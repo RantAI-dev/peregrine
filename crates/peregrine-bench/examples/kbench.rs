@@ -1,7 +1,7 @@
 //! Kernel micro-benchmark: one thread, synthetic rows, every quantised format.
 //!
 //! ```text
-//! cargo run --release --example kbench -- [k] [rows] [reps]
+//! cargo run --release -p peregrine-bench --example kbench -- [k] [rows] [reps]
 //! ```
 //!
 //! Reports ns per row and the effective weight bandwidth for `dot_batch` with one

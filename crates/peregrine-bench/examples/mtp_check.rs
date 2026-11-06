@@ -1,6 +1,6 @@
 // validate the MTP block: greedy decode with the main model and count how often the block's draft for the
 // next position equals the main model's own pick (the fork measures ~85% greedy at depth 1 on the 9B).
-// cargo run --release --example mtp_check -- <model-MTP.gguf> [threads] [tokens]
+// cargo run --release -p peregrine-bench --example mtp_check -- <model-MTP.gguf> [threads] [tokens]
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::KvPrec;
 use peregrine_core::model::{Model, State, StepStats};

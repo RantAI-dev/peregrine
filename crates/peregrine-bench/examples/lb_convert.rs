@@ -1,7 +1,7 @@
 //! Convert a GGUF's projection matrices into a LittleBit sidecar (`<model>.slb`).
 //!
 //! ```text
-//! cargo run --release --example lb_convert -- model.gguf [--bpw 1.0] [--stages 2]
+//! cargo run --release -p peregrine-bench --example lb_convert -- model.gguf [--bpw 1.0] [--stages 2]
 //!     [--refine 1] [--kv-mult 1] [--head] [--rank N] [--out path.slb]
 //! ```
 //!

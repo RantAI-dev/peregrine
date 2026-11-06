@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/peregrine-kernels", "crates/peregrine-core", "crates/peregrine-server"]
+default-members = ["crates/peregrine-kernels", "crates/peregrine-core", "crates/peregrine-server", "crates/peregrine"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,7 +15,9 @@ homepage = "https://github.com/RantAI-dev/peregrine"
 # One place for every version. Crates say `foo = { workspace = true }`.
 [workspace.dependencies]
 peregrine-core = { path = "crates/peregrine-core", version = "0.1.0" }
+peregrine-server = { path = "crates/peregrine-server", version = "0.1.0" }
 peregrine-kernels = { path = "crates/peregrine-kernels", version = "0.1.0" }
+peregrine-bench = { path = "crates/peregrine-bench", version = "0.1.0" }
 
 memmap2 = "0.9"
 

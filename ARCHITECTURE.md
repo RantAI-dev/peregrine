@@ -64,12 +64,23 @@ bound by compute. That split drives most design choices.
 | `pool.rs` | The thread pool and barrier. Thread count and barrier count are measured quantities, which is why there is no rayon. |
 | `telem.rs` | Bytes moved, phases and machine ceilings: the numbers every benchmark reports. |
 | `lbq.rs` | LittleBit 1-bit-class weights. Off by default (it fails accuracy without trained factors). |
-| `examples/` | Benchmarks and one-off experiments. To move to a `peregrine-bench` crate (roadmap S1.6). |
 | `tests/` | Integration tests. Those that need real model files skip when the files are absent. |
+
+### `crates/peregrine-bench`: benchmarks and experiments
+
+The micro-benchmarks and one-off experiments, as examples of this crate (`cargo run --release -p
+peregrine-bench --example <name>`); most are x86-64 only. Nothing depends on it.
+
+### `crates/peregrine`: the facade and the `peregrine` command
+
+What applications depend on: re-exports the engine (`peregrine::engine`), the kernels and, with the default
+`server` feature, the server. The `peregrine` binary (`cli` feature) has `serve`, `inspect` (a model file's
+architecture, formats and whether this build runs it) and `tier` (the kernel tier and every option).
 
 ### `crates/peregrine-server`: HTTP
 
-One binary. Maps the OpenAI chat request onto `Engine` slots, streams with SSE, and exposes `/metrics`.
+A library (`run`, `Args`) and a thin binary. Maps the OpenAI chat request onto `Engine` slots, streams with SSE,
+and exposes `/metrics`.
 
 ## Invariants
 
