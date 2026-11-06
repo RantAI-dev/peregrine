@@ -33,6 +33,9 @@ All notable changes to this project are documented here. The format follows
   variant that runs lossless speculation with it on and off.
 - Synthetic coverage for Qwen2 attention biases, Llama 3.x and linear rope scaling, engine batching (shared
   prefixes, mixed prefill/decode, mapped and per-row caches), LittleBit sidecars and accepted MTP drafts.
+- Synthetic coverage of what the two runtimes do differently, pinned before ADR 0007 makes the engine the
+  only one: the same prompt through `Session` and a one-slot `Engine`, the taps a DSpark drafter needs, a
+  second user arriving mid-speculation, and the prefix store with a drafter attached.
 - Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
   semantics); sampling fields the engine does not implement are refused with a 400 instead of ignored.
 - `PEREGRINE_ISA` caps the kernel tier (`scalar`, `avx2`, `avx512`); CI tests the lower tiers.
