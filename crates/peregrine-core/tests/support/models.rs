@@ -166,7 +166,11 @@ pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> 
 /// heads, GDN 2 key heads and 4 value heads of width 64, Hadamard block 64. Every width is a multiple of
 /// 256, which the PTQ1_0 activation layout needs, and every matrix has a multiple of 16 rows, which the
 /// AVX-512 tile path needs.
-pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
+///
+/// With `mtp`, one NextN block follows the four main layers (`nextn_predict_layers = 1`, counted in
+/// `block_count`), in Q8_0 as the 4B Bonsai file stores it. The main layers are written first from the
+/// same RNG stream, so `mtp = false` files stay byte-identical.
+pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64, mtp: bool) -> PathBuf {
     assert!(matches!(fmt, Format::PQ2_0 | Format::PTQ1_0));
     let (d_model, n_ff, n_layer, interval) = (256usize, 512usize, 4usize, 4usize);
     let (n_head, n_kv, head_dim, rope_dim) = (4usize, 2usize, 64usize, 32usize);
@@ -181,7 +185,10 @@ pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
     w.str("general.architecture", "qwen35");
     w.str("general.name", &format!("synthetic-qwen35-{}", fmt.label()));
     let k = |x: &str| format!("qwen35.{x}");
-    w.u32(&k("block_count"), n_layer as u32);
+    w.u32(&k("block_count"), (n_layer + usize::from(mtp)) as u32);
+    if mtp {
+        w.u32(&k("nextn_predict_layers"), 1);
+    }
     w.u32(&k("embedding_length"), d_model as u32);
     w.u32(&k("attention.head_count"), n_head as u32);
     w.u32(&k("attention.head_count_kv"), n_kv as u32);
@@ -310,6 +317,58 @@ pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
     }
     norm(&mut w, &mut rng, "output_norm.weight", d_model);
     tern(&mut w, &mut rng, "output.weight", d_model, VOCAB_SIZE);
+    if mtp {
+        // One Qwen3.5 full-attention NextN block behind the input projection `[enorm(e) | hnorm(h)]`.
+        // Its head is the model's own output head, reached through `shared_head_norm`.
+        let il = n_layer;
+        let p = |s: &str| format!("blk.{il}.{s}");
+        let q8 = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+            w.add_tensor(
+                name,
+                &[cols as u64, rows as u64],
+                Format::Q8_0,
+                generate_weights(Format::Q8_0, cols * rows, rng),
+            );
+        };
+        q8(
+            &mut w,
+            &mut rng,
+            &p("nextn.eh_proj.weight"),
+            2 * d_model,
+            d_model,
+        );
+        norm(&mut w, &mut rng, &p("nextn.enorm.weight"), d_model);
+        norm(&mut w, &mut rng, &p("nextn.hnorm.weight"), d_model);
+        norm(&mut w, &mut rng, &p("attn_norm.weight"), d_model);
+        q8(&mut w, &mut rng, &p("attn_q.weight"), d_model, 2 * q_dim);
+        q8(
+            &mut w,
+            &mut rng,
+            &p("attn_k.weight"),
+            d_model,
+            n_kv * head_dim,
+        );
+        q8(
+            &mut w,
+            &mut rng,
+            &p("attn_v.weight"),
+            d_model,
+            n_kv * head_dim,
+        );
+        norm(&mut w, &mut rng, &p("attn_q_norm.weight"), head_dim);
+        norm(&mut w, &mut rng, &p("attn_k_norm.weight"), head_dim);
+        q8(&mut w, &mut rng, &p("attn_output.weight"), q_dim, d_model);
+        norm(&mut w, &mut rng, &p("post_attention_norm.weight"), d_model);
+        q8(&mut w, &mut rng, &p("ffn_gate.weight"), d_model, n_ff);
+        q8(&mut w, &mut rng, &p("ffn_up.weight"), d_model, n_ff);
+        q8(&mut w, &mut rng, &p("ffn_down.weight"), n_ff, d_model);
+        norm(
+            &mut w,
+            &mut rng,
+            &p("nextn.shared_head_norm.weight"),
+            d_model,
+        );
+    }
     let path = dir.join(format!("qwen35-{}.gguf", fmt.label()));
     w.write_to_file(&path).expect("write synthetic model");
     path
