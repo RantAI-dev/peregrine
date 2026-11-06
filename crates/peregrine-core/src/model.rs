@@ -20,23 +20,19 @@
 //! rather than an estimate from parameter count — the two differ by the block
 //! metadata, which at Q4_K is 12.5% of the traffic.
 
+use std::any::Any;
+
+use crate::arch::{Architecture, MtpState};
 use crate::blocks::attn::AttnScratch;
-use crate::blocks::par::{Disjoint, OutPtr, SharedBuf};
 use crate::gguf::{Format, Gguf, TensorInfo};
 use crate::kv::KvCache;
 use crate::lbq::Slb;
 use crate::pool::Pool;
 use crate::quant::QuantAct;
 use crate::tokenizer::Tokenizer;
-use std::time::Instant;
 
-pub(crate) use crate::blocks::linear::{LinJob, MatJob};
-pub(crate) use crate::blocks::norm::head_rmsnorm;
-pub(crate) use crate::blocks::ROW_PARALLEL;
 #[allow(unused_imports)]
 pub(crate) use crate::pool::share;
-#[cfg_attr(not(target_arch = "x86_64"), allow(unused_imports))]
-pub(crate) use crate::quant::row_bytes;
 
 // Qwen3.5-style hybrid models (Bonsai 2).
 pub mod hybrid;
@@ -187,110 +183,80 @@ pub enum Linear {
     Lb(usize),
 }
 
-struct Layer {
-    attn_norm: TensorInfo,
-    wq: Linear,
-    wk: Linear,
-    wv: Linear,
-    /// Qwen2's attention biases, decoded once at load (a few KB per layer). `None`
-    /// for llama, which has none — and a file that is missing one it should have
-    /// fails at load, not by silently running without it.
-    bq: Option<Vec<f32>>,
-    bk: Option<Vec<f32>>,
-    bv: Option<Vec<f32>>,
-    /// Qwen3's per-head query and key RMSNorm weights (`head_dim` floats each).
-    q_norm: Option<Vec<f32>>,
-    k_norm: Option<Vec<f32>>,
-    wo: Linear,
-    ffn_norm: TensorInfo,
-    gate: Linear,
-    up: Linear,
-    down: Linear,
-}
-
 pub struct Model {
     /// The file and the repacked weights: what every forward reads matrices from.
-    w: Weights,
+    pub(crate) w: Weights,
     pub cfg: Config,
     pub tk: Tokenizer,
-    tok_embd: TensorInfo,
-    out_norm: TensorInfo,
-    /// The output projection: `output.weight` when the file has one, else the
-    /// embedding table (a tied head). Detected by absence — assuming either way
-    /// silently transposes the head.
-    head: Linear,
-    /// The LittleBit sidecar, when one was attached, with the GGUF bytes it
-    /// displaced — `weight_bytes` and `effective_bpw` report the mix honestly.
-    lb: Option<Slb>,
-    lb_replaced: u64,
-    lb_count: usize,
     /// Llama 3.x's per-frequency rotary factors (`rope_freqs.weight`, `rope_dim/2`
     /// floats): each angle is divided by its factor. Absent on every other model.
     pub rope_factors: Option<Vec<f32>>,
-    layers: Vec<Layer>,
-    // the hybrid model's layers and rotation (`hybrid.rs`); None for the dense architectures.
-    hy: Option<hybrid::Hybrid>,
-    // the MTP (NextN) block of a hybrid file that carries one (`*-MTP-Q8_0.gguf`).
-    mtp: Option<mtp::Mtp>,
+    pub(crate) lb_replaced: u64,
+    pub(crate) lb_count: usize,
+    pub(crate) arch: Box<dyn Architecture>,
 }
 
-/// The weights a forward pass reads: the memory-mapped file and the matrices repacked from it at load.
+/// The weights a forward pass reads: the memory-mapped file, the repacked tiles, and LittleBit factors.
 /// Split from `Model` so layer code can take the weights without the rest of the model (ADR 0006).
-pub(crate) struct Weights {
+pub struct Weights {
     pub(crate) g: Gguf,
     // PQ2_0 matrices repacked into 16-row tiles at load (`TensorInfo::tile_off` points here); empty if not.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
     pub(crate) tiles: TileStore,
+    pub(crate) lb: Option<Slb>,
 }
 
 impl Weights {
     /// A tensor's bytes in the mapped file.
     #[inline]
-    pub(crate) fn bytes(&self, t: &TensorInfo) -> &[u8] {
+    pub fn bytes(&self, t: &TensorInfo) -> &[u8] {
         self.g.bytes(t)
     }
     /// The repacked tile store (see `TensorInfo::tile_off`).
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     #[inline]
-    pub(crate) fn tiles(&self) -> &[u8] {
+    pub fn tiles(&self) -> &[u8] {
         self.tiles.bytes()
+    }
+    pub fn lb(&self) -> Option<&Slb> {
+        self.lb.as_ref()
     }
 }
 
 /// Reusable scratch. Allocated once per session so a decode step does no allocation.
 pub struct State {
     pub x: Vec<f32>,
-    xb: Vec<f32>,
-    xb2: Vec<f32>,
-    hb: Vec<f32>,
-    hb2: Vec<f32>,
-    q: Vec<f32>,
-    k: Vec<f32>,
-    v: Vec<f32>,
+    pub(crate) xb: Vec<f32>,
+    pub(crate) xb2: Vec<f32>,
+    pub(crate) hb: Vec<f32>,
+    pub(crate) hb2: Vec<f32>,
+    pub(crate) q: Vec<f32>,
+    pub(crate) k: Vec<f32>,
+    pub(crate) v: Vec<f32>,
     /// Attention's scratch: per worker, and for split heads.
-    attn: AttnScratch,
+    pub(crate) attn: AttnScratch,
     /// `(cos, sin)` of every rotary angle for every position, computed once. Rope was
     /// recomputing `powf`, `sin` and `cos` for every pair of every head at every
     /// layer of every token — 20 000 transcendental calls per decode step.
-    rope: Vec<f32>,
-    acts: Vec<QuantAct>,
+    pub(crate) rope: Vec<f32>,
+    pub(crate) acts: Vec<QuantAct>,
     pub logits: Vec<f32>,
-    max_batch: usize,
+    pub(crate) max_batch: usize,
     /// `start_pos..start_pos + n` for a `Model::forward` call, filled in place so the
     /// convenience wrapper does not allocate a position vector per call.
-    positions: Vec<usize>,
+    pub(crate) positions: Vec<usize>,
     /// Layers whose output (the residual stream after the layer) `forward` copies
     /// out, in this order — what a DSpark drafter conditions on. Empty: no copy.
-    tap_layers: Vec<usize>,
+    pub(crate) tap_layers: Vec<usize>,
     /// `[batch row][tap][d_model]`, written by every `forward` while taps are set.
     pub tap: Vec<f32>,
     /// LittleBit intermediates — the per-stage `g ⊙ x` copies (reused for `ℓ ⊙ t`)
     /// and the raw latents. Sized by `Model::lb_scratch` after the model is known;
     /// empty when nothing was converted, so the dense path pays nothing.
-    lb_x: Vec<f32>,
-    lb_t: Vec<f32>,
-    // the hybrid pass's extra buffers.
-    hy: Option<hybrid::HyScratch>,
+    pub(crate) lb_x: Vec<f32>,
+    pub(crate) lb_t: Vec<f32>,
+    // family scratch (`HyScratch` today), an opaque box taken by split borrow.
+    pub(crate) fam: Option<Box<dyn Any + Send + Sync>>,
     // when set, a hybrid forward writes every row's final normed hidden state (`output_norm(x)`, the
     // MTP block's input) to `hidden`, `[row][d_model]`.
     pub want_hidden: bool,
@@ -352,7 +318,10 @@ impl State {
             tap: Vec::new(),
             lb_x: Vec::new(),
             lb_t: Vec::new(),
-            hy: cfg.hybrid.map(|h| hybrid::HyScratch::new(cfg, &h, b)),
+            fam: cfg.hybrid.map(|h| {
+                Box::new(crate::families::qwen35::HyScratch::new(cfg, &h, b))
+                    as Box<dyn Any + Send + Sync>
+            }),
             want_hidden: false,
             hidden: Vec::new(),
         }
@@ -443,7 +412,7 @@ pub enum Caches<'a> {
 }
 
 /// Iterator over [`Caches::runs`]: runs of consecutive rows that share one cache, yielded without allocating.
-struct Runs<'a> {
+pub(crate) struct Runs<'a> {
     /// The `Mapped` shape's cache index per row; `None` for one shared cache or one cache per row.
     map: Option<&'a [usize]>,
     /// Every row writes one cache (`Caches::Shared`).
@@ -514,7 +483,7 @@ impl<'a> Caches<'a> {
     /// An iterator, not a `Vec`: the dense and hybrid decode loops call this once per layer, and a decode step
     /// must not allocate. Callers that also need the caches mutably use [`Caches::runs_into`] with a reused
     /// buffer instead (the iterator borrows the caches, so it cannot be held across `cache_mut`).
-    fn runs(&self, nb: usize) -> Runs<'a> {
+    pub(crate) fn runs(&self, nb: usize) -> Runs<'a> {
         Runs {
             map: match self {
                 Caches::Mapped(_, map) => {
@@ -532,26 +501,26 @@ impl<'a> Caches<'a> {
 
     /// `runs`, written into `out` (cleared first) so a caller that also needs mutable cache access can hold
     /// the runs without keeping the caches borrowed. `out` keeps its capacity across calls.
-    fn runs_into(&self, nb: usize, out: &mut Vec<(usize, usize, usize)>) {
+    pub(crate) fn runs_into(&self, nb: usize, out: &mut Vec<(usize, usize, usize)>) {
         out.clear();
         out.extend(self.runs(nb));
     }
     /// The cache of run `c`, mutably.
-    fn cache_mut(&mut self, c: usize) -> &mut KvCache {
+    pub(crate) fn cache_mut(&mut self, c: usize) -> &mut KvCache {
         match self {
             Caches::Shared(kv) => kv,
             Caches::PerRow(kvs) | Caches::Mapped(kvs, _) => kvs[c],
         }
     }
     /// The cache of run `c` (as numbered by `runs`).
-    fn cache(&self, c: usize) -> &KvCache {
+    pub(crate) fn cache(&self, c: usize) -> &KvCache {
         match self {
             Caches::Shared(kv) => kv,
             Caches::PerRow(kvs) | Caches::Mapped(kvs, _) => kvs[c],
         }
     }
     /// Rows this holds caches for, or None when one cache serves every row.
-    fn rows(&self) -> Option<usize> {
+    pub(crate) fn rows(&self) -> Option<usize> {
         match self {
             Caches::Shared(_) => None,
             Caches::PerRow(kvs) => Some(kvs.len()),
@@ -563,238 +532,29 @@ impl<'a> Caches<'a> {
 impl Model {
     pub fn load(g: Gguf) -> Result<Model, String> {
         let arch_name = g.str("general.architecture")?;
-        if arch_name == "qwen35" {
-            return hybrid::load(g);
-        }
-        let arch = Arch::from_name(arch_name).ok_or_else(|| {
-            format!(
-                "Peregrine implements {}; this model is {arch_name:?}",
-                ARCHS.join(" and ")
-            )
-        })?;
-        let k = |suffix: &str| format!("{}.{suffix}", arch.key_prefix());
-        let n_layer = g.u32(&k("block_count"))? as usize;
-        let d_model = g.u32(&k("embedding_length"))? as usize;
-        let n_head = g.u32(&k("attention.head_count"))? as usize;
-        let n_kv_head = g
-            .u32(&k("attention.head_count_kv"))
-            .unwrap_or(n_head as u32) as usize;
-        let n_ff = g.u32(&k("feed_forward_length"))? as usize;
-        // Rope scaling other than Llama 3's factor table is not implemented; a file
-        // asking for it would run with the wrong angles and drift after a few tokens.
-        if let Ok(t) = g.str(&k("rope.scaling.type")) {
-            if t != "none" && t != "linear" {
-                return Err(format!("rope scaling {t:?} is not implemented"));
-            }
-        }
-        if n_head == 0 || n_kv_head == 0 || !n_head.is_multiple_of(n_kv_head) {
-            return Err(format!(
-                "implausible head configuration: {n_head} query heads over {n_kv_head} kv heads"
-            ));
-        }
-        let head_dim = g
-            .u32(&k("attention.key_length"))
-            .map(|v| v as usize)
-            .unwrap_or(d_model / n_head);
-        // Qwen3 decouples the head width from the model width; the others must match.
-        if arch != Arch::Qwen3 && head_dim * n_head != d_model {
-            return Err(format!(
-                "head dim {head_dim} × {n_head} heads ≠ embedding length {d_model}"
-            ));
-        }
-        if !(head_dim * n_head).is_multiple_of(32) {
-            return Err(format!(
-                "query width {} is not a multiple of 32",
-                head_dim * n_head
-            ));
-        }
-        let rope_dim = g.u32(&k("rope.dimension_count")).unwrap_or(head_dim as u32) as usize;
-        if rope_dim > head_dim || !rope_dim.is_multiple_of(2) {
-            return Err(format!(
-                "implausible rope dimension {rope_dim} for head dim {head_dim}"
-            ));
-        }
-        // The activation quantiser works in blocks of 32, so both matmul widths must
-        // be multiples of it. Checked here rather than tripping a debug assert deep
-        // inside the first token.
-        for (what, n) in [("embedding length", d_model), ("feed-forward length", n_ff)] {
-            if !n.is_multiple_of(32) {
-                return Err(format!("{what} {n} is not a multiple of 32"));
-            }
-        }
-
-        let rope_scale = g
-            .f32(&k("rope.scaling.factor"))
-            .ok()
-            .filter(|f| *f > 0.0)
-            .map(|f| 1.0 / f);
-        let cfg = Config {
-            arch,
-            rope_neox: arch != Arch::Llama,
-            n_layer,
-            n_head,
-            n_kv_head,
-            head_dim,
-            d_model,
-            n_ff,
-            n_vocab: g.u32(&k("vocab_size")).unwrap_or(0) as usize,
-            rope_dim,
-            eps: g
-                .f32(&k("attention.layer_norm_rms_epsilon"))
-                .unwrap_or(1e-5),
-            rope_base: g.f32(&k("rope.freq_base")).unwrap_or(10000.0),
-            ctx_train: g.u32(&k("context_length")).unwrap_or(2048) as usize,
-            hybrid: None,
-        };
-        // Linear rope scaling folds into the base angle; it is expressed here as a
-        // uniform factor table so one code path serves both it and Llama 3's.
-        let mut rope_factors: Option<Vec<f32>> = rope_scale.map(|s| vec![1.0 / s; rope_dim / 2]);
-        if let Ok(t) = g.tensor("rope_freqs.weight") {
-            let n = t.numel() as usize;
-            if n != rope_dim / 2 {
-                return Err(format!(
-                    "rope_freqs.weight has {n} entries, expected {}",
-                    rope_dim / 2
-                ));
-            }
-            let mut f = vec![0.0f32; n];
-            crate::quant::dequant_row(t.kind, g.bytes(t), &mut f);
-            if let Some(base) = &rope_factors {
-                for (x, b) in f.iter_mut().zip(base) {
-                    *x *= b;
-                }
-            }
-            rope_factors = Some(f);
-        }
-
-        let get = |n: &str| -> Result<TensorInfo, String> { g.tensor(n).cloned() };
-        // Biases are tiny and read on every token; decode them once rather than
-        // dequantising a 128-float row per layer per step.
-        let bias = |n: &str| -> Result<Option<Vec<f32>>, String> {
-            match arch {
-                Arch::Llama | Arch::Qwen3 | Arch::Qwen35 => Ok(None),
-                Arch::Qwen2 => {
-                    let t = get(n)?;
-                    let mut v = vec![0.0f32; t.numel() as usize];
-                    crate::quant::dequant_row(t.kind, g.bytes(&t), &mut v);
-                    Ok(Some(v))
-                }
-            }
-        };
-        // Qwen3's q/k norms: `head_dim` floats, decoded once like the biases.
-        let head_norm = |n: &str| -> Result<Option<Vec<f32>>, String> {
-            if arch != Arch::Qwen3 {
-                return Ok(None);
-            }
-            let t = get(n)?;
-            if t.numel() as usize != head_dim {
-                return Err(format!(
-                    "{n} has {} entries, expected the head dim {head_dim}",
-                    t.numel()
-                ));
-            }
-            let mut v = vec![0.0f32; head_dim];
-            crate::quant::dequant_row(t.kind, g.bytes(&t), &mut v);
-            Ok(Some(v))
-        };
-        let mut layers = Vec::with_capacity(n_layer);
-        for i in 0..n_layer {
-            layers.push(Layer {
-                attn_norm: get(&format!("blk.{i}.attn_norm.weight"))?,
-                wq: Linear::Dense(get(&format!("blk.{i}.attn_q.weight"))?),
-                wk: Linear::Dense(get(&format!("blk.{i}.attn_k.weight"))?),
-                wv: Linear::Dense(get(&format!("blk.{i}.attn_v.weight"))?),
-                bq: bias(&format!("blk.{i}.attn_q.bias"))?,
-                bk: bias(&format!("blk.{i}.attn_k.bias"))?,
-                bv: bias(&format!("blk.{i}.attn_v.bias"))?,
-                q_norm: head_norm(&format!("blk.{i}.attn_q_norm.weight"))?,
-                k_norm: head_norm(&format!("blk.{i}.attn_k_norm.weight"))?,
-                wo: Linear::Dense(get(&format!("blk.{i}.attn_output.weight"))?),
-                ffn_norm: get(&format!("blk.{i}.ffn_norm.weight"))?,
-                gate: Linear::Dense(get(&format!("blk.{i}.ffn_gate.weight"))?),
-                up: Linear::Dense(get(&format!("blk.{i}.ffn_up.weight"))?),
-                down: Linear::Dense(get(&format!("blk.{i}.ffn_down.weight"))?),
-            });
-        }
-        let tok_embd = get("token_embd.weight")?;
-        let out_norm = get("output_norm.weight")?;
-        let head = Linear::Dense(
-            g.tensor("output.weight")
-                .ok()
-                .cloned()
-                .unwrap_or_else(|| tok_embd.clone()),
-        );
-
+        let family = crate::arch::FAMILIES
+            .iter()
+            .find(|f| f.names().contains(&arch_name))
+            .ok_or_else(|| {
+                format!(
+                    "Peregrine implements {}; this model is {arch_name:?}",
+                    ARCHS.join(" and ")
+                )
+            })?;
         let tk = Tokenizer::from_gguf(&g)?;
-        let mut cfg = cfg;
-        if cfg.n_vocab == 0 {
-            cfg.n_vocab = tk.n_vocab;
-        }
-        if cfg.n_vocab != tk.n_vocab {
-            return Err(format!(
-                "metadata says {} vocabulary entries but the tokenizer has {}",
-                cfg.n_vocab, tk.n_vocab
-            ));
-        }
-
-        // Every matmul writes `dims[1]` rows into buffers sized from `cfg`, and every
-        // kernel reads `dims[0]` activations unchecked: a file whose tensors disagree
-        // with its own metadata must be refused here, not discovered as a heap
-        // overflow mid-turn (`catch_unwind` cannot contain that).
-        let shape = |t: &TensorInfo, d_in: usize, d_out: usize| -> Result<(), String> {
-            let (a, b) = (
-                t.dims.first().copied().unwrap_or(0) as usize,
-                t.dims.get(1).copied().unwrap_or(1) as usize,
-            );
-            if t.dims.len() > 2 || a != d_in || b != d_out {
-                return Err(format!(
-                    "{} is {:?}, the metadata implies [{d_in}, {d_out}]",
-                    t.name, t.dims
-                ));
-            }
-            Ok(())
-        };
-        let (dm, qd, kd, ff) = (cfg.d_model, cfg.q_dim(), cfg.kv_dim(), cfg.n_ff);
-        for l in &layers {
-            for (lin, d_in, d_out) in [
-                (&l.wq, dm, qd),
-                (&l.wk, dm, kd),
-                (&l.wv, dm, kd),
-                (&l.wo, qd, dm),
-                (&l.gate, dm, ff),
-                (&l.up, dm, ff),
-                (&l.down, ff, dm),
-            ] {
-                if let Linear::Dense(t) = lin {
-                    shape(t, d_in, d_out)?;
-                }
-            }
-            shape(&l.attn_norm, dm, 1)?;
-            shape(&l.ffn_norm, dm, 1)?;
-        }
-        shape(&tok_embd, dm, cfg.n_vocab)?;
-        shape(&out_norm, dm, 1)?;
-        if let Linear::Dense(t) = &head {
-            shape(t, dm, cfg.n_vocab)?;
-        }
-
+        let loaded = family.load(&g, &tk)?;
         Ok(Model {
             w: Weights {
                 g,
-                tiles: TileStore::default(),
+                tiles: loaded.tiles,
+                lb: None,
             },
-            cfg,
+            cfg: loaded.cfg,
             tk,
-            tok_embd,
-            out_norm,
-            head,
-            lb: None,
+            rope_factors: loaded.rope_factors,
             lb_replaced: 0,
             lb_count: 0,
-            rope_factors,
-            layers,
-            hy: None,
-            mtp: None,
+            arch: loaded.arch,
         })
     }
 
@@ -803,15 +563,20 @@ impl Model {
     pub fn new_cache(&self, prec: crate::kv::KvPrec, max_ctx: usize) -> KvCache {
         let c = &self.cfg;
         let kv = KvCache::new(prec, c.kv_layers(), c.n_kv_head, c.head_dim, max_ctx);
-        match c.hybrid {
-            Some(h) => kv.with_recurrent(h.n_gdn, h.state_floats(), h.conv_floats()),
+        match self.arch.recurrent() {
+            Some(r) => kv.with_recurrent(r.n_layers, r.state_floats, r.conv_floats),
             None => kv,
         }
     }
 
     // whether the model carries recurrent state (a cache rolls back only to its checkpoint).
     pub fn is_hybrid(&self) -> bool {
-        self.hy.is_some()
+        self.arch.recurrent().is_some()
+    }
+
+    /// Whether this model uses rotated KV cache in Session runtime.
+    pub fn session_kv_rotation(&self) -> bool {
+        self.arch.session_kv_rotation()
     }
 
     /// Swap every projection the sidecar covers from its dense tensor to the
@@ -843,46 +608,29 @@ impl Model {
                 }
                 Ok(())
             };
-            for l in &mut self.layers {
-                for lin in [
-                    &mut l.wq,
-                    &mut l.wk,
-                    &mut l.wv,
-                    &mut l.wo,
-                    &mut l.gate,
-                    &mut l.up,
-                    &mut l.down,
-                ] {
-                    swap(lin)?;
-                }
-            }
-            // Only a real `output.weight` may be swapped, never the tied embedding:
-            // the embedding lookup still needs its rows dense.
-            if let Linear::Dense(ti) = &self.head {
-                if ti.name == "output.weight" {
-                    swap(&mut self.head)?;
-                }
-            }
+            self.arch.linears_mut(&mut swap)?;
         }
         if n == 0 {
             return Err("slb: the sidecar names no tensor of this model".into());
         }
         self.lb_replaced = replaced;
         self.lb_count = n;
-        self.lb = Some(slb);
+        self.w.lb = Some(slb);
         Ok(n)
     }
 
     /// How many projections run as LittleBit, and the sidecar bytes they read.
     pub fn lb_summary(&self) -> Option<(usize, u64)> {
-        self.lb.as_ref().map(|s| (self.lb_count, s.data_bytes))
+        self.w.lb.as_ref().map(|s| (self.lb_count, s.data_bytes))
     }
 
     /// Scratch floats one forward call needs for LittleBit intermediates, as
     /// (`x′` floats, latent floats) — the maximum over the fused groups, times the
     /// batch. Zero when nothing was converted.
     pub fn lb_scratch(&self, max_batch: usize) -> (usize, usize) {
-        let Some(slb) = &self.lb else { return (0, 0) };
+        let Some(slb) = self.w.lb.as_ref() else {
+            return (0, 0);
+        };
         let (mut mx, mut mt) = (0usize, 0usize);
         let mut group = |lins: &[&Linear]| {
             let (mut x, mut t) = (0usize, 0usize);
@@ -896,19 +644,13 @@ impl Model {
             mx = mx.max(x);
             mt = mt.max(t);
         };
-        for l in &self.layers {
-            group(&[&l.wq, &l.wk, &l.wv]);
-            group(&[&l.wo]);
-            group(&[&l.gate, &l.up]);
-            group(&[&l.down]);
-        }
-        group(&[&self.head]);
+        self.arch.linear_groups(&mut group);
         (mx * max_batch, mt * max_batch)
     }
 
     pub fn weight_bytes(&self) -> u64 {
         self.w.g.total_weight_bytes() - self.lb_replaced
-            + self.lb.as_ref().map_or(0, |s| s.data_bytes)
+            + self.w.lb.as_ref().map_or(0, |s| s.data_bytes)
     }
 
     /// The file's metadata, for the template detector and the host's telemetry.
@@ -950,165 +692,6 @@ impl Model {
         } else {
             8.0 * bytes as f64 / params as f64
         }
-    }
-
-    #[inline]
-    fn embed(&self, token: u32, out: &mut [f32], st: &mut StepStats) {
-        crate::blocks::embed::embed(&self.tok_embd, &self.w, token, out, st);
-    }
-
-    #[inline]
-    fn matmul_group(
-        &self,
-        jobs: &[MatJob],
-        acts: &[QuantAct],
-        nb: usize,
-        pool: &Pool,
-        st: &mut StepStats,
-    ) {
-        crate::blocks::linear::matmul_group(&self.w, jobs, acts, nb, pool, st);
-    }
-
-    #[inline]
-    #[allow(clippy::too_many_arguments)]
-    fn linear_group(
-        &self,
-        jobs: &[LinJob],
-        acts: &[QuantAct],
-        xs: &[f32],
-        xstride: usize,
-        nb: usize,
-        lbx: SharedBuf,
-        lbt: SharedBuf,
-        pool: &Pool,
-        st: &mut StepStats,
-    ) {
-        crate::blocks::linear::linear_group(
-            &self.w,
-            self.lb.as_ref(),
-            jobs,
-            acts,
-            xs,
-            xstride,
-            nb,
-            lbx,
-            lbt,
-            pool,
-            st,
-        );
-    }
-
-    #[inline]
-    #[allow(dead_code, clippy::too_many_arguments)]
-    fn lb_group(
-        &self,
-        jobs: &[(usize, OutPtr<'_>)],
-        xs: &[f32],
-        xstride: usize,
-        nb: usize,
-        lbx: SharedBuf<'_>,
-        lbt: SharedBuf<'_>,
-        pool: &Pool,
-        st: &mut StepStats,
-    ) {
-        crate::blocks::linear::lb_group(
-            self.lb.as_ref(),
-            jobs,
-            xs,
-            xstride,
-            nb,
-            lbx,
-            lbt,
-            pool,
-            st,
-        );
-    }
-
-    #[inline]
-    fn rmsnorm(&self, x: &[f32], w: &TensorInfo, out: &mut [f32], st: &mut StepStats) {
-        crate::blocks::norm::rmsnorm(&self.w, w, self.cfg.eps, x, out, st);
-    }
-
-    #[inline]
-    fn rmsnorm_into(&self, x: &[f32], w: &TensorInfo, out: &mut [f32]) {
-        crate::blocks::norm::rmsnorm_into(&self.w, w, self.cfg.eps, x, out);
-    }
-
-    #[inline]
-    fn norm_rows(
-        &self,
-        st8: &mut State,
-        w: &TensorInfo,
-        nb: usize,
-        pool: &Pool,
-        stats: &mut StepStats,
-    ) {
-        crate::blocks::norm::norm_rows(
-            &self.w,
-            w,
-            self.cfg.d_model,
-            self.cfg.eps,
-            &st8.x,
-            &mut st8.xb,
-            &mut st8.acts,
-            nb,
-            pool,
-            stats,
-        );
-    }
-
-    #[inline]
-    fn swiglu_rows(&self, st8: &mut State, nb: usize, pool: &Pool, stats: &mut StepStats) {
-        crate::blocks::ffn::swiglu_rows(
-            self.cfg.n_ff,
-            &mut st8.hb,
-            &st8.hb2,
-            &mut st8.acts,
-            nb,
-            pool,
-            stats,
-        );
-    }
-
-    #[inline]
-    fn prepare_rows(
-        &self,
-        st8: &mut State,
-        l: &Layer,
-        nb: usize,
-        positions: &[usize],
-        pool: &Pool,
-        stats: &mut StepStats,
-    ) {
-        crate::blocks::attn::prepare_rows(
-            &self.cfg,
-            l.bq.as_deref(),
-            l.bk.as_deref(),
-            l.bv.as_deref(),
-            l.q_norm.as_deref(),
-            l.k_norm.as_deref(),
-            &st8.rope,
-            &mut st8.q,
-            &mut st8.k,
-            &mut st8.v,
-            nb,
-            positions,
-            pool,
-            stats,
-        );
-    }
-
-    #[inline]
-    fn rope(&self, rope: &[f32], v: &mut [f32], n_heads: usize, pos: usize) {
-        crate::blocks::rope::rope(
-            rope,
-            v,
-            n_heads,
-            pos,
-            self.cfg.head_dim,
-            self.cfg.rope_dim,
-            self.cfg.rope_neox,
-        );
     }
 
     /// Run `tokens` at positions `start_pos..start_pos+tokens.len()`.
@@ -1188,7 +771,6 @@ impl Model {
                 caches.rows()
             ));
         }
-        let t_fwd = Instant::now();
         for b in 0..nb {
             let kv = caches.get(b);
             if positions[b] >= kv.max_ctx() {
@@ -1206,206 +788,54 @@ impl Model {
                 ));
             }
         }
-        if self.hy.is_some() {
-            return self.forward_hybrid(st8, caches, pool, tokens, positions, want_logits, stats);
-        }
-        for (i, &t) in tokens.iter().enumerate() {
-            self.embed(t, &mut st8.x[i * c.d_model..(i + 1) * c.d_model], stats);
-        }
-
-        for (li, l) in self.layers.iter().enumerate() {
-            // ---- attention ----
-            self.norm_rows(st8, &l.attn_norm, nb, pool, stats);
-            {
-                // Q, K and V share one activation: one fork–join, not three.
-                let lbx = Disjoint::new(&mut st8.lb_x);
-                let lbt = Disjoint::new(&mut st8.lb_t);
-                let acts = &st8.acts[..nb];
-                let xs: &[f32] = &st8.xb;
-                let jobs = [
-                    LinJob {
-                        lin: &l.wq,
-                        out: Disjoint::new(&mut st8.q),
-                    },
-                    LinJob {
-                        lin: &l.wk,
-                        out: Disjoint::new(&mut st8.k),
-                    },
-                    LinJob {
-                        lin: &l.wv,
-                        out: Disjoint::new(&mut st8.v),
-                    },
-                ];
-                self.linear_group(&jobs, acts, xs, c.d_model, nb, lbx, lbt, pool, stats);
-            }
-            self.prepare_rows(st8, l, nb, positions, pool, stats);
-            let qd = c.q_dim();
-            crate::blocks::attn::write_kv_rows(
-                caches,
-                li,
-                &st8.k,
-                &st8.v,
-                nb,
-                positions,
-                c.n_kv_head,
-                c.head_dim,
-            );
-
-            let t_attn = Instant::now();
-            // one grouped call per run of rows that share a cache (a prompt chunk), one row per call otherwise,
-            // so each row computes exactly what it would alone.
-            for (r0, len, c) in caches.runs(nb) {
-                self.attend(
-                    st8,
-                    caches.cache(c),
-                    pool,
-                    li,
-                    len,
-                    positions[r0],
-                    r0,
-                    stats,
-                );
-            }
-            stats.ns_attn += t_attn.elapsed().as_nanos() as u64;
-
-            for b in 0..nb {
-                st8.acts[b].fill(&st8.xb[b * qd..(b + 1) * qd]);
-            }
-            {
-                let lbx = Disjoint::new(&mut st8.lb_x);
-                let lbt = Disjoint::new(&mut st8.lb_t);
-                let acts = &st8.acts[..nb];
-                let jobs = [LinJob {
-                    lin: &l.wo,
-                    out: Disjoint::new(&mut st8.xb2),
-                }];
-                self.linear_group(&jobs, acts, &st8.xb, qd, nb, lbx, lbt, pool, stats);
-            }
-            for i in 0..nb * c.d_model {
-                st8.x[i] += st8.xb2[i];
-            }
-
-            // ---- feed-forward ----
-            self.norm_rows(st8, &l.ffn_norm, nb, pool, stats);
-            {
-                let lbx = Disjoint::new(&mut st8.lb_x);
-                let lbt = Disjoint::new(&mut st8.lb_t);
-                let acts = &st8.acts[..nb];
-                let jobs = [
-                    LinJob {
-                        lin: &l.gate,
-                        out: Disjoint::new(&mut st8.hb),
-                    },
-                    LinJob {
-                        lin: &l.up,
-                        out: Disjoint::new(&mut st8.hb2),
-                    },
-                ];
-                self.linear_group(&jobs, acts, &st8.xb, c.d_model, nb, lbx, lbt, pool, stats);
-            }
-            // SwiGLU: silu(gate) ⊙ up, quantised for the down projection.
-            self.swiglu_rows(st8, nb, pool, stats);
-            {
-                let lbx = Disjoint::new(&mut st8.lb_x);
-                let lbt = Disjoint::new(&mut st8.lb_t);
-                let acts = &st8.acts[..nb];
-                let jobs = [LinJob {
-                    lin: &l.down,
-                    out: Disjoint::new(&mut st8.xb2),
-                }];
-                self.linear_group(&jobs, acts, &st8.hb, c.n_ff, nb, lbx, lbt, pool, stats);
-            }
-            for i in 0..nb * c.d_model {
-                st8.x[i] += st8.xb2[i];
-            }
-            if let Some(t) = st8.tap_layers.iter().position(|&x| x == li) {
-                let (d, nt) = (c.d_model, st8.tap_layers.len());
-                for b in 0..nb {
-                    let dst = (b * nt + t) * d;
-                    st8.tap[dst..dst + d].copy_from_slice(&st8.x[b * d..(b + 1) * d]);
-                }
-            }
-        }
-
-        // ---- output head ----
-        if want_logits.is_empty() {
-            stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
-            return Ok(());
-        }
-        let nl = want_logits.len();
-        if nl > st8.acts.len() || nl * c.n_vocab > st8.logits.len() {
-            return Err(format!(
-                "logits requested for {nl} rows; scratch holds {} activations and {} logit rows",
-                st8.acts.len(),
-                st8.logits.len() / c.n_vocab
-            ));
-        }
-        for (i, &b) in want_logits.iter().enumerate() {
-            if b >= nb {
-                return Err(format!("logits requested for row {b} of a {nb}-row batch"));
-            }
-            // The normed rows are gathered to the *front* of the scratch (`i`, not
-            // `b`), so the head sees them as a contiguous batch — which is what the
-            // LittleBit path requires and costs the dense path nothing.
-            let (xs, xe) = (b * c.d_model, (b + 1) * c.d_model);
-            let (os, oe) = (i * c.d_model, (i + 1) * c.d_model);
-            let (xv, xbv) = (&st8.x, &mut st8.xb);
-            self.rmsnorm(&xv[xs..xe], &self.out_norm, &mut xbv[os..oe], stats);
-            st8.acts[i].fill(&st8.xb[os..oe]);
-        }
-        // The output head is 50 MB — a quarter of all traffic for this model. One
-        // batched call reads it once for every row; a loop would read it `nl` times,
-        // which would make speculation cost more bandwidth than it saves.
-        let before = stats.ns_matmul;
-        {
-            let lbx = Disjoint::new(&mut st8.lb_x);
-            let lbt = Disjoint::new(&mut st8.lb_t);
-            let acts = &st8.acts[..nl];
-            let jobs = [LinJob {
-                lin: &self.head,
-                out: Disjoint::new(&mut st8.logits),
-            }];
-            self.linear_group(&jobs, acts, &st8.xb, c.d_model, nl, lbx, lbt, pool, stats);
-        }
-        stats.ns_head += stats.ns_matmul - before;
-        stats.ns_matmul = before;
-        stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
-        Ok(())
+        self.arch.forward_rows(
+            &self.w,
+            &self.cfg,
+            st8,
+            caches,
+            pool,
+            tokens,
+            positions,
+            want_logits,
+            stats,
+        )
     }
 
-    /// Attention for one layer over a batch, written into `st8.xb` as
-    /// `[nb][n_head][head_dim]`.
-    ///
-    /// Grouped by KV head with an online softmax (`attn.rs`): each task decodes a block
-    /// of cached positions once and scores every query head that shares the KV head
-    /// against it, for every batch row in the task. When the heads alone cannot fill
-    /// the pool, a head's positions are split and the partial results combined.
-    #[inline]
+    pub fn has_mtp(&self) -> bool {
+        self.arch.mtp().is_some()
+    }
+
+    /// Scratch and cache for one sequence's MTP block.
+    pub fn mtp_state(&self, max_ctx: usize, threads: usize) -> Result<MtpState, String> {
+        let mtp = self.arch.mtp().ok_or("this model has no MTP block")?;
+        mtp.new_state(&self.w, &self.cfg, max_ctx, threads)
+    }
+
+    /// Run the MTP block over `tokens` at `positions`.
     #[allow(clippy::too_many_arguments)]
-    fn attend(
+    pub fn mtp_forward(
         &self,
-        st8: &mut State,
-        kv: &KvCache,
+        ms: &mut MtpState,
         pool: &Pool,
-        li: usize,
-        nb: usize,
-        start_pos: usize,
-        row0: usize,
+        tokens: &[u32],
+        hidden: &[f32],
+        positions: &[usize],
+        draft: bool,
         stats: &mut StepStats,
-    ) {
-        crate::blocks::attn::attend(
-            &self.cfg,
-            &mut st8.attn,
-            &st8.q,
-            &mut st8.xb,
-            kv,
-            pool,
-            li,
-            nb,
-            start_pos,
-            row0,
-            stats,
-        );
+    ) -> Result<Option<u32>, String> {
+        let mtp = self.arch.mtp().ok_or("this model has no MTP block")?;
+        mtp.forward(
+            &self.w, &self.cfg, ms, pool, tokens, hidden, positions, draft, stats,
+        )
+    }
+
+    /// Drop the MTP block's cache from position `pos` on.
+    pub fn mtp_truncate(&self, ms: &mut MtpState, pos: usize) {
+        if let Some(mtp) = self.arch.mtp() {
+            mtp.truncate(ms, pos);
+        } else {
+            ms.kv.truncate(pos);
+        }
     }
 }
 
