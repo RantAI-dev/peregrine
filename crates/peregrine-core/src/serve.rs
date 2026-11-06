@@ -197,17 +197,14 @@ pub fn chat_prompt(
     thinking: bool,
     assistant_prefix: Option<&str>,
 ) -> String {
-    let mut s = template.system_block(system, &crate::template::today_llama3());
-    for (u, a) in pairs {
-        s.push_str(&template.user_turn(u));
-        s.push_str(&template.assistant_turn(a));
-    }
-    s.push_str(&template.user_turn(user));
-    s.push_str(template.assistant_open(thinking));
-    if let Some(p) = assistant_prefix {
-        s.push_str(p);
-    }
-    s
+    template.render(
+        system,
+        pairs,
+        user,
+        &crate::template::today_llama3(),
+        thinking,
+        assistant_prefix,
+    )
 }
 
 /// Several users, one model, one weight pass per step.

@@ -66,6 +66,9 @@ pub struct SessionCfg {
     pub ngram: usize,
     /// Prepended once per conversation. `None` uses the model's own default.
     pub system: Option<String>,
+    /// The chat template to use, when the file declares none (or the caller
+    /// prefers another one). `None` uses the file's own template.
+    pub template: Option<Template>,
     /// Let a reasoning model think (Qwen3's `enable_thinking`). Off writes the
     /// template's empty reasoning block, so the reply starts with the answer.
     pub thinking: bool,
@@ -101,6 +104,7 @@ impl Default for SessionCfg {
             draft_len: 12,
             ngram: 2,
             system: None,
+            template: None,
             thinking: true,
             dspark: None,
             dspark_max: 3,
@@ -287,10 +291,10 @@ pub(crate) fn logprob_of(logits: &[f32], id: u32) -> f32 {
 
 impl Session {
     pub fn open(path: &Path, cfg: SessionCfg) -> Result<Session, String> {
-        // `keep::open_with` checks compatibility on the one parse it does (and not at
+        // `keep::open_with_template` checks compatibility on the one parse it does (and not at
         // all when the kept model is reused): the vocabulary and merges are ~100K
         // strings, and parsing them twice per session open was pure waste.
-        let model = crate::model::keep::open_with(path, cfg.littlebit)?;
+        let model = crate::model::keep::open_with_template(path, cfg.littlebit, cfg.template)?;
         let c = model.cfg;
         // a hybrid model's recurrent state rolls back only to its turn-start checkpoint, so nothing may
         // write positions it later takes back: no suffix speculation, no drafter.
@@ -349,7 +353,10 @@ impl Session {
         let machine = Machine::cached(threads);
         let pool = Pool::new(threads);
         let pool1 = crate::pool::narrow_pool(threads);
-        let template = Template::detect(model.gguf())?;
+        let template = match cfg.template {
+            Some(t) => t,
+            None => Template::detect(model.gguf())?,
+        };
         let stops = template.stop_ids(&model.tk);
         let default_system = template.default_system(model.name());
         let seed = if cfg.seed == 0 {
@@ -586,10 +593,17 @@ impl Session {
                     .template
                     .system_block(self.system_text(), &today_llama3()),
             );
+            // The system message, folded into this (the first) user turn for the
+            // templates with no system branch of their own.
+            let u = match self.template.system_fold(self.system_text()) {
+                Some(sys) => format!("{sys}\n{user}"),
+                None => user.to_string(),
+            };
+            s.push_str(&self.template.user_turn(&u));
         } else {
             s.push_str(self.template.close_previous());
+            s.push_str(&self.template.user_turn(user));
         }
-        s.push_str(&self.template.user_turn(user));
         s.push_str(self.template.assistant_open(self.cfg.thinking));
         if let Some(p) = &self.cfg.assistant_prefix {
             s.push_str(p);
