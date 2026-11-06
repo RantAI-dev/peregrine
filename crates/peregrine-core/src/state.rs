@@ -128,9 +128,9 @@ impl State {
         )
     }
 
-    /// Internal constructor called by `Model::new_state` and `State::new`.
+    /// Constructor called by `Model::new_state`, `State::new`, and MTP state builders.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_impl(
+    pub fn new_impl(
         cfg: &Config,
         max_batch: usize,
         max_logit_rows: usize,
@@ -162,10 +162,15 @@ impl State {
             rope,
             acts: (0..b)
                 .map(|_| {
-                    let mut a = QuantAct::with_capacity(cfg.n_ff);
+                    // The activation rows are as wide as the model (the residual, the attention
+                    // output, the head's input), not as wide as the feed-forward: a mixture of
+                    // experts has no dense feed-forward at all, so `n_ff` alone would size this
+                    // buffer too small.
+                    let mut a = QuantAct::with_capacity(cfg.n_ff.max(cfg.d_model).max(cfg.q_dim()));
                     a.ternary = act_layout.ternary;
                     a.ptq1 = act_layout.ptq1;
                     a.tb_span = act_layout.tb_span;
+                    a.keep_f32 = act_layout.keep_f32;
                     a
                 })
                 .collect(),

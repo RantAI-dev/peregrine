@@ -1,14 +1,18 @@
 //! The dense transformer families: Llama, Qwen2 and Qwen3 (ADR 0006).
 
+pub(crate) mod layer;
+
 use std::time::Instant;
 
-use peregrine_core::arch::{Architecture, Family, Loaded};
+use peregrine_core::arch::{ActLayout, Architecture, Family, Loaded};
 use peregrine_core::blocks::linear::LinJob;
 use peregrine_core::blocks::par::Disjoint;
-use peregrine_core::gguf::{Gguf, TensorInfo};
+use peregrine_core::gguf::{Format, Gguf, TensorInfo};
 use peregrine_core::model::{Caches, Config, Linear, State, StepStats, TileStore, Weights};
 use peregrine_core::pool::Pool;
 use peregrine_core::tokenizer::Tokenizer;
+
+use layer::AttnWeights;
 
 /// The dense transformer architectures implemented by Peregrine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,16 +85,7 @@ impl Arch {
 }
 
 pub(crate) struct DenseLayer {
-    pub(crate) attn_norm: TensorInfo,
-    pub(crate) wq: Linear,
-    pub(crate) wk: Linear,
-    pub(crate) wv: Linear,
-    pub(crate) bq: Option<Vec<f32>>,
-    pub(crate) bk: Option<Vec<f32>>,
-    pub(crate) bv: Option<Vec<f32>>,
-    pub(crate) q_norm: Option<Vec<f32>>,
-    pub(crate) k_norm: Option<Vec<f32>>,
-    pub(crate) wo: Linear,
+    pub(crate) attn: AttnWeights,
     pub(crate) ffn_norm: TensorInfo,
     pub(crate) gate: Linear,
     pub(crate) up: Linear,
@@ -282,16 +277,18 @@ impl Dense {
         let mut layers = Vec::with_capacity(n_layer);
         for i in 0..n_layer {
             layers.push(DenseLayer {
-                attn_norm: get(&format!("blk.{i}.attn_norm.weight"))?,
-                wq: Linear::Dense(get(&format!("blk.{i}.attn_q.weight"))?),
-                wk: Linear::Dense(get(&format!("blk.{i}.attn_k.weight"))?),
-                wv: Linear::Dense(get(&format!("blk.{i}.attn_v.weight"))?),
-                bq: bias(&format!("blk.{i}.attn_q.bias"))?,
-                bk: bias(&format!("blk.{i}.attn_k.bias"))?,
-                bv: bias(&format!("blk.{i}.attn_v.bias"))?,
-                q_norm: head_norm(&format!("blk.{i}.attn_q_norm.weight"))?,
-                k_norm: head_norm(&format!("blk.{i}.attn_k_norm.weight"))?,
-                wo: Linear::Dense(get(&format!("blk.{i}.attn_output.weight"))?),
+                attn: AttnWeights {
+                    attn_norm: get(&format!("blk.{i}.attn_norm.weight"))?,
+                    wq: Linear::Dense(get(&format!("blk.{i}.attn_q.weight"))?),
+                    wk: Linear::Dense(get(&format!("blk.{i}.attn_k.weight"))?),
+                    wv: Linear::Dense(get(&format!("blk.{i}.attn_v.weight"))?),
+                    bq: bias(&format!("blk.{i}.attn_q.bias"))?,
+                    bk: bias(&format!("blk.{i}.attn_k.bias"))?,
+                    bv: bias(&format!("blk.{i}.attn_v.bias"))?,
+                    q_norm: head_norm(&format!("blk.{i}.attn_q_norm.weight"))?,
+                    k_norm: head_norm(&format!("blk.{i}.attn_k_norm.weight"))?,
+                    wo: Linear::Dense(get(&format!("blk.{i}.attn_output.weight"))?),
+                },
                 ffn_norm: get(&format!("blk.{i}.ffn_norm.weight"))?,
                 gate: Linear::Dense(get(&format!("blk.{i}.ffn_gate.weight"))?),
                 up: Linear::Dense(get(&format!("blk.{i}.ffn_up.weight"))?),
@@ -334,10 +331,10 @@ impl Dense {
         let (dm, qd, kd, ff) = (cfg.d_model, cfg.q_dim(), cfg.kv_dim(), cfg.n_ff);
         for l in &layers {
             for (lin, d_in, d_out) in [
-                (&l.wq, dm, qd),
-                (&l.wk, dm, kd),
-                (&l.wv, dm, kd),
-                (&l.wo, qd, dm),
+                (&l.attn.wq, dm, qd),
+                (&l.attn.wk, dm, kd),
+                (&l.attn.wv, dm, kd),
+                (&l.attn.wo, qd, dm),
                 (&l.gate, dm, ff),
                 (&l.up, dm, ff),
                 (&l.down, ff, dm),
@@ -346,7 +343,7 @@ impl Dense {
                     shape(t, d_in, d_out)?;
                 }
             }
-            shape(&l.attn_norm, dm, 1)?;
+            shape(&l.attn.attn_norm, dm, 1)?;
             shape(&l.ffn_norm, dm, 1)?;
         }
         shape(&tok_embd, dm, cfg.n_vocab)?;
@@ -381,10 +378,10 @@ impl Architecture for Dense {
     ) -> Result<(), String> {
         for l in &mut self.layers {
             for lin in [
-                &mut l.wq,
-                &mut l.wk,
-                &mut l.wv,
-                &mut l.wo,
+                &mut l.attn.wq,
+                &mut l.attn.wk,
+                &mut l.attn.wv,
+                &mut l.attn.wo,
                 &mut l.gate,
                 &mut l.up,
                 &mut l.down,
@@ -402,12 +399,29 @@ impl Architecture for Dense {
 
     fn linear_groups(&self, f: &mut dyn FnMut(&[&Linear])) {
         for l in &self.layers {
-            f(&[&l.wq, &l.wk, &l.wv]);
-            f(&[&l.wo]);
+            f(&[&l.attn.wq, &l.attn.wk, &l.attn.wv]);
+            f(&[&l.attn.wo]);
             f(&[&l.gate, &l.up]);
             f(&[&l.down]);
         }
         f(&[&self.head]);
+    }
+
+    fn act_layout(&self) -> ActLayout {
+        let mut keep_f32 = false;
+        self.linear_groups(&mut |lins| {
+            for lin in lins {
+                if let Some(ti) = lin.dense() {
+                    if matches!(ti.kind, Format::F32 | Format::F16 | Format::BF16) {
+                        keep_f32 = true;
+                    }
+                }
+            }
+        });
+        ActLayout {
+            keep_f32,
+            ..ActLayout::default()
+        }
     }
 
     fn forward_rows(
@@ -436,125 +450,7 @@ impl Architecture for Dense {
 
         for (li, l) in self.layers.iter().enumerate() {
             // ---- attention ----
-            peregrine_core::blocks::norm::norm_rows(
-                w,
-                &l.attn_norm,
-                cfg.d_model,
-                cfg.eps,
-                &st.x,
-                &mut st.xb,
-                &mut st.acts,
-                nb,
-                pool,
-                stats,
-            );
-            {
-                let lbx = Disjoint::new(&mut st.lb_x);
-                let lbt = Disjoint::new(&mut st.lb_t);
-                let acts = &st.acts[..nb];
-                let xs: &[f32] = &st.xb;
-                let jobs = [
-                    LinJob {
-                        lin: &l.wq,
-                        out: Disjoint::new(&mut st.q),
-                    },
-                    LinJob {
-                        lin: &l.wk,
-                        out: Disjoint::new(&mut st.k),
-                    },
-                    LinJob {
-                        lin: &l.wv,
-                        out: Disjoint::new(&mut st.v),
-                    },
-                ];
-                peregrine_core::blocks::linear::linear_group(
-                    w,
-                    w.lb(),
-                    &jobs,
-                    acts,
-                    xs,
-                    cfg.d_model,
-                    nb,
-                    lbx,
-                    lbt,
-                    pool,
-                    stats,
-                );
-            }
-            peregrine_core::blocks::attn::prepare_rows(
-                cfg,
-                l.bq.as_deref(),
-                l.bk.as_deref(),
-                l.bv.as_deref(),
-                l.q_norm.as_deref(),
-                l.k_norm.as_deref(),
-                &st.rope,
-                &mut st.q,
-                &mut st.k,
-                &mut st.v,
-                nb,
-                positions,
-                pool,
-                stats,
-            );
-            let qd = cfg.q_dim();
-            peregrine_core::blocks::attn::write_kv_rows(
-                caches,
-                li,
-                &st.k,
-                &st.v,
-                nb,
-                positions,
-                cfg.n_kv_head,
-                cfg.head_dim,
-            );
-
-            let t_attn = Instant::now();
-            for (r0, len, c) in caches.runs(nb) {
-                peregrine_core::blocks::attn::attend(
-                    cfg,
-                    &mut st.attn,
-                    &st.q,
-                    &mut st.xb,
-                    caches.cache(c),
-                    pool,
-                    li,
-                    len,
-                    positions[r0],
-                    r0,
-                    stats,
-                );
-            }
-            stats.ns_attn += t_attn.elapsed().as_nanos() as u64;
-
-            for b in 0..nb {
-                st.acts[b].fill(&st.xb[b * qd..(b + 1) * qd]);
-            }
-            {
-                let lbx = Disjoint::new(&mut st.lb_x);
-                let lbt = Disjoint::new(&mut st.lb_t);
-                let acts = &st.acts[..nb];
-                let jobs = [LinJob {
-                    lin: &l.wo,
-                    out: Disjoint::new(&mut st.xb2),
-                }];
-                peregrine_core::blocks::linear::linear_group(
-                    w,
-                    w.lb(),
-                    &jobs,
-                    acts,
-                    &st.xb,
-                    qd,
-                    nb,
-                    lbx,
-                    lbt,
-                    pool,
-                    stats,
-                );
-            }
-            for i in 0..nb * cfg.d_model {
-                st.x[i] += st.xb2[i];
-            }
+            layer::attention_rows(w, cfg, st, caches, pool, &l.attn, li, nb, positions, stats);
 
             // ---- feed-forward ----
             peregrine_core::blocks::norm::norm_rows(
@@ -631,70 +527,23 @@ impl Architecture for Dense {
             for i in 0..nb * cfg.d_model {
                 st.x[i] += st.xb2[i];
             }
-            if let Some(t) = st.tap_layers.iter().position(|&x| x == li) {
-                let (d, nt) = (cfg.d_model, st.tap_layers.len());
-                for b in 0..nb {
-                    let dst = (b * nt + t) * d;
-                    st.tap[dst..dst + d].copy_from_slice(&st.x[b * d..(b + 1) * d]);
-                }
-            }
+            layer::copy_tap(st, cfg, li, nb);
         }
 
         // ---- output head ----
-        if want_logits.is_empty() {
-            stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
-            return Ok(());
-        }
-        let nl = want_logits.len();
-        if nl > st.acts.len() || nl * cfg.n_vocab > st.logits.len() {
-            return Err(format!(
-                "logits requested for {nl} rows; scratch holds {} activations and {} logit rows",
-                st.acts.len(),
-                st.logits.len() / cfg.n_vocab
-            ));
-        }
-        for (i, &b) in want_logits.iter().enumerate() {
-            if b >= nb {
-                return Err(format!("logits requested for row {b} of a {nb}-row batch"));
-            }
-            let (xs, xe) = (b * cfg.d_model, (b + 1) * cfg.d_model);
-            let (os, oe) = (i * cfg.d_model, (i + 1) * cfg.d_model);
-            let (xv, xbv) = (&st.x, &mut st.xb);
-            peregrine_core::blocks::norm::rmsnorm(
+        if !want_logits.is_empty() {
+            layer::head_rows(
                 w,
+                cfg,
+                st,
                 &self.out_norm,
-                cfg.eps,
-                &xv[xs..xe],
-                &mut xbv[os..oe],
-                stats,
-            );
-            st.acts[i].fill(&st.xb[os..oe]);
-        }
-        let before = stats.ns_matmul;
-        {
-            let lbx = Disjoint::new(&mut st.lb_x);
-            let lbt = Disjoint::new(&mut st.lb_t);
-            let acts = &st.acts[..nl];
-            let jobs = [LinJob {
-                lin: &self.head,
-                out: Disjoint::new(&mut st.logits),
-            }];
-            peregrine_core::blocks::linear::linear_group(
-                w,
-                w.lb(),
-                &jobs,
-                acts,
-                &st.xb,
-                cfg.d_model,
-                nl,
-                lbx,
-                lbt,
+                &self.head,
+                nb,
+                want_logits,
                 pool,
                 stats,
-            );
+            )?;
         }
-        stats.ns_head += stats.ns_matmul - before;
-        stats.ns_matmul = before;
         stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
         Ok(())
     }

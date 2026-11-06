@@ -11,3 +11,4 @@ Format: [`0000-template.md`](0000-template.md). Numbered in order; a superseded 
 | [0004](0004-name.md) | The name Peregrine | Accepted |
 | [0005](0005-modular-structure.md) | Modular structure by layer, features for optional parts, runtime CPU dispatch | Accepted (planning) |
 | [0006](0006-architecture-interface.md) | The `Architecture` interface and shared layer blocks (S1.2) | Accepted |
+| [0007](0007-one-runtime.md) | One runtime (`Engine`) and one drafter interface (S1.4) | Accepted |

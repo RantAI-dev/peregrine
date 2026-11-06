@@ -9,14 +9,15 @@ mod support;
 
 use peregrine_core::gguf::{Format, Gguf};
 use peregrine_core::kv::KvPrec;
-use peregrine_core::model::{Model, State, StepStats};
+use peregrine_core::model::{Model, StepStats};
 use peregrine_core::pool::Pool;
 use peregrine_core::serve::{Engine, Finish, SlotCfg};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{
-    write_dense, write_hybrid, write_hybrid_accepting, write_rope_dense, Dense, Rope,
+    write_dense, write_gemma3, write_gemma3_named, write_hybrid, write_hybrid_accepting, write_moe,
+    write_rope_dense, Dense, Gemma3Config, MoeShape, Rope,
 };
 
 const PROMPT: [u32; 24] = [
@@ -56,9 +57,7 @@ fn run(model: &Model, threads: usize) -> String {
     let c = model.cfg;
     let pool = Pool::new(threads);
     let n = PROMPT.len();
-    let mut st = State::new(&c, 128, n, 256, threads, model.rope_factors.as_deref());
-    let (lx, lt) = model.lb_scratch(128);
-    st.set_lb_scratch(lx, lt);
+    let mut st = model.new_state(128, n, 256, threads);
     let mut kv = model.new_cache(KvPrec::F16, 256);
     let mut ss = StepStats::default();
     let want: Vec<usize> = (0..n).collect();
@@ -583,6 +582,10 @@ fn batching_is_invariant_across_slots() {
             write_hybrid(&dir, Format::PQ2_0, 4401, false),
             "qwen35-PQ2_0",
         ),
+        (
+            write_moe(&dir, Format::Q8_0, 4402, MoeShape::default()),
+            "qwen3moe-Q8_0",
+        ),
     ];
     for (path, label) in &models {
         let model = load_arc(path);
@@ -625,6 +628,10 @@ fn perrow_batching_through_engine() {
         (
             write_hybrid(&dir, Format::PQ2_0, 4411, false),
             "qwen35-PQ2_0/perrow",
+        ),
+        (
+            write_moe(&dir, Format::Q8_0, 4412, MoeShape::default()),
+            "qwen3moe-Q8_0/perrow",
         ),
     ];
     for (path, label) in &models {
@@ -709,17 +716,15 @@ fn hybrid_mtp_accepting_variant_accepts_drafts_losslessly() {
 /// A qwen3moe file — a mixture-of-experts model — written the way llama.cpp v0.9.0 expects it
 /// (`src/models/qwen3moe.cpp`, `src/llama-arch.cpp`).
 ///
-/// The engine has no qwen3moe family yet, so this test does two things. It checks that the file
-/// is written and read back exactly as intended: the metadata llama.cpp reads, and the
+/// The engine runs the file now, so this test does two things. It checks that the file is
+/// written and read back exactly as intended: the metadata llama.cpp reads, and the
 /// three-dimensional expert tensors in llama.cpp's dimension order (the expert index runs
 /// slowest, so one expert is a contiguous run of rows — a 2D matrix with no new kernel). And it
-/// checks that the engine refuses the file *by name*: a refusal that does not say which
-/// architecture it cannot run is a bad refusal.
-///
-/// When the family lands (S2.5 step 2), the refusal half becomes the ordinary `check` of every
-/// other synthetic model.
+/// runs the ordinary `check` of every other synthetic model: the file loads, a prefill gives
+/// finite logits, two runs agree, the result is the same on 1, 2 and 4 threads, and it matches
+/// the stored golden for the current kernel tier.
 #[test]
-fn qwen3moe_file_is_written_and_refused_by_name() {
+fn qwen3moe_models_load_and_match_their_goldens() {
     use support::models::{write_moe, MoeShape};
 
     let dir = tmpdir("moe");
@@ -803,15 +808,11 @@ fn qwen3moe_file_is_written_and_refused_by_name() {
                 Err(e) => failures.push(format!("{name}: {e}")),
             }
         }
-        match peregrine_models::check_compatible(&g) {
-            Ok(()) => failures.push(format!(
-                "{name}: the engine accepted a qwen3moe file it cannot run"
-            )),
-            Err(e) if e.contains("qwen3moe") => {}
-            Err(e) => failures.push(format!(
-                "{name}: refused without naming the architecture: {e}"
-            )),
+        // The engine accepts the file, and runs it.
+        if let Err(e) = peregrine_models::check_compatible(&g) {
+            failures.push(format!("{name}: refused: {e}"));
         }
+        failures.extend(check(&path, &name));
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
@@ -899,6 +900,238 @@ fn mxfp4_oracle_matches_llama_cpp() {
     assert!(checked_tensors > 0, "no MXFP4 tensors found to check");
     eprintln!(
         "oracle: {checked_tensors} tensors ({total_weights} weights) bit-identical to llama.cpp"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------- gemma3 (S2.4a) --
+
+/// Gemma 3: 4 norms per layer, per-head q/k norms, sliding-window interleaved with global,
+/// GeGLU activation, tied output head, and sqrt(d_model) embedding scaling.
+#[test]
+fn gemma3_models_in_f16_and_q8_0() {
+    let dir = tmpdir("gemma3");
+    let mut failures = Vec::new();
+    for (i, fmt) in [Format::F16, Format::Q8_0].into_iter().enumerate() {
+        let path = write_gemma3(&dir, fmt, 8000 + i as u64, Gemma3Config::default());
+        failures.extend(check(&path, &format!("gemma3-{}", fmt.label())));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic gemma3 models failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn gemma3_batching_is_invariant_across_slots() {
+    let perrow = !peregrine_core::options::get().mix;
+    let dir = tmpdir("gemma3-batch");
+    let mut failures = Vec::new();
+    let path = write_gemma3(&dir, Format::Q8_0, 8010, Gemma3Config::default());
+    let model = load_arc(&path);
+    failures.extend(batching_failures(&model, "gemma3-Q8_0", perrow));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "gemma3 batching invariance failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn gemma3_synthetic_file_runs_in_llama_cpp() {
+    let compare_bin = PathBuf::from("/tmp/compare_gemma3");
+    if !compare_bin.exists() {
+        let llama_so = Path::new("/tmp/llama.cpp/build/bin/libllama.so");
+        if !llama_so.exists() {
+            eprintln!("llama.cpp not found at {}, skipping", llama_so.display());
+            return;
+        }
+    }
+    let dir = tmpdir("gemma3-llama-cpp");
+    let path = write_gemma3(&dir, Format::F16, 8020, Gemma3Config::default());
+    let logits_path = dir.join("llama_logits.bin");
+
+    // Prompt of 40 tokens on the synthetic model's tokenizer (window is 16 < 40)
+    let prompt = "In a quiet valley surrounded by mountains";
+    let n_predict = 32;
+
+    let output = std::process::Command::new(&compare_bin)
+        .args([
+            path.to_str().unwrap(),
+            &n_predict.to_string(),
+            prompt,
+            logits_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to execute compare_gemma3");
+
+    assert!(
+        output.status.success(),
+        "compare_gemma3 failed on synthetic gemma3 model: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let llama_stdout = String::from_utf8_lossy(&output.stdout);
+
+    let llama_tokens: Vec<u32> = llama_stdout
+        .lines()
+        .find(|l| l.starts_with("TOKENS:"))
+        .expect("TOKENS: line")
+        .strip_prefix("TOKENS:")
+        .unwrap()
+        .split_whitespace()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(llama_tokens.len(), n_predict);
+
+    let llama_logits_bytes = std::fs::read(&logits_path).expect("read logits");
+    let llama_logits: Vec<f32> = llama_logits_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_ne_bytes(*b))
+        .collect();
+
+    let model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
+    let prompt_toks = model.tk.encode(prompt);
+    assert_eq!(prompt_toks.len(), 40, "prompt should be 40 tokens");
+    assert!(
+        prompt_toks.len() > 16,
+        "prompt must be longer than window 16"
+    );
+
+    let pool = Pool::new(1);
+    let mut st = model.new_state(128, prompt_toks.len() + n_predict, 256, 1);
+    let mut kv = model.new_cache(KvPrec::F16, 256);
+    let mut ss = StepStats::default();
+    let want: Vec<usize> = vec![prompt_toks.len() - 1];
+    model
+        .forward(&mut st, &mut kv, &pool, &prompt_toks, 0, &want, &mut ss)
+        .unwrap();
+
+    let pere_logits = st.logits_row(0, model.cfg.n_vocab).to_vec();
+    assert_eq!(pere_logits.len(), llama_logits.len());
+
+    let mut max_abs_err = 0.0f32;
+    let mut max_rel_err = 0.0f32;
+    let mut sum_sq_diff = 0.0f64;
+    let mut sum_sq_ref = 0.0f64;
+    for (p, l) in pere_logits.iter().zip(&llama_logits) {
+        let abs = (p - l).abs();
+        max_abs_err = max_abs_err.max(abs);
+        let rel = abs / l.abs().max(1e-5);
+        max_rel_err = max_rel_err.max(rel);
+        sum_sq_diff += ((p - l) as f64).powi(2);
+        sum_sq_ref += (*l as f64).powi(2);
+    }
+    let rel_l2_err = (sum_sq_diff.sqrt() / sum_sq_ref.sqrt()) as f32;
+    eprintln!(
+        "Last-position logits: max_abs_err = {:e}, max_rel_err = {:e}, rel_l2_err = {:e}",
+        max_abs_err, max_rel_err, rel_l2_err
+    );
+    assert!(max_abs_err < 0.05, "logits error too high: {max_abs_err}");
+
+    let mut pere_tokens = Vec::new();
+    let mut next = argmax(&pere_logits);
+    pere_tokens.push(next);
+    for step in 1..n_predict {
+        let pos = prompt_toks.len() + step - 1;
+        model
+            .forward(&mut st, &mut kv, &pool, &[next], pos, &[0], &mut ss)
+            .unwrap();
+        next = argmax(st.logits_row(0, model.cfg.n_vocab));
+        pere_tokens.push(next);
+    }
+    eprintln!(
+        "llama.cpp greedy tokens ({}): {:?}",
+        llama_tokens.len(),
+        llama_tokens
+    );
+    eprintln!(
+        "Peregrine greedy tokens ({}): {:?}",
+        pere_tokens.len(),
+        pere_tokens
+    );
+
+    assert_eq!(
+        pere_tokens, llama_tokens,
+        "greedy tokens diverged between Peregrine and llama.cpp"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gemma3_attention_scale_follows_llama_cpp() {
+    use peregrine_models::gemma3::attention_scale;
+    // 62 layers is the 27B: 1/sqrt(n_embd / n_head) with llama.cpp's integer division.
+    assert_eq!(attention_scale(62, 5376, 32, 128), 1.0 / (168f32).sqrt());
+    assert_eq!(attention_scale(62, 5377, 32, 128), 1.0 / (168f32).sqrt());
+    // Every other layer count, known or not (llama.cpp loads it as an unknown type): 1/sqrt(head_dim).
+    for n_layer in [6, 18, 26, 34, 48, 40] {
+        assert_eq!(
+            attention_scale(n_layer, 2560, 8, 256),
+            1.0 / (256f32).sqrt()
+        );
+    }
+}
+
+#[test]
+fn gemma3_rope_linear_matches_golden() {
+    let dir = tmpdir("gemma3-rope-linear");
+    let cfg = Gemma3Config {
+        rope: Rope::Linear { factor: 8.0 },
+        ..Default::default()
+    };
+    let path = write_gemma3_named(&dir, Format::F16, 8030, cfg, Some("gemma3-rope-linear"));
+    let failures = check(&path, "gemma3-rope-linear");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_none(),
+        "gemma3-rope-linear failed:\n{}",
+        failures.unwrap_or_default()
+    );
+}
+
+/// A qwen3moe file that does not say how wide the experts are is refused by name.
+///
+/// llama.cpp reads `expert_feed_forward_length` for this architecture and falls back to
+/// `feed_forward_length / expert_used_count` when it is absent
+/// (`src/models/qwen3moe.cpp`). Peregrine refuses the file instead: the dense
+/// `feed_forward_length` a qwen3moe file also carries is not the experts' width, and guessing
+/// it would run the wrong feed-forward.
+#[test]
+fn a_qwen3moe_file_without_the_expert_width_is_refused() {
+    use support::vocab::add_tokenizer_metadata;
+    use support::writer::GgufWriter;
+
+    let dir = tmpdir("moe-refuse");
+    let path = dir.join("qwen3moe-no-expert-ff.gguf");
+    let mut w = GgufWriter::new();
+    w.str("general.architecture", "qwen3moe");
+    w.str("general.name", "synthetic-qwen3moe-no-expert-ff");
+    w.u32("qwen3moe.block_count", 2);
+    w.u32("qwen3moe.embedding_length", 256);
+    w.u32("qwen3moe.attention.head_count", 8);
+    w.u32("qwen3moe.attention.head_count_kv", 4);
+    // The dense width the file also carries — not the experts' width.
+    w.u32("qwen3moe.feed_forward_length", 512);
+    w.u32("qwen3moe.expert_count", 8);
+    w.u32("qwen3moe.expert_used_count", 2);
+    w.u32("qwen3moe.vocab_size", 320);
+    add_tokenizer_metadata(&mut w, "qwen2");
+    w.write_to_file(&path).expect("write the test model");
+
+    let g = Gguf::open(&path).expect("open the test model");
+    let err = match peregrine_models::load(g) {
+        Ok(_) => panic!("the engine loaded a qwen3moe file without the experts' width"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("expert_feed_forward_length"),
+        "refused without naming the key: {err}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

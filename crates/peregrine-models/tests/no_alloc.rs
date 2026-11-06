@@ -9,6 +9,10 @@
 //! layer, `Model::forward` collected a position vector per call, the hybrid pass built four pointer vectors and a
 //! `seen` vector per Gated DeltaNet layer, and the MTP block allocated `e`, `qg`, `gate`, two `to_vec` rows and
 //! `y` per draft.
+//!
+//! One MTP *verification* step is covered too: the drafter proposes into a buffer the caller owns and the
+//! engine commits, the way `Engine::verify_step` asks of it. The proposal is the engine's own buffer and the
+//! drafter's scratch is reused, so neither allocates.
 
 mod support;
 
@@ -19,7 +23,8 @@ use peregrine_core::pool::Pool;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use support::models::{write_dense, write_hybrid, Dense};
+use std::sync::Arc;
+use support::models::{write_dense, write_hybrid, write_moe, Dense, MoeShape};
 
 /// Allocations counted while `COUNTING` was set.
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -72,9 +77,9 @@ fn tmpdir(test: &str) -> PathBuf {
     d
 }
 
-fn load(path: &Path) -> Model {
+fn load(path: &Path) -> Arc<Model> {
     let g = Gguf::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    peregrine_models::load(g).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    Arc::new(peregrine_models::load(g).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
 }
 
 /// No model file here carries a tokenizer vocabulary large enough for the prompt used by the synthetic tests;
@@ -127,6 +132,72 @@ fn check_mtp_draft(model: &Model, threads: usize) -> usize {
     })
 }
 
+/// One MTP verification step: the drafter proposes into the caller's buffer
+/// and the engine commits what was sampled, the way `Engine::verify_step`
+/// asks of it.
+///
+/// The proposal is written into a buffer the caller owns and reused, and the
+/// drafter keeps its own scratch: neither allocates per step.
+fn check_mtp_verify(model: &Arc<Model>, threads: usize) -> usize {
+    use peregrine_core::draft::{Drafter, MtpDrafter, Proposal};
+    let c = model.cfg;
+    let pool = Pool::new(threads);
+    let mut drafter = MtpDrafter::new(model.clone(), 512, threads).unwrap();
+    let mut out = Proposal::default();
+    let hidden = vec![0.0f32; c.d_model];
+    // The sampler's stand-in: the MTP block does not draw with it.
+    let mut pick = |_i: usize, _logits: &[f32]| 0u32;
+    let mut step = |drafter: &mut MtpDrafter, out: &mut Proposal, pos: usize| {
+        // The target's committed row: the token and the hidden state of the
+        // position before it.
+        drafter.commit(pos, TOKEN, &[], &hidden, &pool);
+        drafter.propose(TOKEN, pos + 1, 1, &pool, &mut pick, out);
+    };
+    for pos in 0..8 {
+        step(&mut drafter, &mut out, pos);
+    }
+    allocations_during(|| {
+        for pos in 8..12 {
+            step(&mut drafter, &mut out, pos);
+        }
+    })
+}
+
+/// One suffix verification step: the drafter proposes into the caller's buffer
+/// and is told what the target committed, the way `Engine::verify_step` asks of
+/// it.
+///
+/// The proposal is written into a buffer the caller owns and reused, and the
+/// drafter keeps its own scratch: neither allocates per step. The corpus is a
+/// run of one token, so the index's tables hold one key each and stop growing;
+/// the commits in the measured window are past the corpus, so it does not grow
+/// either.
+fn check_suffix_verify() -> usize {
+    use peregrine_core::draft::{Drafter, Proposal, SuffixDrafter};
+    let pool = Pool::new(4);
+    let mut drafter = SuffixDrafter::new(2, 6);
+    let mut out = Proposal::default();
+    // The sampler's stand-in: the suffix index does not draw with it.
+    let mut pick = |_i: usize, _logits: &[f32]| 0u32;
+    // The corpus: the same token over and over, so the index finds a match and
+    // its tables stop growing.
+    for pos in 0..64 {
+        drafter.commit(pos, TOKEN, &[], &[], &pool);
+    }
+    // A warm proposal: the drafter's own buffers and the caller's have their
+    // capacity.
+    drafter.propose(TOKEN, 64, 6, &pool, &mut pick, &mut out);
+    let base = 64usize + 8;
+    allocations_during(|| {
+        for i in 0..4 {
+            drafter.propose(TOKEN, base + i, 6, &pool, &mut pick, &mut out);
+            // Past the corpus: the corpus keeps its length and its capacity, and
+            // the index indexes nothing new.
+            drafter.commit(base + i + 1, TOKEN, &[], &[], &pool);
+        }
+    })
+}
+
 #[test]
 fn a_decode_step_allocates_nothing() {
     // Prove the counter sees allocations, so a silently broken allocator cannot make this test vacuous.
@@ -151,7 +222,22 @@ fn a_decode_step_allocates_nothing() {
     ));
     // The hybrid model: Gated DeltaNet layers (conv, delta rule, snapshots), gated attention, Hadamard rotation.
     let hybrid = load(&write_hybrid(&dir, Format::PQ2_0, 7001, false));
-    for (name, model) in [("qwen3-Q8_0", &dense), ("qwen35-PQ2_0", &hybrid)] {
+    // The mixture of experts: the router, the expert gather and the slot-ordered sum, all in
+    // the scratch the family sized once.
+    let moe = load(&write_moe(&dir, Format::Q8_0, 7003, MoeShape::default()));
+    // Gemma 3 in Q8_0: sliding-window and global layers, per-head norms, GeGLU, 4 norms per layer.
+    let gemma3 = load(&support::models::write_gemma3(
+        &dir,
+        Format::Q8_0,
+        7004,
+        support::models::Gemma3Config::default(),
+    ));
+    for (name, model) in [
+        ("qwen3-Q8_0", &dense),
+        ("qwen35-PQ2_0", &hybrid),
+        ("qwen3moe-Q8_0", &moe),
+        ("gemma3-Q8_0", &gemma3),
+    ] {
         for threads in [1, 4] {
             let n = check_decode(model, threads);
             if n != 0 {
@@ -174,7 +260,20 @@ fn a_decode_step_allocates_nothing() {
                     "qwen35-MTP draft, {threads} threads: {n} allocations per step"
                 ));
             }
+            let n = check_mtp_verify(&mtp, threads);
+            if n != 0 {
+                failures.push(format!(
+                    "qwen35-MTP verification, {threads} threads: {n} allocations per step"
+                ));
+            }
         }
+    }
+
+    // The suffix drafter: the proposal, the index and the corpus, all in
+    // buffers the drafter and the caller own.
+    let n = check_suffix_verify();
+    if n != 0 {
+        failures.push(format!("suffix verification: {n} allocations per step"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);
