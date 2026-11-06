@@ -26,8 +26,11 @@ the rest. When a rule has to be broken, say so in a comment that gives the reaso
 3. Functions with `#[target_feature]` are `unsafe fn` and are called only after the runtime feature check
    (through the kernel table once it exists). Never call a feature-gated function behind a compile-time
    `cfg` alone.
-4. Sharing a buffer across pool workers uses one helper that hands out disjoint ranges, never raw
-   pointers copied into closures (roadmap S1.3). Aliasing bugs have happened here before.
+4. Sharing a buffer across pool workers uses the checked `Disjoint<'a, T>` helper (`crates/peregrine-core/src/blocks/par.rs`),
+   never raw pointers copied into closures or ad-hoc unsafe slice carving (roadmap S1.3). `Disjoint` wraps `&mut [T]` with
+   always-on bounds checks, safe `.chunk(off, len)` / `.rows(range, stride)` / `.set(i, v)` writes, and optional debug-assertion
+   or `--cfg peregrine_check_disjoint` atomic bitmap overlap detection per `Pool::run` epoch. Recurrent state pointers
+   into multiple caches (`RowPtrs`/`SnapPtrs`) remain the only documented exception.
 
 ## 3. Performance hygiene
 

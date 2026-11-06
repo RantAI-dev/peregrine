@@ -12,7 +12,7 @@
 //! sequence's `KvCache` (so several users batched in one pass each carry their own), and the rotation.
 
 use super::*;
-use crate::blocks::par::{RecScratch, RowPtrs, SnapPtrs};
+use crate::blocks::par::{Disjoint, RecScratch, RowPtrs, SnapPtrs};
 use crate::blocks::recurrent::{self, RecurrentCfg};
 use crate::blocks::rotate::{Rotation, RowPrep, VPerm};
 use std::sync::atomic::{AtomicU64, Ordering as AO};
@@ -568,7 +568,7 @@ impl Model {
         self.mm_jobs(
             &[MatJob {
                 w: h,
-                out: OutPtr(logits.as_mut_ptr()),
+                out: Disjoint::new(logits),
                 rows: Some(rows),
             }],
             &acts[..nb],
@@ -601,14 +601,17 @@ impl Model {
         pool: &Pool,
         stats: &mut StepStats,
     ) {
-        self.rotate_rows_pre(
-            hs,
+        let _t = Tick::new(2);
+        let hy = self.hy();
+        hy.rot.rotate_rows(
+            &mut hs.rot,
+            hs.rot_w,
             acts,
-            SharedBuf(src.as_ptr() as *mut f32),
+            src,
             w,
             nb,
-            perm,
-            None,
+            hy.vperm(perm),
+            nb >= ROW_PARALLEL && pool.width() > 1,
             pool,
             stats,
         );
@@ -623,7 +626,7 @@ impl Model {
         &self,
         hs: &mut HyScratch,
         acts: &mut [QuantAct],
-        src: SharedBuf,
+        src: &mut [f32],
         w: usize,
         nb: usize,
         perm: bool,
@@ -650,7 +653,7 @@ impl Model {
 
     pub(super) fn mm(
         &self,
-        jobs: &[(&TensorInfo, *mut f32)],
+        jobs: &[(&TensorInfo, Disjoint<'_, f32>)],
         acts: &[QuantAct],
         nb: usize,
         pool: &Pool,
@@ -661,7 +664,7 @@ impl Model {
             let (w, o) = jobs[i.min(jobs.len() - 1)];
             MatJob {
                 w,
-                out: OutPtr(o),
+                out: o,
                 rows: None,
             }
         });
@@ -767,11 +770,10 @@ impl Model {
                 let (xs, nw): (&[f32], &TensorInfo) = (&st8.x, &l.attn_norm);
                 let pre =
                     |b: usize, row: &mut [f32]| self.rmsnorm_into(&xs[b * d..(b + 1) * d], nw, row);
-                let xbp = SharedBuf(st8.xb.as_mut_ptr());
                 self.rotate_rows_pre(
                     &mut hs,
                     &mut st8.acts,
-                    xbp,
+                    &mut st8.xb,
                     d,
                     nb,
                     false,
@@ -794,7 +796,10 @@ impl Model {
                     idx,
                 } => {
                     self.mm(
-                        &[(qkv, hs.big.as_mut_ptr()), (gate, hs.z.as_mut_ptr())],
+                        &[
+                            (qkv, Disjoint::new(&mut hs.big)),
+                            (gate, Disjoint::new(&mut hs.z)),
+                        ],
                         &st8.acts[..nb],
                         nb,
                         pool,
@@ -823,11 +828,10 @@ impl Model {
                                 c.eps,
                             )
                         };
-                        let op = SharedBuf(o.as_mut_ptr());
                         self.rotate_rows_pre(
                             &mut hs,
                             &mut st8.acts,
-                            op,
+                            &mut o,
                             vd,
                             nb,
                             hy.v_grouped,
@@ -839,7 +843,7 @@ impl Model {
                     hs.o = o;
                     hs.z = z;
                     self.mm(
-                        &[(out, st8.xb2.as_mut_ptr())],
+                        &[(out, Disjoint::new(&mut st8.xb2))],
                         &st8.acts[..nb],
                         nb,
                         pool,
@@ -858,9 +862,9 @@ impl Model {
                     let (qd, kvd, hd) = (c.q_dim(), c.kv_dim(), c.head_dim);
                     self.mm(
                         &[
-                            (q, hs.big.as_mut_ptr()),
-                            (k, st8.k.as_mut_ptr()),
-                            (v, st8.v.as_mut_ptr()),
+                            (q, Disjoint::new(&mut hs.big)),
+                            (k, Disjoint::new(&mut st8.k)),
+                            (v, Disjoint::new(&mut st8.v)),
                         ],
                         &st8.acts[..nb],
                         nb,
@@ -870,46 +874,44 @@ impl Model {
                     // q and gate are interleaved per head: [q_h (hd) | gate_h (hd)].
                     let ta = Tick::new(8);
                     {
-                        let (qp, kp, zp) = (
-                            SharedBuf(st8.q.as_mut_ptr()),
-                            SharedBuf(st8.k.as_mut_ptr()),
-                            SharedBuf(hs.z.as_mut_ptr()),
-                        );
                         let (big, rope, zw): (&[f32], &[f32], usize) = (&hs.big, &st8.rope, hs.z_w);
-                        let next = std::sync::atomic::AtomicUsize::new(0);
-                        let body = |_wk: usize, _nw: usize| loop {
-                            let b = next.fetch_add(1, AO::Relaxed);
-                            if b >= nb {
-                                break;
-                            }
-                            // SAFETY: row b of q, k and z is claimed by this worker.
-                            let (q, k, z) = unsafe {
-                                (
-                                    qp.slice(b * qd, qd),
-                                    kp.slice(b * kvd, kvd),
-                                    zp.slice(b * zw, qd),
-                                )
-                            };
-                            for h in 0..c.n_head {
-                                let src = b * 2 * qd + h * 2 * hd;
-                                q[h * hd..(h + 1) * hd].copy_from_slice(&big[src..src + hd]);
-                                z[h * hd..(h + 1) * hd]
-                                    .copy_from_slice(&big[src + hd..src + 2 * hd]);
-                            }
-                            for row in q.chunks_exact_mut(hd) {
-                                head_rmsnorm(row, q_norm, c.eps);
-                            }
-                            for row in k.chunks_exact_mut(hd) {
-                                head_rmsnorm(row, k_norm, c.eps);
-                            }
-                            self.rope(rope, q, c.n_head, positions[b]);
-                            self.rope(rope, k, c.n_kv_head, positions[b]);
-                        };
-                        if nb >= ROW_PARALLEL && pool.width() > 1 {
-                            pool.run(body);
+                        let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+                        crate::blocks::par::for_row_chunks_3(
+                            pool,
+                            parallel,
+                            &mut st8.q,
+                            qd,
+                            &mut st8.k,
+                            kvd,
+                            &mut hs.z,
+                            zw,
+                            nb,
+                            crate::blocks::par::Sched::Dynamic(1),
+                            |_wk, rows, q_chunk, k_chunk, z_chunk| {
+                                for (i, b) in rows.enumerate() {
+                                    let q = &mut q_chunk[i * qd..(i + 1) * qd];
+                                    let k = &mut k_chunk[i * kvd..(i + 1) * kvd];
+                                    let z = &mut z_chunk[i * zw..i * zw + qd];
+                                    for h in 0..c.n_head {
+                                        let src = b * 2 * qd + h * 2 * hd;
+                                        q[h * hd..(h + 1) * hd]
+                                            .copy_from_slice(&big[src..src + hd]);
+                                        z[h * hd..(h + 1) * hd]
+                                            .copy_from_slice(&big[src + hd..src + 2 * hd]);
+                                    }
+                                    for row in q.chunks_exact_mut(hd) {
+                                        head_rmsnorm(row, q_norm, c.eps);
+                                    }
+                                    for row in k.chunks_exact_mut(hd) {
+                                        head_rmsnorm(row, k_norm, c.eps);
+                                    }
+                                    self.rope(rope, q, c.n_head, positions[b]);
+                                    self.rope(rope, k, c.n_kv_head, positions[b]);
+                                }
+                            },
+                        );
+                        if parallel {
                             stats.barriers += 1;
-                        } else {
-                            body(0, 1);
                         }
                     }
                     for b in 0..nb {
@@ -969,11 +971,10 @@ impl Model {
                         let pre = |b: usize, row: &mut [f32]| {
                             crate::vmath::mul_sigmoid(row, &zr[b * zw..b * zw + qd])
                         };
-                        let xbp = SharedBuf(st8.xb.as_mut_ptr());
                         self.rotate_rows_pre(
                             &mut hs,
                             &mut st8.acts,
-                            xbp,
+                            &mut st8.xb,
                             qd,
                             nb,
                             false,
@@ -984,7 +985,7 @@ impl Model {
                         hs.z = z;
                     }
                     self.mm(
-                        &[(o, st8.xb2.as_mut_ptr())],
+                        &[(o, Disjoint::new(&mut st8.xb2))],
                         &st8.acts[..nb],
                         nb,
                         pool,
@@ -1002,11 +1003,10 @@ impl Model {
                 let (xs, nw): (&[f32], &TensorInfo) = (&st8.x, &l.post_norm);
                 let pre =
                     |b: usize, row: &mut [f32]| self.rmsnorm_into(&xs[b * d..(b + 1) * d], nw, row);
-                let xbp = SharedBuf(st8.xb.as_mut_ptr());
                 self.rotate_rows_pre(
                     &mut hs,
                     &mut st8.acts,
-                    xbp,
+                    &mut st8.xb,
                     d,
                     nb,
                     false,
@@ -1018,8 +1018,8 @@ impl Model {
             }
             self.mm(
                 &[
-                    (&l.gate, st8.hb.as_mut_ptr()),
-                    (&l.up, st8.hb2.as_mut_ptr()),
+                    (&l.gate, Disjoint::new(&mut st8.hb)),
+                    (&l.up, Disjoint::new(&mut st8.hb2)),
                 ],
                 &st8.acts[..nb],
                 nb,
@@ -1032,11 +1032,10 @@ impl Model {
                 let up: &[f32] = &st8.hb2;
                 let pre =
                     |b: usize, row: &mut [f32]| crate::vmath::swiglu(row, &up[b * f..(b + 1) * f]);
-                let hbp = SharedBuf(st8.hb.as_mut_ptr());
                 self.rotate_rows_pre(
                     &mut hs,
                     &mut st8.acts,
-                    hbp,
+                    &mut st8.hb,
                     f,
                     nb,
                     false,
@@ -1049,15 +1048,18 @@ impl Model {
                 {
                     // One row: its 12 288 exps split across the pool, then the rotation.
                     let total = nb * f;
-                    let g = SharedBuf(st8.hb.as_mut_ptr());
                     let up: &[f32] = &st8.hb2;
-                    pool.run(|wk, nw| {
-                        let (lo, hi) = share(total / 8, wk, nw);
-                        let (lo, hi) = (lo * 8, if wk + 1 == nw { total } else { hi * 8 });
-                        // SAFETY: `share` gives each worker a disjoint range.
-                        let gs = unsafe { g.slice(lo, hi - lo) };
-                        crate::vmath::swiglu(gs, &up[lo..hi]);
-                    });
+                    crate::blocks::par::for_row_chunks(
+                        pool,
+                        true,
+                        &mut st8.hb[..total],
+                        1,
+                        total,
+                        crate::blocks::par::Sched::StaticAligned(8),
+                        |_wk, range, gs| {
+                            crate::vmath::swiglu(gs, &up[range]);
+                        },
+                    );
                     stats.barriers += 1;
                 }
                 drop(tf);
@@ -1066,7 +1068,7 @@ impl Model {
                 st8.hb = hb;
             }
             self.mm(
-                &[(&l.down, st8.xb2.as_mut_ptr())],
+                &[(&l.down, Disjoint::new(&mut st8.xb2))],
                 &st8.acts[..nb],
                 nb,
                 pool,
@@ -1116,7 +1118,7 @@ impl Model {
             let before = stats.ns_matmul;
             if let Linear::Dense(h) = &self.head {
                 self.mm(
-                    &[(h, st8.logits.as_mut_ptr())],
+                    &[(h, Disjoint::new(&mut st8.logits))],
                     &st8.acts[..nl],
                     nl,
                     pool,

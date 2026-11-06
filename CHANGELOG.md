@@ -7,8 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Support for GGML's IQ4_NL and IQ4_XS weight formats (AVX2 single-row and batched kernels, scalar reference).
 - Support for GGML's Q5_K weight format (AVX2 single-row and batched kernels, scalar reference).
 - Support for Gemma, Mistral (v1, v7), and Llama 2 chat templates with exact llama.cpp parity (S2.3b).
+- Support for the pre-update Mistral v0.2 chat template (no system branch), and `--chat-template <name>`
+  for a model file that declares no chat template (S2.3c).
 - Support for SentencePiece (llama) tokenizers transcribed from llama.cpp (S2.3a).
 - Support for GGML's Q4_0 weight format (AVX2 and scalar kernels).
 - `peregrine-core`: CPU inference engine for GGUF models.
