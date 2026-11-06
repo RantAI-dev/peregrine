@@ -135,3 +135,14 @@ pub fn f16(h: u16) -> f32 {
     };
     f32::from_bits(bits)
 }
+
+/// Borrow an aligned `&[f32]` from raw tensor bytes if alignment and length match.
+#[inline]
+pub fn cast_f32_slice(b: &[u8], n: usize) -> Option<&[f32]> {
+    if b.as_ptr() as usize % align_of::<f32>() == 0 && b.len() >= n * 4 {
+        // SAFETY: 4-byte aligned, buffer holds at least n floats, and any 4 bytes represent a valid f32.
+        Some(unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f32, n) })
+    } else {
+        None
+    }
+}
