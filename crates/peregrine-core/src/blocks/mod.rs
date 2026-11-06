@@ -9,7 +9,9 @@ pub(crate) mod ffn;
 pub(crate) mod linear;
 pub(crate) mod norm;
 pub(crate) mod par;
+pub(crate) mod recurrent;
 pub(crate) mod rope;
+pub(crate) mod rotate;
 
 /// Batch rows at which per-row work (norm, SwiGLU, prep) is split across the pool.
 pub(crate) const ROW_PARALLEL: usize = 2;
