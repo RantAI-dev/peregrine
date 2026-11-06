@@ -746,6 +746,9 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
             // KV cache (the rotation on).
             turn: 0,
             kv_rotation: true,
+            // The server asks for no drafter: the slot decodes plainly, and the
+            // engine's own MTP speculation is the engine's business.
+            drafter: Default::default(),
         };
         if app
             .jobs

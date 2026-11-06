@@ -180,6 +180,25 @@ impl Proposal {
     }
 }
 
+/// What the engine does with a drafter's proposal beyond pricing it.
+///
+/// The engine owns the price (it measures its own forward passes), but a
+/// drafter knows what it is: the DSpark head has a switch that pins the draft
+/// count for a measurement, and the suffix index needs a probe now and then
+/// because a confidence that is never tested never recovers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DraftPolicy {
+    /// An exact number of draft tokens to verify, whatever the confidences say
+    /// (`PEREGRINE_DSPARK_K` pins the DSpark head's depth for a measurement).
+    pub pinned_k: Option<usize>,
+    /// Park drafting for a while when a round does not pay for itself: the
+    /// DSpark head's rule, as the session applies it.
+    pub park: bool,
+    /// Verify a couple of drafts every `PROBE_EVERY`th step even when the price
+    /// says not to: the suffix index's rule.
+    pub probe: bool,
+}
+
 /// One way of proposing tokens.
 ///
 /// A drafter is told what the target committed and what was rolled back, and
@@ -239,6 +258,15 @@ pub trait Drafter: Send {
     fn tap_layers(&self) -> &[usize] {
         &[]
     }
+
+    /// What the engine does with this drafter's proposal beyond pricing it.
+    ///
+    /// The default: the engine prices the proposal with [`choose_k`] over the
+    /// drafter's confidences, verifies what is worth verifying, and parks
+    /// nothing.
+    fn policy(&self) -> DraftPolicy {
+        DraftPolicy::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +284,8 @@ struct Pending {
     cells: Vec<crate::suffix::Cell>,
     /// How many of them the target has committed and matched.
     accepted: usize,
+    /// Whether a proposal is under way.
+    live: bool,
 }
 
 /// Suffix-indexed drafting as a [`Drafter`]: the longest match of the
@@ -266,13 +296,18 @@ struct Pending {
 /// ([`Drafter::rollback`]). What it proposes is the match's continuation with
 /// the confidence the index has learned for each of its tokens; how much of it
 /// is verified is the engine's decision ([`choose_k`]).
+///
+/// Nothing here allocates per proposal: the index's proposal is written into a
+/// buffer the drafter owns, and so is the proposal being verified.
 pub struct SuffixDrafter {
     /// The n-gram index over the corpus, and the confidence it has learned.
     index: crate::suffix::SuffixIndex,
     /// The committed tokens: the corpus the index searches.
     ctx: Vec<u32>,
     /// The proposal being verified, if any.
-    pending: Option<Pending>,
+    pending: Pending,
+    /// The proposal the index makes, reused so a draft costs no allocation.
+    draft: crate::suffix::Draft,
     /// The shortest suffix accepted as a match; 0 disables drafting.
     min_order: usize,
     /// The most tokens one proposal may hold.
@@ -288,7 +323,14 @@ impl SuffixDrafter {
         SuffixDrafter {
             index: crate::suffix::SuffixIndex::new(),
             ctx: Vec::new(),
-            pending: None,
+            pending: Pending {
+                anchor_pos: 0,
+                toks: Vec::new(),
+                cells: Vec::new(),
+                accepted: 0,
+                live: false,
+            },
+            draft: crate::suffix::Draft::default(),
             min_order,
             max_len,
         }
@@ -315,6 +357,16 @@ impl Drafter for SuffixDrafter {
         }
     }
 
+    fn policy(&self) -> DraftPolicy {
+        // The suffix index's confidences are learned from what verification
+        // accepted: a confidence that is never tested never recovers, so the
+        // engine probes now and then (as the session does).
+        DraftPolicy {
+            probe: true,
+            ..DraftPolicy::default()
+        }
+    }
+
     fn propose(
         &mut self,
         anchor: u32,
@@ -325,31 +377,31 @@ impl Drafter for SuffixDrafter {
         out: &mut Proposal,
     ) {
         out.clear();
-        self.pending = None;
+        self.pending.live = false;
         let k = k_max.min(self.max_len);
         if k == 0 || self.min_order == 0 || self.ctx.is_empty() {
             return;
         }
         self.index.sync(&self.ctx, self.min_order);
-        let d = self.index.propose(&self.ctx, anchor, k, self.min_order);
-        if d.toks.is_empty() {
+        self.index
+            .propose_into(&self.ctx, anchor, k, self.min_order, &mut self.draft);
+        if self.draft.toks.is_empty() {
             // No match: whatever run was under way is over.
             self.index.cool();
             return;
         }
-        out.toks.extend_from_slice(&d.toks);
-        for &c in &d.cells {
+        out.toks.extend_from_slice(&self.draft.toks);
+        for &c in &self.draft.cells {
             out.conf.push(self.index.conf(c));
         }
-        let mut pending = Pending {
-            anchor_pos,
-            toks: Vec::with_capacity(d.toks.len()),
-            cells: Vec::with_capacity(d.cells.len()),
-            accepted: 0,
-        };
-        pending.toks.extend_from_slice(&d.toks);
-        pending.cells.extend_from_slice(&d.cells);
-        self.pending = Some(pending);
+        let p = &mut self.pending;
+        p.anchor_pos = anchor_pos;
+        p.toks.clear();
+        p.toks.extend_from_slice(&self.draft.toks);
+        p.cells.clear();
+        p.cells.extend_from_slice(&self.draft.cells);
+        p.accepted = 0;
+        p.live = true;
     }
 
     fn commit(&mut self, pos: usize, token: u32, _taps: &[f32], _hidden: &[f32], _pool: &Pool) {
@@ -362,9 +414,10 @@ impl Drafter for SuffixDrafter {
         }
         // Was it one of the drafted tokens? A match is an acceptance, a
         // mismatch ends the run: the tokens after it were never tested.
-        let Some(p) = self.pending.as_mut() else {
+        let p = &mut self.pending;
+        if !p.live {
             return;
-        };
+        }
         let Some(j) = pos.checked_sub(p.anchor_pos + 1) else {
             return;
         };
@@ -375,16 +428,15 @@ impl Drafter for SuffixDrafter {
             p.accepted = j + 1;
             if p.accepted == p.toks.len() {
                 // The whole draft survived.
-                let cells = std::mem::take(&mut p.cells);
-                self.index.observe(&cells, p.accepted);
-                self.pending = None;
+                let accepted = p.accepted;
+                self.index.observe(&p.cells, accepted);
+                p.live = false;
             }
         } else {
             // Rejected at depth `j`: the tokens before it were accepted, this
             // one was not, and the rest were never tested.
-            let cells = std::mem::take(&mut p.cells);
-            self.index.observe(&cells, j);
-            self.pending = None;
+            self.index.observe(&p.cells, j);
+            p.live = false;
         }
     }
 
@@ -394,17 +446,15 @@ impl Drafter for SuffixDrafter {
         }
         // A proposal whose positions were not committed was not verified: the
         // run it belonged to is over.
-        if let Some(p) = &self.pending {
-            if p.anchor_pos + 1 >= pos {
-                self.index.cool();
-                self.pending = None;
-            }
+        if self.pending.live && self.pending.anchor_pos + 1 >= pos {
+            self.index.cool();
+            self.pending.live = false;
         }
     }
 
     fn reset(&mut self) {
         self.ctx.clear();
-        self.pending = None;
+        self.pending.live = false;
         // The corpus is forgotten; what the index learned about how reliable
         // each kind of match is is kept.
         self.index.clear();
@@ -470,6 +520,18 @@ impl Drafter for DsparkDrafter {
 
     fn tap_layers(&self) -> &[usize] {
         &self.drafter.cfg.target_layer_ids
+    }
+
+    fn policy(&self) -> DraftPolicy {
+        DraftPolicy {
+            // `PEREGRINE_DSPARK_K` pins the draft count for a measurement: exactly
+            // that many drafts are verified, whatever the confidences say.
+            pinned_k: crate::options::get().dspark.k,
+            // A drafting round that does not pay for itself parks drafting for a
+            // while, as the session does with this head.
+            park: true,
+            probe: false,
+        }
     }
 
     fn propose(
