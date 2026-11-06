@@ -493,4 +493,39 @@ mod tests {
         d.set(5, 1.0);
         d.set(5, 2.0);
     }
+
+    #[test]
+    fn test_disjoint_parallel_pool() {
+        let mut data = vec![0.0f32; 1024];
+        let d = Disjoint::new(&mut data);
+        let pool = Pool::new(4);
+        pool.run(|wk, nw| {
+            let (lo, hi) = crate::pool::share(1024, wk, nw);
+            let s = d.chunk(lo, hi - lo);
+            for (i, v) in s.iter_mut().enumerate() {
+                *v = (lo + i) as f32;
+            }
+        });
+        for (i, &v) in data.iter().enumerate() {
+            assert_eq!(v, i as f32);
+        }
+    }
+
+    #[test]
+    fn test_disjoint_rows_helpers() {
+        let mut data = vec![0.0f32; 64];
+        let d = Disjoint::new(&mut data);
+        assert_eq!(d.len(), 64);
+        assert!(!d.is_empty());
+        let r0 = d.row(0, 16);
+        r0.fill(1.0);
+        let r1_2 = d.rows(1..3, 16);
+        r1_2.fill(2.0);
+        let r3 = d.slice(48, 16);
+        r3.fill(3.0);
+        assert_eq!(data[0], 1.0);
+        assert_eq!(data[16], 2.0);
+        assert_eq!(data[47], 2.0);
+        assert_eq!(data[48], 3.0);
+    }
 }
