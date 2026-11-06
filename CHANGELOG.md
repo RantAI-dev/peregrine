@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Support for Gemma, Mistral (v1, v7), and Llama 2 chat templates with exact llama.cpp parity (S2.3b).
 - Support for SentencePiece (llama) tokenizers transcribed from llama.cpp (S2.3a).
 - Support for GGML's Q4_0 weight format (AVX2 and scalar kernels).
 - `peregrine-core`: CPU inference engine for GGUF models.
@@ -24,6 +25,8 @@ All notable changes to this project are documented here. The format follows
 - Synthetic test models (llama, qwen3 in six formats; qwen35 hybrid in PQ2_0 / PTQ1_0) generated at test time,
   so CI runs every model code path and format without model files; the qwen35 hybrid also has an MTP (NextN)
   variant that runs lossless speculation with it on and off.
+- Synthetic coverage for Qwen2 attention biases, Llama 3.x and linear rope scaling, engine batching (shared
+  prefixes, mixed prefill/decode, mapped and per-row caches), LittleBit sidecars and accepted MTP drafts.
 - Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
   semantics); sampling fields the engine does not implement are refused with a 400 instead of ignored.
 - `PEREGRINE_ISA` caps the kernel tier (`scalar`, `avx2`, `avx512`); CI tests the lower tiers.
