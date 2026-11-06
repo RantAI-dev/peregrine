@@ -3,6 +3,9 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }
+    # `auto` leaves the manifest alone when the new version still fits the declared requirement, so the
+    # lock file moved to tokio 1.54.1 while Cargo.toml still said 1.53.3. `increase` bumps both.
+    versioning-strategy: increase
     groups:
       server-deps:
         patterns: ["axum*", "tokio*", "tower*", "hyper*", "serde*", "clap*", "tracing*", "futures*"]
