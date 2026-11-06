@@ -40,6 +40,7 @@ bound by compute. That split drives most design choices.
 |---|---|
 | `format.rs` | `Format`, the weight encodings, and the f16 conversion. |
 | `cpu.rs` | Kernel tiers and `cpu_has!`: feature detection under the `PEREGRINE_ISA` cap. |
+| `delta.rs` | Gated DeltaNet linear-attention recurrent head: safe dispatch, scalar reference, AVX2 and AVX-512 kernels. |
 | `simd.rs`, `quant.rs`, `vmath.rs` | x86 kernels for k-quants and Q8_0, activation quantization, vector math. Each has a scalar twin it is tested against. |
 | `tern.rs` | Ternary kernels for PQ2_0 / PTQ1_0 (AVX2, AVX-512 VNNI/GFNI/VBMI tiers). |
 | `hadamard.rs` | Fast Walsh-Hadamard transform for rotated weights and the rotated int8 KV cache. |
