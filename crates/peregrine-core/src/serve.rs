@@ -517,7 +517,6 @@ impl Engine {
     /// Take a request, or give it back when every slot is busy or the prompt cannot fit.
     pub fn admit(&mut self, prompt: Vec<u32>, cfg: SlotCfg) -> Result<SlotId, (Vec<u32>, String)> {
         self.admit_inner(prompt, cfg, None)
-            .map_err(|(p, _, e)| (p, e))
     }
 
     /// Admit a slot that runs on the caller's own cache (ADR 0007).
@@ -528,23 +527,24 @@ impl Engine {
     /// the engine's own prefix store is not consulted — the caller manages its
     /// own reuse, and a drafter's corpus starts at position 0 anyway.
     ///
-    /// A request that is refused gives the cache back with the error: the turn
-    /// did not start, and the conversation still holds what it held.
+    /// A request that is refused gives the cache back too: the engine keeps it
+    /// until the caller takes it, because the turn did not start and the
+    /// conversation still holds what it held.
     pub fn admit_with_cache(
         &mut self,
         prompt: Vec<u32>,
         cfg: SlotCfg,
         kv: KvCache,
-    ) -> Result<SlotId, (Vec<u32>, KvCache, String)> {
+    ) -> Result<SlotId, (Vec<u32>, String)> {
         self.admit_inner(prompt, cfg, Some(kv))
-            .map_err(|(p, kv, e)| (p, kv.expect("the caller's cache"), e))
     }
 
     /// What a conversation's slot left behind when its turn ended: the cache it
     /// keeps, the tokens it holds and the drafter that drafted for it.
     ///
     /// `None` when the last slot was not a conversation's (the server's slots
-    /// keep their caches in the prefix store instead).
+    /// keep their caches in the prefix store instead), or when the request was
+    /// refused before it started.
     pub fn take_kept(&mut self) -> Option<SlotKeep> {
         self.kept.take()
     }
@@ -560,28 +560,46 @@ impl Engine {
         self.pool1.as_ref()
     }
 
+    /// Refuse a request: the caller's cache goes back to it, held until the
+    /// caller takes it.
+    fn refuse(
+        &mut self,
+        prompt: Vec<u32>,
+        cache: Option<KvCache>,
+        e: String,
+    ) -> Result<SlotId, (Vec<u32>, String)> {
+        if let Some(kv) = cache {
+            self.kept = Some(SlotKeep {
+                kv,
+                tokens: Vec::new(),
+                drafter: None,
+            });
+        }
+        Err((prompt, e))
+    }
+
     fn admit_inner(
         &mut self,
         prompt: Vec<u32>,
         cfg: SlotCfg,
         cache: Option<KvCache>,
-    ) -> Result<SlotId, (Vec<u32>, Option<KvCache>, String)> {
+    ) -> Result<SlotId, (Vec<u32>, String)> {
         if !self.has_room() {
-            return Err((prompt, cache, "every slot is busy".into()));
+            return self.refuse(prompt, cache, "every slot is busy".into());
         }
         if prompt.is_empty() {
-            return Err((prompt, cache, "the prompt is empty".into()));
+            return self.refuse(prompt, cache, "the prompt is empty".into());
         }
         if prompt.len() + 1 > self.max_ctx {
             let n = prompt.len();
-            return Err((
+            return self.refuse(
                 prompt,
                 cache,
                 format!(
                     "prompt of {n} tokens does not fit in {} positions",
                     self.max_ctx
                 ),
-            ));
+            );
         }
         // The last prompt token is never prefilled (it is what the first decode step feeds), so a prefix may
         // cover everything before it.
@@ -591,7 +609,7 @@ impl Engine {
         // start at position 0, so a restored prefix would leave them short.
         let asked = match self.make_asked_drafter(&cfg.drafter) {
             Ok(d) => d,
-            Err(e) => return Err((prompt, cache, e)),
+            Err(e) => return self.refuse(prompt, cache, e),
         };
         let id = self.next_id;
         self.next_id += 1;
@@ -602,11 +620,11 @@ impl Engine {
             Some(kv) => {
                 let held = kv.filled();
                 if held > cap {
-                    return Err((
+                    return self.refuse(
                         prompt,
                         Some(kv),
                         format!("the cache holds {held} positions, more than the prompt's {cap}"),
-                    ));
+                    );
                 }
                 kv
             }

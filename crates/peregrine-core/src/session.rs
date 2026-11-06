@@ -755,9 +755,11 @@ impl Session {
             .expect("the cache is the engine's during a turn");
         let id = match self.engine.admit_with_cache(prompt, cfg, kv) {
             Ok(id) => id,
-            Err((_prompt, kv, e)) => {
+            Err((_prompt, e)) => {
                 // The turn did not start: the conversation keeps its cache.
-                self.kv = Some(kv);
+                if let Some(keep) = self.engine.take_kept() {
+                    self.kv = Some(keep.kv);
+                }
                 return Err(e);
             }
         };
@@ -885,7 +887,11 @@ impl Session {
             telem.dspark_ctx_s = d.stats.ctx_ns.saturating_sub(head_ctx_ns) as f64 / 1e9;
         }
 
-        self.history.push((user.to_string(), out.clone()));
+        // A turn that produced nothing is not in the conversation: it is not an
+        // exchange, and the next message must not see it.
+        if !roll_back {
+            self.history.push((user.to_string(), out.clone()));
+        }
         telem.ctx_used = self.ctx.len();
         telem.wall_s = turn_start.elapsed().as_secs_f64();
         Ok((out, telem))
