@@ -505,6 +505,14 @@ mod tests {
             (256, 144)
         );
         assert_eq!(
+            (Format::Q2_K.block(), Format::Q2_K.block_bytes()),
+            (256, 84)
+        );
+        assert_eq!(
+            (Format::Q3_K.block(), Format::Q3_K.block_bytes()),
+            (256, 110)
+        );
+        assert_eq!(
             (Format::Q5_K.block(), Format::Q5_K.block_bytes()),
             (256, 176)
         );
@@ -525,6 +533,8 @@ mod tests {
             (32, 17)
         );
         // And the bpw figures the spec quotes.
+        assert_eq!(Format::Q2_K.bpw(), 2.625);
+        assert_eq!(Format::Q3_K.bpw(), 3.4375);
         assert_eq!(Format::Q4_0.bpw(), 4.5);
         assert_eq!(Format::Q4_K.bpw(), 4.5);
         assert_eq!(Format::Q5_0.bpw(), 5.5);
