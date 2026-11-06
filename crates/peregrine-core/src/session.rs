@@ -677,6 +677,21 @@ impl Session {
         self.suffix = Some(d);
     }
 
+    /// The engine hands the conversation back what the turn left: its cache,
+    /// the tokens the cache holds and the drafter that drafted for it.
+    fn take_back(&mut self, is_dspark: bool) -> Result<(), String> {
+        let keep = self
+            .engine
+            .take_kept()
+            .ok_or("the engine lost the turn's cache")?;
+        self.kv = Some(keep.kv);
+        self.ctx = keep.tokens;
+        if let Some(d) = keep.drafter {
+            self.put_drafter(d, is_dspark);
+        }
+        Ok(())
+    }
+
     /// Run one conversational turn. `on_token` sees text as it is produced.
     pub fn generate<F: FnMut(Emitted)>(
         &mut self,
@@ -766,7 +781,13 @@ impl Session {
         // The conversation's drafter, for this turn.
         let (drafter, depth, is_dspark) = self.take_drafter();
         if let Some(d) = drafter {
-            self.engine.attach_drafter_with_depth(id, d, depth)?;
+            if let Err(e) = self.engine.attach_drafter_with_depth(id, d, depth) {
+                // The turn cannot run: the conversation takes its cache and its
+                // drafter back.
+                self.engine.cancel(id);
+                let _ = self.take_back(is_dspark);
+                return Err(e);
+            }
         }
         // The engine's counters are cumulative: the turn's share is the difference.
         let rounds_before = self.engine.spec_rounds;
@@ -811,7 +832,13 @@ impl Session {
             let mut emitted = 0usize;
             for (i, em) in ems.iter().enumerate() {
                 match &em.finish {
-                    Some(Finish::Error(e)) => return Err(e.clone()),
+                    Some(Finish::Error(e)) => {
+                        // The step failed: the turn ends, and the conversation
+                        // takes its cache and its drafter back.
+                        self.engine.cancel(id);
+                        let _ = self.take_back(is_dspark);
+                        return Err(e.clone());
+                    }
                     // The token that ends the turn is the end of the answer, not
                     // part of it.
                     Some(Finish::Stop) => break,
@@ -850,15 +877,7 @@ impl Session {
         out.push_str(&tail);
 
         // ---- what the turn left behind ----
-        let keep = self
-            .engine
-            .take_kept()
-            .ok_or("the engine lost the turn's cache")?;
-        self.kv = Some(keep.kv);
-        self.ctx = keep.tokens;
-        if let Some(d) = keep.drafter {
-            self.put_drafter(d, is_dspark);
-        }
+        self.take_back(is_dspark)?;
         if roll_back {
             // The turn left nothing in the conversation: the cache, the drafter's
             // context and the conversation itself go back to where it started.
