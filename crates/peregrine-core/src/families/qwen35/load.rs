@@ -5,7 +5,7 @@ use crate::blocks::recurrent::RecurrentCfg;
 use crate::blocks::rotate::Rotation;
 use crate::families::qwen35::{mtp, Qwen35};
 use crate::gguf::{Format, Gguf, TensorInfo};
-use crate::model::{Arch, Config, TileStore};
+use crate::model::{Config, TileStore};
 #[cfg_attr(not(target_arch = "x86_64"), allow(unused_imports))]
 use crate::quant::row_bytes;
 use crate::tokenizer::Tokenizer;
@@ -145,9 +145,10 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
         return Err("implausible hybrid geometry".into());
     }
     let cfg0 = Config {
-        arch: Arch::Qwen35,
+        arch_name: "qwen35",
         rope_neox: true,
         n_layer,
+        n_kv_layer: hc0.n_attn,
         n_head,
         n_kv_head,
         head_dim,
@@ -160,7 +161,6 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
             .unwrap_or(1e-6),
         rope_base: g.f32(&k("rope.freq_base")).unwrap_or(1e7),
         ctx_train: g.u32(&k("context_length")).unwrap_or(4096) as usize,
-        hybrid: None,
     };
     let widths = match g.meta.get("prism.hadamard.sign_widths") {
         Some(crate::gguf::Value::ArrI32(v)) => v.iter().map(|&x| x as usize).collect::<Vec<_>>(),
@@ -340,7 +340,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     let out_norm = get("output_norm.weight")?;
     let cfg = Config {
         n_vocab: tk.n_vocab,
-        hybrid: Some(hc),
+        n_kv_layer: hc.n_attn,
         ..cfg0
     };
     if tok_embd.dims.get(1).copied().unwrap_or(0) as usize != cfg.n_vocab {

@@ -37,51 +37,22 @@ pub mod hybrid;
 pub mod mtp;
 
 /// The transformer families this engine implements. Qwen2 is llama with biases on
-/// the attention projections and NeoX-style rotary pairing; everything else — norms,
-/// SwiGLU, grouped-query attention — is identical, so it shares the forward pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Arch {
-    Llama,
-    Qwen2,
-    /// Qwen3: no attention biases, a per-head RMSNorm on queries and keys before
-    /// rotation, and a head width independent of the model width (Qwen3-4B runs 32
-    /// heads of 128 over a 2560-wide residual). The targets DeepSeek's DSpark
-    /// drafters were trained against.
-    Qwen3,
-    /// Qwen3.5-style hybrid (Gated DeltaNet + gated attention), PrismML's ternary Bonsai 2 (`hybrid.rs`).
-    Qwen35,
-}
-
-impl Arch {
-    pub fn from_name(name: &str) -> Option<Arch> {
-        Some(match name {
-            "llama" => Arch::Llama,
-            "qwen2" => Arch::Qwen2,
-            "qwen3" => Arch::Qwen3,
-            "qwen35" => Arch::Qwen35,
-            _ => return None,
-        })
-    }
-    /// The metadata key prefix (`llama.block_count`, `qwen2.block_count`, …).
-    pub fn key_prefix(self) -> &'static str {
-        match self {
-            Arch::Llama => "llama",
-            Arch::Qwen2 => "qwen2",
-            Arch::Qwen3 => "qwen3",
-            Arch::Qwen35 => "qwen35",
-        }
-    }
-}
-
 /// Architecture names this crate implements, for the compatibility probe's message.
 pub const ARCHS: &[&str] = &["llama", "qwen2", "qwen3", "qwen35"];
 
+/// Transformer model configuration describing dimensional shapes and rotary settings.
+///
+/// Decoupled from specific model families (ADR 0006). Architecture-specific state
+/// and kernels are queried via the `Architecture` trait rather than fields here.
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
-    pub arch: Arch,
+    /// Architecture name (e.g. `"llama"`, `"qwen2"`, `"qwen3"`, `"qwen35"`), for messages and telemetry.
+    pub arch_name: &'static str,
     /// NeoX rotary pairing (`i` with `i + rope_dim/2`) instead of adjacent pairs.
     pub rope_neox: bool,
     pub n_layer: usize,
+    /// Layers that keep K/V cache (all layers for dense models, full-attention layers only for hybrid).
+    pub n_kv_layer: usize,
     pub n_head: usize,
     pub n_kv_head: usize,
     pub head_dim: usize,
@@ -92,24 +63,29 @@ pub struct Config {
     pub eps: f32,
     pub rope_base: f32,
     pub ctx_train: usize,
-    // the linear-attention geometry of a hybrid model; None for the dense architectures.
-    pub hybrid: Option<hybrid::HybridCfg>,
 }
 
 impl Config {
-    // layers that keep K/V (a hybrid model's full-attention layers only).
+    /// Layers that keep K/V (all layers for dense, full-attention layers only for hybrid).
+    #[inline]
     pub fn kv_layers(&self) -> usize {
-        self.hybrid.map_or(self.n_layer, |h| h.n_attn)
+        self.n_kv_layer
     }
+
+    #[inline]
     pub fn kv_dim(&self) -> usize {
         self.n_kv_head * self.head_dim
     }
+
     /// Width of the concatenated query heads — the attention output's width, which
     /// is `d_model` for llama and Qwen2 and not for Qwen3.
+    #[inline]
     pub fn q_dim(&self) -> usize {
         self.n_head * self.head_dim
     }
+
     /// Query heads per key/value head. 1 means multi-head, >1 is grouped-query.
+    #[inline]
     pub fn gqa(&self) -> usize {
         self.n_head / self.n_kv_head
     }
@@ -233,6 +209,36 @@ impl Model {
             lb_count: 0,
             arch: loaded.arch,
         })
+    }
+
+    /// Allocate reusable runtime state for this model. Sized once per engine/session.
+    ///
+    /// Applies rope factors, activation layout, LittleBit scratch sizes, and family-specific scratch.
+    pub fn new_state(
+        &self,
+        max_batch: usize,
+        max_logit_rows: usize,
+        max_ctx: usize,
+        threads: usize,
+    ) -> State {
+        let mut st = State::new_impl(
+            &self.cfg,
+            max_batch,
+            max_logit_rows,
+            max_ctx,
+            threads,
+            self.rope_factors.as_deref(),
+            self.arch.act_layout(),
+            self.arch.new_scratch(&self.cfg, max_batch),
+        );
+        let (lx, lt) = self.lb_scratch(max_batch);
+        st.set_lb_scratch(lx, lt);
+        st
+    }
+
+    /// Recurrent state geometry for hybrid architectures, if any.
+    pub fn recurrent_shape(&self) -> Option<crate::arch::RecurrentShape> {
+        self.arch.recurrent()
     }
 
     // a cache shaped for this model: K/V for the layers that attend, plus the recurrent state of a
@@ -523,7 +529,10 @@ mod tests {
     #[test]
     fn gqa_ratio_is_derived_not_assumed() {
         let c = Config {
+            arch_name: "llama",
+            rope_neox: false,
             n_layer: 32,
+            n_kv_layer: 32,
             n_head: 15,
             n_kv_head: 5,
             head_dim: 64,
@@ -534,9 +543,6 @@ mod tests {
             eps: 1e-5,
             rope_base: 1e5,
             ctx_train: 8192,
-            hybrid: None,
-            arch: Arch::Llama,
-            rope_neox: false,
         };
         assert_eq!(c.gqa(), 3);
         assert_eq!(c.kv_dim(), 320);

@@ -104,10 +104,10 @@ pub struct State {
 }
 
 impl State {
-    /// `max_logit_rows` is sized separately from `max_batch` on purpose. A logits
-    /// row is `n_vocab` floats — 192 KB for this model — so sizing the logits buffer
-    /// by the prefill batch would allocate 39 MB to hold output that prefill never
-    /// reads. Only speculation needs more than one row.
+    /// Allocate reusable runtime state for a model configuration.
+    ///
+    /// Prefer `Model::new_state` which automatically applies `rope_factors`,
+    /// LittleBit scratch sizes, activation quantisation layout, and family scratch.
     pub fn new(
         cfg: &Config,
         max_batch: usize,
@@ -115,6 +115,30 @@ impl State {
         max_ctx: usize,
         threads: usize,
         rope_factors: Option<&[f32]>,
+    ) -> State {
+        Self::new_impl(
+            cfg,
+            max_batch,
+            max_logit_rows,
+            max_ctx,
+            threads,
+            rope_factors,
+            crate::arch::ActLayout::default(),
+            None,
+        )
+    }
+
+    /// Internal constructor called by `Model::new_state` and `State::new`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_impl(
+        cfg: &Config,
+        max_batch: usize,
+        max_logit_rows: usize,
+        max_ctx: usize,
+        threads: usize,
+        rope_factors: Option<&[f32]>,
+        act_layout: crate::arch::ActLayout,
+        fam: Option<Box<dyn Any + Send + Sync>>,
     ) -> State {
         let b = max_batch;
         let rope = crate::blocks::rope::build_rope_table(
@@ -139,11 +163,9 @@ impl State {
             acts: (0..b)
                 .map(|_| {
                     let mut a = QuantAct::with_capacity(cfg.n_ff);
-                    a.ternary = cfg.hybrid.is_some();
-                    // The int16 PTQ1_0 layout has only the AVX-512 VBMI kernel; elsewhere the AVX2 one reads int8.
-                    a.ptq1 = cfg.hybrid.is_some_and(|h| h.ptq1)
-                        && crate::table::MatKernels::get().ptq1_layout();
-                    a.tb_span = cfg.hybrid.map_or(0, |h| h.tb_span);
+                    a.ternary = act_layout.ternary;
+                    a.ptq1 = act_layout.ptq1;
+                    a.tb_span = act_layout.tb_span;
                     a
                 })
                 .collect(),
@@ -158,10 +180,7 @@ impl State {
             tap: Vec::new(),
             lb_x: Vec::new(),
             lb_t: Vec::new(),
-            fam: cfg.hybrid.map(|h| {
-                Box::new(crate::families::qwen35::HyScratch::new(cfg, &h, b))
-                    as Box<dyn Any + Send + Sync>
-            }),
+            fam,
             want_hidden: false,
             hidden: Vec::new(),
         }
