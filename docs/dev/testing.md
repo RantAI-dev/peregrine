@@ -19,13 +19,22 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    variant whose drafts are actually accepted. Each must load, give finite logits, be bit-identical across
    runs and across 1, 2 and 4 threads, decode greedily the same way twice, and match its golden for the
    current tier (`tests/golden/synthetic/<tier>/`). A `qwen3moe` file (8 experts, 2 used, F16 and Q8_0
-   experts) is written there too: llama.cpp v0.9.0 loads and runs it, and Peregrine refuses it by name
-   until the mixture-of-experts family lands. The same tests drive small models through `Engine`:
+   experts) is written there too: the mixture-of-experts family runs it — it loads, gives finite logits,
+   is bit-identical across runs and across 1, 2 and 4 threads, matches its golden, and gives the same
+   tokens alone and batched through `Engine` — and llama.cpp v0.9.0 loads and runs the same file. The
+   same tests drive small models through `Engine`:
    prompts served alone must produce the same tokens when admitted together (a mixed prefill/decode step,
    both `Caches::Mapped` and, with `PEREGRINE_MIX=0`, `Caches::PerRow`), a shared opening must restore from
    the prefix store, and a LittleBit sidecar built in-test must give finite, deterministic logits. They
    need no model files, so they run in CI on every tier; the `x86_64-avx2` and scalar (`x86_64`) goldens
    were recorded on an Intel host and reproduced bit for bit on an AMD host.
+   `tests/runtime_parity.rs` pins what the two runtimes do differently today, before ADR 0007 makes
+   the engine the only one: the same prompt through `Session` and through a one-slot `Engine` (greedy:
+   the same tokens; sampled: the session counts conversation turns into the sampling key and the engine
+   does not), the taps a DSpark drafter needs (which must not change a logit bit), a second user arriving
+   while the first one speculates, and the prefix store, which is off while a drafter is attached. The
+   drafter it uses is written in the test (`tests/support/dspark.rs`: a `config.json` and a safetensors
+   file), so it needs no model files either.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.

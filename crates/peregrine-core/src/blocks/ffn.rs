@@ -76,3 +76,69 @@ pub fn swiglu_rows(
         );
     }
 }
+
+/// GeGLU — `hb = gelu_tanh(gate) ⊙ up` — and its quantisation, row-parallel like
+/// `norm_rows`.
+pub fn geglu_rows(
+    n_ff: usize,
+    hb: &mut [f32],
+    up: &[f32],
+    acts: &mut [QuantAct],
+    nb: usize,
+    pool: &Pool,
+    stats: &mut StepStats,
+) {
+    let f = n_ff;
+    if nb >= ROW_PARALLEL && pool.width() > 1 {
+        for_row_chunks_2(
+            pool,
+            true,
+            hb,
+            f,
+            acts,
+            1,
+            nb,
+            Sched::Static,
+            |_wk, rows, hb_chunk, acts_chunk| {
+                for (i, b) in rows.enumerate() {
+                    let g = &mut hb_chunk[i * f..(i + 1) * f];
+                    crate::vmath::geglu(g, &up[b * f..(b + 1) * f]);
+                    acts_chunk[i].fill(g);
+                }
+            },
+        );
+        stats.barriers += 1;
+    } else if nb == 1 && pool.width() > 1 && f >= 1024 {
+        for_row_chunks(
+            pool,
+            true,
+            &mut hb[..f],
+            1,
+            f,
+            Sched::Static,
+            |_wk, range, gs| {
+                crate::vmath::geglu(gs, &up[range]);
+            },
+        );
+        stats.barriers += 1;
+        acts[0].fill(&hb[..f]);
+    } else {
+        for_row_chunks_2(
+            pool,
+            false,
+            hb,
+            f,
+            acts,
+            1,
+            nb,
+            Sched::Static,
+            |_wk, rows, hb_chunk, acts_chunk| {
+                for (i, b) in rows.enumerate() {
+                    let g = &mut hb_chunk[i * f..(i + 1) * f];
+                    crate::vmath::geglu(g, &up[b * f..(b + 1) * f]);
+                    acts_chunk[i].fill(g);
+                }
+            },
+        );
+    }
+}

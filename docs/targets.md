@@ -87,8 +87,8 @@ Competitors: llama.cpp, ik_llama.cpp, OpenVINO GenAI, MNN; vLLM / SGLang CPU bac
 
 | Release | Architectures | Formats | CPUs | Tokenizers / templates |
 |---|---|---|---|---|
-| today | llama, qwen2, qwen3, qwen35 | F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q6_K, PQ2_0, PTQ1_0 | AVX2, AVX-512 | GPT-2 BPE; 3 built-in templates |
-| v0.3 (Stage 2) | + plain Qwen 3.5, Gemma 3, Phi-4, qwen3moe | + Q4_0, Q5_K, IQ4_XS, IQ4_NL | + AVX-VNNI-256; all formats on AVX2 | + SentencePiece; the model file's own template |
+| today | llama, qwen2, qwen3, qwen35, gemma3 (synthetic only, real-file check pending) | F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q6_K, PQ2_0, PTQ1_0 | AVX2, AVX-512 | GPT-2 BPE; 3 built-in templates |
+| v0.3 (Stage 2) | + plain Qwen 3.5, Gemma 3 (real-file gate), Phi-4, qwen3moe | + Q4_0, Q5_K, IQ4_XS, IQ4_NL | + AVX-VNNI-256; all formats on AVX2 | + SentencePiece; the model file's own template |
 | v0.4 | + gpt-oss | + Q2_K, Q3_K, MXFP4 | + ARM NEON/SDOT (if in scope) | |
 
 A model is "supported" when it loads, passes the accuracy gate in section 1 against llama.cpp on the same

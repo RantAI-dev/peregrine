@@ -248,6 +248,25 @@ unsafe fn swiglu_avx2(gate: &mut [f32], up: &[f32]) {
     }
 }
 
+const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
+const GELU_COEF_A: f32 = 0.044715;
+
+/// GELU (tanh approximation):
+/// `gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
+/// Matching ggml's `ggml_gelu_f32`.
+#[inline]
+pub fn gelu_tanh(x: f32) -> f32 {
+    0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)).tanh())
+}
+
+/// GeGLU in place: `gate[i] = gelu_tanh(gate[i]) · up[i]` — matching llama.cpp's `LLM_FFN_GELU`.
+pub fn geglu(gate: &mut [f32], up: &[f32]) {
+    debug_assert_eq!(gate.len(), up.len());
+    for (g, &u) in gate.iter_mut().zip(up) {
+        *g = gelu_tanh(*g) * u;
+    }
+}
+
 // `Σ x²` accumulated in f64, four lanes at a time (the norms' sums; was a serial f64 loop).
 pub fn sumsq_f64(x: &[f32]) -> f64 {
     #[cfg(target_arch = "x86_64")]
@@ -552,6 +571,18 @@ mod tests {
                 "{i}: {} vs {want}",
                 g[i]
             );
+        }
+    }
+
+    #[test]
+    fn geglu_matches_the_scalar_definition() {
+        let g0 = prng(5, 1539, -12.0, 12.0);
+        let up = prng(9, 1539, -3.0, 3.0);
+        let mut g = g0.clone();
+        geglu(&mut g, &up);
+        for i in 0..g0.len() {
+            let want = gelu_tanh(g0[i]) * up[i];
+            assert_eq!(g[i], want, "{i}: {} vs {want}", g[i]);
         }
     }
 

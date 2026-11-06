@@ -19,6 +19,8 @@ default = [
     "arch-llama",
     "arch-qwen",
     "arch-qwen35",
+    "arch-gemma3",
+    "arch-qwen3moe",
     "fmt-kquant",
     "fmt-ternary",
     "fmt-iq",
@@ -32,6 +34,8 @@ default = [
 arch-llama = []
 arch-qwen = []
 arch-qwen35 = []
+arch-gemma3 = []
+arch-qwen3moe = []
 
 # Formats passed through to core and kernels
 fmt-kquant = ["peregrine-core/fmt-kquant", "peregrine-kernels/fmt-kquant"]
@@ -57,6 +61,14 @@ name = "dspark"
 required-features = ["dspark", "arch-qwen"]
 
 [[test]]
+name = "drafters"
+required-features = ["arch-qwen", "arch-qwen35", "dspark", "mtp", "fmt-legacy", "fmt-ternary"]
+
+[[test]]
+name = "dspark_k"
+required-features = ["arch-qwen", "dspark", "fmt-kquant"]
+
+[[test]]
 name = "engine"
 required-features = ["arch-qwen", "fmt-kquant"]
 
@@ -70,7 +82,11 @@ required-features = ["littlebit", "arch-llama"]
 
 [[test]]
 name = "no_alloc"
-required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "mtp", "fmt-ternary"]
+required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "mtp", "fmt-ternary"]
+
+[[test]]
+name = "runtime_parity"
+required-features = ["arch-qwen", "arch-qwen35", "dspark", "mtp", "fmt-legacy", "fmt-ternary"]
 
 [[test]]
 name = "serve"
@@ -78,7 +94,7 @@ required-features = ["arch-qwen", "fmt-kquant"]
 
 [[test]]
 name = "synthetic"
-required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "mtp", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
+required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "mtp", "fmt-kquant", "fmt-ternary", "fmt-legacy", "arch-gemma3"]
 
 [lints]
 workspace = true

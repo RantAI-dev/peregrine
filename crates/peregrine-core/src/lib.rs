@@ -22,6 +22,7 @@
 pub mod arch;
 pub mod attn;
 pub mod blocks;
+pub mod draft;
 #[cfg(feature = "dspark")]
 pub mod dspark;
 #[cfg(not(feature = "dspark"))]
@@ -118,6 +119,7 @@ pub fn check_compatible_with(
             "llama" => Some("arch-llama"),
             "qwen2" | "qwen3" => Some("arch-qwen"),
             "qwen25" | "qwen35" => Some("arch-qwen35"),
+            "gemma3" => Some("arch-gemma3"),
             _ => None,
         };
         if let Some(feat) = feat {
