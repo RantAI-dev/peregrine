@@ -171,6 +171,28 @@ pub fn attend(
     row0: usize,
     stats: &mut StepStats,
 ) {
+    attend_window(
+        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, None, stats,
+    )
+}
+
+/// Attention over the KV cache with optional sliding window restriction.
+#[allow(clippy::too_many_arguments)]
+pub fn attend_window(
+    cfg: &Config,
+    scratch: &mut AttnScratch,
+    q: &[f32],
+    xb: &mut [f32],
+    kv: &KvCache,
+    pool: &Pool,
+    li: usize,
+    nb: usize,
+    start_pos: usize,
+    // the first row of `q` / `xb` this call reads and writes (0 for a shared cache).
+    row0: usize,
+    window: Option<usize>,
+    stats: &mut StepStats,
+) {
     let c = cfg;
     let hd = c.head_dim;
     let gqa = c.gqa();
@@ -182,6 +204,7 @@ pub fn attend(
         nb,
         start_pos,
         scale: 1.0 / (hd as f32).sqrt(),
+        window,
     };
     let plan = attn::plan(&sh, pool.width());
     let tasks = plan.tasks(&sh);
