@@ -223,10 +223,15 @@ impl Gguf {
         if alignment == 0 || !alignment.is_power_of_two() {
             return Err(format!("gguf: implausible alignment {alignment}"));
         }
-        let data_start = c.p.div_ceil(alignment) * alignment;
-        if data_start > map.len() {
-            return Err("gguf: tensor data starts past end of file".into());
-        }
+        let data_start = if n_tensors == 0 {
+            map.len()
+        } else {
+            let s = c.p.div_ceil(alignment) * alignment;
+            if s > map.len() {
+                return Err("gguf: tensor data starts past end of file".into());
+            }
+            s
+        };
 
         let g = Gguf {
             map,
@@ -311,6 +316,13 @@ impl Gguf {
         match self.meta.get(k) {
             Some(Value::ArrI32(v)) => Ok(v),
             _ => Err(format!("gguf: missing or non-i32-array metadata {k:?}")),
+        }
+    }
+
+    pub fn arr_f32(&self, k: &str) -> Result<&[f32], String> {
+        match self.meta.get(k) {
+            Some(Value::ArrF32(v)) => Ok(v),
+            _ => Err(format!("gguf: missing or non-f32-array metadata {k:?}")),
         }
     }
 }

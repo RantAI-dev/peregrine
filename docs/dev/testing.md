@@ -38,6 +38,13 @@ The SmolLM2 A1 oracle fixture is cut from one exact file: mradermacher's
 `SmolLM2-360M-Instruct.Q4_K_M.gguf` (SHA-256 `ade7aee1e5bd7c3b8f1fedafc61a1a0be31e8afa64e006607cd202323e2ccce0`),
 and `tests/oracle.rs` refuses any other upload.
 
+### Tokenizer test vocabularies
+
+`scripts/fetch-test-vocabs.sh` downloads the llama.cpp SPM test vocabulary (`models/ggml-vocab-llama-spm.gguf`)
+and reference test vectors (`.inp` and `.out`) from pinned llama.cpp release files into `models/vocab/` (git-ignored),
+validating pinned SHA-256 checksums. `crates/peregrine-core/tests/tokenize_spm.rs` tests these reference vectors
+and skips with an informative message if the files are absent.
+
 ## CPU tiers
 
 Kernels are chosen at run time from the CPU's features, capped by `PEREGRINE_ISA` (`scalar`, `avx2`,
