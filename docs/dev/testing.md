@@ -12,13 +12,18 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 1. **Kernel tests** (unit tests in the kernel modules, `tests/simd.rs`, `tests/tern.rs`): each fast kernel
    against its scalar reference. They need no model files and always run.
 2. **Synthetic model tests** (`tests/synthetic.rs`): tiny random GGUFs written at test time by
-   `tests/support/` — llama and qwen3 in F32, F16, Q8_0, Q5_0, Q4_K and Q6_K, and the qwen35 hybrid (Gated
-   DeltaNet, gated attention, Hadamard rotation) in PQ2_0 and PTQ1_0, plus that hybrid with one Q8_0 MTP
-   (NextN) block whose speculation must be lossless. Each must load, give finite logits, be
-   bit-identical across runs and across 1, 2 and 4 threads, decode greedily the same way twice, and match its
-   golden for the current tier (`tests/golden/synthetic/<tier>/`). They need no model files, so they run in
-   CI on every tier; the `x86_64-avx2` and scalar (`x86_64`) goldens were recorded on an Intel host and
-   reproduced bit for bit on an AMD host.
+   `tests/support/` — llama and qwen3 in F32, F16, Q8_0, Q5_0, Q4_0, Q4_K and Q6_K, qwen2 (attention biases,
+   NeoX rotary pairing) in F16 and Q8_0, llama with a Llama 3.x `rope_freqs.weight` table or linear rope
+   scaling, and the qwen35 hybrid (Gated DeltaNet, gated attention, Hadamard rotation) in PQ2_0 and
+   PTQ1_0, plus that hybrid with one Q8_0 MTP (NextN) block whose speculation must be lossless and a
+   variant whose drafts are actually accepted. Each must load, give finite logits, be bit-identical across
+   runs and across 1, 2 and 4 threads, decode greedily the same way twice, and match its golden for the
+   current tier (`tests/golden/synthetic/<tier>/`). The same tests drive small models through `Engine`:
+   prompts served alone must produce the same tokens when admitted together (a mixed prefill/decode step,
+   both `Caches::Mapped` and, with `PEREGRINE_MIX=0`, `Caches::PerRow`), a shared opening must restore from
+   the prefix store, and a LittleBit sidecar built in-test must give finite, deterministic logits. They
+   need no model files, so they run in CI on every tier; the `x86_64-avx2` and scalar (`x86_64`) goldens
+   were recorded on an Intel host and reproduced bit for bit on an AMD host.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.
