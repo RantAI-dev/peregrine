@@ -33,7 +33,7 @@ own memory-bandwidth ceiling.
 | | Supported now |
 |---|---|
 | Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP) |
-| Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, PQ2_0, PTQ1_0 |
+| Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 AVX2, AVX-512 (VNNI, GFNI, VBMI); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE, SentencePiece (llama) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2 — or named with `--chat-template` for a file that declares none |

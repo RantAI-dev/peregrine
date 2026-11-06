@@ -23,6 +23,7 @@ memmap2 = { workspace = true }
 
 [features]
 default = [
+    "fmt-mxfp4",
     "fmt-kquant",
     "fmt-ternary",
     "fmt-iq",
@@ -31,6 +32,7 @@ default = [
     "dspark",
     "mtp",
 ]
+fmt-mxfp4 = ["peregrine-kernels/fmt-mxfp4"]
 fmt-kquant = ["peregrine-kernels/fmt-kquant"]
 fmt-ternary = ["peregrine-kernels/fmt-ternary"]
 fmt-iq = ["peregrine-kernels/fmt-iq"]

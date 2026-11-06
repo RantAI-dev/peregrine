@@ -520,6 +520,10 @@ mod tests {
             (Format::IQ4_XS.block(), Format::IQ4_XS.block_bytes()),
             (256, 136)
         );
+        assert_eq!(
+            (Format::MXFP4.block(), Format::MXFP4.block_bytes()),
+            (32, 17)
+        );
         // And the bpw figures the spec quotes.
         assert_eq!(Format::Q4_0.bpw(), 4.5);
         assert_eq!(Format::Q4_K.bpw(), 4.5);
@@ -529,6 +533,7 @@ mod tests {
         assert!((Format::Q6_K.bpw() - 6.5625).abs() < 1e-9);
         assert_eq!(Format::IQ4_NL.bpw(), 4.5);
         assert_eq!(Format::IQ4_XS.bpw(), 4.25);
+        assert_eq!(Format::MXFP4.bpw(), 4.25);
     }
 
     #[test]

@@ -31,6 +31,7 @@ default = [
     "arch-llama",
     "arch-qwen",
     "arch-qwen35",
+    "fmt-mxfp4",
     "fmt-kquant",
     "fmt-ternary",
     "fmt-iq",
@@ -50,6 +51,11 @@ arch-qwen = ["peregrine-models/arch-qwen"]
 arch-qwen35 = ["peregrine-models/arch-qwen35"]
 
 # Formats
+fmt-mxfp4 = [
+    "peregrine-core/fmt-mxfp4",
+    "peregrine-kernels/fmt-mxfp4",
+    "peregrine-models/fmt-mxfp4",
+]
 fmt-kquant = [
     "peregrine-core/fmt-kquant",
     "peregrine-kernels/fmt-kquant",
