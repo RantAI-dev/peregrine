@@ -647,6 +647,7 @@ mod tests {
             Format::IQ4_NL => 20,
             Format::IQ4_XS => 23,
             Format::BF16 => 30,
+            Format::MXFP4 => 39,
             Format::PQ2_0 => 142,
             Format::PTQ1_0 => 143,
         }

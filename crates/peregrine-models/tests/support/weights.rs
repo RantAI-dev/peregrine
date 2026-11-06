@@ -183,6 +183,18 @@ pub fn generate_weights(fmt: Format, numel: usize, rng: &mut Rng) -> Vec<u8> {
             }
             out
         }
+        Format::MXFP4 => {
+            let num_blocks = numel / 32;
+            let mut out = Vec::with_capacity(num_blocks * 17);
+            for _ in 0..num_blocks {
+                let e = (rng.next_u32() % 5 + 117) as u8;
+                out.push(e);
+                for _ in 0..16 {
+                    out.push(rng.next_u8());
+                }
+            }
+            out
+        }
         Format::PQ2_0 => {
             let num_blocks = numel / 128;
             let mut out = Vec::with_capacity(num_blocks * 34);

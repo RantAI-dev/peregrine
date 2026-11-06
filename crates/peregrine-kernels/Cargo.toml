@@ -15,11 +15,13 @@ publish = false
 
 [features]
 default = [
+    "fmt-mxfp4",
     "fmt-kquant",
     "fmt-ternary",
     "fmt-iq",
     "fmt-legacy",
 ]
+fmt-mxfp4 = []
 fmt-kquant = []
 fmt-ternary = []
 fmt-iq = []
