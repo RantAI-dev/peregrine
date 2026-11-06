@@ -75,6 +75,10 @@ name = "no_alloc"
 required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "mtp", "fmt-ternary"]
 
 [[test]]
+name = "runtime_parity"
+required-features = ["arch-qwen", "arch-qwen35", "dspark", "mtp", "fmt-legacy", "fmt-ternary"]
+
+[[test]]
 name = "serve"
 required-features = ["arch-qwen", "fmt-kquant"]
 
