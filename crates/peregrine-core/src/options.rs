@@ -41,6 +41,17 @@ pub struct DsparkOptions {
     pub dump: Option<PathBuf>,
 }
 
+/// The switches a tuning profile may set: `(environment variable, profile key)`. All are output-neutral —
+/// the golden tests check that tokens do not depend on the thread count, and spinning and prefetch only move
+/// time. Activation-layout switches such as `PEREGRINE_TQ_SPAN` / `PEREGRINE_TB_SPAN` change the quantised
+/// activations, hence the tokens, and are deliberately absent.
+pub const TUNABLE: &[(&str, &str)] = &[
+    ("PEREGRINE_SPIN_US", "spin_us"),
+    ("PEREGRINE_YIELD_US", "yield_us"),
+    ("PEREGRINE_DECODE_THREADS", "decode_threads"),
+    ("PEREGRINE_PF", "prefetch_bytes"),
+];
+
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineOptions {
@@ -170,25 +181,14 @@ impl EngineOptions {
                 return Some(v);
             }
             let prof = profile?;
-            let key_name = match k {
-                "PEREGRINE_SPIN_US" | "SPIN_US" => "spin_us",
-                "PEREGRINE_YIELD_US" | "YIELD_US" => "yield_us",
-                "PEREGRINE_DECODE_THREADS" | "DECODE_THREADS" => "decode_threads",
-                "PEREGRINE_PF" | "PF" => "prefetch_bytes",
-                "PEREGRINE_TQ_SPAN" | "TQ_SPAN" => "tq_span",
-                "PEREGRINE_TB_SPAN" | "TB_SPAN" => "tb_span",
-                other => {
-                    let stripped = other.strip_prefix("PEREGRINE_").unwrap_or(other);
-                    if let Some(val) = prof.get(stripped) {
-                        return Some(val.to_string());
-                    }
-                    ""
-                }
-            };
-            if !key_name.is_empty() {
-                if let Some(val) = prof.get(key_name) {
-                    return Some(val.to_string());
-                }
+            // Only settings that cannot change a token are read from a profile (ADR 0003, ADR 0005):
+            // thread counts, spin windows and prefetch distance. Anything else in the file is ignored.
+            let key_name = TUNABLE
+                .iter()
+                .find(|(env, _)| *env == k)
+                .map(|(_, key)| *key)?;
+            if let Some(val) = prof.get(key_name) {
+                return Some(val.to_string());
             }
             None
         })
@@ -520,5 +520,31 @@ mod tests {
         assert_eq!(o2.prefetch_bytes, 2048); // profile wins over default (2048 vs default)
         assert_eq!(o2.decode_threads, Some(4)); // profile wins over default
         assert_eq!(o2.tb_span, 64); // env wins over default
+    }
+
+    #[test]
+    fn a_profile_cannot_set_an_output_changing_option() {
+        let prof = crate::profile::Profile {
+            peregrine_version: "x".into(),
+            cpu: "x".into(),
+            cpu_features: "x".into(),
+            model_size: 0,
+            model_fnv: 0,
+            created: 0,
+            options: vec![
+                ("tb_span".into(), "64".into()),
+                ("tq_span".into(), "64".into()),
+                ("exact".into(), "true".into()),
+                ("mtp".into(), "false".into()),
+                ("spin_us".into(), "7".into()),
+            ],
+        };
+        let o = EngineOptions::from_chained(|_| None, Some(&prof));
+        let d = EngineOptions::default();
+        assert_eq!(
+            (o.tb_span, o.tq_span, o.exact, o.mtp),
+            (d.tb_span, d.tq_span, d.exact, d.mtp)
+        );
+        assert_eq!(o.spin_us, 7);
     }
 }

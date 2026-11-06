@@ -1,9 +1,10 @@
 //! Smoke tests for `peregrine bench` and `peregrine tune` CLI (roadmap S1.7).
 
+#[path = "../../peregrine-core/tests/support/mod.rs"]
 mod support;
 
 use peregrine_core::gguf::Format;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use support::models::{write_dense, Dense};
 
@@ -14,28 +15,8 @@ fn tmpdir(name: &str) -> PathBuf {
 }
 
 fn find_peregrine_binary() -> PathBuf {
-    // If run through cargo test, current_exe is in target/{profile}/deps/
-    let cur = std::env::current_exe().expect("current exe");
-    let deps = cur.parent().expect("deps dir");
-    let target = deps.parent().expect("target dir");
-    let bin = target.join("peregrine");
-    if bin.exists() {
-        return bin;
-    }
-    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_peregrine") {
-        return PathBuf::from(p);
-    }
-    // Fall back to release or debug in workspace
-    let ws_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let rel = ws_root.join("target/release/peregrine");
-    if rel.exists() {
-        return rel;
-    }
-    ws_root.join("target/debug/peregrine")
+    // Cargo builds this package's binary for its integration tests and says where.
+    PathBuf::from(env!("CARGO_BIN_EXE_peregrine"))
 }
 
 #[test]

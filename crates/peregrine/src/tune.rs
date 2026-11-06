@@ -93,17 +93,6 @@ pub fn run(args: &TuneArgs) -> Result<(), String> {
 
     let mut profile = Profile::new_for_model(&args.model)?;
 
-    let g = peregrine_core::Gguf::open(&args.model)
-        .map_err(|e| format!("cannot inspect {}: {e}", args.model.display()))?;
-    let arch = g.str("general.architecture").unwrap_or("");
-    let is_hybrid = arch == "qwen35";
-    let has_ternary = g.tensors.values().any(|t| {
-        matches!(
-            t.kind,
-            peregrine_core::Format::PQ2_0 | peregrine_core::Format::PTQ1_0
-        )
-    });
-
     let current_exe = std::env::current_exe()
         .map_err(|e| format!("cannot determine current executable path: {e}"))?;
 
@@ -169,24 +158,6 @@ pub fn run(args: &TuneArgs) -> Result<(), String> {
         "PEREGRINE_PF",
         vec!["0".into(), "512".into(), "1024".into(), "2048".into()],
     ));
-
-    // 4. tb_span: 32, 64, 128 (hybrid architecture only)
-    if is_hybrid {
-        knobs.push((
-            "tb_span",
-            "PEREGRINE_TB_SPAN",
-            vec!["32".into(), "64".into(), "128".into()],
-        ));
-    }
-
-    // 5. tq_span: 16, 32, 64, 128 (ternary weights only)
-    if has_ternary {
-        knobs.push((
-            "tq_span",
-            "PEREGRINE_TQ_SPAN",
-            vec!["16".into(), "32".into(), "64".into(), "128".into()],
-        ));
-    }
 
     // Coordinate search over knobs
     'knob_loop: for (knob_name, env_var, values) in knobs {
@@ -262,8 +233,6 @@ pub fn run(args: &TuneArgs) -> Result<(), String> {
             "PEREGRINE_DECODE_THREADS" => "decode_threads",
             "PEREGRINE_SPIN_US" => "spin_us",
             "PEREGRINE_PF" => "prefetch_bytes",
-            "PEREGRINE_TB_SPAN" => "tb_span",
-            "PEREGRINE_TQ_SPAN" => "tq_span",
             other => other.strip_prefix("PEREGRINE_").unwrap_or(other),
         };
         profile.set(opt_key, v);

@@ -57,7 +57,7 @@ Model- and machine-specific tuning is data written by `peregrine tune`, never co
 ```
 
 - Evaluates candidates in isolated child processes (`bench --json --no-profile`) over interleaved rounds to measure the median decode tok/s and spread.
-- Performs coordinate search over output-neutral execution knobs (`decode_threads`, `spin_us`, `prefetch_bytes`, `tb_span`, `tq_span`), keeping a change only when it beats the current best by more than the measured noise.
+- Performs coordinate search over output-neutral execution knobs (`decode_threads`, `spin_us`, `prefetch_bytes`; the list is `options::TUNABLE`). Activation-layout switches (`PEREGRINE_TQ_SPAN`, `PEREGRINE_TB_SPAN`) change tokens and are never tuned or read from a profile, keeping a change only when it beats the current best by more than the measured noise.
 - Respects the time budget (default: 60s), prints a table of tested candidates, and writes a tuning profile.
 - Profiles record engine version, CPU model, CPU feature tier, and model file size/hash; any mismatch at runtime ignores the profile and falls back to safe defaults.
 
