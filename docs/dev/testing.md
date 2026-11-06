@@ -37,6 +37,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 | Qwen2.5-0.5B-Instruct Q4_K_M, Llama-3.2-1B-Instruct Q4_K_M | `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
+| TheBloke's Mistral 7B Instruct v0.2 and Llama 2 7B Chat Q4_K_M | `~/models/` (see below) |
 
 `models/` is git-ignored. These locations will be unified under one variable as part of S0.1.
 
@@ -59,6 +60,20 @@ fixture strings tokenise to the same ids as the fixture files
 `tests/fixtures/tokenize-golden-qwen2.tsv` and `tests/fixtures/tokenize-golden-llama3.tsv`. The two
 models are also checked end to end against llama.cpp on the same files (greedy decoding, the chat
 path and the goldens under `tests/golden/<tier>/`).
+
+### The two chat-template files
+
+The chat templates are checked against llama.cpp v0.9.0 on two files of TheBloke's, under exactly these
+names in `~/models/`:
+
+| File | Download | Bytes | SHA-256 |
+|---|---|---|---|
+| `thebloke-mistral-7b-instruct-v0.2.Q4_K_M.gguf` | <https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf> | 4368439584 | `3e0039fd0273fcbebb49228943b17831aadd55cbcbf56f0af00499be2040ccf9` |
+| `thebloke-llama-2-7b-chat.Q4_K_M.gguf` | <https://huggingface.co/TheBloke/Llama-2-7B-Chat-GGUF/resolve/main/llama-2-7b-chat.Q4_K_M.gguf> | 4081004224 | `08a5566d61d7cb6b420c3e4387a39e0078e1f2fe5f055f3a03887385304d4bfa` |
+
+The first carries the pre-update Mistral v0.2 template (no system branch), the second declares no chat
+template at all: the first is served as it is, the second with `--chat-template llama2`. Both were compared
+with llama.cpp v0.9.0 on the same files — the rendered prompt, its token ids and the answer.
 
 ### Tokenizer test vocabularies
 

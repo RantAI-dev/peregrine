@@ -1557,6 +1557,16 @@ pub mod keep {
     /// `open`, choosing whether a LittleBit sidecar beside the model is used
     /// (`false` runs dense even when one is present).
     pub fn open_with(path: &Path, lb: bool) -> Result<Arc<Model>, String> {
+        open_with_template(path, lb, None)
+    }
+
+    /// `open_with`, with the chat template the caller chose (`--chat-template`):
+    /// a file that declares no template is then loaded with that one.
+    pub fn open_with_template(
+        path: &Path,
+        lb: bool,
+        template: Option<crate::template::Template>,
+    ) -> Result<Arc<Model>, String> {
         let k = key(path, lb)?;
         let mut g = slot().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = g.as_mut() {
@@ -1566,7 +1576,7 @@ pub mod keep {
             }
         }
         let file = Gguf::open(path)?;
-        crate::check_compatible(&file)?;
+        crate::check_compatible_with(&file, template)?;
         let mut model = Model::load(file)?;
         if lb {
             if let Some(slb) = crate::lbq::Slb::open_for(path)? {
