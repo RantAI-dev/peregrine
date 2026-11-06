@@ -22,7 +22,7 @@ use peregrine_core::lbq::{
 };
 use peregrine_core::pool::Pool;
 use peregrine_core::quant::{dequant_row, row_bytes};
-use peregrine_core::session::{Session, SessionCfg};
+use peregrine_core::session::SessionCfg;
 use std::path::PathBuf;
 
 fn model_path() -> PathBuf {
@@ -299,7 +299,7 @@ fn a_lb5_converted_model_chats_and_moves_far_fewer_bytes() {
     };
     // The dense control runs with LittleBit declined, although `dense.gguf` now has a
     // valid sidecar beside it too: the setting, not the file system, decides.
-    let mut dense = Session::open(
+    let mut dense = peregrine_models::session::open(
         &dense_model,
         SessionCfg {
             littlebit: false,
@@ -316,7 +316,7 @@ fn a_lb5_converted_model_chats_and_moves_far_fewer_bytes() {
         .unwrap();
     drop(dense);
 
-    let mut lb = Session::open(&lb_model, cfg.clone()).unwrap();
+    let mut lb = peregrine_models::session::open(&lb_model, cfg.clone()).unwrap();
     assert!(
         lb.model.lb_summary().is_some(),
         "the sidecar was not picked up"
@@ -327,7 +327,7 @@ fn a_lb5_converted_model_chats_and_moves_far_fewer_bytes() {
     assert!(!text.is_empty(), "the converted model produced nothing");
     // Both kernels drive the same factors: the first greedy token agrees.
     peregrine_core::lbq::set_i8_enabled(false);
-    let mut lb32 = Session::open(&lb_model, cfg.clone()).unwrap();
+    let mut lb32 = peregrine_models::session::open(&lb_model, cfg.clone()).unwrap();
     let (text32, _) = lb32
         .generate("Say hello in one short sentence.", |_| {})
         .unwrap();

@@ -107,7 +107,7 @@ jobs:
         run: |
           cargo test --release --locked -p peregrine-kernels --no-run --message-format=json \
             | jq -r 'select(.executable != null) | .executable' > "$RUNNER_TEMP/kernel-tests"
-          cargo test --release --locked -p peregrine-core --test synthetic --no-run --message-format=json \
+          cargo test --release --locked -p peregrine-models --test synthetic --no-run --message-format=json \
             | jq -r 'select(.executable != null) | .executable' > "$RUNNER_TEMP/synthetic-tests"
       - name: Kernel tests under SDE
         run: |

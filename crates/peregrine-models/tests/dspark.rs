@@ -36,7 +36,7 @@ fn session(drafter: bool, max: usize) -> Option<Session> {
         dspark: drafter.then_some(dir),
         ..Default::default()
     };
-    Some(Session::open(&target, cfg).expect("open"))
+    Some(peregrine_models::session::open(&target, cfg).expect("open"))
 }
 
 /// llama.cpp's greedy continuation of the prompt below, thinking off (its first 49 tokens).
@@ -154,7 +154,7 @@ fn a_drafter_for_another_target_is_refused() {
         dspark: Some(dir),
         ..Default::default()
     };
-    let err = Session::open(&other, cfg)
+    let err = peregrine_models::session::open(&other, cfg)
         .err()
         .expect("a 960-wide target must refuse a 2560-wide drafter");
     assert!(err.contains("2560") || err.contains("vocabulary"), "{err}");

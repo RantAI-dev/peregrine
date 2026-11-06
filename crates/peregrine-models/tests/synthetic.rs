@@ -103,7 +103,7 @@ fn run(model: &Model, threads: usize) -> String {
 
 /// Every invariant for one model file; returns a failure description, if any.
 fn check(path: &Path, name: &str) -> Option<String> {
-    let model = match Gguf::open(path).and_then(Model::load) {
+    let model = match Gguf::open(path).and_then(peregrine_models::load) {
         Ok(m) => m,
         Err(e) => return Some(format!("{name}: does not load: {e}")),
     };
@@ -112,7 +112,7 @@ fn check(path: &Path, name: &str) -> Option<String> {
 
 /// The same invariants and golden for a model loaded and converted from a LittleBit sidecar.
 fn check_lb(path: &Path, sidecar: &Path, name: &str) -> Option<String> {
-    let mut model = match Gguf::open(path).and_then(Model::load) {
+    let mut model = match Gguf::open(path).and_then(peregrine_models::load) {
         Ok(m) => m,
         Err(e) => return Some(format!("{name}: does not load: {e}")),
     };
@@ -219,7 +219,7 @@ fn hybrid_mtp_variant_speculates_losslessly() {
         let path = write_hybrid(&dir, fmt, 3000 + i as u64, true);
         let name = format!("qwen35-mtp-{}", fmt.label());
         failures.extend(check(&path, &name));
-        let model = match Gguf::open(&path).and_then(Model::load) {
+        let model = match Gguf::open(&path).and_then(peregrine_models::load) {
             Ok(m) => Arc::new(m),
             Err(e) => {
                 failures.push(format!("{name}: does not load: {e}"));
@@ -385,7 +385,7 @@ fn littlebit_sidecar_on_untied_hybrid_names_no_tensor() {
     let (size, hash) = source_stamp(&path).unwrap();
     write_slb(&sidecar, size, hash, &builds).unwrap();
 
-    let mut model = Gguf::open(&path).and_then(Model::load).unwrap();
+    let mut model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
     let slb = peregrine_core::lbq::Slb::open(&sidecar).unwrap();
     let err = model.attach_lb(slb).unwrap_err();
     assert_eq!(err, "slb: the sidecar names no tensor of this model");
@@ -405,7 +405,7 @@ fn greedy_cfg() -> SlotCfg {
 }
 
 fn load_arc(path: &Path) -> Arc<Model> {
-    Arc::new(Gguf::open(path).and_then(Model::load).unwrap())
+    Arc::new(Gguf::open(path).and_then(peregrine_models::load).unwrap())
 }
 
 /// The long third prompt keeps one slot in prefill while the other two decode, which is the
