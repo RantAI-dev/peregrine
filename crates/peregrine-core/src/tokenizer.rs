@@ -1326,4 +1326,25 @@ abc", 3
         assert_eq!(s.finish(), "\u{fffd}");
         assert_eq!(s.finish(), "");
     }
+
+    #[test]
+    fn encode_prompt_ensures_exactly_one_bos_when_add_bos_is_enabled() {
+        let pieces = vec![
+            "<unk>".to_string(),
+            "<s>".to_string(),
+            "</s>".to_string(),
+            "a".to_string(),
+        ];
+        let scores = vec![0.0, 0.0, 0.0, 1.0];
+        let token_types = vec![2, 3, 3, 1];
+        let mut tk = Tokenizer::from_spm_parts(pieces, scores, token_types, 1, 2, 0, false);
+        // Without leading BOS in text, encode_prompt prepends BOS
+        assert_eq!(tk.encode_prompt("a"), vec![1, 3]);
+        // With leading BOS already present, no duplicate is added
+        assert_eq!(tk.encode_prompt("<s>a"), vec![1, 3]);
+
+        // When add_bos is false, no BOS is prepended
+        tk.add_bos = false;
+        assert_eq!(tk.encode_prompt("a"), vec![3]);
+    }
 }

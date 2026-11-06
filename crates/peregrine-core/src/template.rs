@@ -313,16 +313,231 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
 
+    // Helper rendering full conversation in the same structure serve::chat_prompt uses.
+    fn render_chat_prompt(
+        t: Template,
+        system: Option<&str>,
+        pairs: &[(&str, &str)],
+        user: &str,
+    ) -> String {
+        let mut s = t.system_block(system, "14 Oct 2026");
+        for (u, a) in pairs {
+            s.push_str(&t.user_turn(u));
+            s.push_str(&t.assistant_turn(a));
+        }
+        s.push_str(&t.user_turn(user));
+        s.push_str(t.assistant_open(false));
+        s
+    }
+
     #[test]
-    fn default_system_matches_architecture() {
+    fn chatml_renders_the_smollm_transcript_shape() {
+        let t = Template::ChatMl;
+        let s = t.system_block(Some("S"), "x") + &t.user_turn("U");
+        assert_eq!(s, "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\nU<|im_end|>\n<|im_start|>assistant\n");
+        assert_eq!(t.assistant_turn("A"), "A<|im_end|>\n");
+        assert_eq!(t.close_previous(), "<|im_end|>\n");
+        assert_eq!(t.system_block(None, "x"), "");
+    }
+
+    #[test]
+    fn llama3_always_writes_the_date_header() {
+        let t = Template::Llama3;
+        let s = t.system_block(None, "14 Oct 2026");
+        assert!(s.starts_with("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"));
+        assert!(s.contains("Cutting Knowledge Date: December 2023\nToday Date: 14 Oct 2026\n\n"));
+        assert!(s.ends_with("\n\n<|eot_id|>"), "{s:?}");
+        let s = t.system_block(Some("Be terse."), "14 Oct 2026");
+        assert!(
+            s.ends_with("Today Date: 14 Oct 2026\n\nBe terse.<|eot_id|>"),
+            "{s:?}"
+        );
+        assert_eq!(t.user_turn("U"),
+            "<|start_header_id|>user<|end_header_id|>\n\nU<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n");
+        assert_eq!(t.close_previous(), "<|eot_id|>");
+    }
+
+    // Expected outputs from llama.cpp's test-chat-template.cpp, v0.9.0 (MIT-licensed).
+    // Ground truth conversation:
+    //   system: "You are a helpful assistant"
+    //   user: "Hello"
+    //   assistant: "Hi there"
+    //   user: "Who are you"
+    //   assistant: "   I am an assistant   "
+    //   user: "Another question"
+    const PAIRS: [(&str, &str); 2] = [
+        ("Hello", "Hi there"),
+        ("Who are you", "   I am an assistant   "),
+    ];
+    const FINAL_USER: &str = "Another question";
+    const SYSTEM_MSG: &str = "You are a helpful assistant";
+
+    #[test]
+    fn gemma_renders_expected_output_matching_llama_cpp() {
+        let t = Template::Gemma;
+        let rendered = render_chat_prompt(t, Some(SYSTEM_MSG), &PAIRS, FINAL_USER);
+        // expected_output from llama.cpp's test-chat-template.cpp, v0.9.0 ("google/gemma-7b-it")
+        let expected = "<start_of_turn>user\n\
+                        You are a helpful assistant\n\n\
+                        Hello<end_of_turn>\n\
+                        <start_of_turn>model\n\
+                        Hi there<end_of_turn>\n\
+                        <start_of_turn>user\n\
+                        Who are you<end_of_turn>\n\
+                        <start_of_turn>model\n\
+                        I am an assistant<end_of_turn>\n\
+                        <start_of_turn>user\n\
+                        Another question<end_of_turn>\n\
+                        <start_of_turn>model\n";
+        assert_eq!(rendered, expected);
+
+        // Turn without system message
         assert_eq!(
-            Template::ChatMl.default_system("SmolLM2-135M-Instruct"),
-            Some("You are a helpful assistant.")
+            t.system_block(None, "x") + &t.user_turn("Hello"),
+            "<start_of_turn>user\nHello<end_of_turn>\n<start_of_turn>model\n"
         );
         assert_eq!(
-            Template::Qwen3.default_system("Qwen3-0.6B"),
-            Some("You are a helpful assistant.")
+            t.assistant_turn("Hi there"),
+            "Hi there<end_of_turn>\n<start_of_turn>user\n"
         );
+        assert_eq!(t.close_previous(), "<end_of_turn>\n<start_of_turn>user\n");
+        assert_eq!(t.assistant_open(false), "");
+    }
+
+    #[test]
+    fn mistral_v1_renders_expected_output_matching_llama_cpp() {
+        let t = Template::MistralV1;
+        let rendered = render_chat_prompt(t, Some(SYSTEM_MSG), &PAIRS, FINAL_USER);
+        // expected_output from llama.cpp's test-chat-template.cpp, v0.9.0
+        // ("mistralai/Mistral-7B-Instruct-v0.2 (mistralai 'v1' template with a system prompt)")
+        let expected = " [INST] You are a helpful assistant\n\n\
+                        Hello [/INST] Hi there</s> [INST] Who are you [/INST]    \
+                        I am an assistant   </s> [INST] Another question [/INST]";
+        assert_eq!(rendered, expected);
+
+        // Turn without system message
+        assert_eq!(
+            t.system_block(None, "x") + &t.user_turn("Hello"),
+            " [INST] Hello [/INST]"
+        );
+        assert_eq!(t.assistant_turn("Hi there"), " Hi there</s> [INST] ");
+        assert_eq!(t.close_previous(), "</s> [INST] ");
+        assert_eq!(t.assistant_open(false), "");
+    }
+
+    #[test]
+    fn mistral_v7_renders_expected_output_matching_llama_cpp() {
+        let t = Template::MistralV7;
+        let rendered = render_chat_prompt(t, Some(SYSTEM_MSG), &PAIRS, FINAL_USER);
+        // expected_output from llama.cpp's test-chat-template.cpp, v0.9.0
+        // ("mistralai/Mistral-Large-Instruct-2411 (mistralai 'v7' template)")
+        let expected = "[SYSTEM_PROMPT] You are a helpful assistant[/SYSTEM_PROMPT]\
+                        [INST] Hello[/INST] Hi there</s>\
+                        [INST] Who are you[/INST]    I am an assistant   </s>\
+                        [INST] Another question[/INST]";
+        assert_eq!(rendered, expected);
+
+        // Turn without system message
+        assert_eq!(
+            t.system_block(None, "x") + &t.user_turn("Hello"),
+            "[INST] Hello[/INST]"
+        );
+        assert_eq!(t.assistant_turn("Hi there"), " Hi there</s>");
+        assert_eq!(t.close_previous(), "</s>");
+        assert_eq!(t.assistant_open(false), "");
+    }
+
+    #[test]
+    fn llama2_renders_expected_output_matching_llama_cpp() {
+        let t = Template::Llama2;
+        let rendered = render_chat_prompt(t, Some(SYSTEM_MSG), &PAIRS, FINAL_USER);
+        // expected_output from llama.cpp's test-chat-template.cpp, v0.9.0
+        // ("TheBloke/FusionNet_34Bx2_MoE-AWQ")
+        let expected = "[INST] <<SYS>>\n\
+                        You are a helpful assistant\n\
+                        <</SYS>>\n\n\
+                        Hello [/INST]Hi there</s><s>[INST] Who are you [/INST]   \
+                        I am an assistant   </s><s>[INST] Another question [/INST]";
+        assert_eq!(rendered, expected);
+
+        // Turn without system message
+        assert_eq!(
+            t.system_block(None, "x") + &t.user_turn("Hello"),
+            "[INST] Hello [/INST]"
+        );
+        assert_eq!(t.assistant_turn("Hi there"), "Hi there</s><s>[INST] ");
+        assert_eq!(t.close_previous(), "</s><s>[INST] ");
+        assert_eq!(t.assistant_open(false), "");
+    }
+
+    #[test]
+    fn detection_from_real_jinja_templates() {
+        // Real templates from llama.cpp's test-chat-template.cpp, v0.9.0 (MIT-licensed):
+        let gemma_tmpl = "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\\n' + message['content'] | trim + '<end_of_turn>\\n' }}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\\n'}}{% endif %}";
+        assert_eq!(Template::detect_from_str(gemma_tmpl), Ok(Template::Gemma));
+
+        let mistral_v1_tmpl = "{{ bos_token }}{%- for message in messages %}{%- if message['role'] == 'user' %}{%- if loop.first and system_message is defined %}{{- ' [INST] ' + system_message + '\\n\\n' + message['content'] + ' [/INST]' }}{%- else %}{{- ' [INST] ' + message['content'] + ' [/INST]' }}{%- endif %}{%- elif message['role'] == 'assistant' %}{{- ' ' + message['content'] + eos_token}}{%- endif %}{%- endfor %}";
+        assert_eq!(
+            Template::detect_from_str(mistral_v1_tmpl),
+            Ok(Template::MistralV1)
+        );
+
+        let mistral_v7_tmpl = "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + '[/INST]' }}{% elif message['role'] == 'system' %}{{ '[SYSTEM_PROMPT] ' + message['content'] + '[/SYSTEM_PROMPT]' }}{% elif message['role'] == 'assistant' %}{{ ' ' + message['content'] + eos_token }}{% else %}{{ raise_exception('Only user, system and assistant roles are supported!') }}{% endif %}{% endfor %}";
+        assert_eq!(
+            Template::detect_from_str(mistral_v7_tmpl),
+            Ok(Template::MistralV7)
+        );
+
+        let llama2_tmpl = "{%- for idx in range(0, messages|length) -%}{%- if messages[idx]['role'] == 'user' -%}{%- if idx > 1 -%}{{- bos_token + '[INST] ' + messages[idx]['content'] + ' [/INST]' -}}{%- else -%}{{- messages[idx]['content'] + ' [/INST]' -}}{%- endif -%}{% elif messages[idx]['role'] == 'system' %}{{- '[INST] <<SYS>>\\n' + messages[idx]['content'] + '\\n<</SYS>>\\n\\n' -}}{%- elif messages[idx]['role'] == 'assistant' -%}{{- ' '  + messages[idx]['content'] + ' ' + eos_token -}}{% endif %}{% endfor %}";
+        assert_eq!(Template::detect_from_str(llama2_tmpl), Ok(Template::Llama2));
+
+        // Detection from vocab tokens when template string is missing/empty
+        assert_eq!(
+            Template::detect_from_template("", |t| t == "<start_of_turn>"),
+            Ok(Template::Gemma)
+        );
+        assert_eq!(
+            Template::detect_from_template("", |t| t == "<|im_start|>"),
+            Ok(Template::ChatMl)
+        );
+    }
+
+    #[test]
+    fn unsupported_templates_are_refused() {
+        // Mistral v3 / tool-calling template
+        let v3_tmpl = "{{ bos_token }}[AVAILABLE_TOOLS][{\"type\": \"function\"}][/AVAILABLE_TOOLS][INST] Hello [/INST]";
+        let err = Template::detect_from_str(v3_tmpl).unwrap_err();
+        assert!(
+            err.contains("Mistral v3 / tool-calling chat templates are not supported"),
+            "{err}"
+        );
+
+        // Unknown [INST] variant
+        let unknown_inst = "[INST] Hello [/INST]";
+        let err = Template::detect_from_str(unknown_inst).unwrap_err();
+        assert!(
+            err.contains("unsupported [INST] chat template variant"),
+            "{err}"
+        );
+
+        // Empty template with no recognisable tokens
+        let err = Template::detect_from_template("", |_| false).unwrap_err();
+        assert!(
+            err.contains("chat template is missing or not recognised"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn default_system_follows_the_model_family() {
+        assert!(Template::ChatMl
+            .default_system("Qwen2.5 0.5B Instruct")
+            .unwrap()
+            .contains("Qwen"));
+        assert!(Template::ChatMl
+            .default_system("SmolLM2 360M Instruct")
+            .unwrap()
+            .contains("SmolLM"));
         assert!(Template::Llama3
             .default_system("Llama 3.2 1B Instruct")
             .is_none());
@@ -332,5 +547,21 @@ mod tests {
             .default_system("Mistral Large")
             .is_none());
         assert!(Template::Llama2.default_system("Llama 2 7B").is_none());
+    }
+
+    #[test]
+    fn civil_dates_are_right_across_leap_years_and_epoch() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+        assert_eq!(civil_from_days(20_740), (2026, 10, 14));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        let today = today_llama3();
+        assert_eq!(today.len(), 11, "{today:?}");
+        assert!(
+            today.ends_with("202")
+                || today.ends_with("203")
+                || today.chars().rev().take(4).all(|c| c.is_ascii_digit())
+        );
     }
 }
