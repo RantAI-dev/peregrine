@@ -6,6 +6,8 @@
 //! - `messages` -> a Peregrine session: the system message is the session's system text, earlier user/assistant
 //!   pairs are seeded as history, the last user message is the turn. The session is reset per request; its
 //!   cache prefix is reused when the new prompt shares it (the system prompt, the agent's prompt).
+//! - the chat template -> the one the model file declares, or the one `--chat-template` names for a file that
+//!   declares none (a model prompted in a template it was not trained on answers fluently and wrongly).
 //! - `chat_template_kwargs.enable_thinking` -> `SessionCfg::thinking` (Qwen3's empty reasoning block when off).
 //! - `thinking_budget_tokens` -> the reasoning span is counted by token; at the budget the turn is cancelled and
 //!   replanned with the reasoning so far plus `</think>` as the assistant's prefix (`SessionCfg::assistant_prefix`,
@@ -48,6 +50,12 @@ pub struct Args {
     /// The model id reported by /v1/models and expected in requests (any id is accepted).
     #[arg(long, default_value = "peregrine")]
     pub alias: String,
+    /// The chat template to use, by name (chatml, llama3, qwen3, gemma, mistral-v0,
+    /// mistral-v1, mistral-v7, llama2, llama2-sys-bos). It overrides the template the
+    /// file declares; a file that declares none needs it, since a model prompted in
+    /// a template it was not trained on answers fluently and wrongly.
+    #[arg(long = "chat-template", value_name = "NAME")]
+    pub chat_template: Option<String>,
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
     #[arg(long, default_value_t = 8201)]
@@ -141,8 +149,22 @@ pub async fn run(a: Args) {
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
     let t0 = Instant::now();
+    // The chat template: the one the caller named, else the one the file declares.
+    let chosen = match a.chat_template.as_deref() {
+        Some(name) => match Template::from_name(name) {
+            Some(t) => Some(t),
+            None => {
+                eprintln!(
+                    "unknown chat template {name:?} — Peregrine renders {}",
+                    peregrine_core::template::TEMPLATES.join(", ")
+                );
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
     let gguf = match peregrine_core::gguf::Gguf::open(&a.model).and_then(|g| {
-        peregrine_core::check_compatible(&g)?;
+        peregrine_core::check_compatible_with(&g, chosen)?;
         Ok(g)
     }) {
         Ok(g) => g,
@@ -151,14 +173,18 @@ pub async fn run(a: Args) {
             std::process::exit(2);
         }
     };
-    let template = match Template::detect(&gguf) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("cannot serve {}: {e}", a.model.display());
-            std::process::exit(2);
-        }
+    let template = match chosen {
+        Some(t) => t,
+        None => match Template::detect(&gguf) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("cannot serve {}: {e}", a.model.display());
+                std::process::exit(2);
+            }
+        },
     };
-    let model = match peregrine_core::model::keep::open_with(&a.model, a.littlebit) {
+    let model = match peregrine_core::model::keep::open_with_template(&a.model, a.littlebit, chosen)
+    {
         Ok(m) => m,
         Err(e) => {
             eprintln!("cannot open {}: {e}", a.model.display());
@@ -218,7 +244,7 @@ pub async fn run(a: Args) {
         None => "dense".to_string(),
     };
     tracing::info!(
-        "peregrine-core: {} loaded in {:.1} s, {} threads, {}, ctx {}, {} slots ({} MB of cache each), {} weights, think tokens {:?}/{:?}",
+        "peregrine-core: {} loaded in {:.1} s, {} threads, {}, ctx {}, {} slots ({} MB of cache each), {} weights, {} chat template, think tokens {:?}/{:?}",
         a.model.display(),
         t0.elapsed().as_secs_f64(),
         threads,
@@ -227,6 +253,7 @@ pub async fn run(a: Args) {
         a.slots,
         cache_mb,
         weights,
+        template.name(),
         app.think_open,
         app.think_close
     );
@@ -998,6 +1025,27 @@ mod tests {
             }
         }
         b
+    }
+
+    #[test]
+    fn the_chat_template_option_names_a_template() {
+        use clap::Parser;
+        let a = super::Args::try_parse_from([
+            "peregrine-server",
+            "-m",
+            "model.gguf",
+            "--chat-template",
+            "llama2",
+        ])
+        .unwrap();
+        assert_eq!(a.chat_template.as_deref(), Some("llama2"));
+        assert_eq!(
+            peregrine_core::template::Template::from_name(a.chat_template.as_deref().unwrap()),
+            Some(peregrine_core::template::Template::Llama2Plain)
+        );
+        // Without the option, the file's own template is used.
+        let a = super::Args::try_parse_from(["peregrine-server", "-m", "model.gguf"]).unwrap();
+        assert_eq!(a.chat_template, None);
     }
 
     #[test]
