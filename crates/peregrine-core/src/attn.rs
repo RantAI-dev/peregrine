@@ -60,6 +60,9 @@ pub struct Shape {
     pub nb: usize,
     pub start_pos: usize,
     pub scale: f32,
+    /// Sliding window attention: row `b` sees at most the last `window` positions
+    /// (`(pos + 1 - window)..=pos`). `None` for full attention.
+    pub window: Option<usize>,
 }
 
 impl Shape {
@@ -207,18 +210,43 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape, q: &[f32], t: &Task, sc: &mut
             if n_ctx <= blk {
                 continue;
             }
+            let p_min = match sh.window {
+                Some(w) => n_ctx.saturating_sub(w),
+                None => 0,
+            };
+            if blk + bn <= p_min {
+                continue;
+            }
+            let j_start = p_min.saturating_sub(blk);
             let vis = bn.min(n_ctx - blk);
+            if j_start >= vis {
+                continue;
+            }
+            let count = vis - j_start;
             for g in 0..gqa {
                 let r = bi * gqa + g;
-                let s = &mut sc.s[..vis];
-                scores(&sc.q[r * hd..][..hd], &sc.kf, vis, hd, sh.scale, s);
+                let s = &mut sc.s[..count];
+                scores(
+                    &sc.q[r * hd..][..hd],
+                    &sc.kf[j_start * hd..],
+                    count,
+                    hd,
+                    sh.scale,
+                    s,
+                );
                 let m_old = sc.m[r];
                 let m_new = m_old.max(crate::vmath::max(s));
                 let psum = crate::vmath::exp_shift_sum(s, m_new);
                 // exp(−∞) = 0 on the first block: nothing to rescale.
                 let alpha = (m_old - m_new).exp();
                 sc.l[r] = sc.l[r] * alpha as f64 + psum;
-                mix(&mut sc.o[r * hd..][..hd], alpha, s, &sc.vf, hd);
+                mix(
+                    &mut sc.o[r * hd..][..hd],
+                    alpha,
+                    s,
+                    &sc.vf[j_start * hd..],
+                    hd,
+                );
                 sc.m[r] = m_new;
             }
         }
@@ -438,10 +466,14 @@ mod tests {
         let mut out = vec![0.0f32; sh.nb * sh.n_head * hd];
         for b in 0..sh.nb {
             let n_ctx = sh.start_pos + b + 1;
+            let p_min = match sh.window {
+                Some(w) => n_ctx.saturating_sub(w),
+                None => 0,
+            };
             for h in 0..sh.n_head {
                 let kh = h / sh.gqa();
                 let qv = &q[(b * sh.n_head + h) * hd..][..hd];
-                let sc: Vec<f64> = (0..n_ctx)
+                let sc: Vec<f64> = (p_min..n_ctx)
                     .map(|p| {
                         let k = &ks[p * sh.n_kv_head + kh];
                         qv.iter()
@@ -455,8 +487,9 @@ mod tests {
                 let e: Vec<f64> = sc.iter().map(|s| (s - m).exp()).collect();
                 let z: f64 = e.iter().sum();
                 for d in 0..hd {
-                    let acc: f64 = (0..n_ctx)
-                        .map(|p| e[p] * vs[p * sh.n_kv_head + kh][d] as f64)
+                    let acc: f64 = (p_min..n_ctx)
+                        .enumerate()
+                        .map(|(idx, p)| e[idx] * vs[p * sh.n_kv_head + kh][d] as f64)
                         .sum();
                     out[(b * sh.n_head + h) * hd + d] = (acc / z) as f32;
                 }
@@ -524,6 +557,7 @@ mod tests {
                 nb,
                 start_pos,
                 scale: 1.0 / (head_dim as f32).sqrt(),
+                window: None,
             };
             let (kv, q, ks, vs) = setup(KvPrec::F16, &sh, 2);
             // The cache holds f16; feed the reference what it actually stores.
@@ -576,6 +610,7 @@ mod tests {
             nb: 2,
             start_pos: 300,
             scale: 1.0 / 128f32.sqrt(),
+            window: None,
         };
         let (kv, q, ks, vs) = setup(KvPrec::I8, &sh, 1);
         assert!(kv.rotated());
@@ -591,6 +626,24 @@ mod tests {
         };
         let e = rms(&got, &want);
         assert!(e < 5e-3, "rotated int8 rms error {e}");
+    }
+
+    #[test]
+    fn sliding_window_attention_matches_naive_reference() {
+        let sh = Shape {
+            n_head: 8,
+            n_kv_head: 4,
+            head_dim: 64,
+            nb: 8,
+            start_pos: 20,
+            scale: 1.0 / 8.0,
+            window: Some(6),
+        };
+        let (kv, q, ks, vs) = setup(KvPrec::F16, &sh, 1);
+        let want = reference(&sh, &q, &ks, &vs);
+        let p = plan(&sh, 4);
+        let got = grouped(&kv, 0, &sh, &q, p);
+        assert!(max_rel(&got, &want) < 0.005);
     }
 
     #[test]
@@ -610,6 +663,7 @@ mod tests {
                 nb,
                 start_pos,
                 scale: 0.1,
+                window: None,
             };
             let p = plan(&sh, workers);
             let ctx = start_pos + nb;

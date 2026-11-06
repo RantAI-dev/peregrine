@@ -29,7 +29,6 @@
 // exactly where there are no spare FLOPs (measured elsewhere: 2.7x at one row falling to 1.6x at eight).
 
 use crate::kv::{KvCache, KvPrec};
-use crate::model::mtp::MtpState;
 use crate::model::{Caches, Model, State, StepStats};
 use crate::pool::Pool;
 use crate::prefix::PrefixStore;
@@ -64,6 +63,56 @@ pub enum Finish {
     Error(String),
 }
 
+/// What a slot speculates with (ADR 0007).
+///
+/// The engine asks the slot's drafter for a proposal and verifies it against
+/// the target's own samples (`verify_step`). Which drafter that is, is the
+/// request's business: the server asks for none, a conversation may ask for
+/// the suffix index or for a DSpark head.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DrafterChoice {
+    /// No drafter: the slot decodes plainly.
+    ///
+    /// The default, and what the server asks for. The engine's own MTP
+    /// speculation is the engine's business, not the slot's, and goes on as
+    /// before.
+    #[default]
+    None,
+    /// The model's own MTP block: the engine's own speculation.
+    Mtp,
+    /// Suffix-indexed drafting: the longest match of the conversation's tail,
+    /// continued by what followed it last time.
+    Suffix {
+        /// The shortest suffix (in tokens) accepted as a match; 0 disables
+        /// drafting.
+        min_order: usize,
+        /// The most tokens one proposal may hold.
+        max_len: usize,
+    },
+    /// A DSpark drafter directory (`config.json` + `model.safetensors`) trained
+    /// for this target.
+    Dspark {
+        /// The drafter's directory.
+        dir: std::path::PathBuf,
+        /// The most draft tokens verified per round (the policy may verify
+        /// fewer).
+        max_k: usize,
+    },
+}
+
+impl DrafterChoice {
+    /// The suffix drafter's own defaults: the shortest match the session uses
+    /// and the length of the drafts it proposes.
+    pub const SUFFIX_MIN_ORDER: usize = 2;
+    /// The most tokens one suffix proposal may hold, as the session proposes.
+    pub const SUFFIX_MAX_LEN: usize = 12;
+    /// The most DSpark draft tokens verified per round, as the session does.
+    pub const DSPARK_MAX_K: usize = 3;
+}
+
+/// The drafter a slot asked for, and how deep it may draft.
+type AskedDrafter = Option<(Box<dyn crate::draft::Drafter>, usize)>;
+
 /// What one request asks of the sampler and when it should stop.
 #[derive(Debug, Clone)]
 pub struct SlotCfg {
@@ -93,6 +142,14 @@ pub struct SlotCfg {
     /// rotation (`Architecture::session_kv_rotation`), and a conversation that
     /// wants that behaviour says so here.
     pub kv_rotation: bool,
+    /// The drafter this slot speculates with (ADR 0007).
+    ///
+    /// `None` — the default — is what the server asks for: the slot decodes
+    /// plainly, and the engine's own MTP speculation goes on as it always has.
+    /// A slot that names a drafter gets one of its own, built when the slot is
+    /// admitted, and the engine verifies its proposals in the same
+    /// verification step the MTP block goes through.
+    pub drafter: DrafterChoice,
 }
 
 impl Default for SlotCfg {
@@ -109,6 +166,7 @@ impl Default for SlotCfg {
             logprobs: false,
             turn: 0,
             kv_rotation: true,
+            drafter: DrafterChoice::None,
         }
     }
 }
@@ -165,26 +223,23 @@ struct Slot {
     prefilled: usize,
     prefill_s: f64,
     decode_s: f64,
-    // set while this slot is the only one and the model has an MTP block (see `spec_step`).
-    spec: Option<Spec>,
     /// The slot's own token history and its reused penalty counts. Only touched when
     /// `cfg.penalties` is not off, so an ordinary request pays nothing for it.
     pen: crate::sample::PenaltyState,
     /// The slot's drafter, if one is attached (ADR 0007).
     ///
-    /// The decode loop does not draft with it yet: what the engine does with it
-    /// now is set up the taps and hidden states it asks for and tell it what
-    /// was committed. It is behind a lock because a slot is shared with the
-    /// sampling workers, and a drafter is only `Send`: the lock is never
-    /// contended, because only the engine's own thread talks to it.
+    /// The engine asks it for a proposal and verifies what it proposes against
+    /// the target's own samples (`verify_step`). The engine's own speculation
+    /// — the model's MTP block — is such a drafter, attached when the slot is
+    /// admitted and the gates allow it.
+    ///
+    /// It is behind a lock because a slot is shared with the sampling workers,
+    /// and a drafter is only `Send`: the lock is never contended, because only
+    /// the engine's own thread talks to it.
     drafter: Option<std::sync::Mutex<Box<dyn crate::draft::Drafter>>>,
-}
-
-/// A slot's place in MTP speculation: the main model's final hidden state at `pos - 1`, and the MTP row an
-/// accepted draft left owed (the draft token at `pos - 1` and the hidden state before it).
-struct Spec {
-    hprev: Vec<f32>,
-    pending: Option<(u32, Vec<f32>)>,
+    /// The most draft tokens the slot's drafter is asked for; 0 — the engine's
+    /// own MTP block — leaves the choice to the drafter.
+    drafter_depth: usize,
 }
 
 /// MTP speculation for a lone user; `PEREGRINE_MTP=0` turns it off.
@@ -254,15 +309,55 @@ pub struct Engine {
     pub decode_rows: u64,
     // one sampler scratch per pool worker: the rows of a step are sampled in parallel.
     samps: Vec<std::sync::Mutex<crate::sample::Scratch>>,
-    // the MTP block's cache and scratch, used by the one slot that speculates (there is never more
-    // than one: speculation runs only while a single user is served).
-    mtp: Option<MtpState>,
+    /// The model's MTP block, when it has one and speculation is on: the
+    /// engine's own drafter, attached to the slot that speculates.
+    mtp_available: bool,
+    /// The slot that speculates: the one whose drafter's proposals the engine
+    /// verifies. `None` when nothing does.
+    ///
+    /// Speculation is single-slot (ADR 0007), so there is never more than one.
+    spec_slot: Option<SlotId>,
+    /// The verify-cost model: what a verification pass of a given width costs
+    /// the engine. It measures the engine's own forward passes, so it lives
+    /// here (ADR 0007).
+    vcost: crate::draft::VerifyCost,
+    /// The rows of logits the state holds: the anchor's and the drafted
+    /// tokens'. A verification pass wants one row per row it forwards.
+    max_logit_rows: usize,
+    /// The proposal the drafter writes into: the engine's own buffer, reused,
+    /// so a draft costs no allocation.
+    proposal: crate::draft::Proposal,
+    /// The verification pass's own rows: the anchor and the drafted tokens,
+    /// their positions and the rows that want logits. The engine's buffers,
+    /// reused.
+    v_toks: Vec<u32>,
+    v_pos: Vec<usize>,
+    v_want: Vec<usize>,
+    v_map: Vec<usize>,
+    /// The target's own samples of the verification pass's rows, and their
+    /// log-probabilities.
+    v_samples: Vec<u32>,
+    v_logprobs: Vec<f32>,
     /// The target layers the attached drafters need copied out of the forward pass.
     /// Empty: no drafter is attached, and the forward copies nothing.
     tap_layers: Vec<usize>,
     /// MTP drafts verified, and how many were kept.
     pub spec_drafts: u64,
     pub spec_hits: u64,
+    /// The draft tokens verified: how many the engine asked the target to
+    /// check, over every round.
+    pub spec_tokens: u64,
+    /// The decode steps run, for the suffix index's probe rule: a confidence
+    /// that is never tested never recovers.
+    steps: u64,
+    /// Plain steps left before drafting is probed again (the DSpark head's
+    /// parking rule).
+    park: u32,
+    /// The measured token rate of drafting rounds, against which a plain step
+    /// is priced.
+    draft_rate: Option<f64>,
+    /// The drafting rounds measured.
+    drafted_rounds: u64,
 }
 
 impl Engine {
@@ -284,15 +379,10 @@ impl Engine {
         let use_mtp = model.has_mtp() && mtp_enabled() && mixed();
         let max_logit_rows = if use_mtp { max_slots.max(2) } else { max_slots };
         let state = model.new_state(max_batch, max_logit_rows, max_ctx, threads);
-        let mtp = if use_mtp {
-            model.mtp_state(max_ctx, threads).ok()
-        } else {
-            None
-        };
         Engine {
-            mtp,
             spec_drafts: 0,
             spec_hits: 0,
+            spec_tokens: 0,
             model,
             pool: Pool::new(threads),
             pool1: crate::pool::narrow_pool(threads),
@@ -310,19 +400,34 @@ impl Engine {
             samps: (0..threads.max(1))
                 .map(|_| std::sync::Mutex::new(crate::sample::Scratch::default()))
                 .collect(),
+            // The engine's own drafter needs the MTP feature; without it the
+            // engine speculates with nothing.
+            mtp_available: use_mtp && cfg!(feature = "mtp"),
+            spec_slot: None,
+            vcost: crate::draft::VerifyCost::default(),
+            max_logit_rows,
+            proposal: crate::draft::Proposal::default(),
+            v_toks: Vec::new(),
+            v_pos: Vec::new(),
+            v_want: Vec::new(),
+            v_map: Vec::new(),
+            v_samples: Vec::new(),
+            v_logprobs: Vec::new(),
+            steps: 0,
+            park: 0,
+            draft_rate: None,
+            drafted_rounds: 0,
         }
     }
 
     /// Whether a lone user's decode speculates with the model's MTP block.
     pub fn speculates(&self) -> bool {
-        self.mtp.is_some()
+        self.mtp_available
     }
     /// Turn MTP speculation off (for comparisons; `PEREGRINE_MTP=0` does it at startup).
     pub fn disable_mtp(&mut self) {
-        self.mtp = None;
-        for s in &mut self.slots {
-            s.spec = None;
-        }
+        self.mtp_available = false;
+        self.stop_speculation();
     }
 
     pub fn max_slots(&self) -> usize {
@@ -369,7 +474,6 @@ impl Engine {
                 ),
             ));
         }
-        let c = self.model.cfg;
         let id = self.next_id;
         self.next_id += 1;
         let mut kv = self.model.new_cache(self.kv_prec, self.max_ctx);
@@ -378,15 +482,25 @@ impl Engine {
         if !cfg.kv_rotation {
             kv = kv.without_rotation();
         }
+        // The drafter the slot asks for, built for this slot. It is built
+        // before the prefix store is consulted: a drafter's corpus and context
+        // start at position 0, so a restored prefix would leave them short.
+        let asked = self
+            .make_asked_drafter(&cfg.drafter)
+            .map_err(|e| (prompt.clone(), e))?;
         // The last prompt token is never prefilled (it is what the first decode step feeds), so a prefix may
         // cover everything before it.
         let cap = prompt.len() - 1;
-        let fed = match self.prefixes.best(&prompt, cap) {
-            Some((snap, lcp)) if kv.restore(snap, lcp) => {
-                self.prefixes.note_hit(lcp);
-                lcp
+        let fed = if asked.is_some() {
+            0
+        } else {
+            match self.prefixes.best(&prompt, cap) {
+                Some((snap, lcp)) if kv.restore(snap, lcp) => {
+                    self.prefixes.note_hit(lcp);
+                    lcp
+                }
+                _ => 0,
             }
-            _ => 0,
         };
         // A restored prefix can leave nothing to prefill, in which case the first decode step must still feed
         // the prompt's last token: `prefill_chunk`, which normally sets it, never runs.
@@ -404,21 +518,28 @@ impl Engine {
         // thread each accepted token into the window between the two row draws. Turning speculation off for
         // these slots is the simple, lossless choice (the request asked for penalties explicitly).
         let penalized = !cfg.penalties.is_off();
-        let spec = match self.mtp.as_mut() {
-            Some(ms) if !penalized && self.slots.is_empty() && fed == 0 => {
-                self.model.mtp_truncate(ms, 0);
-                Some(Spec {
-                    hprev: vec![0.0; c.d_model],
-                    pending: None,
-                })
-            }
-            _ => {
-                for s in &mut self.slots {
-                    s.spec = None;
-                }
-                None
-            }
+        let alone = !penalized && self.slots.is_empty() && fed == 0;
+        // The engine's own drafter is the MTP block, and only for a slot that
+        // did not ask for one of its own.
+        let own = if asked.is_none() && alone {
+            self.make_drafter(alone)
+        } else {
+            None
         };
+        let engine_own = own.is_some();
+        let (drafter, depth) = match asked {
+            Some((d, depth)) => (Some(d), depth),
+            None => (own, 0),
+        };
+        // A verification pass is one weight pass over the anchor and the
+        // drafts: it cannot be wider than the scratch the engine was built
+        // with.
+        let depth = depth.min(self.state.max_batch.saturating_sub(1));
+        if !engine_own {
+            // A second user ends the engine's own speculation for good.
+            self.stop_speculation();
+        }
+        let speculating = engine_own;
         // The penalty window starts as the whole prompt, so the first sampled token sees
         // the same sequence plain sampling would (a restored prefix included).
         let mut pen = crate::sample::PenaltyState::default();
@@ -426,7 +547,8 @@ impl Engine {
             pen.start(&prompt, cfg.max_tokens.min(self.max_ctx));
         }
         self.slots.push(Slot {
-            spec,
+            drafter: drafter.map(std::sync::Mutex::new),
+            drafter_depth: depth,
             id,
             kv,
             // The draw is keyed by (seed, position), so a user's tokens do not depend on who else is being served.
@@ -444,17 +566,111 @@ impl Engine {
             prefill_s: 0.0,
             decode_s: 0.0,
             pen,
-            drafter: None,
         });
+        if speculating {
+            self.spec_slot = Some(id);
+        }
+        // A drafter of the slot's own may want the target's taps, and a
+        // verification pass wants a row of logits per drafted token.
+        self.refresh_taps();
+        if depth > 0 {
+            self.ensure_logit_rows(depth + 1);
+        }
         Ok(id)
+    }
+
+    /// The drafter a slot asks for, built for that slot, and how deep it may
+    /// draft.
+    ///
+    /// `None` when the slot asks for none. `Err` when the request cannot be
+    /// served: a drafter a hybrid model cannot use, or a drafter directory that
+    /// does not load.
+    fn make_asked_drafter(&self, choice: &DrafterChoice) -> Result<AskedDrafter, String> {
+        match choice {
+            DrafterChoice::None | DrafterChoice::Mtp => Ok(None),
+            DrafterChoice::Suffix { min_order, max_len } => {
+                // A hybrid model's recurrent state rolls back only to its
+                // turn-start checkpoint, so nothing may write positions it later
+                // takes back: no k-deep speculation.
+                if self.model.is_hybrid() {
+                    return Err(
+                        "suffix speculation is not supported with a hybrid (recurrent) model"
+                            .into(),
+                    );
+                }
+                let max_len = *max_len;
+                let d: Box<dyn crate::draft::Drafter> =
+                    Box::new(crate::draft::SuffixDrafter::new(*min_order, max_len));
+                Ok(Some((d, max_len)))
+            }
+            DrafterChoice::Dspark { dir, max_k: _max_k } => {
+                if self.model.is_hybrid() {
+                    return Err(
+                        "a DSpark drafter is not supported with a hybrid (recurrent) model".into(),
+                    );
+                }
+                #[cfg(feature = "dspark")]
+                {
+                    let c = self.model.cfg;
+                    let head = crate::dspark::Drafter::load(dir, self.pool.width())?;
+                    head.check_target(c.n_vocab, c.d_model, c.n_layer)?;
+                    let k = (*_max_k).clamp(1, head.cfg.block_size - head.cfg.logits_start);
+                    let d: Box<dyn crate::draft::Drafter> =
+                        Box::new(crate::draft::DsparkDrafter::new(head));
+                    Ok(Some((d, k)))
+                }
+                #[cfg(not(feature = "dspark"))]
+                {
+                    Err(format!(
+                        "dspark drafter at {dir:?} requested but 'dspark' feature is disabled in this build"
+                    ))
+                }
+            }
+        }
+    }
+
+    /// The engine's own drafter: the model's MTP block.
+    ///
+    /// `None` when the model has no MTP block, when speculation is off, or
+    /// when the block's cache cannot be allocated. The drafter keeps the
+    /// block's own cache, so it is created per speculating slot.
+    #[cfg(feature = "mtp")]
+    fn make_drafter(&self, allowed: bool) -> Option<Box<dyn crate::draft::Drafter>> {
+        if !allowed || !self.mtp_available {
+            return None;
+        }
+        crate::draft::MtpDrafter::new(self.model.clone(), self.max_ctx, self.pool.width())
+            .ok()
+            .map(|d| Box::new(d) as Box<dyn crate::draft::Drafter>)
+    }
+
+    /// The engine's own drafter: without the `mtp` feature there is none.
+    #[cfg(not(feature = "mtp"))]
+    fn make_drafter(&self, _allowed: bool) -> Option<Box<dyn crate::draft::Drafter>> {
+        None
+    }
+
+    /// The engine's own speculation is over: its drafter goes and the slot
+    /// decodes plainly from here. A drafter the caller attached is not the
+    /// engine's and stays.
+    fn stop_speculation(&mut self) {
+        let Some(id) = self.spec_slot.take() else {
+            return;
+        };
+        if let Some(i) = self.slots.iter().position(|s| s.id == id) {
+            self.slots[i].drafter = None;
+        }
     }
 
     /// Attach a drafter to a slot (ADR 0007).
     ///
-    /// The decode loop does not draft with it yet — that is the next step of
-    /// S1.4 — but the engine does what the drafter asks for: the taps it needs
-    /// are copied out of the forward pass, and every committed position is
-    /// told to it. A drafter that asks for nothing costs the engine nothing.
+    /// The engine verifies what the drafter proposes against the target's own
+    /// samples (`verify_step`), and sets up the taps it asks for and tells it
+    /// what was committed. A drafter that asks for nothing costs the engine
+    /// nothing.
+    ///
+    /// A drafter attached here replaces the engine's own one: the speculation
+    /// the MTP block stood for is over.
     pub fn attach_drafter(
         &mut self,
         id: SlotId,
@@ -464,8 +680,25 @@ impl Engine {
             return Err(format!("no slot {id}"));
         };
         self.slots[i].drafter = Some(std::sync::Mutex::new(drafter));
+        if self.spec_slot == Some(id) {
+            self.spec_slot = None;
+        }
+        // A verification pass wants the logits of the anchor and of the
+        // drafted tokens: room for two rows, whatever the engine was built
+        // for.
+        self.ensure_logit_rows(2);
         self.refresh_taps();
         Ok(())
+    }
+
+    /// Make room for `rows` rows of logits: a verification pass wants one row
+    /// per row it forwards, and the anchor's row is one of them.
+    fn ensure_logit_rows(&mut self, rows: usize) {
+        if self.max_logit_rows < rows {
+            self.max_logit_rows = rows;
+            let n_vocab = self.model.cfg.n_vocab;
+            self.state.logits.resize(rows * n_vocab, 0.0);
+        }
     }
 
     /// Set up the taps the attached drafters need, and take them down again
@@ -538,6 +771,9 @@ impl Engine {
     pub fn cancel(&mut self, id: SlotId) {
         if let Some(i) = self.slots.iter().position(|s| s.id == id) {
             let s = self.slots.remove(i);
+            if self.spec_slot == Some(id) {
+                self.spec_slot = None;
+            }
             self.keep_prefix(&s);
             // The slot's drafter went with it: the taps it needed may not be needed any more.
             self.refresh_taps();
@@ -615,13 +851,21 @@ impl Engine {
     /// oldest first, within the chunk budget. Each prompt run is consecutive positions of one cache
     /// (`Caches::Mapped`), so its attention is one grouped call, as in a plain prefill chunk.
     fn mixed_step(&mut self) -> Vec<Emission> {
-        if self.slots.len() == 1 && self.slots[0].spec.is_some() && self.slots[0].ready() {
+        // A lone slot with a drafter verifies that drafter's proposals: one
+        // weight pass for the anchor and the drafted tokens (ADR 0007,
+        // decision 3: speculation stays single-slot).
+        if self.slots.len() == 1
+            && self.slots[0].ready()
+            && self.slots[0].drafter.is_some()
+            && self.slots[0].cfg.penalties.is_off()
+        {
             let s = &self.slots[0];
             // Room for the draft's position, and more than one token still wanted.
             if s.pos + 2 < self.max_ctx && s.produced + 1 < s.cfg.max_tokens {
-                return self.spec_step();
+                return self.verify_step(0);
             }
-            self.slots[0].spec = None;
+            // No room for a draft, or the turn is over: the slot decodes plainly.
+            self.stop_speculation();
         }
         let t0 = std::time::Instant::now();
         let dec: Vec<usize> = (0..self.slots.len())
@@ -662,11 +906,9 @@ impl Engine {
             }
         }
         let want: Vec<usize> = (0..n_dec).collect();
-        // A lone speculating slot's prompt also goes through the MTP block, which reads the main model's hidden
-        // states.
-        let mtp_pre =
-            n_dec == 0 && pre.len() == 1 && self.slots.len() == 1 && self.slots[0].spec.is_some();
-        self.state.want_hidden = mtp_pre || self.wants_hidden();
+        // A drafter that needs the target's hidden states gets them: the MTP
+        // block's rows read the hidden state of the position before them.
+        self.state.want_hidden = self.wants_hidden();
         let r = {
             let mut refs: Vec<Option<&mut KvCache>> =
                 self.slots.iter_mut().map(|s| Some(&mut s.kv)).collect();
@@ -704,9 +946,6 @@ impl Engine {
                 .collect();
             self.slots.clear();
             return out;
-        }
-        if mtp_pre && self.mtp_catch_up(&tokens, &positions).is_err() {
-            self.slots[0].spec = None;
         }
         self.state.want_hidden = false;
         let elapsed = t0.elapsed().as_secs_f64();
@@ -828,6 +1067,10 @@ impl Engine {
         let n = dec.len();
         self.decode_steps += 1;
         self.decode_rows += n as u64;
+        // The parking rule's countdown: a plain step is a step like any other.
+        if self.park > 0 {
+            self.park -= 1;
+        }
         let share = secs / n as f64;
         let n_vocab = self.model.cfg.n_vocab;
         // Sampling, one row per worker: each is a pass over the whole vocabulary (~2 ms at 248 320 entries), and
@@ -886,6 +1129,9 @@ impl Engine {
             out.push(self.account(si, b, fed[b], id, logprob, share));
         }
         self.reap(&out);
+        // The step is done: the next one is the next step of the count the
+        // suffix index's probe rule uses.
+        self.steps += 1;
         out
     }
 
@@ -977,6 +1223,9 @@ impl Engine {
             gone
         };
         for s in &done {
+            if self.spec_slot == Some(s.id) {
+                self.spec_slot = None;
+            }
             self.keep_prefix(s);
         }
         // A drafter went with its slot: the taps it needed may not be needed any more.
@@ -1010,92 +1259,165 @@ impl Engine {
         (id, lp)
     }
 
-    /// Feed a lone speculating slot's prompt chunk (`tokens` at `positions`, just run with hidden states kept)
-    /// through the MTP block. Its row at position q reads the main model's hidden state at q − 1.
-    fn mtp_catch_up(&mut self, tokens: &[u32], positions: &[usize]) -> Result<(), String> {
-        let d = self.model.cfg.d_model;
-        let n = tokens.len();
-        let sp = self.slots[0].spec.as_mut().ok_or("no speculation")?;
-        let ms = self.mtp.as_mut().ok_or("no MTP state")?;
-        let mut h = Vec::with_capacity(n * d);
-        h.extend_from_slice(&sp.hprev);
-        h.extend_from_slice(&self.state.hidden[..(n - 1) * d]);
-        for k in (0..n).step_by(crate::model::mtp::MTP_MAX_ROWS) {
-            let e = (k + crate::model::mtp::MTP_MAX_ROWS).min(n);
-            self.model.mtp_forward(
-                ms,
-                &self.pool,
-                &tokens[k..e],
-                &h[k * d..e * d],
-                &positions[k..e],
-                false,
-                &mut self.stats,
-            )?;
+    /// Ask the slot's drafter for a proposal, and price it: how many of the
+    /// drafted tokens are worth verifying.
+    ///
+    /// The proposal is written into the engine's own buffer, which is reused,
+    /// so a draft costs no allocation. The drafter draws with the target's own
+    /// position-keyed sampler, so a draft that draws with the target's noise
+    /// survives as often as it survives the argmax.
+    fn ask_drafter(
+        &mut self,
+        si: usize,
+        anchor: u32,
+        pos: usize,
+        policy: crate::draft::DraftPolicy,
+    ) -> usize {
+        let Some(drafter) = &self.slots[si].drafter else {
+            return 0;
+        };
+        let mut d = drafter.lock().expect("drafter");
+        let s = &self.slots[si];
+        let mut sc = self.samps[0].lock().expect("sampler scratch");
+        let (seed, turn) = (s.cfg.seed, s.cfg.turn as u64);
+        let (temp, top_p, top_k, min_p) =
+            (s.cfg.temperature, s.cfg.top_p, s.cfg.top_k, s.cfg.min_p);
+        // Draft `i` lands at position `pos + 1 + i`: it is drawn with that
+        // position's key, as the target will draw it.
+        let mut pick = |i: usize, logits: &[f32]| {
+            crate::sample::sample_penalized(
+                logits,
+                temp,
+                top_p,
+                top_k,
+                min_p,
+                &s.cfg.penalties,
+                s.pen.window(),
+                crate::sample::position_key(seed, turn, pos + 1 + i),
+                &mut sc,
+            )
+        };
+        // The room left in the cache bounds the proposal, and so does the
+        // drafter's own depth: the DSpark head's block is what it is.
+        let room = self.max_ctx.saturating_sub(pos + 2);
+        let depth = self.slots[si].drafter_depth;
+        let k_max = if depth == 0 { room } else { room.min(depth) };
+        // The narrow pool: the draft is a small, memory-bound pass, and the
+        // full pool's SMT siblings spin beside the cores doing the work (on a
+        // 12-core / 24-thread host this step ran 5-6x slower than plain
+        // decode).
+        let pool = self.pool1.as_ref().unwrap_or(&self.pool);
+        d.propose(anchor, pos, k_max, pool, &mut pick, &mut self.proposal);
+        let n = self.proposal.toks.len();
+        // The drafter's own policy first: an exact count (the DSpark head
+        // under `PEREGRINE_DSPARK_K`) is measured, not priced.
+        if let Some(k) = policy.pinned_k {
+            return k.min(n);
         }
-        sp.hprev
-            .copy_from_slice(&self.state.hidden[(n - 1) * d..n * d]);
-        Ok(())
+        // The price: a drafter that is certain of its tokens has them all
+        // verified; one that doubts is priced against the cost of the pass
+        // (the engine's own forward passes, measured).
+        if self.proposal.conf.len() == n && self.proposal.conf.iter().any(|&c| c < 1.0) {
+            let k = crate::draft::choose_k(&self.proposal.conf, |w| self.vcost.cost(w));
+            if k == 0 && policy.probe && self.steps.is_multiple_of(crate::draft::PROBE_EVERY) {
+                // A confidence that is never tested never recovers: every
+                // `PROBE_EVERY`th step verifies a couple of tokens anyway.
+                return n.min(2);
+            }
+            k
+        } else {
+            n
+        }
     }
 
-    /// One step of a lone user with MTP speculation (lossless): the MTP block drafts the token after next, one
-    /// two-row pass of the main model computes the next token and, assuming the draft, the one after it. The
-    /// next token is sampled as always; the draft is kept only if it is that token, and then the second row's
-    /// token is sampled too (the sampler is keyed by position, so both are the tokens plain decoding would
-    /// produce). A rejected draft is undone: the cache drops its position and the recurrent layers go back to
-    /// the state the pass snapshotted after the first row.
-    fn spec_step(&mut self) -> Vec<Emission> {
+    /// One verification step for a slot with a drafter (lossless): the drafter
+    /// proposes the tokens after the anchor, and one pass of the main model
+    /// computes the next token and, assuming the drafts, the ones after it.
+    ///
+    /// The next token is sampled as always; a drafted token is kept only if it
+    /// is the token the target would have sampled there (the sampler is keyed
+    /// by position, so both are the tokens plain decoding would produce). A
+    /// rejected draft is undone: the cache drops its position and the
+    /// recurrent layers go back to the state the pass snapshotted after the
+    /// anchor's row.
+    ///
+    /// The accepted run ends where the turn ends: the token that stops the
+    /// turn is emitted but never fed, exactly as `Session::commit` cuts it.
+    fn verify_step(&mut self, si: usize) -> Vec<Emission> {
         let t0 = std::time::Instant::now();
-        let d = self.model.cfg.d_model;
-        let (tok, p) = (self.slots[0].next, self.slots[0].pos);
-        let (mut mt, mut mh, mut mp) = (vec![], vec![], vec![]);
-        {
-            let sp = self.slots[0].spec.as_mut().expect("checked by the caller");
-            if let Some((pt, ph)) = sp.pending.take() {
-                mt.push(pt);
-                mh.extend(ph);
-                mp.push(p - 1);
-            }
-            mt.push(tok);
-            mh.extend_from_slice(&sp.hprev);
-            mp.push(p);
+        let pos = self.slots[si].pos;
+        let anchor = self.slots[si].next;
+        // The parking rule: a drafter whose rounds do not pay for themselves is
+        // asked less often, and a parked step decodes plainly.
+        if self.park > 0 {
+            self.park -= 1;
         }
-        // One or two rows through the MTP block, then two through the model: bound by memory like a one-row
-        // decode step, so on the narrow pool too. On the full pool the SMT siblings spin beside the cores doing
-        // the work: on a 12-core / 24-thread host this step ran 5-6x slower than plain decode.
-        let pool = self.pool1.as_ref().unwrap_or(&self.pool);
-        let ms = self
-            .mtp
-            .as_mut()
-            .expect("a speculating slot implies MTP state");
-        let draft = match self
-            .model
-            .mtp_forward(ms, pool, &mt, &mh, &mp, true, &mut self.stats)
-        {
-            Ok(Some(t)) => t,
-            // Not fatal: the slot decodes plainly from here.
-            _ => {
-                self.slots[0].spec = None;
-                return self.mixed_step();
-            }
+        let drafting = self.park == 0;
+        // What the engine does with the proposal beyond pricing it: the
+        // drafter's own policy.
+        let policy = self.slots[si]
+            .drafter
+            .as_ref()
+            .map(|d| d.lock().expect("drafter").policy())
+            .unwrap_or_default();
+        // The proposal: the drafter's tokens, and how many of them are worth
+        // verifying.
+        let k = if drafting {
+            self.ask_drafter(si, anchor, pos, policy)
+        } else {
+            0
         };
-        self.state.want_hidden = true;
+        // The rows of logits the state holds bound the proposal: the anchor's
+        // row is one of them.
+        let k = k.min(self.max_logit_rows.saturating_sub(1));
+        // A hybrid model's recurrent state can only be rolled back one row (the
+        // snapshot below), so it verifies one draft at a time.
+        let k = if self.slots[si].kv.has_recurrent() {
+            k.min(1)
+        } else {
+            k
+        };
+        // The verification pass: the anchor and the drafted tokens, one weight
+        // pass. The rows are the engine's own buffers: a verification step
+        // allocates nothing.
+        let n = 1 + k;
+        self.v_toks.clear();
+        self.v_toks.push(anchor);
+        self.v_pos.clear();
+        self.v_pos.push(pos);
+        self.v_want.clear();
+        self.v_map.clear();
+        for i in 0..k {
+            self.v_toks.push(self.proposal.toks[i]);
+            self.v_pos.push(pos + 1 + i);
+        }
+        self.v_want.extend(0..n);
+        self.v_map.extend(std::iter::repeat_n(0, n));
+        // The narrow pool, as a one-row decode step: the pass is bounded by
+        // memory, and on the full pool the SMT siblings spin beside the cores
+        // doing the work (on a 12-core / 24-thread host this step ran 5-6x
+        // slower than plain decode).
+        let pool = self.pool1.as_ref().unwrap_or(&self.pool);
+        self.state.want_hidden = self.wants_hidden();
+        let tv = std::time::Instant::now();
         let r = {
-            let kv = &mut self.slots[0].kv;
-            kv.request_snapshot(p);
+            let kv = &mut self.slots[si].kv;
+            kv.request_snapshot(pos);
             let mut refs = [kv];
             self.model.forward_rows(
                 &mut self.state,
-                &mut Caches::Mapped(&mut refs, &[0, 0]),
+                &mut Caches::Mapped(&mut refs, &self.v_map),
                 pool,
-                &[tok, draft],
-                &[p, p + 1],
-                &[0, 1],
+                &self.v_toks,
+                &self.v_pos,
+                &self.v_want,
                 &mut self.stats,
             )
         };
         self.state.want_hidden = false;
+        let verify_s = tv.elapsed().as_secs_f64();
         if let Err(e) = r {
-            let id = self.slots[0].id;
+            let id = self.slots[si].id;
             self.slots.clear();
             return vec![Emission {
                 slot: id,
@@ -1106,40 +1428,126 @@ impl Engine {
                 cost: None,
             }];
         }
-        let (a, lpa) = self.sample_row(0, 0, p + 1);
-        let h0 = self.state.hidden[..d].to_vec();
-        self.spec_drafts += 1;
+        // What the pass cost is what the model measures.
+        self.vcost.observe(n, verify_s);
+        if k > 0 {
+            self.spec_drafts += 1;
+            self.spec_tokens += k as u64;
+        }
         self.decode_steps += 1;
-        let mut out = Vec::with_capacity(2);
-        if a == draft {
-            self.spec_hits += 1;
-            self.slots[0].kv.drop_snapshot();
-            let (b, lpb) = self.sample_row(0, 1, p + 2);
-            let h1 = self.state.hidden[d..2 * d].to_vec();
-            let secs = t0.elapsed().as_secs_f64();
-            out.push(self.account(0, 0, tok, a, lpa, secs / 2.0));
-            if out[0].finish.is_none() {
-                out.push(self.account(0, 1, draft, b, lpb, secs / 2.0));
-                if let Some(sp) = self.slots[0].spec.as_mut() {
-                    sp.pending = Some((a, h0));
-                    sp.hprev = h1;
-                }
+        // The target's own samples: the longest prefix of the proposal that
+        // equals them survives, and the sample after it is the token plain
+        // decoding would have produced.
+        self.v_samples.clear();
+        self.v_logprobs.clear();
+        let mut accepted = 0usize;
+        for j in 0..=k {
+            let (id, lp) = self.sample_row(si, j, pos + 1 + j);
+            self.v_samples.push(id);
+            self.v_logprobs.push(lp);
+            if j < k && id == self.proposal.toks[j] {
+                accepted = j + 1;
+            } else {
+                break;
             }
+        }
+        // The accepted run ends where the turn ends: the token that stops the
+        // turn is emitted but never fed, so it is not in the cache either.
+        let cut = self.commit_cut(si, accepted);
+        // The cache keeps the rows that survived: the anchor and the accepted
+        // drafts. The rest is taken back.
+        if accepted == k && cut == accepted {
+            self.slots[si].kv.drop_snapshot();
         } else {
-            self.slots[0].kv.truncate(p + 1);
-            let secs = t0.elapsed().as_secs_f64();
-            out.push(self.account(0, 0, tok, a, lpa, secs));
-            // The draft's position was not committed: a drafter forgets it.
-            if let Some(d) = &self.slots[0].drafter {
-                d.lock().expect("drafter").rollback(p + 1);
+            self.slots[si].kv.truncate(pos + 1 + cut);
+        }
+        if accepted > 0 {
+            self.spec_hits += 1;
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        let share = secs / (accepted + 1) as f64;
+        let mut out = Vec::with_capacity(accepted + 1);
+        for i in 0..=accepted {
+            // The turn may have ended with the previous token: nothing more is
+            // committed then.
+            if out.last().is_some_and(|e: &Emission| e.finish.is_some()) {
+                break;
             }
-            if let Some(sp) = self.slots[0].spec.as_mut() {
-                sp.hprev = h0;
+            let fed = if i == 0 {
+                anchor
+            } else {
+                self.proposal.toks[i - 1]
+            };
+            out.push(self.account(si, i, fed, self.v_samples[i], self.v_logprobs[i], share));
+        }
+        // The drafts that were not committed are forgotten.
+        if cut < k {
+            if let Some(d) = &self.slots[si].drafter {
+                d.lock().expect("drafter").rollback(pos + 1 + cut);
+            }
+        }
+        // The parking rule: a drafting round that does not pay for itself
+        // parks drafting for a while (the session's rule, for the DSpark
+        // head). The round is priced against a plain step actually measured.
+        if drafting && k > 0 && policy.park {
+            let round_s = t0.elapsed().as_secs_f64();
+            let rate = (1 + accepted) as f64 / round_s.max(1e-9);
+            self.draft_rate = Some(match self.draft_rate {
+                Some(r) => 0.7 * r + 0.3 * rate,
+                None => rate,
+            });
+            self.drafted_rounds += 1;
+            let plain = self.vcost.ema[1].map(|t| 1.0 / t);
+            if policy.pinned_k.is_none() && self.drafted_rounds >= 8 {
+                if let (Some(dr), Some(pr)) = (self.draft_rate, plain) {
+                    if dr < 0.8 * pr {
+                        self.park = crate::draft::PARK_STEPS;
+                        self.draft_rate = None;
+                    }
+                }
             }
         }
         self.decode_rows += out.len() as u64;
         self.reap(&out);
+        // The step is done: the next one is the next step of the count the
+        // suffix index's probe rule uses.
+        self.steps += 1;
         out
+    }
+
+    /// How many of the `accepted` drafted tokens are committed: the accepted
+    /// run ends where the turn ends.
+    ///
+    /// The token that stops the turn is emitted but never fed — sequential
+    /// decoding does not feed the last token of a turn either — so it must not
+    /// stay in the cache, and the draft that carried it is not committed. The
+    /// same holds for the token that reaches the turn's budget.
+    ///
+    /// This is the rule `Session::commit` applies, and the two runtimes must
+    /// cut the same run at the same place.
+    fn commit_cut(&self, si: usize, accepted: usize) -> usize {
+        let s = &self.slots[si];
+        let pos = s.pos;
+        let mut cut = accepted;
+        let mut produced = s.produced;
+        for (i, &id) in self.v_samples.iter().enumerate().take(accepted + 1) {
+            if s.cfg.stop.contains(&id) {
+                cut = cut.min(i);
+                break;
+            }
+            produced += 1;
+            if produced >= s.cfg.max_tokens {
+                cut = cut.min(i);
+                break;
+            }
+            // The cache is full: the turn ends there too, and the token at that
+            // position is not fed.
+            if pos + i + 2 >= self.max_ctx {
+                cut = cut.min(i);
+                break;
+            }
+        }
+        cut
     }
 
     /// What one request cost: prompt tokens, tokens produced, and the seconds spent prefilling and decoding it

@@ -24,12 +24,12 @@ use peregrine_core::kv::KvPrec;
 use peregrine_core::model::{Model, StepStats};
 use peregrine_core::pool::Pool;
 use peregrine_core::sample::{position_key, sample_filtered, Scratch};
-use peregrine_core::serve::{chat_prompt, Engine, Finish, SlotCfg};
+use peregrine_core::serve::{chat_prompt, DrafterChoice, Engine, Finish, SlotCfg};
 use peregrine_core::session::{Session, SessionCfg};
 use peregrine_core::template::Template;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use support::models::{write_dense, write_hybrid, Dense};
+use support::models::{write_dense, write_dense_accepting, write_hybrid, Dense};
 
 /// The prompt both runtimes are given. Short enough to be one prefill chunk.
 const USER: &str = "Name three colours.";
@@ -146,6 +146,8 @@ fn slot_cfg(model: &Model, temperature: f32) -> SlotCfg {
         // and the engine's own KV cache.
         turn: 0,
         kv_rotation: true,
+        // No drafter: the slot decodes plainly, as the server asks for.
+        drafter: Default::default(),
     }
 }
 
@@ -166,6 +168,33 @@ fn session_cfg(temperature: f32) -> SessionCfg {
         thinking: true,
         ..Default::default()
     }
+}
+
+/// The engine's settings with the session's: the turn in the sampling key (the
+/// session counts its conversation turns, so its first turn draws with
+/// turn = 1) and the family's own KV cache.
+fn session_slot_cfg(model: &Model, temperature: f32, drafter: DrafterChoice) -> SlotCfg {
+    let mut cfg = slot_cfg(model, temperature);
+    cfg.turn = 1;
+    cfg.kv_rotation = model.session_kv_rotation();
+    cfg.drafter = drafter;
+    cfg
+}
+
+/// The tokens a one-slot engine produces for one prompt, and the drafts it
+/// verified and kept.
+fn engine_run(model: &Arc<Model>, prompt: &[u32], cfg: &SlotCfg) -> (Vec<u32>, u64, u64) {
+    let mut e = Engine::new(model.clone(), 4, 512, 1, KvPrec::F16, 0);
+    let id = e.admit(prompt.to_vec(), cfg.clone()).expect("admit");
+    let mut out = Vec::new();
+    while e.active() > 0 {
+        for em in e.step() {
+            assert_eq!(em.slot, id);
+            out.push(em.token);
+        }
+    }
+    drop_stop(&mut out, &cfg.stop);
+    (out, e.spec_drafts, e.spec_hits)
 }
 
 /// The two runtimes, given the same prompt and the same sampling controls.
@@ -662,5 +691,249 @@ fn the_prefix_store_stays_off_while_a_drafter_is_attached() {
     assert!(entries > 0, "the store kept no conversation");
     assert!(hits > 0, "the third prompt did not restore a prefix");
     assert!(saved > 0, "the restore saved no positions");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The engine speculating with the session's drafters (S1.4 steps 4-5)
+// ---------------------------------------------------------------------------
+
+/// **ADR 0007, decision 1: one verification step in the engine.**
+///
+/// The engine speculates with the suffix index now, through the same
+/// verification step the MTP block goes through. The tokens must be the
+/// session's:
+///
+/// * the engine with the session's turn and KV cache, and the session with
+///   the same suffix speculation, must draw the same tokens — at a greedy
+///   temperature and at a sampled one;
+/// * the engine *without* a drafter must draw them too, because speculation
+///   is lossless: a drafted token is kept only when it is the token the
+///   target would have drawn there.
+#[test]
+fn the_engine_speculates_with_the_suffix_index_like_the_session() {
+    let dir = tmpdir("suffix-parity");
+    let path = write_dense(&dir, "qwen3", Format::Q8_0, 7900, Dense::default());
+    let model = load(&path);
+    let prompt = prompt_ids(&model, USER);
+    let mut failures = Vec::new();
+    for temperature in [0.0, TEMP] {
+        // The session, with its own suffix speculation.
+        let mut scfg = session_cfg(temperature);
+        scfg.speculate = true;
+        scfg.ngram = DrafterChoice::SUFFIX_MIN_ORDER;
+        scfg.draft_len = DrafterChoice::SUFFIX_MAX_LEN;
+        let mut session = Session::from_model(model.clone(), scfg).expect("session");
+        let s = session_tokens(&mut session, USER);
+
+        // The engine, with a suffix drafter of its own.
+        let cfg = session_slot_cfg(
+            &model,
+            temperature,
+            DrafterChoice::Suffix {
+                min_order: DrafterChoice::SUFFIX_MIN_ORDER,
+                max_len: DrafterChoice::SUFFIX_MAX_LEN,
+            },
+        );
+        let (e, drafts, hits) = engine_run(&model, &prompt, &cfg);
+        eprintln!("suffix T={temperature}: session {s:?}\nengine          {e:?}");
+        eprintln!("  drafts verified {drafts}, kept {hits}");
+        if s != e {
+            failures.push(format!(
+                "suffix speculation at T={temperature}: the engine and the session disagree\n  \
+                 session: {s:?}\n  engine:  {e:?}"
+            ));
+        }
+
+        // The engine without a drafter: the same tokens, because a draft that
+        // does not survive changes nothing.
+        let plain = session_slot_cfg(&model, temperature, DrafterChoice::None);
+        let (p, drafts, hits) = engine_run(&model, &prompt, &plain);
+        if p != e {
+            failures.push(format!(
+                "suffix speculation at T={temperature}: the engine's tokens changed when a \
+                 drafter was attached\n  without: {p:?}\n  with:    {e:?}"
+            ));
+        }
+        if drafts != 0 || hits != 0 {
+            failures.push(format!(
+                "suffix speculation at T={temperature}: the engine drafted without a drafter \
+                 ({drafts} drafts, {hits} kept)"
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "the runtimes disagree:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// **ADR 0007, decision 1: one verification step in the engine.**
+///
+/// The same, with the DSpark head: the engine asks the head for a block of
+/// drafts, verifies them in one pass, and cuts the accepted run where the
+/// turn ends — exactly as `Session::commit` does. The tokens are the
+/// session's, and the engine's without a drafter.
+#[test]
+fn the_engine_speculates_with_a_dspark_head_like_the_session() {
+    let dir = tmpdir("dspark-parity");
+    let path = write_dense(&dir, "qwen3", Format::Q8_0, 7901, Dense::default());
+    let model = load(&path);
+    let drafter = support::dspark::write_drafter(
+        &dir,
+        support::dspark::DrafterShape {
+            n_vocab: model.cfg.n_vocab,
+            hidden: model.cfg.d_model,
+            ..Default::default()
+        },
+        7902,
+    );
+    let prompt = prompt_ids(&model, USER);
+    let mut failures = Vec::new();
+    for temperature in [0.0, TEMP] {
+        // The session, with the head attached.
+        let mut scfg = session_cfg(temperature);
+        scfg.dspark = Some(drafter.clone());
+        let mut session = Session::from_model(model.clone(), scfg).expect("session with a head");
+        let s = session_tokens(&mut session, USER);
+
+        // The engine, with a head of its own.
+        let cfg = session_slot_cfg(
+            &model,
+            temperature,
+            DrafterChoice::Dspark {
+                dir: drafter.clone(),
+                max_k: DrafterChoice::DSPARK_MAX_K,
+            },
+        );
+        let (e, drafts, hits) = engine_run(&model, &prompt, &cfg);
+        eprintln!("dspark T={temperature}: session {s:?}\nengine           {e:?}");
+        eprintln!("  drafts verified {drafts}, kept {hits}");
+        if s != e {
+            failures.push(format!(
+                "dspark speculation at T={temperature}: the engine and the session disagree\n  \
+                 session: {s:?}\n  engine:  {e:?}"
+            ));
+        }
+        if drafts == 0 {
+            failures.push(format!(
+                "dspark speculation at T={temperature}: the engine never asked the head for a draft"
+            ));
+        }
+
+        // The engine without a drafter: the same tokens.
+        let plain = session_slot_cfg(&model, temperature, DrafterChoice::None);
+        let (p, _, _) = engine_run(&model, &prompt, &plain);
+        if p != e {
+            failures.push(format!(
+                "dspark speculation at T={temperature}: the engine's tokens changed when a \
+                 drafter was attached\n  without: {p:?}\n  with:    {e:?}"
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "the runtimes disagree:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// A hybrid model's recurrent state can only be rolled back one row, so the
+/// k-deep drafters are refused: the request is turned down, as the session
+/// turns down a DSpark head for a hybrid model.
+#[test]
+fn a_hybrid_model_refuses_the_drafters_it_cannot_roll_back() {
+    let dir = tmpdir("hybrid-refusal");
+    let path = write_hybrid(&dir, Format::PQ2_0, 7903, false);
+    let model = load(&path);
+    let prompt = prompt_ids(&model, USER);
+    let mut e = Engine::new(model.clone(), 4, 512, 1, KvPrec::F16, 0);
+
+    let err = e
+        .admit(
+            prompt.clone(),
+            SlotCfg {
+                drafter: DrafterChoice::Suffix {
+                    min_order: 2,
+                    max_len: 12,
+                },
+                ..Default::default()
+            },
+        )
+        .expect_err("a hybrid model took a suffix drafter");
+    assert!(
+        err.1.contains("hybrid"),
+        "the refusal does not say why: {}",
+        err.1
+    );
+
+    let err = e
+        .admit(
+            prompt.clone(),
+            SlotCfg {
+                drafter: DrafterChoice::Dspark {
+                    dir: PathBuf::from("/nonexistent/dspark"),
+                    max_k: 3,
+                },
+                ..Default::default()
+            },
+        )
+        .expect_err("a hybrid model took a DSpark head");
+    assert!(
+        err.1.contains("hybrid"),
+        "the refusal does not say why: {}",
+        err.1
+    );
+
+    // The slot that was turned down is not serving: the engine is as it was.
+    assert_eq!(e.active(), 0, "a refused request left a slot behind");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **ADR 0007, decision 1: one verification step in the engine.**
+///
+/// The suffix index proposes what followed an earlier match; the engine
+/// verifies it against the target's own samples. A draft the target would have
+/// drawn is kept — and the tokens are the same as without a drafter, because
+/// the kept draft *is* the token the target drew.
+///
+/// The model here always answers token 0, so the corpus is a run of zeros: the
+/// index finds the same n-gram twice, proposes zeros, and the target draws
+/// zeros. That is the accepted path — the cache keeps the accepted positions,
+/// the drafter is told what was committed, and the tokens do not move.
+#[test]
+fn the_engine_keeps_the_suffix_drafts_the_target_would_have_drawn() {
+    let dir = tmpdir("suffix-accept");
+    let path = write_dense_accepting(&dir, "qwen3", Format::Q8_0, 7904, Dense::default());
+    let model = load(&path);
+    let prompt = prompt_ids(&model, USER);
+
+    // The engine with a suffix drafter.
+    let cfg = session_slot_cfg(
+        &model,
+        0.0,
+        DrafterChoice::Suffix {
+            min_order: DrafterChoice::SUFFIX_MIN_ORDER,
+            max_len: DrafterChoice::SUFFIX_MAX_LEN,
+        },
+    );
+    let (e, drafts, hits) = engine_run(&model, &prompt, &cfg);
+    eprintln!("suffix accepted: {e:?} ({drafts} drafts, {hits} kept)");
+    assert!(drafts > 0, "the suffix drafter never proposed anything");
+    assert!(
+        hits > 0,
+        "no suffix draft was kept: the accepted path is untested"
+    );
+
+    // The same tokens without a drafter: speculation is lossless.
+    let plain = session_slot_cfg(&model, 0.0, DrafterChoice::None);
+    let (p, drafts, hits) = engine_run(&model, &prompt, &plain);
+    assert_eq!(drafts, 0, "the engine drafted without a drafter");
+    assert_eq!(hits, 0, "the engine kept a draft without a drafter");
+    assert_eq!(p, e, "the accepted drafts changed the tokens");
+
     let _ = std::fs::remove_dir_all(&dir);
 }
