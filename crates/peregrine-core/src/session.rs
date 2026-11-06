@@ -327,7 +327,7 @@ impl Session {
         // `new_cache` adds a hybrid model's recurrent state and sizes K/V for its attention layers only.
         let kv = model.new_cache(cfg.kv_prec, max_ctx);
         // The int8 rotation is measured per family: see `KvCache::without_rotation`.
-        let kv = if c.arch == crate::model::Arch::Qwen2 {
+        let kv = if !model.session_kv_rotation() {
             kv.without_rotation()
         } else {
             kv
