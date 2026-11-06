@@ -34,7 +34,7 @@ own memory-bandwidth ceiling.
 | Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP) | Gemma 3, Phi-4, Mistral checks, MoE (qwen3moe, gpt-oss) |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q6_K, PQ2_0, PTQ1_0 | Q5_K, IQ4_XS/NL, Q2_K/Q3_K, MXFP4 |
 | CPUs | x86-64 AVX2, AVX-512 (VNNI, GFNI, VBMI); others through scalar code | AVX-VNNI-256, ARM NEON/SDOT |
-| Tokenizers | GPT-2 byte-level BPE | SentencePiece |
+| Tokenizers | GPT-2 byte-level BPE, SentencePiece (llama) | |
 
 Measured on a Ryzen AI 9 HX 370 (WSL2), Bonsai 2 9B: **23.5 tok/s single user, 28.7 with lossless MTP
 speculation**, about 75 tok/s total at 10 users. The full table, method and competitors are in

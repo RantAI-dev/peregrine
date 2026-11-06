@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Support for SentencePiece (llama) tokenizers transcribed from llama.cpp (S2.3a).
 - Support for GGML's Q4_0 weight format (AVX2 and scalar kernels).
 - `peregrine-core`: CPU inference engine for GGUF models.
   - Architectures: Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid).
