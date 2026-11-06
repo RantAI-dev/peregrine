@@ -30,5 +30,6 @@ incremental) for daily work, and keep `release` unchanged for published numbers.
 ## Consequences
 
 - Correct builds with the toolchain everyone has; no wrong-code risk in kernels.
-- Release rebuilds stay around 10-20 s; `quick` is measured in roadmap S0.4.
+- Measured (S0.4, `benchmarks/results/2026-11-06-h2-quick-profile/`): after a one-line code edit, `quick`
+  rebuilds the server in 2.6 s against 29.6 s for `release`, and decodes about 0.5% slower.
 - Revisit when a blaze release supports GFNI and passes the full test suite, including the pack probe.
