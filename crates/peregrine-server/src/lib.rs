@@ -976,6 +976,15 @@ fn async_stream(
     .chain(tokio_stream::once(Ok(Event::default().data("[DONE]"))))
 }
 
+/// Log to stderr at `info`, or as `RUST_LOG` says.
+pub fn init_logging() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{continuation_prefix, plan, Penalties};
@@ -1093,13 +1102,4 @@ mod tests {
             "<think>\nOkay\n</think>\n\n"
         );
     }
-}
-
-/// Log to stderr at `info`, or as `RUST_LOG` says.
-pub fn init_logging() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
 }
