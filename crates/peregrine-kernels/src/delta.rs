@@ -26,7 +26,7 @@ pub fn tier() -> DeltaTier {
     *TIER.get_or_init(|| {
         #[cfg(target_arch = "x86_64")]
         {
-            if crate::tern::have_vnni() {
+            if crate::cpu::have_vnni() {
                 return DeltaTier::Avx512;
             }
             if crate::simd::have_batched() {
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn avx512_vs_scalar_reference() {
-        if !crate::tern::have_vnni() {
+        if !crate::cpu::have_vnni() {
             eprintln!("skipping avx512_vs_scalar_reference: AVX-512 not available");
             return;
         }

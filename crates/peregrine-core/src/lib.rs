@@ -22,10 +22,44 @@
 pub mod arch;
 pub mod attn;
 pub mod blocks;
+#[cfg(feature = "dspark")]
 pub mod dspark;
+#[cfg(not(feature = "dspark"))]
+pub mod dspark {
+    pub struct Drafter {
+        pub stats: Stats,
+        pub cfg: Cfg,
+    }
+    pub struct Stats {
+        pub bytes: u64,
+    }
+    pub struct Cfg {
+        pub block_size: usize,
+        pub logits_start: usize,
+        pub target_layer_ids: Vec<usize>,
+    }
+    impl Drafter {
+        pub fn update_context(&mut self, _taps: &[f32], _start: usize, _pool: &crate::pool::Pool) {}
+        pub fn truncate(&mut self, _pos: usize) {}
+        pub fn draft_with(
+            &mut self,
+            _next: u32,
+            _kmax: usize,
+            _pool: &crate::pool::Pool,
+            mut _f: impl FnMut(usize, &[f32]) -> u32,
+        ) -> (Vec<u32>, Vec<f32>) {
+            (Vec::new(), Vec::new())
+        }
+    }
+}
 pub mod gguf;
 pub mod kv;
+#[cfg(feature = "littlebit")]
 pub mod lbq;
+#[cfg(not(feature = "littlebit"))]
+pub mod lbq {
+    pub struct Slb;
+}
 pub mod model;
 pub mod options;
 pub mod pool;
@@ -44,9 +78,11 @@ pub mod tokenizer;
 pub use gguf::{Format, Gguf};
 // The kernels live in `peregrine-kernels`; they keep their paths here.
 pub use peregrine_kernels::cpu_has;
-pub use peregrine_kernels::{cpu, delta, format, hadamard, quant, table, vmath};
 #[cfg(target_arch = "x86_64")]
-pub use peregrine_kernels::{simd, tern};
+pub use peregrine_kernels::simd;
+#[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
+pub use peregrine_kernels::tern;
+pub use peregrine_kernels::{cpu, delta, format, hadamard, quant, table, vmath};
 pub use profile::Profile;
 pub use session::{BenchReport, Session, SessionCfg};
 
@@ -78,6 +114,17 @@ pub fn check_compatible_with(
 ) -> Result<(), String> {
     let arch = g.str("general.architecture").unwrap_or("unknown");
     if !families.iter().any(|f| f.names().contains(&arch)) {
+        let feat = match arch {
+            "llama" => Some("arch-llama"),
+            "qwen2" | "qwen3" => Some("arch-qwen"),
+            "qwen25" | "qwen35" => Some("arch-qwen35"),
+            _ => None,
+        };
+        if let Some(feat) = feat {
+            return Err(format!(
+                "architecture {arch:?} is not enabled in this build (recompile with feature '{feat}')"
+            ));
+        }
         let arch_names: Vec<&str> = families
             .iter()
             .flat_map(|f| f.names().iter().copied())
@@ -86,6 +133,16 @@ pub fn check_compatible_with(
             "architecture {arch:?} — Peregrine implements {}",
             arch_names.join(", ")
         ));
+    }
+    for t in g.tensors.values() {
+        if !t.kind.is_supported() {
+            let feat = t.kind.required_feature().unwrap_or("unknown");
+            return Err(format!(
+                "tensor '{}' uses format {} which is disabled in this build (enable feature '{feat}')",
+                t.name,
+                t.kind.label()
+            ));
+        }
     }
     let tok = g.str("tokenizer.ggml.model").unwrap_or("unknown");
     if tok != "gpt2" && tok != "llama" {

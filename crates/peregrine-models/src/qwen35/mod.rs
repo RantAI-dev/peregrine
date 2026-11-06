@@ -2,6 +2,7 @@
 
 pub mod forward;
 pub mod load;
+#[cfg(feature = "mtp")]
 pub mod mtp;
 
 use std::any::Any;
@@ -24,6 +25,7 @@ pub struct Qwen35 {
     pub(crate) tok_embd: TensorInfo,
     pub(crate) out_norm: TensorInfo,
     pub(crate) head: TensorInfo,
+    #[cfg(feature = "mtp")]
     pub(crate) mtp: Option<mtp::Mtp>,
 }
 
@@ -78,7 +80,14 @@ impl Architecture for Qwen35 {
     }
 
     fn mtp(&self) -> Option<&dyn MtpHead> {
-        self.mtp.as_ref().map(|m| m as &dyn MtpHead)
+        #[cfg(feature = "mtp")]
+        {
+            self.mtp.as_ref().map(|m| m as &dyn MtpHead)
+        }
+        #[cfg(not(feature = "mtp"))]
+        {
+            None
+        }
     }
 
     fn forward_rows(
