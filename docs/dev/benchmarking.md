@@ -22,7 +22,8 @@ harness is roadmap item S3.1; until it exists, follow the same method by hand.
 cargo build --release -p peregrine-server     # the profile published numbers use
 ```
 
-The `quick` profile is for daily work only. `dist` (fat LTO) is a candidate under evaluation (S3.9).
+The `quick` profile is for daily work only: it rebuilds about 11× faster and decodes about 0.5% slower
+(`benchmarks/results/2026-11-06-h2-quick-profile/`). `dist` (fat LTO) is a candidate under evaluation (S3.9).
 
 ## The four numbers
 
