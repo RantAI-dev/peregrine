@@ -6,6 +6,7 @@
 //! the model code. The table also hands out the fast kernels as safe functions: a `MatKernels` that reports a
 //! path exists only on a CPU that has it, and each wrapper checks the call's other preconditions.
 
+use crate::cpu::Tier;
 use crate::format::Format;
 use crate::quant::{row_bytes, QuantAct};
 use std::sync::OnceLock;
@@ -155,11 +156,71 @@ impl MatKernels {
     pub fn row(&self, fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
         crate::quant::dot_batch(fmt, w, acts, out)
     }
+
+    /// The kernel tiers that provide a dedicated kernel for `fmt`.
+    pub fn kernels_for(fmt: Format) -> &'static [Tier] {
+        kernels_for(fmt)
+    }
+}
+
+/// The kernel tiers that provide a dedicated kernel for `fmt`.
+pub fn kernels_for(fmt: Format) -> &'static [Tier] {
+    if !fmt.is_supported() {
+        return &[];
+    }
+    match fmt {
+        Format::F32 | Format::F16 | Format::BF16 => &[Tier::Scalar],
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => &[Tier::Scalar, Tier::Avx2],
+        #[cfg(feature = "fmt-kquant")]
+        Format::Q4_K | Format::Q5_K | Format::Q6_K => &[Tier::Scalar, Tier::Avx2],
+        #[cfg(feature = "fmt-iq")]
+        Format::IQ4_NL | Format::IQ4_XS => &[Tier::Scalar, Tier::Avx2],
+        #[cfg(feature = "fmt-ternary")]
+        Format::PQ2_0 | Format::PTQ1_0 => &[Tier::Scalar, Tier::Avx2, Tier::Avx512],
+        #[allow(unreachable_patterns)]
+        _ => &[],
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_kernels_for_tiers() {
+        assert_eq!(kernels_for(Format::F32), &[Tier::Scalar]);
+        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar]);
+        assert_eq!(kernels_for(Format::BF16), &[Tier::Scalar]);
+        #[cfg(feature = "fmt-legacy")]
+        {
+            assert_eq!(kernels_for(Format::Q4_0), &[Tier::Scalar, Tier::Avx2]);
+            assert_eq!(kernels_for(Format::Q5_0), &[Tier::Scalar, Tier::Avx2]);
+            assert_eq!(kernels_for(Format::Q8_0), &[Tier::Scalar, Tier::Avx2]);
+        }
+        #[cfg(feature = "fmt-kquant")]
+        {
+            assert_eq!(kernels_for(Format::Q4_K), &[Tier::Scalar, Tier::Avx2]);
+            assert_eq!(kernels_for(Format::Q5_K), &[Tier::Scalar, Tier::Avx2]);
+            assert_eq!(kernels_for(Format::Q6_K), &[Tier::Scalar, Tier::Avx2]);
+        }
+        #[cfg(feature = "fmt-iq")]
+        {
+            assert_eq!(kernels_for(Format::IQ4_NL), &[Tier::Scalar, Tier::Avx2]);
+            assert_eq!(kernels_for(Format::IQ4_XS), &[Tier::Scalar, Tier::Avx2]);
+        }
+        #[cfg(feature = "fmt-ternary")]
+        {
+            assert_eq!(
+                kernels_for(Format::PQ2_0),
+                &[Tier::Scalar, Tier::Avx2, Tier::Avx512]
+            );
+            assert_eq!(
+                kernels_for(Format::PTQ1_0),
+                &[Tier::Scalar, Tier::Avx2, Tier::Avx512]
+            );
+        }
+    }
 
     #[test]
     fn exact_overrides_every_fast_path() {
