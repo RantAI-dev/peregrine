@@ -63,6 +63,7 @@ bound by compute. That split drives most design choices.
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
 | `serve.rs` | `Engine`: slots, scheduling, mixed prefill/decode steps, MTP verification. The server runs this. |
 | `session.rs`, `dspark.rs`, `suffix.rs` | `Session`, the older single-user runtime, with DSpark and suffix speculation. To be folded into `Engine` (roadmap S1.4). |
+| `profile.rs` | Tuning profiles: read, write, mismatch detection and default paths (ADR 0005). |
 | `pool.rs` | The thread pool and barrier. Thread count and barrier count are measured quantities, which is why there is no rayon. |
 | `telem.rs` | Bytes moved, phases and machine ceilings: the numbers every benchmark reports. |
 | `lbq.rs` | LittleBit 1-bit-class weights. Off by default (it fails accuracy without trained factors). |
@@ -77,7 +78,8 @@ peregrine-bench --example <name>`); most are x86-64 only. Nothing depends on it.
 
 What applications depend on: re-exports the engine (`peregrine::engine`), the kernels and, with the default
 `server` feature, the server. The `peregrine` binary (`cli` feature) has `serve`, `inspect` (a model file's
-architecture, formats and whether this build runs it) and `tier` (the kernel tier and every option).
+architecture, formats and whether this build runs it), `bench` (single-user throughput and bytes/token
+measurement), `tune` (coordinate search over tuning knobs) and `tier` (the kernel tier and every option).
 
 ### `crates/peregrine-server`: HTTP
 
