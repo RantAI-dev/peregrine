@@ -26,6 +26,23 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: check support table matches README
+        run: |
+          cargo run -q -p peregrine -- support --markdown > /tmp/generated-support.md
+          python3 -c '
+          import sys
+          readme = open("README.md").read()
+          begin, end = "<!-- support:begin -->", "<!-- support:end -->"
+          if begin not in readme or end not in readme:
+              sys.exit("Markers <!-- support:begin --> and <!-- support:end --> not found in README.md")
+          block = readme.split(begin)[1].split(end)[0].strip()
+          open("/tmp/readme-support.md", "w").write(block + "\n")
+          '
+          diff -u /tmp/readme-support.md /tmp/generated-support.md || {
+              echo "Error: README.md support table is out of date."
+              echo "Run 'cargo run -q -p peregrine -- support --markdown' and paste between <!-- support:begin --> and <!-- support:end --> in README.md."
+              exit 1
+          }
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-hack@0.6.46

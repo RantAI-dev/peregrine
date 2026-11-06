@@ -27,3 +27,4 @@ pub mod tern;
 pub mod vmath;
 
 pub use format::{f16, Format};
+pub use table::kernels_for;
