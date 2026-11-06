@@ -25,7 +25,7 @@ fn dynamic_rows() -> bool {
 #[derive(Clone, Copy)]
 pub(crate) struct MatJob<'a> {
     pub(crate) w: &'a TensorInfo,
-    pub(crate) out: OutPtr,
+    pub(crate) out: OutPtr<'a>,
     /// Output rows to compute, when fewer than the matrix's full `dims[1]` (the MTP draft head reads only the
     /// first part of the vocabulary). Kept here rather than in a cloned `TensorInfo`, whose `String` and `dims`
     /// would allocate on every draft step.
@@ -43,7 +43,7 @@ impl<'a> MatJob<'a> {
 /// One matrix of a fused group, dense or LittleBit. `linear_group` dispatches.
 pub(crate) struct LinJob<'a> {
     pub(crate) lin: &'a Linear,
-    pub(crate) out: OutPtr,
+    pub(crate) out: OutPtr<'a>,
 }
 
 /// Several matrices that share one activation — Q, K and V; gate and up — in a
@@ -106,8 +106,7 @@ pub(crate) fn matmul_group(
                         mk.tiles_pq2(w_tiles, ng, nt, acts, &mut blk[..16 * nt * nb]);
                         for i in 0..16 * nt {
                             for b in 0..nb {
-                                // SAFETY: row `r + i` of this job belongs to this worker (tile-aligned ranges).
-                                unsafe { j.out.set(b * rows + r + i, blk[i * nb + b]) };
+                                j.out.set(b * rows + r + i, blk[i * nb + b]);
                             }
                         }
                         r += 16 * nt;
@@ -128,8 +127,7 @@ pub(crate) fn matmul_group(
                         }
                         for i in 0..k {
                             for b in 0..nb {
-                                // SAFETY: as below — row `r + i` of this job belongs to this worker.
-                                unsafe { j.out.set(b * rows + r + i, blk[i * nb + b]) };
+                                j.out.set(b * rows + r + i, blk[i * nb + b]);
                             }
                         }
                         r += k;
@@ -140,11 +138,7 @@ pub(crate) fn matmul_group(
                     for r in r..rz {
                         mk.row(j.w.kind, &bytes[r * rb..(r + 1) * rb], acts, &mut tmp[..nb]);
                         for (b, &v) in tmp[..nb].iter().enumerate() {
-                            // SAFETY: each row of the concatenated row space is taken by exactly one worker
-                            // (a `share` range, or a chunk claimed from the counter), so `(job, r)` — hence the
-                            // index `b*rows + r` within this job's output — is written once. The outputs
-                            // outlive the call because `run` does not return until every worker has finished.
-                            unsafe { j.out.set(b * rows + r, v) };
+                            j.out.set(b * rows + r, v);
                         }
                     }
                 }
@@ -211,14 +205,14 @@ pub(crate) fn linear_group(
     xs: &[f32],
     xstride: usize,
     nb: usize,
-    lbx: SharedBuf,
-    lbt: SharedBuf,
+    lbx: SharedBuf<'_>,
+    lbt: SharedBuf<'_>,
     pool: &Pool,
     st: &mut StepStats,
 ) {
     debug_assert!(jobs.len() <= 4);
     let mut dense: [Option<MatJob>; 4] = [None; 4];
-    let mut lb: [(usize, OutPtr); 4] = [(0, jobs[0].out); 4];
+    let mut lb: [(usize, OutPtr<'_>); 4] = [(0, jobs[0].out); 4];
     let (mut nd, mut nl) = (0usize, 0usize);
     for j in jobs {
         match j.lin {
@@ -258,12 +252,12 @@ pub(crate) fn linear_group(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lb_group(
     slb: Option<&Slb>,
-    jobs: &[(usize, OutPtr)],
+    jobs: &[(usize, OutPtr<'_>)],
     xs: &[f32],
     xstride: usize,
     nb: usize,
-    lbx: SharedBuf,
-    lbt: SharedBuf,
+    lbx: SharedBuf<'_>,
+    lbt: SharedBuf<'_>,
     pool: &Pool,
     st: &mut StepStats,
 ) {
@@ -318,7 +312,7 @@ pub(crate) fn lb_group(
         let g = &t.stages[s.stage].g;
         // SAFETY: each slot's x′ region is disjoint by construction, and no
         // worker runs while this serial prologue writes it.
-        let xp = unsafe { lbx.slice(s.x_off, nb * t.d_in) };
+        let xp = lbx.chunk(s.x_off, nb * t.d_in);
         for b in 0..nb {
             let src = &xs[b * xstride..b * xstride + t.d_in];
             if i8p {
@@ -342,9 +336,7 @@ pub(crate) fn lb_group(
             if a < z {
                 let v = slb.v_bits(t, s.stage);
                 let vrb = t.d_in / 8;
-                // SAFETY: x′ was fully written before the barrier and only read
-                // here; latent rows a..z belong to this worker alone.
-                let xp = unsafe { lbx.slice_ref(s.x_off, nb * t.d_in) };
+                let xp = lbx.slice_ref(s.x_off, nb * t.d_in);
                 for j in (a - base)..(z - base) {
                     let row = &v[j * vrb..(j + 1) * vrb];
                     if i8p {
@@ -352,7 +344,7 @@ pub(crate) fn lb_group(
                     } else {
                         crate::lbq::lb_dot_batch(row, t.d_in, xp, t.d_in, nb, &mut tmp[..nb]);
                     }
-                    unsafe { lbt.slice(s.t_off + j * nb, nb) }.copy_from_slice(&tmp[..nb]);
+                    lbt.chunk(s.t_off + j * nb, nb).copy_from_slice(&tmp[..nb]);
                 }
             }
             base += t.r_pad;
@@ -362,9 +354,8 @@ pub(crate) fn lb_group(
     for s in slots {
         let t = &slb.tensors[s.ti];
         let l = &t.stages[s.stage].l;
-        // SAFETY: serial seam between the barriers; regions as above.
-        let src = unsafe { lbt.slice_ref(s.t_off, nb * t.r_pad) };
-        let dst = unsafe { lbx.slice(s.x_off, nb * t.r_pad) };
+        let src = lbt.slice_ref(s.t_off, nb * t.r_pad);
+        let dst = lbx.chunk(s.x_off, nb * t.r_pad);
         for b in 0..nb {
             if i8p {
                 crate::lbq::quantize_i8_row(&mut dst[b * t.r_pad..], t.r_pad, |j| {
@@ -396,8 +387,7 @@ pub(crate) fn lb_group(
                         ns2 < st2.len(),
                         "more than 8 LittleBit stages in one tensor"
                     );
-                    // SAFETY: ℓ⊙t was fully written in the seam; read-only here.
-                    let tp = unsafe { lbx.slice_ref(s.x_off, nb * t.r_pad) };
+                    let tp = lbx.slice_ref(s.x_off, nb * t.r_pad);
                     st2[ns2] = (slb.u_bits(t, s.stage), tp, &t.stages[s.stage].h[..]);
                     ns2 += 1;
                 }
@@ -423,8 +413,7 @@ pub(crate) fn lb_group(
                         }
                     }
                     for (b, &v) in acc[..nb].iter().enumerate() {
-                        // SAFETY: output row `i` of job `ji` belongs to this worker.
-                        unsafe { out.set(b * t.d_out + i, v) };
+                        out.set(b * t.d_out + i, v);
                     }
                 }
             }

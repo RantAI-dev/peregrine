@@ -8,7 +8,7 @@
 //! The rotation's data — the sign vector of every input width and the block size — is the [`Rotation`] struct
 //! the hybrid family owns; the functions below take it, slices and scratch, never the model.
 
-use crate::blocks::par::{SharedActs, SharedBuf};
+use crate::blocks::par::SharedBuf;
 use crate::hadamard::fwht;
 use crate::model::StepStats;
 use crate::pool::Pool;
@@ -77,36 +77,31 @@ impl Rotation {
     /// `parallel` says whether the rows are worth splitting across the pool: the caller decides, because the
     /// threshold belongs to the model.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn rotate_rows_pre(
+    pub(crate) fn rotate_rows(
         &self,
         rot: &mut [f32],
         rot_w: usize,
         acts: &mut [QuantAct],
-        src: SharedBuf,
+        src: &[f32],
         w: usize,
         nb: usize,
         perm: Option<VPerm>,
-        pre: Option<&RowPrep>,
         parallel: bool,
         pool: &Pool,
         stats: &mut StepStats,
     ) {
         let ss = self.signs_for(w).expect("sign vector checked at load");
         let blk = self.block;
-        let rot = SharedBuf(rot.as_mut_ptr());
-        let ap = SharedActs(acts.as_mut_ptr());
+        let rot = crate::blocks::par::Disjoint::new(rot);
+        let ap = crate::blocks::par::Disjoint::new(acts);
         let next = AtomicUsize::new(0);
         let body = |_wk: usize, _nw: usize| loop {
             let b = next.fetch_add(1, AO::Relaxed);
             if b >= nb {
                 break;
             }
-            // SAFETY: row `b` of `src`, of `rot` and `acts[b]` is claimed by this worker alone.
-            let x = unsafe { src.slice(b * w, w) };
-            if let Some(f) = pre {
-                f(b, x);
-            }
-            let r = unsafe { rot.slice(b * rot_w, w) };
+            let x = &src[b * w..(b + 1) * w];
+            let r = rot.chunk(b * rot_w, w);
             if let Some(p) = perm {
                 let (hd, nk, rep) = (p.dv, p.n_k_heads, p.n_v_heads / p.n_k_heads);
                 for rr in 0..rep {
@@ -127,12 +122,74 @@ impl Rotation {
             for c in r.chunks_exact_mut(blk) {
                 fwht(c);
             }
-            unsafe { ap.get(b) }.fill(r);
+            ap.get(b).fill(r);
         };
         if parallel {
             pool.run(body);
             stats.barriers += 1;
         } else {
+            crate::blocks::par::bump_epoch();
+            body(0, 1);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rotate_rows_pre(
+        &self,
+        rot: &mut [f32],
+        rot_w: usize,
+        acts: &mut [QuantAct],
+        src: SharedBuf<'_>,
+        w: usize,
+        nb: usize,
+        perm: Option<VPerm>,
+        pre: Option<&RowPrep>,
+        parallel: bool,
+        pool: &Pool,
+        stats: &mut StepStats,
+    ) {
+        let ss = self.signs_for(w).expect("sign vector checked at load");
+        let blk = self.block;
+        let rot = crate::blocks::par::Disjoint::new(rot);
+        let ap = crate::blocks::par::Disjoint::new(acts);
+        let next = AtomicUsize::new(0);
+        let body = |_wk: usize, _nw: usize| loop {
+            let b = next.fetch_add(1, AO::Relaxed);
+            if b >= nb {
+                break;
+            }
+            let x = src.chunk(b * w, w);
+            if let Some(f) = pre {
+                f(b, x);
+            }
+            let r = rot.chunk(b * rot_w, w);
+            if let Some(p) = perm {
+                let (hd, nk, rep) = (p.dv, p.n_k_heads, p.n_v_heads / p.n_k_heads);
+                for rr in 0..rep {
+                    for gg in 0..nk {
+                        let s = (rr * nk + gg) * hd;
+                        let d = (gg * rep + rr) * hd;
+                        r[d..d + hd].copy_from_slice(&x[s..s + hd]);
+                    }
+                }
+                for (v, s) in r.iter_mut().zip(ss) {
+                    *v *= s;
+                }
+            } else {
+                for ((v, &xi), s) in r.iter_mut().zip(x.iter()).zip(ss) {
+                    *v = xi * s;
+                }
+            }
+            for c in r.chunks_exact_mut(blk) {
+                fwht(c);
+            }
+            ap.get(b).fill(r);
+        };
+        if parallel {
+            pool.run(body);
+            stats.barriers += 1;
+        } else {
+            crate::blocks::par::bump_epoch();
             body(0, 1);
         }
     }

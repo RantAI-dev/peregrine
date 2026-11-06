@@ -185,7 +185,7 @@ impl Model {
         self.matmul_group(
             &[MatJob {
                 w: &m.eh_proj,
-                out: OutPtr(st.x.as_mut_ptr()),
+                out: Disjoint::new(&mut st.x),
                 rows: None,
             }],
             &st.acts,
@@ -208,17 +208,17 @@ impl Model {
             &[
                 MatJob {
                     w: &m.q,
-                    out: OutPtr(qg.as_mut_ptr()),
+                    out: Disjoint::new(qg),
                     rows: None,
                 },
                 MatJob {
                     w: &m.k,
-                    out: OutPtr(st.k.as_mut_ptr()),
+                    out: Disjoint::new(&mut st.k),
                     rows: None,
                 },
                 MatJob {
                     w: &m.v,
-                    out: OutPtr(st.v.as_mut_ptr()),
+                    out: Disjoint::new(&mut st.v),
                     rows: None,
                 },
             ],
@@ -273,7 +273,7 @@ impl Model {
         self.matmul_group(
             &[MatJob {
                 w: &m.o,
-                out: OutPtr(st.xb2.as_mut_ptr()),
+                out: Disjoint::new(&mut st.xb2),
                 rows: None,
             }],
             &st.acts,
@@ -295,12 +295,12 @@ impl Model {
             &[
                 MatJob {
                     w: &m.gate,
-                    out: OutPtr(st.hb.as_mut_ptr()),
+                    out: Disjoint::new(&mut st.hb),
                     rows: None,
                 },
                 MatJob {
                     w: &m.up,
-                    out: OutPtr(st.hb2.as_mut_ptr()),
+                    out: Disjoint::new(&mut st.hb2),
                     rows: None,
                 },
             ],
@@ -317,7 +317,7 @@ impl Model {
         self.matmul_group(
             &[MatJob {
                 w: &m.down,
-                out: OutPtr(st.xb2.as_mut_ptr()),
+                out: Disjoint::new(&mut st.xb2),
                 rows: None,
             }],
             &st.acts,

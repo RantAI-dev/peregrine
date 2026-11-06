@@ -1,7 +1,7 @@
 //! Attention scratch and layer computations shared by the model families.
 
 use crate::attn;
-use crate::blocks::par::{SharedBuf, SharedMl, SharedScratch};
+use crate::blocks::par::{Disjoint, SharedBuf};
 use crate::blocks::ROW_PARALLEL;
 use crate::kv::KvCache;
 use crate::model::{Caches, Config, StepStats};
@@ -78,9 +78,9 @@ pub(crate) fn prepare_rows(
     q_norm: Option<&[f32]>,
     k_norm: Option<&[f32]>,
     rope_table: &[f32],
-    qp: SharedBuf,
-    kp: SharedBuf,
-    vp: SharedBuf,
+    qp: SharedBuf<'_>,
+    kp: SharedBuf<'_>,
+    vp: SharedBuf<'_>,
     nb: usize,
     positions: &[usize],
     pool: &Pool,
@@ -91,10 +91,9 @@ pub(crate) fn prepare_rows(
     let body = |wk: usize, nw: usize| {
         let (lo, hi) = share(nb, wk, nw);
         for b in lo..hi {
-            // SAFETY: row `b` of q, k and v belongs to this worker alone.
-            let q = unsafe { qp.slice(b * qd, qd) };
-            let k = unsafe { kp.slice(b * kvd, kvd) };
-            let v = unsafe { vp.slice(b * kvd, kvd) };
+            let q = qp.chunk(b * qd, qd);
+            let k = kp.chunk(b * kvd, kvd);
+            let v = vp.chunk(b * kvd, kvd);
             for (buf, bias) in [(&mut *q, bq), (&mut *k, bk), (&mut *v, bv)] {
                 if let Some(bv) = bias {
                     for (x, y) in buf.iter_mut().zip(bv) {
@@ -181,16 +180,13 @@ pub(crate) fn attend(
     let rotated = kv.rotated();
     let rows_all = nb * gqa;
     let q: &[f32] = &q[row0 * qd..];
-    // SAFETY: `row0 * qd` is inside `xb`, which holds `max_batch` rows of at least `qd` floats.
-    let out = SharedBuf(unsafe { xb.as_mut_ptr().add(row0 * qd) });
-    let worker_scratch = SharedScratch(scratch.per_worker.as_mut_ptr());
-    let part = SharedBuf(scratch.part.as_mut_ptr());
-    let part_ml = SharedMl(scratch.ml.as_mut_ptr());
+    let out = Disjoint::new(&mut xb[row0 * qd..]);
+    let worker_scratch = Disjoint::new(&mut scratch.per_worker);
+    let part = Disjoint::new(&mut scratch.part);
+    let part_ml = Disjoint::new(&mut scratch.ml);
     let body = |wk: usize, nw: usize| {
         let (lo, hi) = share(tasks, wk, nw);
-        // SAFETY: worker `wk` alone uses scratch `wk` (the pool has as many workers
-        // as `State` has scratches).
-        let sc = unsafe { worker_scratch.get(wk) };
+        let sc = worker_scratch.get(wk);
         for i in lo..hi {
             let t = attn::task(&sh, &plan, i);
             attn::run(kv, li, &sh, q, &t, sc);
@@ -201,13 +197,11 @@ pub(crate) fn attend(
                     let r = bi * gqa + g;
                     let o = &sc.o[r * hd..(r + 1) * hd];
                     if split {
-                        // SAFETY: the slot `(kh, chunk, row)` belongs to this task.
                         let slot = (t.kh * plan.pos_chunks + pi) * rows_all + b * gqa + g;
-                        unsafe { part.slice(slot * hd, hd) }.copy_from_slice(o);
-                        unsafe { part_ml.set(slot, (sc.m[r], sc.l[r])) };
+                        part.chunk(slot * hd, hd).copy_from_slice(o);
+                        part_ml.set(slot, (sc.m[r], sc.l[r]));
                     } else {
-                        // SAFETY: head `kh·gqa + g` of row `b` belongs to this task.
-                        let dst = unsafe { out.slice(b * qd + (t.kh * gqa + g) * hd, hd) };
+                        let dst = out.chunk(b * qd + (t.kh * gqa + g) * hd, hd);
                         attn::finish_row(o, sc.l[r], rotated, dst);
                     }
                 }
@@ -218,6 +212,7 @@ pub(crate) fn attend(
         pool.run(body);
         stats.barriers += 1;
     } else {
+        crate::blocks::par::bump_epoch();
         body(0, 1);
     }
     if split {

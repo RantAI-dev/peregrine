@@ -21,5 +21,9 @@ publish = false
 peregrine-kernels = { workspace = true }
 memmap2 = { workspace = true }
 
+[features]
+default = []
+check-disjoint = []
+
 [lints]
 workspace = true

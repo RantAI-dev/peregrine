@@ -31,9 +31,7 @@ pub(crate) fn rmsnorm_into(w: &Weights, weight: &TensorInfo, eps: f32, x: &[f32]
         Format::F32 => {
             // read the weight as f32 in place when it is aligned (GGUF aligns tensor data), so the loop
             // vectorises; the byte-by-byte decode was most of a norm's time.
-            // SAFETY: any 4 bytes are a valid f32; `align_to` only yields a middle of whole, aligned elements.
-            let (pre, wf, _) = unsafe { wb.align_to::<f32>() };
-            if pre.is_empty() && wf.len() >= n {
+            if let Some(wf) = crate::format::cast_f32_slice(wb, n) {
                 for ((o, &xi), &wi) in out[..n].iter_mut().zip(&x[..n]).zip(&wf[..n]) {
                     *o = xi * inv * wi;
                 }
@@ -79,8 +77,8 @@ pub(crate) fn norm_rows(
     d_model: usize,
     eps: f32,
     x: &[f32],
-    xb: SharedBuf,
-    acts: SharedActs,
+    xb: SharedBuf<'_>,
+    acts: SharedActs<'_>,
     nb: usize,
     pool: &Pool,
     stats: &mut StepStats,
@@ -89,16 +87,16 @@ pub(crate) fn norm_rows(
     let body = |wk: usize, nw: usize| {
         let (lo, hi) = share(nb, wk, nw);
         for b in lo..hi {
-            // SAFETY: row `b` of `xb` and `acts[b]` belong to this worker alone.
-            let out = unsafe { xb.slice(b * d, d) };
+            let out = xb.chunk(b * d, d);
             rmsnorm_into(w, weight, eps, &x[b * d..(b + 1) * d], out);
-            unsafe { acts.get(b) }.fill(out);
+            acts.get(b).fill(out);
         }
     };
     if nb >= ROW_PARALLEL && pool.width() > 1 {
         pool.run(body);
         stats.barriers += 1;
     } else {
+        crate::blocks::par::bump_epoch();
         body(0, 1);
     }
     // Once per call, like the matmuls: the vector crosses the memory interface

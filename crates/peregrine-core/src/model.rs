@@ -21,7 +21,7 @@
 //! metadata, which at Q4_K is 12.5% of the traffic.
 
 use crate::blocks::attn::AttnScratch;
-use crate::blocks::par::{OutPtr, SharedActs, SharedBuf};
+use crate::blocks::par::{Disjoint, OutPtr, SharedBuf};
 use crate::gguf::{Format, Gguf, TensorInfo};
 use crate::kv::KvCache;
 use crate::lbq::Slb;
@@ -1001,12 +1001,12 @@ impl Model {
     #[allow(dead_code, clippy::too_many_arguments)]
     fn lb_group(
         &self,
-        jobs: &[(usize, OutPtr)],
+        jobs: &[(usize, OutPtr<'_>)],
         xs: &[f32],
         xstride: usize,
         nb: usize,
-        lbx: SharedBuf,
-        lbt: SharedBuf,
+        lbx: SharedBuf<'_>,
+        lbt: SharedBuf<'_>,
         pool: &Pool,
         st: &mut StepStats,
     ) {
@@ -1048,8 +1048,8 @@ impl Model {
             self.cfg.d_model,
             self.cfg.eps,
             &st8.x,
-            SharedBuf(st8.xb.as_mut_ptr()),
-            SharedActs(st8.acts.as_mut_ptr()),
+            Disjoint::new(&mut st8.xb),
+            Disjoint::new(&mut st8.acts),
             nb,
             pool,
             stats,
@@ -1062,7 +1062,7 @@ impl Model {
             self.cfg.n_ff,
             &mut st8.hb,
             &st8.hb2,
-            SharedActs(st8.acts.as_mut_ptr()),
+            Disjoint::new(&mut st8.acts),
             nb,
             pool,
             stats,
@@ -1087,9 +1087,9 @@ impl Model {
             l.q_norm.as_deref(),
             l.k_norm.as_deref(),
             &st8.rope,
-            SharedBuf(st8.q.as_mut_ptr()),
-            SharedBuf(st8.k.as_mut_ptr()),
-            SharedBuf(st8.v.as_mut_ptr()),
+            Disjoint::new(&mut st8.q),
+            Disjoint::new(&mut st8.k),
+            Disjoint::new(&mut st8.v),
             nb,
             positions,
             pool,
@@ -1217,22 +1217,22 @@ impl Model {
             self.norm_rows(st8, &l.attn_norm, nb, pool, stats);
             {
                 // Q, K and V share one activation: one fork–join, not three.
-                let lbx = SharedBuf(st8.lb_x.as_mut_ptr());
-                let lbt = SharedBuf(st8.lb_t.as_mut_ptr());
+                let lbx = Disjoint::new(&mut st8.lb_x);
+                let lbt = Disjoint::new(&mut st8.lb_t);
                 let acts = &st8.acts[..nb];
                 let xs: &[f32] = &st8.xb;
                 let jobs = [
                     LinJob {
                         lin: &l.wq,
-                        out: OutPtr(st8.q.as_mut_ptr()),
+                        out: Disjoint::new(&mut st8.q),
                     },
                     LinJob {
                         lin: &l.wk,
-                        out: OutPtr(st8.k.as_mut_ptr()),
+                        out: Disjoint::new(&mut st8.k),
                     },
                     LinJob {
                         lin: &l.wv,
-                        out: OutPtr(st8.v.as_mut_ptr()),
+                        out: Disjoint::new(&mut st8.v),
                     },
                 ];
                 self.linear_group(&jobs, acts, xs, c.d_model, nb, lbx, lbt, pool, stats);
@@ -1271,12 +1271,12 @@ impl Model {
                 st8.acts[b].fill(&st8.xb[b * qd..(b + 1) * qd]);
             }
             {
-                let lbx = SharedBuf(st8.lb_x.as_mut_ptr());
-                let lbt = SharedBuf(st8.lb_t.as_mut_ptr());
+                let lbx = Disjoint::new(&mut st8.lb_x);
+                let lbt = Disjoint::new(&mut st8.lb_t);
                 let acts = &st8.acts[..nb];
                 let jobs = [LinJob {
                     lin: &l.wo,
-                    out: OutPtr(st8.xb2.as_mut_ptr()),
+                    out: Disjoint::new(&mut st8.xb2),
                 }];
                 self.linear_group(&jobs, acts, &st8.xb, qd, nb, lbx, lbt, pool, stats);
             }
@@ -1287,17 +1287,17 @@ impl Model {
             // ---- feed-forward ----
             self.norm_rows(st8, &l.ffn_norm, nb, pool, stats);
             {
-                let lbx = SharedBuf(st8.lb_x.as_mut_ptr());
-                let lbt = SharedBuf(st8.lb_t.as_mut_ptr());
+                let lbx = Disjoint::new(&mut st8.lb_x);
+                let lbt = Disjoint::new(&mut st8.lb_t);
                 let acts = &st8.acts[..nb];
                 let jobs = [
                     LinJob {
                         lin: &l.gate,
-                        out: OutPtr(st8.hb.as_mut_ptr()),
+                        out: Disjoint::new(&mut st8.hb),
                     },
                     LinJob {
                         lin: &l.up,
-                        out: OutPtr(st8.hb2.as_mut_ptr()),
+                        out: Disjoint::new(&mut st8.hb2),
                     },
                 ];
                 self.linear_group(&jobs, acts, &st8.xb, c.d_model, nb, lbx, lbt, pool, stats);
@@ -1305,12 +1305,12 @@ impl Model {
             // SwiGLU: silu(gate) ⊙ up, quantised for the down projection.
             self.swiglu_rows(st8, nb, pool, stats);
             {
-                let lbx = SharedBuf(st8.lb_x.as_mut_ptr());
-                let lbt = SharedBuf(st8.lb_t.as_mut_ptr());
+                let lbx = Disjoint::new(&mut st8.lb_x);
+                let lbt = Disjoint::new(&mut st8.lb_t);
                 let acts = &st8.acts[..nb];
                 let jobs = [LinJob {
                     lin: &l.down,
-                    out: OutPtr(st8.xb2.as_mut_ptr()),
+                    out: Disjoint::new(&mut st8.xb2),
                 }];
                 self.linear_group(&jobs, acts, &st8.hb, c.n_ff, nb, lbx, lbt, pool, stats);
             }
@@ -1357,12 +1357,12 @@ impl Model {
         // which would make speculation cost more bandwidth than it saves.
         let before = stats.ns_matmul;
         {
-            let lbx = SharedBuf(st8.lb_x.as_mut_ptr());
-            let lbt = SharedBuf(st8.lb_t.as_mut_ptr());
+            let lbx = Disjoint::new(&mut st8.lb_x);
+            let lbt = Disjoint::new(&mut st8.lb_t);
             let acts = &st8.acts[..nl];
             let jobs = [LinJob {
                 lin: &self.head,
-                out: OutPtr(st8.logits.as_mut_ptr()),
+                out: Disjoint::new(&mut st8.logits),
             }];
             self.linear_group(&jobs, acts, &st8.xb, c.d_model, nl, lbx, lbt, pool, stats);
         }

@@ -8,7 +8,7 @@
 //! Look-alike helpers are kept apart on purpose (ADR 0006): the L2 norm below scales by `(1/n.max(1e-6))·scale`
 //! and the gated norm by `x *= inv·w`, neither of which is the norm of the dense path.
 
-use crate::blocks::par::{RowPtrs, SharedBuf, SnapPtrs};
+use crate::blocks::par::{RowPtrs, SnapPtrs};
 use crate::model::StepStats;
 use crate::pool::Pool;
 use std::sync::atomic::{AtomicUsize, Ordering as AO};
@@ -77,7 +77,7 @@ pub(crate) fn beta_alpha(
     pool: &Pool,
     stats: &mut StepStats,
 ) {
-    let out = SharedBuf(out.as_mut_ptr());
+    let out = crate::blocks::par::Disjoint::new(out);
     let n_out = 2 * nv;
     let next = AtomicUsize::new(0);
     pool.run(|_wk, _nw| loop {
@@ -88,9 +88,8 @@ pub(crate) fn beta_alpha(
         for r in lo..(lo + 4).min(n_out) {
             let w = &ab_w[r * d..(r + 1) * d];
             for b in 0..nb {
-                // SAFETY: output (b, r) belongs to the worker claiming r.
                 let v = crate::vmath::dot_f32(w, &xb[b * d..(b + 1) * d]);
-                unsafe { out.slice(b * n_out + r, 1)[0] = v };
+                out.set(b * n_out + r, v);
             }
         }
     });
@@ -121,7 +120,7 @@ pub(crate) fn causal_conv(
 ) {
     let cd = cfg.conv_dim();
     let taps = cfg.d_conv - 1;
-    let bigp = SharedBuf(big.as_mut_ptr());
+    let bigp = crate::blocks::par::Disjoint::new(big);
     let wcur = &conv_w[taps * cd..(taps + 1) * cd];
     const C: usize = 256;
     let next = AtomicUsize::new(0);
@@ -134,10 +133,10 @@ pub(crate) fn causal_conv(
             }
             let c1 = (c0 + C).min(cd);
             for b in 0..nb {
-                // SAFETY: channels c0..c1 of every row's buffer and history are this worker's.
+                // SAFETY: channels c0..c1 of every row's history in KvCache belong to this task.
                 let (_, hp) = unsafe { rp.at(b) };
                 let pos = positions[b];
-                let y = unsafe { bigp.slice(b * big_w + c0, c1 - c0) };
+                let y = bigp.chunk(b * big_w + c0, c1 - c0);
                 for (i, ch) in (c0..c1).enumerate() {
                     acc[i] = y[i] * wcur[ch];
                 }
@@ -196,16 +195,15 @@ pub(crate) fn silu_norm_gates(
     let (nv, nk, dk) = (cfg.n_v_heads, cfg.n_k_heads, cfg.dk);
     let (kd, cd) = (cfg.key_dim(), cfg.conv_dim());
     let q_scale = 1.0 / (dk as f32).sqrt();
-    let bigp = SharedBuf(big.as_mut_ptr());
-    let abp = SharedBuf(ab.as_mut_ptr());
+    let bigp = crate::blocks::par::Disjoint::new(big);
+    let abp = crate::blocks::par::Disjoint::new(ab);
     let next = AtomicUsize::new(0);
     let body = |_wk: usize, _nw: usize| loop {
         let b = next.fetch_add(1, AO::Relaxed);
         if b >= nb {
             break;
         }
-        // SAFETY: row b of `big` and of `ab` is claimed by this worker.
-        let y = unsafe { bigp.slice(b * big_w, cd) };
+        let y = bigp.chunk(b * big_w, cd);
         crate::vmath::silu(y);
         for (base, scale) in [(0usize, q_scale), (kd, 1.0)] {
             for h in 0..nk {
@@ -217,7 +215,7 @@ pub(crate) fn silu_norm_gates(
                 }
             }
         }
-        let ab = unsafe { abp.slice(b * 2 * nv, 2 * nv) };
+        let ab = abp.chunk(b * 2 * nv, 2 * nv);
         for h in 0..nv {
             let beta = sigmoid(ab[h]);
             let g = a_log[h] * softplus(ab[nv + h] + dt_bias[h]);
@@ -229,6 +227,7 @@ pub(crate) fn silu_norm_gates(
         pool.run(body);
         stats.barriers += 1;
     } else {
+        crate::blocks::par::bump_epoch();
         body(0, 1);
     }
 }
@@ -254,7 +253,7 @@ pub(crate) fn delta_rule(
 ) {
     let (nv, nk, dk, dv) = (cfg.n_v_heads, cfg.n_k_heads, cfg.dk, cfg.dv);
     let (kd, vd) = (cfg.key_dim(), cfg.value_dim());
-    let out = SharedBuf(out.as_mut_ptr());
+    let out = crate::blocks::par::Disjoint::new(out);
     // Two tasks per head (each half of the state's rows), claimed dynamically so fast cores take more.
     const SPLIT: usize = 2;
     let next = AtomicUsize::new(0);
@@ -278,7 +277,7 @@ pub(crate) fn delta_rule(
             let v = &y[2 * kd + hv * dv..2 * kd + (hv + 1) * dv];
             let beta = abv[b * 2 * nv + hv];
             let decay = abv[b * 2 * nv + nv + hv];
-            let o = unsafe { out.slice(b * vd + hv * dv + j0, j1 - j0) };
+            let o = out.chunk(b * vd + hv * dv + j0, j1 - j0);
             crate::delta::delta_head(s, q, k, &v[j0..j1], beta, decay, o, dk);
             // A speculative verification's snapshot: this task's slice of the state after its row.
             if let Some((sp, sstate, _)) = unsafe { spp.at(b) } {
