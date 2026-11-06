@@ -15,7 +15,7 @@ roadmap changes it, says so. If this file and the code disagree, the code wins a
    └──────────────────┬─────────────────────┘
                       │ one forward pass for every active row
                       ▼
-   model::Model (dense: llama/qwen2/qwen3) ── model::hybrid (qwen35: Gated DeltaNet + attention, MTP)
+   model::Model ── arch::Architecture ── families/ (dense, qwen35, MTP)
                       │
      ┌────────────────┼──────────────────┬──────────────┐
      ▼                ▼                  ▼              ▼
@@ -54,15 +54,19 @@ bound by compute. That split drives most design choices.
 |---|---|
 | `gguf.rs`, `safetensors.rs` | Read model files by memory map. `gguf::Format` lists every weight format the engine knows. |
 | `tokenizer.rs`, `template.rs` | Byte-level BPE with the pre-tokenizers transcribed from llama.cpp; chat templates rendered in Rust so the token stream equals llama.cpp's `--jinja` output. |
-| `model.rs` | `Model`: loader, the dense forward (`forward_rows`) and the tile store for repacked weights. |
-| `model/hybrid.rs` | The Qwen 3.5 / Bonsai 2 forward: Gated DeltaNet recurrent layers plus gated attention, Hadamard rotation. |
-| `model/mtp.rs` | The multi-token-prediction head used as a lossless drafter. |
+| `arch.rs` | The `Architecture`, `MtpHead` and `Family` traits, and the family dispatch table (ADR 0006). |
+| `families/` | Architecture implementations behind the `Architecture` trait: `dense` (Llama, Qwen2, Qwen3) and `qwen35` (Gated DeltaNet + attention, Hadamard rotation, MTP). |
+| `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, and LittleBit accounting. |
+| `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
+| `model/hybrid.rs` | Re-exports for Qwen 3.5 / Bonsai 2 (`families/qwen35`). |
+| `model/mtp.rs` | Re-exports for the multi-token-prediction head (`families/qwen35/mtp.rs`). |
 | `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU), `rope`, `attn` (attention scratch, row prep, KV write, attention), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
 | `attn.rs` | Grouped online-softmax attention. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state, snapshots for speculation, and the prefix store that reuses a shared prompt beginning. |
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
 | `serve.rs` | `Engine`: slots, scheduling, mixed prefill/decode steps, MTP verification. The server runs this. |
 | `session.rs`, `dspark.rs`, `suffix.rs` | `Session`, the older single-user runtime, with DSpark and suffix speculation. To be folded into `Engine` (roadmap S1.4). |
+| `profile.rs` | Tuning profiles: read, write, mismatch detection and default paths (ADR 0005). |
 | `pool.rs` | The thread pool and barrier. Thread count and barrier count are measured quantities, which is why there is no rayon. |
 | `telem.rs` | Bytes moved, phases and machine ceilings: the numbers every benchmark reports. |
 | `lbq.rs` | LittleBit 1-bit-class weights. Off by default (it fails accuracy without trained factors). |
@@ -77,7 +81,8 @@ peregrine-bench --example <name>`); most are x86-64 only. Nothing depends on it.
 
 What applications depend on: re-exports the engine (`peregrine::engine`), the kernels and, with the default
 `server` feature, the server. The `peregrine` binary (`cli` feature) has `serve`, `inspect` (a model file's
-architecture, formats and whether this build runs it) and `tier` (the kernel tier and every option).
+architecture, formats and whether this build runs it), `bench` (single-user throughput and bytes/token
+measurement), `tune` (coordinate search over tuning knobs) and `tier` (the kernel tier and every option).
 
 ### `crates/peregrine-server`: HTTP
 

@@ -594,6 +594,7 @@ dependencies = [
  "peregrine-core",
  "peregrine-kernels",
  "peregrine-server",
+ "serde_json",
  "tokio",
 ]
 

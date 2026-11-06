@@ -19,9 +19,11 @@
     clippy::chunks_exact_to_as_chunks
 )]
 
+pub mod arch;
 pub mod attn;
 mod blocks;
 pub mod dspark;
+pub mod families;
 pub mod gguf;
 pub mod kv;
 pub mod lbq;
@@ -29,10 +31,12 @@ pub mod model;
 pub mod options;
 pub mod pool;
 pub mod prefix;
+pub mod profile;
 pub mod safetensors;
 pub mod sample;
 pub mod serve;
 pub mod session;
+pub mod state;
 pub mod suffix;
 pub mod telem;
 pub mod template;
@@ -44,7 +48,8 @@ pub use peregrine_kernels::cpu_has;
 pub use peregrine_kernels::{cpu, delta, format, hadamard, quant, table, vmath};
 #[cfg(target_arch = "x86_64")]
 pub use peregrine_kernels::{simd, tern};
-pub use session::{Session, SessionCfg};
+pub use profile::Profile;
+pub use session::{BenchReport, Session, SessionCfg};
 
 /// Whether this engine can run the GGUF at `path`, read from its header alone.
 ///
@@ -80,7 +85,7 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
 /// is the one thing the file cannot say, and the engine will not guess it.
 pub fn check_compatible_with(g: &Gguf, template: Option<template::Template>) -> Result<(), String> {
     let arch = g.str("general.architecture").unwrap_or("unknown");
-    if model::Arch::from_name(arch).is_none() {
+    if !arch::FAMILIES.iter().any(|f| f.names().contains(&arch)) {
         return Err(format!(
             "architecture {arch:?} — Peregrine implements {}",
             model::ARCHS.join(", ")

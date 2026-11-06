@@ -255,18 +255,8 @@ impl Engine {
         let max_batch = PREFILL_CHUNK + max_slots;
         // An MTP verification pass wants logits for two rows, whatever the slot count.
         let use_mtp = model.has_mtp() && mtp_enabled() && mixed();
-        let mut state = State::new(
-            &c,
-            max_batch,
-            if use_mtp { max_slots.max(2) } else { max_slots },
-            max_ctx,
-            threads,
-            model.rope_factors.as_deref(),
-        );
-        // A LittleBit sidecar's projections need scratch for their intermediates; without it the first one
-        // writes through an empty buffer.
-        let (lx, lt) = model.lb_scratch(max_batch);
-        state.set_lb_scratch(lx, lt);
+        let max_logit_rows = if use_mtp { max_slots.max(2) } else { max_slots };
+        let state = model.new_state(max_batch, max_logit_rows, max_ctx, threads);
         let mtp = if use_mtp {
             model.mtp_state(max_ctx, threads).ok()
         } else {
@@ -325,7 +315,7 @@ impl Engine {
         KvCache::new(self.kv_prec, c.kv_layers(), c.n_kv_head, c.head_dim, 1).bytes_per_position()
             * self.max_ctx as u64
             // a hybrid model's recurrent state, per slot, whatever the context length.
-            + c.hybrid.map_or(0, |h| (h.n_gdn * (h.state_floats() + h.conv_floats()) * 4) as u64)
+            + self.model.recurrent_shape().map_or(0, |r| (r.n_layers * (r.state_floats + r.conv_floats) * 4) as u64)
     }
 
     /// Take a request, or give it back when every slot is busy or the prompt cannot fit.
