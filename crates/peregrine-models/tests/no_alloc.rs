@@ -74,7 +74,7 @@ fn tmpdir(test: &str) -> PathBuf {
 
 fn load(path: &Path) -> Model {
     let g = Gguf::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    Model::load(g).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    peregrine_models::load(g).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
 /// No model file here carries a tokenizer vocabulary large enough for the prompt used by the synthetic tests;

@@ -2,7 +2,7 @@
 // cargo run --release -p peregrine-bench --example bonsai_check -- <model.gguf> [threads] [decode_tokens]
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::KvPrec;
-use peregrine_core::model::{Model, State, StepStats};
+use peregrine_core::model::{State, StepStats};
 use peregrine_core::pool::Pool;
 use std::time::Instant;
 
@@ -27,7 +27,7 @@ fn main() {
     let threads: usize = a.get(1).and_then(|v| v.parse().ok()).unwrap_or(12);
     let ndec: usize = a.get(2).and_then(|v| v.parse().ok()).unwrap_or(32);
     let t = Instant::now();
-    let model = Model::load(Gguf::open(std::path::Path::new(path)).unwrap()).unwrap();
+    let model = peregrine_models::load(Gguf::open(std::path::Path::new(path)).unwrap()).unwrap();
     eprintln!(
         "loaded in {:.1}s, simd {}",
         t.elapsed().as_secs_f64(),
@@ -82,7 +82,7 @@ fn main() {
     println!("text {:?}", model.tk.decode(&out));
     // Decode timing.
     let mut ss = StepStats::default();
-    let _ = peregrine_core::model::hybrid::profile();
+    let _ = peregrine_models::hybrid::profile();
     let t = Instant::now();
     let mut next = out[out.len() - 1];
     for _ in 0..ndec {
@@ -107,7 +107,7 @@ fn main() {
         100.0 * ss.ns_other() as f64 / ss.ns_total as f64
     );
     let tot = ss.ns_total as f64;
-    let pr = peregrine_core::model::hybrid::profile();
+    let pr = peregrine_models::hybrid::profile();
     let p: Vec<String> = pr[..10]
         .iter()
         .map(|(n, v)| format!("{n} {:.1}%", 100.0 * *v as f64 / tot))

@@ -138,7 +138,7 @@ fn decode(
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let model = Model::load(Gguf::open(std::path::Path::new(&a[0])).unwrap()).unwrap();
+    let model = peregrine_models::load(Gguf::open(std::path::Path::new(&a[0])).unwrap()).unwrap();
     let threads: usize = a.get(1).and_then(|v| v.parse().ok()).unwrap_or(16);
     let n: usize = a.get(2).and_then(|v| v.parse().ok()).unwrap_or(128);
     let t: f32 = a.get(3).and_then(|v| v.parse().ok()).unwrap_or(0.0);

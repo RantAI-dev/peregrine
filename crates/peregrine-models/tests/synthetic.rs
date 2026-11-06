@@ -103,7 +103,7 @@ fn run(model: &Model, threads: usize) -> String {
 
 /// Every invariant for one model file; returns a failure description, if any.
 fn check(path: &Path, name: &str) -> Option<String> {
-    let model = match Gguf::open(path).and_then(Model::load) {
+    let model = match Gguf::open(path).and_then(peregrine_models::load) {
         Ok(m) => m,
         Err(e) => return Some(format!("{name}: does not load: {e}")),
     };
@@ -112,7 +112,7 @@ fn check(path: &Path, name: &str) -> Option<String> {
 
 /// The same invariants and golden for a model loaded and converted from a LittleBit sidecar.
 fn check_lb(path: &Path, sidecar: &Path, name: &str) -> Option<String> {
-    let mut model = match Gguf::open(path).and_then(Model::load) {
+    let mut model = match Gguf::open(path).and_then(peregrine_models::load) {
         Ok(m) => m,
         Err(e) => return Some(format!("{name}: does not load: {e}")),
     };
@@ -219,7 +219,7 @@ fn hybrid_mtp_variant_speculates_losslessly() {
         let path = write_hybrid(&dir, fmt, 3000 + i as u64, true);
         let name = format!("qwen35-mtp-{}", fmt.label());
         failures.extend(check(&path, &name));
-        let model = match Gguf::open(&path).and_then(Model::load) {
+        let model = match Gguf::open(&path).and_then(peregrine_models::load) {
             Ok(m) => Arc::new(m),
             Err(e) => {
                 failures.push(format!("{name}: does not load: {e}"));
@@ -358,6 +358,40 @@ fn littlebit_sidecar_forward_is_finite_and_deterministic() {
     );
 }
 
+#[test]
+fn littlebit_sidecar_on_untied_hybrid_names_no_tensor() {
+    use peregrine_core::lbq::{build_tensor, default_sidecar_path, source_stamp, write_slb};
+    use support::vocab::VOCAB_SIZE;
+    use support::weights::Rng;
+
+    let dir = tmpdir("lbq_hybrid");
+    let path = write_hybrid(&dir, Format::PQ2_0, 4390, false);
+    let sidecar = default_sidecar_path(&path);
+    let mut rng = Rng::new(4391);
+    let pool = Pool::new(4);
+    let w: Vec<f32> = (0..256 * VOCAB_SIZE)
+        .map(|_| rng.f32_range(-0.04, 0.04))
+        .collect();
+    let builds = vec![build_tensor(
+        "output.weight",
+        w,
+        VOCAB_SIZE,
+        256,
+        32,
+        2,
+        1,
+        &pool,
+    )];
+    let (size, hash) = source_stamp(&path).unwrap();
+    write_slb(&sidecar, size, hash, &builds).unwrap();
+
+    let mut model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
+    let slb = peregrine_core::lbq::Slb::open(&sidecar).unwrap();
+    let err = model.attach_lb(slb).unwrap_err();
+    assert_eq!(err, "slb: the sidecar names no tensor of this model");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ------------------------------------------------------------- batching through the engine --
 
 const ENGINE_TOKENS: usize = 16;
@@ -371,7 +405,7 @@ fn greedy_cfg() -> SlotCfg {
 }
 
 fn load_arc(path: &Path) -> Arc<Model> {
-    Arc::new(Gguf::open(path).and_then(Model::load).unwrap())
+    Arc::new(Gguf::open(path).and_then(peregrine_models::load).unwrap())
 }
 
 /// The long third prompt keeps one slot in prefill while the other two decode, which is the
@@ -665,6 +699,120 @@ fn hybrid_mtp_accepting_variant_accepts_drafts_losslessly() {
     assert!(
         failures.is_empty(),
         "synthetic MTP acceptance models failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+// --------------------------------------------------------------------- qwen3moe (S2.5) --
+
+/// A qwen3moe file — a mixture-of-experts model — written the way llama.cpp v0.9.0 expects it
+/// (`src/models/qwen3moe.cpp`, `src/llama-arch.cpp`).
+///
+/// The engine has no qwen3moe family yet, so this test does two things. It checks that the file
+/// is written and read back exactly as intended: the metadata llama.cpp reads, and the
+/// three-dimensional expert tensors in llama.cpp's dimension order (the expert index runs
+/// slowest, so one expert is a contiguous run of rows — a 2D matrix with no new kernel). And it
+/// checks that the engine refuses the file *by name*: a refusal that does not say which
+/// architecture it cannot run is a bad refusal.
+///
+/// When the family lands (S2.5 step 2), the refusal half becomes the ordinary `check` of every
+/// other synthetic model.
+#[test]
+fn qwen3moe_file_is_written_and_refused_by_name() {
+    use support::models::{write_moe, MoeShape};
+
+    let dir = tmpdir("moe");
+    let s = MoeShape::default();
+    let mut failures = Vec::new();
+    for (i, fmt) in [Format::F16, Format::Q8_0].into_iter().enumerate() {
+        let name = format!("qwen3moe-{}", fmt.label());
+        let path = write_moe(&dir, fmt, 5000 + i as u64, s);
+        let g = match Gguf::open(&path) {
+            Ok(g) => g,
+            Err(e) => {
+                failures.push(format!("{name}: does not open: {e}"));
+                continue;
+            }
+        };
+        if g.str("general.architecture").unwrap_or("") != "qwen3moe" {
+            failures.push(format!("{name}: the architecture is not qwen3moe"));
+        }
+        for (key, want) in [
+            ("qwen3moe.block_count", s.n_layer as u32),
+            ("qwen3moe.embedding_length", s.d_model as u32),
+            ("qwen3moe.feed_forward_length", s.n_ff as u32),
+            ("qwen3moe.expert_feed_forward_length", s.expert_ff as u32),
+            ("qwen3moe.expert_count", s.n_expert as u32),
+            ("qwen3moe.expert_used_count", s.n_expert_used as u32),
+            ("qwen3moe.attention.head_count", s.n_head as u32),
+            ("qwen3moe.attention.head_count_kv", s.n_head_kv as u32),
+        ] {
+            match g.u32(key) {
+                Ok(v) if v == want => {}
+                Ok(v) => failures.push(format!("{name}: {key} is {v}, want {want}")),
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        // The router is a plain 2D matrix; the experts are 3D, the expert index slowest.
+        let d = s.d_model as u64;
+        let ff = s.expert_ff as u64;
+        let ne = s.n_expert as u64;
+        for (tensor, dims) in [
+            ("blk.0.ffn_gate_inp.weight", vec![d, ne]),
+            ("blk.0.ffn_gate_exps.weight", vec![d, ff, ne]),
+            ("blk.0.ffn_up_exps.weight", vec![d, ff, ne]),
+            ("blk.0.ffn_down_exps.weight", vec![ff, d, ne]),
+            // The second layer has its own bank of experts.
+            ("blk.1.ffn_gate_exps.weight", vec![d, ff, ne]),
+        ] {
+            match g.tensor(tensor) {
+                Ok(t) => {
+                    if t.dims != dims {
+                        failures.push(format!(
+                            "{name}: {tensor} has dims {:?}, want {dims:?}",
+                            t.dims
+                        ));
+                    }
+                    if t.kind != fmt {
+                        failures.push(format!(
+                            "{name}: {tensor} is {}, want {}",
+                            t.kind.label(),
+                            fmt.label()
+                        ));
+                    }
+                }
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        // Qwen3's per-head q/k norms, one weight per head dimension (F32, like every norm).
+        for tensor in ["blk.0.attn_q_norm.weight", "blk.0.attn_k_norm.weight"] {
+            match g.tensor(tensor) {
+                Ok(t) => {
+                    let want = vec![d / s.n_head as u64];
+                    if t.dims != want {
+                        failures.push(format!(
+                            "{name}: {tensor} has dims {:?}, want {want:?}",
+                            t.dims
+                        ));
+                    }
+                }
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        match peregrine_models::check_compatible(&g) {
+            Ok(()) => failures.push(format!(
+                "{name}: the engine accepted a qwen3moe file it cannot run"
+            )),
+            Err(e) if e.contains("qwen3moe") => {}
+            Err(e) => failures.push(format!(
+                "{name}: refused without naming the architecture: {e}"
+            )),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic qwen3moe models failed:\n{}",
         failures.join("\n")
     );
 }

@@ -21,7 +21,7 @@ fn main() {
     let threads: usize = args.next().and_then(|x| x.parse().ok()).unwrap_or(3);
     let steps: usize = args.next().and_then(|x| x.parse().ok()).unwrap_or(24);
     let ctx: usize = args.next().and_then(|x| x.parse().ok()).unwrap_or(512);
-    let model = peregrine_core::model::keep::open(&path).expect("open model");
+    let model = peregrine_models::open(&path).expect("open model");
     let c = model.cfg;
     let pool = Pool::new(threads);
     println!(

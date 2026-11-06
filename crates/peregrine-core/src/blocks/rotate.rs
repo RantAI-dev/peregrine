@@ -15,10 +15,11 @@ use crate::pool::Pool;
 use crate::quant::QuantAct;
 
 /// A per-row step fused into a rotation's pass: `(row index, row)`.
-pub(crate) type RowPrep<'a> = dyn Fn(usize, &mut [f32]) + Sync + 'a;
+pub type RowPrep<'a> = dyn Fn(usize, &mut [f32]) + Sync + 'a;
 
 /// The Hadamard rotation's data: the sign vector of every input width and the block size.
-pub(crate) struct Rotation {
+#[derive(Clone)]
+pub struct Rotation {
     /// `signs / √block` per input width.
     signs: Vec<(usize, Vec<f32>)>,
     /// The Hadamard block size (a power of two).
@@ -28,7 +29,7 @@ pub(crate) struct Rotation {
 /// The tiled→grouped v-head permutation's geometry: the value heads of a Gated DeltaNet output are permuted
 /// from the tiled order to the grouped one before the rotation.
 #[derive(Clone, Copy)]
-pub(crate) struct VPerm {
+pub struct VPerm {
     /// The width of one v-head's slice.
     pub dv: usize,
     /// The number of key heads the value heads are grouped over.
@@ -64,12 +65,13 @@ fn apply_rotation(r: &mut [f32], x: &[f32], ss: &[f32], perm: Option<VPerm>, blk
 impl Rotation {
     /// The rotation of a model: `signs` holds the sign vector of every input width (already divided by
     /// `√block`), `block` the transform's block size.
-    pub(crate) fn new(signs: Vec<(usize, Vec<f32>)>, block: usize) -> Rotation {
+    pub fn new(signs: Vec<(usize, Vec<f32>)>, block: usize) -> Rotation {
         Rotation { signs, block }
     }
 
     /// The sign vector of an input width.
-    pub(crate) fn signs_for(&self, width: usize) -> Result<&[f32], String> {
+    #[inline]
+    pub fn signs_for(&self, width: usize) -> Result<&[f32], String> {
         self.signs
             .iter()
             .find(|(w, _)| *w == width)
@@ -82,7 +84,7 @@ impl Rotation {
     /// The row must already be dequantised. This is *not* the matmul input's rotation
     /// ([`Rotation::rotate_rows_pre`]), which applies the signs first: the two orders are not interchangeable.
     #[inline]
-    pub(crate) fn rotate_embedding(&self, row: &mut [f32], signs: &[f32]) {
+    pub fn rotate_embedding(&self, row: &mut [f32], signs: &[f32]) {
         for ch in row.chunks_exact_mut(self.block) {
             fwht(ch);
         }
@@ -100,7 +102,7 @@ impl Rotation {
     /// `parallel` says whether the rows are worth splitting across the pool: the caller decides, because the
     /// threshold belongs to the model.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn rotate_rows(
+    pub fn rotate_rows(
         &self,
         rot: &mut [f32],
         rot_w: usize,
@@ -139,7 +141,7 @@ impl Rotation {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn rotate_rows_pre(
+    pub fn rotate_rows_pre(
         &self,
         rot: &mut [f32],
         rot_w: usize,

@@ -1,7 +1,7 @@
 //! Rotary position embedding and precomputed table construction.
 
 /// Precompute the RoPE sin/cos table for positions `0..max_ctx`.
-pub(crate) fn build_rope_table(
+pub fn build_rope_table(
     rope_dim: usize,
     rope_base: f32,
     max_ctx: usize,
@@ -34,7 +34,8 @@ pub(crate) fn build_rope_table(
 /// rotated by `pos · base^(-2i/rope_dim)`. NeoX-style models pair `i` with
 /// `i + dim/2` instead; llama does not, and using the wrong pairing produces a
 /// model that is coherent for a few tokens and then drifts.
-pub(crate) fn rope(
+#[inline]
+pub fn rope(
     rope: &[f32],
     v: &mut [f32],
     n_heads: usize,

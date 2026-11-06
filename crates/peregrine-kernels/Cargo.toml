@@ -13,5 +13,18 @@ publish = false
 # No dependencies, on purpose (docs/adr/0002-dependency-policy.md).
 [dependencies]
 
+[features]
+default = [
+    "fmt-kquant",
+    "fmt-ternary",
+    "fmt-iq",
+    "fmt-legacy",
+]
+fmt-kquant = []
+fmt-ternary = []
+fmt-iq = []
+fmt-legacy = []
+
 [lints]
 workspace = true
+

@@ -13,6 +13,8 @@
 pub use peregrine_core as engine;
 /// CPU kernels, the kernel tier cap and the weight formats.
 pub use peregrine_kernels as kernels;
+/// Model architecture implementations and loading.
+pub use peregrine_models as models;
 /// The OpenAI-compatible HTTP server.
 #[cfg(feature = "server")]
 pub use peregrine_server as server;
@@ -20,7 +22,13 @@ pub use peregrine_server as server;
 pub use peregrine_core::gguf::{Format, Gguf};
 pub use peregrine_core::model::Model;
 pub use peregrine_core::options::EngineOptions;
+pub use peregrine_core::profile::Profile;
 pub use peregrine_core::serve::Engine;
+
+#[cfg(feature = "cli")]
+pub mod bench;
+#[cfg(feature = "cli")]
+pub mod tune;
 
 /// A description of a model file: what it is, what it holds, and whether this build can run it.
 pub fn inspect(path: &std::path::Path) -> Result<String, String> {
@@ -73,7 +81,7 @@ pub fn inspect(path: &std::path::Path) -> Result<String, String> {
             *b as f64 / (1u64 << 20) as f64
         );
     }
-    let _ = match peregrine_core::check_compatible(&g) {
+    let _ = match peregrine_models::check_compatible(&g) {
         Ok(()) => writeln!(out, "supported     yes"),
         Err(e) => writeln!(out, "supported     no: {e}"),
     };

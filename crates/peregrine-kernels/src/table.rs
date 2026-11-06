@@ -40,7 +40,7 @@ impl MatKernels {
     }
 
     fn detect() -> MatKernels {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
         {
             MatKernels {
                 tiles: crate::tern::have_zmm(),
@@ -49,7 +49,7 @@ impl MatKernels {
                 exact: crate::quant::exact_ternary(),
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-ternary")))]
         {
             MatKernels {
                 tiles: false,
@@ -105,12 +105,12 @@ impl MatKernels {
         assert!(acts.iter().all(|a| a.tb_span == span && a.n == ng * 128));
         assert!(wt.len() >= nt * 16 * row_bytes(Format::PQ2_0, ng * 128));
         assert!(out.len() >= 16 * nt * acts.len());
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
         // SAFETY: `tiles` is `have_zmm()`; the activations are in one tile mode; lengths checked above.
         unsafe {
             crate::tern::dot_tiles_pq2(wt, ng, nt, acts, out)
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-ternary")))]
         unreachable!("no tile kernel on this architecture")
     }
 
@@ -122,13 +122,13 @@ impl MatKernels {
             .iter()
             .all(|a| a.ternary && rb == row_bytes(Format::PQ2_0, a.n)));
         assert!(w.len() >= rows * rb && out.len() >= rows * acts.len());
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
         // SAFETY: `pq2_rows` is `have_batched()` (AVX2, FMA, F16C); the activations are in the ternary layout and
         // match the row width; lengths checked above.
         unsafe {
             crate::tern::dot_rows_pq2(w, rb, rows, acts, out)
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-ternary")))]
         unreachable!("no PQ2_0 row kernel on this architecture")
     }
 
@@ -140,13 +140,13 @@ impl MatKernels {
             .iter()
             .all(|a| a.ptq1 && a.n % 256 == 0 && rb == row_bytes(Format::PTQ1_0, a.n)));
         assert!(w.len() >= rows * rb && out.len() >= rows * acts.len());
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
         // SAFETY: `ptq1_rows` is `have_ptq1_zmm()`; the activations are in the PTQ1 layout, width a multiple of
         // 256; lengths checked above.
         unsafe {
             crate::tern::dot_rows_ptq1(w, rb, rows, acts, out)
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-ternary")))]
         unreachable!("no PTQ1_0 row kernel on this architecture")
     }
 

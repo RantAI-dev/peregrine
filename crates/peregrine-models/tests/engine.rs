@@ -54,7 +54,7 @@ fn open(cfg: SessionCfg) -> Option<Session> {
         eprintln!("\n  SKIPPED: needs the model at {p:?}\n");
         return None;
     }
-    Some(Session::open(&p, cfg).expect("open session"))
+    Some(peregrine_models::session::open(&p, cfg).expect("open session"))
 }
 
 /// **A2.** The engine produces correct language, not merely fluent tokens.
@@ -82,7 +82,8 @@ fn qwen_and_llama3_answer_through_their_own_templates() {
             speculate: false,
             ..Default::default()
         };
-        let mut s = Session::open(&p, cfg).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let mut s =
+            peregrine_models::session::open(&p, cfg).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert_eq!(s.template().name(), tpl, "{file}");
         let (text, tl) = s
             .generate("What is the capital of France? Answer in one word.", |_| {})
@@ -666,8 +667,8 @@ fn the_compatibility_probe_accepts_the_reference_model() {
     if !p.exists() {
         return;
     }
-    assert_eq!(peregrine_core::compatibility(&p), Ok(()));
-    assert!(peregrine_core::compatibility(std::path::Path::new("/nope/missing.gguf")).is_err());
+    assert_eq!(peregrine_models::compatibility(&p), Ok(()));
+    assert!(peregrine_models::compatibility(std::path::Path::new("/nope/missing.gguf")).is_err());
 }
 
 /// `seed_history` makes a reopened chat the same chat: the follow-up is answered

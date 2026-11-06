@@ -8,20 +8,20 @@ use crate::model::{Caches, Config, StepStats};
 use crate::pool::{share, Pool};
 
 /// Scratch for one forward pass's attention, sized once in `State::new`.
-pub(crate) struct AttnScratch {
+pub struct AttnScratch {
     /// One scratch per worker (decoded K/V tiles, the task's queries and its running softmax state); see
     /// `attn.rs`.
-    pub(crate) per_worker: Vec<attn::Scratch>,
+    pub per_worker: Vec<attn::Scratch>,
     /// Partial `o` per (KV head, position chunk, query row) when a call splits a head's positions across
-    /// workers; merged by `attn::combine_row`.
-    pub(crate) part: Vec<f32>,
+    /// workers; merged by `attn::combine_row``.
+    pub part: Vec<f32>,
     /// The matching partial `(m, l)`.
-    pub(crate) ml: Vec<(f32, f64)>,
+    pub ml: Vec<(f32, f64)>,
 }
 
 impl AttnScratch {
     /// For batches of up to `max_batch` rows and a pool of `threads` workers.
-    pub(crate) fn new(cfg: &Config, max_batch: usize, threads: usize) -> AttnScratch {
+    pub fn new(cfg: &Config, max_batch: usize, threads: usize) -> AttnScratch {
         AttnScratch {
             per_worker: (0..threads.max(1))
                 .map(|_| attn::Scratch::new(max_batch * cfg.gqa(), cfg.head_dim))
@@ -37,7 +37,7 @@ impl AttnScratch {
 
 /// Write this step's key and value rows into the caches and advance each cache to make the new positions readable.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_kv_rows(
+pub fn write_kv_rows(
     caches: &mut Caches<'_>,
     li: usize,
     k: &[f32],
@@ -70,7 +70,7 @@ pub(crate) fn write_kv_rows(
 /// loops on the calling thread, which in a 64-row prefill chunk ran 64 × (n_head +
 /// n_kv_head) rotations per layer while three cores waited.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_rows(
+pub fn prepare_rows(
     cfg: &Config,
     bq: Option<&[f32]>,
     bk: Option<&[f32]>,
@@ -157,7 +157,7 @@ pub(crate) fn prepare_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn attend(
+pub fn attend(
     cfg: &Config,
     scratch: &mut AttnScratch,
     q: &[f32],

@@ -104,6 +104,35 @@ impl Format {
             Format::BF16 => "BF16",
         }
     }
+
+    /// The Cargo feature that enables kernels and runtime support for this format,
+    /// or None if the format is always enabled (F32, F16, BF16).
+    pub const fn required_feature(self) -> Option<&'static str> {
+        match self {
+            Format::F32 | Format::F16 | Format::BF16 => None,
+            Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => Some("fmt-legacy"),
+            Format::Q4_K | Format::Q5_K | Format::Q6_K => Some("fmt-kquant"),
+            Format::IQ4_NL | Format::IQ4_XS => Some("fmt-iq"),
+            Format::PQ2_0 | Format::PTQ1_0 => Some("fmt-ternary"),
+        }
+    }
+
+    /// Whether this build includes kernels and support for this format.
+    pub const fn is_supported(self) -> bool {
+        match self {
+            Format::F32 | Format::F16 | Format::BF16 => true,
+            #[cfg(feature = "fmt-legacy")]
+            Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => true,
+            #[cfg(feature = "fmt-kquant")]
+            Format::Q4_K | Format::Q5_K | Format::Q6_K => true,
+            #[cfg(feature = "fmt-iq")]
+            Format::IQ4_NL | Format::IQ4_XS => true,
+            #[cfg(feature = "fmt-ternary")]
+            Format::PQ2_0 | Format::PTQ1_0 => true,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
 }
 
 /// IEEE-754 binary16 to binary32.

@@ -26,13 +26,20 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
-      # Every feature set of the facade builds on its own (ADR 0005).
-      - name: feature sets
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-hack@0.6.46
+      # Every feature combination must build (ADR 0005).
+      - name: feature combinations
         run: |
-          cargo check -p peregrine --no-default-features --locked
-          cargo check -p peregrine --no-default-features --features cli --locked
-          cargo check -p peregrine --no-default-features --features server --locked
-          cargo check -p peregrine --all-features --locked
+          cargo hack check --each-feature --no-dev-deps -p peregrine-kernels
+          cargo hack check --each-feature --no-dev-deps -p peregrine-core
+          cargo hack check --each-feature --no-dev-deps -p peregrine-models
+          cargo hack check --each-feature --no-dev-deps -p peregrine
+          cargo check -p peregrine-kernels --no-default-features
+          cargo check -p peregrine-core --no-default-features
+          cargo check -p peregrine-models --no-default-features
+          cargo check -p peregrine --no-default-features
 
   # Release mode: the kernels are tested as they ship, and debug-mode SIMD tests are too slow.
   test:
@@ -92,7 +99,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Cache Intel SDE
         id: sde-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/intel-sde
           key: intel-sde-10.13.1-2026-07-28-lin
@@ -107,7 +114,7 @@ jobs:
         run: |
           cargo test --release --locked -p peregrine-kernels --no-run --message-format=json \
             | jq -r 'select(.executable != null) | .executable' > "$RUNNER_TEMP/kernel-tests"
-          cargo test --release --locked -p peregrine-core --test synthetic --no-run --message-format=json \
+          cargo test --release --locked -p peregrine-models --test synthetic --no-run --message-format=json \
             | jq -r 'select(.executable != null) | .executable' > "$RUNNER_TEMP/synthetic-tests"
       - name: Kernel tests under SDE
         run: |

@@ -57,6 +57,8 @@ path returns a byte-identical rendered prompt, the same prompt token count and t
 git clone https://github.com/RantAI-dev/peregrine && cd peregrine
 cargo build --release
 ./target/release/peregrine inspect path/to/model.gguf      # what it is, and whether it runs
+./target/release/peregrine bench -m path/to/model.gguf        # measure prefill & decode tok/s and bytes/token
+./target/release/peregrine tune -m path/to/model.gguf         # tune execution knobs for host CPU and model
 ./target/release/peregrine serve -m path/to/model.gguf --port 8201
 curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"Hello"}]}'
@@ -64,6 +66,24 @@ curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
 
 The server speaks the OpenAI chat API (`/v1/chat/completions`, streamed or not), plus `/v1/models`,
 `/health` and `/metrics`.
+
+### Building with fewer features
+
+By default, Peregrine builds with all architectures, quantisation formats, and extras enabled. For embedded applications or smaller binaries, you can disable default features and pick only what you need:
+
+```sh
+# Dense Llama models only with K-quant formats:
+cargo build --release -p peregrine --no-default-features --features cli,arch-llama,fmt-kquant
+
+# Hybrid Qwen3.5 models with ternary formats:
+cargo build --release -p peregrine --no-default-features --features cli,arch-qwen35,fmt-ternary
+```
+
+| Category | Features |
+|---|---|
+| Architectures | `arch-llama` (Llama), `arch-qwen` (Qwen 2/3), `arch-qwen35` (Qwen 3.5 hybrid) |
+| Formats | `fmt-kquant` (Q2_K..Q6_K), `fmt-ternary` (PQ2_0, PTQ1_0), `fmt-iq` (IQ4_NL, IQ4_XS), `fmt-legacy` (Q4_0, Q5_0, Q8_0); F32/F16/BF16 always enabled |
+| Extras | `littlebit` (LittleBit sidecars), `dspark` (speculative drafter), `mtp` (multi-token prediction head), `server` (OpenAI HTTP server), `cli` (CLI binary) |
 
 ## Documentation
 
