@@ -17,5 +17,7 @@ All notable changes to this project are documented here. The format follows
   - Bytes-moved telemetry against the machine's bandwidth ceiling.
 - `peregrine-server`: OpenAI-compatible chat API (streaming, `n > 1`, `logprobs`, `/metrics`).
 - Golden-output tests per kernel tier.
+- Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
+  semantics); sampling fields the engine does not implement are refused with a 400 instead of ignored.
 - Project setup: CI on x86-64 / aarch64 Linux and macOS, MSRV and supply-chain checks, issue forms,
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.

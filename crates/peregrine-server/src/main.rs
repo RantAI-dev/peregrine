@@ -25,6 +25,7 @@ use axum::{
 };
 use clap::Parser;
 use peregrine_core::model::Model;
+use peregrine_core::sample::Penalties;
 use peregrine_core::serve::{Emission, Engine, Finish, SlotCfg, SlotId};
 use peregrine_core::template::Template;
 use serde_json::{json, Value};
@@ -318,6 +319,8 @@ struct Plan {
     top_p: f32,
     top_k: usize,
     min_p: f32,
+    /// Repetition penalties; all off unless the request asks for them.
+    penalties: Penalties,
     seed: u64,
     thinking: bool,
     budget: Option<usize>,
@@ -331,7 +334,97 @@ struct Plan {
 /// Most choices one request may ask for.
 const MAX_CHOICES: u64 = 16;
 
+/// Sampling controls we do not implement, with the value that means "off" or "unchanged".
+///
+/// A request that sends one of these at any other value is refused by name: silently
+/// ignoring it would sample differently from what the caller asked for, which is worse
+/// than a clear 400. At their no-op values they have no effect, so they are accepted for
+/// client compatibility.
+const UNSUPPORTED_SAMPLING: &[(&str, f64)] = &[
+    ("typical_p", 1.0),
+    ("tfs_z", 1.0),
+    ("mirostat", 0.0),
+    ("mirostat_tau", 5.0),
+    ("mirostat_eta", 0.1),
+    ("dry_multiplier", 0.0),
+    ("dry_base", 1.75),
+    ("dry_allowed_length", 2.0),
+    ("dry_penalty_last_n", 64.0),
+    ("xtc_probability", 0.0),
+    ("xtc_threshold", 0.1),
+    ("top_n_sigma", -1.0),
+];
+
+/// Refuse sampling fields the engine cannot honour, but only when they would do something.
+fn reject_unsupported_sampling(b: &Value) -> Result<(), String> {
+    for &(field, no_op) in UNSUPPORTED_SAMPLING {
+        if let Some(v) = b.get(field).filter(|v| !v.is_null()) {
+            if v.as_f64() != Some(no_op) {
+                return Err(format!(
+                    "{field} is not supported by this backend (only its no-op value {no_op} is accepted)"
+                ));
+            }
+        }
+    }
+    if let Some(v) = b.get("logit_bias").filter(|v| !v.is_null()) {
+        // An empty object is how clients spell "no biases"; any entry is a real request.
+        if !v.as_object().is_some_and(|o| o.is_empty()) {
+            return Err(
+                "logit_bias is not supported by this backend (only an empty object is accepted)"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A numeric sampling field, defaulting when absent, with a typed error naming the field.
+fn number(b: &Value, field: &str, default: f64) -> Result<f64, String> {
+    match b.get(field) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| format!("{field} must be a finite number")),
+    }
+}
+
+/// Read the four llama.cpp-compatible repetition-penalty fields and validate their ranges.
+fn sampling_penalties(b: &Value) -> Result<Penalties, String> {
+    let presence = number(b, "presence_penalty", 0.0)?;
+    let frequency = number(b, "frequency_penalty", 0.0)?;
+    let repeat = number(b, "repeat_penalty", 1.0)?;
+    if !(-2.0..=2.0).contains(&presence) {
+        return Err("presence_penalty must be between -2 and 2".into());
+    }
+    if !(-2.0..=2.0).contains(&frequency) {
+        return Err("frequency_penalty must be between -2 and 2".into());
+    }
+    // 0 divides by zero; a negative value would reward repetition.
+    if repeat <= 0.0 {
+        return Err("repeat_penalty must be greater than 0".into());
+    }
+    let last_n = match b.get("repeat_last_n") {
+        None | Some(Value::Null) => 64,
+        Some(v) => v
+            .as_i64()
+            .ok_or_else(|| "repeat_last_n must be an integer".to_string())?,
+    };
+    if last_n < -1 || last_n > i32::MAX as i64 {
+        return Err(
+            "repeat_last_n must be -1 (the whole sequence), 0 (off) or a positive count".into(),
+        );
+    }
+    Ok(Penalties {
+        presence: presence as f32,
+        frequency: frequency as f32,
+        repeat: repeat as f32,
+        last_n: last_n as i32,
+    })
+}
+
 fn plan(b: &Value) -> Result<Plan, String> {
+    reject_unsupported_sampling(b)?;
     let n = b["n"].as_u64().unwrap_or(1).max(1);
     if n > MAX_CHOICES {
         return Err(format!("n > {MAX_CHOICES} is not supported"));
@@ -391,6 +484,7 @@ fn plan(b: &Value) -> Result<Plan, String> {
         // llama-server's defaults, so the two engines sample alike unless a request says otherwise.
         top_k: b["top_k"].as_u64().unwrap_or(40) as usize,
         min_p: b["min_p"].as_f64().unwrap_or(0.05) as f32,
+        penalties: sampling_penalties(b)?,
         seed: b["seed"].as_u64().unwrap_or(42),
         n: n as usize,
         thinking: kw["enable_thinking"].as_bool().unwrap_or(true),
@@ -607,6 +701,7 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
             top_p: p.top_p,
             top_k: p.top_k,
             min_p: p.min_p,
+            penalties: p.penalties,
             seed: p.seed,
             max_tokens: budget_left.max(1),
             stop: app.stop.clone(),
@@ -888,7 +983,105 @@ fn async_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::continuation_prefix;
+    use super::{continuation_prefix, plan, Penalties};
+    use serde_json::{json, Value};
+
+    fn body(extra: Value) -> Value {
+        let mut b = json!({"messages": [{"role": "user", "content": "hi"}]});
+        if let Some(obj) = extra.as_object() {
+            for (k, v) in obj {
+                b[k] = v.clone();
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn penalties_are_off_unless_asked_for() {
+        let p = plan(&body(json!({}))).unwrap();
+        assert_eq!(p.penalties, Penalties::default());
+        assert!(p.penalties.is_off());
+    }
+
+    #[test]
+    fn penalty_fields_are_read_in_openai_and_llama_cpp_spelling() {
+        let p = plan(&body(json!({
+            "presence_penalty": 1.5,
+            "frequency_penalty": 0.25,
+            "repeat_penalty": 1.1,
+            "repeat_last_n": -1
+        })))
+        .unwrap();
+        assert_eq!(p.penalties.presence, 1.5);
+        assert_eq!(p.penalties.frequency, 0.25);
+        assert_eq!(p.penalties.repeat, 1.1);
+        assert_eq!(p.penalties.last_n, -1);
+        assert!(!p.penalties.is_off());
+    }
+
+    #[test]
+    fn nonsense_penalty_values_are_refused() {
+        for bad in [
+            json!({"repeat_penalty": -1.0}),
+            json!({"repeat_penalty": 0.0}),
+            json!({"presence_penalty": 3.0}),
+            json!({"frequency_penalty": -2.5}),
+            json!({"repeat_last_n": -2}),
+            json!({"repeat_last_n": 1.5}),
+            json!({"presence_penalty": "high"}),
+        ] {
+            assert!(plan(&body(bad.clone())).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn unsupported_sampling_fields_are_refused_by_name_when_active() {
+        for (field, value) in [
+            ("typical_p", json!(0.9)),
+            ("tfs_z", json!(0.95)),
+            ("mirostat", json!(2)),
+            ("dry_multiplier", json!(0.8)),
+            ("xtc_probability", json!(0.5)),
+            ("top_n_sigma", json!(1.0)),
+            ("logit_bias", json!({"15": 5})),
+        ] {
+            let err = plan(&body(json!({ field: value })))
+                .err()
+                .unwrap_or_default();
+            assert!(err.contains(field), "{field}: {err:?}");
+        }
+        // At their no-op values they change nothing, so clients that always send them still work.
+        for (field, value) in [
+            ("typical_p", json!(1.0)),
+            ("mirostat", json!(0)),
+            ("top_n_sigma", json!(-1.0)),
+            ("logit_bias", json!({})),
+            ("xtc_probability", json!(null)),
+        ] {
+            assert!(
+                plan(&body(json!({ field: value }))).is_ok(),
+                "{field} at its no-op value"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_fields_are_not_refused() {
+        let p = plan(&body(json!({
+            "model": "peregrine",
+            "stream": false,
+            "max_tokens": 32,
+            "stop": ["\n\n"],
+            "n": 2,
+            "seed": 7,
+            "logprobs": true,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 20,
+            "min_p": 0.0
+        })));
+        assert!(p.is_ok(), "{:?}", p.err());
+    }
 
     #[test]
     fn the_continuation_repeats_what_was_generated_without_an_extra_newline() {

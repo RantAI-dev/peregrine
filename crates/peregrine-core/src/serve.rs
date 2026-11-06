@@ -71,6 +71,8 @@ pub struct SlotCfg {
     pub top_p: f32,
     pub top_k: usize,
     pub min_p: f32,
+    /// llama.cpp-compatible repetition penalties, all off by default.
+    pub penalties: crate::sample::Penalties,
     pub seed: u64,
     pub max_tokens: usize,
     /// Token ids that end the turn.
@@ -86,6 +88,7 @@ impl Default for SlotCfg {
             top_p: 0.95,
             top_k: 40,
             min_p: 0.05,
+            penalties: crate::sample::Penalties::default(),
             seed: 42,
             max_tokens: 256,
             stop: vec![],
@@ -148,6 +151,9 @@ struct Slot {
     decode_s: f64,
     // set while this slot is the only one and the model has an MTP block (see `spec_step`).
     spec: Option<Spec>,
+    /// The slot's own token history and its reused penalty counts. Only touched when
+    /// `cfg.penalties` is not off, so an ordinary request pays nothing for it.
+    pen: crate::sample::PenaltyState,
 }
 
 /// A slot's place in MTP speculation: the main model's final hidden state at `pos - 1`, and the MTP row an
@@ -166,6 +172,15 @@ impl Slot {
     /// The prompt is in the cache and the slot is ready to decode.
     fn ready(&self) -> bool {
         self.fed + 1 >= self.prompt.len()
+    }
+
+    /// Rebuild this slot's penalty window before its next token is sampled. A no-op for
+    /// the default, penalty-free request.
+    fn prepare_penalties(&mut self, n_vocab: usize) {
+        let pen = self.cfg.penalties;
+        if !pen.is_off() {
+            self.pen.prepare(pen.last_n, n_vocab);
+        }
     }
 }
 
@@ -358,8 +373,14 @@ impl Engine {
         // Speculation only for a user served alone, from position 0 (the MTP cache must cover the whole prompt).
         // A second user ends it for good on the first: verifying drafts while batching spends FLOPs the batch
         // already uses.
+        //
+        // Penalties keep speculation off. A draft extends the token window, so verifying it would sample the
+        // next row from a different window than plain decoding would see; correct verification would have to
+        // thread each accepted token into the window between the two row draws. Turning speculation off for
+        // these slots is the simple, lossless choice (the request asked for penalties explicitly).
+        let penalized = !cfg.penalties.is_off();
         let spec = match self.mtp.as_mut() {
-            Some(ms) if self.slots.is_empty() && fed == 0 => {
+            Some(ms) if !penalized && self.slots.is_empty() && fed == 0 => {
                 self.model.mtp_truncate(ms, 0);
                 Some(Spec {
                     hprev: vec![0.0; c.d_model],
@@ -373,6 +394,12 @@ impl Engine {
                 None
             }
         };
+        // The penalty window starts as the whole prompt, so the first sampled token sees
+        // the same sequence plain sampling would (a restored prefix included).
+        let mut pen = crate::sample::PenaltyState::default();
+        if penalized {
+            pen.start(&prompt, cfg.max_tokens.min(self.max_ctx));
+        }
         self.slots.push(Slot {
             spec,
             id,
@@ -391,6 +418,7 @@ impl Engine {
             utf8: Utf8Stream::default(),
             prefill_s: 0.0,
             decode_s: 0.0,
+            pen,
         });
         Ok(id)
     }
@@ -671,6 +699,13 @@ impl Engine {
         // serially they cost a 2B model's step 40% at ten users. The sampler is keyed by (seed, position), so which
         // worker samples a row does not change what it draws.
         let mut picks = vec![(0u32, 0.0f32); n];
+        // Penalty windows are rebuilt serially (each is O(window)) so the parallel
+        // sampling below only reads them; the default request skips this entirely.
+        if dec.iter().any(|&si| !self.slots[si].cfg.penalties.is_off()) {
+            for &si in dec {
+                self.slots[si].prepare_penalties(n_vocab);
+            }
+        }
         {
             let next = std::sync::atomic::AtomicUsize::new(0);
             let pk = std::sync::Mutex::new(&mut picks);
@@ -685,12 +720,14 @@ impl Engine {
                     let sc = sc.get_or_insert_with(|| samps[wk].lock().expect("sampler scratch"));
                     let s = &slots[dec[b]];
                     let logits = state.logits_row(b, n_vocab);
-                    let id = crate::sample::sample_filtered(
+                    let id = crate::sample::sample_penalized(
                         logits,
                         s.cfg.temperature,
                         s.cfg.top_p,
                         s.cfg.top_k,
                         s.cfg.min_p,
+                        &s.cfg.penalties,
+                        s.pen.window(),
                         crate::sample::position_key(s.seed, 0, s.pos + 1),
                         sc,
                     );
@@ -728,6 +765,10 @@ impl Engine {
         }
         s.pos += 1;
         s.next = id;
+        // The sampled token joins the sequence for the next penalty window.
+        if !s.cfg.penalties.is_off() {
+            s.pen.push(id);
+        }
         s.produced += 1;
         s.decode_s += secs;
         let stop = s.cfg.stop.contains(&id);
@@ -793,16 +834,20 @@ impl Engine {
 
     /// Sample logits row `row` for slot `si` at position `pos` (the sampler's key), with its log-probability
     /// when the request asked for them.
-    fn sample_row(&self, si: usize, row: usize, pos: usize) -> (u32, f32) {
+    fn sample_row(&mut self, si: usize, row: usize, pos: usize) -> (u32, f32) {
+        let n_vocab = self.model.cfg.n_vocab;
+        self.slots[si].prepare_penalties(n_vocab);
         let s = &self.slots[si];
-        let logits = self.state.logits_row(row, self.model.cfg.n_vocab);
+        let logits = self.state.logits_row(row, n_vocab);
         let mut sc = self.samps[0].lock().expect("sampler scratch");
-        let id = crate::sample::sample_filtered(
+        let id = crate::sample::sample_penalized(
             logits,
             s.cfg.temperature,
             s.cfg.top_p,
             s.cfg.top_k,
             s.cfg.min_p,
+            &s.cfg.penalties,
+            s.pen.window(),
             crate::sample::position_key(s.seed, 0, pos),
             &mut sc,
         );
