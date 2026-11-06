@@ -38,6 +38,11 @@ All notable changes to this project are documented here. The format follows
 - Synthetic coverage of what the two runtimes do differently, pinned before ADR 0007 makes the engine the
   only one: the same prompt through `Session` and a one-slot `Engine`, the taps a DSpark drafter needs, a
   second user arriving mid-speculation, and the prefix store with a drafter attached.
+- `peregrine-core`: the `Drafter` interface (ADR 0007) — one way of proposing tokens, told what the target
+  committed and what was rolled back — with wrappers over today's drafters (the suffix index, DeepSeek's
+  DSpark head, the model's own MTP block). Unstable until 1.0.
+- `SlotCfg`: the sampling `turn` (mixed into the position key) and the KV rotation choice, so a conversation
+  can be given the same settings it uses today.
 - Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
   semantics); sampling fields the engine does not implement are refused with a 400 instead of ignored.
 - `PEREGRINE_ISA` caps the kernel tier (`scalar`, `avx2`, `avx512`); CI tests the lower tiers.
