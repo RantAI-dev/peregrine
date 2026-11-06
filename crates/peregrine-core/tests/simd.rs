@@ -174,7 +174,7 @@ fn sane(fmt: Format, w: &mut [u8]) {
     let fix = |b: &mut [u8], at: usize| b[at + 1] = (b[at + 1] & 0x0F) | 0x30;
     for blk in w.chunks_exact_mut(fmt.block_bytes()) {
         match fmt {
-            Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
+            Format::Q8_0 | Format::Q5_0 | Format::Q4_0 => fix(blk, 0),
             Format::Q4_K => {
                 fix(blk, 0);
                 fix(blk, 2);
@@ -190,6 +190,7 @@ fn batched_kernels_match_the_scalar_specification_at_every_batch_width() {
     use peregrine_core::quant::dot_batch;
     for (fmt, n) in [
         (Format::Q8_0, 960),
+        (Format::Q4_0, 960),
         (Format::Q5_0, 960),
         (Format::Q4_K, 2560),
         (Format::Q6_K, 2560),

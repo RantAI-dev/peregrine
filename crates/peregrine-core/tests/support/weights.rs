@@ -72,6 +72,18 @@ pub fn generate_weights(fmt: Format, numel: usize, rng: &mut Rng) -> Vec<u8> {
             }
             out
         }
+        Format::Q4_0 => {
+            let num_blocks = numel / 32;
+            let mut out = Vec::with_capacity(num_blocks * 18);
+            for _ in 0..num_blocks {
+                let d = to_f16(rng.f32_range(0.001, 0.003));
+                out.extend_from_slice(&d.to_le_bytes());
+                for _ in 0..16 {
+                    out.push(rng.next_u8());
+                }
+            }
+            out
+        }
         Format::Q5_0 => {
             let num_blocks = numel / 32;
             let mut out = Vec::with_capacity(num_blocks * 22);
