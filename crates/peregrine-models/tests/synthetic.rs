@@ -16,7 +16,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{
-    write_dense, write_hybrid, write_hybrid_accepting, write_rope_dense, Dense, Rope,
+    write_dense, write_gemma3, write_hybrid, write_hybrid_accepting, write_rope_dense, Dense,
+    Gemma3Config, Rope,
 };
 
 const PROMPT: [u32; 24] = [
@@ -815,4 +816,99 @@ fn qwen3moe_file_is_written_and_refused_by_name() {
         "synthetic qwen3moe models failed:\n{}",
         failures.join("\n")
     );
+}
+
+// ---------------------------------------------------------------------- gemma3 (S2.4a) --
+
+/// Gemma 3: 4 norms per layer, per-head q/k norms, sliding-window interleaved with global,
+/// GeGLU activation, tied output head, and sqrt(d_model) embedding scaling.
+#[test]
+fn gemma3_models_in_f16_and_q8_0() {
+    let dir = tmpdir("gemma3");
+    let mut failures = Vec::new();
+    for (i, fmt) in [Format::F16, Format::Q8_0].into_iter().enumerate() {
+        let path = write_gemma3(&dir, fmt, 8000 + i as u64, Gemma3Config::default());
+        failures.extend(check(&path, &format!("gemma3-{}", fmt.label())));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic gemma3 models failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn gemma3_batching_is_invariant_across_slots() {
+    let perrow = !peregrine_core::options::get().mix;
+    let dir = tmpdir("gemma3-batch");
+    let mut failures = Vec::new();
+    let path = write_gemma3(&dir, Format::Q8_0, 8010, Gemma3Config::default());
+    let model = load_arc(&path);
+    failures.extend(batching_failures(&model, "gemma3-Q8_0", perrow));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "gemma3 batching invariance failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn gemma3_synthetic_file_runs_in_llama_cpp() {
+    let llama_simple = Path::new("/tmp/llama.cpp/build/bin/llama-simple");
+    if !llama_simple.exists() {
+        eprintln!(
+            "llama-simple not found at {}, skipping",
+            llama_simple.display()
+        );
+        return;
+    }
+    let dir = tmpdir("gemma3-llama-cpp");
+    let path = write_gemma3(&dir, Format::F16, 8020, Gemma3Config::default());
+
+    let output = std::process::Command::new(llama_simple)
+        .args(["-m", path.to_str().unwrap(), "-n", "5", "-ngl", "0"])
+        .output()
+        .expect("failed to execute llama-simple");
+
+    assert!(
+        output.status.success(),
+        "llama-simple failed on synthetic gemma3 model"
+    );
+    let llama_stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("llama-simple stdout:\n{llama_stdout}");
+
+    let model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
+    let prompt_toks = model.tk.encode("Hello my name is");
+    eprintln!("Peregrine prompt tokens: {prompt_toks:?}");
+
+    let pool = Pool::new(1);
+    let mut st = State::new(&model.cfg, 128, prompt_toks.len(), 256, 1, None);
+    let mut kv = model.new_cache(KvPrec::F16, 256);
+    let mut ss = StepStats::default();
+    let want: Vec<usize> = vec![prompt_toks.len() - 1];
+    model
+        .forward(&mut st, &mut kv, &pool, &prompt_toks, 0, &want, &mut ss)
+        .unwrap();
+
+    let mut pere_tokens = Vec::new();
+    let mut next = argmax(st.logits_row(0, model.cfg.n_vocab));
+    pere_tokens.push(next);
+    for step in 1..5 {
+        let pos = prompt_toks.len() + step - 1;
+        model
+            .forward(&mut st, &mut kv, &pool, &[next], pos, &[0], &mut ss)
+            .unwrap();
+        next = argmax(st.logits_row(0, model.cfg.n_vocab));
+        pere_tokens.push(next);
+    }
+    eprintln!("Peregrine greedy token IDs: {pere_tokens:?}");
+    let mut pere_decoded = String::new();
+    for &t in &pere_tokens {
+        pere_decoded.push_str(&model.tk.decode(&[t]));
+    }
+    eprintln!("Peregrine decoded text: {pere_decoded}");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

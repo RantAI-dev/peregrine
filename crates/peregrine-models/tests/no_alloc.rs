@@ -151,7 +151,18 @@ fn a_decode_step_allocates_nothing() {
     ));
     // The hybrid model: Gated DeltaNet layers (conv, delta rule, snapshots), gated attention, Hadamard rotation.
     let hybrid = load(&write_hybrid(&dir, Format::PQ2_0, 7001, false));
-    for (name, model) in [("qwen3-Q8_0", &dense), ("qwen35-PQ2_0", &hybrid)] {
+    // Gemma 3 in Q8_0: sliding-window and global layers, per-head norms, GeGLU, 4 norms per layer.
+    let gemma3 = load(&support::models::write_gemma3(
+        &dir,
+        Format::Q8_0,
+        7003,
+        support::models::Gemma3Config::default(),
+    ));
+    for (name, model) in [
+        ("qwen3-Q8_0", &dense),
+        ("qwen35-PQ2_0", &hybrid),
+        ("gemma3-Q8_0", &gemma3),
+    ] {
         for threads in [1, 4] {
             let n = check_decode(model, threads);
             if n != 0 {

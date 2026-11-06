@@ -219,6 +219,171 @@ fn write_dense_impl(
     path
 }
 
+/// A Gemma 3 model's shape.
+#[derive(Clone, Copy, Debug)]
+pub struct Gemma3Config {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    pub sliding_window: usize,
+}
+
+impl Default for Gemma3Config {
+    fn default() -> Self {
+        Gemma3Config {
+            d_model: 256,
+            n_layer: 6,
+            n_head: 8,
+            n_head_kv: 4,
+            n_ff: 512,
+            ctx: 512,
+            sliding_window: 16,
+        }
+    }
+}
+
+/// Write a synthetic `gemma3` model whose matrices are all `fmt`, seeded by `seed`.
+pub fn write_gemma3(dir: &Path, fmt: Format, seed: u64, s: Gemma3Config) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let head_dim = s.d_model / s.n_head;
+    w.str("general.architecture", "gemma3");
+    w.str("general.name", &format!("synthetic-gemma3-{}", fmt.label()));
+    let k = |x: &str| format!("gemma3.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("attention.head_count_kv"), s.n_head_kv as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.u32(&k("attention.key_length"), head_dim as u32);
+    w.u32(&k("attention.value_length"), head_dim as u32);
+    w.u32(&k("rope.dimension_count"), head_dim as u32);
+    w.f32(&k("rope.freq_base"), 1_000_000.0);
+    w.f32(&k("rope.freq_base_swa"), 10_000.0);
+    w.u32(&k("attention.sliding_window"), s.sliding_window as u32);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
+
+    vocab::add_gemma_tokenizer_metadata(&mut w);
+    w.str(
+        "tokenizer.chat_template",
+        vocab::chat_template(TemplateKind::Gemma),
+    );
+
+    let kv = s.n_head_kv * head_dim;
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    for i in 0..s.n_layer {
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_q.weight"),
+            s.d_model,
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_k.weight"),
+            s.d_model,
+            kv,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_v.weight"),
+            s.d_model,
+            kv,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_q_norm.weight"),
+            head_dim,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_k_norm.weight"),
+            head_dim,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_output.weight"),
+            s.d_model,
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.post_attention_norm.weight"),
+            s.d_model,
+        );
+
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_gate.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_up.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_down.weight"),
+            s.n_ff,
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.post_ffw_norm.weight"),
+            s.d_model,
+        );
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+    // output.weight is intentionally omitted to verify tied word embeddings
+
+    let path = dir.join(format!("gemma3-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// Write a `qwen35` hybrid model (Gated DeltaNet layers, one gated-attention layer in every
 /// `interval`, Hadamard-rotated ternary matmuls) with every matmul in `fmt` (PQ2_0 or PTQ1_0).
 ///
