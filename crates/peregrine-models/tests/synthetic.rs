@@ -978,29 +978,18 @@ fn gemma3_synthetic_file_runs_in_llama_cpp() {
 }
 
 #[test]
-fn gemma3_unclassified_size_is_refused_by_name() {
-    let dir = tmpdir("gemma3-refuse");
-    let cfg = Gemma3Config {
-        n_layer: 17,
-        ..Default::default()
-    };
-    let path = write_gemma3_named(
-        &dir,
-        Format::F16,
-        8050,
-        cfg,
-        Some("unclassified-gemma3-model"),
-    );
-    let g = Gguf::open(&path).unwrap();
-    let err = match peregrine_models::load(g) {
-        Err(e) => e,
-        Ok(_) => panic!("expected unclassified model load to fail"),
-    };
-    assert!(
-        err.contains("unclassified-gemma3-model"),
-        "error message should cite the model name, got: {err}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
+fn gemma3_attention_scale_follows_llama_cpp() {
+    use peregrine_models::gemma3::attention_scale;
+    // 62 layers is the 27B: 1/sqrt(n_embd / n_head) with llama.cpp's integer division.
+    assert_eq!(attention_scale(62, 5376, 32, 128), 1.0 / (168f32).sqrt());
+    assert_eq!(attention_scale(62, 5377, 32, 128), 1.0 / (168f32).sqrt());
+    // Every other layer count, known or not (llama.cpp loads it as an unknown type): 1/sqrt(head_dim).
+    for n_layer in [6, 18, 26, 34, 48, 40] {
+        assert_eq!(
+            attention_scale(n_layer, 2560, 8, 256),
+            1.0 / (256f32).sqrt()
+        );
+    }
 }
 
 #[test]

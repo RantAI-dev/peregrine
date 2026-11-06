@@ -88,7 +88,7 @@ required-features = ["arch-qwen", "fmt-kquant"]
 
 [[test]]
 name = "synthetic"
-required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "mtp", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
+required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "mtp", "fmt-kquant", "fmt-ternary", "fmt-legacy", "arch-gemma3"]
 
 [lints]
 workspace = true
