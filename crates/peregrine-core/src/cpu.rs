@@ -1,6 +1,6 @@
 //! CPU feature checks with a cap (roadmap S0.3).
 //!
-//! Every kernel choice asks [`cpu_has!`] instead of `is_x86_feature_detected!`. The answer is the real
+//! Every kernel choice asks `cpu_has!` instead of `is_x86_feature_detected!`. The answer is the real
 //! detection AND the tier cap from `PEREGRINE_ISA` (`scalar`, `avx2`, `avx512`; default `native`, no cap).
 //! Forcing a lower tier runs that tier's kernels on any machine that has it, so one host can test every
 //! tier below its own, and two hosts can be checked against each other on a shared tier.
