@@ -165,13 +165,85 @@ fn hybrid_models_in_both_ternary_formats() {
     let dir = tmpdir("hybrid");
     let mut failures = Vec::new();
     for (i, fmt) in [Format::PQ2_0, Format::PTQ1_0].into_iter().enumerate() {
-        let path = write_hybrid(&dir, fmt, 2000 + i as u64);
+        let path = write_hybrid(&dir, fmt, 2000 + i as u64, false);
         failures.extend(check(&path, &format!("qwen35-{}", fmt.label())));
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         failures.is_empty(),
         "synthetic models failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn hybrid_mtp_variant_speculates_losslessly() {
+    use peregrine_core::serve::{Engine, Finish, SlotCfg};
+    use std::sync::Arc;
+
+    let dir = tmpdir("hybrid-mtp");
+    let mut failures = Vec::new();
+    for (i, fmt) in [Format::PQ2_0, Format::PTQ1_0].into_iter().enumerate() {
+        let path = write_hybrid(&dir, fmt, 3000 + i as u64, true);
+        let name = format!("qwen35-mtp-{}", fmt.label());
+        failures.extend(check(&path, &name));
+        let model = match Gguf::open(&path).and_then(Model::load) {
+            Ok(m) => Arc::new(m),
+            Err(e) => {
+                failures.push(format!("{name}: does not load: {e}"));
+                continue;
+            }
+        };
+        if !model.has_mtp() {
+            failures.push(format!("{name}: loaded without an MTP block"));
+            continue;
+        }
+        // Greedy through the batching engine, with the MTP drafter and with `disable_mtp()` (what
+        // `PEREGRINE_MTP=0` does at startup): the token streams must be the same.
+        let decode = |spec: bool| -> Result<(Vec<u32>, u64), String> {
+            let mut e = Engine::new(model.clone(), 4, 512, 1, KvPrec::F16, 0);
+            if !spec {
+                e.disable_mtp();
+            }
+            if e.speculates() != spec {
+                return Err(format!("speculation {spec} was not configured"));
+            }
+            let cfg = SlotCfg {
+                temperature: 0.0,
+                max_tokens: 24,
+                ..Default::default()
+            };
+            e.admit(PROMPT.to_vec(), cfg).map_err(|(_, e)| e)?;
+            let mut toks = Vec::new();
+            while e.active() > 0 {
+                for em in e.step() {
+                    if let Some(Finish::Error(e)) = em.finish {
+                        return Err(e);
+                    }
+                    toks.push(em.token);
+                }
+            }
+            Ok((toks, e.spec_drafts))
+        };
+        match (decode(true), decode(false)) {
+            (Ok((with, drafts)), Ok((without, _))) => {
+                if drafts == 0 {
+                    failures.push(format!("{name}: the drafter never ran"));
+                }
+                if with.len() != 24 {
+                    failures.push(format!("{name}: {} tokens, want 24", with.len()));
+                }
+                if with != without {
+                    failures.push(format!("{name}: MTP speculation changed the tokens"));
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => failures.push(format!("{name}: {e}")),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic MTP models failed:\n{}",
         failures.join("\n")
     );
 }

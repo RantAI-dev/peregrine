@@ -13,7 +13,8 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    against its scalar reference. They need no model files and always run.
 2. **Synthetic model tests** (`tests/synthetic.rs`): tiny random GGUFs written at test time by
    `tests/support/` — llama and qwen3 in F32, F16, Q8_0, Q5_0, Q4_K and Q6_K, and the qwen35 hybrid (Gated
-   DeltaNet, gated attention, Hadamard rotation) in PQ2_0 and PTQ1_0. Each must load, give finite logits, be
+   DeltaNet, gated attention, Hadamard rotation) in PQ2_0 and PTQ1_0, plus that hybrid with one Q8_0 MTP
+   (NextN) block whose speculation must be lossless. Each must load, give finite logits, be
    bit-identical across runs and across 1, 2 and 4 threads, decode greedily the same way twice, and match its
    golden for the current tier (`tests/golden/synthetic/<tier>/`). They need no model files, so they run in
    CI on every tier; the `x86_64-avx2` and scalar (`x86_64`) goldens were recorded on an Intel host and
@@ -50,3 +51,11 @@ host's goldens.
 
 CI runs the native tier on x86-64 Linux, aarch64 Linux and aarch64 macOS, and the `scalar` and `avx2` tiers
 on x86-64 Linux.
+
+GitHub's x86-64 runners have AVX2 but no AVX-512, so the `sde` job runs the kernel tests and the synthetic
+models under Intel's Software Development Emulator with `sde64 -spr` (Sapphire Rapids: AVX-512 F/BW/VL,
+VNNI, GFNI, VBMI). It downloads SDE 10.13.1 from Intel's official mirror, checks the pinned SHA-256, caches
+the unpacked emulator, and fails unless the tier reported by the synthetic tests is
+`x86_64-avx2-avx512-vnni-gfni-vbmi`. SDE is free of charge for any type of use under the Intel Simplified
+Software License. No AVX-512 synthetic goldens are committed yet, so the tests report `ok (no golden for
+tier ...)`; a follow-up records them on a real AVX-512 host.
