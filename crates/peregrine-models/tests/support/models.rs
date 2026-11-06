@@ -46,12 +46,28 @@ pub enum Rope {
 /// Write a dense `arch` model ("llama", "qwen2" or "qwen3") whose matrices are all `fmt`, seeded by
 /// `seed`. `qwen2` carries the attention biases and NeoX rotary pairing its loader requires.
 pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None)
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false)
+}
+
+/// The dense model whose drafts are accepted: every output-head row is identical, so all logits tie and
+/// the argmax picks row 0 whatever the hidden state — the model always answers token 0. A corpus of
+/// zeros is what the suffix index needs to find a match in (the same n-gram twice), and what makes the
+/// draft it proposes the token the target draws.
+pub fn write_dense_accepting(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true)
 }
 
 /// A llama file in F16 with the requested rotary-frequency treatment, for the rope-scaling loaders.
 pub fn write_rope_dense(dir: &Path, rope: Rope, seed: u64) -> PathBuf {
-    write_dense_impl(dir, "llama", Format::F16, seed, Dense::default(), rope)
+    write_dense_impl(
+        dir,
+        "llama",
+        Format::F16,
+        seed,
+        Dense::default(),
+        rope,
+        false,
+    )
 }
 
 fn write_dense_impl(
@@ -61,6 +77,7 @@ fn write_dense_impl(
     seed: u64,
     s: Dense,
     rope: Rope,
+    accept: bool,
 ) -> PathBuf {
     let mut rng = Rng::new(seed);
     let mut w = GgufWriter::new();
@@ -198,7 +215,24 @@ fn write_dense_impl(
         );
     }
     norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
-    mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
+    if accept {
+        // Every output row is the same row, so every logit is the same value and
+        // the argmax picks row 0 whatever the hidden state: the model always
+        // answers token 0.
+        let row = generate_weights(fmt, s.d_model, &mut rng);
+        let mut data = Vec::with_capacity(row.len() * VOCAB_SIZE);
+        for _ in 0..VOCAB_SIZE {
+            data.extend_from_slice(&row);
+        }
+        w.add_tensor(
+            "output.weight",
+            &[s.d_model as u64, VOCAB_SIZE as u64],
+            fmt,
+            data,
+        );
+    } else {
+        mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
+    }
     if matches!(rope, Rope::Freqs) {
         // Llama 3.x stores one positive factor per rotary frequency; the loader divides
         // each angle by it. Kept near 1 so every angle stays finite.
@@ -209,10 +243,11 @@ fn write_dense_impl(
             generate_norm(head_dim / 2, &mut rng),
         );
     }
-    let name = match rope {
-        Rope::None => format!("{arch}-{}", fmt.label()),
-        Rope::Freqs => format!("{arch}-rope-freqs-{}", fmt.label()),
-        Rope::Linear { .. } => format!("{arch}-rope-linear-{}", fmt.label()),
+    let name = match (accept, rope) {
+        (true, _) => format!("{arch}-{}-accept", fmt.label()),
+        (false, Rope::None) => format!("{arch}-{}", fmt.label()),
+        (false, Rope::Freqs) => format!("{arch}-rope-freqs-{}", fmt.label()),
+        (false, Rope::Linear { .. }) => format!("{arch}-rope-linear-{}", fmt.label()),
     };
     let path = dir.join(format!("{name}.gguf"));
     w.write_to_file(&path).expect("write synthetic model");

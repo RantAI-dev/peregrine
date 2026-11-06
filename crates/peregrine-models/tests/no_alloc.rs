@@ -163,6 +163,41 @@ fn check_mtp_verify(model: &Arc<Model>, threads: usize) -> usize {
     })
 }
 
+/// One suffix verification step: the drafter proposes into the caller's buffer
+/// and is told what the target committed, the way `Engine::verify_step` asks of
+/// it.
+///
+/// The proposal is written into a buffer the caller owns and reused, and the
+/// drafter keeps its own scratch: neither allocates per step. The corpus is a
+/// run of one token, so the index's tables hold one key each and stop growing;
+/// the commits in the measured window are past the corpus, so it does not grow
+/// either.
+fn check_suffix_verify() -> usize {
+    use peregrine_core::draft::{Drafter, Proposal, SuffixDrafter};
+    let pool = Pool::new(4);
+    let mut drafter = SuffixDrafter::new(2, 6);
+    let mut out = Proposal::default();
+    // The sampler's stand-in: the suffix index does not draw with it.
+    let mut pick = |_i: usize, _logits: &[f32]| 0u32;
+    // The corpus: the same token over and over, so the index finds a match and
+    // its tables stop growing.
+    for pos in 0..64 {
+        drafter.commit(pos, TOKEN, &[], &[], &pool);
+    }
+    // A warm proposal: the drafter's own buffers and the caller's have their
+    // capacity.
+    drafter.propose(TOKEN, 64, 6, &pool, &mut pick, &mut out);
+    let base = 64usize + 8;
+    allocations_during(|| {
+        for i in 0..4 {
+            drafter.propose(TOKEN, base + i, 6, &pool, &mut pick, &mut out);
+            // Past the corpus: the corpus keeps its length and its capacity, and
+            // the index indexes nothing new.
+            drafter.commit(base + i + 1, TOKEN, &[], &[], &pool);
+        }
+    })
+}
+
 #[test]
 fn a_decode_step_allocates_nothing() {
     // Prove the counter sees allocations, so a silently broken allocator cannot make this test vacuous.
@@ -232,6 +267,13 @@ fn a_decode_step_allocates_nothing() {
                 ));
             }
         }
+    }
+
+    // The suffix drafter: the proposal, the index and the corpus, all in
+    // buffers the drafter and the caller own.
+    let n = check_suffix_verify();
+    if n != 0 {
+        failures.push(format!("suffix verification: {n} allocations per step"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);
