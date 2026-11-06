@@ -282,6 +282,8 @@ fn format_to_id(fmt: Format) -> u32 {
         Format::Q4_K => 12,
         Format::Q5_K => 13,
         Format::Q6_K => 14,
+        Format::IQ4_NL => 20,
+        Format::IQ4_XS => 23,
         Format::BF16 => 30,
         Format::PQ2_0 => 142,
         Format::PTQ1_0 => 143,

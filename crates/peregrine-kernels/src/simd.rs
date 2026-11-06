@@ -147,6 +147,72 @@ unsafe fn dot_q5_0(w: &[u8], a: &QuantAct) -> f32 {
     acc
 }
 
+/// Signed 8-bit pairwise multiply-add into 16-bit lanes via `VPMADDUBSW`.
+///
+/// `VPMADDUBSW` multiplies unsigned bytes by signed bytes. To multiply signed `w` by
+/// signed `a`, we take `|w|` as the unsigned operand via `sign_epi8(w, w)` and move
+/// the sign of `w` onto `a` via `sign_epi8(a, w)`. Because `|w| · (sign(w) · a) = w · a`,
+/// this computes the exact signed pairwise products.
+#[inline(always)]
+unsafe fn mul_add_epi8(w: __m256i, a: __m256i) -> __m256i {
+    let absw = _mm256_sign_epi8(w, w);
+    let sa = _mm256_sign_epi8(a, w);
+    _mm256_maddubs_epi16(absw, sa)
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn dot_iq4_nl(w: &[u8], a: &QuantAct) -> f32 {
+    let lownib = _mm_set1_epi8(0x0F);
+    let table = _mm_loadu_si128(crate::quant::KVALUES_IQ4NL.as_ptr() as *const __m128i);
+    let mut acc = 0.0f32;
+    for (b, blk) in w.chunks_exact(18).enumerate() {
+        let qs = _mm_loadu_si128(blk.as_ptr().add(2) as *const __m128i);
+        let lo = _mm_and_si128(qs, lownib);
+        let hi = _mm_and_si128(_mm_srli_epi16(qs, 4), lownib);
+        let w_lo = _mm_shuffle_epi8(table, lo);
+        let w_hi = _mm_shuffle_epi8(table, hi);
+        let w32 = _mm256_set_m128i(w_hi, w_lo);
+        let aq = acts32(a, b);
+        let prod = mul_add_epi8(w32, aq);
+        let s = hsum_i32(_mm256_madd_epi16(prod, _mm256_set1_epi16(1)));
+        acc += f16(u16::from_le_bytes([blk[0], blk[1]])) * a.d[b] * s as f32;
+    }
+    acc
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn dot_iq4_xs(w: &[u8], a: &QuantAct) -> f32 {
+    debug_assert!(!a.qk.is_empty(), "k-quant rows need the per-256 activation");
+    let lownib = _mm_set1_epi8(0x0F);
+    let table = _mm_loadu_si128(crate::quant::KVALUES_IQ4NL.as_ptr() as *const __m128i);
+    let mut acc = 0.0f32;
+    for (sb, blk) in w.chunks_exact(136).enumerate() {
+        let d = f16(u16::from_le_bytes([blk[0], blk[1]]));
+        let scales_h = u16::from_le_bytes([blk[2], blk[3]]);
+        let scales_l = &blk[4..8];
+        let qs = blk.as_ptr().add(8);
+        let mut sumi = _mm256_setzero_si256();
+        for ib in 0..8 {
+            let q4bits = _mm_loadu_si128(qs.add(ib * 16) as *const __m128i);
+            let lo = _mm_and_si128(q4bits, lownib);
+            let hi = _mm_and_si128(_mm_srli_epi16(q4bits, 4), lownib);
+            let w_lo = _mm_shuffle_epi8(table, lo);
+            let w_hi = _mm_shuffle_epi8(table, hi);
+            let w32 = _mm256_set_m128i(w_hi, w_lo);
+            let aq = _mm256_loadu_si256(a.qk.as_ptr().add(sb * 256 + ib * 32) as *const __m256i);
+            let p16 = mul_add_epi8(w32, aq);
+            let ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F) as i16
+                | ((((scales_h >> (2 * ib)) & 3) << 4) as i16);
+            let scale = ls - 32;
+            let p32 = _mm256_madd_epi16(p16, _mm256_set1_epi16(scale));
+            sumi = _mm256_add_epi32(sumi, p32);
+        }
+        let sumi_scalar = hsum_i32(sumi);
+        acc += a.dk[sb] * (d * sumi_scalar as f32);
+    }
+    acc
+}
+
 /// The byte-wise reference `unpack_q4k_scales` is tested against.
 #[cfg(test)]
 fn scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
@@ -295,6 +361,8 @@ pub unsafe fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             tile_q6_k::<1>(w, std::slice::from_ref(a), &mut o);
             o[0]
         }
+        Format::IQ4_NL => dot_iq4_nl(w, a),
+        Format::IQ4_XS => dot_iq4_xs(w, a),
         // Norm vectors, not a matmul path; the scalar twin is already adequate and
         // duplicating it here would be two implementations of a cold path.
         Format::F32 | Format::F16 | Format::BF16 => crate::quant::dot_scalar(fmt, w, a),
@@ -722,6 +790,83 @@ unsafe fn tile_q6_k<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]
     }
 }
 
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn tile_iq4_nl<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let lownib = _mm_set1_epi8(0x0F);
+    let table = _mm_loadu_si128(crate::quant::KVALUES_IQ4NL.as_ptr() as *const __m128i);
+    let nblk = w.len() / 18;
+    for a in &acts[..T] {
+        assert!(a.d.len() >= nblk && a.q.len() >= nblk * 32);
+    }
+    let mut acc = [0.0f32; T];
+    for (b, blk) in w.chunks_exact(18).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 1);
+        let qs = _mm_loadu_si128(blk.as_ptr().add(2) as *const __m128i);
+        let lo = _mm_and_si128(qs, lownib);
+        let hi = _mm_and_si128(_mm_srli_epi16(qs, 4), lownib);
+        let w_lo = _mm_shuffle_epi8(table, lo);
+        let w_hi = _mm_shuffle_epi8(table, hi);
+        let w32 = _mm256_set_m128i(w_hi, w_lo);
+        let dw = f16_at(blk, 0);
+        for t in 0..T {
+            let a = &acts[t];
+            let aq = acts32(a, b);
+            let prod = mul_add_epi8(w32, aq);
+            let s = hsum_i32(_mm256_madd_epi16(prod, _mm256_set1_epi16(1)));
+            acc[t] += dw * *a.d.get_unchecked(b) * s as f32;
+        }
+    }
+    out[..T].copy_from_slice(&acc[..T]);
+}
+
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn tile_iq4_xs<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    debug_assert!(
+        acts[..T].iter().all(|a| !a.qk.is_empty()),
+        "k-quant rows need the per-256 activation"
+    );
+    let lownib = _mm_set1_epi8(0x0F);
+    let table = _mm_loadu_si128(crate::quant::KVALUES_IQ4NL.as_ptr() as *const __m128i);
+    let mut acc = [0.0f32; T];
+    for (sb, blk) in w.chunks_exact(136).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 3);
+        let d = f16_at(blk, 0);
+        let scales_h = u16::from_le_bytes([blk[2], blk[3]]);
+        let scales_l = &blk[4..8];
+        let qs = blk.as_ptr().add(8);
+
+        let mut w32 = [_mm256_setzero_si256(); 8];
+        let mut scv = [_mm256_setzero_si256(); 8];
+        for ib in 0..8 {
+            let q4bits = _mm_loadu_si128(qs.add(ib * 16) as *const __m128i);
+            let lo = _mm_and_si128(q4bits, lownib);
+            let hi = _mm_and_si128(_mm_srli_epi16(q4bits, 4), lownib);
+            let w_lo = _mm_shuffle_epi8(table, lo);
+            let w_hi = _mm_shuffle_epi8(table, hi);
+            w32[ib] = _mm256_set_m128i(w_hi, w_lo);
+            let ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F) as i16
+                | ((((scales_h >> (2 * ib)) & 3) << 4) as i16);
+            scv[ib] = _mm256_set1_epi16(ls - 32);
+        }
+
+        for t in 0..T {
+            let mut sumi = _mm256_setzero_si256();
+            let base = acts[t].qk.as_ptr().add(sb * 256);
+            for ib in 0..8 {
+                let aq = _mm256_loadu_si256(base.add(ib * 32) as *const __m256i);
+                let p16 = mul_add_epi8(w32[ib], aq);
+                let p32 = _mm256_madd_epi16(p16, scv[ib]);
+                sumi = _mm256_add_epi32(sumi, p32);
+            }
+            let sumi_scalar = hsum_i32(sumi);
+            acc[t] += acts[t].dk[sb] * (d * sumi_scalar as f32);
+        }
+    }
+    out[..T].copy_from_slice(&acc[..T]);
+}
+
 /// `PEREGRINE_NO_WIDE=1` keeps the tiled kernels for every batch width — the A/B
 /// switch the wide kernels were measured against (kbench, and a real prefill).
 #[inline]
@@ -1011,6 +1156,8 @@ pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32
         Format::Q4_K => run!(tile_q4_k),
         Format::Q5_K => run!(tile_q5_k),
         Format::Q6_K => run!(tile_q6_k),
+        Format::IQ4_NL => run!(tile_iq4_nl),
+        Format::IQ4_XS => run!(tile_iq4_xs),
         Format::F32 | Format::F16 | Format::BF16 => {
             for (b, a) in acts.iter().enumerate() {
                 out[b] = crate::quant::dot_scalar(fmt, w, a);
@@ -1096,6 +1243,10 @@ mod tests {
         assert!(31 * 127 * 2 < i16::MAX as i32, "Q5_K would saturate");
         assert!(15 * 127 * 2 < i16::MAX as i32, "Q4_K would saturate");
         assert!(15 * 127 * 2 < i16::MAX as i32, "Q4_0 would saturate");
+        assert!(
+            127 * 127 * 2 < i16::MAX as i32,
+            "IQ4_NL / IQ4_XS would saturate"
+        );
         // Q8_0 is the tight one. Its codes are signed, and `_mm256_sign_epi8` maps a
         // code of -128 to unsigned 128 (negation overflows back to itself), so the
         // unsigned operand reaches 128 and not 127.
@@ -1244,11 +1395,12 @@ mod tests {
         let sz = fmt.block_bytes();
         for blk in w.chunks_exact_mut(sz) {
             match fmt {
-                Format::Q4_0 | Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
+                Format::Q4_0 | Format::Q8_0 | Format::Q5_0 | Format::IQ4_NL => fix(blk, 0),
                 Format::Q4_K | Format::Q5_K => {
                     fix(blk, 0);
                     fix(blk, 2);
                 }
+                Format::IQ4_XS => fix(blk, 0),
                 _ => {}
             }
         }
@@ -1461,6 +1613,169 @@ mod tests {
                     (got - want).abs() <= tol,
                     "Q5_K max codes n={n}: avx2 {got} vs scalar {want}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn avx2_dot_matches_dot_scalar_bit_for_bit_iq4_nl_and_iq4_xs() {
+        if !have_avx2() || !have_batched() {
+            return;
+        }
+        let mut s = 0x9876_5432_10FE_DCBAu64;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+
+        for fmt in [Format::IQ4_NL, Format::IQ4_XS] {
+            let lens: &[usize] = if fmt == Format::IQ4_NL {
+                &[32, 96, 160, 256, 960]
+            } else {
+                &[256, 512, 1024, 2560]
+            };
+            for &n in lens {
+                let rb = crate::quant::row_bytes(fmt, n);
+
+                // 1. Random rows: single-row and batched
+                for trial in 0..10 {
+                    let mut w: Vec<u8> = (0..rb).map(|_| (rnd() >> 32) as u8).collect();
+                    sane_scales(fmt, &mut w);
+                    let x: Vec<f32> = (0..n)
+                        .map(|_| ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 6.0)
+                        .collect();
+                    let mut a = QuantAct::with_capacity(n);
+                    a.fill(&x);
+                    // SAFETY: have_avx2() checked; w has row_bytes(fmt, n) and a has length n.
+                    let got = unsafe { dot(fmt, &w, &a) };
+                    let want = crate::quant::dot_scalar(fmt, &w, &a);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{:?} trial {trial} n={n}: avx2 {got} vs scalar {want}",
+                        fmt.label()
+                    );
+
+                    // Batched kernels across widths 1..=5
+                    for nb in 1..=5usize {
+                        let acts: Vec<QuantAct> = (0..nb)
+                            .map(|_| {
+                                let mut act = QuantAct::with_capacity(n);
+                                let xi: Vec<f32> = (0..n)
+                                    .map(|_| {
+                                        ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 6.0
+                                    })
+                                    .collect();
+                                act.fill(&xi);
+                                act
+                            })
+                            .collect();
+                        let mut bgot = vec![0.0f32; nb];
+                        // SAFETY: have_batched() checked; lengths match preconditions.
+                        unsafe { dot_batch(fmt, &w, &acts, &mut bgot) };
+                        for (b, act) in acts.iter().enumerate() {
+                            let bwant = crate::quant::dot_scalar(fmt, &w, act);
+                            assert_eq!(
+                                bgot[b].to_bits(),
+                                bwant.to_bits(),
+                                "{:?} batched nb={nb} act {b} n={n}: got {} vs scalar {bwant}",
+                                fmt.label(),
+                                bgot[b]
+                            );
+                        }
+                    }
+                }
+
+                // 2. Zero blocks (scale = 0, codes = 0)
+                {
+                    let w = vec![0u8; rb];
+                    let x: Vec<f32> = (0..n)
+                        .map(|_| ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 4.0)
+                        .collect();
+                    let mut a = QuantAct::with_capacity(n);
+                    a.fill(&x);
+                    // SAFETY: have_avx2() checked.
+                    let got = unsafe { dot(fmt, &w, &a) };
+                    let want = crate::quant::dot_scalar(fmt, &w, &a);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{:?} zero blocks n={n}: avx2 {got} vs scalar {want}",
+                        fmt.label()
+                    );
+                    let mut bgot = [0.0f32; 1];
+                    // SAFETY: have_batched() checked.
+                    unsafe { dot_batch(fmt, &w, std::slice::from_ref(&a), &mut bgot) };
+                    assert_eq!(
+                        bgot[0].to_bits(),
+                        want.to_bits(),
+                        "{:?} batched zero blocks n={n}: got {} vs scalar {want}",
+                        fmt.label(),
+                        bgot[0]
+                    );
+                }
+
+                // 3. Max codes (all 0xFF bytes)
+                {
+                    let mut w = vec![0xFFu8; rb];
+                    sane_scales(fmt, &mut w);
+                    let x: Vec<f32> = (0..n)
+                        .map(|_| ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 4.0)
+                        .collect();
+                    let mut a = QuantAct::with_capacity(n);
+                    a.fill(&x);
+                    // SAFETY: have_avx2() checked.
+                    let got = unsafe { dot(fmt, &w, &a) };
+                    let want = crate::quant::dot_scalar(fmt, &w, &a);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{:?} max codes n={n}: avx2 {got} vs scalar {want}",
+                        fmt.label()
+                    );
+                    let mut bgot = [0.0f32; 1];
+                    // SAFETY: have_batched() checked.
+                    unsafe { dot_batch(fmt, &w, std::slice::from_ref(&a), &mut bgot) };
+                    assert_eq!(
+                        bgot[0].to_bits(),
+                        want.to_bits(),
+                        "{:?} batched max codes n={n}: got {} vs scalar {want}",
+                        fmt.label(),
+                        bgot[0]
+                    );
+                }
+
+                // 4. Min codes (all 0x00 bytes) with sane scales
+                {
+                    let mut w = vec![0x00u8; rb];
+                    sane_scales(fmt, &mut w);
+                    let x: Vec<f32> = (0..n)
+                        .map(|_| ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 4.0)
+                        .collect();
+                    let mut a = QuantAct::with_capacity(n);
+                    a.fill(&x);
+                    // SAFETY: have_avx2() checked.
+                    let got = unsafe { dot(fmt, &w, &a) };
+                    let want = crate::quant::dot_scalar(fmt, &w, &a);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{:?} min codes n={n}: avx2 {got} vs scalar {want}",
+                        fmt.label()
+                    );
+                    let mut bgot = [0.0f32; 1];
+                    // SAFETY: have_batched() checked.
+                    unsafe { dot_batch(fmt, &w, std::slice::from_ref(&a), &mut bgot) };
+                    assert_eq!(
+                        bgot[0].to_bits(),
+                        want.to_bits(),
+                        "{:?} batched min codes n={n}: got {} vs scalar {want}",
+                        fmt.label(),
+                        bgot[0]
+                    );
+                }
             }
         }
     }
