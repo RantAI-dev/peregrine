@@ -70,6 +70,49 @@ jobs:
         env:
           PEREGRINE_ISA: ${{ matrix.isa }}
 
+  # The AVX-512 tier on GitHub's AVX2-only runners, under Intel SDE (#7, S0.3b). SDE is Intel's
+  # emulator, not a re-host: the official mirror URL and its SHA-256 are pinned below. Sapphire
+  # Rapids (-spr) is the newest Intel target with everything the kernels use: AVX-512 F/BW/VL
+  # plus VNNI, GFNI and VBMI. Tests are built natively, then the test binaries themselves run
+  # under SDE, so cargo and rustc are not emulated. Not part of `ci-ok` yet.
+  sde:
+    runs-on: ubuntu-24.04
+    env:
+      SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+      SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Cache Intel SDE
+        id: sde-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/intel-sde
+          key: intel-sde-10.13.1-2026-07-28-lin
+      - name: Download and verify Intel SDE
+        if: steps.sde-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --silent --show-error "$SDE_URL" -o "$RUNNER_TEMP/sde.tar.xz"
+          echo "$SDE_SHA256  $RUNNER_TEMP/sde.tar.xz" | sha256sum --check --strict
+          mkdir -p "$HOME/.cache/intel-sde"
+          tar -xJf "$RUNNER_TEMP/sde.tar.xz" --strip-components=1 -C "$HOME/.cache/intel-sde"
+      - name: Build test binaries
+        run: |
+          cargo test --release --locked -p peregrine-kernels --no-run --message-format=json \
+            | jq -r 'select(.executable != null) | .executable' > "$RUNNER_TEMP/kernel-tests"
+          cargo test --release --locked -p peregrine-core --test synthetic --no-run --message-format=json \
+            | jq -r 'select(.executable != null) | .executable' > "$RUNNER_TEMP/synthetic-tests"
+      - name: Kernel tests under SDE
+        run: |
+          "$HOME/.cache/intel-sde/sde64" -spr -- "$(<"$RUNNER_TEMP/kernel-tests")"
+      - name: Synthetic models under SDE
+        run: |
+          "$HOME/.cache/intel-sde/sde64" -spr -- "$(<"$RUNNER_TEMP/synthetic-tests")" --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/synthetic.log"
+          # No AVX-512 goldens are committed yet, so the test tolerates "no golden for tier"; this
+          # assertion is what proves SDE really exposed the AVX-512/VNNI/GFNI/VBMI features.
+          grep -q 'x86_64-avx2-avx512-vnni-gfni-vbmi' "$RUNNER_TEMP/synthetic.log"
+
   # The oldest compiler we promise to build with (workspace `rust-version`).
   msrv:
     runs-on: ubuntu-24.04

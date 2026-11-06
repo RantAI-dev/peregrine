@@ -50,3 +50,11 @@ host's goldens.
 
 CI runs the native tier on x86-64 Linux, aarch64 Linux and aarch64 macOS, and the `scalar` and `avx2` tiers
 on x86-64 Linux.
+
+GitHub's x86-64 runners have AVX2 but no AVX-512, so the `sde` job runs the kernel tests and the synthetic
+models under Intel's Software Development Emulator with `sde64 -spr` (Sapphire Rapids: AVX-512 F/BW/VL,
+VNNI, GFNI, VBMI). It downloads SDE 10.13.1 from Intel's official mirror, checks the pinned SHA-256, caches
+the unpacked emulator, and fails unless the tier reported by the synthetic tests is
+`x86_64-avx2-avx512-vnni-gfni-vbmi`. SDE is free of charge for any type of use under the Intel Simplified
+Software License. No AVX-512 synthetic goldens are committed yet, so the tests report `ok (no golden for
+tier ...)`; a follow-up records them on a real AVX-512 host.
