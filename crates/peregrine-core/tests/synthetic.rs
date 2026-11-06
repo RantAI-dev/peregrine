@@ -176,6 +176,8 @@ fn dense_models_in_every_format() {
         Format::Q5_K,
         Format::IQ4_NL,
         Format::IQ4_XS,
+        Format::Q2_K,
+        Format::Q3_K,
     ];
     for arch in ["llama", "qwen3"] {
         for (i, &fmt) in formats.iter().enumerate() {
