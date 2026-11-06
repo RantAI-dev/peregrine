@@ -31,7 +31,7 @@
 
 #![cfg(target_arch = "x86_64")]
 
-use crate::gguf::{f16, Format};
+use crate::format::{f16, Format};
 use crate::quant::QuantAct;
 use std::arch::x86_64::*;
 
@@ -39,7 +39,8 @@ use std::arch::x86_64::*;
 /// this is a load of a relaxed atomic after the first call.
 #[inline]
 pub fn have_avx2() -> bool {
-    crate::cpu_has!("avx2")
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::cpu_has!("avx2"))
 }
 
 #[inline(always)]
@@ -316,11 +317,16 @@ pub const TILE: usize = 4;
 /// scale conversion (every AVX2 CPU since Haswell has both).
 #[inline]
 pub fn have_batched() -> bool {
-    crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c")
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c"))
 }
 
+/// The sum of the eight lanes of `v`.
+///
+/// # Safety
+/// AVX must be available (it is wherever an `__m256` exists in a caller compiled for AVX2).
 #[inline(always)]
-pub(crate) unsafe fn hsum_ps(v: __m256) -> f32 {
+pub unsafe fn hsum_ps(v: __m256) -> f32 {
     let lo = _mm256_castps256_ps128(v);
     let hi = _mm256_extractf128_ps(v, 1);
     let s = _mm_add_ps(lo, hi);

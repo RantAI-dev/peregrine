@@ -18,6 +18,7 @@ publish = false
 # the materialise-a-dequantised-buffer pattern the engine exists to avoid, and rayon would make thread and
 # barrier counts unpredictable when both are quantities this engine measures and reports.
 [dependencies]
+peregrine-kernels = { workspace = true }
 memmap2 = { workspace = true }
 
 [lints]

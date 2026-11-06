@@ -34,7 +34,8 @@ pub const TILE: usize = 8;
 
 #[inline]
 pub fn have_vnni() -> bool {
-    crate::cpu_has!("avx512vnni") && crate::cpu_has!("avx512vl")
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::cpu_has!("avx512vnni") && crate::cpu_has!("avx512vl"))
 }
 
 #[inline(always)]
@@ -210,7 +211,10 @@ unsafe fn pq2_zmm<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) 
 
 #[inline]
 pub fn have_zmm() -> bool {
-    have_vnni() && crate::cpu_has!("avx512bw") && crate::cpu_has!("gfni") && zmm_enabled()
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        have_vnni() && crate::cpu_has!("avx512bw") && crate::cpu_has!("gfni") && zmm_enabled()
+    })
 }
 
 /// `PEREGRINE_ZMM=0` keeps the 256-bit kernels (an A/B switch).
@@ -372,7 +376,7 @@ pub unsafe fn dot_batch_ptq1(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
             tiled!(ptq1_zmm, w, acts, out)
         } else {
             for (b, a) in acts.iter().enumerate() {
-                out[b] = crate::quant::dot_scalar(crate::gguf::Format::PTQ1_0, w, a);
+                out[b] = crate::quant::dot_scalar(crate::format::Format::PTQ1_0, w, a);
             }
         }
         return;
@@ -680,7 +684,8 @@ pub unsafe fn dot_rows_pq2(w: &[u8], rb: usize, rows: usize, acts: &[QuantAct], 
 
 #[inline]
 pub fn have_vbmi() -> bool {
-    crate::cpu_has!("avx512vbmi") && crate::cpu_has!("avx512bw")
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::cpu_has!("avx512vbmi") && crate::cpu_has!("avx512bw"))
 }
 
 /// `tp[tp_off(g) + 64s + k] = tq[128g + 4k + s]` for every group, two byte permutes per group.
@@ -828,7 +833,8 @@ unsafe fn ptq1_zmm<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32])
 
 #[inline]
 pub fn have_ptq1_zmm() -> bool {
-    have_vnni() && have_vbmi() && zmm_enabled()
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| have_vnni() && have_vbmi() && zmm_enabled())
 }
 
 #[target_feature(enable = "avx2,fma,f16c,avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi")]

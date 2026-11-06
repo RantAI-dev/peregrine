@@ -26,10 +26,13 @@ fn vector_ok() -> bool {
 }
 
 /// Eight `exp`s at once — ggml's `ggml_v_expf`, transcribed.
+///
+/// # Safety
+/// AVX2 and FMA must be available.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx2,fma")]
-pub(crate) unsafe fn exp8(x: __m256) -> __m256 {
+pub unsafe fn exp8(x: __m256) -> __m256 {
     let r = _mm256_set1_ps(f32::from_bits(0x4b40_0000)); // 0x1.8p23
     let z = _mm256_fmadd_ps(x, _mm256_set1_ps(f32::from_bits(0x3fb8_aa3b)), r); // log2(e)
     let n = _mm256_sub_ps(z, r);

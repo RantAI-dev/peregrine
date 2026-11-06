@@ -1,0 +1,17 @@
+[package]
+name = "peregrine-kernels"
+description = "CPU kernels for the Peregrine inference engine: weight formats x instruction-set tiers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+# No dependencies, on purpose (docs/adr/0002-dependency-policy.md).
+[dependencies]
+
+[lints]
+workspace = true

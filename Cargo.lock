@@ -591,7 +591,12 @@ name = "peregrine-core"
 version = "0.1.0"
 dependencies = [
  "memmap2",
+ "peregrine-kernels",
 ]
+
+[[package]]
+name = "peregrine-kernels"
+version = "0.1.0"
 
 [[package]]
 name = "peregrine-server"
