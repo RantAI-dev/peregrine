@@ -26,6 +26,13 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      # Every feature set of the facade builds on its own (ADR 0005).
+      - name: feature sets
+        run: |
+          cargo check -p peregrine --no-default-features --locked
+          cargo check -p peregrine --no-default-features --features cli --locked
+          cargo check -p peregrine --no-default-features --features server --locked
+          cargo check -p peregrine --all-features --locked
 
   # Release mode: the kernels are tested as they ship, and debug-mode SIMD tests are too slow.
   test:
