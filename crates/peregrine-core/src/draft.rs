@@ -185,9 +185,13 @@ impl Proposal {
 /// A drafter is told what the target committed and what was rolled back, and
 /// asks for what it needs ([`Drafter::needs`]). It proposes into a buffer the
 /// engine owns ([`Proposal`]) and keeps whatever bookkeeping it needs — the
-/// cells a suffix draft is booked to, a DSpark block's context, the hidden
-/// state an MTP row is owed — inside itself: the engine must not have to know
-/// what a drafter draws drafts with.
+/// cells a suffix draft is booked to, a DSpark block's context, the MTP
+/// block's own cache — inside itself: the engine must not have to know what a
+/// drafter draws drafts with.
+///
+/// The engine verifies what a drafter proposes: it asks the drafter, prices
+/// the proposal (how much of it is worth verifying) and checks it against the
+/// target's own samples. A draft that does not survive is rolled back.
 ///
 /// The interface is unstable until 1.0 (ADR 0005).
 pub trait Drafter: Send {
@@ -528,6 +532,10 @@ impl Drafter for DsparkDrafter {
 /// that are committed are fed as they are committed; the anchor's row is fed
 /// with the proposal, because the anchor is not committed yet when it is
 /// proposed.
+///
+/// The committed rows wait in a buffer and are fed in one batch: the block
+/// reads its weights once per call, so a row at a time would read them once
+/// per token. The buffer is the engine's own — a draft costs no allocation.
 #[cfg(feature = "mtp")]
 pub struct MtpDrafter {
     model: std::sync::Arc<crate::model::Model>,
@@ -536,22 +544,18 @@ pub struct MtpDrafter {
     /// The hidden state of the last committed position: the block's row for
     /// the anchor reads it.
     hprev: Vec<f32>,
-    /// The row an accepted draft leaves owed.
-    owed: Option<Owed>,
-    /// The last proposal: the anchor's position and the token proposed after it.
-    proposal: Option<(usize, u32)>,
+    /// The next position the block's cache needs: the committed rows before it
+    /// are fed, or wait in the buffer.
+    next_pos: usize,
+    /// The committed rows the block has not seen yet: their tokens, their
+    /// positions, and the hidden state each of their rows reads.
+    pending_toks: Vec<u32>,
+    pending_pos: Vec<usize>,
+    pending_hidden: Vec<f32>,
+    /// Whether the block has failed: a broken block drafts nothing.
+    broken: bool,
     /// The block's own forward statistics.
     stats: crate::model::StepStats,
-}
-
-/// The row an accepted draft leaves owed: the token that survived, the hidden
-/// state of the position before it (what the block's row at that position
-/// reads) and the position the row sits at.
-#[cfg(feature = "mtp")]
-struct Owed {
-    token: u32,
-    hidden: Vec<f32>,
-    pos: usize,
 }
 
 #[cfg(feature = "mtp")]
@@ -568,8 +572,11 @@ impl MtpDrafter {
             model,
             ms,
             hprev: vec![0.0; d],
-            owed: None,
-            proposal: None,
+            next_pos: 0,
+            pending_toks: Vec::new(),
+            pending_pos: Vec::new(),
+            pending_hidden: Vec::new(),
+            broken: false,
             stats: crate::model::StepStats::default(),
         })
     }
@@ -577,24 +584,31 @@ impl MtpDrafter {
     /// The hidden state of a position, exactly `d_model` wide.
     fn set_hidden(&mut self, hidden: &[f32]) {
         let d = self.model.cfg.d_model;
-        self.hprev.clear();
-        self.hprev.resize(d, 0.0);
         let n = hidden.len().min(d);
         self.hprev[..n].copy_from_slice(&hidden[..n]);
+        self.hprev[n..].fill(0.0);
     }
 
-    /// Feed the block's row for `pos`: the token committed there and the hidden
-    /// state of the position before it.
-    fn feed_row(&mut self, pos: usize, token: u32, hidden: &[f32], pool: &Pool) {
-        let _ = self.model.mtp_forward(
+    /// Feed the block the rows waiting in the buffer: the committed positions
+    /// it has not seen. One call, one read of the block's weights.
+    fn flush(&mut self, pool: &Pool) -> Result<(), String> {
+        if self.pending_toks.is_empty() {
+            return Ok(());
+        }
+        let r = self.model.mtp_forward(
             &mut self.ms,
             pool,
-            &[token],
-            hidden,
-            &[pos],
+            &self.pending_toks,
+            &self.pending_hidden,
+            &self.pending_pos,
             false,
             &mut self.stats,
         );
+        self.pending_toks.clear();
+        self.pending_pos.clear();
+        self.pending_hidden.clear();
+        self.next_pos = self.ms.kv.filled();
+        r.map(|_| ())
     }
 }
 
@@ -617,70 +631,63 @@ impl Drafter for MtpDrafter {
         out: &mut Proposal,
     ) {
         out.clear();
-        if k_max == 0 {
+        if k_max == 0 || self.broken {
             return;
         }
         let d = self.model.cfg.d_model;
-        let mut tokens = Vec::with_capacity(2);
-        let mut hidden = Vec::with_capacity(2 * d);
-        let mut positions = Vec::with_capacity(2);
-        // The row an accepted draft left owed comes first: the block's rows
-        // must continue its cache in order.
-        if let Some(o) = self.owed.take() {
-            tokens.push(o.token);
-            hidden.extend_from_slice(&o.hidden);
-            positions.push(o.pos);
+        // The anchor's row joins the committed rows the block has not seen: one
+        // call, one read of the block's weights. When they do not fit in one
+        // call, the committed rows go first and the anchor follows alone.
+        if self.pending_toks.len() + 1 > crate::model::mtp::MTP_MAX_ROWS
+            && self.flush(pool).is_err()
+        {
+            self.broken = true;
+            return;
         }
-        tokens.push(anchor);
-        hidden.extend_from_slice(&self.hprev);
-        positions.push(anchor_pos);
-        match self.model.mtp_forward(
+        self.pending_toks.push(anchor);
+        self.pending_pos.push(anchor_pos);
+        self.pending_hidden.extend_from_slice(&self.hprev[..d]);
+        let r = self.model.mtp_forward(
             &mut self.ms,
             pool,
-            &tokens,
-            &hidden,
-            &positions,
+            &self.pending_toks,
+            &self.pending_hidden,
+            &self.pending_pos,
             true,
             &mut self.stats,
-        ) {
+        );
+        self.pending_toks.clear();
+        self.pending_pos.clear();
+        self.pending_hidden.clear();
+        self.next_pos = self.ms.kv.filled();
+        match r {
             Ok(Some(t)) => {
                 out.toks.push(t);
                 // The block has no confidence head: its single draft is always
                 // verified, so it is as good as it gets.
                 out.conf.push(1.0);
-                self.proposal = Some((anchor_pos, t));
             }
             // Not fatal: the slot decodes plainly from here.
             Ok(None) => {}
-            Err(_) => {}
+            Err(_) => self.broken = true,
         }
     }
 
     fn commit(&mut self, pos: usize, token: u32, _taps: &[f32], hidden: &[f32], pool: &Pool) {
-        // Was the committed token the drafted one? Then it survived, and the
-        // block owes a row for it: the row reads the hidden state of the
-        // position before it, which is the last committed one.
-        let mut owed = None;
-        if let Some((anchor_pos, drafted)) = self.proposal {
-            if pos == anchor_pos + 1 {
-                if drafted == token {
-                    owed = Some(Owed {
-                        token,
-                        hidden: self.hprev.clone(),
-                        pos,
-                    });
-                }
-                self.proposal = None;
+        if pos == self.next_pos && !self.broken {
+            // A position the block's cache has not seen: its row is the token
+            // committed there and the hidden state of the position before it,
+            // which is what the block's row at that position reads.
+            let d = self.model.cfg.d_model;
+            self.pending_toks.push(token);
+            self.pending_pos.push(pos);
+            self.pending_hidden.extend_from_slice(&self.hprev[..d]);
+            self.next_pos += 1;
+            if self.pending_toks.len() >= crate::model::mtp::MTP_MAX_ROWS
+                && self.flush(pool).is_err()
+            {
+                self.broken = true;
             }
-        }
-        if owed.is_none() && pos == self.ms.kv.filled() {
-            // A position no proposal covered: the block's row for it is fed
-            // now, as the engine's cache catch-up does.
-            let h = self.hprev.clone();
-            self.feed_row(pos, token, &h, pool);
-        }
-        if let Some(o) = owed {
-            self.owed = Some(o);
         }
         if !hidden.is_empty() {
             self.set_hidden(hidden);
@@ -690,20 +697,28 @@ impl Drafter for MtpDrafter {
     fn rollback(&mut self, pos: usize) {
         // The block's cache drops the positions that were not committed.
         self.model.mtp_truncate(&mut self.ms, pos);
-        if let Some((anchor_pos, _)) = self.proposal {
-            if anchor_pos + 1 >= pos {
-                self.proposal = None;
-            }
-        }
-        if self.owed.as_ref().is_some_and(|o| o.pos >= pos) {
-            self.owed = None;
+        // The rows waiting in the buffer go back with the cache.
+        let start = self.next_pos.saturating_sub(self.pending_toks.len());
+        let keep = pos.saturating_sub(start).min(self.pending_toks.len());
+        self.pending_toks.truncate(keep);
+        self.pending_pos.truncate(keep);
+        let d = self.model.cfg.d_model;
+        self.pending_hidden.truncate(keep * d);
+        self.next_pos = start + keep;
+        if self.next_pos != self.ms.kv.filled() {
+            // The cache was cut below the rows the block had: it cannot catch
+            // up again, and drafts nothing from here.
+            self.broken = true;
         }
     }
 
     fn reset(&mut self) {
         self.model.mtp_truncate(&mut self.ms, 0);
-        self.proposal = None;
-        self.owed = None;
+        self.pending_toks.clear();
+        self.pending_pos.clear();
+        self.pending_hidden.clear();
+        self.next_pos = 0;
+        self.broken = false;
         self.set_hidden(&[]);
     }
 }

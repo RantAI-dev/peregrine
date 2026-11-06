@@ -290,6 +290,125 @@ fn run(e: &mut Engine, id: peregrine_core::serve::SlotId) -> Vec<u32> {
 }
 
 // ---------------------------------------------------------------------------
+// The engine's verification step
+// ---------------------------------------------------------------------------
+
+/// A drafter that proposes one fixed token, whatever the anchor is.
+struct FixedDrafter {
+    /// The token it proposes.
+    token: u32,
+}
+
+impl Drafter for FixedDrafter {
+    fn needs(&self) -> Needs {
+        Needs::default()
+    }
+
+    fn propose(
+        &mut self,
+        _anchor: u32,
+        _anchor_pos: usize,
+        k_max: usize,
+        _pool: &Pool,
+        _pick: &mut dyn FnMut(usize, &[f32]) -> u32,
+        out: &mut Proposal,
+    ) {
+        out.clear();
+        if k_max == 0 {
+            return;
+        }
+        out.toks.push(self.token);
+        // The drafter is certain of its token: the engine verifies all of it.
+        out.conf.push(1.0);
+    }
+
+    fn commit(&mut self, _pos: usize, _token: u32, _taps: &[f32], _hidden: &[f32], _pool: &Pool) {}
+
+    fn rollback(&mut self, _pos: usize) {}
+
+    fn reset(&mut self) {}
+}
+
+/// The tokens one engine produces for `prompt`, with a drafter attached or
+/// not: the token stream, the drafts verified and the drafts kept.
+fn decode_with(
+    model: &Arc<Model>,
+    prompt: &[u32],
+    cfg: &SlotCfg,
+    drafter: Option<Box<dyn Drafter>>,
+) -> (Vec<u32>, u64, u64) {
+    let mut e = Engine::new(model.clone(), 4, 512, 1, KvPrec::F16, 0);
+    let id = e.admit(prompt.to_vec(), cfg.clone()).expect("admit");
+    if let Some(d) = drafter {
+        e.attach_drafter(id, d).expect("attach");
+    }
+    let mut toks = Vec::new();
+    while e.active() > 0 {
+        for em in e.step() {
+            assert_eq!(em.slot, id);
+            toks.push(em.token);
+        }
+    }
+    (toks, e.spec_drafts, e.spec_hits)
+}
+
+/// **ADR 0007, decision 1: one verification step in the engine.**
+///
+/// The engine asks the slot's drafter for a proposal and verifies it against
+/// the target's own samples: a drafted token is kept only when it is the token
+/// the target would have drawn there. So the token stream is the same with a
+/// drafter and without one — whether the draft is kept or rejected.
+#[test]
+fn the_engine_verifies_a_drafter_s_proposal_against_the_target_s_own_samples() {
+    let dir = tmpdir("engine-verify");
+    let path = write_dense(&dir, "qwen3", Format::Q8_0, 8200, Dense::default());
+    let model = load(&path);
+    let prompt: Vec<u32> = (0..8).map(|i| (i * 13 % 200) as u32).collect();
+    let cfg = SlotCfg {
+        temperature: 0.0,
+        max_tokens: 8,
+        ..Default::default()
+    };
+
+    // The plain run: the tokens the target draws on its own.
+    let (plain, drafts, hits) = decode_with(&model, &prompt, &cfg, None);
+    assert_eq!(drafts, 0, "the engine drafted without a drafter");
+    assert_eq!(hits, 0, "the engine kept a draft without a drafter");
+
+    // A drafter that proposes a token the target never draws: every draft is
+    // rejected, and the tokens are the same.
+    let never = (0..model.cfg.n_vocab as u32)
+        .find(|t| !plain.contains(t))
+        .expect("a token the target never draws");
+    let (with, drafts, hits) = decode_with(
+        &model,
+        &prompt,
+        &cfg,
+        Some(Box::new(FixedDrafter { token: never })),
+    );
+    assert!(drafts > 0, "the drafter was never asked for a proposal");
+    assert_eq!(hits, 0, "a draft the target never draws was kept");
+    assert_eq!(with, plain, "the rejected drafts changed the tokens");
+
+    // A drafter that proposes the token the target does draw: the first draft
+    // is kept, and the tokens are the same.
+    let (with, drafts, hits) = decode_with(
+        &model,
+        &prompt,
+        &cfg,
+        Some(Box::new(FixedDrafter { token: plain[0] })),
+    );
+    assert!(drafts > 0, "the drafter was never asked for a proposal");
+    assert!(
+        hits > 0,
+        "the draft the target would have drawn was not kept"
+    );
+    assert_eq!(with, plain, "the accepted draft changed the tokens");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
 // The DSpark drafter
 // ---------------------------------------------------------------------------
 

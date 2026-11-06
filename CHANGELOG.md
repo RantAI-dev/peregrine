@@ -42,6 +42,9 @@ All notable changes to this project are documented here. The format follows
 - `peregrine-core`: the `Drafter` interface (ADR 0007) — one way of proposing tokens, told what the target
   committed and what was rolled back — with wrappers over today's drafters (the suffix index, DeepSeek's
   DSpark head, the model's own MTP block). Unstable until 1.0.
+- `peregrine-core`: one verification step in the engine — the slot's drafter proposes, the engine prices the
+  proposal against the verify-cost model and verifies it against the target's own samples. MTP speculation
+  runs through it, so the engine no longer knows what a draft is (ADR 0007, S1.4 step 3).
 - `SlotCfg`: the sampling `turn` (mixed into the position key) and the KV rotation choice, so a conversation
   can be given the same settings it uses today.
 - Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
