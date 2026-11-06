@@ -12,9 +12,11 @@
 pub enum Format {
     F32,
     F16,
+    Q4_0,
     Q5_0,
     Q8_0,
     Q4_K,
+    Q5_K,
     Q6_K,
     // PrismML's ternary formats (Bonsai 2), group size 128. PQ2_0: f16 scale, then 32 bytes of 2-bit
     // codes, weight j in bits 2(j%4) of byte j/4, value code − 1. PTQ1_0: 24 + 2 bytes of base-3 trits, then f16.
@@ -30,9 +32,11 @@ impl Format {
         Some(match id {
             0 => Format::F32,
             1 => Format::F16,
+            2 => Format::Q4_0,
             6 => Format::Q5_0,
             8 => Format::Q8_0,
             12 => Format::Q4_K,
+            13 => Format::Q5_K,
             14 => Format::Q6_K,
             30 => Format::BF16,
             142 => Format::PQ2_0,
@@ -45,8 +49,8 @@ impl Format {
     pub const fn block(self) -> usize {
         match self {
             Format::F32 | Format::F16 | Format::BF16 => 1,
-            Format::Q5_0 | Format::Q8_0 => 32,
-            Format::Q4_K | Format::Q6_K => 256,
+            Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => 32,
+            Format::Q4_K | Format::Q5_K | Format::Q6_K => 256,
             Format::PQ2_0 | Format::PTQ1_0 => 128,
         }
     }
@@ -57,9 +61,11 @@ impl Format {
             Format::F32 => 4,
             Format::F16 => 2,
             Format::BF16 => 2,
+            Format::Q4_0 => 18,   // f16 d + u8 qs[16]
             Format::Q5_0 => 22,   // f16 d + u8 qh[4] + u8 qs[16]
             Format::Q8_0 => 34,   // f16 d + i8 qs[32]
             Format::Q4_K => 144,  // f16 d + f16 dmin + u8 scales[12] + u8 qs[128]
+            Format::Q5_K => 176,  // f16 d + f16 dmin + u8 scales[12] + u8 qh[32] + u8 qs[128]
             Format::Q6_K => 210,  // u8 ql[128] + u8 qh[64] + i8 scales[16] + f16 d
             Format::PQ2_0 => 34,  // f16 d + u8 qs[32]
             Format::PTQ1_0 => 28, // u8 qs[24] + u8 qh[2] + f16 d
@@ -77,9 +83,11 @@ impl Format {
         match self {
             Format::F32 => "F32",
             Format::F16 => "F16",
+            Format::Q4_0 => "Q4_0",
             Format::Q5_0 => "Q5_0",
             Format::Q8_0 => "Q8_0",
             Format::Q4_K => "Q4_K",
+            Format::Q5_K => "Q5_K",
             Format::Q6_K => "Q6_K",
             Format::PQ2_0 => "PQ2_0",
             Format::PTQ1_0 => "PTQ1_0",

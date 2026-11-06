@@ -276,9 +276,11 @@ fn format_to_id(fmt: Format) -> u32 {
     match fmt {
         Format::F32 => 0,
         Format::F16 => 1,
+        Format::Q4_0 => 2,
         Format::Q5_0 => 6,
         Format::Q8_0 => 8,
         Format::Q4_K => 12,
+        Format::Q5_K => 13,
         Format::Q6_K => 14,
         Format::BF16 => 30,
         Format::PQ2_0 => 142,

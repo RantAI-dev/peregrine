@@ -183,7 +183,7 @@ impl Gguf {
             let kind = Format::from_id(tid).ok_or_else(|| {
                 format!(
                     "gguf: tensor {name} uses ggml type {tid}, which Peregrine does not \
-                     implement. Supported: F32, F16, Q5_0, Q8_0, Q4_K, Q6_K."
+                     implement. Supported: F32, F16, Q4_0, Q5_0, Q8_0, Q4_K, Q6_K."
                 )
             })?;
             let offset = c.u64()?;
@@ -223,10 +223,15 @@ impl Gguf {
         if alignment == 0 || !alignment.is_power_of_two() {
             return Err(format!("gguf: implausible alignment {alignment}"));
         }
-        let data_start = c.p.div_ceil(alignment) * alignment;
-        if data_start > map.len() {
-            return Err("gguf: tensor data starts past end of file".into());
-        }
+        let data_start = if n_tensors == 0 {
+            map.len()
+        } else {
+            let s = c.p.div_ceil(alignment) * alignment;
+            if s > map.len() {
+                return Err("gguf: tensor data starts past end of file".into());
+            }
+            s
+        };
 
         let g = Gguf {
             map,
@@ -311,6 +316,13 @@ impl Gguf {
         match self.meta.get(k) {
             Some(Value::ArrI32(v)) => Ok(v),
             _ => Err(format!("gguf: missing or non-i32-array metadata {k:?}")),
+        }
+    }
+
+    pub fn arr_f32(&self, k: &str) -> Result<&[f32], String> {
+        match self.meta.get(k) {
+            Some(Value::ArrF32(v)) => Ok(v),
+            _ => Err(format!("gguf: missing or non-f32-array metadata {k:?}")),
         }
     }
 }
@@ -478,6 +490,7 @@ mod tests {
     #[test]
     fn block_geometry_matches_ggml() {
         // The sizes ggml static_asserts. A wrong one here misreads every tensor.
+        assert_eq!((Format::Q4_0.block(), Format::Q4_0.block_bytes()), (32, 18));
         assert_eq!((Format::Q5_0.block(), Format::Q5_0.block_bytes()), (32, 22));
         assert_eq!((Format::Q8_0.block(), Format::Q8_0.block_bytes()), (32, 34));
         assert_eq!(
@@ -485,12 +498,18 @@ mod tests {
             (256, 144)
         );
         assert_eq!(
+            (Format::Q5_K.block(), Format::Q5_K.block_bytes()),
+            (256, 176)
+        );
+        assert_eq!(
             (Format::Q6_K.block(), Format::Q6_K.block_bytes()),
             (256, 210)
         );
         // And the bpw figures the spec quotes.
+        assert_eq!(Format::Q4_0.bpw(), 4.5);
         assert_eq!(Format::Q4_K.bpw(), 4.5);
         assert_eq!(Format::Q5_0.bpw(), 5.5);
+        assert_eq!(Format::Q5_K.bpw(), 5.5);
         assert_eq!(Format::Q8_0.bpw(), 8.5);
         assert!((Format::Q6_K.bpw() - 6.5625).abs() < 1e-9);
     }

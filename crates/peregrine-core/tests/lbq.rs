@@ -191,8 +191,12 @@ fn a_lb5_converted_model_chats_and_moves_far_fewer_bytes() {
     let dense_model = dir.join("dense.gguf");
     let _ = std::fs::remove_file(&lb_model);
     let _ = std::fs::remove_file(&dense_model);
-    std::fs::hard_link(&model, &lb_model).unwrap();
-    std::fs::hard_link(&model, &dense_model).unwrap();
+    // A temp dir on another filesystem (a tmpfs /tmp) cannot take a hard link: copy then.
+    for link in [&lb_model, &dense_model] {
+        if std::fs::hard_link(&model, link).is_err() {
+            std::fs::copy(&model, link).unwrap();
+        }
+    }
 
     // Generous-but-quick settings: rank 64, both stages. Quality is exploratory
     // without QAT (plan §2) and is not gated here; bytes and correctness are.

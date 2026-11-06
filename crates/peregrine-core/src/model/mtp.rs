@@ -96,6 +96,12 @@ pub struct MtpState {
     tacts: Vec<QuantAct>,
     cat: Vec<f32>,
     logits: Vec<f32>,
+    /// Per-call scratch — the embedding row, the interleaved q/gate output, the attention gate and the head's
+    /// normed row — sized once here so a draft step allocates nothing.
+    e: Vec<f32>,
+    qg: Vec<f32>,
+    gate: Vec<f32>,
+    y: Vec<f32>,
     /// Rows of the head the draft is taken from (the first token ids; a multiple of 16).
     pub draft_vocab: usize,
 }
@@ -134,6 +140,10 @@ impl Model {
             tacts,
             cat: vec![0.0; MTP_MAX_ROWS * 2 * c.d_model],
             logits: vec![0.0; draft_vocab],
+            e: vec![0.0; c.d_model],
+            qg: vec![0.0; MTP_MAX_ROWS * 2 * c.q_dim()],
+            gate: vec![0.0; MTP_MAX_ROWS * c.q_dim()],
+            y: vec![0.0; c.d_model],
             draft_vocab,
         })
     }
@@ -164,11 +174,11 @@ impl Model {
         let (qd, kvd, hd) = (c.q_dim(), c.kv_dim(), c.head_dim);
         let st = &mut ms.st;
         // [enorm(e) | hnorm(h)] · eh_proj
-        let mut e = vec![0.0f32; d];
+        let e = &mut ms.e;
         for b in 0..nb {
-            self.embed_primal(tokens[b], &mut e, stats)?;
+            self.embed_primal(tokens[b], e, stats)?;
             let (lo, hi) = ms.cat.split_at_mut(b * 2 * d + d);
-            self.rmsnorm_into(&e, &m.enorm, &mut lo[b * 2 * d..b * 2 * d + d]);
+            self.rmsnorm_into(e, &m.enorm, &mut lo[b * 2 * d..b * 2 * d + d]);
             self.rmsnorm_into(&hidden[b * d..(b + 1) * d], &m.hnorm, &mut hi[..d]);
             st.acts[b].fill(&ms.cat[b * 2 * d..(b + 1) * 2 * d]);
         }
@@ -176,6 +186,7 @@ impl Model {
             &[MatJob {
                 w: &m.eh_proj,
                 out: OutPtr(st.x.as_mut_ptr()),
+                rows: None,
             }],
             &st.acts,
             nb,
@@ -192,20 +203,23 @@ impl Model {
             );
             st.acts[b].fill(&st.xb[b * d..(b + 1) * d]);
         }
-        let mut qg = vec![0.0f32; nb * 2 * qd];
+        let qg = &mut ms.qg;
         self.matmul_group(
             &[
                 MatJob {
                     w: &m.q,
                     out: OutPtr(qg.as_mut_ptr()),
+                    rows: None,
                 },
                 MatJob {
                     w: &m.k,
                     out: OutPtr(st.k.as_mut_ptr()),
+                    rows: None,
                 },
                 MatJob {
                     w: &m.v,
                     out: OutPtr(st.v.as_mut_ptr()),
+                    rows: None,
                 },
             ],
             &st.acts,
@@ -213,7 +227,7 @@ impl Model {
             pool,
             stats,
         );
-        let mut gate = vec![0.0f32; nb * qd];
+        let gate = &mut ms.gate;
         for b in 0..nb {
             for h in 0..c.n_head {
                 let src = b * 2 * qd + h * 2 * hd;
@@ -246,8 +260,7 @@ impl Model {
         ms.kv.advance(positions[nb - 1] + 1);
         // Only the last row's output is read; the earlier rows exist for their cache entries. Attention one row at a
         // time (the same call shape whatever the batch, so a draft never depends on how rows were grouped).
-        let rows: Vec<usize> = if draft { vec![nb - 1] } else { vec![] };
-        if rows.is_empty() {
+        if !draft {
             return Ok(None);
         }
         let b = nb - 1;
@@ -256,12 +269,12 @@ impl Model {
             &mut st.xb[b * qd..(b + 1) * qd],
             &gate[b * qd..(b + 1) * qd],
         );
-        let row = st.xb[b * qd..(b + 1) * qd].to_vec();
-        st.acts[0].fill(&row);
+        st.acts[0].fill(&st.xb[b * qd..(b + 1) * qd]);
         self.matmul_group(
             &[MatJob {
                 w: &m.o,
                 out: OutPtr(st.xb2.as_mut_ptr()),
+                rows: None,
             }],
             &st.acts,
             1,
@@ -283,10 +296,12 @@ impl Model {
                 MatJob {
                     w: &m.gate,
                     out: OutPtr(st.hb.as_mut_ptr()),
+                    rows: None,
                 },
                 MatJob {
                     w: &m.up,
                     out: OutPtr(st.hb2.as_mut_ptr()),
+                    rows: None,
                 },
             ],
             &st.acts,
@@ -298,12 +313,12 @@ impl Model {
             let (g, u) = (&mut st.hb[..f], &st.hb2[..f]);
             crate::vmath::swiglu(g, u);
         }
-        let hb = st.hb[..f].to_vec();
-        st.acts[0].fill(&hb);
+        st.acts[0].fill(&st.hb[..f]);
         self.matmul_group(
             &[MatJob {
                 w: &m.down,
                 out: OutPtr(st.xb2.as_mut_ptr()),
+                rows: None,
             }],
             &st.acts,
             1,
@@ -314,13 +329,12 @@ impl Model {
             st.x[i] += st.xb2[i];
         }
         // head over the draft vocabulary
-        let mut y = vec![0.0f32; d];
-        self.rmsnorm_into(&st.x[..d], &m.head_norm, &mut y);
+        self.rmsnorm_into(&st.x[..d], &m.head_norm, &mut ms.y);
         let dv = ms.draft_vocab;
         self.head_rows(
             &mut ms.hs,
             &mut ms.tacts,
-            &y,
+            &ms.y,
             1,
             dv,
             &mut ms.logits,

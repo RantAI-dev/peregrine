@@ -20,6 +20,7 @@
 )]
 
 pub mod attn;
+mod blocks;
 pub mod dspark;
 pub mod gguf;
 pub mod kv;
@@ -40,7 +41,7 @@ pub mod tokenizer;
 pub use gguf::{Format, Gguf};
 // The kernels live in `peregrine-kernels`; they keep their paths here.
 pub use peregrine_kernels::cpu_has;
-pub use peregrine_kernels::{cpu, hadamard, quant, table, vmath};
+pub use peregrine_kernels::{cpu, delta, hadamard, quant, table, vmath};
 #[cfg(target_arch = "x86_64")]
 pub use peregrine_kernels::{simd, tern};
 pub use session::{Session, SessionCfg};
@@ -59,7 +60,7 @@ pub use session::{Session, SessionCfg};
 ///   pre-tokenizer (`tokenizer::PRE_TYPES`) — each transcribed from llama.cpp and
 ///   checked against `llama-tokenize`; a near-miss tokenizer produces confident
 ///   wrong text, so nothing else is approximated;
-/// * a ChatML or Llama 3 chat template (`template::TEMPLATES`), detected from the
+/// * a chat template (`template::TEMPLATES`), detected from the
 ///   file's own `tokenizer.chat_template`;
 /// * rope scaling only as Llama 3's factor table or a linear factor;
 /// * tensors in F32, F16, Q5_0, Q8_0, Q4_K or Q6_K (`Gguf::open` refuses others).
@@ -77,17 +78,19 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
         ));
     }
     let tok = g.str("tokenizer.ggml.model").unwrap_or("unknown");
-    if tok != "gpt2" {
+    if tok != "gpt2" && tok != "llama" {
         return Err(format!(
-            "tokenizer {tok:?} — Peregrine reads gpt2 byte-level BPE vocabularies"
+            "tokenizer {tok:?} — Peregrine reads gpt2 (BPE) and llama (SentencePiece) vocabularies"
         ));
     }
-    let pre = g.str("tokenizer.ggml.pre").unwrap_or("smollm");
-    if tokenizer::PreType::from_name(pre).is_none() {
-        return Err(format!(
-            "pre-tokenizer {pre:?} — Peregrine implements {}",
-            tokenizer::PRE_TYPES.join(", ")
-        ));
+    if tok == "gpt2" {
+        let pre = g.str("tokenizer.ggml.pre").unwrap_or("smollm");
+        if tokenizer::PreType::from_name(pre).is_none() {
+            return Err(format!(
+                "pre-tokenizer {pre:?} — Peregrine implements {}",
+                tokenizer::PRE_TYPES.join(", ")
+            ));
+        }
     }
     if let Ok(t) = g.str(&format!("{arch}.rope.scaling.type")) {
         if t != "none" && t != "linear" {
