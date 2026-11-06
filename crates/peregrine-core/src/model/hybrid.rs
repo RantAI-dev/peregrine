@@ -13,7 +13,8 @@
 
 use super::*;
 use crate::blocks::par::{RecScratch, RowPtrs, SnapPtrs};
-use crate::hadamard::fwht;
+use crate::blocks::recurrent::{self, RecurrentCfg};
+use crate::blocks::rotate::{Rotation, RowPrep, VPerm};
 use std::sync::atomic::{AtomicU64, Ordering as AO};
 
 // Profiling buckets (`PEREGRINE_PROF=1`): wall nanoseconds per part of the hybrid pass, read by `profile()`.
@@ -102,6 +103,16 @@ impl HybridCfg {
     fn is_attn(&self, layer: usize) -> bool {
         (layer + 1) % self.interval == 0
     }
+    /// The Gated DeltaNet geometry, for the recurrent block's steps.
+    pub(crate) fn recurrent(&self) -> RecurrentCfg {
+        RecurrentCfg {
+            n_k_heads: self.n_k_heads,
+            n_v_heads: self.n_v_heads,
+            dk: self.dk,
+            dv: self.dv,
+            d_conv: self.d_conv,
+        }
+    }
 }
 
 pub(super) enum Mixer {
@@ -144,8 +155,8 @@ pub(super) struct HLayer {
 pub(super) struct Hybrid {
     pub cfg: HybridCfg,
     layers: Vec<HLayer>,
-    /// `signs / √block` per input width.
-    signs: Vec<(usize, Vec<f32>)>,
+    /// The Hadamard rotation's data: the sign vector of every input width and the block size.
+    rot: Rotation,
     /// `ssm_out`'s input is permuted from tiled to grouped v-head order before its rotation.
     v_grouped: bool,
 }
@@ -195,9 +206,6 @@ impl HyScratch {
         }
     }
 }
-
-/// A per-row step fused into a rotation's pass: `(row index, row)`.
-type RowPrep<'a> = dyn Fn(usize, &mut [f32]) + Sync + 'a;
 
 fn f32_vec(g: &Gguf, t: &TensorInfo) -> Vec<f32> {
     let mut v = vec![0.0f32; t.numel() as usize];
@@ -471,7 +479,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
     let hy = Hybrid {
         cfg: hc,
         layers,
-        signs,
+        rot: Rotation::new(signs, hc.had_block),
         v_grouped,
     };
     for w in [d_model, n_ff, hc.value_dim(), cfg.q_dim()] {
@@ -500,34 +508,28 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
 }
 
 impl Hybrid {
+    /// The Hadamard sign vector of an input width.
+    #[inline]
     fn signs_for(&self, width: usize) -> Result<&[f32], String> {
-        self.signs
-            .iter()
-            .find(|(w, _)| *w == width)
-            .map(|(_, s)| s.as_slice())
-            .ok_or_else(|| format!("no Hadamard sign vector for input width {width}"))
+        self.rot.signs_for(width)
+    }
+    /// The tiled→grouped v-head permutation, when the call asks for it.
+    #[inline]
+    fn vperm(&self, perm: bool) -> Option<VPerm> {
+        perm.then_some(VPerm {
+            dv: self.cfg.dv,
+            n_k_heads: self.cfg.n_k_heads,
+            n_v_heads: self.cfg.n_v_heads,
+        })
     }
 }
 
 /// Runs of at most this many rows of one cache attend one row at a time (see the attention call).
 const SHORT_RUN: usize = 4;
 
-#[inline]
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
-
-#[inline]
-fn softplus(x: f32) -> f32 {
-    if x > 20.0 {
-        x
-    } else {
-        (1.0 + x.exp()).ln()
-    }
-}
-
 impl Model {
     /// Row `token` of the (latent) embedding table in the primal basis: dequantised, then `s ⊙ H·row`.
+    #[inline]
     pub(super) fn embed_primal(
         &self,
         token: u32,
@@ -537,12 +539,7 @@ impl Model {
         let hy = self.hy();
         let se = hy.signs_for(self.cfg.d_model)?;
         self.embed(token, row, stats);
-        for ch in row.chunks_exact_mut(hy.cfg.had_block) {
-            fwht(ch);
-        }
-        for (v, s) in row.iter_mut().zip(se) {
-            *v *= s;
-        }
+        hy.rot.rotate_embedding(row, se);
         Ok(())
     }
 
@@ -634,54 +631,21 @@ impl Model {
         pool: &Pool,
         stats: &mut StepStats,
     ) {
-        let hy = self.hy();
-        let hc = hy.cfg;
         let _t = Tick::new(2);
-        let ss = hy.signs_for(w).expect("sign vector checked at load");
-        let blk = hc.had_block;
-        let rw = hs.rot_w;
-        let rot = SharedBuf(hs.rot.as_mut_ptr());
-        let ap = SharedActs(acts.as_mut_ptr());
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let body = |_wk: usize, _nw: usize| loop {
-            let b = next.fetch_add(1, AO::Relaxed);
-            if b >= nb {
-                break;
-            }
-            // SAFETY: row `b` of `src`, of `rot` and `acts[b]` is claimed by this worker alone.
-            let x = unsafe { src.slice(b * w, w) };
-            if let Some(f) = pre {
-                f(b, x);
-            }
-            let r = unsafe { rot.slice(b * rw, w) };
-            if perm {
-                let (hd, nk, rep) = (hc.dv, hc.n_k_heads, hc.n_v_heads / hc.n_k_heads);
-                for rr in 0..rep {
-                    for gg in 0..nk {
-                        let s = (rr * nk + gg) * hd;
-                        let d = (gg * rep + rr) * hd;
-                        r[d..d + hd].copy_from_slice(&x[s..s + hd]);
-                    }
-                }
-                for (v, s) in r.iter_mut().zip(ss) {
-                    *v *= s;
-                }
-            } else {
-                for ((v, &xi), s) in r.iter_mut().zip(x.iter()).zip(ss) {
-                    *v = xi * s;
-                }
-            }
-            for c in r.chunks_exact_mut(blk) {
-                fwht(c);
-            }
-            unsafe { ap.get(b) }.fill(r);
-        };
-        if nb >= ROW_PARALLEL && pool.width() > 1 {
-            pool.run(body);
-            stats.barriers += 1;
-        } else {
-            body(0, 1);
-        }
+        let hy = self.hy();
+        hy.rot.rotate_rows_pre(
+            &mut hs.rot,
+            hs.rot_w,
+            acts,
+            src,
+            w,
+            nb,
+            hy.vperm(perm),
+            pre,
+            nb >= ROW_PARALLEL && pool.width() > 1,
+            pool,
+            stats,
+        );
     }
 
     pub(super) fn mm(
@@ -792,12 +756,7 @@ impl Model {
         for (i, &t) in tokens.iter().enumerate() {
             let row = &mut st8.x[i * d..(i + 1) * d];
             self.embed(t, row, stats);
-            for ch in row.chunks_exact_mut(hc.had_block) {
-                fwht(ch);
-            }
-            for (v, s) in row.iter_mut().zip(se) {
-                *v *= s;
-            }
+            hy.rot.rotate_embedding(row, se);
         }
 
         drop(te);
@@ -845,8 +804,8 @@ impl Model {
                     restride(&mut hs.big, hc.conv_dim(), hs.big_w, nb);
                     restride(&mut hs.z, hc.value_dim(), hs.z_w, nb);
                     self.gdn(
-                        &mut hs, st8, caches, ab, conv, dt_bias, a, norm, *idx, positions, nb,
-                        pool, stats,
+                        &mut hs, &st8.xb, caches, ab, conv, dt_bias, a, *idx, positions, nb, pool,
+                        stats,
                     );
                     let vd = hc.value_dim();
                     let mut o = std::mem::take(&mut hs.o);
@@ -855,7 +814,14 @@ impl Model {
                         let zw = hs.z_w;
                         let zr: &[f32] = &z;
                         let pre = |b: usize, row: &mut [f32]| {
-                            self.gated_norm_row(row, &zr[b * zw..b * zw + vd], norm)
+                            recurrent::gated_norm_row(
+                                row,
+                                &zr[b * zw..b * zw + vd],
+                                norm,
+                                hc.n_v_heads,
+                                hc.dv,
+                                c.eps,
+                            )
                         };
                         let op = SharedBuf(o.as_mut_ptr());
                         self.rotate_rows_pre(
@@ -1166,18 +1132,18 @@ impl Model {
     }
 
     /// The Gated DeltaNet core for one layer: conv, gates, delta rule and gated norm, from `hs.big` (qkv), `hs.z`
-    /// and the unrotated normed input `st8.xb`, into `hs.o`.
+    /// and the unrotated normed input `xb`, into `hs.o`. The steps themselves are the recurrent block's free
+    /// functions; this is the order they run in.
     #[allow(clippy::too_many_arguments)]
     fn gdn(
         &self,
         hs: &mut HyScratch,
-        st8: &mut State,
+        xb: &[f32],
         caches: &mut Caches,
         ab_w: &[f32],
         conv_w: &[f32],
         dt_bias: &[f32],
         a_log: &[f32],
-        norm_w: &[f32],
         idx: usize,
         positions: &[usize],
         nb: usize,
@@ -1185,270 +1151,80 @@ impl Model {
         stats: &mut StepStats,
     ) {
         let c = self.cfg;
-        let hc = self.hy().cfg;
-        let (d, nv, nk, dk, dv) = (c.d_model, hc.n_v_heads, hc.n_k_heads, hc.dk, hc.dv);
-        let (kd, vd, cd, taps) = (hc.key_dim(), hc.value_dim(), hc.conv_dim(), hc.d_conv - 1);
+        let rc = self.hy().cfg.recurrent();
+        let (d, nv) = (c.d_model, rc.n_v_heads);
 
         // β and α: `[2·n_v][d]` f32 against the unrotated normed rows, split across the pool by output.
         {
             let _t = Tick::new(4);
-            let xb: &[f32] = &st8.xb;
-            let out = SharedBuf(hs.ab.as_mut_ptr());
-            let n_out = 2 * nv;
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            pool.run(|_wk, _nw| loop {
-                let lo = next.fetch_add(4, AO::Relaxed);
-                if lo >= n_out {
-                    break;
-                }
-                for r in lo..(lo + 4).min(n_out) {
-                    let w = &ab_w[r * d..(r + 1) * d];
-                    for b in 0..nb {
-                        // SAFETY: output (b, r) belongs to the worker claiming r.
-                        let v = crate::vmath::dot_f32(w, &xb[b * d..(b + 1) * d]);
-                        unsafe { out.slice(b * n_out + r, 1)[0] = v };
-                    }
-                }
-            });
-            stats.barriers += 1;
-            stats.bytes_weights += (ab_w.len() * 4) as u64;
-            stats.macs += (ab_w.len() * nb) as u64;
+            recurrent::beta_alpha(&mut hs.ab, ab_w, xb, d, nv, nb, pool, stats);
         }
+
+        // The state and conv pointers of every row, taken once per cache (rows of one cache share them):
+        // re-borrowing a cache per row would invalidate the pointers taken before.
+        caches.runs_into(nb, &mut hs.runs);
+        recurrent::rec_ptrs(
+            &hs.runs,
+            |ci| caches.cache_mut(ci).recurrent_ptrs(idx),
+            &mut hs.ptrs.rec,
+        );
+        recurrent::snap_ptrs(
+            &hs.runs,
+            |ci| caches.cache_mut(ci).snapshot_ptrs(idx),
+            &mut hs.ptrs.snap,
+        );
+        let (rp, spp) = (
+            RowPtrs(hs.ptrs.rec.as_ptr()),
+            SnapPtrs(hs.ptrs.snap.as_ptr()),
+        );
 
         // Conv, SiLU, L2 norms and the gate maths, row by row in order: a shared cache's conv history advances
         // one token per row.
-        let q_scale = 1.0 / (dk as f32).sqrt();
         let tc = Tick::new(5);
-        // Conv: channels are independent, so a worker takes a channel range and runs every row through it in
-        // order (a shared cache's history advances one token per row). The history is a ring of `taps` planes of
-        // `cd` channels: the input at position p sits in plane p mod taps, so the oldest of the window ending at
-        // `pos` is plane pos mod taps, the one this token overwrites after the sum.
-        {
-            let (rp, spp) = {
-                rec_ptrs(caches, idx, nb, &mut hs.runs, &mut hs.ptrs.rec);
-                snap_ptrs(caches, idx, nb, &mut hs.runs, &mut hs.ptrs.snap);
-                (
-                    RowPtrs(hs.ptrs.rec.as_ptr()),
-                    SnapPtrs(hs.ptrs.snap.as_ptr()),
-                )
-            };
-            let bigp = SharedBuf(hs.big.as_mut_ptr());
-            let bw = hs.big_w;
-            let wcur = &conv_w[taps * cd..(taps + 1) * cd];
-            const C: usize = 256;
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            pool.run(|_wk, _nw| {
-                let mut acc = [0.0f32; C];
-                loop {
-                    let c0 = next.fetch_add(C, AO::Relaxed);
-                    if c0 >= cd {
-                        break;
-                    }
-                    let c1 = (c0 + C).min(cd);
-                    for b in 0..nb {
-                        // SAFETY: channels c0..c1 of every row's buffer and history are this worker's.
-                        let (_, hp) = unsafe { rp.at(b) };
-                        let pos = positions[b];
-                        let y = unsafe { bigp.slice(b * bw + c0, c1 - c0) };
-                        for (i, ch) in (c0..c1).enumerate() {
-                            acc[i] = y[i] * wcur[ch];
-                        }
-                        for t in 0..taps {
-                            let plane = (pos + t) % taps;
-                            let hist = unsafe {
-                                std::slice::from_raw_parts(hp.add(plane * cd + c0), c1 - c0)
-                            };
-                            let wt = &conv_w[t * cd + c0..t * cd + c1];
-                            for i in 0..c1 - c0 {
-                                acc[i] += hist[i] * wt[i];
-                            }
-                        }
-                        let slot = pos % taps;
-                        let dst = unsafe {
-                            std::slice::from_raw_parts_mut(hp.add(slot * cd + c0), c1 - c0)
-                        };
-                        dst.copy_from_slice(y);
-                        y.copy_from_slice(&acc[..c1 - c0]);
-                        // A speculative verification's snapshot: this range of the history after its row.
-                        if let Some((sp, _, sconv)) = unsafe { spp.at(b) } {
-                            if pos == sp {
-                                for t in 0..taps {
-                                    unsafe {
-                                        std::ptr::copy_nonoverlapping(
-                                            hp.add(t * cd + c0),
-                                            sconv.add(t * cd + c0),
-                                            c1 - c0,
-                                        )
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-            stats.barriers += 1;
-        }
-        // SiLU, the q/k L2 norms and the gate maths, per row (rows are independent now).
-        {
-            let bigp = SharedBuf(hs.big.as_mut_ptr());
-            let abp = SharedBuf(hs.ab.as_mut_ptr());
-            let bw = hs.big_w;
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let body = |_wk: usize, _nw: usize| loop {
-                let b = next.fetch_add(1, AO::Relaxed);
-                if b >= nb {
-                    break;
-                }
-                // SAFETY: row b of `big` and of `ab` is claimed by this worker.
-                let y = unsafe { bigp.slice(b * bw, cd) };
-                crate::vmath::silu(y);
-                for (base, scale) in [(0usize, q_scale), (kd, 1.0)] {
-                    for h in 0..nk {
-                        let v = &mut y[base + h * dk..base + (h + 1) * dk];
-                        let n = crate::vmath::sumsq_f64(v).sqrt() as f32;
-                        let inv = 1.0 / n.max(1e-6) * scale;
-                        for x in v.iter_mut() {
-                            *x *= inv;
-                        }
-                    }
-                }
-                let ab = unsafe { abp.slice(b * 2 * nv, 2 * nv) };
-                for h in 0..nv {
-                    let beta = sigmoid(ab[h]);
-                    let g = a_log[h] * softplus(ab[nv + h] + dt_bias[h]);
-                    ab[h] = beta;
-                    ab[nv + h] = g.exp();
-                }
-            };
-            if nb >= ROW_PARALLEL && pool.width() > 1 {
-                pool.run(body);
-                stats.barriers += 1;
-            } else {
-                body(0, 1);
-            }
-        }
-
+        recurrent::causal_conv(
+            &mut hs.big,
+            hs.big_w,
+            conv_w,
+            rp,
+            spp,
+            &rc,
+            nb,
+            positions,
+            pool,
+            stats,
+        );
+        recurrent::silu_norm_gates(
+            &mut hs.big,
+            hs.big_w,
+            &mut hs.ab,
+            dt_bias,
+            a_log,
+            &rc,
+            nb,
+            nb >= ROW_PARALLEL && pool.width() > 1,
+            pool,
+            stats,
+        );
         drop(tc);
+
         let td = Tick::new(6);
-        // Delta rule: tasks are v-heads; a task runs its head through every row in order.
-        let (rp, spp) = {
-            rec_ptrs(caches, idx, nb, &mut hs.runs, &mut hs.ptrs.rec);
-            snap_ptrs(caches, idx, nb, &mut hs.runs, &mut hs.ptrs.snap);
-            (
-                RowPtrs(hs.ptrs.rec.as_ptr()),
-                SnapPtrs(hs.ptrs.snap.as_ptr()),
-            )
-        };
-        let big: &[f32] = &hs.big;
-        let abv: &[f32] = &hs.ab;
-        let out = SharedBuf(hs.o.as_mut_ptr());
-        let bw = hs.big_w;
-        let shared = matches!(caches, Caches::Shared(_));
-        // Two tasks per head (each half of the state's rows), claimed dynamically so fast cores take more.
-        const SPLIT: usize = 2;
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        pool.run(|_wk, _nw| loop {
-            let task = next.fetch_add(1, AO::Relaxed);
-            if task >= nv * SPLIT {
-                break;
-            }
-            let (hv, part) = (task / SPLIT, task % SPLIT);
-            let (j0, j1) = (part * dv / SPLIT, (part + 1) * dv / SPLIT);
-            for b in 0..nb {
-                // SAFETY: `ptrs` outlives the call; rows j0..j1 of head `hv` of row `b`'s state are this task's.
-                let (sp, _) = unsafe { rp.at(b) };
-                let s = unsafe {
-                    std::slice::from_raw_parts_mut(sp.add((hv * dv + j0) * dk), (j1 - j0) * dk)
-                };
-                let y = &big[b * bw..];
-                let kh = hv % nk;
-                let q = &y[kh * dk..(kh + 1) * dk];
-                let k = &y[kd + kh * dk..kd + (kh + 1) * dk];
-                let v = &y[2 * kd + hv * dv..2 * kd + (hv + 1) * dv];
-                let beta = abv[b * 2 * nv + hv];
-                let decay = abv[b * 2 * nv + nv + hv];
-                let o = unsafe { out.slice(b * vd + hv * dv + j0, j1 - j0) };
-                crate::delta::delta_head(s, q, k, &v[j0..j1], beta, decay, o, dk);
-                // A speculative verification's snapshot: this task's slice of the state after its row.
-                if let Some((sp, sstate, _)) = unsafe { spp.at(b) } {
-                    if positions[b] == sp {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                s.as_ptr(),
-                                sstate.add((hv * dv + j0) * dk),
-                                s.len(),
-                            )
-                        };
-                    }
-                }
-            }
-        });
-        let _ = shared;
-        stats.barriers += 1;
-        stats.bytes_kv += (2
-            * hc.state_floats()
-            * 4
-            * if matches!(caches, Caches::Shared(_)) {
-                1
-            } else {
-                nb
-            }) as u64;
-        stats.macs += (4 * nv * dv * dk * nb) as u64;
-
+        // The delta rule: tasks are v-heads; a task runs its head through every row in order.
+        recurrent::delta_rule(
+            &hs.big,
+            hs.big_w,
+            &hs.ab,
+            &mut hs.o,
+            rp,
+            spp,
+            &rc,
+            nb,
+            positions,
+            matches!(caches, Caches::Shared(_)),
+            pool,
+            stats,
+        );
         drop(td);
-        // The gated RMSNorm runs in the ssm_out rotation's pass (`gated_norm_row`).
-        let _ = norm_w;
-    }
-
-    /// Gated RMSNorm of one row of the GDN output, per head: rms(o_h)·w ⊙ silu(z_h).
-    fn gated_norm_row(&self, o: &mut [f32], z: &[f32], norm_w: &[f32]) {
-        let hc = self.hy().cfg;
-        let (nv, dv) = (hc.n_v_heads, hc.dv);
-        for h in 0..nv {
-            let oh = &mut o[h * dv..(h + 1) * dv];
-            let zh = &z[h * dv..(h + 1) * dv];
-            let ss = crate::vmath::sumsq_f64(oh) / dv as f64;
-            let inv = (1.0 / (ss + self.cfg.eps as f64).sqrt()) as f32;
-            for i in 0..dv {
-                oh[i] *= inv * norm_w[i];
-            }
-            crate::vmath::mul_silu(oh, zh);
-        }
-    }
-}
-
-/// Every row's (state, conv) pointers for recurrent layer `idx`, taken once per cache (rows of one cache share
-/// them): re-borrowing a cache per row would invalidate the pointers taken before. `runs` and `out` are reused
-/// scratch — a decode step runs this four times per layer and must not allocate.
-fn rec_ptrs(
-    caches: &mut Caches,
-    idx: usize,
-    nb: usize,
-    runs: &mut Vec<(usize, usize, usize)>,
-    out: &mut [(*mut f32, *mut f32)],
-) {
-    caches.runs_into(nb, runs);
-    for &(r0, len, ci) in runs.iter() {
-        let p = caches.cache_mut(ci).recurrent_ptrs(idx);
-        for slot in &mut out[r0..r0 + len] {
-            *slot = p;
-        }
-    }
-}
-
-fn snap_ptrs(
-    caches: &mut Caches,
-    idx: usize,
-    nb: usize,
-    runs: &mut Vec<(usize, usize, usize)>,
-    out: &mut [Option<(usize, *mut f32, *mut f32)>],
-) {
-    caches.runs_into(nb, runs);
-    for &(r0, len, ci) in runs.iter() {
-        let p = caches.cache_mut(ci).snapshot_ptrs(idx);
-        for slot in &mut out[r0..r0 + len] {
-            *slot = p;
-        }
+        // The gated RMSNorm runs in the ssm_out rotation's pass (`recurrent::gated_norm_row`).
     }
 }
 
