@@ -269,3 +269,381 @@ pub unsafe fn delta_head_avx512(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn f32_range(&mut self, lo: f32, hi: f32) -> f32 {
+            let frac = ((self.next_u64() >> 40) as f32) / (1u64 << 24) as f32;
+            lo + (hi - lo) * frac
+        }
+        fn vec(&mut self, len: usize, lo: f32, hi: f32) -> Vec<f32> {
+            (0..len).map(|_| self.f32_range(lo, hi)).collect()
+        }
+    }
+
+    #[derive(Default, Debug)]
+    struct DiffStats {
+        max_abs: f32,
+        max_rel: f32, // |g - w| / max(|w|, 1.0)
+        max_ulp: u32,
+    }
+
+    fn check_diff(got: &[f32], want: &[f32], max_stats: &mut DiffStats) {
+        assert_eq!(got.len(), want.len());
+        for (&g, &w) in got.iter().zip(want) {
+            let abs = (g - w).abs();
+            let rel = abs / w.abs().max(1.0);
+            let ulp = (g.to_bits() as i64 - w.to_bits() as i64).unsigned_abs() as u32;
+            if abs > max_stats.max_abs {
+                max_stats.max_abs = abs;
+            }
+            if rel > max_stats.max_rel {
+                max_stats.max_rel = rel;
+            }
+            if ulp > max_stats.max_ulp {
+                max_stats.max_ulp = ulp;
+            }
+        }
+    }
+
+    #[test]
+    fn delta_head_checks_preconditions() {
+        let mut s = vec![0.0f32; 128];
+        let q = vec![0.0f32; 64];
+        let k = vec![0.0f32; 64];
+        let v = vec![0.0f32; 2];
+        let mut o = vec![0.0f32; 2];
+
+        // Normal valid call does not panic
+        delta_head(&mut s, &q, &k, &v, 0.5, 0.9, &mut o, 64);
+
+        // q too short
+        let r = std::panic::catch_unwind(|| {
+            let mut s = vec![0.0f32; 128];
+            let mut o = vec![0.0f32; 2];
+            delta_head(&mut s, &q[..63], &k, &v, 0.5, 0.9, &mut o, 64);
+        });
+        assert!(r.is_err());
+
+        // k too short
+        let r = std::panic::catch_unwind(|| {
+            let mut s = vec![0.0f32; 128];
+            let mut o = vec![0.0f32; 2];
+            delta_head(&mut s, &q, &k[..63], &v, 0.5, 0.9, &mut o, 64);
+        });
+        assert!(r.is_err());
+
+        // v too short
+        let r = std::panic::catch_unwind(|| {
+            let mut s = vec![0.0f32; 128];
+            let mut o = vec![0.0f32; 2];
+            delta_head(&mut s, &q, &k, &v[..1], 0.5, 0.9, &mut o, 64);
+        });
+        assert!(r.is_err());
+
+        // s too short
+        let r = std::panic::catch_unwind(|| {
+            let mut s = vec![0.0f32; 127];
+            let mut o = vec![0.0f32; 2];
+            delta_head(&mut s, &q, &k, &v, 0.5, 0.9, &mut o, 64);
+        });
+        assert!(r.is_err());
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx2_vs_scalar_reference() {
+        if !crate::simd::have_batched() {
+            eprintln!("skipping avx2_vs_scalar_reference: AVX2+FMA not available");
+            return;
+        }
+
+        let mut rng = Rng::new(0xABCD_EF01_2345_6789);
+        let mut stats_s = DiffStats::default();
+        let mut stats_o = DiffStats::default();
+
+        // Test multiple (dk, dv) shapes where dk % 16 == 0
+        let shapes = [
+            (16, 1),
+            (16, 8),
+            (32, 4),
+            (48, 16),
+            (64, 32),
+            (128, 64),
+            (128, 128),
+            (256, 16),
+        ];
+
+        for &(dk, dv) in &shapes {
+            // 1. Zero inputs
+            {
+                let mut s_scalar = vec![0.0f32; dv * dk];
+                let mut s_avx2 = s_scalar.clone();
+                let q = vec![0.0f32; dk];
+                let k = vec![0.0f32; dk];
+                let v = vec![0.0f32; dv];
+                let mut o_scalar = vec![0.0f32; dv];
+                let mut o_avx2 = vec![0.0f32; dv];
+
+                delta_head_scalar(&mut s_scalar, &q, &k, &v, 0.5, 0.9, &mut o_scalar, dk);
+                // SAFETY: have_batched() checked above; lengths and dk % 16 == 0 verified.
+                unsafe {
+                    delta_head_avx2(&mut s_avx2, &q, &k, &v, 0.5, 0.9, &mut o_avx2, dk);
+                }
+                assert_eq!(s_avx2, s_scalar);
+                assert_eq!(o_avx2, o_scalar);
+            }
+
+            // 2. Random normal inputs in [-1.0, 1.0]
+            for _ in 0..10 {
+                let s_init = rng.vec(dv * dk, -1.0, 1.0);
+                let q = rng.vec(dk, -1.0, 1.0);
+                let k = rng.vec(dk, -1.0, 1.0);
+                let v = rng.vec(dv, -1.0, 1.0);
+                let beta = rng.f32_range(0.01, 0.99);
+                let decay = rng.f32_range(0.01, 0.99);
+
+                let mut s_scalar = s_init.clone();
+                let mut s_avx2 = s_init.clone();
+                let mut o_scalar = vec![0.0f32; dv];
+                let mut o_avx2 = vec![0.0f32; dv];
+
+                delta_head_scalar(&mut s_scalar, &q, &k, &v, beta, decay, &mut o_scalar, dk);
+                // SAFETY: have_batched() checked above; lengths and dk % 16 == 0 verified.
+                unsafe {
+                    delta_head_avx2(&mut s_avx2, &q, &k, &v, beta, decay, &mut o_avx2, dk);
+                }
+
+                check_diff(&s_avx2, &s_scalar, &mut stats_s);
+                check_diff(&o_avx2, &o_scalar, &mut stats_o);
+            }
+
+            // 3. Large inputs
+            {
+                let s_init = rng.vec(dv * dk, -50.0, 50.0);
+                let q = rng.vec(dk, -2.0, 2.0);
+                let k = rng.vec(dk, -2.0, 2.0);
+                let v = rng.vec(dv, -50.0, 50.0);
+                let beta = 0.8;
+                let decay = 0.95;
+
+                let mut s_scalar = s_init.clone();
+                let mut s_avx2 = s_init.clone();
+                let mut o_scalar = vec![0.0f32; dv];
+                let mut o_avx2 = vec![0.0f32; dv];
+
+                delta_head_scalar(&mut s_scalar, &q, &k, &v, beta, decay, &mut o_scalar, dk);
+                // SAFETY: have_batched() checked above; lengths and dk % 16 == 0 verified.
+                unsafe {
+                    delta_head_avx2(&mut s_avx2, &q, &k, &v, beta, decay, &mut o_avx2, dk);
+                }
+
+                check_diff(&s_avx2, &s_scalar, &mut stats_s);
+                check_diff(&o_avx2, &o_scalar, &mut stats_o);
+            }
+        }
+
+        eprintln!("AVX2 vs scalar stats: S={stats_s:?}, O={stats_o:?}");
+        // Floating point reduction order differs between 8-wide scalar summation and 16-wide AVX2 FMA.
+        // Across random inputs and large inputs (scale up to 50.0):
+        //   - Recurrent state S: max_abs ≈ 3.7e-4, max_rel < 2.0e-4 (normalized by max(|w|, 1.0))
+        //   - Output vector O: max_abs ≈ 5.9e-3, max_rel < 5.0e-5
+        // Both match bit-for-bit on zero inputs.
+        assert!(stats_s.max_rel < 2.5e-4, "s max_rel: {}", stats_s.max_rel);
+        assert!(stats_o.max_rel < 5.0e-5, "o max_rel: {}", stats_o.max_rel);
+        assert!(stats_s.max_abs < 5.0e-4, "s max_abs: {}", stats_s.max_abs);
+        assert!(stats_o.max_abs < 1.0e-2, "o max_abs: {}", stats_o.max_abs);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx512_vs_scalar_reference() {
+        if !crate::tern::have_vnni() {
+            eprintln!("skipping avx512_vs_scalar_reference: AVX-512 not available");
+            return;
+        }
+
+        let mut rng = Rng::new(0x1234_5678_9ABC_DEF0);
+        let mut stats_s = DiffStats::default();
+        let mut stats_o = DiffStats::default();
+
+        // Test multiple (dk, dv) shapes where dk % 64 == 0
+        let shapes = [
+            (64, 1),
+            (64, 8),
+            (64, 32),
+            (128, 64),
+            (128, 128),
+            (192, 16),
+            (256, 32),
+        ];
+
+        for &(dk, dv) in &shapes {
+            // 1. Zero inputs
+            {
+                let mut s_scalar = vec![0.0f32; dv * dk];
+                let mut s_avx512 = s_scalar.clone();
+                let q = vec![0.0f32; dk];
+                let k = vec![0.0f32; dk];
+                let v = vec![0.0f32; dv];
+                let mut o_scalar = vec![0.0f32; dv];
+                let mut o_avx512 = vec![0.0f32; dv];
+
+                delta_head_scalar(&mut s_scalar, &q, &k, &v, 0.5, 0.9, &mut o_scalar, dk);
+                // SAFETY: have_vnni() checked above; lengths and dk % 64 == 0 verified.
+                unsafe {
+                    delta_head_avx512(&mut s_avx512, &q, &k, &v, 0.5, 0.9, &mut o_avx512, dk);
+                }
+                assert_eq!(s_avx512, s_scalar);
+                assert_eq!(o_avx512, o_scalar);
+            }
+
+            // 2. Random normal inputs in [-1.0, 1.0]
+            for _ in 0..10 {
+                let s_init = rng.vec(dv * dk, -1.0, 1.0);
+                let q = rng.vec(dk, -1.0, 1.0);
+                let k = rng.vec(dk, -1.0, 1.0);
+                let v = rng.vec(dv, -1.0, 1.0);
+                let beta = rng.f32_range(0.01, 0.99);
+                let decay = rng.f32_range(0.01, 0.99);
+
+                let mut s_scalar = s_init.clone();
+                let mut s_avx512 = s_init.clone();
+                let mut o_scalar = vec![0.0f32; dv];
+                let mut o_avx512 = vec![0.0f32; dv];
+
+                delta_head_scalar(&mut s_scalar, &q, &k, &v, beta, decay, &mut o_scalar, dk);
+                // SAFETY: have_vnni() checked above; lengths and dk % 64 == 0 verified.
+                unsafe {
+                    delta_head_avx512(&mut s_avx512, &q, &k, &v, beta, decay, &mut o_avx512, dk);
+                }
+
+                check_diff(&s_avx512, &s_scalar, &mut stats_s);
+                check_diff(&o_avx512, &o_scalar, &mut stats_o);
+            }
+
+            // 3. Large inputs
+            {
+                let s_init = rng.vec(dv * dk, -50.0, 50.0);
+                let q = rng.vec(dk, -2.0, 2.0);
+                let k = rng.vec(dk, -2.0, 2.0);
+                let v = rng.vec(dv, -50.0, 50.0);
+                let beta = 0.8;
+                let decay = 0.95;
+
+                let mut s_scalar = s_init.clone();
+                let mut s_avx512 = s_init.clone();
+                let mut o_scalar = vec![0.0f32; dv];
+                let mut o_avx512 = vec![0.0f32; dv];
+
+                delta_head_scalar(&mut s_scalar, &q, &k, &v, beta, decay, &mut o_scalar, dk);
+                // SAFETY: have_vnni() checked above; lengths and dk % 64 == 0 verified.
+                unsafe {
+                    delta_head_avx512(&mut s_avx512, &q, &k, &v, beta, decay, &mut o_avx512, dk);
+                }
+
+                check_diff(&s_avx512, &s_scalar, &mut stats_s);
+                check_diff(&o_avx512, &o_scalar, &mut stats_o);
+            }
+        }
+
+        eprintln!("AVX-512 vs scalar stats: S={stats_s:?}, O={stats_o:?}");
+        // Floating point reduction order differs between 8-wide scalar summation and 64-wide AVX-512 FMA.
+        // Across random inputs and large inputs (scale up to 50.0):
+        //   - Recurrent state S: max_abs ≈ 3.7e-4, max_rel < 2.0e-4 (normalized by max(|w|, 1.0))
+        //   - Output vector O: max_abs ≈ 3.9e-3, max_rel < 5.0e-5
+        // Both match bit-for-bit on zero inputs.
+        assert!(stats_s.max_rel < 2.5e-4, "s max_rel: {}", stats_s.max_rel);
+        assert!(stats_o.max_rel < 5.0e-5, "o max_rel: {}", stats_o.max_rel);
+        assert!(stats_s.max_abs < 5.0e-4, "s max_abs: {}", stats_s.max_abs);
+        assert!(stats_o.max_abs < 1.0e-2, "o max_abs: {}", stats_o.max_abs);
+    }
+
+    #[test]
+    fn delta_head_dispatch_across_shapes() {
+        let mut rng = Rng::new(0x9876_5432_10FE_DCBA);
+        let mut stats_s = DiffStats::default();
+        let mut stats_o = DiffStats::default();
+
+        // Various shapes: some unaligned (scalar), some AVX2-aligned (% 16 == 0), some AVX-512-aligned (% 64 == 0)
+        let shapes = [
+            (7, 4),    // scalar
+            (15, 2),   // scalar
+            (16, 4),   // avx2
+            (24, 8),   // scalar (not % 16)
+            (32, 16),  // avx2
+            (48, 8),   // avx2
+            (64, 16),  // avx-512 or avx2
+            (70, 4),   // scalar
+            (128, 32), // avx-512 or avx2
+        ];
+
+        for &(dk, dv) in &shapes {
+            let s_init = rng.vec(dv * dk, -1.0, 1.0);
+            let q = rng.vec(dk, -1.0, 1.0);
+            let k = rng.vec(dk, -1.0, 1.0);
+            let v = rng.vec(dv, -1.0, 1.0);
+            let beta = rng.f32_range(0.1, 0.9);
+            let decay = rng.f32_range(0.1, 0.9);
+
+            let mut s_dispatch = s_init.clone();
+            let mut s_scalar = s_init.clone();
+            let mut o_dispatch = vec![0.0f32; dv];
+            let mut o_scalar = vec![0.0f32; dv];
+
+            delta_head(
+                &mut s_dispatch,
+                &q,
+                &k,
+                &v,
+                beta,
+                decay,
+                &mut o_dispatch,
+                dk,
+            );
+            delta_head_scalar(&mut s_scalar, &q, &k, &v, beta, decay, &mut o_scalar, dk);
+
+            if dk % 16 != 0 {
+                // Must be bit-for-bit identical to scalar when unaligned
+                assert_eq!(s_dispatch, s_scalar, "bit identical s for dk={dk}");
+                assert_eq!(o_dispatch, o_scalar, "bit identical o for dk={dk}");
+            } else {
+                check_diff(&s_dispatch, &s_scalar, &mut stats_s);
+                check_diff(&o_dispatch, &o_scalar, &mut stats_o);
+            }
+        }
+
+        assert!(
+            stats_s.max_rel < 3.5e-4,
+            "dispatch s max_rel: {}",
+            stats_s.max_rel
+        );
+        assert!(
+            stats_o.max_rel < 5.0e-5,
+            "dispatch o max_rel: {}",
+            stats_o.max_rel
+        );
+        assert!(
+            stats_s.max_abs < 5.0e-4,
+            "dispatch s max_abs: {}",
+            stats_s.max_abs
+        );
+        assert!(
+            stats_o.max_abs < 1.0e-2,
+            "dispatch o max_abs: {}",
+            stats_o.max_abs
+        );
+    }
+}
