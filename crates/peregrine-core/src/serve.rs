@@ -79,6 +79,20 @@ pub struct SlotCfg {
     pub stop: Vec<u32>,
     /// Report each token's log-probability (for clients that request `logprobs`).
     pub logprobs: bool,
+    /// The sampling turn mixed into every position's key (`sample::position_key`).
+    ///
+    /// 0 — the default — is what the engine has always done: the same prompt
+    /// and the same seed draw the same tokens every time, whoever is being
+    /// served. A conversation counts its turns instead, so its first turn draws
+    /// with turn = 1 and a regenerated reply draws afresh (ADR 0007).
+    pub turn: u32,
+    /// Whether the slot's KV cache uses the rotated int8 layout.
+    ///
+    /// `true` — the default — is what the engine has always done. A family
+    /// whose keys and queries share a few huge channels measures worse with the
+    /// rotation (`Architecture::session_kv_rotation`), and a conversation that
+    /// wants that behaviour says so here.
+    pub kv_rotation: bool,
 }
 
 impl Default for SlotCfg {
@@ -93,6 +107,8 @@ impl Default for SlotCfg {
             max_tokens: 256,
             stop: vec![],
             logprobs: false,
+            turn: 0,
+            kv_rotation: true,
         }
     }
 }
@@ -154,6 +170,14 @@ struct Slot {
     /// The slot's own token history and its reused penalty counts. Only touched when
     /// `cfg.penalties` is not off, so an ordinary request pays nothing for it.
     pen: crate::sample::PenaltyState,
+    /// The slot's drafter, if one is attached (ADR 0007).
+    ///
+    /// The decode loop does not draft with it yet: what the engine does with it
+    /// now is set up the taps and hidden states it asks for and tell it what
+    /// was committed. It is behind a lock because a slot is shared with the
+    /// sampling workers, and a drafter is only `Send`: the lock is never
+    /// contended, because only the engine's own thread talks to it.
+    drafter: Option<std::sync::Mutex<Box<dyn crate::draft::Drafter>>>,
 }
 
 /// A slot's place in MTP speculation: the main model's final hidden state at `pos - 1`, and the MTP row an
@@ -233,6 +257,9 @@ pub struct Engine {
     // the MTP block's cache and scratch, used by the one slot that speculates (there is never more
     // than one: speculation runs only while a single user is served).
     mtp: Option<MtpState>,
+    /// The target layers the attached drafters need copied out of the forward pass.
+    /// Empty: no drafter is attached, and the forward copies nothing.
+    tap_layers: Vec<usize>,
     /// MTP drafts verified, and how many were kept.
     pub spec_drafts: u64,
     pub spec_hits: u64,
@@ -279,6 +306,7 @@ impl Engine {
             stats: StepStats::default(),
             decode_steps: 0,
             decode_rows: 0,
+            tap_layers: Vec::new(),
             samps: (0..threads.max(1))
                 .map(|_| std::sync::Mutex::new(crate::sample::Scratch::default()))
                 .collect(),
@@ -308,6 +336,11 @@ impl Engine {
     }
     pub fn max_ctx(&self) -> usize {
         self.max_ctx
+    }
+    /// The target layers the engine copies out of the forward pass for the
+    /// attached drafters. Empty: no drafter is attached, and nothing is copied.
+    pub fn tap_layers(&self) -> &[usize] {
+        &self.tap_layers
     }
     /// Bytes one slot's cache holds, for sizing a deployment.
     pub fn cache_bytes_per_slot(&self) -> u64 {
@@ -340,6 +373,11 @@ impl Engine {
         let id = self.next_id;
         self.next_id += 1;
         let mut kv = self.model.new_cache(self.kv_prec, self.max_ctx);
+        // The rotation is the engine's default; a request may ask for the
+        // family's own choice instead (ADR 0007).
+        if !cfg.kv_rotation {
+            kv = kv.without_rotation();
+        }
         // The last prompt token is never prefilled (it is what the first decode step feeds), so a prefix may
         // cover everything before it.
         let cap = prompt.len() - 1;
@@ -406,8 +444,93 @@ impl Engine {
             prefill_s: 0.0,
             decode_s: 0.0,
             pen,
+            drafter: None,
         });
         Ok(id)
+    }
+
+    /// Attach a drafter to a slot (ADR 0007).
+    ///
+    /// The decode loop does not draft with it yet — that is the next step of
+    /// S1.4 — but the engine does what the drafter asks for: the taps it needs
+    /// are copied out of the forward pass, and every committed position is
+    /// told to it. A drafter that asks for nothing costs the engine nothing.
+    pub fn attach_drafter(
+        &mut self,
+        id: SlotId,
+        drafter: Box<dyn crate::draft::Drafter>,
+    ) -> Result<(), String> {
+        let Some(i) = self.slots.iter().position(|s| s.id == id) else {
+            return Err(format!("no slot {id}"));
+        };
+        self.slots[i].drafter = Some(std::sync::Mutex::new(drafter));
+        self.refresh_taps();
+        Ok(())
+    }
+
+    /// Set up the taps the attached drafters need, and take them down again
+    /// when the last one goes: a forward copies the tapped layers out of the
+    /// residual stream, and a request without a drafter must not pay for it.
+    fn refresh_taps(&mut self) {
+        let mut layers: Vec<usize> = Vec::new();
+        for s in &self.slots {
+            let Some(d) = &s.drafter else { continue };
+            let d = d.lock().expect("drafter");
+            if !d.needs().taps {
+                continue;
+            }
+            for &l in d.tap_layers() {
+                if !layers.contains(&l) {
+                    layers.push(l);
+                }
+            }
+        }
+        if layers != self.tap_layers {
+            self.tap_layers = layers;
+            self.state
+                .set_taps(&self.tap_layers, self.model.cfg.d_model);
+        }
+    }
+
+    /// Whether any attached drafter needs the target's hidden states.
+    fn wants_hidden(&self) -> bool {
+        self.slots.iter().any(|s| {
+            s.drafter
+                .as_ref()
+                .is_some_and(|d| d.lock().expect("drafter").needs().hidden)
+        })
+    }
+
+    /// Tell a slot's drafter what was committed in batch row `row`: the token
+    /// at position `pos`, with the target's taps and hidden state for that row.
+    ///
+    /// A slot without a drafter pays nothing: nothing is copied out of the
+    /// forward pass for it.
+    fn commit_row(&mut self, si: usize, row: usize, pos: usize, token: u32) {
+        let Some(d) = &self.slots[si].drafter else {
+            return;
+        };
+        let mut d = d.lock().expect("drafter");
+        let d_model = self.model.cfg.d_model;
+        let needs = d.needs();
+        let taps: &[f32] = if needs.taps {
+            self.state.tap_row(row, d_model)
+        } else {
+            &[]
+        };
+        let hidden: &[f32] = if needs.hidden {
+            let st = &self.state;
+            let lo = row * d_model;
+            let hi = (lo + d_model).min(st.hidden.len());
+            if lo < hi {
+                &st.hidden[lo..hi]
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        };
+        d.commit(pos, token, taps, hidden, &self.pool);
     }
 
     /// Drop a request (its caller has gone, or it is being replanned); its cache is kept for whoever shares its
@@ -416,6 +539,8 @@ impl Engine {
         if let Some(i) = self.slots.iter().position(|s| s.id == id) {
             let s = self.slots.remove(i);
             self.keep_prefix(&s);
+            // The slot's drafter went with it: the taps it needed may not be needed any more.
+            self.refresh_taps();
         }
     }
 
@@ -541,7 +666,7 @@ impl Engine {
         // states.
         let mtp_pre =
             n_dec == 0 && pre.len() == 1 && self.slots.len() == 1 && self.slots[0].spec.is_some();
-        self.state.want_hidden = mtp_pre;
+        self.state.want_hidden = mtp_pre || self.wants_hidden();
         let r = {
             let mut refs: Vec<Option<&mut KvCache>> =
                 self.slots.iter_mut().map(|s| Some(&mut s.kv)).collect();
@@ -586,6 +711,18 @@ impl Engine {
         self.state.want_hidden = false;
         let elapsed = t0.elapsed().as_secs_f64();
         let rows = tokens.len().max(1) as f64;
+        // The prefilled rows are committed positions too: a drafter is told about them, with the
+        // target's taps and hidden state for the row.
+        for (k, &(i, take)) in pre.iter().enumerate() {
+            if self.slots[i].drafter.is_none() {
+                continue;
+            }
+            let fed = self.slots[i].fed;
+            for t in 0..take {
+                let row = n_dec + k + t;
+                self.commit_row(i, row, fed + t, tokens[row]);
+            }
+        }
         for &(i, take) in &pre {
             let s = &mut self.slots[i];
             let last = s.prompt.len() - 1;
@@ -611,6 +748,7 @@ impl Engine {
         let take = PREFILL_CHUNK.min(last - s.fed);
         let chunk: Vec<u32> = s.prompt[s.fed..s.fed + take].to_vec();
         let start = s.fed;
+        self.state.want_hidden = self.wants_hidden();
         self.model.forward(
             &mut self.state,
             &mut self.slots[i].kv,
@@ -620,6 +758,13 @@ impl Engine {
             &[],
             &mut self.stats,
         )?;
+        // The prefilled rows are committed positions too: a drafter is told about them.
+        if self.slots[i].drafter.is_some() {
+            for (t, &token) in chunk.iter().enumerate() {
+                self.commit_row(i, t, start + t, token);
+            }
+        }
+        self.state.want_hidden = false;
         let s = &mut self.slots[i];
         s.fed += take;
         s.prefilled += take;
@@ -638,12 +783,14 @@ impl Engine {
         let tokens: Vec<u32> = self.slots.iter().map(|s| s.next).collect();
         let positions: Vec<usize> = self.slots.iter().map(|s| s.pos).collect();
         let want: Vec<usize> = (0..n).collect();
+        let hidden = self.wants_hidden();
         let mut caches: Vec<&mut KvCache> = self.slots.iter_mut().map(|s| &mut s.kv).collect();
         let p = if n == 1 {
             self.pool1.as_ref().unwrap_or(&self.pool)
         } else {
             &self.pool
         };
+        self.state.want_hidden = hidden;
         let r = self.model.forward_rows(
             &mut self.state,
             &mut Caches::PerRow(&mut caches),
@@ -653,6 +800,7 @@ impl Engine {
             &want,
             &mut self.stats,
         );
+        self.state.want_hidden = false;
         if let Err(e) = r {
             // A failed step is the whole batch's failure: every caller is told, and the slots go.
             let out = self
@@ -715,7 +863,7 @@ impl Engine {
                         s.cfg.min_p,
                         &s.cfg.penalties,
                         s.pen.window(),
-                        crate::sample::position_key(s.seed, 0, s.pos + 1),
+                        crate::sample::position_key(s.seed, s.cfg.turn as u64, s.pos + 1),
                         sc,
                     );
                     let lp = if s.cfg.logprobs {
@@ -735,7 +883,7 @@ impl Engine {
         let mut out = Vec::with_capacity(n);
         for (b, &si) in dec.iter().enumerate() {
             let (id, logprob) = picks[b];
-            out.push(self.account(si, fed[b], id, logprob, share));
+            out.push(self.account(si, b, fed[b], id, logprob, share));
         }
         self.reap(&out);
         out
@@ -743,7 +891,21 @@ impl Engine {
 
     /// Slot `si` was fed `fed` at its position and sampled `id` for the next: move it on one position, and
     /// say what to send.
-    fn account(&mut self, si: usize, fed: u32, id: u32, logprob: f32, secs: f64) -> Emission {
+    ///
+    /// `row` is the batch row the slot's token was computed in: its taps and its hidden state are that
+    /// row's, and a drafter that asked for them is told what was committed.
+    fn account(
+        &mut self,
+        si: usize,
+        row: usize,
+        fed: u32,
+        id: u32,
+        logprob: f32,
+        secs: f64,
+    ) -> Emission {
+        let pos = self.slots[si].pos;
+        // The drafter is told what was committed, with the target's row for it.
+        self.commit_row(si, row, pos, fed);
         let s = &mut self.slots[si];
         // The token just fed sat at `pos`; after the prompt's own positions it is part of what the cache
         // now describes.
@@ -817,6 +979,8 @@ impl Engine {
         for s in &done {
             self.keep_prefix(s);
         }
+        // A drafter went with its slot: the taps it needed may not be needed any more.
+        self.refresh_taps();
     }
 
     /// Sample logits row `row` for slot `si` at position `pos` (the sampler's key), with its log-probability
@@ -835,7 +999,7 @@ impl Engine {
             s.cfg.min_p,
             &s.cfg.penalties,
             s.pen.window(),
-            crate::sample::position_key(s.seed, 0, pos),
+            crate::sample::position_key(s.seed, s.cfg.turn as u64, pos),
             &mut sc,
         );
         let lp = if s.cfg.logprobs {
@@ -953,9 +1117,9 @@ impl Engine {
             let (b, lpb) = self.sample_row(0, 1, p + 2);
             let h1 = self.state.hidden[d..2 * d].to_vec();
             let secs = t0.elapsed().as_secs_f64();
-            out.push(self.account(0, tok, a, lpa, secs / 2.0));
+            out.push(self.account(0, 0, tok, a, lpa, secs / 2.0));
             if out[0].finish.is_none() {
-                out.push(self.account(0, draft, b, lpb, secs / 2.0));
+                out.push(self.account(0, 1, draft, b, lpb, secs / 2.0));
                 if let Some(sp) = self.slots[0].spec.as_mut() {
                     sp.pending = Some((a, h0));
                     sp.hprev = h1;
@@ -964,7 +1128,11 @@ impl Engine {
         } else {
             self.slots[0].kv.truncate(p + 1);
             let secs = t0.elapsed().as_secs_f64();
-            out.push(self.account(0, tok, a, lpa, secs));
+            out.push(self.account(0, 0, tok, a, lpa, secs));
+            // The draft's position was not committed: a drafter forgets it.
+            if let Some(d) = &self.slots[0].drafter {
+                d.lock().expect("drafter").rollback(p + 1);
+            }
             if let Some(sp) = self.slots[0].spec.as_mut() {
                 sp.hprev = h0;
             }

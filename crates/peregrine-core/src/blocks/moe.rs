@@ -202,6 +202,11 @@ pub struct MoeWeights<'a> {
     /// Whether the selected experts' weights are renormalised over the selection (qwen3moe: yes,
     /// `src/models/qwen3moe.cpp:144`).
     pub renorm: bool,
+    /// The scale on the selected experts' weights (`expert_weights_scale`), with llama.cpp's
+    /// meaning: **a scale of 0 or 1 is not applied** (`src/llama-graph.cpp:2390`), any other
+    /// value multiplies the weights. Every qwen3moe file carries 0, which means "no scaling" —
+    /// not "scale everything by zero".
+    pub w_scale: f32,
 }
 
 /// The buffers a mixture-of-experts layer needs, sized once.
@@ -264,6 +269,15 @@ impl MoeScratch {
             slots: vec![0.0; nb * n_used * d_model],
             acts: (0..nb).map(|_| QuantAct::with_capacity(d_model)).collect(),
             acts_ffn: (0..nb).map(|_| QuantAct::with_capacity(n_ff)).collect(),
+        }
+    }
+}
+
+impl MoeScratch {
+    /// Keep each activation row's f32 values for F32/F16/BF16 expert matrices (see `QuantAct::keep_f32`).
+    pub fn set_keep_f32(&mut self, on: bool) {
+        for a in self.acts.iter_mut().chain(self.acts_ffn.iter_mut()) {
+            a.keep_f32 = on;
         }
     }
 }
@@ -335,6 +349,17 @@ pub fn moe_ffn(
             &mut scratch.ids[b * k..(b + 1) * k],
             &mut scratch.weights[b * k..(b + 1) * k],
         );
+    }
+
+    // 2b. the scale on the weights, with llama.cpp's rule: a scale of 0 or 1 is not applied
+    //     (`src/llama-graph.cpp:2390`), so the 0 every qwen3moe file carries means "no
+    //     scaling". The scale lands after the renormalisation, as it does there.
+    if mw.w_scale != 0.0 && mw.w_scale != 1.0 {
+        for b in 0..nb {
+            for w in scratch.weights[b * k..(b + 1) * k].iter_mut() {
+                *w *= mw.w_scale;
+            }
+        }
     }
 
     // 3. the rows that chose each expert, in row order: a counting sort over the selections.
@@ -796,6 +821,7 @@ mod tests {
                 down: &self.down,
                 n_used,
                 renorm: true,
+                w_scale: 0.0,
             }
         }
     }

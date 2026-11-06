@@ -13,10 +13,16 @@
     clippy::chunks_exact_to_as_chunks
 )]
 
-#[cfg(any(feature = "arch-llama", feature = "arch-qwen"))]
+#[cfg(any(
+    feature = "arch-llama",
+    feature = "arch-qwen",
+    feature = "arch-qwen3moe"
+))]
 pub mod dense;
 #[cfg(feature = "arch-qwen35")]
 pub mod qwen35;
+#[cfg(feature = "arch-qwen3moe")]
+pub mod qwen3moe;
 
 #[cfg(any(feature = "arch-llama", feature = "arch-qwen"))]
 pub use dense::DenseFamily;
@@ -26,6 +32,8 @@ pub use dense::LlamaFamily;
 pub use dense::QwenFamily;
 #[cfg(feature = "arch-qwen35")]
 pub use qwen35::Qwen35Family;
+#[cfg(feature = "arch-qwen3moe")]
+pub use qwen3moe::Qwen3MoeFamily;
 
 // Re-exports for consumers expecting `hybrid` and `mtp`
 #[cfg(feature = "arch-qwen35")]
@@ -55,6 +63,8 @@ pub const ARCHS: &[&str] = &[
     "qwen3",
     #[cfg(feature = "arch-qwen35")]
     "qwen35",
+    #[cfg(feature = "arch-qwen3moe")]
+    "qwen3moe",
 ];
 
 /// Table of model families implemented by Peregrine.
@@ -65,6 +75,8 @@ pub static FAMILIES: &[&dyn Family] = &[
     &QwenFamily,
     #[cfg(feature = "arch-qwen35")]
     &Qwen35Family,
+    #[cfg(feature = "arch-qwen3moe")]
+    &Qwen3MoeFamily,
 ];
 
 /// Load a model from a parsed GGUF file using the built-in model families.

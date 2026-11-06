@@ -741,6 +741,11 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
             max_tokens: budget_left.max(1),
             stop: app.stop.clone(),
             logprobs: p.logprobs,
+            // The server serves independent requests: every one of them draws with the
+            // engine's own key (no conversation turn in it) and with the engine's own
+            // KV cache (the rotation on).
+            turn: 0,
+            kv_rotation: true,
         };
         if app
             .jobs
