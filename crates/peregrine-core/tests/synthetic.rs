@@ -358,6 +358,40 @@ fn littlebit_sidecar_forward_is_finite_and_deterministic() {
     );
 }
 
+#[test]
+fn littlebit_sidecar_on_untied_hybrid_names_no_tensor() {
+    use peregrine_core::lbq::{build_tensor, default_sidecar_path, source_stamp, write_slb};
+    use support::vocab::VOCAB_SIZE;
+    use support::weights::Rng;
+
+    let dir = tmpdir("lbq_hybrid");
+    let path = write_hybrid(&dir, Format::PQ2_0, 4390, false);
+    let sidecar = default_sidecar_path(&path);
+    let mut rng = Rng::new(4391);
+    let pool = Pool::new(4);
+    let w: Vec<f32> = (0..256 * VOCAB_SIZE)
+        .map(|_| rng.f32_range(-0.04, 0.04))
+        .collect();
+    let builds = vec![build_tensor(
+        "output.weight",
+        w,
+        VOCAB_SIZE,
+        256,
+        32,
+        2,
+        1,
+        &pool,
+    )];
+    let (size, hash) = source_stamp(&path).unwrap();
+    write_slb(&sidecar, size, hash, &builds).unwrap();
+
+    let mut model = Gguf::open(&path).and_then(Model::load).unwrap();
+    let slb = peregrine_core::lbq::Slb::open(&sidecar).unwrap();
+    let err = model.attach_lb(slb).unwrap_err();
+    assert_eq!(err, "slb: the sidecar names no tensor of this model");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ------------------------------------------------------------- batching through the engine --
 
 const ENGINE_TOKENS: usize = 16;
