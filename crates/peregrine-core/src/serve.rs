@@ -908,22 +908,25 @@ impl Engine {
             mh.extend_from_slice(&sp.hprev);
             mp.push(p);
         }
+        // One or two rows through the MTP block, then two through the model: bound by memory like a one-row
+        // decode step, so on the narrow pool too. On the full pool the SMT siblings spin beside the cores doing
+        // the work: on a 12-core / 24-thread host this step ran 5-6x slower than plain decode.
+        let pool = self.pool1.as_ref().unwrap_or(&self.pool);
         let ms = self
             .mtp
             .as_mut()
             .expect("a speculating slot implies MTP state");
-        let draft =
-            match self
-                .model
-                .mtp_forward(ms, &self.pool, &mt, &mh, &mp, true, &mut self.stats)
-            {
-                Ok(Some(t)) => t,
-                // Not fatal: the slot decodes plainly from here.
-                _ => {
-                    self.slots[0].spec = None;
-                    return self.mixed_step();
-                }
-            };
+        let draft = match self
+            .model
+            .mtp_forward(ms, pool, &mt, &mh, &mp, true, &mut self.stats)
+        {
+            Ok(Some(t)) => t,
+            // Not fatal: the slot decodes plainly from here.
+            _ => {
+                self.slots[0].spec = None;
+                return self.mixed_step();
+            }
+        };
         self.state.want_hidden = true;
         let r = {
             let kv = &mut self.slots[0].kv;
@@ -932,7 +935,7 @@ impl Engine {
             self.model.forward_rows(
                 &mut self.state,
                 &mut Caches::Mapped(&mut refs, &[0, 0]),
-                &self.pool,
+                pool,
                 &[tok, draft],
                 &[p, p + 1],
                 &[0, 1],
