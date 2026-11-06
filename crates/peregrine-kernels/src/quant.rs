@@ -1471,7 +1471,15 @@ mod tests {
     /// reference, so the comparison would pass vacuously (NaN == NaN is never
     /// asserted) or fail for a reason that has nothing to do with the kernel.
     /// Clearing the top exponent bits leaves a normal half in [0.125, 0.25).
-    #[allow(unused_variables, dead_code)]
+    #[cfg_attr(
+        not(all(
+            feature = "fmt-kquant",
+            feature = "fmt-ternary",
+            feature = "fmt-iq",
+            feature = "fmt-legacy"
+        )),
+        allow(unused_variables, dead_code)
+    )]
     fn sane_scales(fmt: Format, w: &mut [u8]) {
         let fix = |b: &mut [u8], at: usize| b[at + 1] = (b[at + 1] & 0x0F) | 0x30;
         let sz = fmt.block_bytes();
@@ -1513,7 +1521,16 @@ mod tests {
     /// The central invariant of this file: the fused kernel must equal the reference
     /// decode followed by a plain dot product. If these disagree, the fusion is
     /// wrong — which is a class of bug that still produces fluent text.
-    #[allow(dead_code, clippy::needless_range_loop)]
+    #[allow(clippy::needless_range_loop)]
+    #[cfg_attr(
+        not(all(
+            feature = "fmt-kquant",
+            feature = "fmt-ternary",
+            feature = "fmt-iq",
+            feature = "fmt-legacy"
+        )),
+        allow(dead_code)
+    )]
     fn fused_equals_reference(fmt: Format, n: usize) {
         let mut w = prng(0xA5A5_1234, row_bytes(fmt, n));
         sane_scales(fmt, &mut w);

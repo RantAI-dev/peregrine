@@ -30,7 +30,15 @@
 //! specification; this file is an optimisation of it and is never the reference.
 
 #![cfg(target_arch = "x86_64")]
-#![allow(dead_code)]
+#![cfg_attr(
+    not(all(
+        feature = "fmt-kquant",
+        feature = "fmt-ternary",
+        feature = "fmt-iq",
+        feature = "fmt-legacy"
+    )),
+    allow(dead_code)
+)]
 
 use crate::format::{f16, Format};
 use crate::quant::QuantAct;
@@ -1420,7 +1428,15 @@ mod tests {
         }
     }
 
-    #[allow(unused_variables, dead_code)]
+    #[cfg_attr(
+        not(all(
+            feature = "fmt-kquant",
+            feature = "fmt-ternary",
+            feature = "fmt-iq",
+            feature = "fmt-legacy"
+        )),
+        allow(unused_variables, dead_code)
+    )]
     fn sane_scales(fmt: Format, w: &mut [u8]) {
         let fix = |b: &mut [u8], at: usize| b[at + 1] = (b[at + 1] & 0x0F) | 0x30;
         let sz = fmt.block_bytes();

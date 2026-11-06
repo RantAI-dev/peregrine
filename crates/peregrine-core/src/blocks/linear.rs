@@ -201,7 +201,8 @@ pub fn matmul_group(
 /// output row — via `lb_group`. `xs` is the same activation `acts` was
 /// quantised from: the LittleBit path works on floats (its per-column scale
 /// `g` is applied before the signs), while the dense path keeps its int8 form.
-#[allow(clippy::too_many_arguments, unused_variables)]
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "littlebit"), allow(unused_variables))]
 pub fn linear_group(
     w: &Weights,
     slb: Option<&Slb>,
