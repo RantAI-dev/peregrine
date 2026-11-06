@@ -9,6 +9,8 @@ All notable changes to this project are documented here. The format follows
 ### Added
 - `peregrine-bench` example `kld`: KL divergence and top-1 agreement against llama.cpp on real text (`docs/dev/accuracy.md`); first results in `docs/targets.md`.
 - `peregrine bench`, `peregrine tune` and tuning profiles (S1.7).
+- The `qwen3moe` mixture-of-experts family (S2.5 step 3): the synthetic models load, run, and give the
+  same tokens alone and batched; the check against llama.cpp on a real file is step 4.
 - Support for GGML's IQ4_NL and IQ4_XS weight formats (AVX2 single-row and batched kernels, scalar reference).
 - Support for GGML's Q5_K weight format (AVX2 single-row and batched kernels, scalar reference).
 - Support for Gemma, Mistral (v1, v7), and Llama 2 chat templates with exact llama.cpp parity (S2.3b).

@@ -19,7 +19,7 @@ use peregrine_core::pool::Pool;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use support::models::{write_dense, write_hybrid, Dense};
+use support::models::{write_dense, write_hybrid, write_moe, Dense, MoeShape};
 
 /// Allocations counted while `COUNTING` was set.
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -151,7 +151,14 @@ fn a_decode_step_allocates_nothing() {
     ));
     // The hybrid model: Gated DeltaNet layers (conv, delta rule, snapshots), gated attention, Hadamard rotation.
     let hybrid = load(&write_hybrid(&dir, Format::PQ2_0, 7001, false));
-    for (name, model) in [("qwen3-Q8_0", &dense), ("qwen35-PQ2_0", &hybrid)] {
+    // The mixture of experts: the router, the expert gather and the slot-ordered sum, all in
+    // the scratch the family sized once.
+    let moe = load(&write_moe(&dir, Format::Q8_0, 7003, MoeShape::default()));
+    for (name, model) in [
+        ("qwen3-Q8_0", &dense),
+        ("qwen35-PQ2_0", &hybrid),
+        ("qwen3moe-Q8_0", &moe),
+    ] {
         for threads in [1, 4] {
             let n = check_decode(model, threads);
             if n != 0 {
