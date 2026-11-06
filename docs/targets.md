@@ -40,10 +40,13 @@ plus the `kld` tool), llama.cpp v0.9.0 `cd959ba`; wikitext-2 test, `-c 512`, 40 
 | Llama-2-7B-Chat | 0.00171 ± 0.00004 | 0.0007 / 0.015 | 1.24 % | 98.1 % | 7.283 / 7.281 |
 | Mistral-7B-Instruct-v0.2 | 0.00121 ± 0.00003 | 0.0006 / 0.010 | 1.01 % | 98.2 % | 6.245 / 6.237 |
 
-Qwen3-1.7B is the outlier (and Peregrine's perplexity on it is 1.5 % higher than llama.cpp's). On 8 chunks the
-scalar kernels give 0.0136 against 0.0145 on AVX2 (`PEREGRINE_EXACT=1`, which affects only ternary weights, gives
-the same as native), so the difference is not a SIMD kernel's: it is in the computation itself and is the first
-thing to investigate under S3.3. Bonsai (PQ2_0) is not listed: llama.cpp v0.9.0 refuses the file (`invalid ggml type 142`).
+Qwen3-1.7B is the outlier, and the cause is on llama.cpp's side: a layer-by-layer comparison (S3.3b) finds every
+Qwen3-specific step (q/k head norms, NeoX RoPE at base 1e6, the tied head) equal to llama.cpp's within ~1e-7; the
+first jump is at the attention, where llama.cpp's default F16 KV cache makes it compute Q·K and the value mix
+with f16 operands. Qwen3's head norms make the raw scores large (up to ~350), so that rounding becomes a 0.3-0.4 %
+error in every softmax weight. Against an exact f32 evaluation of the attention, Peregrine is 4.7e-6 away and
+llama.cpp 1.6e-4 (1.8e-7 with an F32 KV cache). A like-for-like comparison needs both engines' attention in f32
+(llama.cpp `--cache-type-k f32 --cache-type-v f32 --flash-attn off`). Bonsai (PQ2_0) is not listed: llama.cpp v0.9.0 refuses the file (`invalid ggml type 142`).
 
 ## 2. Speed
 
