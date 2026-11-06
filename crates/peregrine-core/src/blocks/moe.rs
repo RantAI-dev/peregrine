@@ -436,6 +436,7 @@ pub fn moe_ffn(
 }
 
 #[cfg(test)]
+#[cfg_attr(not(feature = "fmt-legacy"), allow(dead_code))]
 mod tests {
     use super::*;
     use crate::gguf::{Format, Gguf};
@@ -615,6 +616,8 @@ mod tests {
             Format::Q4_0 => 2,
             Format::Q5_0 => 6,
             Format::Q8_0 => 8,
+            Format::Q2_K => 10,
+            Format::Q3_K => 11,
             Format::Q4_K => 12,
             Format::Q5_K => 13,
             Format::Q6_K => 14,
@@ -772,6 +775,7 @@ mod tests {
                 w: Weights {
                     g,
                     tiles: TileStore::default(),
+                    #[cfg(feature = "littlebit")]
                     lb: None,
                 },
                 router,
@@ -937,6 +941,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn the_block_matches_the_dense_reference() {
         let mut rng = Rng::new(0x1234_5678);
         let (d_model, n_ff, n_expert, k) = (64usize, 32usize, 4usize, 2usize);
@@ -968,6 +973,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn a_row_does_not_depend_on_the_batch_it_is_in() {
         let mut rng = Rng::new(0x9876_5432);
         let (d_model, n_ff, n_expert, k) = (64usize, 32usize, 4usize, 2usize);
@@ -1016,6 +1022,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn the_block_does_not_depend_on_the_thread_count() {
         let mut rng = Rng::new(0xfeed_face);
         let (d_model, n_ff, n_expert, k) = (64usize, 32usize, 4usize, 2usize);

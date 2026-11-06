@@ -186,7 +186,7 @@ impl QuantAct {
         self.tp.resize(x.len().div_ceil(256) * 256, 0);
         self.td.resize(x.len() / 16, 0.0);
         self.tls.resize(x.len() / 16, 0);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
         {
             if self.tb_span > 0 {
                 if crate::simd::have_avx2() {
@@ -214,7 +214,7 @@ impl QuantAct {
                 self.quantize16_scalar(x);
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-ternary")))]
         if self.tb_span > 0 {
             self.quantize_span(x, self.tb_span);
         } else {
@@ -226,7 +226,7 @@ impl QuantAct {
             return;
         }
         // Pair-interleaved: groups 2p and 2p+1 alternate by plane, so one 512-bit load holds plane s of both.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
         {
             if crate::tern::have_vbmi() {
                 // SAFETY: AVX-512 VBMI checked; tq holds x.len() codes and tp the padded layout.
@@ -246,7 +246,7 @@ impl QuantAct {
     }
 
     /// One scale shared by every `span` values (a multiple of 16), written into each 16-block's slot: the
-    /// accuracy comparison for `PEREGRINE_TQ_SPAN`.
+    /// accuracy comparison for `PEREGRINE_TQ_SPAN` net.
     pub fn quantize_span(&mut self, x: &[f32], span: usize) {
         for (c, blk) in x.chunks_exact(span).enumerate() {
             let amax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -280,7 +280,7 @@ impl QuantAct {
             self.tbn.push(-sum);
         }
         // Within each 16 values the order is a 4×4 byte transpose (b[4s + i] = q[4i + s]).
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
         {
             if crate::tern::have_vbmi() {
                 // SAFETY: AVX-512 BW checked (with VBMI); both buffers hold n bytes, n a multiple of 128.
@@ -540,6 +540,7 @@ pub fn f32_to_f16(x: f32) -> u16 {
 /// One row as Q8_0 blocks (34 bytes per 32 weights), appended to `out`. The same
 /// arithmetic as llama.cpp's `quantize_row_q8_0_ref`: `d = amax/127` stored as f16,
 /// codes `round(x / d)` from the unrounded `d`.
+#[cfg(feature = "fmt-legacy")]
 pub fn quantize_row_q8_0(x: &[f32], out: &mut Vec<u8>) {
     assert!(
         x.len().is_multiple_of(32),
@@ -556,6 +557,7 @@ pub fn quantize_row_q8_0(x: &[f32], out: &mut Vec<u8>) {
 
 /// ggml's `nearest_int`: round to nearest, ties to even, by the float-add trick —
 /// reproduced exactly so the quantiser below picks the same codes as llama.cpp's.
+#[cfg(feature = "fmt-kquant")]
 #[inline]
 fn nearest_int(f: f32) -> i32 {
     let v = f + 12_582_912.0;
@@ -564,6 +566,7 @@ fn nearest_int(f: f32) -> i32 {
 
 /// `make_qkx2_quants` from `ggml-quants.c`: a scale and min for one 32-weight
 /// sub-block, searched over `nstep` candidate scales to minimise the weighted error.
+#[cfg(feature = "fmt-kquant")]
 #[allow(clippy::too_many_arguments)]
 fn make_qkx2_quants(
     x: &[f32],
@@ -643,6 +646,7 @@ fn make_qkx2_quants(
 /// `quantize_row_q4_K_ref` from `ggml-quants.c`, step for step, so a row quantised
 /// here is the row llama.cpp would write. Used for the DSpark drafter, whose bf16
 /// checkpoint would otherwise run at 8.5 bits per weight.
+#[cfg(feature = "fmt-kquant")]
 pub fn quantize_row_q4_k(x: &[f32], out: &mut Vec<u8>) {
     assert!(
         x.len().is_multiple_of(256),
@@ -720,6 +724,7 @@ pub fn quantize_row_q4_k(x: &[f32], out: &mut Vec<u8>) {
 
 /// `get_scale_min_k4` from `ggml-quants.c`: unpack the 6-bit scale and min for
 /// sub-block `j` of a k-quant super-block out of the 12 packed bytes.
+#[cfg(feature = "fmt-kquant")]
 #[inline(always)]
 fn scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
     if j < 4 {
@@ -815,6 +820,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 *o = f32::from_bits((u16::from_le_bytes(c.try_into().unwrap()) as u32) << 16);
             }
         }
+        #[cfg(feature = "fmt-ternary")]
         Format::PQ2_0 => {
             // dequantize_row_pq2_0: byte j/4, bits 2(j%4); 00=-1, 01=0, 10=+1 (11=+2, unused by ternary files).
             for (blk, out) in w.chunks_exact(34).zip(y.chunks_exact_mut(128)) {
@@ -825,6 +831,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-ternary")]
         Format::PTQ1_0 => {
             for (blk, out) in w.chunks_exact(28).zip(y.chunks_exact_mut(128)) {
                 let d = h(blk, 26);
@@ -835,6 +842,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => {
             for (blk, out) in w.chunks_exact(34).zip(y.chunks_exact_mut(32)) {
                 let d = h(blk, 0);
@@ -843,6 +851,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-legacy")]
         Format::Q4_0 => {
             for (blk, out) in w.chunks_exact(18).zip(y.chunks_exact_mut(32)) {
                 let d = h(blk, 0);
@@ -853,6 +862,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-legacy")]
         Format::Q5_0 => {
             for (blk, out) in w.chunks_exact(22).zip(y.chunks_exact_mut(32)) {
                 let d = h(blk, 0);
@@ -869,6 +879,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q2_K => {
             for (blk, out) in w.chunks_exact(84).zip(y.chunks_exact_mut(256)) {
                 let scales = &blk[0..16];
@@ -901,6 +912,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q3_K => {
             for (blk, out) in w.chunks_exact(110).zip(y.chunks_exact_mut(256)) {
                 let hmask = &blk[0..32];
@@ -954,6 +966,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q4_K => {
             for (blk, out) in w.chunks_exact(144).zip(y.chunks_exact_mut(256)) {
                 let d = h(blk, 0);
@@ -981,6 +994,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q5_K => {
             for (blk, out) in w.chunks_exact(176).zip(y.chunks_exact_mut(256)) {
                 let d = h(blk, 0);
@@ -1009,6 +1023,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q6_K => {
             for (blk, out) in w.chunks_exact(210).zip(y.chunks_exact_mut(256)) {
                 let ql = &blk[0..128];
@@ -1035,6 +1050,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-iq")]
         Format::IQ4_NL => {
             for (blk, out) in w.chunks_exact(18).zip(y.chunks_exact_mut(32)) {
                 let d = h(blk, 0);
@@ -1045,6 +1061,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[cfg(feature = "fmt-iq")]
         Format::IQ4_XS => {
             for (blk, out) in w.chunks_exact(136).zip(y.chunks_exact_mut(256)) {
                 let d = h(blk, 0);
@@ -1064,6 +1081,8 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        #[allow(unreachable_patterns)]
+        _ => panic!("format {} disabled in this build", fmt.label()),
     }
 }
 
@@ -1099,6 +1118,7 @@ pub fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
 #[inline]
 pub fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
     debug_assert!(out.len() >= acts.len());
+    #[cfg(feature = "fmt-ternary")]
     if matches!(fmt, Format::PQ2_0 | Format::PTQ1_0) && exact_ternary() {
         let n = acts[0].n;
         let mut y = vec![0.0f32; n];
@@ -1129,6 +1149,7 @@ pub fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
 pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
     debug_assert_eq!(w.len(), row_bytes(fmt, a.n));
     match fmt {
+        #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => {
             let mut acc = 0.0f32;
             for (b, blk) in w.chunks_exact(34).enumerate() {
@@ -1142,6 +1163,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-legacy")]
         Format::Q4_0 => {
             let mut acc = 0.0f32;
             for (b, blk) in w.chunks_exact(18).enumerate() {
@@ -1158,6 +1180,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-legacy")]
         Format::Q5_0 => {
             let mut acc = 0.0f32;
             for (b, blk) in w.chunks_exact(22).enumerate() {
@@ -1177,6 +1200,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q2_K => {
             assert!(
                 !a.qk.is_empty(),
@@ -1226,6 +1250,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q3_K => {
             assert!(
                 !a.qk.is_empty(),
@@ -1291,6 +1316,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q4_K => {
             // Against the per-256 activation (`qk`, `dk`, `bsums`): the eight
             // sub-block dot products are scaled and summed as integers and the
@@ -1331,6 +1357,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q5_K => {
             assert!(
                 !a.qk.is_empty(),
@@ -1372,6 +1399,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q6_K => {
             assert!(
                 !a.qk.is_empty(),
@@ -1419,6 +1447,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-iq")]
         Format::IQ4_NL => {
             let mut acc = 0.0f32;
             for (b, blk) in w.chunks_exact(18).enumerate() {
@@ -1433,6 +1462,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-iq")]
         Format::IQ4_XS => {
             assert!(
                 !a.qk.is_empty(),
@@ -1464,6 +1494,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-ternary")]
         Format::PQ2_0 => {
             let mut acc = 0.0f32;
             for (g, blk) in w.chunks_exact(34).enumerate() {
@@ -1480,6 +1511,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-ternary")]
         Format::PTQ1_0 if a.ptq1 => {
             let mut acc = 0.0f32;
             let mut t = [0i8; 128];
@@ -1498,6 +1530,7 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-ternary")]
         Format::PTQ1_0 => {
             let mut acc = 0.0f32;
             let mut t = [0i8; 128];
@@ -1531,6 +1564,8 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[allow(unreachable_patterns)]
+        _ => panic!("format {} disabled in this build", fmt.label()),
     }
 }
 
@@ -1556,6 +1591,7 @@ mod tests {
     /// from a real Q4_K block — must quantise back to essentially the same values.
     /// And a smooth random row must come back with a small error.
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn q4_k_quantisation_matches_ggml_on_representable_rows() {
         let mut s = 0x9E37_79B9u64;
         let mut rnd = || {
@@ -1595,6 +1631,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn q8_0_quantisation_round_trips_within_half_a_step() {
         let x: Vec<f32> = (0..256)
             .map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.013)
@@ -1637,26 +1674,45 @@ mod tests {
     /// reference, so the comparison would pass vacuously (NaN == NaN is never
     /// asserted) or fail for a reason that has nothing to do with the kernel.
     /// Clearing the top exponent bits leaves a normal half in [0.125, 0.25).
+    #[cfg_attr(
+        not(all(
+            feature = "fmt-kquant",
+            feature = "fmt-ternary",
+            feature = "fmt-iq",
+            feature = "fmt-legacy"
+        )),
+        allow(unused_variables, dead_code)
+    )]
     fn sane_scales(fmt: Format, w: &mut [u8]) {
         let fix = |b: &mut [u8], at: usize| b[at + 1] = (b[at + 1] & 0x0F) | 0x30;
         let sz = fmt.block_bytes();
         for blk in w.chunks_exact_mut(sz) {
             match fmt {
-                Format::Q4_0 | Format::Q8_0 | Format::Q5_0 | Format::IQ4_NL => fix(blk, 0),
+                #[cfg(feature = "fmt-legacy")]
+                Format::Q4_0 | Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
+                #[cfg(feature = "fmt-iq")]
+                Format::IQ4_NL => fix(blk, 0),
+                #[cfg(feature = "fmt-kquant")]
                 Format::Q2_K => {
                     fix(blk, 80);
                     fix(blk, 82);
                 }
+                #[cfg(feature = "fmt-kquant")]
                 Format::Q3_K => fix(blk, 108),
+                #[cfg(feature = "fmt-kquant")]
                 Format::Q4_K | Format::Q5_K => {
                     fix(blk, 0);
                     fix(blk, 2);
                 }
+                #[cfg(feature = "fmt-kquant")]
                 Format::Q6_K => fix(blk, 208),
+                #[cfg(feature = "fmt-iq")]
                 Format::IQ4_XS => fix(blk, 0),
+                #[cfg(feature = "fmt-ternary")]
                 Format::PQ2_0 => fix(blk, 0),
+                #[cfg(feature = "fmt-ternary")]
                 Format::PTQ1_0 => fix(blk, 26),
-                Format::F32 | Format::F16 | Format::BF16 => {}
+                _ => {}
             }
         }
     }
@@ -1676,6 +1732,15 @@ mod tests {
     /// decode followed by a plain dot product. If these disagree, the fusion is
     /// wrong — which is a class of bug that still produces fluent text.
     #[allow(clippy::needless_range_loop)]
+    #[cfg_attr(
+        not(all(
+            feature = "fmt-kquant",
+            feature = "fmt-ternary",
+            feature = "fmt-iq",
+            feature = "fmt-legacy"
+        )),
+        allow(dead_code)
+    )]
     fn fused_equals_reference(fmt: Format, n: usize) {
         let mut w = prng(0xA5A5_1234, row_bytes(fmt, n));
         sane_scales(fmt, &mut w);
@@ -1686,15 +1751,13 @@ mod tests {
         // Reference: dot of the decoded weights against the *reconstructed*
         // activation, which is what the fused kernel actually computes — the
         // per-256 representation for the k-quants, the per-32 one otherwise.
-        let kq = matches!(
-            fmt,
-            Format::Q2_K
-                | Format::Q3_K
-                | Format::Q4_K
-                | Format::Q5_K
-                | Format::Q6_K
-                | Format::IQ4_XS
-        );
+        let kq = match fmt {
+            #[cfg(feature = "fmt-kquant")]
+            Format::Q2_K | Format::Q3_K | Format::Q4_K | Format::Q5_K | Format::Q6_K => true,
+            #[cfg(feature = "fmt-iq")]
+            Format::IQ4_XS => true,
+            _ => false,
+        };
         let mut want = 0.0f64;
         for i in 0..n {
             let act = if kq {
@@ -1746,56 +1809,67 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn fused_dot_matches_reference_decode_q8_0() {
         fused_equals_reference(Format::Q8_0, 960);
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn fused_dot_matches_reference_decode_q4_0() {
         fused_equals_reference(Format::Q4_0, 960);
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn fused_dot_matches_reference_decode_q5_0() {
         fused_equals_reference(Format::Q5_0, 960);
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn fused_dot_matches_reference_decode_q2_k() {
         fused_equals_reference(Format::Q2_K, 2560);
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn fused_dot_matches_reference_decode_q3_k() {
         fused_equals_reference(Format::Q3_K, 2560);
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn fused_dot_matches_reference_decode_q4_k() {
         fused_equals_reference(Format::Q4_K, 2560);
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn fused_dot_matches_reference_decode_q5_k() {
         fused_equals_reference(Format::Q5_K, 2560);
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn fused_dot_matches_reference_decode_q6_k() {
         fused_equals_reference(Format::Q6_K, 2560);
     }
 
     #[test]
+    #[cfg(feature = "fmt-iq")]
     fn fused_dot_matches_reference_decode_iq4_nl() {
         fused_equals_reference(Format::IQ4_NL, 960);
     }
 
     #[test]
+    #[cfg(feature = "fmt-iq")]
     fn fused_dot_matches_reference_decode_iq4_xs() {
         fused_equals_reference(Format::IQ4_XS, 2560);
     }
 
     #[test]
+    #[cfg(feature = "fmt-iq")]
     fn dequant_row_iq4_nl_matches_hand_computed_block() {
         let mut blk = vec![0u8; 18];
         // d = 2.0 (0x4000)
@@ -1819,6 +1893,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-iq")]
     fn dequant_row_iq4_xs_matches_hand_computed_block() {
         let mut blk = vec![0u8; 136];
         // d = 0.5 (0x3800)
@@ -1855,6 +1930,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn dequant_row_q2_k_matches_hand_computed_block() {
         let mut blk = vec![0u8; 84];
         // d = 1.0 (0x3C00) at 80..82, dmin = 0.5 (0x3800) at 82..84
@@ -1902,6 +1978,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn dequant_row_q3_k_matches_hand_computed_block() {
         let mut blk = vec![0u8; 110];
         // d = 1.0 (0x3C00) at 108..110
@@ -1956,6 +2033,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn dequant_row_q5_k_matches_hand_computed_block() {
         let mut blk = vec![0u8; 176];
         // d = 2.0 (0x4000), dmin = 0.5 (0x3800)
@@ -2025,6 +2103,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn scale_min_k4_unpacks_six_bit_fields() {
         // Construct a byte pattern where every field is distinguishable, then check
         // the two branches agree with the packing rule in ggml-quants.c.
@@ -2064,6 +2143,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn an_all_zero_activation_block_does_not_divide_by_zero() {
         let mut a = QuantAct::with_capacity(32);
         a.fill(&[0.0f32; 32]);

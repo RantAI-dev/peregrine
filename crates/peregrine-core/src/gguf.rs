@@ -205,6 +205,13 @@ impl Gguf {
                 offset,
                 tile_off: None,
             };
+            if !kind.is_supported() {
+                let feat = kind.required_feature().unwrap_or("unknown");
+                return Err(format!(
+                    "gguf: tensor '{name}' uses format {} which is disabled in this build (enable feature '{feat}')",
+                    kind.label()
+                ));
+            }
             if !ti.numel().is_multiple_of(kind.block() as u64) {
                 return Err(format!(
                     "gguf: tensor {name} has {} elements, not a multiple of the {} block size",

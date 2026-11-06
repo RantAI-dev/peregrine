@@ -307,6 +307,7 @@ impl Session {
 
         let max_ctx = cfg.max_ctx.clamp(32, c.ctx_train);
         let threads = cfg.threads.max(1);
+        #[cfg(feature = "dspark")]
         let dspark = match &cfg.dspark {
             Some(dir) => {
                 let d = Drafter::load(dir, threads)?;
@@ -314,6 +315,15 @@ impl Session {
                 Some(d)
             }
             None => None,
+        };
+        #[cfg(not(feature = "dspark"))]
+        let dspark: Option<Drafter> = if let Some(dir) = &cfg.dspark {
+            return Err(format!(
+                "dspark drafter at {:?} requested but 'dspark' feature is disabled in this build",
+                dir
+            ));
+        } else {
+            None
         };
         let dspark_k = dspark.as_ref().map_or(0, |d| {
             cfg.dspark_max
