@@ -159,6 +159,8 @@ impl Format {
         Format::Q4_0,
         Format::Q5_0,
         Format::Q8_0,
+        Format::Q2_K,
+        Format::Q3_K,
         Format::Q4_K,
         Format::Q5_K,
         Format::Q6_K,
@@ -216,5 +218,25 @@ pub fn cast_f32_slice(b: &[u8], n: usize) -> Option<&[f32]> {
         Some(unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f32, n) })
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Format::ALL` drives `peregrine support` and the README table: every format the GGUF reader
+    /// knows must be in it, or a new format silently goes missing from the support list.
+    #[test]
+    fn all_lists_every_format_the_reader_knows() {
+        for id in 0..=u16::MAX as u32 {
+            if let Some(f) = Format::from_id(id) {
+                assert!(
+                    Format::ALL.contains(&f),
+                    "{} (id {id}) is missing from Format::ALL",
+                    f.label()
+                );
+            }
+        }
     }
 }
