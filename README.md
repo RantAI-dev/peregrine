@@ -57,6 +57,8 @@ path returns a byte-identical rendered prompt, the same prompt token count and t
 git clone https://github.com/RantAI-dev/peregrine && cd peregrine
 cargo build --release
 ./target/release/peregrine inspect path/to/model.gguf      # what it is, and whether it runs
+./target/release/peregrine bench -m path/to/model.gguf        # measure prefill & decode tok/s and bytes/token
+./target/release/peregrine tune -m path/to/model.gguf         # tune execution knobs for host CPU and model
 ./target/release/peregrine serve -m path/to/model.gguf --port 8201
 curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"Hello"}]}'

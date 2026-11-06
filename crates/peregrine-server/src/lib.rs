@@ -87,6 +87,12 @@ pub struct Args {
     /// beside a model must not switch the weights silently. A missing or corrupt sidecar refuses to start.
     #[arg(long, default_value_t = false)]
     pub littlebit: bool,
+    /// A tuning profile file to apply. Defaults to the default profile for this model and machine.
+    #[arg(long)]
+    pub profile: Option<std::path::PathBuf>,
+    /// Ignore tuning profiles and use defaults or environment variables.
+    #[arg(long, default_value_t = false)]
+    pub no_profile: bool,
 }
 
 struct App {
@@ -117,7 +123,10 @@ struct App {
 
 /// Run the server until it is stopped. Logging must already be set up (see [`init_logging`]).
 pub async fn run(a: Args) {
-    let opts = match engine_options(&a.opts) {
+    let (profile, prof_msg) =
+        peregrine_core::profile::resolve(&a.model, a.profile.as_deref(), a.no_profile);
+    println!("{prof_msg}");
+    let opts = match engine_options(&a.opts, profile.as_ref()) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("peregrine-server: {e}");
@@ -296,8 +305,12 @@ async fn metrics(State(s): State<Arc<App>>) -> String {
     )
 }
 
-/// The engine options: the environment's `PEREGRINE_*` variables, overridden by `--opt NAME=VALUE`.
-fn engine_options(cli: &[String]) -> Result<peregrine_core::options::EngineOptions, String> {
+/// The engine options: the environment's `PEREGRINE_*` variables, overridden by `--opt NAME=VALUE`,
+/// falling back to tuning profile, then defaults.
+fn engine_options(
+    cli: &[String],
+    profile: Option<&peregrine_core::profile::Profile>,
+) -> Result<peregrine_core::options::EngineOptions, String> {
     let mut over = HashMap::new();
     for o in cli {
         let (k, v) = o
@@ -315,9 +328,10 @@ fn engine_options(cli: &[String]) -> Result<peregrine_core::options::EngineOptio
         }
         over.insert(format!("PEREGRINE_{k}"), v.to_string());
     }
-    Ok(peregrine_core::options::EngineOptions::from_lookup(|k| {
-        over.get(k).cloned().or_else(|| std::env::var(k).ok())
-    }))
+    Ok(peregrine_core::options::EngineOptions::from_chained(
+        |k| over.get(k).cloned().or_else(|| std::env::var(k).ok()),
+        profile,
+    ))
 }
 
 fn bad(msg: impl Into<String>) -> Response {
