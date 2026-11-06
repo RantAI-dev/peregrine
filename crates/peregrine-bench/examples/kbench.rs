@@ -42,6 +42,7 @@ fn sane(fmt: Format, w: &mut [u8]) {
             }
             Format::Q6_K => fix(blk, 208),
             Format::IQ4_XS => fix(blk, 0),
+            Format::MXFP4 => blk[0] = (blk[0] % 30) + 115,
             _ => {}
         }
     }
@@ -81,6 +82,7 @@ fn main() {
         Format::Q6_K,
         Format::IQ4_NL,
         Format::IQ4_XS,
+        Format::MXFP4,
     ] {
         let rb = row_bytes(fmt, k);
         let mut w = prng_bytes(7, rb * rows);

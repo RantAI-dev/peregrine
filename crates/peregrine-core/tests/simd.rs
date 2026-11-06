@@ -186,6 +186,7 @@ fn sane(fmt: Format, w: &mut [u8]) {
             }
             Format::Q6_K => fix(blk, 208),
             Format::IQ4_XS => fix(blk, 0),
+            Format::MXFP4 => blk[0] = (blk[0] % 30) + 115,
             _ => {}
         }
     }
@@ -205,6 +206,7 @@ fn batched_kernels_match_the_scalar_specification_at_every_batch_width() {
         (Format::Q5_K, 2560),
         (Format::Q6_K, 2560),
         (Format::IQ4_XS, 2560),
+        (Format::MXFP4, 960),
     ] {
         let mut w = prng_bytes(0xBEEF_0000 + n as u64, row_bytes(fmt, n));
         sane(fmt, &mut w);

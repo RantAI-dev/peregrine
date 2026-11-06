@@ -805,6 +805,10 @@ pub const KVALUES_IQ4NL: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 ];
 
+/// The 16-entry lookup table for GGML's MXFP4 format, transcribed from `kvalues_fp4` / `kvalues_mxfp4`
+/// in `ggml-common.h`. Note that values are doubled relative to OCP E2M1 floats: [0, 1, 2, 3, 4, 6, 8, 12, ...].
+pub const KVALUES_MXFP4: [i8; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
+
 // The Q6_K decoders below contain `qh[l] >> 0`. It is an identity, and it is kept:
 // the four shifts form the series 0/2/4/6, and writing the first one as a bare
 // `qh[l]` breaks the column alignment that lets a reader check this transcription
@@ -1088,6 +1092,17 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                         o[j] = dl * KVALUES_IQ4NL[(sub_qs[j] & 0x0F) as usize] as f32;
                         o[j + 16] = dl * KVALUES_IQ4NL[(sub_qs[j] >> 4) as usize] as f32;
                     }
+                }
+            }
+        }
+        #[cfg(feature = "fmt-mxfp4")]
+        Format::MXFP4 => {
+            for (blk, out) in w.chunks_exact(17).zip(y.chunks_exact_mut(32)) {
+                let d = crate::format::e8m0_to_f32_half(blk[0]);
+                let qs = &blk[1..17];
+                for j in 0..16 {
+                    out[j] = d * KVALUES_MXFP4[(qs[j] & 0x0F) as usize] as f32;
+                    out[j + 16] = d * KVALUES_MXFP4[(qs[j] >> 4) as usize] as f32;
                 }
             }
         }
@@ -1507,6 +1522,21 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        #[cfg(feature = "fmt-mxfp4")]
+        Format::MXFP4 => {
+            let mut acc = 0.0f32;
+            for (b, blk) in w.chunks_exact(17).enumerate() {
+                let qs = &blk[1..17];
+                let aq = &a.q[b * 32..b * 32 + 32];
+                let mut s = 0i32;
+                for j in 0..16 {
+                    s += KVALUES_MXFP4[(qs[j] & 0x0F) as usize] as i32 * aq[j] as i32;
+                    s += KVALUES_MXFP4[(qs[j] >> 4) as usize] as i32 * aq[j + 16] as i32;
+                }
+                acc += crate::format::e8m0_to_f32_half(blk[0]) * a.d[b] * s as f32;
+            }
+            acc
+        }
         #[cfg(feature = "fmt-ternary")]
         Format::PQ2_0 => {
             let mut acc = 0.0f32;
@@ -1744,6 +1774,7 @@ mod tests {
             feature = "fmt-kquant",
             feature = "fmt-ternary",
             feature = "fmt-iq",
+            feature = "fmt-mxfp4",
             feature = "fmt-legacy"
         )),
         allow(unused_variables, dead_code)
@@ -1773,6 +1804,8 @@ mod tests {
                 Format::Q6_K => fix(blk, 208),
                 #[cfg(feature = "fmt-iq")]
                 Format::IQ4_XS => fix(blk, 0),
+                #[cfg(feature = "fmt-mxfp4")]
+                Format::MXFP4 => blk[0] = (blk[0] % 30) + 115,
                 #[cfg(feature = "fmt-ternary")]
                 Format::PQ2_0 => fix(blk, 0),
                 #[cfg(feature = "fmt-ternary")]
@@ -1802,6 +1835,7 @@ mod tests {
             feature = "fmt-kquant",
             feature = "fmt-ternary",
             feature = "fmt-iq",
+            feature = "fmt-mxfp4",
             feature = "fmt-legacy"
         )),
         allow(dead_code)
@@ -1931,6 +1965,51 @@ mod tests {
     #[cfg(feature = "fmt-iq")]
     fn fused_dot_matches_reference_decode_iq4_xs() {
         fused_equals_reference(Format::IQ4_XS, 2560);
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-mxfp4")]
+    fn fused_dot_matches_reference_decode_mxfp4() {
+        fused_equals_reference(Format::MXFP4, 960);
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-mxfp4")]
+    fn dequant_row_mxfp4_matches_hand_computed_block() {
+        let mut blk = vec![0u8; 17];
+        // e = 129 (0x81) -> e8m0_to_f32_half(129) = 2.0
+        blk[0] = 129;
+        // qs[0]: low nibble = 0 (KVALUES_MXFP4[0] = 0), high nibble = 1 (KVALUES_MXFP4[1] = 1)
+        blk[1] = 0x10;
+        // qs[1]: low nibble = 7 (KVALUES_MXFP4[7] = 12), high nibble = 9 (KVALUES_MXFP4[9] = -1)
+        blk[2] = 0x97;
+        // qs[2]: low nibble = 14 (KVALUES_MXFP4[14] = -8), high nibble = 15 (KVALUES_MXFP4[15] = -12)
+        blk[3] = 0xFE;
+        // qs[3]: low nibble = 4 (KVALUES_MXFP4[4] = 4), high nibble = 5 (KVALUES_MXFP4[5] = 6)
+        blk[4] = 0x54;
+
+        let mut out = vec![0.0f32; 32];
+        dequant_row(Format::MXFP4, &blk, &mut out);
+
+        assert_eq!(out[0], 0.0);
+        assert_eq!(out[16], 2.0);
+        assert_eq!(out[1], 24.0);
+        assert_eq!(out[17], -2.0);
+        assert_eq!(out[2], -16.0);
+        assert_eq!(out[18], -24.0);
+        assert_eq!(out[3], 8.0);
+        assert_eq!(out[19], 12.0);
+
+        // Test subnormal exponent edge values:
+        // e = 0 -> e8m0_to_f32_half(0) = 2^(-128)
+        blk[0] = 0;
+        dequant_row(Format::MXFP4, &blk, &mut out);
+        assert_eq!(out[16], f32::from_bits(0x0020_0000));
+
+        // e = 1 -> e8m0_to_f32_half(1) = 2^(-127)
+        blk[0] = 1;
+        dequant_row(Format::MXFP4, &blk, &mut out);
+        assert_eq!(out[16], f32::from_bits(0x0040_0000));
     }
 
     #[test]

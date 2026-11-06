@@ -178,6 +178,8 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
         }
         #[cfg(feature = "fmt-iq")]
         Format::IQ4_NL | Format::IQ4_XS => &[Tier::Scalar, Tier::Avx2],
+        #[cfg(feature = "fmt-mxfp4")]
+        Format::MXFP4 => &[Tier::Scalar, Tier::Avx2],
         #[cfg(feature = "fmt-ternary")]
         Format::PQ2_0 | Format::PTQ1_0 => &[Tier::Scalar, Tier::Avx2, Tier::Avx512],
         #[allow(unreachable_patterns)]
@@ -210,6 +212,10 @@ mod tests {
         {
             assert_eq!(kernels_for(Format::IQ4_NL), &[Tier::Scalar, Tier::Avx2]);
             assert_eq!(kernels_for(Format::IQ4_XS), &[Tier::Scalar, Tier::Avx2]);
+        }
+        #[cfg(feature = "fmt-mxfp4")]
+        {
+            assert_eq!(kernels_for(Format::MXFP4), &[Tier::Scalar, Tier::Avx2]);
         }
         #[cfg(feature = "fmt-ternary")]
         {

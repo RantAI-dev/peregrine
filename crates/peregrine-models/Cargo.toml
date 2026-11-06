@@ -21,6 +21,7 @@ default = [
     "arch-qwen35",
     "arch-gemma3",
     "arch-qwen3moe",
+    "fmt-mxfp4",
     "fmt-kquant",
     "fmt-ternary",
     "fmt-iq",
@@ -38,6 +39,7 @@ arch-gemma3 = []
 arch-qwen3moe = []
 
 # Formats passed through to core and kernels
+fmt-mxfp4 = ["peregrine-core/fmt-mxfp4", "peregrine-kernels/fmt-mxfp4"]
 fmt-kquant = ["peregrine-core/fmt-kquant", "peregrine-kernels/fmt-kquant"]
 fmt-ternary = ["peregrine-core/fmt-ternary", "peregrine-kernels/fmt-ternary"]
 fmt-iq = ["peregrine-core/fmt-iq", "peregrine-kernels/fmt-iq"]
@@ -94,7 +96,7 @@ required-features = ["arch-qwen", "fmt-kquant"]
 
 [[test]]
 name = "synthetic"
-required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "mtp", "fmt-kquant", "fmt-ternary", "fmt-legacy", "arch-gemma3"]
+required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-gemma3", "mtp", "fmt-mxfp4", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
 
 [lints]
 workspace = true

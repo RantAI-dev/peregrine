@@ -26,6 +26,8 @@ pub enum Format {
     IQ4_NL,
     /// GGML's non-linear 4-bit format with 6-bit sub-block scales, 256 weights in 136 bytes (`f16 d, u16 scales_h, u8 scales_l[4], u8 qs[128]`).
     IQ4_XS,
+    /// GGML's MXFP4 format (OCP microscaling FP4), 32 weights in 17 bytes (u8 e8m0 scale, 16 bytes qs).
+    MXFP4,
     // PrismML's ternary formats (Bonsai 2), group size 128. PQ2_0: f16 scale, then 32 bytes of 2-bit
     // codes, weight j in bits 2(j%4) of byte j/4, value code − 1. PTQ1_0: 24 + 2 bytes of base-3 trits, then f16.
     PQ2_0,
@@ -51,6 +53,7 @@ impl Format {
             20 => Format::IQ4_NL,
             23 => Format::IQ4_XS,
             30 => Format::BF16,
+            39 => Format::MXFP4,
             142 => Format::PQ2_0,
             143 => Format::PTQ1_0,
             _ => return None,
@@ -61,7 +64,7 @@ impl Format {
     pub const fn block(self) -> usize {
         match self {
             Format::F32 | Format::F16 | Format::BF16 => 1,
-            Format::Q4_0 | Format::Q5_0 | Format::Q8_0 | Format::IQ4_NL => 32,
+            Format::Q4_0 | Format::Q5_0 | Format::Q8_0 | Format::IQ4_NL | Format::MXFP4 => 32,
             Format::Q2_K
             | Format::Q3_K
             | Format::Q4_K
@@ -88,6 +91,7 @@ impl Format {
             Format::Q6_K => 210,   // u8 ql[128] + u8 qh[64] + i8 scales[16] + f16 d
             Format::IQ4_NL => 18,  // f16 d + u8 qs[16]
             Format::IQ4_XS => 136, // f16 d + u16 scales_h + u8 scales_l[4] + u8 qs[128]
+            Format::MXFP4 => 17,   // u8 e + u8 qs[16]
             Format::PQ2_0 => 34,   // f16 d + u8 qs[32]
             Format::PTQ1_0 => 28,  // u8 qs[24] + u8 qh[2] + f16 d
         }
@@ -114,6 +118,7 @@ impl Format {
             Format::Q6_K => "Q6_K",
             Format::IQ4_NL => "IQ4_NL",
             Format::IQ4_XS => "IQ4_XS",
+            Format::MXFP4 => "MXFP4",
             Format::PQ2_0 => "PQ2_0",
             Format::PTQ1_0 => "PTQ1_0",
             Format::BF16 => "BF16",
@@ -130,6 +135,7 @@ impl Format {
                 Some("fmt-kquant")
             }
             Format::IQ4_NL | Format::IQ4_XS => Some("fmt-iq"),
+            Format::MXFP4 => Some("fmt-mxfp4"),
             Format::PQ2_0 | Format::PTQ1_0 => Some("fmt-ternary"),
         }
     }
@@ -144,6 +150,8 @@ impl Format {
             Format::Q2_K | Format::Q3_K | Format::Q4_K | Format::Q5_K | Format::Q6_K => true,
             #[cfg(feature = "fmt-iq")]
             Format::IQ4_NL | Format::IQ4_XS => true,
+            #[cfg(feature = "fmt-mxfp4")]
+            Format::MXFP4 => true,
             #[cfg(feature = "fmt-ternary")]
             Format::PQ2_0 | Format::PTQ1_0 => true,
             #[allow(unreachable_patterns)]
@@ -166,6 +174,7 @@ impl Format {
         Format::Q6_K,
         Format::IQ4_NL,
         Format::IQ4_XS,
+        Format::MXFP4,
         Format::PQ2_0,
         Format::PTQ1_0,
     ];
@@ -219,6 +228,39 @@ pub fn cast_f32_slice(b: &[u8], n: usize) -> Option<&[f32]> {
     } else {
         None
     }
+}
+
+/// Decode an 8-bit power-of-two exponent (e8m0) to f32.
+///
+/// Follows `ggml_e8m0_to_fp32` in `ggml-impl.h`:
+/// - `x == 0`: 2^(-127) (represented as subnormal float with bits `0x0040_0000`)
+/// - `x > 0`: 2^(x - 127) (represented as normalized float with bits `(x as u32) << 23`)
+#[inline(always)]
+pub const fn e8m0_to_f32(x: u8) -> f32 {
+    let bits = if x == 0 {
+        0x0040_0000
+    } else {
+        (x as u32) << 23
+    };
+    f32::from_bits(bits)
+}
+
+/// Decode an 8-bit power-of-two exponent (e8m0) halved (divided by 2.0) to f32.
+///
+/// Follows `ggml_e8m0_to_fp32_half` in `ggml-impl.h`:
+/// Because `kvalues_mxfp4` contains doubled values (2 * E2M1), scales in `dequant_row`
+/// and `dot_scalar` use this half-scale to compensate.
+/// - `x == 0`: 2^(-128) (subnormal, bits `0x0020_0000`)
+/// - `x == 1`: 2^(-127) (subnormal, bits `0x0040_0000`)
+/// - `x >= 2`: 2^(x - 128) (normalized, bits `((x - 1) as u32) << 23`)
+#[inline(always)]
+pub const fn e8m0_to_f32_half(x: u8) -> f32 {
+    let bits = if x < 2 {
+        0x0020_0000 << x
+    } else {
+        ((x - 1) as u32) << 23
+    };
+    f32::from_bits(bits)
 }
 
 #[cfg(test)]
