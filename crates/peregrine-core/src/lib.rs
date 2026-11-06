@@ -40,7 +40,7 @@ pub mod tokenizer;
 pub use gguf::{Format, Gguf};
 // The kernels live in `peregrine-kernels`; they keep their paths here.
 pub use peregrine_kernels::cpu_has;
-pub use peregrine_kernels::{cpu, hadamard, quant, table, vmath};
+pub use peregrine_kernels::{cpu, delta, hadamard, quant, table, vmath};
 #[cfg(target_arch = "x86_64")]
 pub use peregrine_kernels::{simd, tern};
 pub use session::{Session, SessionCfg};
