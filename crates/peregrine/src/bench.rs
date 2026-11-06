@@ -3,7 +3,7 @@
 use clap::Args;
 use peregrine_core::options::EngineOptions;
 use peregrine_core::profile;
-use peregrine_core::{Session, SessionCfg};
+use peregrine_core::SessionCfg;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -46,7 +46,7 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
         ..Default::default()
     };
 
-    let mut session = Session::open(&args.model, cfg)
+    let mut session = peregrine_models::session::open(&args.model, cfg)
         .map_err(|e| format!("cannot open session for {}: {e}", args.model.display()))?;
 
     let report = session.bench(args.prompt_tokens, args.tokens)?;

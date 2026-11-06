@@ -15,7 +15,7 @@ fn f32_at(b: &[u8], i: usize) -> f32 {
 /// RMSNorm of one attention head in place, against its `head_dim` weights (Qwen3's
 /// q/k norm). Summed in f64 like `rmsnorm_into`, so both norms round the same way.
 #[inline]
-pub(crate) fn head_rmsnorm(x: &mut [f32], w: &[f32], eps: f32) {
+pub fn head_rmsnorm(x: &mut [f32], w: &[f32], eps: f32) {
     let ss = x.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / x.len() as f64;
     let inv = (1.0 / (ss + eps as f64).sqrt()) as f32;
     for (v, g) in x.iter_mut().zip(w) {
@@ -23,7 +23,7 @@ pub(crate) fn head_rmsnorm(x: &mut [f32], w: &[f32], eps: f32) {
     }
 }
 
-pub(crate) fn rmsnorm_into(w: &Weights, weight: &TensorInfo, eps: f32, x: &[f32], out: &mut [f32]) {
+pub fn rmsnorm_into(w: &Weights, weight: &TensorInfo, eps: f32, x: &[f32], out: &mut [f32]) {
     let n = x.len();
     let wb = w.bytes(weight);
     let ss = crate::vmath::sumsq_f64(x) / n as f64;
@@ -55,7 +55,8 @@ pub(crate) fn rmsnorm_into(w: &Weights, weight: &TensorInfo, eps: f32, x: &[f32]
     }
 }
 
-pub(crate) fn rmsnorm(
+#[inline]
+pub fn rmsnorm(
     w: &Weights,
     weight: &TensorInfo,
     eps: f32,
@@ -72,7 +73,7 @@ pub(crate) fn rmsnorm(
 /// Rows are independent, so with a batch (prefill, speculative verification) they
 /// are split across the pool. This was a fifth of prefill time on one thread.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn norm_rows(
+pub fn norm_rows(
     w: &Weights,
     weight: &TensorInfo,
     d_model: usize,

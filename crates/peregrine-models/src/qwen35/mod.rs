@@ -9,12 +9,12 @@ use std::any::Any;
 pub use forward::{profile, HyScratch};
 pub use load::HybridCfg;
 
-use crate::arch::{ActLayout, Architecture, Family, Loaded, MtpHead, RecurrentShape};
-use crate::blocks::rotate::Rotation;
-use crate::gguf::{Gguf, TensorInfo};
-use crate::model::{Caches, Config, Linear, State, StepStats, Weights};
-use crate::pool::Pool;
-use crate::tokenizer::Tokenizer;
+use peregrine_core::arch::{ActLayout, Architecture, Family, Loaded, MtpHead, RecurrentShape};
+use peregrine_core::blocks::rotate::Rotation;
+use peregrine_core::gguf::{Gguf, TensorInfo};
+use peregrine_core::model::{Caches, Config, Linear, State, StepStats, Weights};
+use peregrine_core::pool::Pool;
+use peregrine_core::tokenizer::Tokenizer;
 
 pub struct Qwen35 {
     pub(crate) cfg: HybridCfg,
@@ -51,7 +51,7 @@ impl Architecture for Qwen35 {
     fn act_layout(&self) -> ActLayout {
         ActLayout {
             ternary: true,
-            ptq1: self.cfg.ptq1 && crate::table::MatKernels::get().ptq1_layout(),
+            ptq1: self.cfg.ptq1 && peregrine_kernels::table::MatKernels::get().ptq1_layout(),
             tb_span: self.cfg.tb_span,
         }
     }

@@ -11,7 +11,7 @@ use std::time::Instant;
 
 /// Largest batch one matmul call accepts. A stack array of this many scratch floats
 /// holds one row's results; `PREFILL_CHUNK` and `draft_len + 1` are both far below it.
-pub(crate) const MAX_BATCH: usize = 128;
+pub const MAX_BATCH: usize = 128;
 
 /// whether matmul rows are handed out in chunks from a counter (default) or in equal shares
 /// (`PEREGRINE_DYNAMIC=0`, the static partition).
@@ -23,27 +23,27 @@ fn dynamic_rows() -> bool {
 
 /// One matrix of a fused matmul group, and where its output goes.
 #[derive(Clone, Copy)]
-pub(crate) struct MatJob<'a> {
-    pub(crate) w: &'a TensorInfo,
-    pub(crate) out: OutPtr<'a>,
+pub struct MatJob<'a> {
+    pub w: &'a TensorInfo,
+    pub out: OutPtr<'a>,
     /// Output rows to compute, when fewer than the matrix's full `dims[1]` (the MTP draft head reads only the
     /// first part of the vocabulary). Kept here rather than in a cloned `TensorInfo`, whose `String` and `dims`
     /// would allocate on every draft step.
-    pub(crate) rows: Option<usize>,
+    pub rows: Option<usize>,
 }
 
 impl<'a> MatJob<'a> {
     /// The number of output rows this job computes.
     #[inline(always)]
-    pub(crate) fn rows(&self) -> usize {
+    pub fn rows(&self) -> usize {
         self.rows.unwrap_or(self.w.dims[1] as usize)
     }
 }
 
 /// One matrix of a fused group, dense or LittleBit. `linear_group` dispatches.
-pub(crate) struct LinJob<'a> {
-    pub(crate) lin: &'a Linear,
-    pub(crate) out: OutPtr<'a>,
+pub struct LinJob<'a> {
+    pub lin: &'a Linear,
+    pub out: OutPtr<'a>,
 }
 
 /// Several matrices that share one activation — Q, K and V; gate and up — in a
@@ -51,7 +51,7 @@ pub(crate) struct LinJob<'a> {
 /// concatenated row space, so the split stays balanced even though K and V have a
 /// third of Q's rows. The byte, MAC and barrier accounting is unchanged except
 /// that the barrier count honestly falls.
-pub(crate) fn matmul_group(
+pub fn matmul_group(
     w: &Weights,
     jobs: &[MatJob],
     acts: &[QuantAct],
@@ -202,7 +202,7 @@ pub(crate) fn matmul_group(
 /// quantised from: the LittleBit path works on floats (its per-column scale
 /// `g` is applied before the signs), while the dense path keeps its int8 form.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn linear_group(
+pub fn linear_group(
     w: &Weights,
     slb: Option<&Slb>,
     jobs: &[LinJob],
@@ -255,7 +255,7 @@ pub(crate) fn linear_group(
 /// Weight traffic counted: the bit matrices plus the decoded f32 scales, once
 /// per call — like the dense path, independent of batch size.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn lb_group(
+pub fn lb_group(
     slb: Option<&Slb>,
     jobs: &[(usize, OutPtr<'_>)],
     xs: &[f32],

@@ -169,7 +169,7 @@ fn tracker_for(ptr: usize, len: usize) -> &'static BufferTracker {
 
 /// Scheduling strategy for partitioning tasks across worker threads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Sched {
+pub enum Sched {
     /// Contiguous shares: worker `wk` of `nw` takes `pool::share(n_rows, wk, nw)`.
     Static,
     /// Contiguous block-aligned shares: workers take blocks of `align` rows via `share(n_rows / align, wk, nw)`.
@@ -182,7 +182,7 @@ pub(crate) enum Sched {
 ///
 /// If `parallel` is false or `pool.width() <= 1`, runs synchronously on the calling thread as worker 0.
 /// If `parallel` is true, partitions the rows across `pool` workers according to `sched`.
-pub(crate) fn for_row_chunks<T, F>(
+pub fn for_row_chunks<T, F>(
     pool: &Pool,
     parallel: bool,
     buf: &mut [T],
@@ -297,7 +297,7 @@ pub(crate) fn for_row_chunks<T, F>(
 
 /// Carve disjoint row ranges of two buffers across worker threads.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn for_row_chunks_2<T1, T2, F>(
+pub fn for_row_chunks_2<T1, T2, F>(
     pool: &Pool,
     parallel: bool,
     buf1: &mut [T1],
@@ -439,7 +439,7 @@ pub(crate) fn for_row_chunks_2<T1, T2, F>(
 
 /// Carve disjoint row ranges of three buffers across worker threads.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn for_row_chunks_3<T1, T2, T3, F>(
+pub fn for_row_chunks_3<T1, T2, T3, F>(
     pool: &Pool,
     parallel: bool,
     buf1: &mut [T1],
@@ -610,7 +610,7 @@ pub(crate) fn for_row_chunks_3<T1, T2, T3, F>(
 
 /// Carve disjoint chunks of a single 1D buffer across worker threads.
 #[allow(dead_code)]
-pub(crate) fn for_chunks<T, F>(pool: &Pool, buf: &mut [T], sched: Sched, f: F)
+pub fn for_chunks<T, F>(pool: &Pool, buf: &mut [T], sched: Sched, f: F)
 where
     T: Send,
     F: Fn(usize, Range<usize>, &mut [T]) + Sync,
@@ -815,25 +815,25 @@ impl<'a, T> Disjoint<'a, T> {
 }
 
 // Type aliases for existing block and model interfaces.
-pub(crate) type OutPtr<'a> = Disjoint<'a, f32>;
-pub(crate) type SharedBuf<'a> = Disjoint<'a, f32>;
+pub type OutPtr<'a> = Disjoint<'a, f32>;
+pub type SharedBuf<'a> = Disjoint<'a, f32>;
 #[allow(dead_code)]
-pub(crate) type SharedActs<'a> = Disjoint<'a, QuantAct>;
+pub type SharedActs<'a> = Disjoint<'a, QuantAct>;
 #[allow(dead_code)]
-pub(crate) type SharedScratch<'a> = Disjoint<'a, attn::Scratch>;
+pub type SharedScratch<'a> = Disjoint<'a, attn::Scratch>;
 #[allow(dead_code)]
-pub(crate) type SharedMl<'a> = Disjoint<'a, (f32, f64)>;
+pub type SharedMl<'a> = Disjoint<'a, (f32, f64)>;
 
 // ---- recurrent-state pointers of the hybrid (Gated DeltaNet) pass ----
 
 /// Per-row raw pointers into the caches' recurrent state, and the snapshots a speculative verification asks
 /// for, kept beside the other hybrid scratch so a decode step reuses them instead of allocating four vectors
 /// per Gated DeltaNet layer.
-pub(crate) struct RecScratch {
+pub struct RecScratch {
     /// Row `b`'s `(state, conv)` pointers for the recurrent layer being processed.
-    pub(crate) rec: Vec<(*mut f32, *mut f32)>,
+    pub rec: Vec<(*mut f32, *mut f32)>,
     /// Row `b`'s snapshot request `(position, state, conv)`, if its cache asked for one.
-    pub(crate) snap: Vec<Option<(usize, *mut f32, *mut f32)>>,
+    pub snap: Vec<Option<(usize, *mut f32, *mut f32)>>,
 }
 
 // SAFETY: the vectors only hold pointers into the `KvCache`s passed to the same `forward_hybrid` call; they are
@@ -846,7 +846,7 @@ unsafe impl Sync for RecScratch {}
 
 /// Raw per-row state pointers for the delta-rule workers.
 #[derive(Clone, Copy)]
-pub(crate) struct RowPtrs(pub(crate) *const (*mut f32, *mut f32));
+pub struct RowPtrs(pub *const (*mut f32, *mut f32));
 // SAFETY: each (row's state, head) region is written by exactly one task; rows of a shared cache are processed in
 // order by the task that owns the head.
 unsafe impl Send for RowPtrs {}
@@ -858,14 +858,14 @@ impl RowPtrs {
     /// # Safety
     /// `b` must be inside the pointer array, which must outlive the call.
     #[inline(always)]
-    pub(crate) unsafe fn at(self, b: usize) -> (*mut f32, *mut f32) {
+    pub unsafe fn at(self, b: usize) -> (*mut f32, *mut f32) {
         *self.0.add(b)
     }
 }
 
 /// Per row, the snapshot request of its cache for recurrent layer `idx`: (position, state, conv) pointers.
 #[derive(Clone, Copy)]
-pub(crate) struct SnapPtrs(pub(crate) *const Option<(usize, *mut f32, *mut f32)>);
+pub struct SnapPtrs(pub *const Option<(usize, *mut f32, *mut f32)>);
 // SAFETY: as `RowPtrs`: each snapshot region is written by the task that owns it (a head slice, a channel range).
 unsafe impl Send for SnapPtrs {}
 unsafe impl Sync for SnapPtrs {}
@@ -873,7 +873,7 @@ impl SnapPtrs {
     /// # Safety
     /// `b` must be inside the array, which must outlive the call.
     #[inline(always)]
-    pub(crate) unsafe fn at(self, b: usize) -> Option<(usize, *mut f32, *mut f32)> {
+    pub unsafe fn at(self, b: usize) -> Option<(usize, *mut f32, *mut f32)> {
         *self.0.add(b)
     }
 }
