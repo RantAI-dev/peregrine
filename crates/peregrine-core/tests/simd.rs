@@ -175,7 +175,7 @@ fn sane(fmt: Format, w: &mut [u8]) {
     for blk in w.chunks_exact_mut(fmt.block_bytes()) {
         match fmt {
             Format::Q8_0 | Format::Q5_0 | Format::Q4_0 => fix(blk, 0),
-            Format::Q4_K => {
+            Format::Q4_K | Format::Q5_K => {
                 fix(blk, 0);
                 fix(blk, 2);
             }
@@ -193,6 +193,7 @@ fn batched_kernels_match_the_scalar_specification_at_every_batch_width() {
         (Format::Q4_0, 960),
         (Format::Q5_0, 960),
         (Format::Q4_K, 2560),
+        (Format::Q5_K, 2560),
         (Format::Q6_K, 2560),
     ] {
         let mut w = prng_bytes(0xBEEF_0000 + n as u64, row_bytes(fmt, n));

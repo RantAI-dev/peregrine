@@ -149,6 +149,24 @@ pub(super) struct Hybrid {
     v_grouped: bool,
 }
 
+/// Per-row raw pointers into the caches' recurrent state, and the snapshots a speculative verification asks
+/// for, kept beside the other hybrid scratch so a decode step reuses them instead of allocating four vectors
+/// per Gated DeltaNet layer.
+struct RecScratch {
+    /// Row `b`'s `(state, conv)` pointers for the recurrent layer being processed.
+    rec: Vec<(*mut f32, *mut f32)>,
+    /// Row `b`'s snapshot request `(position, state, conv)`, if its cache asked for one.
+    snap: Vec<Option<(usize, *mut f32, *mut f32)>>,
+}
+
+// SAFETY: the vectors only hold pointers into the `KvCache`s passed to the same `forward_hybrid` call; they are
+// rewritten by every `gdn`. `State` owns them and only one thread uses it at a time; the pool closures see copies
+// through `RowPtrs`/`SnapPtrs`, whose `Send`/`Sync` impls carry the disjoint-write argument. The `Send` impl keeps
+// `State` (and the `Engine` holding it) movable between threads like the rest of the scratch.
+unsafe impl Send for RecScratch {}
+// SAFETY: as `Send`; shared access only reads the vector's values (pointer copies) and never dereferences them.
+unsafe impl Sync for RecScratch {}
+
 /// Scratch for the hybrid pass, beside `State`'s own buffers.
 pub struct HyScratch {
     /// `attn_q` output (q and gate interleaved per head) or the GDN `attn_qkv` output, per row.
@@ -164,6 +182,11 @@ pub struct HyScratch {
     rot_w: usize,
     /// GDN output per row, `value_dim`.
     o: Vec<f32>,
+    /// Runs of rows sharing one cache, and the caches already seen, reused every call.
+    runs: Vec<(usize, usize, usize)>,
+    seen: Vec<usize>,
+    /// Recurrent-state pointers for the delta-rule and conv workers, reused every layer.
+    ptrs: RecScratch,
 }
 
 impl HyScratch {
@@ -180,6 +203,12 @@ impl HyScratch {
             rot: vec![0.0; b * rot_w],
             rot_w,
             o: vec![0.0; b * h.value_dim()],
+            runs: Vec::with_capacity(b),
+            seen: Vec::with_capacity(b),
+            ptrs: RecScratch {
+                rec: vec![(std::ptr::null_mut(), std::ptr::null_mut()); b],
+                snap: vec![None; b],
+            },
         }
     }
 }
@@ -573,11 +602,15 @@ impl Model {
             return Err("the hybrid head is dense".into());
         };
         let rows = rows.min(h.dims[1] as usize) / 16 * 16;
-        let mut part = h.clone();
-        part.dims[1] = rows as u64;
         self.rotate_rows(hs, acts, y, d, nb, false, pool, stats);
-        self.mm(
-            &[(&part, logits.as_mut_ptr())],
+        // The head reads only its first `rows` output rows; narrowing the job keeps the full `TensorInfo`
+        // borrowed instead of cloning it, which would allocate on every draft step.
+        self.mm_jobs(
+            &[MatJob {
+                w: h,
+                out: OutPtr(logits.as_mut_ptr()),
+                rows: Some(rows),
+            }],
             &acts[..nb],
             nb,
             pool,
@@ -699,9 +732,26 @@ impl Model {
         assert!(!jobs.is_empty() && jobs.len() <= 4);
         let mj: [MatJob; 4] = std::array::from_fn(|i| {
             let (w, o) = jobs[i.min(jobs.len() - 1)];
-            MatJob { w, out: OutPtr(o) }
+            MatJob {
+                w,
+                out: OutPtr(o),
+                rows: None,
+            }
         });
         let mj = &mj[..jobs.len()];
+        self.mm_jobs(mj, acts, nb, pool, stats);
+    }
+
+    /// One matmul group with its jobs already described, so a caller can narrow a matrix's output rows (the MTP
+    /// draft head) without cloning its `TensorInfo` — that clone allocated a `String` and a `Vec` per draft step.
+    fn mm_jobs(
+        &self,
+        mj: &[MatJob],
+        acts: &[QuantAct],
+        nb: usize,
+        pool: &Pool,
+        stats: &mut StepStats,
+    ) {
         let _t = Tick::new(3);
         let t0 = prof_on().then(Instant::now);
         self.matmul_group(mj, acts, nb, pool, stats);
@@ -746,22 +796,30 @@ impl Model {
         // A recurrent state advances one token at a time: each cache's rows must be one run of consecutive
         // positions starting where the cache ends, or the state would silently describe another sequence.
         {
-            let runs = caches.runs(nb);
-            let mut seen: Vec<usize> = Vec::with_capacity(runs.len());
-            for &(r0, len, ci) in &runs {
-                let ok = !seen.contains(&ci)
-                    && positions[r0] == caches.cache(ci).filled()
-                    && (1..len).all(|k| positions[r0 + k] == positions[r0] + k);
-                if !ok {
-                    st8.hy = Some(hs);
-                    return Err(format!(
-                        "rows {r0}..{} do not continue their recurrent cache in order (cache holds {}, row starts at {})",
-                        r0 + len,
-                        caches.cache(ci).filled(),
-                        positions[r0]
-                    ));
+            caches.runs_into(nb, &mut hs.runs);
+            let mut err = None;
+            {
+                let seen = &mut hs.seen;
+                seen.clear();
+                for &(r0, len, ci) in &hs.runs {
+                    let ok = !seen.contains(&ci)
+                        && positions[r0] == caches.cache(ci).filled()
+                        && (1..len).all(|k| positions[r0 + k] == positions[r0] + k);
+                    if !ok {
+                        err = Some(format!(
+                            "rows {r0}..{} do not continue their recurrent cache in order (cache holds {}, row starts at {})",
+                            r0 + len,
+                            caches.cache(ci).filled(),
+                            positions[r0]
+                        ));
+                        break;
+                    }
+                    seen.push(ci);
                 }
-                seen.push(ci);
+            }
+            if let Some(e) = err {
+                st8.hy = Some(hs);
+                return Err(e);
             }
         }
 
@@ -1203,10 +1261,14 @@ impl Model {
         // `cd` channels: the input at position p sits in plane p mod taps, so the oldest of the window ending at
         // `pos` is plane pos mod taps, the one this token overwrites after the sum.
         {
-            let ptrs = rec_ptrs(caches, idx, nb);
-            let rp = RowPtrs(ptrs.as_ptr());
-            let snaps = snap_ptrs(caches, idx, nb);
-            let spp = SnapPtrs(snaps.as_ptr());
+            let (rp, spp) = {
+                rec_ptrs(caches, idx, nb, &mut hs.runs, &mut hs.ptrs.rec);
+                snap_ptrs(caches, idx, nb, &mut hs.runs, &mut hs.ptrs.snap);
+                (
+                    RowPtrs(hs.ptrs.rec.as_ptr()),
+                    SnapPtrs(hs.ptrs.snap.as_ptr()),
+                )
+            };
             let bigp = SharedBuf(hs.big.as_mut_ptr());
             let bw = hs.big_w;
             let wcur = &conv_w[taps * cd..(taps + 1) * cd];
@@ -1306,10 +1368,14 @@ impl Model {
         drop(tc);
         let td = Tick::new(6);
         // Delta rule: tasks are v-heads; a task runs its head through every row in order.
-        let ptrs = rec_ptrs(caches, idx, nb);
-        let rp = RowPtrs(ptrs.as_ptr());
-        let snaps = snap_ptrs(caches, idx, nb);
-        let spp = SnapPtrs(snaps.as_ptr());
+        let (rp, spp) = {
+            rec_ptrs(caches, idx, nb, &mut hs.runs, &mut hs.ptrs.rec);
+            snap_ptrs(caches, idx, nb, &mut hs.runs, &mut hs.ptrs.snap);
+            (
+                RowPtrs(hs.ptrs.rec.as_ptr()),
+                SnapPtrs(hs.ptrs.snap.as_ptr()),
+            )
+        };
         let big: &[f32] = &hs.big;
         let abv: &[f32] = &hs.ab;
         let out = SharedBuf(hs.o.as_mut_ptr());
@@ -1389,16 +1455,22 @@ impl Model {
 }
 
 /// Every row's (state, conv) pointers for recurrent layer `idx`, taken once per cache (rows of one cache share
-/// them): re-borrowing a cache per row would invalidate the pointers taken before.
-fn rec_ptrs(caches: &mut Caches, idx: usize, nb: usize) -> Vec<(*mut f32, *mut f32)> {
-    let mut out = vec![(std::ptr::null_mut(), std::ptr::null_mut()); nb];
-    for (r0, len, ci) in caches.runs(nb) {
+/// them): re-borrowing a cache per row would invalidate the pointers taken before. `runs` and `out` are reused
+/// scratch — a decode step runs this four times per layer and must not allocate.
+fn rec_ptrs(
+    caches: &mut Caches,
+    idx: usize,
+    nb: usize,
+    runs: &mut Vec<(usize, usize, usize)>,
+    out: &mut [(*mut f32, *mut f32)],
+) {
+    caches.runs_into(nb, runs);
+    for &(r0, len, ci) in runs.iter() {
         let p = caches.cache_mut(ci).recurrent_ptrs(idx);
         for slot in &mut out[r0..r0 + len] {
             *slot = p;
         }
     }
-    out
 }
 
 /// Per row, the snapshot request of its cache for recurrent layer `idx`: (position, state, conv) pointers.
@@ -1420,15 +1492,16 @@ fn snap_ptrs(
     caches: &mut Caches,
     idx: usize,
     nb: usize,
-) -> Vec<Option<(usize, *mut f32, *mut f32)>> {
-    let mut out = vec![None; nb];
-    for (r0, len, ci) in caches.runs(nb) {
+    runs: &mut Vec<(usize, usize, usize)>,
+    out: &mut [Option<(usize, *mut f32, *mut f32)>],
+) {
+    caches.runs_into(nb, runs);
+    for &(r0, len, ci) in runs.iter() {
         let p = caches.cache_mut(ci).snapshot_ptrs(idx);
         for slot in &mut out[r0..r0 + len] {
             *slot = p;
         }
     }
-    out
 }
 
 /// Matmul outputs land at row stride `from` (the matrix's row count); move them to stride `to` in place.
