@@ -115,7 +115,7 @@ fn check(path: &Path, name: &str) -> Option<String> {
         .join("tests/golden/synthetic")
         .join(&tier);
     let gpath = dir.join(format!("{name}.golden"));
-    if std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record") {
+    if std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record") && !gpath.exists() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&gpath, &a).unwrap();
         eprintln!("synthetic: recorded {name} ({tier})");
@@ -144,6 +144,7 @@ fn dense_models_in_every_format() {
         Format::Q5_0,
         Format::Q4_K,
         Format::Q6_K,
+        Format::Q4_0,
     ];
     for arch in ["llama", "qwen3"] {
         for (i, &fmt) in formats.iter().enumerate() {
