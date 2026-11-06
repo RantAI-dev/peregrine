@@ -466,3 +466,179 @@ fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
+
+/// A `qwen3moe` model's shape: ordinary Qwen3 attention, but the FFN is a bank of experts.
+#[derive(Clone, Copy, Debug)]
+pub struct MoeShape {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    /// The *dense* FFN width the file also carries. llama.cpp reads it, but the experts ignore it
+    /// (`expert_feed_forward_length` is what the experts use).
+    pub n_ff: usize,
+    /// How many experts the router chooses from.
+    pub n_expert: usize,
+    /// How many of them one token uses.
+    pub n_expert_used: usize,
+    /// `expert_feed_forward_length`: the width of one expert's FFN.
+    pub expert_ff: usize,
+    pub ctx: usize,
+}
+
+impl Default for MoeShape {
+    fn default() -> Self {
+        // Every matrix row is a multiple of 256 (the K-quant block), heads are 32 wide, and the
+        // experts are 128 wide — a multiple of the 32-weight block of Q8_0.
+        MoeShape {
+            d_model: 256,
+            n_layer: 2,
+            n_head: 8,
+            n_head_kv: 4,
+            n_ff: 512,
+            n_expert: 8,
+            n_expert_used: 2,
+            expert_ff: 128,
+            ctx: 512,
+        }
+    }
+}
+
+/// Write a `qwen3moe` file — a mixture-of-experts model as llama.cpp v0.9.0 expects it
+/// (`src/models/qwen3moe.cpp`, `src/llama-arch.cpp`).
+///
+/// The attention block is Qwen3's (per-head q/k RMSNorm, GQA); the FFN is a bank of experts:
+///
+/// | tensor | GGUF dims | what |
+/// |---|---|---|
+/// | `blk.i.ffn_gate_inp.weight` | `[d_model, n_expert]` | the router |
+/// | `blk.i.ffn_gate_exps.weight` | `[d_model, expert_ff, n_expert]` | per expert, `d_model → expert_ff` |
+/// | `blk.i.ffn_up_exps.weight` | `[d_model, expert_ff, n_expert]` | per expert, `d_model → expert_ff` |
+/// | `blk.i.ffn_down_exps.weight` | `[expert_ff, d_model, n_expert]` | per expert, `expert_ff → d_model` |
+///
+/// The expert tensors are three-dimensional, and GGUF stores `dims[0]` contiguous, so the layout
+/// is expert-major: expert `e` is a contiguous run of `dims[1]` rows of `dims[0]` weights — a
+/// 2D `[in, out]` matrix in the layout the matmul wants, with no new kernel.
+///
+/// Every matrix is in `fmt`; the RMSNorm weights are F32, as in the dense models.
+pub fn write_moe(dir: &Path, fmt: Format, seed: u64, s: MoeShape) -> PathBuf {
+    // ggml multiplies a quantized matrix by an activation along `ne[0]`, so that row must be a
+    // whole number of blocks. The default shape satisfies this for F16 and Q8_0; a K-quant would
+    // need `d_model` and `expert_ff` to be multiples of 256.
+    assert!(
+        s.d_model.is_multiple_of(fmt.block()) && s.expert_ff.is_multiple_of(fmt.block()),
+        "qwen3moe rows must be a multiple of the {} block {}",
+        fmt.label(),
+        fmt.block()
+    );
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let head_dim = s.d_model / s.n_head;
+    w.str("general.architecture", "qwen3moe");
+    w.str(
+        "general.name",
+        &format!("synthetic-qwen3moe-{}", fmt.label()),
+    );
+    let k = |x: &str| format!("qwen3moe.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("attention.head_count_kv"), s.n_head_kv as u32);
+    w.u32(&k("attention.key_length"), head_dim as u32);
+    w.u32(&k("attention.value_length"), head_dim as u32);
+    // The dense FFN width: llama.cpp reads it, and the experts ignore it.
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    // The experts' own width, the router's bank and how many of them a token uses.
+    w.u32(&k("expert_feed_forward_length"), s.expert_ff as u32);
+    w.u32(&k("expert_count"), s.n_expert as u32);
+    w.u32(&k("expert_used_count"), s.n_expert_used as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.u32(&k("rope.dimension_count"), head_dim as u32);
+    w.f32(&k("rope.freq_base"), 1e6);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
+    // llama.cpp never reads this key for qwen3moe — its own value stays 0, which means "no
+    // scaling" (`llama-graph.cpp`: a scale of 0 or 1 is not applied).
+    w.f32(&k("expert_weights_scale"), 0.0);
+    vocab::add_tokenizer_metadata(&mut w, "qwen2");
+    w.str(
+        "tokenizer.chat_template",
+        vocab::chat_template(TemplateKind::Qwen3),
+    );
+
+    let kv = s.n_head_kv * head_dim;
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    // One expert's weights: `cols` weights per row, `rows` rows, `n_expert` of them, the last
+    // dimension running slowest — llama.cpp's own order.
+    let exps = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64, s.n_expert as u64],
+            fmt,
+            generate_weights(fmt, cols * rows * s.n_expert, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    for i in 0..s.n_layer {
+        let p = |t: &str| format!("blk.{i}.{t}");
+        norm(&mut w, &mut rng, &p("attn_norm.weight"), s.d_model);
+        mat(&mut w, &mut rng, &p("attn_q.weight"), s.d_model, s.d_model);
+        mat(&mut w, &mut rng, &p("attn_k.weight"), s.d_model, kv);
+        mat(&mut w, &mut rng, &p("attn_v.weight"), s.d_model, kv);
+        norm(&mut w, &mut rng, &p("attn_q_norm.weight"), head_dim);
+        norm(&mut w, &mut rng, &p("attn_k_norm.weight"), head_dim);
+        mat(
+            &mut w,
+            &mut rng,
+            &p("attn_output.weight"),
+            s.d_model,
+            s.d_model,
+        );
+        norm(&mut w, &mut rng, &p("ffn_norm.weight"), s.d_model);
+        // The router: one row of `n_expert` weights per input.
+        mat(
+            &mut w,
+            &mut rng,
+            &p("ffn_gate_inp.weight"),
+            s.d_model,
+            s.n_expert,
+        );
+        // The experts themselves.
+        exps(
+            &mut w,
+            &mut rng,
+            &p("ffn_gate_exps.weight"),
+            s.d_model,
+            s.expert_ff,
+        );
+        exps(
+            &mut w,
+            &mut rng,
+            &p("ffn_up_exps.weight"),
+            s.d_model,
+            s.expert_ff,
+        );
+        exps(
+            &mut w,
+            &mut rng,
+            &p("ffn_down_exps.weight"),
+            s.expert_ff,
+            s.d_model,
+        );
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+    mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
+    let path = dir.join(format!("qwen3moe-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
