@@ -59,6 +59,9 @@ All notable changes to this project are documented here. The format follows
 - Project setup: CI on x86-64 / aarch64 Linux and macOS, MSRV and supply-chain checks, issue forms,
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
+### Changed
+- F32/F16/BF16 matrices multiply f32 activations instead of int8-quantised ones (output change for those formats).
+
 ### Fixed
 - The A1 dequantisation oracle is re-cut from one pinned SmolLM2-360M-Instruct Q4_K_M file (size and
   FNV-1a checked at test time, SHA-256 in the failure message), so another upload fails loudly instead

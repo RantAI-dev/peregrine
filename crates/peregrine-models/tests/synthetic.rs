@@ -9,7 +9,7 @@ mod support;
 
 use peregrine_core::gguf::{Format, Gguf};
 use peregrine_core::kv::KvPrec;
-use peregrine_core::model::{Model, State, StepStats};
+use peregrine_core::model::{Model, StepStats};
 use peregrine_core::pool::Pool;
 use peregrine_core::serve::{Engine, Finish, SlotCfg};
 use std::fmt::Write as _;
@@ -57,9 +57,7 @@ fn run(model: &Model, threads: usize) -> String {
     let c = model.cfg;
     let pool = Pool::new(threads);
     let n = PROMPT.len();
-    let mut st = State::new(&c, 128, n, 256, threads, model.rope_factors.as_deref());
-    let (lx, lt) = model.lb_scratch(128);
-    st.set_lb_scratch(lx, lt);
+    let mut st = model.new_state(128, n, 256, threads);
     let mut kv = model.new_cache(KvPrec::F16, 256);
     let mut ss = StepStats::default();
     let want: Vec<usize> = (0..n).collect();
@@ -921,7 +919,7 @@ fn gemma3_synthetic_file_runs_in_llama_cpp() {
     );
 
     let pool = Pool::new(1);
-    let mut st = State::new(&model.cfg, 128, prompt_toks.len() + n_predict, 256, 1, None);
+    let mut st = model.new_state(128, prompt_toks.len() + n_predict, 256, 1);
     let mut kv = model.new_cache(KvPrec::F16, 256);
     let mut ss = StepStats::default();
     let want: Vec<usize> = vec![prompt_toks.len() - 1];

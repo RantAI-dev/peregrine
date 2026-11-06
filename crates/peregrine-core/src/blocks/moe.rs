@@ -273,6 +273,15 @@ impl MoeScratch {
     }
 }
 
+impl MoeScratch {
+    /// Keep each activation row's f32 values for F32/F16/BF16 expert matrices (see `QuantAct::keep_f32`).
+    pub fn set_keep_f32(&mut self, on: bool) {
+        for a in self.acts.iter_mut().chain(self.acts_ffn.iter_mut()) {
+            a.keep_f32 = on;
+        }
+    }
+}
+
 /// The mixture-of-experts block: route every row, run the experts it chose, and add up their
 /// weighted outputs.
 ///
