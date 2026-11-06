@@ -1,5 +1,5 @@
 // lossless MTP speculation, end to end: decode with and without it and require the same tokens.
-// cargo run --release --example spec_check -- <model-MTP.gguf> [threads] [tokens] [temperature]
+// cargo run --release -p peregrine-bench --example spec_check -- <model-MTP.gguf> [threads] [tokens] [temperature]
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::KvPrec;
 use peregrine_core::model::{Caches, Model, State, StepStats};
