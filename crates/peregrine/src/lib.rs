@@ -25,6 +25,9 @@ pub use peregrine_core::options::EngineOptions;
 pub use peregrine_core::profile::Profile;
 pub use peregrine_core::serve::Engine;
 
+pub mod support;
+pub use support::support;
+
 #[cfg(feature = "cli")]
 pub mod bench;
 #[cfg(feature = "cli")]
