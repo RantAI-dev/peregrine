@@ -36,6 +36,7 @@ pub mod safetensors;
 pub mod sample;
 pub mod serve;
 pub mod session;
+pub mod state;
 pub mod suffix;
 pub mod telem;
 pub mod template;
