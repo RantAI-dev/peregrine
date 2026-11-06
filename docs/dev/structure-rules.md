@@ -59,6 +59,9 @@ peregrine-bench     harness and experiments; depends on the others, nothing depe
   - Gate the family registration in `FAMILIES` and `ARCHS` under `#[cfg(feature = "arch-<family>")]`.
   - Update `check_compatible_with` in `peregrine-core/src/lib.rs` and `Model::load_with` in `peregrine-core/src/model.rs` to refuse disabled architectures with `architecture ... is not enabled in this build (recompile with feature 'arch-<name>')`.
 
+- **Support table (`README.md`)**:
+  - After adding a format/arch, run `peregrine support --markdown` and paste between `<!-- support:begin -->` and `<!-- support:end -->` in `README.md`. CI validates this in the lint job.
+
 ## Files and modules
 
 1. A module owns one job and says so in its `//!` header.
