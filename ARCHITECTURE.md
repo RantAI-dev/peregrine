@@ -57,6 +57,7 @@ bound by compute. That split drives most design choices.
 | `model.rs` | `Model`: loader, the dense forward (`forward_rows`) and the tile store for repacked weights. |
 | `model/hybrid.rs` | The Qwen 3.5 / Bonsai 2 forward: Gated DeltaNet recurrent layers plus gated attention, Hadamard rotation. |
 | `model/mtp.rs` | The multi-token-prediction head used as a lossless drafter. |
+| `blocks/` | Pieces shared by the model families (ADR 0006): `par.rs`, every raw-pointer type that hands pool workers disjoint parts of a buffer; `attn.rs`, attention scratch. The layer computations move here in S1.2 step 3. |
 | `attn.rs` | Grouped online-softmax attention. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state, snapshots for speculation, and the prefix store that reuses a shared prompt beginning. |
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
