@@ -441,21 +441,24 @@ impl Session {
                 .expect("the cache is the engine's during a turn")
                 .filled(),
         );
-        // The drafter's own context goes back with the cache: it drafts from the
-        // positions the target has, and no further.
-        if let Some(d) = &mut self.suffix {
-            d.rollback(l);
-        }
+        // The DSpark head's own context goes back with the cache: it drafts
+        // from the positions the target has, and no further.
         if let Some(d) = &mut self.dspark {
             d.truncate(l);
         }
         self.ctx.clear();
         self.ctx.extend_from_slice(&kept[..l]);
+        // The suffix index's corpus is the conversation's tokens: it is rebuilt
+        // from them, because a reset (or a shifted context) left it with the
+        // ones the cache no longer holds. What it learned about how reliable
+        // each kind of match is stays.
+        self.reset_suffix_corpus();
         l
     }
 
-    /// The suffix index's corpus is the conversation's tokens: after a restore from
-    /// the store it is a different sequence, so the index is rebuilt from it.
+    /// The suffix index's corpus is the conversation's tokens: after a restore
+    /// from the store, or a reset, it is a different sequence, so the index is
+    /// rebuilt from it.
     fn reset_suffix_corpus(&mut self) {
         let Some(d) = &mut self.suffix else {
             return;
