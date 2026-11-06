@@ -183,6 +183,41 @@ pub struct SlotCost {
     pub decode_s: f64,
 }
 
+/// What one step of the engine cost, for a caller that reports per token.
+///
+/// The server counts tokens and bytes and needs nothing more. A conversation
+/// does: it reports what each of its tokens cost, and the drafts that were
+/// verified and kept (ADR 0007).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StepReport {
+    /// What the step's forward pass moved.
+    pub stats: StepStats,
+    /// The step's wall time.
+    pub secs: f64,
+    /// The rows the step forwarded: more than one means a batched pass.
+    pub rows: usize,
+    /// The tokens the step emitted.
+    pub tokens: usize,
+    /// The draft tokens the step verified, and how many of them survived.
+    pub drafted: u16,
+    pub accepted: u16,
+}
+
+/// What a conversation's slot leaves behind when its turn ends.
+///
+/// The conversation keeps its cache: the next turn reuses the positions it
+/// shares with this one. It keeps the tokens the cache holds (the same
+/// sequence), and the drafter that drafted for it — a suffix index's corpus
+/// and a DSpark head's context belong to the conversation, not to the turn.
+pub struct SlotKeep {
+    /// The cache: the positions the slot computed.
+    pub kv: KvCache,
+    /// The tokens the cache holds, position by position.
+    pub tokens: Vec<u32>,
+    /// The drafter the slot speculated with.
+    pub drafter: Option<Box<dyn crate::draft::Drafter>>,
+}
+
 /// One token of one request, or the end of it.
 #[derive(Debug, Clone)]
 pub struct Emission {
@@ -240,6 +275,9 @@ struct Slot {
     /// The most draft tokens the slot's drafter is asked for; 0 — the engine's
     /// own MTP block — leaves the choice to the drafter.
     drafter_depth: usize,
+    /// The cache belongs to the caller, not to the engine: a conversation lends
+    /// it for its turn and takes it back when the turn ends.
+    owned_cache: bool,
 }
 
 /// MTP speculation for a lone user; `PEREGRINE_MTP=0` turns it off.
@@ -347,6 +385,19 @@ pub struct Engine {
     /// The draft tokens verified: how many the engine asked the target to
     /// check, over every round.
     pub spec_tokens: u64,
+    /// The rounds in which a drafter was asked for a proposal, whether or not
+    /// the price said to verify any of it.
+    pub spec_rounds: u64,
+    /// What the last step cost: the bytes it moved, the rows it forwarded, the
+    /// tokens it emitted and the drafts it verified.
+    ///
+    /// A conversation (one slot) reads this after every step, and reports what
+    /// each of its tokens cost. With several slots the report covers the whole
+    /// pass, not one slot's share of it.
+    pub last_step: StepReport,
+    /// What a conversation's slot left behind when its turn ended: the cache
+    /// it keeps, the tokens it holds and the drafter that drafted for it.
+    kept: Option<SlotKeep>,
     /// The decode steps run, for the suffix index's probe rule: a confidence
     /// that is never tested never recovers.
     steps: u64,
@@ -371,7 +422,11 @@ impl Engine {
     ) -> Engine {
         let c = model.cfg;
         let max_slots = max_slots.max(1);
-        let max_ctx = max_ctx.clamp(32, c.ctx_train);
+        // One position more than the model's own context is allowed: the engine
+        // stops a turn one position short of a full cache, so a caller that
+        // wants the whole context asks for one more (ADR 0007: a conversation
+        // runs on a one-slot engine).
+        let max_ctx = max_ctx.clamp(32, c.ctx_train + 1);
         // The widest batch is a prefill chunk beside one row per slot (a mixed step); every decode row wants
         // logits, a prefill chunk wants none.
         let max_batch = PREFILL_CHUNK + max_slots;
@@ -383,6 +438,9 @@ impl Engine {
             spec_drafts: 0,
             spec_hits: 0,
             spec_tokens: 0,
+            spec_rounds: 0,
+            last_step: StepReport::default(),
+            kept: None,
             model,
             pool: Pool::new(threads),
             pool1: crate::pool::narrow_pool(threads),
@@ -458,40 +516,113 @@ impl Engine {
 
     /// Take a request, or give it back when every slot is busy or the prompt cannot fit.
     pub fn admit(&mut self, prompt: Vec<u32>, cfg: SlotCfg) -> Result<SlotId, (Vec<u32>, String)> {
+        self.admit_inner(prompt, cfg, None)
+            .map_err(|(p, _, e)| (p, e))
+    }
+
+    /// Admit a slot that runs on the caller's own cache (ADR 0007).
+    ///
+    /// A conversation's cache outlives its turn: the next turn reuses the
+    /// positions it shares with the previous one. The engine takes the cache
+    /// for the turn and hands it back when the turn ends (`take_kept`), and
+    /// the engine's own prefix store is not consulted — the caller manages its
+    /// own reuse, and a drafter's corpus starts at position 0 anyway.
+    ///
+    /// A request that is refused gives the cache back with the error: the turn
+    /// did not start, and the conversation still holds what it held.
+    pub fn admit_with_cache(
+        &mut self,
+        prompt: Vec<u32>,
+        cfg: SlotCfg,
+        kv: KvCache,
+    ) -> Result<SlotId, (Vec<u32>, KvCache, String)> {
+        self.admit_inner(prompt, cfg, Some(kv))
+            .map_err(|(p, kv, e)| (p, kv.expect("the caller's cache"), e))
+    }
+
+    /// What a conversation's slot left behind when its turn ended: the cache it
+    /// keeps, the tokens it holds and the drafter that drafted for it.
+    ///
+    /// `None` when the last slot was not a conversation's (the server's slots
+    /// keep their caches in the prefix store instead).
+    pub fn take_kept(&mut self) -> Option<SlotKeep> {
+        self.kept.take()
+    }
+
+    /// The engine's worker pool, for a caller that runs a forward pass of its
+    /// own (a conversation's benchmark, the verification-width probe).
+    pub fn pool(&self) -> &Pool {
+        &self.pool
+    }
+
+    /// The narrow pool for one-row steps, when there is one.
+    pub fn narrow_pool(&self) -> Option<&Pool> {
+        self.pool1.as_ref()
+    }
+
+    fn admit_inner(
+        &mut self,
+        prompt: Vec<u32>,
+        cfg: SlotCfg,
+        cache: Option<KvCache>,
+    ) -> Result<SlotId, (Vec<u32>, Option<KvCache>, String)> {
         if !self.has_room() {
-            return Err((prompt, "every slot is busy".into()));
+            return Err((prompt, cache, "every slot is busy".into()));
         }
         if prompt.is_empty() {
-            return Err((prompt, "the prompt is empty".into()));
+            return Err((prompt, cache, "the prompt is empty".into()));
         }
         if prompt.len() + 1 > self.max_ctx {
             let n = prompt.len();
             return Err((
                 prompt,
+                cache,
                 format!(
                     "prompt of {n} tokens does not fit in {} positions",
                     self.max_ctx
                 ),
             ));
         }
-        let id = self.next_id;
-        self.next_id += 1;
-        let mut kv = self.model.new_cache(self.kv_prec, self.max_ctx);
-        // The rotation is the engine's default; a request may ask for the
-        // family's own choice instead (ADR 0007).
-        if !cfg.kv_rotation {
-            kv = kv.without_rotation();
-        }
-        // The drafter the slot asks for, built for this slot. It is built
-        // before the prefix store is consulted: a drafter's corpus and context
-        // start at position 0, so a restored prefix would leave them short.
-        let asked = self
-            .make_asked_drafter(&cfg.drafter)
-            .map_err(|e| (prompt.clone(), e))?;
         // The last prompt token is never prefilled (it is what the first decode step feeds), so a prefix may
         // cover everything before it.
         let cap = prompt.len() - 1;
-        let fed = if asked.is_some() {
+        // The drafter the slot asks for, built for this slot. It is built
+        // before the prefix store is consulted: a drafter's corpus and context
+        // start at position 0, so a restored prefix would leave them short.
+        let asked = match self.make_asked_drafter(&cfg.drafter) {
+            Ok(d) => d,
+            Err(e) => return Err((prompt, cache, e)),
+        };
+        let id = self.next_id;
+        self.next_id += 1;
+        // The caller's cache is already the one it wants: its rotation, its
+        // positions. The engine's own cache is made here.
+        let given = cache.is_some();
+        let mut kv = match cache {
+            Some(kv) => {
+                let held = kv.filled();
+                if held > cap {
+                    return Err((
+                        prompt,
+                        Some(kv),
+                        format!("the cache holds {held} positions, more than the prompt's {cap}"),
+                    ));
+                }
+                kv
+            }
+            None => {
+                let mut kv = self.model.new_cache(self.kv_prec, self.max_ctx);
+                // The rotation is the engine's default; a request may ask for the
+                // family's own choice instead (ADR 0007).
+                if !cfg.kv_rotation {
+                    kv = kv.without_rotation();
+                }
+                kv
+            }
+        };
+        let fed = if given {
+            kv.filled()
+        } else if asked.is_some() {
             0
         } else {
             match self.prefixes.best(&prompt, cap) {
@@ -566,6 +697,7 @@ impl Engine {
             prefill_s: 0.0,
             decode_s: 0.0,
             pen,
+            owned_cache: given,
         });
         if speculating {
             self.spec_slot = Some(id);
@@ -676,17 +808,32 @@ impl Engine {
         id: SlotId,
         drafter: Box<dyn crate::draft::Drafter>,
     ) -> Result<(), String> {
+        self.attach_drafter_with_depth(id, drafter, 0)
+    }
+
+    /// Attach a drafter to a slot, with the depth it may draft (ADR 0007).
+    ///
+    /// The depth is how many tokens the drafter is asked for at most: the
+    /// DSpark head's block is what it is, and the suffix index proposes as far
+    /// as the evidence supports. A caller that keeps its drafter between turns
+    /// (a conversation) attaches the same drafter to each of them.
+    pub fn attach_drafter_with_depth(
+        &mut self,
+        id: SlotId,
+        drafter: Box<dyn crate::draft::Drafter>,
+        depth: usize,
+    ) -> Result<(), String> {
         let Some(i) = self.slots.iter().position(|s| s.id == id) else {
             return Err(format!("no slot {id}"));
         };
         self.slots[i].drafter = Some(std::sync::Mutex::new(drafter));
+        self.slots[i].drafter_depth = depth.min(self.state.max_batch.saturating_sub(1));
         if self.spec_slot == Some(id) {
             self.spec_slot = None;
         }
         // A verification pass wants the logits of the anchor and of the
-        // drafted tokens: room for two rows, whatever the engine was built
-        // for.
-        self.ensure_logit_rows(2);
+        // drafted tokens: room for one row per drafted token.
+        self.ensure_logit_rows(self.slots[i].drafter_depth.max(1) + 1);
         self.refresh_taps();
         Ok(())
     }
@@ -774,9 +921,31 @@ impl Engine {
             if self.spec_slot == Some(id) {
                 self.spec_slot = None;
             }
-            self.keep_prefix(&s);
+            // A conversation's cache is the conversation's: it goes back to the
+            // caller, which decides what to keep of it.
+            if s.owned_cache {
+                self.kept = Some(self.keep_for(s));
+            } else {
+                self.keep_prefix(&s);
+            }
             // The slot's drafter went with it: the taps it needed may not be needed any more.
             self.refresh_taps();
+        }
+    }
+
+    /// What a finished slot leaves a conversation: its cache, the tokens the
+    /// cache holds and the drafter that drafted for it.
+    fn keep_for(&mut self, s: Slot) -> SlotKeep {
+        // The cache holds exactly the prompt positions that were prefilled (`fed` of them) followed by the
+        // tokens fed back during decode, in that order.
+        let mut tokens: Vec<u32> = s.prompt[..s.fed.min(s.prompt.len())].to_vec();
+        tokens.extend(&s.fed_back);
+        let n = tokens.len().min(s.kv.filled());
+        tokens.truncate(n);
+        SlotKeep {
+            kv: s.kv,
+            tokens,
+            drafter: s.drafter.map(|d| d.into_inner().expect("drafter")),
         }
     }
 
@@ -868,6 +1037,7 @@ impl Engine {
             self.stop_speculation();
         }
         let t0 = std::time::Instant::now();
+        let before = self.stats;
         let dec: Vec<usize> = (0..self.slots.len())
             .filter(|&i| self.slots[i].ready())
             .collect();
@@ -950,6 +1120,12 @@ impl Engine {
         self.state.want_hidden = false;
         let elapsed = t0.elapsed().as_secs_f64();
         let rows = tokens.len().max(1) as f64;
+        // The plain step is a verification pass of width one: the cost model
+        // prices the drafts against it, and without it the prices are a prior
+        // in the wrong units (a second against a millisecond).
+        if n_dec == 1 && pre.is_empty() {
+            self.vcost.observe(1, elapsed);
+        }
         // The prefilled rows are committed positions too: a drafter is told about them, with the
         // target's taps and hidden state for the row.
         for (k, &(i, take)) in pre.iter().enumerate() {
@@ -974,14 +1150,33 @@ impl Engine {
             }
         }
         if n_dec == 0 {
+            // A prompt chunk: what it cost is the prompt's own time.
+            self.last_step = StepReport {
+                stats: self.stats.since(&before),
+                secs: t0.elapsed().as_secs_f64(),
+                rows: tokens.len(),
+                tokens: 0,
+                drafted: 0,
+                accepted: 0,
+            };
             return vec![];
         }
-        self.finish_decode(&dec, &tokens[..n_dec], elapsed * n_dec as f64 / rows)
+        let out = self.finish_decode(&dec, &tokens[..n_dec], elapsed * n_dec as f64 / rows);
+        self.last_step = StepReport {
+            stats: self.stats.since(&before),
+            secs: t0.elapsed().as_secs_f64(),
+            rows: tokens.len(),
+            tokens: out.len(),
+            drafted: 0,
+            accepted: 0,
+        };
+        out
     }
     /// Feed the next chunk of slot `i`'s prompt. Its last token is left for the first decode step, which is
     /// what produces the logits the first token is sampled from.
     fn prefill_chunk(&mut self, i: usize) -> Result<(), String> {
         let t0 = std::time::Instant::now();
+        let before = self.stats;
         let s = &mut self.slots[i];
         let last = s.prompt.len() - 1;
         let take = PREFILL_CHUNK.min(last - s.fed);
@@ -1004,20 +1199,32 @@ impl Engine {
             }
         }
         self.state.want_hidden = false;
+        let secs = t0.elapsed().as_secs_f64();
         let s = &mut self.slots[i];
         s.fed += take;
         s.prefilled += take;
         s.pos = s.fed;
-        s.prefill_s += t0.elapsed().as_secs_f64();
+        s.prefill_s += secs;
         if s.ready() {
             s.next = s.prompt[last];
         }
+        // What the chunk cost: a conversation reports the prompt's own time
+        // apart from the decode steps'.
+        self.last_step = StepReport {
+            stats: self.stats.since(&before),
+            secs,
+            rows: take,
+            tokens: 0,
+            drafted: 0,
+            accepted: 0,
+        };
         Ok(())
     }
 
     /// One token for every ready slot, in one pass over the weights.
     fn decode(&mut self) -> Vec<Emission> {
         let t0 = std::time::Instant::now();
+        let before = self.stats;
         let n = self.slots.len();
         let tokens: Vec<u32> = self.slots.iter().map(|s| s.next).collect();
         let positions: Vec<usize> = self.slots.iter().map(|s| s.pos).collect();
@@ -1058,7 +1265,22 @@ impl Engine {
             return out;
         }
         let all: Vec<usize> = (0..n).collect();
-        self.finish_decode(&all, &tokens, t0.elapsed().as_secs_f64())
+        let secs = t0.elapsed().as_secs_f64();
+        // A lone slot's plain step is a verification pass of width one: the cost
+        // model prices the drafts against it.
+        if n == 1 {
+            self.vcost.observe(1, secs);
+        }
+        let out = self.finish_decode(&all, &tokens, secs);
+        self.last_step = StepReport {
+            stats: self.stats.since(&before),
+            secs: t0.elapsed().as_secs_f64(),
+            rows: tokens.len(),
+            tokens: out.len(),
+            drafted: 0,
+            accepted: 0,
+        };
+        out
     }
 
     /// Sample and account for the decode rows just computed: row `b` of the logits belongs to slot `dec[b]`, which
@@ -1222,11 +1444,16 @@ impl Engine {
             self.slots = keep;
             gone
         };
-        for s in &done {
+        for s in done {
             if self.spec_slot == Some(s.id) {
                 self.spec_slot = None;
             }
-            self.keep_prefix(s);
+            if s.owned_cache {
+                // A conversation's cache goes back to the conversation.
+                self.kept = Some(self.keep_for(s));
+            } else {
+                self.keep_prefix(&s);
+            }
         }
         // A drafter went with its slot: the taps it needed may not be needed any more.
         self.refresh_taps();
@@ -1345,6 +1572,7 @@ impl Engine {
     /// turn is emitted but never fed, exactly as `Session::commit` cuts it.
     fn verify_step(&mut self, si: usize) -> Vec<Emission> {
         let t0 = std::time::Instant::now();
+        let before = self.stats;
         let pos = self.slots[si].pos;
         let anchor = self.slots[si].next;
         // The parking rule: a drafter whose rounds do not pay for themselves is
@@ -1353,6 +1581,11 @@ impl Engine {
             self.park -= 1;
         }
         let drafting = self.park == 0;
+        if drafting {
+            // The round in which the drafter was asked, whether or not the
+            // price said to verify any of it.
+            self.spec_rounds += 1;
+        }
         // What the engine does with the proposal beyond pricing it: the
         // drafter's own policy.
         let policy = self.slots[si]
@@ -1512,6 +1745,15 @@ impl Engine {
         // The step is done: the next one is the next step of the count the
         // suffix index's probe rule uses.
         self.steps += 1;
+        // What the step cost: a conversation reports it per token.
+        self.last_step = StepReport {
+            stats: self.stats.since(&before),
+            secs: t0.elapsed().as_secs_f64(),
+            rows: n,
+            tokens: out.len(),
+            drafted: k as u16,
+            accepted: accepted as u16,
+        };
         out
     }
 

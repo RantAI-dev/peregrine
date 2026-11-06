@@ -213,7 +213,7 @@ pub struct DraftPolicy {
 /// target's own samples. A draft that does not survive is rolled back.
 ///
 /// The interface is unstable until 1.0 (ADR 0005).
-pub trait Drafter: Send {
+pub trait Drafter: Send + std::any::Any {
     /// What the drafter needs from the engine.
     fn needs(&self) -> Needs;
 
@@ -498,8 +498,14 @@ impl DsparkDrafter {
         &self.drafter
     }
 
+    /// The head itself: a conversation keeps it between its turns, and the
+    /// head's context (the tapped hidden states it drafts from) is part of it.
+    pub fn into_inner(self) -> crate::dspark::Drafter {
+        self.drafter
+    }
+
     /// The committed positions' taps, in one batch, join the drafter's context.
-    fn flush(&mut self, pool: &Pool) {
+    pub fn flush(&mut self, pool: &Pool) {
         if self.pending.is_empty() {
             return;
         }
@@ -569,6 +575,10 @@ impl Drafter for DsparkDrafter {
         let width = self.drafter.cfg.target_layer_ids.len() * self.drafter.cfg.hidden;
         let keep = pos.saturating_sub(self.pending_start);
         self.pending.truncate(keep * width);
+        // The head's own context goes back with them: a conversation that
+        // reuses a prefix of its cache must not draft from the positions the
+        // cache no longer holds.
+        self.drafter.truncate(pos);
     }
 
     fn reset(&mut self) {
