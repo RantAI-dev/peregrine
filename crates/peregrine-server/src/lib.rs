@@ -681,7 +681,7 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
             thinking || prefix.is_some(),
             prefix.as_deref(),
         );
-        let prompt = app.model.tk.encode(&prompt_text);
+        let prompt = app.model.tk.encode_prompt(&prompt_text);
         if prompt.len() + 1 >= app.max_ctx {
             let _ = tx.send(Msg::Err(format!(
                 "the prompt is {} tokens; this model is served with {} positions",

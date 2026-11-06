@@ -49,11 +49,12 @@ pub fn inspect(path: &std::path::Path) -> Result<String, String> {
             );
         }
     }
-    let _ = writeln!(
-        out,
-        "tokenizer     {}",
-        g.str("tokenizer.ggml.model").unwrap_or("-")
-    );
+    let tok_model = g.str("tokenizer.ggml.model").unwrap_or("-");
+    let tok_display = match tok_model {
+        "llama" => "llama (SPM)",
+        other => other,
+    };
+    let _ = writeln!(out, "tokenizer     {tok_display}");
     let mut by_fmt: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
     for t in g.tensors.values() {
         let e = by_fmt.entry(t.kind.label()).or_default();

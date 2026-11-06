@@ -32,8 +32,36 @@ impl Default for Dense {
     }
 }
 
-/// Write a dense `arch` model ("llama" or "qwen3") whose matrices are all `fmt`, seeded by `seed`.
+/// How a dense llama file expresses its rotary frequencies.
+#[derive(Clone, Copy, Debug)]
+pub enum Rope {
+    /// The metadata's base angle only.
+    None,
+    /// Llama 3.x's per-frequency factor table (`rope_freqs.weight`).
+    Freqs,
+    /// Linear scaling through `rope.scaling.type = "linear"` and `rope.scaling.factor`.
+    Linear { factor: f32 },
+}
+
+/// Write a dense `arch` model ("llama", "qwen2" or "qwen3") whose matrices are all `fmt`, seeded by
+/// `seed`. `qwen2` carries the attention biases and NeoX rotary pairing its loader requires.
 pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None)
+}
+
+/// A llama file in F16 with the requested rotary-frequency treatment, for the rope-scaling loaders.
+pub fn write_rope_dense(dir: &Path, rope: Rope, seed: u64) -> PathBuf {
+    write_dense_impl(dir, "llama", Format::F16, seed, Dense::default(), rope)
+}
+
+fn write_dense_impl(
+    dir: &Path,
+    arch: &str,
+    fmt: Format,
+    seed: u64,
+    s: Dense,
+    rope: Rope,
+) -> PathBuf {
     let mut rng = Rng::new(seed);
     let mut w = GgufWriter::new();
     let head_dim = s.d_model / s.n_head;
@@ -49,6 +77,10 @@ pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> 
     w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
     w.u32(&k("rope.dimension_count"), head_dim as u32);
     w.f32(&k("rope.freq_base"), 10000.0);
+    if let Rope::Linear { factor } = rope {
+        w.str(&k("rope.scaling.type"), "linear");
+        w.f32(&k("rope.scaling.factor"), factor);
+    }
     w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
     if arch == "qwen3" {
         w.u32(&k("attention.key_length"), head_dim as u32);
@@ -103,6 +135,19 @@ pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> 
             s.d_model,
             kv,
         );
+        if arch == "qwen2" {
+            // Qwen2's attention biases: the loader requires all three and decodes
+            // them once (`Model::load`'s `bias`).
+            let bias = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+                let data: Vec<u8> = (0..n)
+                    .flat_map(|_| rng.f32_range(-0.1, 0.1).to_le_bytes())
+                    .collect();
+                w.add_tensor(name, &[n as u64], Format::F32, data);
+            };
+            bias(&mut w, &mut rng, &format!("blk.{i}.attn_q.bias"), s.d_model);
+            bias(&mut w, &mut rng, &format!("blk.{i}.attn_k.bias"), kv);
+            bias(&mut w, &mut rng, &format!("blk.{i}.attn_v.bias"), kv);
+        }
         if arch == "qwen3" {
             norm(
                 &mut w,
@@ -154,7 +199,22 @@ pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> 
     }
     norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
     mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
-    let path = dir.join(format!("{arch}-{}.gguf", fmt.label()));
+    if matches!(rope, Rope::Freqs) {
+        // Llama 3.x stores one positive factor per rotary frequency; the loader divides
+        // each angle by it. Kept near 1 so every angle stays finite.
+        w.add_tensor(
+            "rope_freqs.weight",
+            &[(head_dim / 2) as u64],
+            Format::F32,
+            generate_norm(head_dim / 2, &mut rng),
+        );
+    }
+    let name = match rope {
+        Rope::None => format!("{arch}-{}", fmt.label()),
+        Rope::Freqs => format!("{arch}-rope-freqs-{}", fmt.label()),
+        Rope::Linear { .. } => format!("{arch}-rope-linear-{}", fmt.label()),
+    };
+    let path = dir.join(format!("{name}.gguf"));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -166,7 +226,22 @@ pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> 
 /// heads, GDN 2 key heads and 4 value heads of width 64, Hadamard block 64. Every width is a multiple of
 /// 256, which the PTQ1_0 activation layout needs, and every matrix has a multiple of 16 rows, which the
 /// AVX-512 tile path needs.
-pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
+///
+/// With `mtp`, one NextN block follows the four main layers (`nextn_predict_layers = 1`, counted in
+/// `block_count`), in Q8_0 as the 4B Bonsai file stores it. The main layers are written first from the
+/// same RNG stream, so `mtp = false` files stay byte-identical.
+pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64, mtp: bool) -> PathBuf {
+    write_hybrid_impl(dir, fmt, seed, mtp, false)
+}
+
+/// The MTP variant whose drafts are accepted: every output-head row is identical, so all logits tie and
+/// both the main model and the MTP block's shared head argmax to token 0; a draft then always matches what
+/// the main model sampled. Random weights otherwise (the ordinary MTP model rejects every draft).
+pub fn write_hybrid_accepting(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
+    write_hybrid_impl(dir, fmt, seed, true, true)
+}
+
+fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool) -> PathBuf {
     assert!(matches!(fmt, Format::PQ2_0 | Format::PTQ1_0));
     let (d_model, n_ff, n_layer, interval) = (256usize, 512usize, 4usize, 4usize);
     let (n_head, n_kv, head_dim, rope_dim) = (4usize, 2usize, 64usize, 32usize);
@@ -181,7 +256,10 @@ pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
     w.str("general.architecture", "qwen35");
     w.str("general.name", &format!("synthetic-qwen35-{}", fmt.label()));
     let k = |x: &str| format!("qwen35.{x}");
-    w.u32(&k("block_count"), n_layer as u32);
+    w.u32(&k("block_count"), (n_layer + usize::from(mtp)) as u32);
+    if mtp {
+        w.u32(&k("nextn_predict_layers"), 1);
+    }
     w.u32(&k("embedding_length"), d_model as u32);
     w.u32(&k("attention.head_count"), n_head as u32);
     w.u32(&k("attention.head_count_kv"), n_kv as u32);
@@ -309,8 +387,82 @@ pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
         tern(&mut w, &mut rng, &p("ffn_down.weight"), n_ff, d_model);
     }
     norm(&mut w, &mut rng, "output_norm.weight", d_model);
-    tern(&mut w, &mut rng, "output.weight", d_model, VOCAB_SIZE);
-    let path = dir.join(format!("qwen35-{}.gguf", fmt.label()));
+    if accept {
+        // Every output row is the same ternary row, so every logit is the same value and
+        // argmax picks row 0 whatever the hidden state: both heads propose token 0, and a
+        // draft always matches what the main model sampled.
+        let row = generate_weights(fmt, d_model, &mut rng);
+        let mut data = Vec::with_capacity(row.len() * VOCAB_SIZE);
+        for _ in 0..VOCAB_SIZE {
+            data.extend_from_slice(&row);
+        }
+        w.add_tensor(
+            "output.weight",
+            &[d_model as u64, VOCAB_SIZE as u64],
+            fmt,
+            data,
+        );
+    } else {
+        tern(&mut w, &mut rng, "output.weight", d_model, VOCAB_SIZE);
+    }
+    if mtp {
+        // One Qwen3.5 full-attention NextN block behind the input projection `[enorm(e) | hnorm(h)]`.
+        // Its head is the model's own output head, reached through `shared_head_norm`.
+        let il = n_layer;
+        let p = |s: &str| format!("blk.{il}.{s}");
+        let q8 = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+            w.add_tensor(
+                name,
+                &[cols as u64, rows as u64],
+                Format::Q8_0,
+                generate_weights(Format::Q8_0, cols * rows, rng),
+            );
+        };
+        q8(
+            &mut w,
+            &mut rng,
+            &p("nextn.eh_proj.weight"),
+            2 * d_model,
+            d_model,
+        );
+        norm(&mut w, &mut rng, &p("nextn.enorm.weight"), d_model);
+        norm(&mut w, &mut rng, &p("nextn.hnorm.weight"), d_model);
+        norm(&mut w, &mut rng, &p("attn_norm.weight"), d_model);
+        q8(&mut w, &mut rng, &p("attn_q.weight"), d_model, 2 * q_dim);
+        q8(
+            &mut w,
+            &mut rng,
+            &p("attn_k.weight"),
+            d_model,
+            n_kv * head_dim,
+        );
+        q8(
+            &mut w,
+            &mut rng,
+            &p("attn_v.weight"),
+            d_model,
+            n_kv * head_dim,
+        );
+        norm(&mut w, &mut rng, &p("attn_q_norm.weight"), head_dim);
+        norm(&mut w, &mut rng, &p("attn_k_norm.weight"), head_dim);
+        q8(&mut w, &mut rng, &p("attn_output.weight"), q_dim, d_model);
+        norm(&mut w, &mut rng, &p("post_attention_norm.weight"), d_model);
+        q8(&mut w, &mut rng, &p("ffn_gate.weight"), d_model, n_ff);
+        q8(&mut w, &mut rng, &p("ffn_up.weight"), d_model, n_ff);
+        q8(&mut w, &mut rng, &p("ffn_down.weight"), n_ff, d_model);
+        norm(
+            &mut w,
+            &mut rng,
+            &p("nextn.shared_head_norm.weight"),
+            d_model,
+        );
+    }
+    let name = if accept {
+        format!("qwen35-{}-mtp-accept", fmt.label())
+    } else {
+        format!("qwen35-{}", fmt.label())
+    };
+    let path = dir.join(format!("{name}.gguf"));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }

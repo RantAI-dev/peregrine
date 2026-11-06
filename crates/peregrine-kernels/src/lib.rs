@@ -14,12 +14,14 @@
 )]
 
 pub mod cpu;
+pub mod delta;
 pub mod format;
 pub mod hadamard;
 pub mod options;
 pub mod quant;
 #[cfg(target_arch = "x86_64")]
 pub mod simd;
+pub mod table;
 #[cfg(target_arch = "x86_64")]
 pub mod tern;
 pub mod vmath;
