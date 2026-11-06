@@ -55,7 +55,7 @@ unsafe impl Sync for BufferTracker {}
 #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
 impl BufferTracker {
     fn new(len: usize) -> Self {
-        let n_words = (len + 63) / 64;
+        let n_words = len.div_ceil(64);
         let mut words = Vec::with_capacity(n_words);
         for _ in 0..n_words {
             words.push(AtomicU64::new(0));
@@ -117,7 +117,7 @@ impl BufferTracker {
         self.ensure_epoch();
         let end = off + len;
         let start_word = off / 64;
-        let end_word = (end + 63) / 64;
+        let end_word = end.div_ceil(64);
         let n_words = self.words.len();
         let end_word = end_word.min(n_words);
 

@@ -71,6 +71,24 @@ curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
 The server speaks the OpenAI chat API (`/v1/chat/completions`, streamed or not), plus `/v1/models`,
 `/health` and `/metrics`.
 
+### Building with fewer features
+
+By default, Peregrine builds with all architectures, quantisation formats, and extras enabled. For embedded applications or smaller binaries, you can disable default features and pick only what you need:
+
+```sh
+# Dense Llama models only with K-quant formats:
+cargo build --release -p peregrine --no-default-features --features cli,arch-llama,fmt-kquant
+
+# Hybrid Qwen3.5 models with ternary formats:
+cargo build --release -p peregrine --no-default-features --features cli,arch-qwen35,fmt-ternary
+```
+
+| Category | Features |
+|---|---|
+| Architectures | `arch-llama` (Llama), `arch-qwen` (Qwen 2/3), `arch-qwen35` (Qwen 3.5 hybrid) |
+| Formats | `fmt-kquant` (Q2_K..Q6_K), `fmt-ternary` (PQ2_0, PTQ1_0), `fmt-iq` (IQ4_NL, IQ4_XS), `fmt-legacy` (Q4_0, Q5_0, Q8_0); F32/F16/BF16 always enabled |
+| Extras | `littlebit` (LittleBit sidecars), `dspark` (speculative drafter), `mtp` (multi-token prediction head), `server` (OpenAI HTTP server), `cli` (CLI binary) |
+
 ## Documentation
 
 | | |

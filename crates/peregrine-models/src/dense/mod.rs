@@ -17,34 +17,70 @@ use layer::AttnWeights;
 /// The dense transformer architectures implemented by Peregrine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arch {
+    #[cfg(feature = "arch-llama")]
     Llama,
+    #[cfg(feature = "arch-qwen")]
     Qwen2,
     /// Qwen3: no attention biases, a per-head RMSNorm on queries and keys before
     /// rotation, and a head width independent of the model width (Qwen3-4B runs 32
     /// heads of 128 over a 2560-wide residual).
+    #[cfg(feature = "arch-qwen")]
     Qwen3,
 }
 
 impl Arch {
     pub fn from_name(name: &str) -> Option<Arch> {
-        Some(match name {
-            "llama" => Arch::Llama,
-            "qwen2" => Arch::Qwen2,
-            "qwen3" => Arch::Qwen3,
-            _ => return None,
-        })
+        match name {
+            #[cfg(feature = "arch-llama")]
+            "llama" => Some(Arch::Llama),
+            #[cfg(feature = "arch-qwen")]
+            "qwen2" => Some(Arch::Qwen2),
+            #[cfg(feature = "arch-qwen")]
+            "qwen3" => Some(Arch::Qwen3),
+            _ => None,
+        }
     }
 
     pub fn name(self) -> &'static str {
         match self {
+            #[cfg(feature = "arch-llama")]
             Arch::Llama => "llama",
+            #[cfg(feature = "arch-qwen")]
             Arch::Qwen2 => "qwen2",
+            #[cfg(feature = "arch-qwen")]
             Arch::Qwen3 => "qwen3",
         }
     }
 
     pub fn key_prefix(self) -> &'static str {
         self.name()
+    }
+
+    pub fn is_llama(self) -> bool {
+        match self {
+            #[cfg(feature = "arch-llama")]
+            Arch::Llama => true,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
+    pub fn is_qwen2(self) -> bool {
+        match self {
+            #[cfg(feature = "arch-qwen")]
+            Arch::Qwen2 => true,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
+    pub fn is_qwen3(self) -> bool {
+        match self {
+            #[cfg(feature = "arch-qwen")]
+            Arch::Qwen3 => true,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
     }
 }
 
@@ -64,11 +100,46 @@ pub struct Dense {
     pub(crate) arch: Arch,
 }
 
+#[cfg(feature = "arch-llama")]
+pub struct LlamaFamily;
+
+#[cfg(feature = "arch-llama")]
+impl Family for LlamaFamily {
+    fn names(&self) -> &'static [&'static str] {
+        &["llama"]
+    }
+
+    fn load(&self, g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
+        Dense::load(g, tk)
+    }
+}
+
+#[cfg(feature = "arch-qwen")]
+pub struct QwenFamily;
+
+#[cfg(feature = "arch-qwen")]
+impl Family for QwenFamily {
+    fn names(&self) -> &'static [&'static str] {
+        &["qwen2", "qwen3"]
+    }
+
+    fn load(&self, g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
+        Dense::load(g, tk)
+    }
+}
+
 pub struct DenseFamily;
 
 impl Family for DenseFamily {
     fn names(&self) -> &'static [&'static str] {
-        &["llama", "qwen2", "qwen3"]
+        &[
+            #[cfg(feature = "arch-llama")]
+            "llama",
+            #[cfg(feature = "arch-qwen")]
+            "qwen2",
+            #[cfg(feature = "arch-qwen")]
+            "qwen3",
+        ]
     }
 
     fn load(&self, g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
@@ -80,10 +151,14 @@ impl Dense {
     pub fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
         let arch_name = g.str("general.architecture")?;
         let arch = Arch::from_name(arch_name).ok_or_else(|| {
-            format!(
-                "Peregrine implements {}; this model is {arch_name:?}",
-                crate::ARCHS.join(" and ")
-            )
+            match arch_name {
+                "llama" => "architecture \"llama\" is not enabled in this build (recompile with feature 'arch-llama')".to_string(),
+                "qwen2" | "qwen3" => format!("architecture {arch_name:?} is not enabled in this build (recompile with feature 'arch-qwen')"),
+                _ => format!(
+                    "Peregrine implements {}; this model is {arch_name:?}",
+                    crate::ARCHS.join(" and ")
+                ),
+            }
         })?;
         let k = |suffix: &str| format!("{}.{suffix}", arch.key_prefix());
         let n_layer = g.u32(&k("block_count"))? as usize;
@@ -107,7 +182,8 @@ impl Dense {
             .u32(&k("attention.key_length"))
             .map(|v| v as usize)
             .unwrap_or(d_model / n_head);
-        if arch != Arch::Qwen3 && head_dim * n_head != d_model {
+        let is_qwen3 = arch.is_qwen3();
+        if !is_qwen3 && head_dim * n_head != d_model {
             return Err(format!(
                 "head dim {head_dim} × {n_head} heads ≠ embedding length {d_model}"
             ));
@@ -137,7 +213,7 @@ impl Dense {
             .map(|f| 1.0 / f);
         let cfg = Config {
             arch_name: arch.name(),
-            rope_neox: arch != Arch::Llama,
+            rope_neox: !arch.is_llama(),
             n_layer,
             n_kv_layer: n_layer,
             n_head,
@@ -174,18 +250,17 @@ impl Dense {
 
         let get = |n: &str| -> Result<TensorInfo, String> { g.tensor(n).cloned() };
         let bias = |n: &str| -> Result<Option<Vec<f32>>, String> {
-            match arch {
-                Arch::Llama | Arch::Qwen3 => Ok(None),
-                Arch::Qwen2 => {
-                    let t = get(n)?;
-                    let mut v = vec![0.0f32; t.numel() as usize];
-                    peregrine_kernels::quant::dequant_row(t.kind, g.bytes(&t), &mut v);
-                    Ok(Some(v))
-                }
+            if arch.is_qwen2() {
+                let t = get(n)?;
+                let mut v = vec![0.0f32; t.numel() as usize];
+                peregrine_kernels::quant::dequant_row(t.kind, g.bytes(&t), &mut v);
+                Ok(Some(v))
+            } else {
+                Ok(None)
             }
         };
         let head_norm = |n: &str| -> Result<Option<Vec<f32>>, String> {
-            if arch != Arch::Qwen3 {
+            if !arch.is_qwen3() {
                 return Ok(None);
             }
             let t = get(n)?;
@@ -264,7 +339,7 @@ impl Dense {
                 (&l.up, dm, ff),
                 (&l.down, ff, dm),
             ] {
-                if let Linear::Dense(t) = lin {
+                if let Some(t) = lin.dense() {
                     shape(t, d_in, d_out)?;
                 }
             }
@@ -273,7 +348,7 @@ impl Dense {
         }
         shape(&tok_embd, dm, cfg.n_vocab)?;
         shape(&out_norm, dm, 1)?;
-        if let Linear::Dense(t) = &head {
+        if let Some(t) = head.dense() {
             shape(t, dm, cfg.n_vocab)?;
         }
 
@@ -294,7 +369,7 @@ impl Dense {
 
 impl Architecture for Dense {
     fn session_kv_rotation(&self) -> bool {
-        self.arch != Arch::Qwen2
+        !self.arch.is_qwen2()
     }
 
     fn linears_mut(
@@ -314,7 +389,7 @@ impl Architecture for Dense {
                 f(lin)?;
             }
         }
-        if let Linear::Dense(ti) = &self.head {
+        if let Some(ti) = self.head.dense() {
             if ti.name == "output.weight" {
                 f(&mut self.head)?;
             }

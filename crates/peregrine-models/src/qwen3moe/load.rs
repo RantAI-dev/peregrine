@@ -276,7 +276,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
             (&l.attn.wv, dm, kd),
             (&l.attn.wo, qd, dm),
         ] {
-            if let Linear::Dense(t) = lin {
+            if let Some(t) = lin.dense() {
                 shape(t, d_in, d_out)?;
             }
         }
@@ -297,7 +297,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     }
     shape(&tok_embd, dm, cfg.n_vocab)?;
     shape(&out_norm, dm, 1)?;
-    if let Linear::Dense(t) = &head {
+    if let Some(t) = head.dense() {
         shape(t, dm, cfg.n_vocab)?;
     }
 

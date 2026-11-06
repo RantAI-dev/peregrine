@@ -13,18 +13,34 @@
     clippy::chunks_exact_to_as_chunks
 )]
 
+#[cfg(any(
+    feature = "arch-llama",
+    feature = "arch-qwen",
+    feature = "arch-qwen3moe"
+))]
 pub mod dense;
+#[cfg(feature = "arch-qwen35")]
 pub mod qwen35;
+#[cfg(feature = "arch-qwen3moe")]
 pub mod qwen3moe;
 
+#[cfg(any(feature = "arch-llama", feature = "arch-qwen"))]
 pub use dense::DenseFamily;
+#[cfg(feature = "arch-llama")]
+pub use dense::LlamaFamily;
+#[cfg(feature = "arch-qwen")]
+pub use dense::QwenFamily;
+#[cfg(feature = "arch-qwen35")]
 pub use qwen35::Qwen35Family;
+#[cfg(feature = "arch-qwen3moe")]
 pub use qwen3moe::Qwen3MoeFamily;
 
 // Re-exports for consumers expecting `hybrid` and `mtp`
+#[cfg(feature = "arch-qwen35")]
 pub mod hybrid {
     pub use crate::qwen35::{profile, HyScratch, HybridCfg};
 }
+#[cfg(all(feature = "arch-qwen35", feature = "mtp"))]
 pub mod mtp {
     pub use crate::qwen35::mtp::Mtp;
     pub use peregrine_core::arch::{MtpHead, MtpState, MTP_MAX_ROWS};
@@ -38,10 +54,30 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Architecture names this crate implements, for compatibility probe messages.
-pub const ARCHS: &[&str] = &["llama", "qwen2", "qwen3", "qwen35", "qwen3moe"];
+pub const ARCHS: &[&str] = &[
+    #[cfg(feature = "arch-llama")]
+    "llama",
+    #[cfg(feature = "arch-qwen")]
+    "qwen2",
+    #[cfg(feature = "arch-qwen")]
+    "qwen3",
+    #[cfg(feature = "arch-qwen35")]
+    "qwen35",
+    #[cfg(feature = "arch-qwen3moe")]
+    "qwen3moe",
+];
 
 /// Table of model families implemented by Peregrine.
-pub static FAMILIES: &[&dyn Family] = &[&DenseFamily, &Qwen35Family, &Qwen3MoeFamily];
+pub static FAMILIES: &[&dyn Family] = &[
+    #[cfg(feature = "arch-llama")]
+    &LlamaFamily,
+    #[cfg(feature = "arch-qwen")]
+    &QwenFamily,
+    #[cfg(feature = "arch-qwen35")]
+    &Qwen35Family,
+    #[cfg(feature = "arch-qwen3moe")]
+    &Qwen3MoeFamily,
+];
 
 /// Load a model from a parsed GGUF file using the built-in model families.
 pub fn load(g: Gguf) -> Result<Model, String> {

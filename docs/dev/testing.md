@@ -119,6 +119,10 @@ and reference test vectors (`.inp` and `.out`) from pinned llama.cpp release fil
 validating pinned SHA-256 checksums. `crates/peregrine-core/tests/tokenize_spm.rs` tests these reference vectors
 and skips with an informative message if the files are absent.
 
+## Accuracy against llama.cpp
+
+`docs/dev/accuracy.md`: the KL-divergence measurement on real text (`peregrine-bench` example `kld`).
+
 ## CPU tiers
 
 Kernels are chosen at run time from the CPU's features, capped by `PEREGRINE_ISA` (`scalar`, `avx2`,

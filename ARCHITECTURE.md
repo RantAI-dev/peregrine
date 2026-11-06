@@ -97,6 +97,27 @@ measurement), `tune` (coordinate search over tuning knobs) and `tier` (the kerne
 A library (`run`, `Args`) and a thin binary. Maps the OpenAI chat request onto `Engine` slots, streams with SSE,
 and exposes `/metrics`.
 
+## Cargo Features (ADR 0005)
+
+The engine provides fine-grained Cargo features across its layers so embedders can build minimal binaries for specific models or formats. Default features enable everything.
+
+| Axis | Feature | Crate | Description |
+|---|---|---|---|
+| **Architectures** | `arch-llama` | `peregrine-models` | Dense Llama models (`llama`) |
+| | `arch-qwen` | `peregrine-models` | Dense Qwen models (`qwen2`, `qwen3`) |
+| | `arch-qwen35` | `peregrine-models` | Hybrid Gated DeltaNet + softmax attention (`qwen35`, `qwen25`) |
+| **Formats** | `fmt-kquant` | `peregrine-kernels` | K-quants: Q2_K through Q6_K |
+| | `fmt-ternary` | `peregrine-kernels` | Ternary formats: PQ2_0, PTQ1_0 |
+| | `fmt-iq` | `peregrine-kernels` | Importance-matrix quants: IQ4_NL, IQ4_XS |
+| | `fmt-legacy` | `peregrine-kernels` | Legacy formats: Q4_0, Q5_0, Q8_0 |
+| **Extras** | `littlebit` | `peregrine-core` | LittleBit sidecar loading and 1-bit linear variant (`Linear::Lb`) |
+| | `dspark` | `peregrine-core` | DSpark speculative drafting |
+| | `mtp` | `peregrine-core` | Multi-token prediction speculation |
+| | `server` | `peregrine` | OpenAI-compatible HTTP server (`peregrine-server`) |
+| | `cli` | `peregrine` | CLI binary (`clap`, `serde_json`) |
+
+Unused formats and architectures are stripped at compile time. Loading a model that requires a disabled feature produces an error naming the required feature to enable (e.g. `architecture "llama" is not enabled in this build (recompile with feature 'arch-llama')` or `tensor '...' uses format Q4_K which is disabled in this build (enable feature 'fmt-kquant')`). When LittleBit or MTP are disabled, sidecars or MTP blocks are safely ignored with a single log line.
+
 ## Invariants
 
 These hold everywhere. A change that breaks one is a bug even if every test passes.

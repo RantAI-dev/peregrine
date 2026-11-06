@@ -88,6 +88,20 @@ pub fn tier_name() -> String {
     }
 }
 
+/// Cached check for AVX-512 VNNI + VL support under tier cap.
+#[inline]
+pub fn have_vnni() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| crate::cpu_has!("avx512vnni") && crate::cpu_has!("avx512vl"))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

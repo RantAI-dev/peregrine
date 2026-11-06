@@ -32,11 +32,7 @@ use std::arch::x86_64::*;
 /// temporaries; AVX-512's 32 hold them with room.
 pub const TILE: usize = 8;
 
-#[inline]
-pub fn have_vnni() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| crate::cpu_has!("avx512vnni") && crate::cpu_has!("avx512vl"))
-}
+pub use crate::cpu::have_vnni;
 
 #[inline(always)]
 unsafe fn f16_at(p: *const u8) -> f32 {

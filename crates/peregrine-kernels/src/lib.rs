@@ -22,7 +22,7 @@ pub mod quant;
 #[cfg(target_arch = "x86_64")]
 pub mod simd;
 pub mod table;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
 pub mod tern;
 pub mod vmath;
 
