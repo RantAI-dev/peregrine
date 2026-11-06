@@ -98,7 +98,12 @@ fn session_tokens(session: &mut Session, user: &str) -> Vec<u32> {
 /// the same token; the engine reports that token, the session does not (it is the
 /// turn's end, not part of the answer), so it is dropped here.
 fn engine_tokens(model: &Arc<Model>, prompt: &[u32], cfg: &SlotCfg) -> Vec<u32> {
-    let mut e = Engine::new(model.clone(), 4, 512, 1, KvPrec::F16, 0);
+    engine_tokens_with(model, prompt, cfg, KvPrec::F16)
+}
+
+/// [`engine_tokens`] with the engine's KV cache in the given precision.
+fn engine_tokens_with(model: &Arc<Model>, prompt: &[u32], cfg: &SlotCfg, kv: KvPrec) -> Vec<u32> {
+    let mut e = Engine::new(model.clone(), 4, 512, 1, kv, 0);
     let id = e.admit(prompt.to_vec(), cfg.clone()).expect("admit");
     let mut out = Vec::new();
     while e.active() > 0 {
@@ -137,6 +142,10 @@ fn slot_cfg(model: &Model, temperature: f32) -> SlotCfg {
         stop: template(model).stop_ids(&model.tk),
         logprobs: false,
         penalties: Default::default(),
+        // The engine's own defaults: no conversation turn in the sampling key,
+        // and the engine's own KV cache.
+        turn: 0,
+        kv_rotation: true,
     }
 }
 
@@ -393,6 +402,77 @@ fn the_two_runtimes_sample_with_different_keys() {
         "the sampling keys do not behave as documented:\n{}",
         failures.join("\n")
     );
+}
+
+/// **ADR 0007, decision 5: the session's turn and KV rotation are per-slot settings.**
+///
+/// The two runtimes differ in two places that change the output, and both are
+/// settings of a slot now:
+///
+/// * the sampling key — the session counts its conversation turns into it, so
+///   its first turn draws with `turn = 1`; the engine keeps `turn = 0`;
+/// * the KV cache — the session uses the family's own choice
+///   (`Architecture::session_kv_rotation`), which is no rotation for Qwen2; the
+///   engine keeps the rotation on.
+///
+/// Told both, a one-slot engine draws exactly the session's tokens at a
+/// temperature above zero. This is the test that says the session may move onto
+/// the engine without a single token changing.
+///
+/// The model is a Qwen2 (the family that measures worse with the rotation) and
+/// the cache is int8: with an f16 cache the rotation is not used at all, and
+/// the choice would make no difference.
+#[test]
+fn a_one_slot_engine_with_the_session_s_settings_reproduces_the_session_s_tokens() {
+    let dir = tmpdir("session-settings");
+    let path = write_dense(&dir, "qwen2", Format::Q8_0, 7700, Dense::default());
+    let model = load(&path);
+    assert!(
+        !model.session_kv_rotation(),
+        "the synthetic qwen2 is the family that turns the rotation off"
+    );
+
+    // The session: its own settings, its own turn counter, its own cache.
+    let mut scfg = session_cfg(TEMP);
+    scfg.kv_prec = KvPrec::I8;
+    let mut session = Session::from_model(model.clone(), scfg).expect("session");
+    let s = session_tokens(&mut session, USER);
+
+    // The engine: the same prompt, the session's turn (its first turn is turn
+    // one) and the session's cache.
+    let prompt = prompt_ids(&model, USER);
+    let mut cfg = slot_cfg(&model, TEMP);
+    cfg.turn = 1;
+    cfg.kv_rotation = model.session_kv_rotation();
+    let e = engine_tokens_with(&model, &prompt, &cfg, KvPrec::I8);
+    eprintln!("session {s:?}\nengine  {e:?}");
+    assert_eq!(
+        s, e,
+        "the engine with the session's settings did not reproduce the session's tokens"
+    );
+
+    // The engine's own defaults do not: the turn is in the key, and the
+    // rotation is in the cache.
+    let mut plain = slot_cfg(&model, TEMP);
+    plain.kv_rotation = true;
+    let p = engine_tokens_with(&model, &prompt, &plain, KvPrec::I8);
+    assert_ne!(
+        s, p,
+        "the engine's defaults reproduced the session's tokens: the turn and the \
+         rotation changed nothing"
+    );
+
+    // The rotation alone changes the output: the same turn, the engine's own
+    // cache and the family's own.
+    let mut rotated = cfg.clone();
+    rotated.kv_rotation = true;
+    let r = engine_tokens_with(&model, &prompt, &rotated, KvPrec::I8);
+    assert_ne!(
+        e, r,
+        "the KV rotation changed nothing: the int8 cache is the same either way"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// **ADR 0007, decision 2: one `Drafter` interface, told what the engine computed.**
