@@ -280,10 +280,10 @@ impl Pool {
     /// borrows live on the caller's stack, so unwinding earlier would free them under
     /// the workers (and leave `remaining` counting into the next job).
     pub fn run<F: Fn(usize, usize) + Sync>(&self, f: F) {
+        #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
         crate::blocks::par::bump_epoch();
         if self.n == 1 {
             f(0, 1);
-            crate::blocks::par::bump_epoch();
             return;
         }
         let job = Job {

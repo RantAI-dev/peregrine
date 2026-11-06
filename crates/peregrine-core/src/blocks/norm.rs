@@ -1,10 +1,11 @@
 //! Root-mean-square normalisation blocks.
 
-use crate::blocks::par::{SharedActs, SharedBuf};
+use crate::blocks::par::{for_row_chunks_2, Sched};
 use crate::blocks::ROW_PARALLEL;
 use crate::gguf::{f16, Format, TensorInfo};
 use crate::model::{StepStats, Weights};
-use crate::pool::{share, Pool};
+use crate::pool::Pool;
+use crate::quant::QuantAct;
 
 #[inline]
 fn f32_at(b: &[u8], i: usize) -> f32 {
@@ -77,27 +78,33 @@ pub(crate) fn norm_rows(
     d_model: usize,
     eps: f32,
     x: &[f32],
-    xb: SharedBuf<'_>,
-    acts: SharedActs<'_>,
+    xb: &mut [f32],
+    acts: &mut [QuantAct],
     nb: usize,
     pool: &Pool,
     stats: &mut StepStats,
 ) {
     let d = d_model;
-    let body = |wk: usize, nw: usize| {
-        let (lo, hi) = share(nb, wk, nw);
-        for b in lo..hi {
-            let out = xb.chunk(b * d, d);
-            rmsnorm_into(w, weight, eps, &x[b * d..(b + 1) * d], out);
-            acts.get(b).fill(out);
-        }
-    };
-    if nb >= ROW_PARALLEL && pool.width() > 1 {
-        pool.run(body);
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    for_row_chunks_2(
+        pool,
+        parallel,
+        xb,
+        d,
+        acts,
+        1,
+        nb,
+        Sched::Static,
+        |_wk, rows, xb_chunk, acts_chunk| {
+            for (i, b) in rows.enumerate() {
+                let out = &mut xb_chunk[i * d..(i + 1) * d];
+                rmsnorm_into(w, weight, eps, &x[b * d..(b + 1) * d], out);
+                acts_chunk[i].fill(out);
+            }
+        },
+    );
+    if parallel {
         stats.barriers += 1;
-    } else {
-        crate::blocks::par::bump_epoch();
-        body(0, 1);
     }
     // Once per call, like the matmuls: the vector crosses the memory interface
     // once however many rows reuse it.

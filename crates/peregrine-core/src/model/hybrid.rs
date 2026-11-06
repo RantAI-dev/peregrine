@@ -626,7 +626,7 @@ impl Model {
         &self,
         hs: &mut HyScratch,
         acts: &mut [QuantAct],
-        src: Disjoint<'_, f32>,
+        src: &mut [f32],
         w: usize,
         nb: usize,
         perm: bool,
@@ -770,11 +770,10 @@ impl Model {
                 let (xs, nw): (&[f32], &TensorInfo) = (&st8.x, &l.attn_norm);
                 let pre =
                     |b: usize, row: &mut [f32]| self.rmsnorm_into(&xs[b * d..(b + 1) * d], nw, row);
-                let xbp = Disjoint::new(&mut st8.xb);
                 self.rotate_rows_pre(
                     &mut hs,
                     &mut st8.acts,
-                    xbp,
+                    &mut st8.xb,
                     d,
                     nb,
                     false,
@@ -829,11 +828,10 @@ impl Model {
                                 c.eps,
                             )
                         };
-                        let op = Disjoint::new(&mut o);
                         self.rotate_rows_pre(
                             &mut hs,
                             &mut st8.acts,
-                            op,
+                            &mut o,
                             vd,
                             nb,
                             hy.v_grouped,
@@ -876,43 +874,43 @@ impl Model {
                     // q and gate are interleaved per head: [q_h (hd) | gate_h (hd)].
                     let ta = Tick::new(8);
                     {
-                        let (qp, kp, zp) = (
-                            Disjoint::new(&mut st8.q),
-                            Disjoint::new(&mut st8.k),
-                            Disjoint::new(&mut hs.z),
-                        );
                         let (big, rope, zw): (&[f32], &[f32], usize) = (&hs.big, &st8.rope, hs.z_w);
-                        let next = std::sync::atomic::AtomicUsize::new(0);
-                        let body = |_wk: usize, _nw: usize| loop {
-                            let b = next.fetch_add(1, AO::Relaxed);
-                            if b >= nb {
-                                break;
-                            }
-                            let (q, k, z) = (
-                                qp.chunk(b * qd, qd),
-                                kp.chunk(b * kvd, kvd),
-                                zp.chunk(b * zw, qd),
-                            );
-                            for h in 0..c.n_head {
-                                let src = b * 2 * qd + h * 2 * hd;
-                                q[h * hd..(h + 1) * hd].copy_from_slice(&big[src..src + hd]);
-                                z[h * hd..(h + 1) * hd]
-                                    .copy_from_slice(&big[src + hd..src + 2 * hd]);
-                            }
-                            for row in q.chunks_exact_mut(hd) {
-                                head_rmsnorm(row, q_norm, c.eps);
-                            }
-                            for row in k.chunks_exact_mut(hd) {
-                                head_rmsnorm(row, k_norm, c.eps);
-                            }
-                            self.rope(rope, q, c.n_head, positions[b]);
-                            self.rope(rope, k, c.n_kv_head, positions[b]);
-                        };
-                        if nb >= ROW_PARALLEL && pool.width() > 1 {
-                            pool.run(body);
+                        let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+                        crate::blocks::par::for_row_chunks_3(
+                            pool,
+                            parallel,
+                            &mut st8.q,
+                            qd,
+                            &mut st8.k,
+                            kvd,
+                            &mut hs.z,
+                            zw,
+                            nb,
+                            crate::blocks::par::Sched::Dynamic(1),
+                            |_wk, rows, q_chunk, k_chunk, z_chunk| {
+                                for (i, b) in rows.enumerate() {
+                                    let q = &mut q_chunk[i * qd..(i + 1) * qd];
+                                    let k = &mut k_chunk[i * kvd..(i + 1) * kvd];
+                                    let z = &mut z_chunk[i * zw..i * zw + qd];
+                                    for h in 0..c.n_head {
+                                        let src = b * 2 * qd + h * 2 * hd;
+                                        q[h * hd..(h + 1) * hd].copy_from_slice(&big[src..src + hd]);
+                                        z[h * hd..(h + 1) * hd]
+                                            .copy_from_slice(&big[src + hd..src + 2 * hd]);
+                                    }
+                                    for row in q.chunks_exact_mut(hd) {
+                                        head_rmsnorm(row, q_norm, c.eps);
+                                    }
+                                    for row in k.chunks_exact_mut(hd) {
+                                        head_rmsnorm(row, k_norm, c.eps);
+                                    }
+                                    self.rope(rope, q, c.n_head, positions[b]);
+                                    self.rope(rope, k, c.n_kv_head, positions[b]);
+                                }
+                            },
+                        );
+                        if parallel {
                             stats.barriers += 1;
-                        } else {
-                            body(0, 1);
                         }
                     }
                     for b in 0..nb {
@@ -972,11 +970,10 @@ impl Model {
                         let pre = |b: usize, row: &mut [f32]| {
                             crate::vmath::mul_sigmoid(row, &zr[b * zw..b * zw + qd])
                         };
-                        let xbp = Disjoint::new(&mut st8.xb);
                         self.rotate_rows_pre(
                             &mut hs,
                             &mut st8.acts,
-                            xbp,
+                            &mut st8.xb,
                             qd,
                             nb,
                             false,
@@ -1005,11 +1002,10 @@ impl Model {
                 let (xs, nw): (&[f32], &TensorInfo) = (&st8.x, &l.post_norm);
                 let pre =
                     |b: usize, row: &mut [f32]| self.rmsnorm_into(&xs[b * d..(b + 1) * d], nw, row);
-                let xbp = Disjoint::new(&mut st8.xb);
                 self.rotate_rows_pre(
                     &mut hs,
                     &mut st8.acts,
-                    xbp,
+                    &mut st8.xb,
                     d,
                     nb,
                     false,
@@ -1035,11 +1031,10 @@ impl Model {
                 let up: &[f32] = &st8.hb2;
                 let pre =
                     |b: usize, row: &mut [f32]| crate::vmath::swiglu(row, &up[b * f..(b + 1) * f]);
-                let hbp = Disjoint::new(&mut st8.hb);
                 self.rotate_rows_pre(
                     &mut hs,
                     &mut st8.acts,
-                    hbp,
+                    &mut st8.hb,
                     f,
                     nb,
                     false,
@@ -1052,14 +1047,18 @@ impl Model {
                 {
                     // One row: its 12 288 exps split across the pool, then the rotation.
                     let total = nb * f;
-                    let g = Disjoint::new(&mut st8.hb);
                     let up: &[f32] = &st8.hb2;
-                    pool.run(|wk, nw| {
-                        let (lo, hi) = share(total / 8, wk, nw);
-                        let (lo, hi) = (lo * 8, if wk + 1 == nw { total } else { hi * 8 });
-                        let gs = g.chunk(lo, hi - lo);
-                        crate::vmath::swiglu(gs, &up[lo..hi]);
-                    });
+                    crate::blocks::par::for_row_chunks(
+                        pool,
+                        true,
+                        &mut st8.hb[..total],
+                        1,
+                        total,
+                        crate::blocks::par::Sched::StaticAligned(8),
+                        |_wk, range, gs| {
+                            crate::vmath::swiglu(gs, &up[range]);
+                        },
+                    );
                     stats.barriers += 1;
                 }
                 drop(tf);

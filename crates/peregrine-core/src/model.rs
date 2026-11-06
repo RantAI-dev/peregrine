@@ -33,6 +33,7 @@ use std::time::Instant;
 pub(crate) use crate::blocks::linear::{LinJob, MatJob};
 pub(crate) use crate::blocks::norm::head_rmsnorm;
 pub(crate) use crate::blocks::ROW_PARALLEL;
+#[allow(unused_imports)]
 pub(crate) use crate::pool::share;
 #[cfg_attr(not(target_arch = "x86_64"), allow(unused_imports))]
 pub(crate) use crate::quant::row_bytes;
@@ -1048,8 +1049,8 @@ impl Model {
             self.cfg.d_model,
             self.cfg.eps,
             &st8.x,
-            Disjoint::new(&mut st8.xb),
-            Disjoint::new(&mut st8.acts),
+            &mut st8.xb,
+            &mut st8.acts,
             nb,
             pool,
             stats,
@@ -1062,7 +1063,7 @@ impl Model {
             self.cfg.n_ff,
             &mut st8.hb,
             &st8.hb2,
-            Disjoint::new(&mut st8.acts),
+            &mut st8.acts,
             nb,
             pool,
             stats,
@@ -1087,9 +1088,9 @@ impl Model {
             l.q_norm.as_deref(),
             l.k_norm.as_deref(),
             &st8.rope,
-            Disjoint::new(&mut st8.q),
-            Disjoint::new(&mut st8.k),
-            Disjoint::new(&mut st8.v),
+            &mut st8.q,
+            &mut st8.k,
+            &mut st8.v,
             nb,
             positions,
             pool,

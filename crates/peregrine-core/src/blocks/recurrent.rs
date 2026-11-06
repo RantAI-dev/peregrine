@@ -89,7 +89,8 @@ pub(crate) fn beta_alpha(
             let w = &ab_w[r * d..(r + 1) * d];
             for b in 0..nb {
                 let v = crate::vmath::dot_f32(w, &xb[b * d..(b + 1) * d]);
-                out.set(b * n_out + r, v);
+                // SAFETY: output index b * n_out + r is written only by the worker computing row r.
+                unsafe { out.set(b * n_out + r, v) };
             }
         }
     });
@@ -136,7 +137,8 @@ pub(crate) fn causal_conv(
                 // SAFETY: channels c0..c1 of every row's history in KvCache belong to this task.
                 let (_, hp) = unsafe { rp.at(b) };
                 let pos = positions[b];
-                let y = bigp.chunk(b * big_w + c0, c1 - c0);
+                // SAFETY: channels c0..c1 of row b's big buffer belong to this task.
+                let y = unsafe { bigp.chunk(b * big_w + c0, c1 - c0) };
                 for (i, ch) in (c0..c1).enumerate() {
                     acc[i] = y[i] * wcur[ch];
                 }
@@ -195,40 +197,41 @@ pub(crate) fn silu_norm_gates(
     let (nv, nk, dk) = (cfg.n_v_heads, cfg.n_k_heads, cfg.dk);
     let (kd, cd) = (cfg.key_dim(), cfg.conv_dim());
     let q_scale = 1.0 / (dk as f32).sqrt();
-    let bigp = crate::blocks::par::Disjoint::new(big);
-    let abp = crate::blocks::par::Disjoint::new(ab);
-    let next = AtomicUsize::new(0);
-    let body = |_wk: usize, _nw: usize| loop {
-        let b = next.fetch_add(1, AO::Relaxed);
-        if b >= nb {
-            break;
-        }
-        let y = bigp.chunk(b * big_w, cd);
-        crate::vmath::silu(y);
-        for (base, scale) in [(0usize, q_scale), (kd, 1.0)] {
-            for h in 0..nk {
-                let v = &mut y[base + h * dk..base + (h + 1) * dk];
-                let n = crate::vmath::sumsq_f64(v).sqrt() as f32;
-                let inv = 1.0 / n.max(1e-6) * scale;
-                for x in v.iter_mut() {
-                    *x *= inv;
+    crate::blocks::par::for_row_chunks_2(
+        pool,
+        parallel,
+        big,
+        big_w,
+        ab,
+        2 * nv,
+        nb,
+        crate::blocks::par::Sched::Dynamic(1),
+        |_wk, rows, big_chunk, ab_chunk| {
+            for (i, _b) in rows.enumerate() {
+                let y = &mut big_chunk[i * big_w..i * big_w + cd];
+                crate::vmath::silu(y);
+                for (base, scale) in [(0usize, q_scale), (kd, 1.0)] {
+                    for h in 0..nk {
+                        let v = &mut y[base + h * dk..base + (h + 1) * dk];
+                        let n = crate::vmath::sumsq_f64(v).sqrt() as f32;
+                        let inv = 1.0 / n.max(1e-6) * scale;
+                        for x in v.iter_mut() {
+                            *x *= inv;
+                        }
+                    }
+                }
+                let ab_row = &mut ab_chunk[i * 2 * nv..(i + 1) * 2 * nv];
+                for h in 0..nv {
+                    let beta = sigmoid(ab_row[h]);
+                    let g = a_log[h] * softplus(ab_row[nv + h] + dt_bias[h]);
+                    ab_row[h] = beta;
+                    ab_row[nv + h] = g.exp();
                 }
             }
-        }
-        let ab = abp.chunk(b * 2 * nv, 2 * nv);
-        for h in 0..nv {
-            let beta = sigmoid(ab[h]);
-            let g = a_log[h] * softplus(ab[nv + h] + dt_bias[h]);
-            ab[h] = beta;
-            ab[nv + h] = g.exp();
-        }
-    };
+        },
+    );
     if parallel {
-        pool.run(body);
         stats.barriers += 1;
-    } else {
-        crate::blocks::par::bump_epoch();
-        body(0, 1);
     }
 }
 
@@ -277,7 +280,8 @@ pub(crate) fn delta_rule(
             let v = &y[2 * kd + hv * dv..2 * kd + (hv + 1) * dv];
             let beta = abv[b * 2 * nv + hv];
             let decay = abv[b * 2 * nv + nv + hv];
-            let o = out.chunk(b * vd + hv * dv + j0, j1 - j0);
+            // SAFETY: slice j0..j1 of head hv for row b belongs to this task.
+            let o = unsafe { out.chunk(b * vd + hv * dv + j0, j1 - j0) };
             crate::delta::delta_head(s, q, k, &v[j0..j1], beta, decay, o, dk);
             // A speculative verification's snapshot: this task's slice of the state after its row.
             if let Some((sp, sstate, _)) = unsafe { spp.at(b) } {
