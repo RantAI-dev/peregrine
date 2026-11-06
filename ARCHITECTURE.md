@@ -34,6 +34,19 @@ bound by compute. That split drives most design choices.
 
 ## Code map
 
+### `crates/peregrine-kernels`: CPU kernels (no dependencies)
+
+| Module | Role |
+|---|---|
+| `format.rs` | `Format`, the weight encodings, and the f16 conversion. |
+| `cpu.rs` | Kernel tiers and `cpu_has!`: feature detection under the `PEREGRINE_ISA` cap. |
+| `simd.rs`, `quant.rs`, `vmath.rs` | x86 kernels for k-quants and Q8_0, activation quantization, vector math. Each has a scalar twin it is tested against. |
+| `tern.rs` | Ternary kernels for PQ2_0 / PTQ1_0 (AVX2, AVX-512 VNNI/GFNI/VBMI tiers). |
+| `hadamard.rs` | Fast Walsh-Hadamard transform for rotated weights and the rotated int8 KV cache. |
+| `options.rs` | The six switches kernel code reads, set from `EngineOptions`. |
+
+`peregrine-core` re-exports these modules under their old paths (`peregrine_core::simd`, ...).
+
 ### `crates/peregrine-core`: the engine (a library; knows nothing about HTTP)
 
 | Module | Role |
@@ -43,9 +56,6 @@ bound by compute. That split drives most design choices.
 | `model.rs` | `Model`: loader, the dense forward (`forward_rows`) and the tile store for repacked weights. |
 | `model/hybrid.rs` | The Qwen 3.5 / Bonsai 2 forward: Gated DeltaNet recurrent layers plus gated attention, Hadamard rotation. |
 | `model/mtp.rs` | The multi-token-prediction head used as a lossless drafter. |
-| `simd.rs`, `quant.rs`, `vmath.rs` | x86 kernels for k-quants and Q8_0, activation quantization, vector math. Each has a scalar twin it is tested against. |
-| `tern.rs` | Ternary kernels for PQ2_0 / PTQ1_0 (AVX2, AVX-512 VNNI/GFNI/VBMI tiers). |
-| `hadamard.rs` | Fast Walsh-Hadamard transform for rotated weights and the rotated int8 KV cache. |
 | `attn.rs` | Grouped online-softmax attention. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state, snapshots for speculation, and the prefix store that reuses a shared prompt beginning. |
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
