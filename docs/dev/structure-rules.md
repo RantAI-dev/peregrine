@@ -41,6 +41,24 @@ peregrine-bench     harness and experiments; depends on the others, nothing depe
 | An engine switch | a field in `EngineOptions` with a doc comment and a default | a new `std::env::var` read |
 | A tuned value for one machine or model | a field in the tuning profile, measured by `peregrine tune` | a hard-coded constant or a check on the model's name |
 
+### Choosing features for a new format or architecture
+
+- **Weight formats (`peregrine-kernels`)**:
+  - K-quants (Q2_K..Q6_K) belong to `fmt-kquant`.
+  - Ternary formats (PQ2_0, PTQ1_0) belong to `fmt-ternary`.
+  - Importance-matrix non-linear quants (IQ4_NL, IQ4_XS) belong to `fmt-iq`.
+  - Legacy block formats (Q4_0, Q5_0, Q8_0) belong to `fmt-legacy`.
+  - Unquantized floats (F32, F16, BF16) are core formats and always enabled (no feature required).
+  - A novel format family (e.g. MXFP, NVFP4) gets a new `fmt-<family>` feature declared in `peregrine-kernels` and passed through `peregrine-core`, `peregrine-models`, and `peregrine`.
+  - Update `Format::required_feature()` and `Format::is_supported()` in `peregrine-kernels/src/format.rs` so disabled formats are refused at load time with the feature name.
+
+- **Architectures (`peregrine-models`)**:
+  - Dense transformers get an `arch-<family>` feature (e.g. `arch-llama` for Llama, `arch-qwen` for Qwen2/Qwen3, `arch-gemma` for Gemma). If models share architecture internals but differ in identity, split by name if users would build them independently.
+  - Hybrid or novel architectures get dedicated features (e.g. `arch-qwen35`, `arch-moe`).
+  - Declare the feature in `peregrine-models` and pass through `peregrine`.
+  - Gate the family registration in `FAMILIES` and `ARCHS` under `#[cfg(feature = "arch-<family>")]`.
+  - Update `check_compatible_with` in `peregrine-core/src/lib.rs` and `Model::load_with` in `peregrine-core/src/model.rs` to refuse disabled architectures with `architecture ... is not enabled in this build (recompile with feature 'arch-<name>')`.
+
 ## Files and modules
 
 1. A module owns one job and says so in its `//!` header.

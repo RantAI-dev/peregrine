@@ -18,12 +18,43 @@ publish = false
 # the materialise-a-dequantised-buffer pattern the engine exists to avoid, and rayon would make thread and
 # barrier counts unpredictable when both are quantities this engine measures and reports.
 [dependencies]
-peregrine-kernels = { workspace = true }
+peregrine-kernels = { workspace = true, default-features = false }
 memmap2 = { workspace = true }
 
 [features]
-default = []
+default = [
+    "fmt-kquant",
+    "fmt-ternary",
+    "fmt-iq",
+    "fmt-legacy",
+    "littlebit",
+    "dspark",
+    "mtp",
+]
+fmt-kquant = ["peregrine-kernels/fmt-kquant"]
+fmt-ternary = ["peregrine-kernels/fmt-ternary"]
+fmt-iq = ["peregrine-kernels/fmt-iq"]
+fmt-legacy = ["peregrine-kernels/fmt-legacy"]
+littlebit = []
+dspark = ["fmt-kquant", "fmt-legacy"]
+mtp = []
 check-disjoint = []
+
+[[test]]
+name = "q4k_requant"
+required-features = ["fmt-kquant"]
+
+[[test]]
+name = "tern"
+required-features = ["fmt-ternary"]
+
+[[test]]
+name = "oracle"
+required-features = ["fmt-kquant"]
+
+[[test]]
+name = "simd"
+required-features = ["fmt-kquant"]
 
 [lints]
 workspace = true

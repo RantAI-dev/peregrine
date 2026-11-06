@@ -31,14 +31,8 @@ use crate::tokenizer::Tokenizer;
 #[allow(unused_imports)]
 pub(crate) use crate::pool::share;
 
-// Qwen3.5-style hybrid models (Bonsai 2).
-pub mod hybrid;
 // Bonsai 2's multi-token-prediction block (`mtp.rs`).
 pub mod mtp;
-
-/// The transformer families this engine implements. Qwen2 is llama with biases on
-/// Architecture names this crate implements, for the compatibility probe's message.
-pub const ARCHS: &[&str] = &["llama", "qwen2", "qwen3", "qwen35"];
 
 /// Transformer model configuration describing dimensional shapes and rotary settings.
 ///
@@ -97,7 +91,19 @@ impl Config {
 /// reports whichever bytes actually moved.
 pub enum Linear {
     Dense(TensorInfo),
+    #[cfg(feature = "littlebit")]
     Lb(usize),
+}
+
+impl Linear {
+    #[inline]
+    pub fn dense(&self) -> Option<&TensorInfo> {
+        match self {
+            Linear::Dense(t) => Some(t),
+            #[cfg(feature = "littlebit")]
+            Linear::Lb(_) => None,
+        }
+    }
 }
 
 pub struct Model {
@@ -108,7 +114,9 @@ pub struct Model {
     /// Llama 3.x's per-frequency rotary factors (`rope_freqs.weight`, `rope_dim/2`
     /// floats): each angle is divided by its factor. Absent on every other model.
     pub rope_factors: Option<Vec<f32>>,
+    #[cfg(feature = "littlebit")]
     pub(crate) lb_replaced: u64,
+    #[cfg(feature = "littlebit")]
     pub(crate) lb_count: usize,
     pub(crate) arch: Box<dyn Architecture>,
 }
@@ -120,6 +128,7 @@ pub struct Weights {
     // PQ2_0 matrices repacked into 16-row tiles at load (`TensorInfo::tile_off` points here); empty if not.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
     pub(crate) tiles: TileStore,
+    #[cfg(feature = "littlebit")]
     pub(crate) lb: Option<Slb>,
 }
 
@@ -135,8 +144,13 @@ impl Weights {
     pub fn tiles(&self) -> &[u8] {
         self.tiles.bytes()
     }
+    #[cfg(feature = "littlebit")]
     pub fn lb(&self) -> Option<&Slb> {
         self.lb.as_ref()
+    }
+    #[cfg(not(feature = "littlebit"))]
+    pub fn lb(&self) -> Option<&Slb> {
+        None
     }
 }
 
@@ -183,16 +197,32 @@ impl TileStore {
 }
 
 impl Model {
-    pub fn load(g: Gguf) -> Result<Model, String> {
+    pub fn load_with(g: Gguf, families: &[&dyn crate::arch::Family]) -> Result<Model, String> {
         let arch_name = g.str("general.architecture")?;
-        let family = crate::arch::FAMILIES
+        let family = families
             .iter()
             .find(|f| f.names().contains(&arch_name))
             .ok_or_else(|| {
-                format!(
-                    "Peregrine implements {}; this model is {arch_name:?}",
-                    ARCHS.join(" and ")
-                )
+                let feat = match arch_name {
+                    "llama" => Some("arch-llama"),
+                    "qwen2" | "qwen3" => Some("arch-qwen"),
+                    "qwen25" | "qwen35" => Some("arch-qwen35"),
+                    _ => None,
+                };
+                if let Some(feat) = feat {
+                    format!(
+                        "architecture {arch_name:?} is not enabled in this build (recompile with feature '{feat}')"
+                    )
+                } else {
+                    let known: Vec<&str> = families
+                        .iter()
+                        .flat_map(|f| f.names().iter().copied())
+                        .collect();
+                    format!(
+                        "Peregrine implements {}; this model is {arch_name:?}",
+                        known.join(" and ")
+                    )
+                }
             })?;
         let tk = Tokenizer::from_gguf(&g)?;
         let loaded = family.load(&g, &tk)?;
@@ -200,12 +230,15 @@ impl Model {
             w: Weights {
                 g,
                 tiles: loaded.tiles,
+                #[cfg(feature = "littlebit")]
                 lb: None,
             },
             cfg: loaded.cfg,
             tk,
             rope_factors: loaded.rope_factors,
+            #[cfg(feature = "littlebit")]
             lb_replaced: 0,
+            #[cfg(feature = "littlebit")]
             lb_count: 0,
             arch: loaded.arch,
         })
@@ -266,6 +299,7 @@ impl Model {
     /// LittleBit factors, after checking each one's geometry against the tensor it
     /// replaces. The embedding table is never swapped — a tied head therefore stays
     /// dense even when the sidecar carries `output.weight` for an untied model.
+    #[cfg(feature = "littlebit")]
     pub fn attach_lb(&mut self, slb: Slb) -> Result<usize, String> {
         let mut n = 0usize;
         let mut replaced = 0u64;
@@ -303,13 +337,20 @@ impl Model {
     }
 
     /// How many projections run as LittleBit, and the sidecar bytes they read.
+    #[cfg(feature = "littlebit")]
     pub fn lb_summary(&self) -> Option<(usize, u64)> {
         self.w.lb.as_ref().map(|s| (self.lb_count, s.data_bytes))
+    }
+
+    #[cfg(not(feature = "littlebit"))]
+    pub fn lb_summary(&self) -> Option<(usize, u64)> {
+        None
     }
 
     /// Scratch floats one forward call needs for LittleBit intermediates, as
     /// (`x′` floats, latent floats) — the maximum over the fused groups, times the
     /// batch. Zero when nothing was converted.
+    #[cfg(feature = "littlebit")]
     pub fn lb_scratch(&self, max_batch: usize) -> (usize, usize) {
         let Some(slb) = self.w.lb.as_ref() else {
             return (0, 0);
@@ -331,9 +372,21 @@ impl Model {
         (mx * max_batch, mt * max_batch)
     }
 
+    #[cfg(not(feature = "littlebit"))]
+    pub fn lb_scratch(&self, _max_batch: usize) -> (usize, usize) {
+        (0, 0)
+    }
+
     pub fn weight_bytes(&self) -> u64 {
-        self.w.g.total_weight_bytes() - self.lb_replaced
-            + self.w.lb.as_ref().map_or(0, |s| s.data_bytes)
+        #[cfg(feature = "littlebit")]
+        {
+            self.w.g.total_weight_bytes() - self.lb_replaced
+                + self.w.lb.as_ref().map_or(0, |s| s.data_bytes)
+        }
+        #[cfg(not(feature = "littlebit"))]
+        {
+            self.w.g.total_weight_bytes()
+        }
     }
 
     /// The file's metadata, for the template detector and the host's telemetry.
@@ -588,7 +641,7 @@ pub mod keep {
         S.get_or_init(|| Mutex::new(None))
     }
 
-    fn key(path: &Path, lb: bool) -> Result<Key, String> {
+    fn key(path: &Path, _lb: bool) -> Result<Key, String> {
         let m = std::fs::metadata(path).map_err(|e| format!("cannot stat {path:?}: {e}"))?;
         let mtime = m
             .modified()
@@ -600,7 +653,8 @@ pub mod keep {
         // removing) a sidecar must invalidate the kept dense (or converted) model.
         // A session that declines LittleBit keys as "no sidecar", so switching the
         // setting reloads rather than reusing the other kind of load.
-        let side = lb
+        #[cfg(feature = "littlebit")]
+        let side = _lb
             .then(|| crate::lbq::sidecar_path(path))
             .flatten()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -613,6 +667,8 @@ pub mod keep {
                     .unwrap_or(0);
                 (m.len(), mt)
             });
+        #[cfg(not(feature = "littlebit"))]
+        let side = None;
         Ok((
             std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
             m.len(),
@@ -621,19 +677,14 @@ pub mod keep {
         ))
     }
 
-    /// The model at `path`: the kept one when it is the same file (same canonical
-    /// path, size and modification time, same sidecar state), else freshly loaded —
-    /// and kept in place of whatever was there. `Err` is `Gguf::open`/`Model::load`'s,
-    /// or a corrupt or stale sidecar's: that one refuses loudly rather than running
-    /// dense when the user built a sidecar.
-    pub fn open(path: &Path) -> Result<Arc<Model>, String> {
-        open_with(path, true)
-    }
-
-    /// `open`, choosing whether a LittleBit sidecar beside the model is used
+    /// `open_with`, choosing whether a LittleBit sidecar beside the model is used
     /// (`false` runs dense even when one is present).
-    pub fn open_with(path: &Path, lb: bool) -> Result<Arc<Model>, String> {
-        open_with_template(path, lb, None)
+    pub fn open_with(
+        path: &Path,
+        lb: bool,
+        families: &[&dyn crate::arch::Family],
+    ) -> Result<Arc<Model>, String> {
+        open_with_template(path, lb, None, families)
     }
 
     /// `open_with`, with the chat template the caller chose (`--chat-template`):
@@ -642,6 +693,7 @@ pub mod keep {
         path: &Path,
         lb: bool,
         template: Option<crate::template::Template>,
+        families: &[&dyn crate::arch::Family],
     ) -> Result<Arc<Model>, String> {
         let k = key(path, lb)?;
         let mut g = slot().lock().unwrap_or_else(|e| e.into_inner());
@@ -652,11 +704,27 @@ pub mod keep {
             }
         }
         let file = Gguf::open(path)?;
-        crate::check_compatible_with(&file, template)?;
-        let mut model = Model::load(file)?;
+        crate::check_compatible_with(&file, template, families)?;
+        #[allow(unused_mut)]
+        let mut model = Model::load_with(file, families)?;
         if lb {
-            if let Some(slb) = crate::lbq::Slb::open_for(path)? {
-                model.attach_lb(slb)?;
+            #[cfg(feature = "littlebit")]
+            {
+                if let Some(slb) = crate::lbq::Slb::open_for(path)? {
+                    model.attach_lb(slb)?;
+                }
+            }
+            #[cfg(not(feature = "littlebit"))]
+            {
+                let mut sidecar = path.to_path_buf().into_os_string();
+                sidecar.push(".slb");
+                let sidecar = PathBuf::from(sidecar);
+                if sidecar.is_file() {
+                    eprintln!(
+                        "info: LittleBit sidecar {} ignored (recompile with feature 'littlebit')",
+                        sidecar.display()
+                    );
+                }
             }
         }
         let model = Arc::new(model);

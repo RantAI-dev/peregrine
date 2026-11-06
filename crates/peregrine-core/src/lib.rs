@@ -21,12 +21,45 @@
 
 pub mod arch;
 pub mod attn;
-mod blocks;
+pub mod blocks;
+#[cfg(feature = "dspark")]
 pub mod dspark;
-pub mod families;
+#[cfg(not(feature = "dspark"))]
+pub mod dspark {
+    pub struct Drafter {
+        pub stats: Stats,
+        pub cfg: Cfg,
+    }
+    pub struct Stats {
+        pub bytes: u64,
+    }
+    pub struct Cfg {
+        pub block_size: usize,
+        pub logits_start: usize,
+        pub target_layer_ids: Vec<usize>,
+    }
+    impl Drafter {
+        pub fn update_context(&mut self, _taps: &[f32], _start: usize, _pool: &crate::pool::Pool) {}
+        pub fn truncate(&mut self, _pos: usize) {}
+        pub fn draft_with(
+            &mut self,
+            _next: u32,
+            _kmax: usize,
+            _pool: &crate::pool::Pool,
+            mut _f: impl FnMut(usize, &[f32]) -> u32,
+        ) -> (Vec<u32>, Vec<f32>) {
+            (Vec::new(), Vec::new())
+        }
+    }
+}
 pub mod gguf;
 pub mod kv;
+#[cfg(feature = "littlebit")]
 pub mod lbq;
+#[cfg(not(feature = "littlebit"))]
+pub mod lbq {
+    pub struct Slb;
+}
 pub mod model;
 pub mod options;
 pub mod pool;
@@ -45,9 +78,11 @@ pub mod tokenizer;
 pub use gguf::{Format, Gguf};
 // The kernels live in `peregrine-kernels`; they keep their paths here.
 pub use peregrine_kernels::cpu_has;
-pub use peregrine_kernels::{cpu, delta, format, hadamard, quant, table, vmath};
 #[cfg(target_arch = "x86_64")]
-pub use peregrine_kernels::{simd, tern};
+pub use peregrine_kernels::simd;
+#[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
+pub use peregrine_kernels::tern;
+pub use peregrine_kernels::{cpu, delta, format, hadamard, quant, table, vmath};
 pub use profile::Profile;
 pub use session::{BenchReport, Session, SessionCfg};
 
@@ -58,24 +93,13 @@ pub use session::{BenchReport, Session, SessionCfg};
 /// pairing, because every way of failing it — another architecture, another
 /// tokenizer, another chat template — otherwise surfaces at the first token as an
 /// error or, worse, as fluent text from a prompt the model never saw.
-///
-/// What is implemented, and therefore what this accepts:
-/// * the `llama` and `qwen2` architectures (`model::ARCHS`);
-/// * a `gpt2` byte-level BPE vocabulary with the `smollm`, `llama-bpe` or `qwen2`
-///   pre-tokenizer (`tokenizer::PRE_TYPES`) — each transcribed from llama.cpp and
-///   checked against `llama-tokenize`; a near-miss tokenizer produces confident
-///   wrong text, so nothing else is approximated;
-/// * a chat template (`template::TEMPLATES`), detected from the
-///   file's own `tokenizer.chat_template`;
-/// * rope scaling only as Llama 3's factor table or a linear factor;
-/// * tensors in F32, F16, Q5_0, Q8_0, Q4_K or Q6_K (`Gguf::open` refuses others).
-pub fn compatibility(path: &std::path::Path) -> Result<(), String> {
+pub fn compatibility(path: &std::path::Path, families: &[&dyn arch::Family]) -> Result<(), String> {
     let g = Gguf::open(path)?;
-    check_compatible(&g)
+    check_compatible(&g, families)
 }
 
-pub fn check_compatible(g: &Gguf) -> Result<(), String> {
-    check_compatible_with(g, None)
+pub fn check_compatible(g: &Gguf, families: &[&dyn arch::Family]) -> Result<(), String> {
+    check_compatible_with(g, None, families)
 }
 
 /// The same check, with the chat template the caller chose (`--chat-template`).
@@ -83,13 +107,42 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
 /// A file that declares no template at all — or one whose template this engine
 /// does not render — is refused with a message naming the option: the template
 /// is the one thing the file cannot say, and the engine will not guess it.
-pub fn check_compatible_with(g: &Gguf, template: Option<template::Template>) -> Result<(), String> {
+pub fn check_compatible_with(
+    g: &Gguf,
+    template: Option<template::Template>,
+    families: &[&dyn arch::Family],
+) -> Result<(), String> {
     let arch = g.str("general.architecture").unwrap_or("unknown");
-    if !arch::FAMILIES.iter().any(|f| f.names().contains(&arch)) {
+    if !families.iter().any(|f| f.names().contains(&arch)) {
+        let feat = match arch {
+            "llama" => Some("arch-llama"),
+            "qwen2" | "qwen3" => Some("arch-qwen"),
+            "qwen25" | "qwen35" => Some("arch-qwen35"),
+            _ => None,
+        };
+        if let Some(feat) = feat {
+            return Err(format!(
+                "architecture {arch:?} is not enabled in this build (recompile with feature '{feat}')"
+            ));
+        }
+        let arch_names: Vec<&str> = families
+            .iter()
+            .flat_map(|f| f.names().iter().copied())
+            .collect();
         return Err(format!(
             "architecture {arch:?} — Peregrine implements {}",
-            model::ARCHS.join(", ")
+            arch_names.join(", ")
         ));
+    }
+    for t in g.tensors.values() {
+        if !t.kind.is_supported() {
+            let feat = t.kind.required_feature().unwrap_or("unknown");
+            return Err(format!(
+                "tensor '{}' uses format {} which is disabled in this build (enable feature '{feat}')",
+                t.name,
+                t.kind.label()
+            ));
+        }
     }
     let tok = g.str("tokenizer.ggml.model").unwrap_or("unknown");
     if tok != "gpt2" && tok != "llama" {

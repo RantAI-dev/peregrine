@@ -38,6 +38,15 @@
 //! scalar twin bit for bit.
 
 #![cfg(target_arch = "x86_64")]
+#![cfg_attr(
+    not(all(
+        feature = "fmt-kquant",
+        feature = "fmt-ternary",
+        feature = "fmt-iq",
+        feature = "fmt-legacy"
+    )),
+    allow(dead_code)
+)]
 
 use crate::format::{f16, Format};
 use crate::quant::QuantAct;
@@ -349,36 +358,47 @@ unsafe fn q4k_fold(
 /// long and `a` must hold `a.n` codes; both hold for every call from `matmul`.
 pub unsafe fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
     match fmt {
+        #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => dot_q8_0(w, a),
+        #[cfg(feature = "fmt-legacy")]
         Format::Q4_0 => dot_q4_0(w, a),
+        #[cfg(feature = "fmt-legacy")]
         Format::Q5_0 => dot_q5_0(w, a),
         // The k-quants run on the per-256 tiles at width one: integer
         // accumulation across the super-block, one float scale per 256.
+        #[cfg(feature = "fmt-kquant")]
         Format::Q4_K => {
             let mut o = [0.0f32];
             tile_q4_k::<1>(w, std::slice::from_ref(a), &mut o);
             o[0]
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q5_K => {
             let mut o = [0.0f32];
             tile_q5_k::<1>(w, std::slice::from_ref(a), &mut o);
             o[0]
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q6_K => {
             let mut o = [0.0f32];
             tile_q6_k::<1>(w, std::slice::from_ref(a), &mut o);
             o[0]
         }
+        #[cfg(feature = "fmt-iq")]
         Format::IQ4_NL => dot_iq4_nl(w, a),
+        #[cfg(feature = "fmt-iq")]
         Format::IQ4_XS => dot_iq4_xs(w, a),
         Format::F32 => dot_f32(w, a),
         Format::F16 => dot_f16(w, a),
         Format::BF16 => dot_bf16(w, a),
+        #[cfg(feature = "fmt-ternary")]
         Format::PQ2_0 | Format::PTQ1_0 => {
             let mut o = [0.0f32];
             dot_batch(fmt, w, std::slice::from_ref(a), &mut o);
             o[0]
         }
+        #[allow(unreachable_patterns)]
+        _ => panic!("format {} disabled in this build", fmt.label()),
     }
 }
 
@@ -1326,6 +1346,7 @@ unsafe fn wide_q6_k(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
 /// Caller must have checked `have_batched()`. `w` must be exactly
 /// `row_bytes(fmt, a.n)` long for every activation `a`, and `out.len() >= acts.len()`.
 pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    #[allow(unused_macros)]
     macro_rules! run {
         ($f:ident) => {{
             let mut b = 0;
@@ -1342,30 +1363,45 @@ pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32
         }};
     }
     match fmt {
+        #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => run!(tile_q8_0),
+        #[cfg(feature = "fmt-legacy")]
         Format::Q4_0 => run!(tile_q4_0),
+        #[cfg(feature = "fmt-legacy")]
         Format::Q5_0 => run!(tile_q5_0),
         // A prompt-sized batch decodes the row once for all of it; decode and the
         // speculative block (≤ 4) keep the tiled kernels, so their figures are unchanged.
+        #[cfg(feature = "fmt-kquant")]
         Format::Q4_K if acts.len() > TILE && acts.len() <= MAX_WIDE && wide_enabled() => {
             wide_q4_k(w, acts, out)
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q5_K if acts.len() > TILE && acts.len() <= MAX_WIDE && wide_enabled() => {
             wide_q5_k(w, acts, out)
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q6_K if acts.len() > TILE && acts.len() <= MAX_WIDE && wide_enabled() => {
             wide_q6_k(w, acts, out)
         }
+        #[cfg(feature = "fmt-kquant")]
         Format::Q4_K => run!(tile_q4_k),
+        #[cfg(feature = "fmt-kquant")]
         Format::Q5_K => run!(tile_q5_k),
+        #[cfg(feature = "fmt-kquant")]
         Format::Q6_K => run!(tile_q6_k),
+        #[cfg(feature = "fmt-iq")]
         Format::IQ4_NL => run!(tile_iq4_nl),
+        #[cfg(feature = "fmt-iq")]
         Format::IQ4_XS => run!(tile_iq4_xs),
         Format::F32 => run!(tile_f32),
         Format::F16 => run!(tile_f16),
         Format::BF16 => run!(tile_bf16),
+        #[cfg(feature = "fmt-ternary")]
         Format::PQ2_0 => crate::tern::dot_batch_pq2(w, acts, out),
+        #[cfg(feature = "fmt-ternary")]
         Format::PTQ1_0 => crate::tern::dot_batch_ptq1(w, acts, out),
+        #[allow(unreachable_patterns)]
+        _ => panic!("format {} disabled in this build", fmt.label()),
     }
 }
 
@@ -1466,6 +1502,7 @@ mod tests {
     /// reference, on random scale bytes and run sums (including the i16 extremes a
     /// 256-block of ±127 can produce).
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn q4k_scale_unpacking_and_min_term_match_the_reference() {
         if !have_batched() {
             return;
@@ -1567,6 +1604,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     #[allow(clippy::needless_range_loop)]
     fn q5_high_bit_expansion_maps_bit_i_to_byte_i() {
         if !have_avx2() {
@@ -1591,6 +1629,15 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        not(all(
+            feature = "fmt-kquant",
+            feature = "fmt-ternary",
+            feature = "fmt-iq",
+            feature = "fmt-legacy"
+        )),
+        allow(unused_variables, dead_code)
+    )]
     fn sane_scales(fmt: Format, w: &mut [u8]) {
         let fix = |b: &mut [u8], at: usize| b[at + 1] = (b[at + 1] & 0x0F) | 0x30;
         let sz = fmt.block_bytes();
@@ -1608,6 +1655,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-legacy")]
     fn avx2_dot_matches_dot_scalar_bit_for_bit_q4_0_and_q5_0() {
         if !have_avx2() {
             return;
@@ -1708,6 +1756,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-kquant")]
     fn avx2_dot_matches_dot_scalar_q5_k() {
         if !have_avx2() || !have_batched() {
             return;
@@ -1819,6 +1868,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "fmt-iq")]
     fn avx2_dot_matches_dot_scalar_bit_for_bit_iq4_nl_and_iq4_xs() {
         if !have_avx2() || !have_batched() {
             return;

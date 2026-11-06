@@ -173,7 +173,7 @@ pub async fn run(a: Args) {
         None => None,
     };
     let gguf = match peregrine_core::gguf::Gguf::open(&a.model).and_then(|g| {
-        peregrine_core::check_compatible_with(&g, chosen)?;
+        peregrine_models::check_compatible_with(&g, chosen)?;
         Ok(g)
     }) {
         Ok(g) => g,
@@ -192,8 +192,7 @@ pub async fn run(a: Args) {
             }
         },
     };
-    let model = match peregrine_core::model::keep::open_with_template(&a.model, a.littlebit, chosen)
-    {
+    let model = match peregrine_models::keep::open_with_template(&a.model, a.littlebit, chosen) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("cannot open {}: {e}", a.model.display());

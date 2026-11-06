@@ -1,14 +1,21 @@
-//! Qwen3.5 hybrid loader and configuration (ADR 0006).
-
-use crate::arch::Loaded;
-use crate::blocks::recurrent::RecurrentCfg;
-use crate::blocks::rotate::Rotation;
-use crate::families::qwen35::{mtp, Qwen35};
-use crate::gguf::{Format, Gguf, TensorInfo};
-use crate::model::{Config, TileStore};
-#[cfg_attr(not(target_arch = "x86_64"), allow(unused_imports))]
-use crate::quant::row_bytes;
-use crate::tokenizer::Tokenizer;
+#[cfg(feature = "mtp")]
+use crate::qwen35::mtp;
+use crate::qwen35::Qwen35;
+use peregrine_core::arch::Loaded;
+use peregrine_core::blocks::recurrent::RecurrentCfg;
+use peregrine_core::blocks::rotate::Rotation;
+use peregrine_core::gguf::{Format, Gguf, TensorInfo, Value};
+use peregrine_core::model::{Config, TileStore};
+#[cfg(target_arch = "x86_64")]
+use peregrine_core::options;
+use peregrine_core::tokenizer::Tokenizer;
+use peregrine_kernels::quant::dequant_row;
+#[allow(unused_imports)]
+use peregrine_kernels::quant::row_bytes;
+#[cfg(target_arch = "x86_64")]
+use peregrine_kernels::table::MatKernels;
+#[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
+use peregrine_kernels::tern;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HybridCfg {
@@ -100,7 +107,7 @@ pub(crate) struct HLayer {
 
 fn f32_vec(g: &Gguf, t: &TensorInfo) -> Vec<f32> {
     let mut v = vec![0.0f32; t.numel() as usize];
-    crate::quant::dequant_row(t.kind, g.bytes(t), &mut v);
+    dequant_row(t.kind, g.bytes(t), &mut v);
     v
 }
 
@@ -163,7 +170,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
         ctx_train: g.u32(&k("context_length")).unwrap_or(4096) as usize,
     };
     let widths = match g.meta.get("prism.hadamard.sign_widths") {
-        Some(crate::gguf::Value::ArrI32(v)) => v.iter().map(|&x| x as usize).collect::<Vec<_>>(),
+        Some(Value::ArrI32(v)) => v.iter().map(|&x| x as usize).collect::<Vec<_>>(),
         _ => return Err("prism.hadamard.sign_widths missing".into()),
     };
     let vals = g.arr_i32("prism.hadamard.sign_values")?;
@@ -296,7 +303,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     let mut tb_span = 0usize;
     #[cfg(target_arch = "x86_64")]
     {
-        let want = !ptq1 && crate::table::MatKernels::get().tiles() && crate::options::get().tiles;
+        let want = !ptq1 && MatKernels::get().tiles() && options::get().tiles;
         let mut mats: Vec<&mut TensorInfo> = Vec::new();
         for l in layers.iter_mut() {
             mats.extend([&mut l.gate, &mut l.up, &mut l.down]);
@@ -310,23 +317,28 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
             .iter()
             .all(|t| t.dims.get(1).is_some_and(|r| r % 16 == 0) && t.dims[0] % 128 == 0);
         if want && ok {
-            let total: usize = mats.iter().map(|t| t.bytes() as usize).sum();
-            tiles = TileStore::new(total);
-            let mut at = 0usize;
-            for t in mats {
-                let (n, rows) = (t.dims[0] as usize, t.dims[1] as usize);
-                let rb = row_bytes(t.kind, n);
-                let len = rows * rb;
-                crate::tern::repack_tiles(
-                    g.bytes(t),
-                    rows,
-                    rb,
-                    &mut tiles.bytes_mut()[at..at + len],
+            #[cfg(not(all(target_arch = "x86_64", feature = "fmt-ternary")))]
+            {
+                return Err(
+                    "ternary format disabled in this build (recompile with feature 'fmt-ternary')"
+                        .to_string(),
                 );
-                t.tile_off = Some(at);
-                at += len;
             }
-            tb_span = crate::options::get().tb_span;
+            #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
+            {
+                let total: usize = mats.iter().map(|t| t.bytes() as usize).sum();
+                tiles = TileStore::new(total);
+                let mut at = 0usize;
+                for t in mats {
+                    let (n, rows) = (t.dims[0] as usize, t.dims[1] as usize);
+                    let rb = row_bytes(t.kind, n);
+                    let len = rows * rb;
+                    tern::repack_tiles(g.bytes(t), rows, rb, &mut tiles.bytes_mut()[at..at + len]);
+                    t.tile_off = Some(at);
+                    at += len;
+                }
+                tb_span = options::get().tb_span;
+            }
         }
     }
     let hc = HybridCfg {
@@ -361,6 +373,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     for w in [d_model, n_ff, hc.value_dim(), cfg.q_dim()] {
         rot.signs_for(w)?;
     }
+    #[cfg(feature = "mtp")]
     let mtp = if n_nextn == 1 {
         let se = rot.signs_for(d_model)?;
         Some(mtp::Mtp::load(
@@ -369,6 +382,10 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     } else {
         None
     };
+    #[cfg(not(feature = "mtp"))]
+    if n_nextn > 0 {
+        eprintln!("info: MTP blocks in model ignored (recompile with feature 'mtp')");
+    }
     let qwen35 = Qwen35 {
         cfg: hc,
         layers,
@@ -377,6 +394,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
         tok_embd,
         out_norm,
         head: output,
+        #[cfg(feature = "mtp")]
         mtp,
     };
     Ok(Loaded {

@@ -2,6 +2,7 @@
 
 pub mod forward;
 pub mod load;
+#[cfg(feature = "mtp")]
 pub mod mtp;
 
 use std::any::Any;
@@ -9,12 +10,12 @@ use std::any::Any;
 pub use forward::{profile, HyScratch};
 pub use load::HybridCfg;
 
-use crate::arch::{ActLayout, Architecture, Family, Loaded, MtpHead, RecurrentShape};
-use crate::blocks::rotate::Rotation;
-use crate::gguf::{Gguf, TensorInfo};
-use crate::model::{Caches, Config, Linear, State, StepStats, Weights};
-use crate::pool::Pool;
-use crate::tokenizer::Tokenizer;
+use peregrine_core::arch::{ActLayout, Architecture, Family, Loaded, MtpHead, RecurrentShape};
+use peregrine_core::blocks::rotate::Rotation;
+use peregrine_core::gguf::{Gguf, TensorInfo};
+use peregrine_core::model::{Caches, Config, Linear, State, StepStats, Weights};
+use peregrine_core::pool::Pool;
+use peregrine_core::tokenizer::Tokenizer;
 
 pub struct Qwen35 {
     pub(crate) cfg: HybridCfg,
@@ -24,6 +25,7 @@ pub struct Qwen35 {
     pub(crate) tok_embd: TensorInfo,
     pub(crate) out_norm: TensorInfo,
     pub(crate) head: TensorInfo,
+    #[cfg(feature = "mtp")]
     pub(crate) mtp: Option<mtp::Mtp>,
 }
 
@@ -51,7 +53,7 @@ impl Architecture for Qwen35 {
     fn act_layout(&self) -> ActLayout {
         ActLayout {
             ternary: true,
-            ptq1: self.cfg.ptq1 && crate::table::MatKernels::get().ptq1_layout(),
+            ptq1: self.cfg.ptq1 && peregrine_kernels::table::MatKernels::get().ptq1_layout(),
             tb_span: self.cfg.tb_span,
             keep_f32: false,
         }
@@ -79,7 +81,14 @@ impl Architecture for Qwen35 {
     }
 
     fn mtp(&self) -> Option<&dyn MtpHead> {
-        self.mtp.as_ref().map(|m| m as &dyn MtpHead)
+        #[cfg(feature = "mtp")]
+        {
+            self.mtp.as_ref().map(|m| m as &dyn MtpHead)
+        }
+        #[cfg(not(feature = "mtp"))]
+        {
+            None
+        }
     }
 
     fn forward_rows(

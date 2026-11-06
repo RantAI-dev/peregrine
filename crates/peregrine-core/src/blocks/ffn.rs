@@ -9,7 +9,7 @@ use crate::quant::QuantAct;
 /// SwiGLU — `hb = silu(gate) ⊙ up` — and its quantisation, row-parallel like
 /// `norm_rows`. The activation is `vmath::swiglu`, ggml's vector form, so the
 /// feed-forward nonlinearity is llama.cpp's to the last rounding of its `exp`.
-pub(crate) fn swiglu_rows(
+pub fn swiglu_rows(
     n_ff: usize,
     hb: &mut [f32],
     up: &[f32],

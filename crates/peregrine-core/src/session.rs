@@ -290,11 +290,8 @@ pub(crate) fn logprob_of(logits: &[f32], id: u32) -> f32 {
 }
 
 impl Session {
-    pub fn open(path: &Path, cfg: SessionCfg) -> Result<Session, String> {
-        // `keep::open_with_template` checks compatibility on the one parse it does (and not at
-        // all when the kept model is reused): the vocabulary and merges are ~100K
-        // strings, and parsing them twice per session open was pure waste.
-        let model = crate::model::keep::open_with_template(path, cfg.littlebit, cfg.template)?;
+    /// Initialize a single-user `Session` from an already loaded model.
+    pub fn from_model(model: std::sync::Arc<Model>, cfg: SessionCfg) -> Result<Session, String> {
         let c = model.cfg;
         // a hybrid model's recurrent state rolls back only to its turn-start checkpoint, so nothing may
         // write positions it later takes back: no suffix speculation, no drafter.
@@ -310,6 +307,7 @@ impl Session {
 
         let max_ctx = cfg.max_ctx.clamp(32, c.ctx_train);
         let threads = cfg.threads.max(1);
+        #[cfg(feature = "dspark")]
         let dspark = match &cfg.dspark {
             Some(dir) => {
                 let d = Drafter::load(dir, threads)?;
@@ -317,6 +315,15 @@ impl Session {
                 Some(d)
             }
             None => None,
+        };
+        #[cfg(not(feature = "dspark"))]
+        let dspark: Option<Drafter> = if let Some(dir) = &cfg.dspark {
+            return Err(format!(
+                "dspark drafter at {:?} requested but 'dspark' feature is disabled in this build",
+                dir
+            ));
+        } else {
+            None
         };
         let dspark_k = dspark.as_ref().map_or(0, |d| {
             cfg.dspark_max
@@ -391,6 +398,17 @@ impl Session {
             prefix_reused: 0,
             prefixes: None,
         })
+    }
+
+    /// Open a model at `path` using the provided model families and initialize a `Session`.
+    pub fn open_with(
+        path: &Path,
+        cfg: SessionCfg,
+        families: &[&dyn crate::arch::Family],
+    ) -> Result<Session, String> {
+        let model =
+            crate::model::keep::open_with_template(path, cfg.littlebit, cfg.template, families)?;
+        Self::from_model(model, cfg)
     }
 
     /// Seconds for one verification forward of each width in `widths` (median of

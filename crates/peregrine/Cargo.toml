@@ -21,15 +21,70 @@ name = "cli_bench"
 required-features = ["cli"]
 
 [features]
-default = ["cli", "server"]
+default = [
+    "cli",
+    "server",
+    "arch-llama",
+    "arch-qwen",
+    "arch-qwen35",
+    "fmt-kquant",
+    "fmt-ternary",
+    "fmt-iq",
+    "fmt-legacy",
+    "littlebit",
+    "dspark",
+    "mtp",
+]
 # The OpenAI-compatible HTTP server (`peregrine serve`, `peregrine::server`).
 server = ["dep:peregrine-server", "dep:tokio"]
 # The `peregrine` command line.
 cli = ["dep:clap", "dep:serde_json"]
 
+# Architectures
+arch-llama = ["peregrine-models/arch-llama"]
+arch-qwen = ["peregrine-models/arch-qwen"]
+arch-qwen35 = ["peregrine-models/arch-qwen35"]
+
+# Formats
+fmt-kquant = [
+    "peregrine-core/fmt-kquant",
+    "peregrine-kernels/fmt-kquant",
+    "peregrine-models/fmt-kquant",
+]
+fmt-ternary = [
+    "peregrine-core/fmt-ternary",
+    "peregrine-kernels/fmt-ternary",
+    "peregrine-models/fmt-ternary",
+]
+fmt-iq = [
+    "peregrine-core/fmt-iq",
+    "peregrine-kernels/fmt-iq",
+    "peregrine-models/fmt-iq",
+]
+fmt-legacy = [
+    "peregrine-core/fmt-legacy",
+    "peregrine-kernels/fmt-legacy",
+    "peregrine-models/fmt-legacy",
+]
+
+# Extras
+littlebit = [
+    "peregrine-core/littlebit",
+    "peregrine-models/littlebit",
+]
+dspark = [
+    "peregrine-core/dspark",
+    "peregrine-models/dspark",
+]
+mtp = [
+    "peregrine-core/mtp",
+    "peregrine-models/mtp",
+]
+
 [dependencies]
-peregrine-core = { workspace = true }
-peregrine-kernels = { workspace = true }
+peregrine-core = { workspace = true, default-features = false }
+peregrine-kernels = { workspace = true, default-features = false }
+peregrine-models = { workspace = true, default-features = false }
 peregrine-server = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

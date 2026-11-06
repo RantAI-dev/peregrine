@@ -64,7 +64,7 @@ Do not: change goldens, add dependencies to peregrine-core, touch files outside 
 
 ## Goldens
 
-`crates/peregrine-core/tests/golden.rs` runs three fixed prompts through every model file present and
+`crates/peregrine-models/tests/golden.rs` runs three fixed prompts through every model file present and
 compares, per kernel tier, a hash of every prefill logit's bits, the argmax at every position, and 24
 greedy tokens; it also checks that results do not depend on thread count.
 

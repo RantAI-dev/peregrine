@@ -88,7 +88,7 @@ fn two_users_in_one_pass_get_exactly_what_they_would_get_alone() {
         eprintln!("skipped: no model at {}", path.display());
         return;
     }
-    let model = peregrine_core::model::keep::open(&path).unwrap();
+    let model = peregrine_models::open(&path).unwrap();
     let c = model.cfg;
     let pool = Pool::new(3);
     let max_ctx = 256;
@@ -189,7 +189,7 @@ fn a_row_reads_its_own_cache() {
         eprintln!("skipped: no model at {}", path.display());
         return;
     }
-    let model = peregrine_core::model::keep::open(&path).unwrap();
+    let model = peregrine_models::open(&path).unwrap();
     let c = model.cfg;
     let pool = Pool::new(2);
     let max_ctx = 128;
@@ -273,7 +273,7 @@ fn a_restored_cache_gives_the_same_logits_as_a_computed_one() {
     if !path.exists() {
         return;
     }
-    let model = peregrine_core::model::keep::open(&path).unwrap();
+    let model = peregrine_models::open(&path).unwrap();
     let c = model.cfg;
     let pool = Pool::new(3);
     let max_ctx = 256;

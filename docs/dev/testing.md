@@ -18,7 +18,9 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    PTQ1_0, plus that hybrid with one Q8_0 MTP (NextN) block whose speculation must be lossless and a
    variant whose drafts are actually accepted. Each must load, give finite logits, be bit-identical across
    runs and across 1, 2 and 4 threads, decode greedily the same way twice, and match its golden for the
-   current tier (`tests/golden/synthetic/<tier>/`). The same tests drive small models through `Engine`:
+   current tier (`tests/golden/synthetic/<tier>/`). A `qwen3moe` file (8 experts, 2 used, F16 and Q8_0
+   experts) is written there too: llama.cpp v0.9.0 loads and runs it, and Peregrine refuses it by name
+   until the mixture-of-experts family lands. The same tests drive small models through `Engine`:
    prompts served alone must produce the same tokens when admitted together (a mixed prefill/decode step,
    both `Caches::Mapped` and, with `PEREGRINE_MIX=0`, `Caches::PerRow`), a shared opening must restore from
    the prefix store, and a LittleBit sidecar built in-test must give finite, deterministic logits. They
@@ -114,6 +116,10 @@ enough to carry the models' own templates.
 and reference test vectors (`.inp` and `.out`) from pinned llama.cpp release files into `models/vocab/` (git-ignored),
 validating pinned SHA-256 checksums. `crates/peregrine-core/tests/tokenize_spm.rs` tests these reference vectors
 and skips with an informative message if the files are absent.
+
+## Accuracy against llama.cpp
+
+`docs/dev/accuracy.md`: the KL-divergence measurement on real text (`peregrine-bench` example `kld`).
 
 ## CPU tiers
 
