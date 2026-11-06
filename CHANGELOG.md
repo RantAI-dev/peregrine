@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Support for GGML's IQ4_NL and IQ4_XS weight formats (AVX2 single-row and batched kernels, scalar reference).
 - Support for GGML's Q5_K weight format (AVX2 single-row and batched kernels, scalar reference).
 - Support for Gemma, Mistral (v1, v7), and Llama 2 chat templates with exact llama.cpp parity (S2.3b).
 - Support for SentencePiece (llama) tokenizers transcribed from llama.cpp (S2.3a).

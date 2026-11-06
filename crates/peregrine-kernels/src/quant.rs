@@ -784,6 +784,12 @@ pub fn row_bytes(fmt: Format, n: usize) -> usize {
 // oracle the fused kernels are checked against.
 // ---------------------------------------------------------------------------
 
+/// The 16-entry lookup table for GGML's non-linear 4-bit formats (IQ4_NL and IQ4_XS),
+/// transcribed from `kvalues_iq4nl` in `ggml-common.h`.
+pub const KVALUES_IQ4NL: [i8; 16] = [
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+];
+
 // The Q6_K decoders below contain `qh[l] >> 0`. It is an identity, and it is kept:
 // the four shifts form the series 0/2/4/6, and writing the first one as a bare
 // `qh[l]` breaks the column alignment that lets a reader check this transcription
@@ -940,6 +946,35 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                         out[l + 32] = d * sc[is + 2] as f32 * q2 as f32;
                         out[l + 64] = d * sc[is + 4] as f32 * q3 as f32;
                         out[l + 96] = d * sc[is + 6] as f32 * q4 as f32;
+                    }
+                }
+            }
+        }
+        Format::IQ4_NL => {
+            for (blk, out) in w.chunks_exact(18).zip(y.chunks_exact_mut(32)) {
+                let d = h(blk, 0);
+                let qs = &blk[2..18];
+                for j in 0..16 {
+                    out[j] = d * KVALUES_IQ4NL[(qs[j] & 0x0F) as usize] as f32;
+                    out[j + 16] = d * KVALUES_IQ4NL[(qs[j] >> 4) as usize] as f32;
+                }
+            }
+        }
+        Format::IQ4_XS => {
+            for (blk, out) in w.chunks_exact(136).zip(y.chunks_exact_mut(256)) {
+                let d = h(blk, 0);
+                let scales_h = u16::from_le_bytes([blk[2], blk[3]]);
+                let scales_l = &blk[4..8];
+                let qs = &blk[8..136];
+                for ib in 0..8 {
+                    let ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F) as i32
+                        | ((((scales_h >> (2 * ib)) & 3) << 4) as i32);
+                    let dl = d * (ls - 32) as f32;
+                    let sub_qs = &qs[ib * 16..(ib + 1) * 16];
+                    let o = &mut out[ib * 32..ib * 32 + 32];
+                    for j in 0..16 {
+                        o[j] = dl * KVALUES_IQ4NL[(sub_qs[j] & 0x0F) as usize] as f32;
+                        o[j + 16] = dl * KVALUES_IQ4NL[(sub_qs[j] >> 4) as usize] as f32;
                     }
                 }
             }
@@ -1185,6 +1220,51 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             }
             acc
         }
+        Format::IQ4_NL => {
+            let mut acc = 0.0f32;
+            for (b, blk) in w.chunks_exact(18).enumerate() {
+                let qs = &blk[2..18];
+                let aq = &a.q[b * 32..b * 32 + 32];
+                let mut s = 0i32;
+                for j in 0..16 {
+                    s += KVALUES_IQ4NL[(qs[j] & 0x0F) as usize] as i32 * aq[j] as i32;
+                    s += KVALUES_IQ4NL[(qs[j] >> 4) as usize] as i32 * aq[j + 16] as i32;
+                }
+                acc += h(blk, 0) * a.d[b] * s as f32;
+            }
+            acc
+        }
+        Format::IQ4_XS => {
+            assert!(
+                !a.qk.is_empty(),
+                "a k-quant row needs a multiple-of-256 activation"
+            );
+            let mut acc = 0.0f32;
+            for (sb, blk) in w.chunks_exact(136).enumerate() {
+                let d = h(blk, 0);
+                let scales_h = u16::from_le_bytes([blk[2], blk[3]]);
+                let scales_l = &blk[4..8];
+                let qs = &blk[8..136];
+                let aq = &a.qk[sb * 256..sb * 256 + 256];
+                let mut sumi = 0i32;
+                for ib in 0..8 {
+                    let ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F) as i32
+                        | ((((scales_h >> (2 * ib)) & 3) << 4) as i32);
+                    let scale = ls - 32;
+                    let sub_qs = &qs[ib * 16..(ib + 1) * 16];
+                    let sub_act = &aq[ib * 32..(ib + 1) * 32];
+                    let mut s = 0i32;
+                    for j in 0..16 {
+                        s += KVALUES_IQ4NL[(sub_qs[j] & 0x0F) as usize] as i32 * sub_act[j] as i32;
+                        s += KVALUES_IQ4NL[(sub_qs[j] >> 4) as usize] as i32
+                            * sub_act[j + 16] as i32;
+                    }
+                    sumi += scale * s;
+                }
+                acc += a.dk[sb] * (d * sumi as f32);
+            }
+            acc
+        }
         Format::PQ2_0 => {
             let mut acc = 0.0f32;
             for (g, blk) in w.chunks_exact(34).enumerate() {
@@ -1363,12 +1443,13 @@ mod tests {
         let sz = fmt.block_bytes();
         for blk in w.chunks_exact_mut(sz) {
             match fmt {
-                Format::Q4_0 | Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
+                Format::Q4_0 | Format::Q8_0 | Format::Q5_0 | Format::IQ4_NL => fix(blk, 0),
                 Format::Q4_K | Format::Q5_K => {
                     fix(blk, 0);
                     fix(blk, 2);
                 }
                 Format::Q6_K => fix(blk, 208),
+                Format::IQ4_XS => fix(blk, 0),
                 Format::PQ2_0 => fix(blk, 0),
                 Format::PTQ1_0 => fix(blk, 26),
                 Format::F32 | Format::F16 | Format::BF16 => {}
@@ -1401,7 +1482,10 @@ mod tests {
         // Reference: dot of the decoded weights against the *reconstructed*
         // activation, which is what the fused kernel actually computes — the
         // per-256 representation for the k-quants, the per-32 one otherwise.
-        let kq = matches!(fmt, Format::Q4_K | Format::Q5_K | Format::Q6_K);
+        let kq = matches!(
+            fmt,
+            Format::Q4_K | Format::Q5_K | Format::Q6_K | Format::IQ4_XS
+        );
         let mut want = 0.0f64;
         for i in 0..n {
             let act = if kq {
@@ -1480,6 +1564,75 @@ mod tests {
     #[test]
     fn fused_dot_matches_reference_decode_q6_k() {
         fused_equals_reference(Format::Q6_K, 2560);
+    }
+
+    #[test]
+    fn fused_dot_matches_reference_decode_iq4_nl() {
+        fused_equals_reference(Format::IQ4_NL, 960);
+    }
+
+    #[test]
+    fn fused_dot_matches_reference_decode_iq4_xs() {
+        fused_equals_reference(Format::IQ4_XS, 2560);
+    }
+
+    #[test]
+    fn dequant_row_iq4_nl_matches_hand_computed_block() {
+        let mut blk = vec![0u8; 18];
+        // d = 2.0 (0x4000)
+        blk[0..2].copy_from_slice(&0x4000u16.to_le_bytes());
+        // qs[0]: low nibble = 0 (KVALUES_IQ4NL[0] = -127), high nibble = 8 (KVALUES_IQ4NL[8] = 1)
+        blk[2] = 0x80;
+        // qs[1]: low nibble = 15 (KVALUES_IQ4NL[15] = 113), high nibble = 7 (KVALUES_IQ4NL[7] = -10)
+        blk[3] = 0x7F;
+        // qs[2]: low nibble = 8 (KVALUES_IQ4NL[8] = 1), high nibble = 9 (KVALUES_IQ4NL[9] = 13)
+        blk[4] = 0x98;
+
+        let mut out = vec![0.0f32; 32];
+        dequant_row(Format::IQ4_NL, &blk, &mut out);
+
+        assert_eq!(out[0], -254.0);
+        assert_eq!(out[16], 2.0);
+        assert_eq!(out[1], 226.0);
+        assert_eq!(out[17], -20.0);
+        assert_eq!(out[2], 2.0);
+        assert_eq!(out[18], 26.0);
+    }
+
+    #[test]
+    fn dequant_row_iq4_xs_matches_hand_computed_block() {
+        let mut blk = vec![0u8; 136];
+        // d = 0.5 (0x3800)
+        blk[0..2].copy_from_slice(&0x3800u16.to_le_bytes());
+        // Sub-block 0 (ib=0): ls0 = 34 -> ls0 - 32 = 2. scales_l[0] & 0xF = 2, (scales_h >> 0) & 3 = 2
+        // Sub-block 1 (ib=1): ls1 = 31 -> ls1 - 32 = -1. (scales_l[0] >> 4) & 0xF = 0xF, (scales_h >> 2) & 3 = 1
+        // scales_l[0] = 0xF2
+        // Sub-block 4 (ib=4): ls4 = 36 -> ls4 - 32 = 4. scales_l[2] & 0xF = 4, (scales_h >> 8) & 3 = 2
+        let scales_h: u16 = 2 | (1 << 2) | (2 << 8);
+        blk[2..4].copy_from_slice(&scales_h.to_le_bytes());
+        blk[4] = 0xF2;
+        blk[6] = 0x04;
+
+        // qs at 8..136
+        // Sub-block 0: qs[0] (weights 0 and 16): low = 0 (-127), high = 8 (1)
+        // dl = 0.5 * 2 = 1.0 -> out[0] = -127.0, out[16] = 1.0
+        blk[8] = 0x80;
+        // Sub-block 1: qs[16] (weights 32 and 48): low = 15 (113), high = 9 (13)
+        // dl = 0.5 * (-1) = -0.5 -> out[32] = -56.5, out[48] = -6.5
+        blk[8 + 16] = 0x9F;
+        // Sub-block 4: qs[64] (weights 128 and 144): low = 8 (1), high = 0 (-127)
+        // dl = 0.5 * 4 = 2.0 -> out[128] = 2.0, out[144] = -254.0
+        blk[8 + 64] = 0x08;
+
+        let mut out = vec![0.0f32; 256];
+        dequant_row(Format::IQ4_XS, &blk, &mut out);
+
+        assert_eq!(out[0], -127.0);
+        assert_eq!(out[16], 1.0);
+        assert_eq!(out[32], -56.5);
+        assert_eq!(out[48], -6.5);
+        assert_eq!(out[128], 2.0);
+        assert_eq!(out[144], -254.0);
     }
 
     #[test]
