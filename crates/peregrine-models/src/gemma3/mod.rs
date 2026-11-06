@@ -27,6 +27,79 @@ pub(crate) struct Gemma3Layer {
     pub(crate) ffn_post_norm: TensorInfo,
 }
 
+/// The Gemma 3 model size classified from architecture hyperparameters, matching
+/// llama.cpp (`src/models/gemma3.cpp:19-26`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gemma3Size {
+    /// 270M model (18 layers).
+    Size270M,
+    /// 1B model (26 layers).
+    Size1B,
+    /// 8B model (32 layers).
+    Size8B,
+    /// 4B model (34 layers).
+    Size4B,
+    /// 12B model (48 layers).
+    Size12B,
+    /// 27B model (62 layers). Note: attention scale uses `sqrt(d_model / n_head)` rather than `sqrt(head_dim)`.
+    Size27B,
+    /// Synthetic test model (6 layers, or explicit synthetic model name).
+    Synthetic,
+}
+
+impl Gemma3Size {
+    /// Classify model size from layer count and model name.
+    ///
+    /// llama.cpp detects model type by matching `n_layer` (`src/models/gemma3.cpp:19-26`).
+    /// If layer count does not match a known size, falls back to `general.name` (for test/synthetic models),
+    /// and otherwise refuses the file by name.
+    pub fn classify(n_layer: usize, model_name: &str) -> Result<Self, String> {
+        match n_layer {
+            18 => Ok(Gemma3Size::Size270M),
+            26 => Ok(Gemma3Size::Size1B),
+            32 => Ok(Gemma3Size::Size8B),
+            34 => Ok(Gemma3Size::Size4B),
+            48 => Ok(Gemma3Size::Size12B),
+            62 => Ok(Gemma3Size::Size27B),
+            6 => Ok(Gemma3Size::Synthetic),
+            _ => {
+                let lower = model_name.to_ascii_lowercase();
+                if lower.contains("synthetic") {
+                    Ok(Gemma3Size::Synthetic)
+                } else if lower.contains("270m") {
+                    Ok(Gemma3Size::Size270M)
+                } else if lower.contains("1b") {
+                    Ok(Gemma3Size::Size1B)
+                } else if lower.contains("4b") {
+                    Ok(Gemma3Size::Size4B)
+                } else if lower.contains("8b") {
+                    Ok(Gemma3Size::Size8B)
+                } else if lower.contains("12b") {
+                    Ok(Gemma3Size::Size12B)
+                } else if lower.contains("27b") {
+                    Ok(Gemma3Size::Size27B)
+                } else {
+                    Err(format!(
+                        "cannot classify Gemma 3 model size for {model_name:?}: layer count {n_layer} is unrecognized (expected 18, 26, 32, 34, 48, or 62 layers)"
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Compute attention scale `f_attention_scale` matching llama.cpp (`src/models/gemma3.cpp:29-32`).
+    ///
+    /// For the 27B model, `query_pre_attn_scalar` differs from `head_dim`:
+    /// `1.0 / sqrt(d_model / n_head)` instead of `1.0 / sqrt(head_dim)`.
+    /// For all other sizes, `1.0 / sqrt(head_dim)`.
+    pub fn attention_scale(self, d_model: usize, n_head: usize, head_dim: usize) -> f32 {
+        match self {
+            Gemma3Size::Size27B => 1.0 / (d_model as f32 / n_head as f32).sqrt(),
+            _ => 1.0 / (head_dim as f32).sqrt(),
+        }
+    }
+}
+
 pub struct Gemma3 {
     pub(crate) tok_embd: TensorInfo,
     pub(crate) out_norm: TensorInfo,
@@ -37,6 +110,7 @@ pub struct Gemma3 {
     pub(crate) rope_swa: RwLock<Vec<f32>>,
     pub(crate) rope_base_swa: f32,
     pub(crate) final_logit_softcapping: Option<f32>,
+    pub(crate) attn_scale: f32,
 }
 
 #[cfg(feature = "arch-gemma3")]
@@ -117,12 +191,21 @@ impl Gemma3 {
             ));
         }
 
-        let rope_scale = g
-            .f32(&k("rope.scaling.factor"))
-            .ok()
-            .filter(|f| *f > 0.0)
-            .map(|f| 1.0 / f);
-        let mut rope_factors: Option<Vec<f32>> = rope_scale.map(|s| vec![1.0 / s; rope_dim / 2]);
+        let model_name = g.str("general.name").unwrap_or("gemma3");
+        let model_size = Gemma3Size::classify(n_layer, model_name)?;
+        let attn_scale = model_size.attention_scale(d_model, n_head, head_dim);
+
+        let rope_scaling_type = g.str(&k("rope.scaling.type")).ok();
+        let rope_scaling_factor = g.f32(&k("rope.scaling.factor")).ok();
+        let mut rope_factors: Option<Vec<f32>> = match (rope_scaling_type, rope_scaling_factor) {
+            (Some("none"), _) => None,
+            (Some("linear"), Some(factor)) if factor > 0.0 => Some(vec![factor; rope_dim / 2]),
+            (None, Some(factor)) if factor > 0.0 => Some(vec![factor; rope_dim / 2]),
+            (Some(other), _) => {
+                return Err(format!("unsupported Gemma 3 rope scaling type {other:?}"));
+            }
+            _ => None,
+        };
         if let Ok(t) = g.tensor("rope_freqs.weight") {
             let n = t.numel() as usize;
             if n != rope_dim / 2 {
@@ -316,6 +399,7 @@ impl Gemma3 {
                 rope_swa: RwLock::new(rope_swa),
                 rope_base_swa,
                 final_logit_softcapping,
+                attn_scale,
             }),
             rope_factors,
             tiles: TileStore::default(),
@@ -495,7 +579,7 @@ impl Architecture for Gemma3 {
             // ---- Attend ----
             let t_attn = Instant::now();
             for (r0, len, c) in caches.runs(nb) {
-                peregrine_core::blocks::attn::attend_window(
+                peregrine_core::blocks::attn::attend_scaled_window(
                     cfg,
                     &mut st.attn,
                     &st.q,
@@ -507,6 +591,7 @@ impl Architecture for Gemma3 {
                     positions[r0],
                     r0,
                     window,
+                    Some(self.attn_scale),
                     stats,
                 );
             }

@@ -16,8 +16,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{
-    write_dense, write_gemma3, write_hybrid, write_hybrid_accepting, write_rope_dense, Dense,
-    Gemma3Config, Rope,
+    write_dense, write_gemma3, write_gemma3_named, write_hybrid, write_hybrid_accepting,
+    write_rope_dense, Dense, Gemma3Config, Rope,
 };
 
 const PROMPT: [u32; 24] = [
@@ -856,35 +856,68 @@ fn gemma3_batching_is_invariant_across_slots() {
 
 #[test]
 fn gemma3_synthetic_file_runs_in_llama_cpp() {
-    let llama_simple = Path::new("/tmp/llama.cpp/build/bin/llama-simple");
-    if !llama_simple.exists() {
-        eprintln!(
-            "llama-simple not found at {}, skipping",
-            llama_simple.display()
-        );
-        return;
+    let compare_bin = PathBuf::from("/tmp/compare_gemma3");
+    if !compare_bin.exists() {
+        let llama_so = Path::new("/tmp/llama.cpp/build/bin/libllama.so");
+        if !llama_so.exists() {
+            eprintln!("llama.cpp not found at {}, skipping", llama_so.display());
+            return;
+        }
     }
     let dir = tmpdir("gemma3-llama-cpp");
     let path = write_gemma3(&dir, Format::F16, 8020, Gemma3Config::default());
+    let logits_path = dir.join("llama_logits.bin");
 
-    let output = std::process::Command::new(llama_simple)
-        .args(["-m", path.to_str().unwrap(), "-n", "5", "-ngl", "0"])
+    // Prompt of 40 tokens on the synthetic model's tokenizer (window is 16 < 40)
+    let prompt = "In a quiet valley surrounded by mountains";
+    let n_predict = 32;
+
+    let output = std::process::Command::new(&compare_bin)
+        .args([
+            path.to_str().unwrap(),
+            &n_predict.to_string(),
+            prompt,
+            logits_path.to_str().unwrap(),
+        ])
         .output()
-        .expect("failed to execute llama-simple");
+        .expect("failed to execute compare_gemma3");
 
     assert!(
         output.status.success(),
-        "llama-simple failed on synthetic gemma3 model"
+        "compare_gemma3 failed on synthetic gemma3 model: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     let llama_stdout = String::from_utf8_lossy(&output.stdout);
-    eprintln!("llama-simple stdout:\n{llama_stdout}");
+
+    let llama_tokens: Vec<u32> = llama_stdout
+        .lines()
+        .find(|l| l.starts_with("TOKENS:"))
+        .expect("TOKENS: line")
+        .strip_prefix("TOKENS:")
+        .unwrap()
+        .split_whitespace()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(llama_tokens.len(), n_predict);
+
+    let llama_logits_bytes = std::fs::read(&logits_path).expect("read logits");
+    let llama_logits: Vec<f32> = llama_logits_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_ne_bytes(*b))
+        .collect();
 
     let model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
-    let prompt_toks = model.tk.encode("Hello my name is");
-    eprintln!("Peregrine prompt tokens: {prompt_toks:?}");
+    let prompt_toks = model.tk.encode(prompt);
+    assert_eq!(prompt_toks.len(), 40, "prompt should be 40 tokens");
+    assert!(
+        prompt_toks.len() > 16,
+        "prompt must be longer than window 16"
+    );
 
     let pool = Pool::new(1);
-    let mut st = State::new(&model.cfg, 128, prompt_toks.len(), 256, 1, None);
+    let mut st = State::new(&model.cfg, 128, prompt_toks.len() + n_predict, 256, 1, None);
     let mut kv = model.new_cache(KvPrec::F16, 256);
     let mut ss = StepStats::default();
     let want: Vec<usize> = vec![prompt_toks.len() - 1];
@@ -892,10 +925,32 @@ fn gemma3_synthetic_file_runs_in_llama_cpp() {
         .forward(&mut st, &mut kv, &pool, &prompt_toks, 0, &want, &mut ss)
         .unwrap();
 
+    let pere_logits = st.logits_row(0, model.cfg.n_vocab).to_vec();
+    assert_eq!(pere_logits.len(), llama_logits.len());
+
+    let mut max_abs_err = 0.0f32;
+    let mut max_rel_err = 0.0f32;
+    let mut sum_sq_diff = 0.0f64;
+    let mut sum_sq_ref = 0.0f64;
+    for (p, l) in pere_logits.iter().zip(&llama_logits) {
+        let abs = (p - l).abs();
+        max_abs_err = max_abs_err.max(abs);
+        let rel = abs / l.abs().max(1e-5);
+        max_rel_err = max_rel_err.max(rel);
+        sum_sq_diff += ((p - l) as f64).powi(2);
+        sum_sq_ref += (*l as f64).powi(2);
+    }
+    let rel_l2_err = (sum_sq_diff.sqrt() / sum_sq_ref.sqrt()) as f32;
+    eprintln!(
+        "Last-position logits: max_abs_err = {:e}, max_rel_err = {:e}, rel_l2_err = {:e}",
+        max_abs_err, max_rel_err, rel_l2_err
+    );
+    assert!(max_abs_err < 0.05, "logits error too high: {max_abs_err}");
+
     let mut pere_tokens = Vec::new();
-    let mut next = argmax(st.logits_row(0, model.cfg.n_vocab));
+    let mut next = argmax(&pere_logits);
     pere_tokens.push(next);
-    for step in 1..5 {
+    for step in 1..n_predict {
         let pos = prompt_toks.len() + step - 1;
         model
             .forward(&mut st, &mut kv, &pool, &[next], pos, &[0], &mut ss)
@@ -903,12 +958,64 @@ fn gemma3_synthetic_file_runs_in_llama_cpp() {
         next = argmax(st.logits_row(0, model.cfg.n_vocab));
         pere_tokens.push(next);
     }
-    eprintln!("Peregrine greedy token IDs: {pere_tokens:?}");
-    let mut pere_decoded = String::new();
-    for &t in &pere_tokens {
-        pere_decoded.push_str(&model.tk.decode(&[t]));
-    }
-    eprintln!("Peregrine decoded text: {pere_decoded}");
+    eprintln!(
+        "llama.cpp greedy tokens ({}): {:?}",
+        llama_tokens.len(),
+        llama_tokens
+    );
+    eprintln!(
+        "Peregrine greedy tokens ({}): {:?}",
+        pere_tokens.len(),
+        pere_tokens
+    );
+
+    assert_eq!(
+        pere_tokens, llama_tokens,
+        "greedy tokens diverged between Peregrine and llama.cpp"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gemma3_unclassified_size_is_refused_by_name() {
+    let dir = tmpdir("gemma3-refuse");
+    let cfg = Gemma3Config {
+        n_layer: 17,
+        ..Default::default()
+    };
+    let path = write_gemma3_named(
+        &dir,
+        Format::F16,
+        8050,
+        cfg,
+        Some("unclassified-gemma3-model"),
+    );
+    let g = Gguf::open(&path).unwrap();
+    let err = match peregrine_models::load(g) {
+        Err(e) => e,
+        Ok(_) => panic!("expected unclassified model load to fail"),
+    };
+    assert!(
+        err.contains("unclassified-gemma3-model"),
+        "error message should cite the model name, got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn gemma3_rope_linear_matches_golden() {
+    let dir = tmpdir("gemma3-rope-linear");
+    let cfg = Gemma3Config {
+        rope: Rope::Linear { factor: 8.0 },
+        ..Default::default()
+    };
+    let path = write_gemma3_named(&dir, Format::F16, 8030, cfg, Some("gemma3-rope-linear"));
+    let failures = check(&path, "gemma3-rope-linear");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_none(),
+        "gemma3-rope-linear failed:\n{}",
+        failures.unwrap_or_default()
+    );
 }

@@ -229,6 +229,7 @@ pub struct Gemma3Config {
     pub n_ff: usize,
     pub ctx: usize,
     pub sliding_window: usize,
+    pub rope: Rope,
 }
 
 impl Default for Gemma3Config {
@@ -241,17 +242,32 @@ impl Default for Gemma3Config {
             n_ff: 512,
             ctx: 512,
             sliding_window: 16,
+            rope: Rope::None,
         }
     }
 }
 
 /// Write a synthetic `gemma3` model whose matrices are all `fmt`, seeded by `seed`.
 pub fn write_gemma3(dir: &Path, fmt: Format, seed: u64, s: Gemma3Config) -> PathBuf {
+    write_gemma3_named(dir, fmt, seed, s, None)
+}
+
+/// Write a synthetic `gemma3` model with optional custom file stem / general.name.
+pub fn write_gemma3_named(
+    dir: &Path,
+    fmt: Format,
+    seed: u64,
+    s: Gemma3Config,
+    custom_name: Option<&str>,
+) -> PathBuf {
     let mut rng = Rng::new(seed);
     let mut w = GgufWriter::new();
     let head_dim = s.d_model / s.n_head;
     w.str("general.architecture", "gemma3");
-    w.str("general.name", &format!("synthetic-gemma3-{}", fmt.label()));
+    let name = custom_name
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("synthetic-gemma3-{}", fmt.label()));
+    w.str("general.name", &name);
     let k = |x: &str| format!("gemma3.{x}");
     w.u32(&k("block_count"), s.n_layer as u32);
     w.u32(&k("embedding_length"), s.d_model as u32);
@@ -267,6 +283,10 @@ pub fn write_gemma3(dir: &Path, fmt: Format, seed: u64, s: Gemma3Config) -> Path
     w.f32(&k("rope.freq_base_swa"), 10_000.0);
     w.u32(&k("attention.sliding_window"), s.sliding_window as u32);
     w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
+    if let Rope::Linear { factor } = s.rope {
+        w.str(&k("rope.scaling.type"), "linear");
+        w.f32(&k("rope.scaling.factor"), factor);
+    }
 
     vocab::add_gemma_tokenizer_metadata(&mut w);
     w.str(
@@ -379,7 +399,10 @@ pub fn write_gemma3(dir: &Path, fmt: Format, seed: u64, s: Gemma3Config) -> Path
     norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
     // output.weight is intentionally omitted to verify tied word embeddings
 
-    let path = dir.join(format!("gemma3-{}.gguf", fmt.label()));
+    let file_stem = custom_name
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("gemma3-{}", fmt.label()));
+    let path = dir.join(format!("{file_stem}.gguf"));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
