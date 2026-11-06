@@ -1069,15 +1069,18 @@ impl Model {
         // starts and ends on one.
         let mk = crate::table::MatKernels::get();
         let act_ptq1 = acts[0].ptq1;
-        let paths: Vec<MatPath> = jobs
-            .iter()
-            .map(|j| mk.path(j.w.kind, j.w.tile_off.is_some(), act_ptq1))
-            .collect();
+        // At most 4 matrices per group (q/k/v, gate/up): a fixed array, no allocation per call.
+        assert!(jobs.len() <= 4, "a matmul group has at most 4 matrices");
+        let mut paths = [MatPath::PerRow; 4];
+        for (p, j) in paths.iter_mut().zip(jobs) {
+            *p = mk.path(j.w.kind, j.w.tile_off.is_some(), act_ptq1);
+        }
+        let paths = &paths[..jobs.len()];
         let tiled = paths.contains(&MatPath::Tiles);
         // The rows `lo..hi` of the concatenated row space.
         let rows_range = |lo: usize, hi: usize, tmp: &mut [f32; MAX_BATCH]| {
             let mut off = 0usize;
-            for (j, &path) in jobs.iter().zip(&paths) {
+            for (j, &path) in jobs.iter().zip(paths) {
                 let n = j.w.dims[0] as usize;
                 let rows = j.w.dims[1] as usize;
                 let (a, z) = (lo.max(off), hi.min(off + rows));

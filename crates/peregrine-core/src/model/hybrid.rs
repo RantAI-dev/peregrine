@@ -713,14 +713,15 @@ impl Model {
         pool: &Pool,
         stats: &mut StepStats,
     ) {
-        let mut mj = [None; 4];
-        for (i, (w, o)) in jobs.iter().enumerate() {
-            mj[i] = Some(MatJob { w, out: OutPtr(*o) });
-        }
-        let mj: Vec<MatJob> = mj.iter().flatten().copied().collect();
+        assert!(!jobs.is_empty() && jobs.len() <= 4);
+        let mj: [MatJob; 4] = std::array::from_fn(|i| {
+            let (w, o) = jobs[i.min(jobs.len() - 1)];
+            MatJob { w, out: OutPtr(o) }
+        });
+        let mj = &mj[..jobs.len()];
         let _t = Tick::new(3);
         let t0 = prof_on().then(Instant::now);
-        self.matmul_group(&mj, acts, nb, pool, stats);
+        self.matmul_group(mj, acts, nb, pool, stats);
         if let Some(t0) = t0 {
             let bytes: u64 = mj.iter().map(|j| j.w.bytes()).sum();
             let k = if bytes < 8 << 20 {
