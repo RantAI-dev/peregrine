@@ -27,6 +27,24 @@ Every change, every release.
 | Task scores (GSM8K, HumanEval+, MMLU subset) vs the reference engine on the same weights | within ±1 point |
 | Default paths that lose accuracy | none |
 
+**Distance to llama.cpp on real text** (not the budget above, which is against Peregrine's own exact path; method
+in `docs/dev/accuracy.md`). 2026-11-07, bluefin (Ryzen 3 PRO 4350G, AVX2), branch `s3.3a-kl` (main at `bc4dda6`
+plus the `kld` tool), llama.cpp v0.9.0 `cd959ba`; wikitext-2 test, `-c 512`, 40 chunks, 8 threads:
+
+| Model (Q4_K_M) | Mean KLD | Median / 99% KLD | RMS Δp | Same top p | PPL Peregrine / llama.cpp |
+|---|---|---|---|---|---|
+| SmolLM2-360M-Instruct | 0.00398 ± 0.00006 | 0.0028 / 0.025 | 1.59 % | 96.1 % | 14.232 / 14.220 |
+| Qwen2.5-0.5B-Instruct | 0.00345 ± 0.00005 | 0.0025 / 0.019 | 1.42 % | 96.5 % | 13.956 / 13.928 |
+| Llama-3.2-1B-Instruct | 0.00248 ± 0.00003 | 0.0018 / 0.014 | 1.15 % | 97.2 % | 14.893 / 14.865 |
+| Qwen3-1.7B | 0.01262 ± 0.00041 | 0.0054 / 0.105 | 3.16 % | 94.8 % | 15.819 / 15.590 |
+| Llama-2-7B-Chat | 0.00171 ± 0.00004 | 0.0007 / 0.015 | 1.24 % | 98.1 % | 7.283 / 7.281 |
+| Mistral-7B-Instruct-v0.2 | 0.00121 ± 0.00003 | 0.0006 / 0.010 | 1.01 % | 98.2 % | 6.245 / 6.237 |
+
+Qwen3-1.7B is the outlier (and Peregrine's perplexity on it is 1.5 % higher than llama.cpp's). On 8 chunks the
+scalar kernels give 0.0136 against 0.0145 on AVX2 (`PEREGRINE_EXACT=1`, which affects only ternary weights, gives
+the same as native), so the difference is not a SIMD kernel's: it is in the computation itself and is the first
+thing to investigate under S3.3. Bonsai (PQ2_0) is not listed: llama.cpp v0.9.0 refuses the file (`invalid ggml type 142`).
+
 ## 2. Speed
 
 Measured per the method in section 4. Baselines are H1 today.
