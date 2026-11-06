@@ -114,6 +114,8 @@ pub struct QuantAct {
     pub t1sc: Vec<f32>,
     /// The unquantised f32 activations (`x`), kept for F32/F16/BF16 matrix multiplies and exact reference paths.
     pub xf: Vec<f32>,
+    /// Keep unquantised f32 activations in `xf` during `fill`.
+    pub keep_f32: bool,
 }
 
 /// `PEREGRINE_TQ_SPAN` (16, 32, 64 or 128): values sharing one activation scale in the ternary layout.
@@ -162,6 +164,7 @@ impl QuantAct {
             t1a: Vec::new(),
             t1init: Vec::new(),
             t1sc: Vec::new(),
+            keep_f32: false,
         }
     }
 
@@ -366,8 +369,10 @@ impl QuantAct {
     /// or carries its own min, so an activation zero point would have to be carried
     /// through the bias correction for no accuracy gain.
     pub fn fill(&mut self, x: &[f32]) {
-        self.xf.clear();
-        self.xf.extend_from_slice(x);
+        if self.keep_f32 {
+            self.xf.clear();
+            self.xf.extend_from_slice(x);
+        }
         if self.ternary {
             self.fill_ternary(x);
             return;
@@ -380,7 +385,7 @@ impl QuantAct {
                 return;
             }
         }
-        self.fill_scalar_codes(x);
+        self.fill_scalar(x);
     }
 
     /// The vector `fill`: the same scales from the same scalar arithmetic, the codes
@@ -389,10 +394,12 @@ impl QuantAct {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn fill_avx2(&mut self, x: &[f32]) {
-        if !x.len().is_multiple_of(32) {
-            self.fill_scalar_codes(x);
-            return;
-        }
+        assert_eq!(
+            x.len() % 32,
+            0,
+            "activation length {} is not a multiple of 32",
+            x.len()
+        );
         self.n = x.len();
         self.q.clear();
         self.d.clear();
@@ -439,13 +446,12 @@ impl QuantAct {
 
     /// The scalar specification of `fill`, which the vector form is tested against.
     pub fn fill_scalar(&mut self, x: &[f32]) {
-        self.n = x.len();
-        self.xf.clear();
-        self.xf.extend_from_slice(x);
-        self.fill_scalar_codes(x);
-    }
-
-    fn fill_scalar_codes(&mut self, x: &[f32]) {
+        assert_eq!(
+            x.len() % 32,
+            0,
+            "activation length {} is not a multiple of 32",
+            x.len()
+        );
         self.n = x.len();
         self.q.clear();
         self.d.clear();
@@ -474,45 +480,33 @@ impl QuantAct {
             }
         }
 
-        let chunks = x.chunks_exact(32);
-        let rem = chunks.remainder();
-        for blk in chunks {
-            self.quantize_block_32(blk);
-        }
-        if !rem.is_empty() {
-            let mut pad = [0.0f32; 32];
-            pad[..rem.len()].copy_from_slice(rem);
-            self.quantize_block_32(&pad);
-        }
-    }
-
-    #[inline(always)]
-    fn quantize_block_32(&mut self, blk: &[f32]) {
-        let amax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        // An all-zero block is real (a masked position, a dead channel). Scale 0
-        // with codes 0 reconstructs exactly, and avoids a division by zero.
-        let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
-        let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
-        let mut s_lo = 0i32;
-        let mut s_hi = 0i32;
-        for (i, &v) in blk.iter().enumerate() {
-            let q = (v * inv).round().clamp(-127.0, 127.0) as i8;
-            self.q.push(q);
-            if i < 16 {
-                s_lo += q as i32;
-            } else {
-                s_hi += q as i32;
+        for blk in x.chunks_exact(32) {
+            let amax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            // An all-zero block is real (a masked position, a dead channel). Scale 0
+            // with codes 0 reconstructs exactly, and avoids a division by zero.
+            let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
+            let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+            let mut s_lo = 0i32;
+            let mut s_hi = 0i32;
+            for (i, &v) in blk.iter().enumerate() {
+                let q = (v * inv).round().clamp(-127.0, 127.0) as i8;
+                self.q.push(q);
+                if i < 16 {
+                    s_lo += q as i32;
+                } else {
+                    s_hi += q as i32;
+                }
             }
+            let base = self.q.len() - 32;
+            for j in 0..8 {
+                let l = &self.q[base + 4 * j..base + 4 * j + 4];
+                self.lane_sums.push(l.iter().map(|&v| v as i32).sum());
+            }
+            self.d.push(d);
+            self.sums16.push(s_lo);
+            self.sums16.push(s_hi);
+            self.sums.push(s_lo + s_hi);
         }
-        let base = self.q.len() - 32;
-        for j in 0..8 {
-            let l = &self.q[base + 4 * j..base + 4 * j + 4];
-            self.lane_sums.push(l.iter().map(|&v| v as i32).sum());
-        }
-        self.d.push(d);
-        self.sums16.push(s_lo);
-        self.sums16.push(s_hi);
-        self.sums.push(s_lo + s_hi);
     }
 }
 
@@ -1335,6 +1329,10 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             acc
         }
         Format::F32 | Format::F16 | Format::BF16 => {
+            assert!(
+                a.keep_f32,
+                "float matrix matmul reached with keep_f32 off on QuantAct"
+            );
             assert_eq!(
                 a.xf.len(),
                 a.n,
@@ -1822,5 +1820,14 @@ mod tests {
         let mut w4 = prng(7, row_bytes(Format::Q4_0, 32));
         sane_scales(Format::Q4_0, &mut w4);
         assert_eq!(dot_scalar(Format::Q4_0, &w4, &a), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "float matrix matmul reached with keep_f32 off on QuantAct")]
+    fn float_matmul_panics_when_keep_f32_is_off() {
+        let mut a = QuantAct::with_capacity(32);
+        a.n = 32;
+        let w = [0u8; 128];
+        dot_scalar(Format::F32, &w, &a);
     }
 }

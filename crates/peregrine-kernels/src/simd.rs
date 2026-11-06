@@ -882,6 +882,10 @@ unsafe fn tile_iq4_xs<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f3
 /// Each `acts[t].xf` must contain at least `acts[0].n` floats. `out` must have at least `T` elements.
 #[target_feature(enable = "avx2")]
 unsafe fn tile_f32<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    assert!(
+        acts[..T].iter().all(|a| a.keep_f32),
+        "float matrix matmul reached with keep_f32 off on QuantAct"
+    );
     let pf = prefetch_distance();
     let n = acts[0].n;
     for a in &acts[..T] {
@@ -930,6 +934,10 @@ unsafe fn tile_f32<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32])
 /// Each `acts[t].xf` must contain at least `acts[0].n` floats. `out` must have at least `T` elements.
 #[target_feature(enable = "avx2,f16c")]
 unsafe fn tile_f16<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    assert!(
+        acts[..T].iter().all(|a| a.keep_f32),
+        "float matrix matmul reached with keep_f32 off on QuantAct"
+    );
     let pf = prefetch_distance();
     let n = acts[0].n;
     for a in &acts[..T] {
@@ -979,6 +987,10 @@ unsafe fn tile_f16<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32])
 /// Each `acts[t].xf` must contain at least `acts[0].n` floats. `out` must have at least `T` elements.
 #[target_feature(enable = "avx2")]
 unsafe fn tile_bf16<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    assert!(
+        acts[..T].iter().all(|a| a.keep_f32),
+        "float matrix matmul reached with keep_f32 off on QuantAct"
+    );
     let pf = prefetch_distance();
     let n = acts[0].n;
     for a in &acts[..T] {
@@ -2023,7 +2035,10 @@ mod tests {
                         .map(|_| ((rnd() >> 32) as f32 / (1u64 << 32) as f32 - 0.5) * 6.0)
                         .collect();
                     let mut a = QuantAct::with_capacity(n);
-                    a.fill(&x);
+                    a.n = n;
+                    a.keep_f32 = true;
+                    a.xf.clear();
+                    a.xf.extend_from_slice(&x);
 
                     // Single-row
                     let got = unsafe { dot(fmt, &w, &a) };
@@ -2045,7 +2060,10 @@ mod tests {
                                     })
                                     .collect();
                                 let mut act = QuantAct::with_capacity(n);
-                                act.fill(&xi);
+                                act.n = n;
+                                act.keep_f32 = true;
+                                act.xf.clear();
+                                act.xf.extend_from_slice(&xi);
                                 act
                             })
                             .collect();
@@ -2087,7 +2105,10 @@ mod tests {
                         .map(|i| if i % 3 == 0 { 500.0 } else { -0.005 })
                         .collect();
                     let mut a = QuantAct::with_capacity(n);
-                    a.fill(&x);
+                    a.n = n;
+                    a.keep_f32 = true;
+                    a.xf.clear();
+                    a.xf.extend_from_slice(&x);
                     let got = unsafe { dot(fmt, &w, &a) };
                     let want = crate::quant::dot_scalar(fmt, &w, &a);
                     assert_eq!(
@@ -2103,7 +2124,10 @@ mod tests {
                     let w = vec![0u8; crate::quant::row_bytes(fmt, n)];
                     let x = vec![1.0f32; n];
                     let mut a = QuantAct::with_capacity(n);
-                    a.fill(&x);
+                    a.n = n;
+                    a.keep_f32 = true;
+                    a.xf.clear();
+                    a.xf.extend_from_slice(&x);
                     let got = unsafe { dot(fmt, &w, &a) };
                     let want = crate::quant::dot_scalar(fmt, &w, &a);
                     assert_eq!(
@@ -2115,5 +2139,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "float matrix matmul reached with keep_f32 off on QuantAct")]
+    fn simd_float_matmul_panics_when_keep_f32_is_off() {
+        if !have_avx2() {
+            panic!("float matrix matmul reached with keep_f32 off on QuantAct");
+        }
+        let mut a = QuantAct::with_capacity(32);
+        a.n = 32;
+        let w = [0u8; 128];
+        unsafe { dot(Format::F32, &w, &a) };
     }
 }

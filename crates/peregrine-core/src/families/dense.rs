@@ -2,10 +2,10 @@
 
 use std::time::Instant;
 
-use crate::arch::{Architecture, Family, Loaded};
+use crate::arch::{ActLayout, Architecture, Family, Loaded};
 use crate::blocks::linear::LinJob;
 use crate::blocks::par::Disjoint;
-use crate::gguf::{Gguf, TensorInfo};
+use crate::gguf::{Format, Gguf, TensorInfo};
 use crate::model::{Caches, Config, Linear, State, StepStats, TileStore, Weights};
 use crate::pool::Pool;
 use crate::tokenizer::Tokenizer;
@@ -333,6 +333,23 @@ impl Architecture for Dense {
             f(&[&l.down]);
         }
         f(&[&self.head]);
+    }
+
+    fn act_layout(&self) -> ActLayout {
+        let mut keep_f32 = false;
+        self.linear_groups(&mut |lins| {
+            for lin in lins {
+                if let Linear::Dense(ti) = lin {
+                    if matches!(ti.kind, Format::F32 | Format::F16 | Format::BF16) {
+                        keep_f32 = true;
+                    }
+                }
+            }
+        });
+        ActLayout {
+            keep_f32,
+            ..ActLayout::default()
+        }
     }
 
     fn forward_rows(

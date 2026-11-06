@@ -9,7 +9,7 @@ mod support;
 
 use peregrine_core::gguf::{Format, Gguf};
 use peregrine_core::kv::KvPrec;
-use peregrine_core::model::{Model, State, StepStats};
+use peregrine_core::model::{Model, StepStats};
 use peregrine_core::pool::Pool;
 use peregrine_core::serve::{Engine, Finish, SlotCfg};
 use std::fmt::Write as _;
@@ -56,9 +56,7 @@ fn run(model: &Model, threads: usize) -> String {
     let c = model.cfg;
     let pool = Pool::new(threads);
     let n = PROMPT.len();
-    let mut st = State::new(&c, 128, n, 256, threads, model.rope_factors.as_deref());
-    let (lx, lt) = model.lb_scratch(128);
-    st.set_lb_scratch(lx, lt);
+    let mut st = model.new_state(128, n, 256, threads);
     let mut kv = model.new_cache(KvPrec::F16, 256);
     let mut ss = StepStats::default();
     let want: Vec<usize> = (0..n).collect();

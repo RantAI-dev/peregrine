@@ -25,6 +25,7 @@ pub struct ActLayout {
     pub ternary: bool,
     pub ptq1: bool,
     pub tb_span: usize,
+    pub keep_f32: bool,
 }
 
 /// The architecture trait implemented by each model family.

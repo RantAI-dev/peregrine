@@ -140,8 +140,33 @@ impl MtpHead for Mtp {
                 a
             })
             .collect();
+        let keep_f32 = [
+            &self.eh_proj,
+            &self.q,
+            &self.k,
+            &self.v,
+            &self.o,
+            &self.gate,
+            &self.up,
+            &self.down,
+        ]
+        .iter()
+        .any(|t| matches!(t.kind, Format::F32 | Format::F16 | Format::BF16));
+        let act_layout = crate::arch::ActLayout {
+            keep_f32,
+            ..Default::default()
+        };
         let inner = Qwen35MtpState {
-            st: State::new(&c, MTP_MAX_ROWS, 1, max_ctx, threads, None),
+            st: State::new_impl(
+                &c,
+                MTP_MAX_ROWS,
+                1,
+                max_ctx,
+                threads,
+                None,
+                act_layout,
+                None,
+            ),
             hs: HyScratch::new(&c, &hc, MTP_MAX_ROWS),
             tacts,
             cat: vec![0.0; MTP_MAX_ROWS * 2 * c.d_model],

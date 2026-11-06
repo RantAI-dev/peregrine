@@ -166,6 +166,7 @@ impl State {
                     a.ternary = act_layout.ternary;
                     a.ptq1 = act_layout.ptq1;
                     a.tb_span = act_layout.tb_span;
+                    a.keep_f32 = act_layout.keep_f32;
                     a
                 })
                 .collect(),
