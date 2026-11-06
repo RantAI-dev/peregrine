@@ -411,7 +411,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
     let mut tb_span = 0usize;
     #[cfg(target_arch = "x86_64")]
     {
-        let want = !ptq1 && crate::tern::have_zmm() && crate::options::get().tiles;
+        let want = !ptq1 && crate::table::MatKernels::get().tiles() && crate::options::get().tiles;
         let mut mats: Vec<&mut TensorInfo> = Vec::new();
         for l in layers.iter_mut() {
             mats.extend([&mut l.gate, &mut l.up, &mut l.down]);
