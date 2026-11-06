@@ -34,6 +34,33 @@ Per model, at 512, 4k and 16k context:
 3. total tok/s at 4 and 10 users;
 4. first-token time at 10 users.
 
+## Single-user benchmarking: `peregrine bench`
+
+Run a clean single-user throughput and bytes/token measurement:
+
+```sh
+./target/release/peregrine bench -m path/to/model.gguf [--tokens N] [--prompt-tokens P] [--json]
+```
+
+- Prefills a fixed synthetic prompt of `P` tokens (default: 32).
+- Decodes `N` greedy tokens (default: 32).
+- Prints prefill tok/s, decode tok/s, bytes/token (from telemetry), and the effective options.
+- `--json` formats results as a single JSON object for automation.
+- Automatically checks for and applies the default tuning profile for the model and host CPU (or `--profile <path>`, `--no-profile`).
+
+## Model and machine tuning: `peregrine tune`
+
+Model- and machine-specific tuning is data written by `peregrine tune`, never code (ADR 0005):
+
+```sh
+./target/release/peregrine tune -m path/to/model.gguf [--budget-s S] [--out path/to/profile]
+```
+
+- Evaluates candidates in isolated child processes (`bench --json --no-profile`) over interleaved rounds to measure the median decode tok/s and spread.
+- Performs coordinate search over output-neutral execution knobs (`decode_threads`, `spin_us`, `prefetch_bytes`, `tb_span`, `tq_span`), keeping a change only when it beats the current best by more than the measured noise.
+- Respects the time budget (default: 60s), prints a table of tested candidates, and writes a tuning profile.
+- Profiles record engine version, CPU model, CPU feature tier, and model file size/hash; any mismatch at runtime ignores the profile and falls back to safe defaults.
+
 ## Where results go
 
 Curated results, with the raw JSON and the exact commands, go in `benchmarks/results/<date>-<host>-<topic>/`.
