@@ -35,6 +35,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 | SmolLM2-360M-Instruct Q4_K_M, Qwen3-4B Q4_K_M | `$PEREGRINE_MODEL`, or `~/models/` |
 | Qwen3-1.7B Q4_K_M | `models/` at the repository root |
 | Qwen2.5-0.5B-Instruct Q4_K_M, Llama-3.2-1B-Instruct Q4_K_M | `~/models/` |
+| Llama-2-7b-chat-hf Q4_K_M, Mistral-7B-Instruct-v0.2 Q4_K_M | `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
 
@@ -59,6 +60,38 @@ fixture strings tokenise to the same ids as the fixture files
 `tests/fixtures/tokenize-golden-qwen2.tsv` and `tests/fixtures/tokenize-golden-llama3.tsv`. The two
 models are also checked end to end against llama.cpp on the same files (greedy decoding, the chat
 path and the goldens under `tests/golden/<tier>/`).
+
+### The two SentencePiece oracle files
+
+`tests/tokenize_spm_real.rs` checks the SentencePiece tokenizer on the two SentencePiece families
+Peregrine renders chat templates for — Llama 2 and Mistral 7B — against token ids taken from
+llama.cpp's `llama-tokenize` on the same uploads. It needs both files in `~/models/`, under exactly
+these names:
+
+| File | Download | Bytes | SHA-256 |
+|---|---|---|---|
+| `Llama-2-7b-chat-hf-Q4_K_M.gguf` | <https://huggingface.co/second-state/Llama-2-7B-Chat-GGUF/resolve/main/Llama-2-7b-chat-hf-Q4_K_M.gguf> | 4081005152 | `f475bcb77959f5721548bcc5122f4d5a0eb9d94ddb5b7fdce826bc1410ae0a8b` |
+| `Mistral-7B-Instruct-v0.2.Q4_K_M.gguf` | <https://huggingface.co/mradermacher/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/Mistral-7B-Instruct-v0.2.Q4_K_M.gguf> | 4368441024 | `b2d7044c02b0ce9bce2ef8f37fb5bbab0190b774515473613400627b6f49f321` |
+
+Both hashes match the ones Hugging Face reports for those uploads. The fixture files
+`tests/fixtures/tokenize-golden-llama2-spm.tsv` and `tests/fixtures/tokenize-golden-mistral-spm.tsv`
+hold, for 22 strings each, the ids `llama-tokenize --ids --no-escape` produced with and without
+`--no-bos`; the test compares `Tokenizer::encode` against the third column and
+`Tokenizer::encode_prompt` against the fourth.
+
+Two strings in each fixture start with the literal `<s>`, and there the two implementations differ
+by one token: llama.cpp prepends the model's BOS to every prompt *unconditionally* — so a prompt that
+already begins with one gets two, which llama.cpp itself warns about — while `encode_prompt` keeps
+exactly one. The test states that difference explicitly rather than hiding it.
+
+Both models are also checked end to end against llama.cpp on the same files (greedy decoding, the
+chat path and the goldens under `tests/golden/<tier>/`).
+
+The upload matters: TheBloke's `Llama-2-7B-Chat-GGUF` and `Mistral-7B-Instruct-v0.2-GGUF` carry no
+chat template and a template Peregrine does not render, and `peregrine inspect` refuses them with
+"chat template is missing or not recognised" and "unsupported [INST] chat template variant". The two
+files above were converted from the Hugging Face repositories with a `convert_hf_to_gguf.py` new
+enough to carry the models' own templates.
 
 ### Tokenizer test vocabularies
 

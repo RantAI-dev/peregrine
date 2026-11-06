@@ -31,7 +31,7 @@ own memory-bandwidth ceiling.
 
 | | Supported now | On the roadmap |
 |---|---|---|
-| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP) | Gemma 3, Phi-4, Mistral checks, MoE (qwen3moe, gpt-oss) |
+| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP) | Gemma 3, Phi-4, MoE (qwen3moe, gpt-oss) |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, PQ2_0, PTQ1_0 | Q2_K/Q3_K, MXFP4 |
 | CPUs | x86-64 AVX2, AVX-512 (VNNI, GFNI, VBMI); others through scalar code | AVX-VNNI-256, ARM NEON/SDOT |
 | Tokenizers | GPT-2 byte-level BPE, SentencePiece (llama) | |
@@ -44,6 +44,11 @@ Checked against llama.cpp v0.9.0 on the same file, for **Llama 3.2 1B Instruct**
 Instruct** (Q4_K_M): the tokenizer produces the same token ids, greedy decoding produces the same token
 ids except where the top two logits are closer than the two implementations' own rounding difference,
 and the chat path returns the same prompt token count and the same answer.
+
+The same holds for the two SentencePiece families, **Llama 2 7B Chat** and **Mistral 7B Instruct
+v0.2** (Q4_K_M): the tokenizer produces the same ids as llama.cpp's `llama-tokenize`, greedy decoding
+produces the same ids except at one near-tie below the implementations' own logit spread, and the chat
+path returns a byte-identical rendered prompt, the same prompt token count and the same answer.
 
 ## Quick start
 
