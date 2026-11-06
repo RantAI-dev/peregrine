@@ -78,6 +78,7 @@ pub fn support_markdown() -> String {
                 "qwen2" => "Qwen 2",
                 "qwen3" => "Qwen 3",
                 "qwen35" => "Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP)",
+                "qwen3moe" => "Qwen 3 MoE (synthetic check; real file pending)",
                 other => other,
             };
             arch_items.push(label);

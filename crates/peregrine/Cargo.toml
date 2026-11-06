@@ -31,6 +31,7 @@ default = [
     "arch-llama",
     "arch-qwen",
     "arch-qwen35",
+    "arch-qwen3moe",
     "fmt-kquant",
     "fmt-ternary",
     "fmt-iq",
@@ -48,6 +49,7 @@ cli = ["dep:clap", "dep:serde_json"]
 arch-llama = ["peregrine-models/arch-llama"]
 arch-qwen = ["peregrine-models/arch-qwen"]
 arch-qwen35 = ["peregrine-models/arch-qwen35"]
+arch-qwen3moe = ["peregrine-models/arch-qwen3moe"]
 
 # Formats
 fmt-kquant = [
