@@ -25,7 +25,8 @@ use crate::gguf::{f16, Format, Gguf, TensorInfo};
 use crate::kv::KvCache;
 use crate::lbq::Slb;
 use crate::pool::{share, Pool};
-use crate::quant::{dot_batch, row_bytes, QuantAct};
+use crate::quant::{row_bytes, QuantAct};
+use crate::table::MatPath;
 use crate::tokenizer::Tokenizer;
 use std::time::Instant;
 
@@ -328,11 +329,8 @@ impl State {
                     let mut a = QuantAct::with_capacity(cfg.n_ff);
                     a.ternary = cfg.hybrid.is_some();
                     // The int16 PTQ1_0 layout has only the AVX-512 VBMI kernel; elsewhere the AVX2 one reads int8.
-                    #[cfg(target_arch = "x86_64")]
-                    let ptq1_zmm = crate::tern::have_ptq1_zmm();
-                    #[cfg(not(target_arch = "x86_64"))]
-                    let ptq1_zmm = false;
-                    a.ptq1 = cfg.hybrid.is_some_and(|h| h.ptq1) && ptq1_zmm;
+                    a.ptq1 = cfg.hybrid.is_some_and(|h| h.ptq1)
+                        && crate::table::MatKernels::get().ptq1_layout();
                     a.tb_span = cfg.hybrid.map_or(0, |h| h.tb_span);
                     a
                 })
@@ -1066,71 +1064,67 @@ impl Model {
         let t0 = Instant::now();
         let total: usize = jobs.iter().map(|j| j.w.dims[1] as usize).sum();
         let acts = &acts[..nb];
-        // tiled matrices are worked in whole 16-row tiles, so every range below starts and ends on one.
-        // `PEREGRINE_EXACT=1` (the f32 reference) must reach `dot_batch`, so it bypasses the tile and row paths.
-        let exact = crate::quant::exact_ternary();
-        let tiled = !exact && jobs.iter().any(|j| j.w.tile_off.is_some());
+        // Each matrix's kernel is chosen once, from the kernel table: by format, storage (tiles or rows),
+        // activation layout and CPU. Tiled matrices are worked in whole 16-row tiles, so every range below
+        // starts and ends on one.
+        let mk = crate::table::MatKernels::get();
+        let act_ptq1 = acts[0].ptq1;
+        // At most 4 matrices per group (q/k/v, gate/up): a fixed array, no allocation per call.
+        assert!(jobs.len() <= 4, "a matmul group has at most 4 matrices");
+        let mut paths = [MatPath::PerRow; 4];
+        for (p, j) in paths.iter_mut().zip(jobs) {
+            *p = mk.path(j.w.kind, j.w.tile_off.is_some(), act_ptq1);
+        }
+        let paths = &paths[..jobs.len()];
+        let tiled = paths.contains(&MatPath::Tiles);
         // The rows `lo..hi` of the concatenated row space.
         let rows_range = |lo: usize, hi: usize, tmp: &mut [f32; MAX_BATCH]| {
             let mut off = 0usize;
-            for j in jobs {
+            for (j, &path) in jobs.iter().zip(paths) {
                 let n = j.w.dims[0] as usize;
                 let rows = j.w.dims[1] as usize;
                 let (a, z) = (lo.max(off), hi.min(off + rows));
-                #[cfg(target_arch = "x86_64")]
-                if let (Some(toff), true, false) = (j.w.tile_off, a < z, exact) {
-                    let rb = row_bytes(j.w.kind, n);
-                    let ng = n / 128;
-                    let tb = 16 * rb;
-                    const TPC: usize = 2; // tiles per call: 32 rows × MAX_BATCH outputs fit `blk`
-                    let mut blk = [0.0f32; 32 * MAX_BATCH];
-                    let (mut r, rz) = (a - off, z - off);
-                    debug_assert!(r % 16 == 0 && rz % 16 == 0);
-                    while r < rz {
-                        let nt = TPC.min((rz - r) / 16);
-                        let w =
-                            &self.tiles.bytes()[toff + (r / 16) * tb..toff + (r / 16 + nt) * tb];
-                        // SAFETY: the tile path is enabled only with `have_zmm()` and a tile-mode activation; `blk`
-                        // holds 32 × MAX_BATCH ≥ 16·nt·nb floats.
-                        unsafe {
-                            crate::tern::dot_tiles_pq2(w, ng, nt, acts, &mut blk[..16 * nt * nb])
-                        };
-                        for i in 0..16 * nt {
-                            for b in 0..nb {
-                                // SAFETY: row `r + i` of this job belongs to this worker (tile-aligned ranges).
-                                unsafe { j.out.set(b * rows + r + i, blk[i * nb + b]) };
-                            }
-                        }
-                        r += 16 * nt;
-                    }
+                if a >= z {
                     off += rows;
                     continue;
                 }
-                if a < z {
-                    let rb = row_bytes(j.w.kind, n);
-                    let bytes = self.g.bytes(j.w);
-                    // PQ2_0 rows go to the kernel a block at a time (the dispatch was paid per row).
-                    #[cfg(target_arch = "x86_64")]
-                    let ptq1_fast =
-                        j.w.kind == Format::PTQ1_0 && acts[0].ptq1 && crate::tern::have_ptq1_zmm();
-                    #[cfg(target_arch = "x86_64")]
-                    if !exact
-                        && ((j.w.kind == Format::PQ2_0 && crate::simd::have_batched()) || ptq1_fast)
-                    {
+                let rb = row_bytes(j.w.kind, n);
+                let (mut r, rz) = (a - off, z - off);
+                match path {
+                    MatPath::Tiles => {
+                        let toff = j.w.tile_off.expect("a tiled path has a tile offset");
+                        let ng = n / 128;
+                        let tb = 16 * rb;
+                        const TPC: usize = 2; // tiles per call: 32 rows × MAX_BATCH outputs fit `blk`
+                        let mut blk = [0.0f32; 32 * MAX_BATCH];
+                        debug_assert!(r % 16 == 0 && rz % 16 == 0);
+                        while r < rz {
+                            let nt = TPC.min((rz - r) / 16);
+                            let w = &self.tiles.bytes()
+                                [toff + (r / 16) * tb..toff + (r / 16 + nt) * tb];
+                            mk.tiles_pq2(w, ng, nt, acts, &mut blk[..16 * nt * nb]);
+                            for i in 0..16 * nt {
+                                for b in 0..nb {
+                                    // SAFETY: row `r + i` of this job belongs to this worker (tile-aligned ranges).
+                                    unsafe { j.out.set(b * rows + r + i, blk[i * nb + b]) };
+                                }
+                            }
+                            r += 16 * nt;
+                        }
+                    }
+                    MatPath::RowsPq2 | MatPath::RowsPtq1 => {
+                        // A block of rows per kernel call (the dispatch is paid per block, not per row).
+                        let bytes = self.g.bytes(j.w);
                         const BLK: usize = 32;
                         let mut blk = [0.0f32; BLK * MAX_BATCH];
-                        let mut r = a - off;
-                        while r < z - off {
-                            let k = BLK.min(z - off - r).min(MAX_BATCH * BLK / nb.max(1));
-                            // SAFETY: AVX2/FMA/F16C checked; `k` rows of `rb` bytes from row `r`; `blk` holds k·nb.
+                        while r < rz {
+                            let k = BLK.min(rz - r).min(MAX_BATCH * BLK / nb.max(1));
                             let (wr, o) = (&bytes[r * rb..(r + k) * rb], &mut blk[..k * nb]);
-                            unsafe {
-                                if ptq1_fast {
-                                    crate::tern::dot_rows_ptq1(wr, rb, k, acts, o)
-                                } else {
-                                    crate::tern::dot_rows_pq2(wr, rb, k, acts, o)
-                                }
-                            };
+                            if path == MatPath::RowsPtq1 {
+                                mk.rows_ptq1(wr, rb, k, acts, o)
+                            } else {
+                                mk.rows_pq2(wr, rb, k, acts, o)
+                            }
                             for i in 0..k {
                                 for b in 0..nb {
                                     // SAFETY: as below — row `r + i` of this job belongs to this worker.
@@ -1139,17 +1133,18 @@ impl Model {
                             }
                             r += k;
                         }
-                        off += rows;
-                        continue;
                     }
-                    for r in (a - off)..(z - off) {
-                        dot_batch(j.w.kind, &bytes[r * rb..(r + 1) * rb], acts, &mut tmp[..nb]);
-                        for (b, &v) in tmp[..nb].iter().enumerate() {
-                            // SAFETY: each row of the concatenated row space is taken by exactly one worker
-                            // (a `share` range, or a chunk claimed from the counter), so `(job, r)` — hence the
-                            // index `b*rows + r` within this job's output — is written once. The outputs outlive
-                            // the call because `run` does not return until every worker has finished.
-                            unsafe { j.out.set(b * rows + r, v) };
+                    MatPath::PerRow => {
+                        let bytes = self.g.bytes(j.w);
+                        for r in r..rz {
+                            mk.row(j.w.kind, &bytes[r * rb..(r + 1) * rb], acts, &mut tmp[..nb]);
+                            for (b, &v) in tmp[..nb].iter().enumerate() {
+                                // SAFETY: each row of the concatenated row space is taken by exactly one worker
+                                // (a `share` range, or a chunk claimed from the counter), so `(job, r)` — hence the
+                                // index `b*rows + r` within this job's output — is written once. The outputs
+                                // outlive the call because `run` does not return until every worker has finished.
+                                unsafe { j.out.set(b * rows + r, v) };
+                            }
                         }
                     }
                 }
