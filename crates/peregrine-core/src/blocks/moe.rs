@@ -16,10 +16,6 @@
 //!
 //! Roadmap S2.5: the `qwen3moe` family (step 3) is the first caller. Nothing calls this yet.
 
-// Nothing in this module is called yet: the `qwen3moe` family (S2.5 step 3) is the first caller,
-// and until it lands every item here is dead code. The allow goes with that step.
-#![allow(dead_code)]
-
 use crate::blocks::ffn::swiglu_rows;
 use crate::blocks::linear::{matmul_group, MatJob};
 use crate::blocks::par::OutPtr;
@@ -59,7 +55,7 @@ const MIN_F16_NORMAL: f32 = 6.103_515_6e-5;
 ///
 /// `out_ids` and `out_w` are the caller's buffers and must hold at least `k` entries, so the decode
 /// path allocates nothing.
-pub(crate) fn route(
+pub fn route(
     router_logits: &[f32],
     k: usize,
     renorm: bool,
@@ -156,7 +152,7 @@ fn better(p_a: f32, id_a: u32, p_b: f32, id_b: u32) -> bool {
 /// boundary; a file that fails this is refused (the caller turns the error into a load failure).
 /// The view is never repacked into the tile store: the LittleBit sidecar must not touch the expert
 /// tensors.
-pub(crate) fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
+pub fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
     if t.dims.len() != 3 {
         return Err(format!(
             "{}: an expert tensor has three dimensions, not {}",
@@ -192,20 +188,20 @@ pub(crate) fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String
 ///
 /// The three expert banks are the 2D views of the file's 3D tensors, one per expert
 /// ([`expert_view`]), so the block reads an expert's weights as an ordinary matrix.
-pub(crate) struct MoeWeights<'a> {
+pub struct MoeWeights<'a> {
     /// The router: `[d_model, n_expert]`, one row of scores per expert.
-    pub(crate) router: &'a TensorInfo,
+    pub router: &'a TensorInfo,
     /// The gate projections, one 2D view per expert: `[d_model, n_ff]`.
-    pub(crate) gate: &'a [TensorInfo],
+    pub gate: &'a [TensorInfo],
     /// The up projections, one 2D view per expert: `[d_model, n_ff]`.
-    pub(crate) up: &'a [TensorInfo],
+    pub up: &'a [TensorInfo],
     /// The down projections, one 2D view per expert: `[n_ff, d_model]`.
-    pub(crate) down: &'a [TensorInfo],
+    pub down: &'a [TensorInfo],
     /// How many experts a row uses.
-    pub(crate) n_used: usize,
+    pub n_used: usize,
     /// Whether the selected experts' weights are renormalised over the selection (qwen3moe: yes,
     /// `src/models/qwen3moe.cpp:144`).
-    pub(crate) renorm: bool,
+    pub renorm: bool,
 }
 
 /// The buffers a mixture-of-experts layer needs, sized once.
@@ -213,7 +209,7 @@ pub(crate) struct MoeWeights<'a> {
 /// Every buffer is written before it is read and reused by the next layer, so a decode step
 /// allocates nothing (invariant 4). The sizes follow the layer's geometry: `nb` rows, `n_expert`
 /// experts, `n_used` of them per row, `d_model` wide rows and `n_ff` wide expert intermediates.
-pub(crate) struct MoeScratch {
+pub struct MoeScratch {
     /// The router's logits: `[nb][n_expert]`.
     router: Vec<f32>,
     /// The selected experts and their weights: `[nb][n_used]`.
@@ -246,7 +242,7 @@ pub(crate) struct MoeScratch {
 
 impl MoeScratch {
     /// Size the scratch for a layer of this geometry.
-    pub(crate) fn new(
+    pub fn new(
         nb: usize,
         n_expert: usize,
         n_used: usize,
@@ -293,7 +289,7 @@ impl MoeScratch {
 /// of 32 (the activation block) and of the weights' own block size (the matmul's row width). The
 /// loader checks that before it builds the views.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn moe_ffn(
+pub fn moe_ffn(
     w: &Weights,
     mw: &MoeWeights<'_>,
     x: &[f32],
@@ -770,9 +766,13 @@ mod tests {
                 .map(|e| expert_view(g.tensor("down").unwrap(), e).unwrap())
                 .collect();
             Tiny {
+                // The weights of a file with no repacked tiles and no LittleBit sidecar: the same
+                // three fields `Model::load_with` fills in. `Weights` has no constructor of its own,
+                // so this literal names its fields; a new field means adding it here too.
                 w: Weights {
                     g,
                     tiles: TileStore::default(),
+                    lb: None,
                 },
                 router,
                 gate,
