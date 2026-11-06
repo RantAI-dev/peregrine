@@ -12,6 +12,7 @@ pub mod attn;
 pub mod embed;
 pub mod ffn;
 pub mod linear;
+pub mod moe;
 pub mod norm;
 pub mod par;
 pub mod recurrent;

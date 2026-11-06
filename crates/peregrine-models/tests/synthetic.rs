@@ -704,3 +704,117 @@ fn hybrid_mtp_accepting_variant_accepts_drafts_losslessly() {
         failures.join("\n")
     );
 }
+
+// --------------------------------------------------------------------- qwen3moe (S2.5) --
+
+/// A qwen3moe file — a mixture-of-experts model — written the way llama.cpp v0.9.0 expects it
+/// (`src/models/qwen3moe.cpp`, `src/llama-arch.cpp`).
+///
+/// The engine has no qwen3moe family yet, so this test does two things. It checks that the file
+/// is written and read back exactly as intended: the metadata llama.cpp reads, and the
+/// three-dimensional expert tensors in llama.cpp's dimension order (the expert index runs
+/// slowest, so one expert is a contiguous run of rows — a 2D matrix with no new kernel). And it
+/// checks that the engine refuses the file *by name*: a refusal that does not say which
+/// architecture it cannot run is a bad refusal.
+///
+/// When the family lands (S2.5 step 2), the refusal half becomes the ordinary `check` of every
+/// other synthetic model.
+#[test]
+fn qwen3moe_file_is_written_and_refused_by_name() {
+    use support::models::{write_moe, MoeShape};
+
+    let dir = tmpdir("moe");
+    let s = MoeShape::default();
+    let mut failures = Vec::new();
+    for (i, fmt) in [Format::F16, Format::Q8_0].into_iter().enumerate() {
+        let name = format!("qwen3moe-{}", fmt.label());
+        let path = write_moe(&dir, fmt, 5000 + i as u64, s);
+        let g = match Gguf::open(&path) {
+            Ok(g) => g,
+            Err(e) => {
+                failures.push(format!("{name}: does not open: {e}"));
+                continue;
+            }
+        };
+        if g.str("general.architecture").unwrap_or("") != "qwen3moe" {
+            failures.push(format!("{name}: the architecture is not qwen3moe"));
+        }
+        for (key, want) in [
+            ("qwen3moe.block_count", s.n_layer as u32),
+            ("qwen3moe.embedding_length", s.d_model as u32),
+            ("qwen3moe.feed_forward_length", s.n_ff as u32),
+            ("qwen3moe.expert_feed_forward_length", s.expert_ff as u32),
+            ("qwen3moe.expert_count", s.n_expert as u32),
+            ("qwen3moe.expert_used_count", s.n_expert_used as u32),
+            ("qwen3moe.attention.head_count", s.n_head as u32),
+            ("qwen3moe.attention.head_count_kv", s.n_head_kv as u32),
+        ] {
+            match g.u32(key) {
+                Ok(v) if v == want => {}
+                Ok(v) => failures.push(format!("{name}: {key} is {v}, want {want}")),
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        // The router is a plain 2D matrix; the experts are 3D, the expert index slowest.
+        let d = s.d_model as u64;
+        let ff = s.expert_ff as u64;
+        let ne = s.n_expert as u64;
+        for (tensor, dims) in [
+            ("blk.0.ffn_gate_inp.weight", vec![d, ne]),
+            ("blk.0.ffn_gate_exps.weight", vec![d, ff, ne]),
+            ("blk.0.ffn_up_exps.weight", vec![d, ff, ne]),
+            ("blk.0.ffn_down_exps.weight", vec![ff, d, ne]),
+            // The second layer has its own bank of experts.
+            ("blk.1.ffn_gate_exps.weight", vec![d, ff, ne]),
+        ] {
+            match g.tensor(tensor) {
+                Ok(t) => {
+                    if t.dims != dims {
+                        failures.push(format!(
+                            "{name}: {tensor} has dims {:?}, want {dims:?}",
+                            t.dims
+                        ));
+                    }
+                    if t.kind != fmt {
+                        failures.push(format!(
+                            "{name}: {tensor} is {}, want {}",
+                            t.kind.label(),
+                            fmt.label()
+                        ));
+                    }
+                }
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        // Qwen3's per-head q/k norms, one weight per head dimension (F32, like every norm).
+        for tensor in ["blk.0.attn_q_norm.weight", "blk.0.attn_k_norm.weight"] {
+            match g.tensor(tensor) {
+                Ok(t) => {
+                    let want = vec![d / s.n_head as u64];
+                    if t.dims != want {
+                        failures.push(format!(
+                            "{name}: {tensor} has dims {:?}, want {want:?}",
+                            t.dims
+                        ));
+                    }
+                }
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        match peregrine_models::check_compatible(&g) {
+            Ok(()) => failures.push(format!(
+                "{name}: the engine accepted a qwen3moe file it cannot run"
+            )),
+            Err(e) if e.contains("qwen3moe") => {}
+            Err(e) => failures.push(format!(
+                "{name}: refused without naming the architecture: {e}"
+            )),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic qwen3moe models failed:\n{}",
+        failures.join("\n")
+    );
+}
