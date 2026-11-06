@@ -13,20 +13,21 @@ repository = "https://github.com/RantAI-dev/peregrine"
 homepage = "https://github.com/RantAI-dev/peregrine"
 
 # One place for every version. Crates say `foo = { workspace = true }`.
+# Each declared version is the one `Cargo.lock` pins, so the manifest and the lock never disagree.
 [workspace.dependencies]
 peregrine-core = { path = "crates/peregrine-core", version = "0.1.0" }
 peregrine-server = { path = "crates/peregrine-server", version = "0.1.0" }
 peregrine-kernels = { path = "crates/peregrine-kernels", version = "0.1.0" }
 peregrine-bench = { path = "crates/peregrine-bench", version = "0.1.0" }
 
-memmap2 = "0.9"
+memmap2 = "0.9.12"
 
 axum = { version = "0.8.9", features = ["ws"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 futures = "0.3.34"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-tokio = { version = "1.53.3", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 tokio-stream = { version = "0.1.19", features = ["sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
