@@ -1,7 +1,7 @@
 //! LittleBit kernel micro-benchmark: one thread, synthetic rows, L2-resident.
 //!
 //! ```text
-//! cargo run --release --example lbbench -- [n] [rows] [reps]
+//! cargo run --release -p peregrine-bench --example lbbench -- [n] [rows] [reps]
 //! ```
 //!
 //! Times the f32 sign-flip kernel (`lb_dot_batch`) against the int8-activation

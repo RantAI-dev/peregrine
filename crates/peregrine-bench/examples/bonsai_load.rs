@@ -1,5 +1,5 @@
 // Bonsai 2 prefill speed and several users in one weight pass (Caches::PerRow).
-// cargo run --release --example bonsai_load -- <model.gguf> [threads] [prompt_tokens] [users,...]
+// cargo run --release -p peregrine-bench --example bonsai_load -- <model.gguf> [threads] [prompt_tokens] [users,...]
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::{KvCache, KvPrec};
 use peregrine_core::model::{Caches, Model, State, StepStats};

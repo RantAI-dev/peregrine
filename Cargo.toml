@@ -16,6 +16,7 @@ homepage = "https://github.com/RantAI-dev/peregrine"
 [workspace.dependencies]
 peregrine-core = { path = "crates/peregrine-core", version = "0.1.0" }
 peregrine-kernels = { path = "crates/peregrine-kernels", version = "0.1.0" }
+peregrine-bench = { path = "crates/peregrine-bench", version = "0.1.0" }
 
 memmap2 = "0.9"
 

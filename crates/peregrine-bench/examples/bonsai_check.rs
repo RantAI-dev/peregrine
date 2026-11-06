@@ -1,5 +1,5 @@
 // Bonsai 2 against the reference fixture (PrismML llama.cpp fork, greedy, top-5), and a decode timing.
-// cargo run --release --example bonsai_check -- <model.gguf> [threads] [decode_tokens]
+// cargo run --release -p peregrine-bench --example bonsai_check -- <model.gguf> [threads] [decode_tokens]
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::KvPrec;
 use peregrine_core::model::{Model, State, StepStats};

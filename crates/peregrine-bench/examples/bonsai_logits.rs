@@ -1,5 +1,5 @@
 // logits of every position of a fixed text, for accuracy comparisons between kernel paths.
-// cargo run --release --example bonsai_logits -- <model.gguf> <out.bin>
+// cargo run --release -p peregrine-bench --example bonsai_logits -- <model.gguf> <out.bin>
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::KvPrec;
 use peregrine_core::model::{Model, State, StepStats};

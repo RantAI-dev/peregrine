@@ -44,8 +44,8 @@ jobs:
       - name: test (x86-64, every target)
         if: runner.arch == 'X64'
         run: cargo test --workspace --release --locked
-      # The examples are x86-only benchmarks (moving to peregrine-bench, roadmap S1.6); the library,
-      # binaries and tests must build warning-free and pass everywhere.
+      # peregrine-bench's examples are x86-only benchmarks; the library, binaries and tests must build
+      # warning-free and pass everywhere.
       - name: clippy (non-x86)
         if: runner.arch != 'X64'
         run: cargo clippy --workspace --lib --bins --tests --release --locked -- -D warnings

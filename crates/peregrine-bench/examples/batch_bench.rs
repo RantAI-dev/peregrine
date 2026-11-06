@@ -4,7 +4,7 @@
 //! them in one pass reads them once and does `n` dot products per weight row. This measures both, on the same
 //! model and machine, alternating the arms.
 //!
-//!     cargo run --release -p peregrine-core --example batch_bench -- <model.gguf> [threads] [steps] [ctx]
+//!     cargo run --release -p peregrine-bench --example batch_bench -- <model.gguf> [threads] [steps] [ctx]
 
 use peregrine_core::kv::{KvCache, KvPrec};
 use peregrine_core::model::{Caches, State, StepStats};
