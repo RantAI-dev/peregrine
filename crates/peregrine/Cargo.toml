@@ -30,6 +30,7 @@ cli = ["dep:clap", "dep:serde_json"]
 [dependencies]
 peregrine-core = { workspace = true }
 peregrine-kernels = { workspace = true }
+peregrine-models = { workspace = true }
 peregrine-server = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

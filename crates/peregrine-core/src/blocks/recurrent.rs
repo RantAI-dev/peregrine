@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AO};
 
 /// The Gated DeltaNet geometry of a layer: the head counts and widths its steps need.
 #[derive(Clone, Copy)]
-pub(crate) struct RecurrentCfg {
+pub struct RecurrentCfg {
     /// The key (query) heads; the value heads are grouped over them.
     pub n_k_heads: usize,
     /// The value heads; each holds its own state.
@@ -31,22 +31,22 @@ pub(crate) struct RecurrentCfg {
 impl RecurrentCfg {
     /// The width of the concatenated query heads.
     #[inline]
-    pub(crate) fn key_dim(&self) -> usize {
+    pub fn key_dim(&self) -> usize {
         self.n_k_heads * self.dk
     }
     /// The width of the concatenated value heads.
     #[inline]
-    pub(crate) fn value_dim(&self) -> usize {
+    pub fn value_dim(&self) -> usize {
         self.n_v_heads * self.dv
     }
     /// The width of the conv's input: the query, the key and the value, concatenated.
     #[inline]
-    pub(crate) fn conv_dim(&self) -> usize {
+    pub fn conv_dim(&self) -> usize {
         2 * self.key_dim() + self.value_dim()
     }
     /// Floats of the delta-rule state per sequence per layer.
     #[inline]
-    pub(crate) fn state_floats(&self) -> usize {
+    pub fn state_floats(&self) -> usize {
         self.n_v_heads * self.dv * self.dk
     }
 }
@@ -67,7 +67,7 @@ fn softplus(x: f32) -> f32 {
 
 /// β and α: `[2·n_v][d]` f32 against the unrotated normed rows, split across the pool by output.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn beta_alpha(
+pub fn beta_alpha(
     out: &mut [f32],
     ab_w: &[f32],
     xb: &[f32],
@@ -107,7 +107,7 @@ pub(crate) fn beta_alpha(
 /// `big` holds the layer's query, key and value rows (the conv's input), `big_w` its row stride; the conv
 /// writes its result over them.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn causal_conv(
+pub fn causal_conv(
     big: &mut [f32],
     big_w: usize,
     conv_w: &[f32],
@@ -182,7 +182,7 @@ pub(crate) fn causal_conv(
 /// gates turn α into the state's decay. `ab` holds `[β (n_v) | α (n_v)]` per row and comes back as
 /// `[β | decay]`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn silu_norm_gates(
+pub fn silu_norm_gates(
     big: &mut [f32],
     big_w: usize,
     ab: &mut [f32],
@@ -240,7 +240,7 @@ pub(crate) fn silu_norm_gates(
 /// `shared` says whether every row writes to one cache (then the state is read once, not once per row); it
 /// only moves the byte accounting.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn delta_rule(
+pub fn delta_rule(
     big: &[f32],
     big_w: usize,
     abv: &[f32],
@@ -303,14 +303,7 @@ pub(crate) fn delta_rule(
 }
 
 /// Gated RMSNorm of one row of the GDN output, per head: rms(o_h)·w ⊙ silu(z_h).
-pub(crate) fn gated_norm_row(
-    o: &mut [f32],
-    z: &[f32],
-    norm_w: &[f32],
-    nv: usize,
-    dv: usize,
-    eps: f32,
-) {
+pub fn gated_norm_row(o: &mut [f32], z: &[f32], norm_w: &[f32], nv: usize, dv: usize, eps: f32) {
     for h in 0..nv {
         let oh = &mut o[h * dv..(h + 1) * dv];
         let zh = &z[h * dv..(h + 1) * dv];
@@ -329,7 +322,8 @@ pub(crate) fn gated_norm_row(
 /// `runs` are the runs of consecutive rows sharing a cache (`(first row, rows, cache)`), `ptrs` the cache's
 /// pointers for the layer being processed. `out` is reused scratch — a decode step runs this four times per
 /// layer and must not allocate.
-pub(crate) fn rec_ptrs(
+#[inline]
+pub fn rec_ptrs(
     runs: &[(usize, usize, usize)],
     mut ptrs: impl FnMut(usize) -> (*mut f32, *mut f32),
     out: &mut [(*mut f32, *mut f32)],
@@ -344,7 +338,8 @@ pub(crate) fn rec_ptrs(
 
 /// Every row's snapshot request for a recurrent layer, taken once per cache: the position asked for and the
 /// snapshot's state and conv buffers, if the cache asked for one.
-pub(crate) fn snap_ptrs(
+#[inline]
+pub fn snap_ptrs(
     runs: &[(usize, usize, usize)],
     mut ptrs: impl FnMut(usize) -> Option<(usize, *mut f32, *mut f32)>,
     out: &mut [Option<(usize, *mut f32, *mut f32)>],

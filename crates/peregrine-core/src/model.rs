@@ -31,14 +31,8 @@ use crate::tokenizer::Tokenizer;
 #[allow(unused_imports)]
 pub(crate) use crate::pool::share;
 
-// Qwen3.5-style hybrid models (Bonsai 2).
-pub mod hybrid;
 // Bonsai 2's multi-token-prediction block (`mtp.rs`).
 pub mod mtp;
-
-/// The transformer families this engine implements. Qwen2 is llama with biases on
-/// Architecture names this crate implements, for the compatibility probe's message.
-pub const ARCHS: &[&str] = &["llama", "qwen2", "qwen3", "qwen35"];
 
 /// Transformer model configuration describing dimensional shapes and rotary settings.
 ///
@@ -183,15 +177,19 @@ impl TileStore {
 }
 
 impl Model {
-    pub fn load(g: Gguf) -> Result<Model, String> {
+    pub fn load_with(g: Gguf, families: &[&dyn crate::arch::Family]) -> Result<Model, String> {
         let arch_name = g.str("general.architecture")?;
-        let family = crate::arch::FAMILIES
+        let family = families
             .iter()
             .find(|f| f.names().contains(&arch_name))
             .ok_or_else(|| {
+                let known: Vec<&str> = families
+                    .iter()
+                    .flat_map(|f| f.names().iter().copied())
+                    .collect();
                 format!(
                     "Peregrine implements {}; this model is {arch_name:?}",
-                    ARCHS.join(" and ")
+                    known.join(" and ")
                 )
             })?;
         let tk = Tokenizer::from_gguf(&g)?;
@@ -621,19 +619,14 @@ pub mod keep {
         ))
     }
 
-    /// The model at `path`: the kept one when it is the same file (same canonical
-    /// path, size and modification time, same sidecar state), else freshly loaded —
-    /// and kept in place of whatever was there. `Err` is `Gguf::open`/`Model::load`'s,
-    /// or a corrupt or stale sidecar's: that one refuses loudly rather than running
-    /// dense when the user built a sidecar.
-    pub fn open(path: &Path) -> Result<Arc<Model>, String> {
-        open_with(path, true)
-    }
-
-    /// `open`, choosing whether a LittleBit sidecar beside the model is used
+    /// `open_with`, choosing whether a LittleBit sidecar beside the model is used
     /// (`false` runs dense even when one is present).
-    pub fn open_with(path: &Path, lb: bool) -> Result<Arc<Model>, String> {
-        open_with_template(path, lb, None)
+    pub fn open_with(
+        path: &Path,
+        lb: bool,
+        families: &[&dyn crate::arch::Family],
+    ) -> Result<Arc<Model>, String> {
+        open_with_template(path, lb, None, families)
     }
 
     /// `open_with`, with the chat template the caller chose (`--chat-template`):
@@ -642,6 +635,7 @@ pub mod keep {
         path: &Path,
         lb: bool,
         template: Option<crate::template::Template>,
+        families: &[&dyn crate::arch::Family],
     ) -> Result<Arc<Model>, String> {
         let k = key(path, lb)?;
         let mut g = slot().lock().unwrap_or_else(|e| e.into_inner());
@@ -652,8 +646,8 @@ pub mod keep {
             }
         }
         let file = Gguf::open(path)?;
-        crate::check_compatible_with(&file, template)?;
-        let mut model = Model::load(file)?;
+        crate::check_compatible_with(&file, template, families)?;
+        let mut model = Model::load_with(file, families)?;
         if lb {
             if let Some(slb) = crate::lbq::Slb::open_for(path)? {
                 model.attach_lb(slb)?;

@@ -3,7 +3,7 @@
 // model tests do). PEREGRINE_BONSAI9 overrides the path.
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::KvPrec;
-use peregrine_core::model::{Model, State, StepStats};
+use peregrine_core::model::{State, StepStats};
 use peregrine_core::pool::Pool;
 use std::path::PathBuf;
 
@@ -29,7 +29,7 @@ fn bonsai2_9b_matches_the_reference() {
         eprintln!("skipped: no Bonsai 2 9B file");
         return;
     };
-    let model = Model::load(Gguf::open(&path).unwrap()).unwrap();
+    let model = peregrine_models::load(Gguf::open(&path).unwrap()).unwrap();
     let c = model.cfg;
     let toks = model.tk.encode("The capital of France is");
     assert_eq!(toks, vec![760, 6511, 314, 9338, 369]);
@@ -88,7 +88,7 @@ fn mtp_speculation_changes_no_token() {
         eprintln!("skipped: no Bonsai 2 4B MTP file");
         return;
     }
-    let model = Arc::new(Model::load(Gguf::open(&path).unwrap()).unwrap());
+    let model = Arc::new(peregrine_models::load(Gguf::open(&path).unwrap()).unwrap());
     assert!(model.has_mtp());
     let prompt = model.tk.encode(
         "<|im_start|>user\nWrite a Python function that merges two sorted lists.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",

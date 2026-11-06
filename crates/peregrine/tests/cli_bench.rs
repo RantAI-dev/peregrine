@@ -1,6 +1,6 @@
 //! Smoke tests for `peregrine bench` and `peregrine tune` CLI (roadmap S1.7).
 
-#[path = "../../peregrine-core/tests/support/mod.rs"]
+#[path = "../../peregrine-models/tests/support/mod.rs"]
 mod support;
 
 use peregrine_core::gguf::Format;

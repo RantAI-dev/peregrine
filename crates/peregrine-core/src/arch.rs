@@ -119,9 +119,3 @@ pub trait Family: Sync {
     fn names(&self) -> &'static [&'static str];
     fn load(&self, g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String>;
 }
-
-/// Table of model families implemented by Peregrine.
-pub static FAMILIES: &[&dyn Family] = &[
-    &crate::families::dense::DenseFamily,
-    &crate::families::qwen35::Qwen35Family,
-];
