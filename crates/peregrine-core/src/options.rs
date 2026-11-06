@@ -153,6 +153,47 @@ impl EngineOptions {
         Self::from_lookup(|k| std::env::var(k).ok())
     }
 
+    /// The options from the environment and an optional tuning profile:
+    /// environment variables win over the profile, the profile wins over defaults.
+    pub fn from_env_and_profile(profile: Option<&crate::profile::Profile>) -> Self {
+        Self::from_chained(|k| std::env::var(k).ok(), profile)
+    }
+
+    /// Build options from a custom key-lookup (e.g. environment) and a profile:
+    /// `get` wins over the profile, the profile wins over defaults.
+    pub fn from_chained(
+        get: impl Fn(&str) -> Option<String>,
+        profile: Option<&crate::profile::Profile>,
+    ) -> Self {
+        Self::from_lookup(|k| {
+            if let Some(v) = get(k) {
+                return Some(v);
+            }
+            let prof = profile?;
+            let key_name = match k {
+                "PEREGRINE_SPIN_US" | "SPIN_US" => "spin_us",
+                "PEREGRINE_YIELD_US" | "YIELD_US" => "yield_us",
+                "PEREGRINE_DECODE_THREADS" | "DECODE_THREADS" => "decode_threads",
+                "PEREGRINE_PF" | "PF" => "prefetch_bytes",
+                "PEREGRINE_TQ_SPAN" | "TQ_SPAN" => "tq_span",
+                "PEREGRINE_TB_SPAN" | "TB_SPAN" => "tb_span",
+                other => {
+                    let stripped = other.strip_prefix("PEREGRINE_").unwrap_or(other);
+                    if let Some(val) = prof.get(stripped) {
+                        return Some(val.to_string());
+                    }
+                    ""
+                }
+            };
+            if !key_name.is_empty() {
+                if let Some(val) = prof.get(key_name) {
+                    return Some(val.to_string());
+                }
+            }
+            None
+        })
+    }
+
     /// The options from any key → value lookup (the environment, a file, a test's map).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
         let d = EngineOptions::default();
@@ -441,5 +482,43 @@ mod tests {
             nd,
             vec![("spin_us", "50".to_string()), ("mix", "false".to_string())]
         );
+    }
+
+    #[test]
+    fn env_over_profile_over_default_precedence() {
+        let prof = crate::profile::Profile {
+            peregrine_version: "0.1.0".into(),
+            cpu: "Test CPU".into(),
+            cpu_features: "x86_64-avx2".into(),
+            model_size: 1024,
+            model_fnv: 0x1234,
+            created: 1700000000,
+            options: vec![
+                ("spin_us".into(), "500".into()),
+                ("prefetch_bytes".into(), "2048".into()),
+                ("decode_threads".into(), "4".into()),
+            ],
+        };
+
+        // 1. Profile wins over default (env is empty)
+        let o1 = EngineOptions::from_chained(|_| None, Some(&prof));
+        assert_eq!(o1.spin_us, 500);
+        assert_eq!(o1.prefetch_bytes, 2048);
+        assert_eq!(o1.decode_threads, Some(4));
+        assert_eq!(o1.tb_span, 32); // unmentioned defaults to 32
+
+        // 2. Env wins over profile
+        let env_map: HashMap<String, String> = [
+            ("PEREGRINE_SPIN_US".to_string(), "200".to_string()),
+            ("PEREGRINE_TB_SPAN".to_string(), "64".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let o2 = EngineOptions::from_chained(|k| env_map.get(k).cloned(), Some(&prof));
+        assert_eq!(o2.spin_us, 200); // env wins over profile (200 vs 500)
+        assert_eq!(o2.prefetch_bytes, 2048); // profile wins over default (2048 vs default)
+        assert_eq!(o2.decode_threads, Some(4)); // profile wins over default
+        assert_eq!(o2.tb_span, 64); // env wins over default
     }
 }

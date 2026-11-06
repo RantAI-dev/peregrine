@@ -20,7 +20,13 @@ pub use peregrine_server as server;
 pub use peregrine_core::gguf::{Format, Gguf};
 pub use peregrine_core::model::Model;
 pub use peregrine_core::options::EngineOptions;
+pub use peregrine_core::profile::Profile;
 pub use peregrine_core::serve::Engine;
+
+#[cfg(feature = "cli")]
+pub mod bench;
+#[cfg(feature = "cli")]
+pub mod tune;
 
 /// A description of a model file: what it is, what it holds, and whether this build can run it.
 pub fn inspect(path: &std::path::Path) -> Result<String, String> {

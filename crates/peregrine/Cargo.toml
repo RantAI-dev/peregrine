@@ -21,13 +21,14 @@ default = ["cli", "server"]
 # The OpenAI-compatible HTTP server (`peregrine serve`, `peregrine::server`).
 server = ["dep:peregrine-server", "dep:tokio"]
 # The `peregrine` command line.
-cli = ["dep:clap"]
+cli = ["dep:clap", "dep:serde_json"]
 
 [dependencies]
 peregrine-core = { workspace = true }
 peregrine-kernels = { workspace = true }
 peregrine-server = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 
 [lints]

@@ -28,6 +28,7 @@ pub mod model;
 pub mod options;
 pub mod pool;
 pub mod prefix;
+pub mod profile;
 pub mod safetensors;
 pub mod sample;
 pub mod serve;
@@ -43,7 +44,8 @@ pub use peregrine_kernels::cpu_has;
 pub use peregrine_kernels::{cpu, delta, hadamard, quant, table, vmath};
 #[cfg(target_arch = "x86_64")]
 pub use peregrine_kernels::{simd, tern};
-pub use session::{Session, SessionCfg};
+pub use profile::Profile;
+pub use session::{BenchReport, Session, SessionCfg};
 
 /// Whether this engine can run the GGUF at `path`, read from its header alone.
 ///
