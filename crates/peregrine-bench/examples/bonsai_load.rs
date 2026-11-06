@@ -1,13 +1,11 @@
-// Bonsai 2 prefill speed and several users in one weight pass (Caches::PerRow).
-// cargo run --release -p peregrine-bench --example bonsai_load -- <model.gguf> [threads] [prompt_tokens] [users,...]
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::{KvCache, KvPrec};
-use peregrine_core::model::{Caches, Model, State, StepStats};
+use peregrine_core::model::{Caches, State, StepStats};
 use peregrine_core::pool::Pool;
 use std::time::Instant;
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let model = Model::load(Gguf::open(std::path::Path::new(&a[0])).unwrap()).unwrap();
+    let model = peregrine_models::load(Gguf::open(std::path::Path::new(&a[0])).unwrap()).unwrap();
     let threads: usize = a.get(1).and_then(|v| v.parse().ok()).unwrap_or(12);
     let np: usize = a.get(2).and_then(|v| v.parse().ok()).unwrap_or(512);
     let users: Vec<usize> = a
@@ -23,7 +21,7 @@ fn main() {
     let toks: Vec<u32> = model.tk.encode(&text).into_iter().take(np).collect();
     let mut kv = model.new_cache(KvPrec::F16, 8192);
     let mut ss = StepStats::default();
-    let _ = peregrine_core::model::hybrid::profile();
+    let _ = peregrine_models::hybrid::profile();
     let t = Instant::now();
     let mut p = 0;
     while p < toks.len() {
@@ -45,7 +43,7 @@ fn main() {
         toks.len() as f64 / dt,
         dt
     );
-    let pr = peregrine_core::model::hybrid::profile();
+    let pr = peregrine_models::hybrid::profile();
     let tot = dt * 1e9;
     let pp: Vec<String> = pr[..10]
         .iter()
@@ -69,7 +67,7 @@ fn main() {
         let mut next = vec![prompt[prompt.len() - 1]; nu];
         let want: Vec<usize> = (0..nu).collect();
         let steps = 32;
-        let _ = peregrine_core::model::hybrid::profile();
+        let _ = peregrine_models::hybrid::profile();
         let t = Instant::now();
         for _ in 0..steps {
             let mut refs: Vec<&mut KvCache> = caches.iter_mut().collect();
@@ -86,7 +84,7 @@ fn main() {
             }
         }
         let dt = t.elapsed().as_secs_f64();
-        let pr = peregrine_core::model::hybrid::profile();
+        let pr = peregrine_models::hybrid::profile();
         let pp: Vec<String> = pr[..10]
             .iter()
             .map(|(n, v)| format!("{n} {:.0}%", 100.0 * *v as f64 / (dt * 1e9)))

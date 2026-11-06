@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 peregrine-core = { workspace = true }
+peregrine-models = { workspace = true }
 
 [lints]
 workspace = true

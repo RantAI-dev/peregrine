@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 peregrine-core = { workspace = true }
+peregrine-models = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
