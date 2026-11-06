@@ -1,6 +1,21 @@
-# tensor	format	start	count	blob_off  (golden f32 produced by llama-quantize ... F32)
+# dequantisation oracle: 2048-element windows of llama.cpp's own F32 dequantisation
+#
+# Generated from exactly this model file (do not regenerate from another upload):
+#   path      SmolLM2-360M-Instruct.Q4_K_M.gguf
+#   url       https://huggingface.co/mradermacher/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct.Q4_K_M.gguf
+#   sha256    ade7aee1e5bd7c3b8f1fedafc61a1a0be31e8afa64e006607cd202323e2ccce0
+#   size      270590976
+#   fnv1a64   first1MiB=12794659150644441972 last1MiB=9807110217639181536
+#
+# Reproduced with llama.cpp v0.9.0 (cd959bae99ff4bed22bef2604f45241c09bbb8c8):
+#   llama-quantize --allow-requantize <model> smol-f32.gguf F32 4
+# then the windows below were copied byte-for-byte out of that F32 file.
+# The Q4_K window is blk.10.ffn_down: in this upload blk.12.ffn_down is Q6_K,
+# unlike the older fixture, and all formats in the model must stay covered.
+#
+# tensor	format	start	count	blob_off
 blk.0.attn_norm.weight	F32	0	960	0
-blk.12.ffn_down.weight	Q4_K	4096	2048	3840
+blk.10.ffn_down.weight	Q4_K	4096	2048	3840
 blk.0.attn_q.weight	Q5_0	4096	2048	12032
 blk.0.ffn_down.weight	Q6_K	4096	2048	20224
 token_embd.weight	Q8_0	4096	2048	28416

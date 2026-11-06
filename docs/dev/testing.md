@@ -33,6 +33,10 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 
 `models/` is git-ignored. These locations will be unified under one variable as part of S0.1.
 
+The SmolLM2 A1 oracle fixture is cut from one exact file: mradermacher's
+`SmolLM2-360M-Instruct.Q4_K_M.gguf` (SHA-256 `ade7aee1e5bd7c3b8f1fedafc61a1a0be31e8afa64e006607cd202323e2ccce0`),
+and `tests/oracle.rs` refuses any other upload.
+
 ## CPU tiers
 
 Kernels are chosen at run time from the CPU's features, capped by `PEREGRINE_ISA` (`scalar`, `avx2`,
