@@ -483,7 +483,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
         None
     };
     Ok(Model {
-        g,
+        w: Weights { g, tiles },
         cfg,
         tk,
         tok_embd,
@@ -496,7 +496,6 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
         layers: Vec::new(),
         mtp,
         hy: Some(hy),
-        tiles,
     })
 }
 

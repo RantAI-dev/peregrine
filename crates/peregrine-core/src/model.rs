@@ -202,7 +202,8 @@ struct Layer {
 }
 
 pub struct Model {
-    g: Gguf,
+    /// The file and the repacked weights: what every forward reads matrices from.
+    w: Weights,
     pub cfg: Config,
     pub tk: Tokenizer,
     tok_embd: TensorInfo,
@@ -222,11 +223,31 @@ pub struct Model {
     layers: Vec<Layer>,
     // the hybrid model's layers and rotation (`hybrid.rs`); None for the dense architectures.
     hy: Option<hybrid::Hybrid>,
-    // PQ2_0 matrices repacked into 16-row tiles at load (`TensorInfo::tile_off` points here); empty if not.
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
-    tiles: TileStore,
     // the MTP (NextN) block of a hybrid file that carries one (`*-MTP-Q8_0.gguf`).
     mtp: Option<mtp::Mtp>,
+}
+
+/// The weights a forward pass reads: the memory-mapped file and the matrices repacked from it at load.
+/// Split from `Model` so layer code can take the weights without the rest of the model (ADR 0006).
+pub(crate) struct Weights {
+    pub(crate) g: Gguf,
+    // PQ2_0 matrices repacked into 16-row tiles at load (`TensorInfo::tile_off` points here); empty if not.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
+    pub(crate) tiles: TileStore,
+}
+
+impl Weights {
+    /// A tensor's bytes in the mapped file.
+    #[inline]
+    pub(crate) fn bytes(&self, t: &TensorInfo) -> &[u8] {
+        self.g.bytes(t)
+    }
+    /// The repacked tile store (see `TensorInfo::tile_off`).
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    #[inline]
+    pub(crate) fn tiles(&self) -> &[u8] {
+        self.tiles.bytes()
+    }
 }
 
 /// Reusable scratch. Allocated once per session so a decode step does no allocation.
@@ -835,7 +856,10 @@ impl Model {
         }
 
         Ok(Model {
-            g,
+            w: Weights {
+                g,
+                tiles: TileStore::default(),
+            },
             cfg,
             tk,
             tok_embd,
@@ -847,7 +871,6 @@ impl Model {
             rope_factors,
             layers,
             hy: None,
-            tiles: TileStore::default(),
             mtp: None,
         })
     }
@@ -961,25 +984,25 @@ impl Model {
     }
 
     pub fn weight_bytes(&self) -> u64 {
-        self.g.total_weight_bytes() - self.lb_replaced
+        self.w.g.total_weight_bytes() - self.lb_replaced
             + self.lb.as_ref().map_or(0, |s| s.data_bytes)
     }
 
     /// The file's metadata, for the template detector and the host's telemetry.
     pub fn gguf(&self) -> &Gguf {
-        &self.g
+        &self.w.g
     }
 
     /// `general.name`, or an empty string.
     pub fn name(&self) -> &str {
-        self.g.str("general.name").unwrap_or("")
+        self.w.g.str("general.name").unwrap_or("")
     }
 
     /// Formats present in this model and how many tensors use each — the input to
     /// the mixed-precision report.
     pub fn format_mix(&self) -> Vec<(Format, usize, u64)> {
         let mut out: Vec<(Format, usize, u64)> = Vec::new();
-        for t in self.g.tensors.values() {
+        for t in self.w.g.tensors.values() {
             match out.iter_mut().find(|e| e.0 == t.kind) {
                 Some(e) => {
                     e.1 += 1;
@@ -998,7 +1021,7 @@ impl Model {
     /// Q4_K_M while the tensors are mostly Q5_0.
     pub fn effective_bpw(&self) -> f64 {
         let bytes = self.weight_bytes();
-        let params: u64 = self.g.tensors.values().map(|t| t.numel()).sum();
+        let params: u64 = self.w.g.tensors.values().map(|t| t.numel()).sum();
         if params == 0 {
             0.0
         } else {
@@ -1012,7 +1035,7 @@ impl Model {
         let t = &self.tok_embd;
         let n = t.dims[0] as usize;
         let rb = row_bytes(t.kind, n);
-        let all = self.g.bytes(t);
+        let all = self.w.bytes(t);
         let off = token as usize * rb;
         crate::quant::dequant_row(t.kind, &all[off..off + rb], &mut out[..n]);
         st.bytes_weights += rb as u64;
@@ -1074,8 +1097,8 @@ impl Model {
                         debug_assert!(r % 16 == 0 && rz % 16 == 0);
                         while r < rz {
                             let nt = TPC.min((rz - r) / 16);
-                            let w = &self.tiles.bytes()
-                                [toff + (r / 16) * tb..toff + (r / 16 + nt) * tb];
+                            let w =
+                                &self.w.tiles()[toff + (r / 16) * tb..toff + (r / 16 + nt) * tb];
                             mk.tiles_pq2(w, ng, nt, acts, &mut blk[..16 * nt * nb]);
                             for i in 0..16 * nt {
                                 for b in 0..nb {
@@ -1088,7 +1111,7 @@ impl Model {
                     }
                     MatPath::RowsPq2 | MatPath::RowsPtq1 => {
                         // A block of rows per kernel call (the dispatch is paid per block, not per row).
-                        let bytes = self.g.bytes(j.w);
+                        let bytes = self.w.bytes(j.w);
                         const BLK: usize = 32;
                         let mut blk = [0.0f32; BLK * MAX_BATCH];
                         while r < rz {
@@ -1109,7 +1132,7 @@ impl Model {
                         }
                     }
                     MatPath::PerRow => {
-                        let bytes = self.g.bytes(j.w);
+                        let bytes = self.w.bytes(j.w);
                         for r in r..rz {
                             mk.row(j.w.kind, &bytes[r * rb..(r + 1) * rb], acts, &mut tmp[..nb]);
                             for (b, &v) in tmp[..nb].iter().enumerate() {
@@ -1433,7 +1456,7 @@ impl Model {
 
     fn rmsnorm_into(&self, x: &[f32], w: &TensorInfo, out: &mut [f32]) {
         let n = x.len();
-        let wb = self.g.bytes(w);
+        let wb = self.w.bytes(w);
         let ss = crate::vmath::sumsq_f64(x) / n as f64;
         let inv = (1.0 / (ss + self.cfg.eps as f64).sqrt()) as f32;
         match w.kind {
