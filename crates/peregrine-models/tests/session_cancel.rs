@@ -26,11 +26,15 @@ use support::models::{write_dense, Dense};
 /// The prompts the test asks. The synthetic model's answer differs per kernel
 /// tier, and it sometimes opens with its end-of-turn token — a turn with no
 /// tokens has nothing to cancel.
-const PROMPTS: [&str; 4] = [
+const PROMPTS: [&str; 8] = [
     "Name three colours.",
     "Name three fruits.",
     "Name three animals.",
     "Name a colour.",
+    "Name a fruit.",
+    "Name an animal.",
+    "Name three birds.",
+    "Name three trees.",
 ];
 
 fn tmpdir(test: &str) -> PathBuf {
