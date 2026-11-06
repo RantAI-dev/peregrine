@@ -17,7 +17,7 @@ mod support;
 
 use peregrine_core::gguf::{Format, Gguf};
 use peregrine_core::session::{Session, SessionCfg};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use support::models::{write_dense, Dense};
@@ -28,7 +28,7 @@ fn tmpdir(test: &str) -> PathBuf {
     d
 }
 
-fn load(path: &PathBuf) -> Arc<peregrine_core::model::Model> {
+fn load(path: &Path) -> Arc<peregrine_core::model::Model> {
     Arc::new(Gguf::open(path).and_then(peregrine_models::load).unwrap())
 }
 
