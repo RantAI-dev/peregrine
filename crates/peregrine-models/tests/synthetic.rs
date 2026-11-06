@@ -62,7 +62,7 @@ fn run_with(model: &Model, threads: usize, prec: KvPrec) -> String {
     let c = model.cfg;
     let pool = Pool::new(threads);
     let n = PROMPT.len();
-let mut st = model.new_state(128, n, 256, threads);
+    let mut st = model.new_state(128, n, 256, threads);
     let mut kv = model.new_cache(prec, 256);
     let mut ss = StepStats::default();
     let want: Vec<usize> = (0..n).collect();
