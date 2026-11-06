@@ -16,7 +16,7 @@ pub struct TuneArgs {
     /// Time budget for tuning in seconds (default: 60).
     #[arg(long, default_value_t = 60)]
     pub budget_s: u64,
-    /// Output path for the tuning profile (default: $XDG_CONFIG_HOME/peregrine/profiles/<model>-<fnv>.profile).
+    /// Output path for the tuning profile (default: `$XDG_CONFIG_HOME/peregrine/profiles/<model>-<fnv>.profile`).
     #[arg(long)]
     pub out: Option<PathBuf>,
 }
