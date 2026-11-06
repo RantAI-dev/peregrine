@@ -13,7 +13,7 @@
 
 use super::*;
 use crate::blocks::par::{RecScratch, RowPtrs, SnapPtrs};
-use crate::hadamard::fwht;
+use crate::blocks::rotate::{Rotation, RowPrep, VPerm};
 use std::sync::atomic::{AtomicU64, Ordering as AO};
 
 // Profiling buckets (`PEREGRINE_PROF=1`): wall nanoseconds per part of the hybrid pass, read by `profile()`.
@@ -144,8 +144,8 @@ pub(super) struct HLayer {
 pub(super) struct Hybrid {
     pub cfg: HybridCfg,
     layers: Vec<HLayer>,
-    /// `signs / √block` per input width.
-    signs: Vec<(usize, Vec<f32>)>,
+    /// The Hadamard rotation's data: the sign vector of every input width and the block size.
+    rot: Rotation,
     /// `ssm_out`'s input is permuted from tiled to grouped v-head order before its rotation.
     v_grouped: bool,
 }
@@ -195,9 +195,6 @@ impl HyScratch {
         }
     }
 }
-
-/// A per-row step fused into a rotation's pass: `(row index, row)`.
-type RowPrep<'a> = dyn Fn(usize, &mut [f32]) + Sync + 'a;
 
 fn f32_vec(g: &Gguf, t: &TensorInfo) -> Vec<f32> {
     let mut v = vec![0.0f32; t.numel() as usize];
@@ -471,7 +468,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
     let hy = Hybrid {
         cfg: hc,
         layers,
-        signs,
+        rot: Rotation::new(signs, hc.had_block),
         v_grouped,
     };
     for w in [d_model, n_ff, hc.value_dim(), cfg.q_dim()] {
@@ -500,12 +497,19 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
 }
 
 impl Hybrid {
+    /// The Hadamard sign vector of an input width.
+    #[inline]
     fn signs_for(&self, width: usize) -> Result<&[f32], String> {
-        self.signs
-            .iter()
-            .find(|(w, _)| *w == width)
-            .map(|(_, s)| s.as_slice())
-            .ok_or_else(|| format!("no Hadamard sign vector for input width {width}"))
+        self.rot.signs_for(width)
+    }
+    /// The tiled→grouped v-head permutation, when the call asks for it.
+    #[inline]
+    fn vperm(&self, perm: bool) -> Option<VPerm> {
+        perm.then_some(VPerm {
+            dv: self.cfg.dv,
+            n_k_heads: self.cfg.n_k_heads,
+            n_v_heads: self.cfg.n_v_heads,
+        })
     }
 }
 
@@ -537,12 +541,7 @@ impl Model {
         let hy = self.hy();
         let se = hy.signs_for(self.cfg.d_model)?;
         self.embed(token, row, stats);
-        for ch in row.chunks_exact_mut(hy.cfg.had_block) {
-            fwht(ch);
-        }
-        for (v, s) in row.iter_mut().zip(se) {
-            *v *= s;
-        }
+        hy.rot.rotate_embedding(row, se);
         Ok(())
     }
 
@@ -634,54 +633,21 @@ impl Model {
         pool: &Pool,
         stats: &mut StepStats,
     ) {
-        let hy = self.hy();
-        let hc = hy.cfg;
         let _t = Tick::new(2);
-        let ss = hy.signs_for(w).expect("sign vector checked at load");
-        let blk = hc.had_block;
-        let rw = hs.rot_w;
-        let rot = SharedBuf(hs.rot.as_mut_ptr());
-        let ap = SharedActs(acts.as_mut_ptr());
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let body = |_wk: usize, _nw: usize| loop {
-            let b = next.fetch_add(1, AO::Relaxed);
-            if b >= nb {
-                break;
-            }
-            // SAFETY: row `b` of `src`, of `rot` and `acts[b]` is claimed by this worker alone.
-            let x = unsafe { src.slice(b * w, w) };
-            if let Some(f) = pre {
-                f(b, x);
-            }
-            let r = unsafe { rot.slice(b * rw, w) };
-            if perm {
-                let (hd, nk, rep) = (hc.dv, hc.n_k_heads, hc.n_v_heads / hc.n_k_heads);
-                for rr in 0..rep {
-                    for gg in 0..nk {
-                        let s = (rr * nk + gg) * hd;
-                        let d = (gg * rep + rr) * hd;
-                        r[d..d + hd].copy_from_slice(&x[s..s + hd]);
-                    }
-                }
-                for (v, s) in r.iter_mut().zip(ss) {
-                    *v *= s;
-                }
-            } else {
-                for ((v, &xi), s) in r.iter_mut().zip(x.iter()).zip(ss) {
-                    *v = xi * s;
-                }
-            }
-            for c in r.chunks_exact_mut(blk) {
-                fwht(c);
-            }
-            unsafe { ap.get(b) }.fill(r);
-        };
-        if nb >= ROW_PARALLEL && pool.width() > 1 {
-            pool.run(body);
-            stats.barriers += 1;
-        } else {
-            body(0, 1);
-        }
+        let hy = self.hy();
+        hy.rot.rotate_rows_pre(
+            &mut hs.rot,
+            hs.rot_w,
+            acts,
+            src,
+            w,
+            nb,
+            hy.vperm(perm),
+            pre,
+            nb >= ROW_PARALLEL && pool.width() > 1,
+            pool,
+            stats,
+        );
     }
 
     pub(super) fn mm(
@@ -792,12 +758,7 @@ impl Model {
         for (i, &t) in tokens.iter().enumerate() {
             let row = &mut st8.x[i * d..(i + 1) * d];
             self.embed(t, row, stats);
-            for ch in row.chunks_exact_mut(hc.had_block) {
-                fwht(ch);
-            }
-            for (v, s) in row.iter_mut().zip(se) {
-                *v *= s;
-            }
+            hy.rot.rotate_embedding(row, se);
         }
 
         drop(te);

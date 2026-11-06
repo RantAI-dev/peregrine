@@ -5,3 +5,4 @@
 
 pub(crate) mod attn;
 pub(crate) mod par;
+pub(crate) mod rotate;
