@@ -19,9 +19,11 @@
     clippy::chunks_exact_to_as_chunks
 )]
 
+pub mod arch;
 pub mod attn;
 mod blocks;
 pub mod dspark;
+pub mod families;
 pub mod gguf;
 pub mod kv;
 pub mod lbq;
@@ -82,7 +84,7 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
 /// is the one thing the file cannot say, and the engine will not guess it.
 pub fn check_compatible_with(g: &Gguf, template: Option<template::Template>) -> Result<(), String> {
     let arch = g.str("general.architecture").unwrap_or("unknown");
-    if model::Arch::from_name(arch).is_none() {
+    if !arch::FAMILIES.iter().any(|f| f.names().contains(&arch)) {
         return Err(format!(
             "architecture {arch:?} — Peregrine implements {}",
             model::ARCHS.join(", ")

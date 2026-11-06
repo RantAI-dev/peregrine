@@ -18,6 +18,7 @@ use crate::quant::QuantAct;
 pub(crate) type RowPrep<'a> = dyn Fn(usize, &mut [f32]) + Sync + 'a;
 
 /// The Hadamard rotation's data: the sign vector of every input width and the block size.
+#[derive(Clone)]
 pub(crate) struct Rotation {
     /// `signs / √block` per input width.
     signs: Vec<(usize, Vec<f32>)>,
