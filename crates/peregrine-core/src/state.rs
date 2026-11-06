@@ -162,7 +162,7 @@ impl State {
             rope,
             acts: (0..b)
                 .map(|_| {
-                    let mut a = QuantAct::with_capacity(cfg.n_ff);
+                    let mut a = QuantAct::with_capacity(cfg.n_ff.max(cfg.d_model).max(cfg.q_dim()));
                     a.ternary = act_layout.ternary;
                     a.ptq1 = act_layout.ptq1;
                     a.tb_span = act_layout.tb_span;

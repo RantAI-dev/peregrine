@@ -28,6 +28,14 @@
 //! Every kernel has a scalar twin in `quant.rs`, and `tests/simd.rs` asserts they
 //! agree on the real weight file (acceptance criterion A4). The scalar path is the
 //! specification; this file is an optimisation of it and is never the reference.
+//!
+//! # Float formats (F32, F16, BF16)
+//!
+//! Float weights run on the full `f32` activation (`QuantAct::xf`) rather than the
+//! int8-quantised codes. Decoding uses native float load for F32, F16C (`_mm256_cvtph_ps`)
+//! for F16, and integer shift-left-16 for BF16. Accumulation uses 8 vector lanes with
+//! uncontracted multiply-add (`_mm256_mul_ps` followed by `_mm256_add_ps`), matching the
+//! scalar twin bit for bit.
 
 #![cfg(target_arch = "x86_64")]
 
@@ -363,9 +371,9 @@ pub unsafe fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
         }
         Format::IQ4_NL => dot_iq4_nl(w, a),
         Format::IQ4_XS => dot_iq4_xs(w, a),
-        // Norm vectors, not a matmul path; the scalar twin is already adequate and
-        // duplicating it here would be two implementations of a cold path.
-        Format::F32 | Format::F16 | Format::BF16 => crate::quant::dot_scalar(fmt, w, a),
+        Format::F32 => dot_f32(w, a),
+        Format::F16 => dot_f16(w, a),
+        Format::BF16 => dot_bf16(w, a),
         Format::PQ2_0 | Format::PTQ1_0 => {
             let mut o = [0.0f32];
             dot_batch(fmt, w, std::slice::from_ref(a), &mut o);
@@ -867,6 +875,189 @@ unsafe fn tile_iq4_xs<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f3
     out[..T].copy_from_slice(&acc[..T]);
 }
 
+/// F32 weight dot product against `T` activations in f32 (`QuantAct::xf`).
+///
+/// # Safety
+/// AVX2 must be available. `w` must contain at least `acts[0].n * 4` bytes.
+/// Each `acts[t].xf` must contain at least `acts[0].n` floats. `out` must have at least `T` elements.
+#[target_feature(enable = "avx2")]
+unsafe fn tile_f32<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let n = acts[0].n;
+    for a in &acts[..T] {
+        debug_assert_eq!(a.n, n);
+        debug_assert!(a.xf.len() >= n);
+    }
+    debug_assert!(w.len() >= n * 4);
+    debug_assert!(out.len() >= T);
+
+    let n8 = (n / 8) * 8;
+    let mut acc = [_mm256_setzero_ps(); T];
+    let w_ptr = w.as_ptr() as *const f32;
+    let mut i = 0;
+    while i < n8 {
+        prefetch_ahead(w.as_ptr().add(i * 4), pf, 1);
+        let wv = _mm256_loadu_ps(w_ptr.add(i));
+        for t in 0..T {
+            let xv = _mm256_loadu_ps(acts[t].xf.as_ptr().add(i));
+            // IEEE-754 multiply followed by add without FMA contraction, matching scalar dot_f32_ref.
+            acc[t] = _mm256_add_ps(acc[t], _mm256_mul_ps(wv, xv));
+        }
+        i += 8;
+    }
+    let rem = n - n8;
+    for t in 0..T {
+        if rem == 0 {
+            out[t] = hsum_ps(acc[t]);
+        } else {
+            let mut acc_arr = [0.0f32; 8];
+            _mm256_storeu_ps(acc_arr.as_mut_ptr(), acc[t]);
+            for j in 0..rem {
+                let idx = n8 + j;
+                let wv = f32::from_le_bytes(w[idx * 4..idx * 4 + 4].try_into().unwrap());
+                let xv = *acts[t].xf.get_unchecked(idx);
+                acc_arr[j] += wv * xv;
+            }
+            out[t] = crate::quant::hsum_8(acc_arr);
+        }
+    }
+}
+
+/// F16 weight dot product against `T` activations in f32 (`QuantAct::xf`), using F16C conversion.
+///
+/// # Safety
+/// AVX2 and F16C must be available. `w` must contain at least `acts[0].n * 2` bytes.
+/// Each `acts[t].xf` must contain at least `acts[0].n` floats. `out` must have at least `T` elements.
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn tile_f16<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let n = acts[0].n;
+    for a in &acts[..T] {
+        debug_assert_eq!(a.n, n);
+        debug_assert!(a.xf.len() >= n);
+    }
+    debug_assert!(w.len() >= n * 2);
+    debug_assert!(out.len() >= T);
+
+    let n8 = (n / 8) * 8;
+    let mut acc = [_mm256_setzero_ps(); T];
+    let w_ptr = w.as_ptr() as *const u16;
+    let mut i = 0;
+    while i < n8 {
+        prefetch_ahead(w.as_ptr().add(i * 2), pf, 1);
+        let wh = _mm_loadu_si128(w_ptr.add(i) as *const __m128i);
+        let wv = _mm256_cvtph_ps(wh);
+        for t in 0..T {
+            let xv = _mm256_loadu_ps(acts[t].xf.as_ptr().add(i));
+            acc[t] = _mm256_add_ps(acc[t], _mm256_mul_ps(wv, xv));
+        }
+        i += 8;
+    }
+    let rem = n - n8;
+    for t in 0..T {
+        if rem == 0 {
+            out[t] = hsum_ps(acc[t]);
+        } else {
+            let mut acc_arr = [0.0f32; 8];
+            _mm256_storeu_ps(acc_arr.as_mut_ptr(), acc[t]);
+            for j in 0..rem {
+                let idx = n8 + j;
+                let h = u16::from_le_bytes([w[idx * 2], w[idx * 2 + 1]]);
+                let wv = f16(h);
+                let xv = *acts[t].xf.get_unchecked(idx);
+                acc_arr[j] += wv * xv;
+            }
+            out[t] = crate::quant::hsum_8(acc_arr);
+        }
+    }
+}
+
+/// BF16 weight dot product against `T` activations in f32 (`QuantAct::xf`), using shift-left-16 conversion.
+///
+/// # Safety
+/// AVX2 must be available. `w` must contain at least `acts[0].n * 2` bytes.
+/// Each `acts[t].xf` must contain at least `acts[0].n` floats. `out` must have at least `T` elements.
+#[target_feature(enable = "avx2")]
+unsafe fn tile_bf16<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let n = acts[0].n;
+    for a in &acts[..T] {
+        debug_assert_eq!(a.n, n);
+        debug_assert!(a.xf.len() >= n);
+    }
+    debug_assert!(w.len() >= n * 2);
+    debug_assert!(out.len() >= T);
+
+    let n8 = (n / 8) * 8;
+    let mut acc = [_mm256_setzero_ps(); T];
+    let w_ptr = w.as_ptr() as *const u16;
+    let mut i = 0;
+    while i < n8 {
+        prefetch_ahead(w.as_ptr().add(i * 2), pf, 1);
+        let wb = _mm_loadu_si128(w_ptr.add(i) as *const __m128i);
+        let raw32 = _mm256_cvtepu16_epi32(wb);
+        let wv = _mm256_castsi256_ps(_mm256_slli_epi32::<16>(raw32));
+        for t in 0..T {
+            let xv = _mm256_loadu_ps(acts[t].xf.as_ptr().add(i));
+            acc[t] = _mm256_add_ps(acc[t], _mm256_mul_ps(wv, xv));
+        }
+        i += 8;
+    }
+    let rem = n - n8;
+    for t in 0..T {
+        if rem == 0 {
+            out[t] = hsum_ps(acc[t]);
+        } else {
+            let mut acc_arr = [0.0f32; 8];
+            _mm256_storeu_ps(acc_arr.as_mut_ptr(), acc[t]);
+            for j in 0..rem {
+                let idx = n8 + j;
+                let bits = (u16::from_le_bytes([w[idx * 2], w[idx * 2 + 1]]) as u32) << 16;
+                let wv = f32::from_bits(bits);
+                let xv = *acts[t].xf.get_unchecked(idx);
+                acc_arr[j] += wv * xv;
+            }
+            out[t] = crate::quant::hsum_8(acc_arr);
+        }
+    }
+}
+
+/// Single-row F32 dot product.
+///
+/// # Safety
+/// AVX2 must be available. `w` must contain `a.n * 4` bytes and `a.xf` must contain `a.n` floats.
+#[target_feature(enable = "avx2")]
+pub unsafe fn dot_f32(w: &[u8], a: &QuantAct) -> f32 {
+    let mut o = [0.0f32];
+    // SAFETY: caller guaranteed AVX2 and length preconditions.
+    tile_f32::<1>(w, std::slice::from_ref(a), &mut o);
+    o[0]
+}
+
+/// Single-row F16 dot product with F16C conversion.
+///
+/// # Safety
+/// AVX2 and F16C must be available. `w` must contain `a.n * 2` bytes and `a.xf` must contain `a.n` floats.
+#[target_feature(enable = "avx2,f16c")]
+pub unsafe fn dot_f16(w: &[u8], a: &QuantAct) -> f32 {
+    let mut o = [0.0f32];
+    // SAFETY: caller guaranteed AVX2, F16C and length preconditions.
+    tile_f16::<1>(w, std::slice::from_ref(a), &mut o);
+    o[0]
+}
+
+/// Single-row BF16 dot product with shift-left-16 conversion.
+///
+/// # Safety
+/// AVX2 must be available. `w` must contain `a.n * 2` bytes and `a.xf` must contain `a.n` floats.
+#[target_feature(enable = "avx2")]
+pub unsafe fn dot_bf16(w: &[u8], a: &QuantAct) -> f32 {
+    let mut o = [0.0f32];
+    // SAFETY: caller guaranteed AVX2 and length preconditions.
+    tile_bf16::<1>(w, std::slice::from_ref(a), &mut o);
+    o[0]
+}
+
 /// `PEREGRINE_NO_WIDE=1` keeps the tiled kernels for every batch width — the A/B
 /// switch the wide kernels were measured against (kbench, and a real prefill).
 #[inline]
@@ -1158,11 +1349,9 @@ pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32
         Format::Q6_K => run!(tile_q6_k),
         Format::IQ4_NL => run!(tile_iq4_nl),
         Format::IQ4_XS => run!(tile_iq4_xs),
-        Format::F32 | Format::F16 | Format::BF16 => {
-            for (b, a) in acts.iter().enumerate() {
-                out[b] = crate::quant::dot_scalar(fmt, w, a);
-            }
-        }
+        Format::F32 => run!(tile_f32),
+        Format::F16 => run!(tile_f16),
+        Format::BF16 => run!(tile_bf16),
         Format::PQ2_0 => crate::tern::dot_batch_pq2(w, acts, out),
         Format::PTQ1_0 => crate::tern::dot_batch_ptq1(w, acts, out),
     }
@@ -1774,6 +1963,154 @@ mod tests {
                         "{:?} batched min codes n={n}: got {} vs scalar {want}",
                         fmt.label(),
                         bgot[0]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn avx2_dot_matches_dot_scalar_bit_for_bit_float_formats() {
+        if !have_avx2() || !have_batched() {
+            return;
+        }
+
+        let mut seed = 0x51E2_F321_u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let lengths = [1, 3, 7, 8, 9, 15, 16, 32, 33, 64, 97, 128, 255, 256, 960];
+        let formats = [Format::F32, Format::F16, Format::BF16];
+
+        for fmt in formats {
+            for &n in &lengths {
+                let gen_w = |rnd: &mut dyn FnMut() -> u64| -> Vec<u8> {
+                    let mut w = Vec::with_capacity(crate::quant::row_bytes(fmt, n));
+                    for _ in 0..n {
+                        match fmt {
+                            Format::F32 => {
+                                let v = ((rnd() >> 32) as f32 / (1u64 << 32) as f32 - 0.5) * 10.0;
+                                w.extend_from_slice(&v.to_le_bytes());
+                            }
+                            Format::F16 => {
+                                // Exponent <= 30 to stay finite (no inf/nan)
+                                let h =
+                                    ((rnd() >> 48) as u16 & 0x7bff) | ((rnd() >> 63) as u16) << 15;
+                                w.extend_from_slice(&h.to_le_bytes());
+                            }
+                            Format::BF16 => {
+                                // Exponent <= 254 to stay finite
+                                let mut raw = (rnd() >> 48) as u16;
+                                if (raw & 0x7f80) == 0x7f80 {
+                                    raw &= 0x7f7f;
+                                }
+                                w.extend_from_slice(&raw.to_le_bytes());
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    w
+                };
+
+                // 1. Random trials (single-row and batched)
+                for trial in 0..5 {
+                    let w = gen_w(&mut rnd);
+                    let x: Vec<f32> = (0..n)
+                        .map(|_| ((rnd() >> 32) as f32 / (1u64 << 32) as f32 - 0.5) * 6.0)
+                        .collect();
+                    let mut a = QuantAct::with_capacity(n);
+                    a.fill(&x);
+
+                    // Single-row
+                    let got = unsafe { dot(fmt, &w, &a) };
+                    let want = crate::quant::dot_scalar(fmt, &w, &a);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{:?} trial {trial} n={n}: avx2 {got} vs scalar {want}",
+                        fmt.label()
+                    );
+
+                    // Batched (nb = 1, 2, 3, 4, 7)
+                    for nb in [1, 2, 3, 4, 7] {
+                        let acts: Vec<QuantAct> = (0..nb)
+                            .map(|_| {
+                                let xi: Vec<f32> = (0..n)
+                                    .map(|_| {
+                                        ((rnd() >> 32) as f32 / (1u64 << 32) as f32 - 0.5) * 6.0
+                                    })
+                                    .collect();
+                                let mut act = QuantAct::with_capacity(n);
+                                act.fill(&xi);
+                                act
+                            })
+                            .collect();
+                        let mut bgot = vec![0.0f32; nb];
+                        unsafe { dot_batch(fmt, &w, &acts, &mut bgot) };
+                        for b in 0..nb {
+                            let bwant = crate::quant::dot_scalar(fmt, &w, &acts[b]);
+                            assert_eq!(
+                                bgot[b].to_bits(),
+                                bwant.to_bits(),
+                                "{:?} trial {trial} n={n} b={b}/{nb}: avx2 {} vs scalar {bwant}",
+                                fmt.label(),
+                                bgot[b]
+                            );
+                        }
+                    }
+                }
+
+                // 2. Extremes (subnormal/inf/nan-free large and small floats)
+                {
+                    let mut w = Vec::with_capacity(crate::quant::row_bytes(fmt, n));
+                    for i in 0..n {
+                        let sign: f32 = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        let mag: f32 = if i % 4 == 0 { 1000.0 } else { 0.001 };
+                        let v: f32 = sign * mag;
+                        match fmt {
+                            Format::F32 => w.extend_from_slice(&v.to_le_bytes()),
+                            Format::F16 => {
+                                w.extend_from_slice(&crate::quant::f32_to_f16(v).to_le_bytes())
+                            }
+                            Format::BF16 => {
+                                let bits = (v.to_bits() >> 16) as u16;
+                                w.extend_from_slice(&bits.to_le_bytes());
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    let x: Vec<f32> = (0..n)
+                        .map(|i| if i % 3 == 0 { 500.0 } else { -0.005 })
+                        .collect();
+                    let mut a = QuantAct::with_capacity(n);
+                    a.fill(&x);
+                    let got = unsafe { dot(fmt, &w, &a) };
+                    let want = crate::quant::dot_scalar(fmt, &w, &a);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{:?} extremes n={n}: avx2 {got} vs scalar {want}",
+                        fmt.label()
+                    );
+                }
+
+                // 3. Zeroes
+                {
+                    let w = vec![0u8; crate::quant::row_bytes(fmt, n)];
+                    let x = vec![1.0f32; n];
+                    let mut a = QuantAct::with_capacity(n);
+                    a.fill(&x);
+                    let got = unsafe { dot(fmt, &w, &a) };
+                    let want = crate::quant::dot_scalar(fmt, &w, &a);
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "{:?} zeroes n={n}: avx2 {got} vs scalar {want}",
+                        fmt.label()
                     );
                 }
             }
