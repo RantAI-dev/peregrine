@@ -894,7 +894,8 @@ impl Model {
                                     let z = &mut z_chunk[i * zw..i * zw + qd];
                                     for h in 0..c.n_head {
                                         let src = b * 2 * qd + h * 2 * hd;
-                                        q[h * hd..(h + 1) * hd].copy_from_slice(&big[src..src + hd]);
+                                        q[h * hd..(h + 1) * hd]
+                                            .copy_from_slice(&big[src..src + hd]);
                                         z[h * hd..(h + 1) * hd]
                                             .copy_from_slice(&big[src + hd..src + 2 * hd]);
                                     }
