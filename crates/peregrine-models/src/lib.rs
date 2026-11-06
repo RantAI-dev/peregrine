@@ -19,6 +19,8 @@
     feature = "arch-qwen3moe"
 ))]
 pub mod dense;
+#[cfg(feature = "arch-gemma3")]
+pub mod gemma3;
 #[cfg(feature = "arch-qwen35")]
 pub mod qwen35;
 #[cfg(feature = "arch-qwen3moe")]
@@ -30,6 +32,8 @@ pub use dense::DenseFamily;
 pub use dense::LlamaFamily;
 #[cfg(feature = "arch-qwen")]
 pub use dense::QwenFamily;
+#[cfg(feature = "arch-gemma3")]
+pub use gemma3::Gemma3Family;
 #[cfg(feature = "arch-qwen35")]
 pub use qwen35::Qwen35Family;
 #[cfg(feature = "arch-qwen3moe")]
@@ -63,6 +67,8 @@ pub const ARCHS: &[&str] = &[
     "qwen3",
     #[cfg(feature = "arch-qwen35")]
     "qwen35",
+    #[cfg(feature = "arch-gemma3")]
+    "gemma3",
     #[cfg(feature = "arch-qwen3moe")]
     "qwen3moe",
 ];
@@ -75,6 +81,8 @@ pub static FAMILIES: &[&dyn Family] = &[
     &QwenFamily,
     #[cfg(feature = "arch-qwen35")]
     &Qwen35Family,
+    #[cfg(feature = "arch-gemma3")]
+    &Gemma3Family,
     #[cfg(feature = "arch-qwen3moe")]
     &Qwen3MoeFamily,
 ];

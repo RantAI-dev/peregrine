@@ -11,6 +11,7 @@ pub enum TemplateKind {
     ChatMl,
     Qwen3,
     Llama3,
+    Gemma,
 }
 
 /// The 256 GPT-2 byte pieces mapping each byte 0..=255 to a distinct printable char.
@@ -137,7 +138,26 @@ pub fn chat_template(kind: TemplateKind) -> &'static str {
             "{% for message in messages %}{{'<|start_header_id|>' + message['role'] + \
              '<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>'}}{% endfor %}"
         }
+        TemplateKind::Gemma => {
+            "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\n'}}{% endif %}"
+        }
     }
+}
+
+/// Writes Gemma tokenizer metadata to a `GgufWriter`.
+pub fn add_gemma_tokenizer_metadata(w: &mut GgufWriter) {
+    let (mut tokens, types, merges) = build_vocab();
+    tokens[VOCAB_SIZE - 2] = "<start_of_turn>".to_string();
+    tokens[VOCAB_SIZE - 1] = "<end_of_turn>".to_string();
+    w.str("tokenizer.ggml.model", "gpt2");
+    w.str("tokenizer.ggml.pre", "qwen2");
+    w.arr_str("tokenizer.ggml.tokens", &tokens);
+    w.arr_i32("tokenizer.ggml.token_type", &types);
+    w.arr_str("tokenizer.ggml.merges", &merges);
+    w.u32("tokenizer.ggml.bos_token_id", (VOCAB_SIZE - 2) as u32);
+    w.u32("tokenizer.ggml.eos_token_id", (VOCAB_SIZE - 1) as u32);
+    w.u32("tokenizer.ggml.padding_token_id", 0);
+    w.bool("tokenizer.ggml.add_bos_token", false);
 }
 
 /// Writes tokenizer metadata to a `GgufWriter`.

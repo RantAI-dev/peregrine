@@ -60,6 +60,16 @@ pub struct Draft {
     pub order: usize,
 }
 
+impl Draft {
+    /// Forget the proposal. The buffers keep their capacity, so the next
+    /// proposal does not allocate.
+    pub fn clear(&mut self) {
+        self.toks.clear();
+        self.cells.clear();
+        self.order = 0;
+    }
+}
+
 pub struct SuffixIndex {
     maps: Vec<HashMap<u64, Slot>>,
     /// `ctx[..indexed]` is in the tables.
@@ -171,47 +181,68 @@ impl SuffixIndex {
     /// Propose up to `k` tokens to follow `next`, the token just chosen but not yet
     /// in `ctx`. The longest suffix of `ctx + next` that occurred before wins.
     pub fn propose(&self, ctx: &[u32], next: u32, k: usize, min_order: usize) -> Draft {
+        let mut d = Draft::default();
+        self.propose_into(ctx, next, k, min_order, &mut d);
+        d
+    }
+
+    /// As [`SuffixIndex::propose`], written into `out` (cleared first) instead of a
+    /// fresh [`Draft`]: a caller that proposes every step keeps one buffer, and the
+    /// proposal costs no allocation.
+    pub fn propose_into(
+        &self,
+        ctx: &[u32],
+        next: u32,
+        k: usize,
+        min_order: usize,
+        out: &mut Draft,
+    ) {
+        out.clear();
         if k == 0 || ctx.is_empty() {
-            return Draft::default();
+            return;
         }
+        // The n-gram that is looked up: the tail of the context plus the token
+        // about to be fed. At most `ORDERS`' longest length, so it fits on the
+        // stack: a proposal allocates nothing.
+        let mut tail = [0u32; 12];
         for oi in (0..ORDERS.len()).rev() {
             let n = ORDERS[oi];
             if n < min_order || ctx.len() + 1 < n {
                 continue;
             }
-            let tail = ctx[ctx.len() + 1 - n..]
-                .iter()
-                .copied()
-                .chain(std::iter::once(next));
-            let Some(slot) = self.maps[oi].get(&key(tail.clone())) else {
+            let at = ctx.len() + 1 - n;
+            tail[..n - 1].copy_from_slice(&ctx[at..]);
+            tail[n - 1] = next;
+            let Some(slot) = self.maps[oi].get(&key(tail[..n].iter().copied())) else {
                 continue;
             };
-            let tail: Vec<u32> = tail.collect();
             // Genuine matches that have something after them (hash collisions out).
-            let mut alive: Vec<usize> = slot.pos[..slot.n as usize]
-                .iter()
-                .map(|&p| p as usize)
-                .filter(|&p| p + n < ctx.len() && ctx[p..p + n] == tail[..])
-                .collect();
-            if alive.is_empty() {
+            // At most `WAYS` of them, so the survivors fit on the stack.
+            let mut alive = [0usize; WAYS];
+            let mut n_alive = 0usize;
+            for &p in slot.pos[..slot.n as usize].iter() {
+                let p = p as usize;
+                if p + n < ctx.len() && ctx[p..p + n] == tail[..n] {
+                    alive[n_alive] = p;
+                    n_alive += 1;
+                }
+            }
+            if n_alive == 0 {
                 continue;
             }
-            let mut d = Draft {
-                order: n,
-                ..Default::default()
-            };
+            out.order = n;
             for depth in 0..k {
                 // Plurality of the survivors' next tokens; the newest wins a tie.
                 let mut best: Option<(u32, usize)> = None;
                 let mut alive_here = 0;
-                for &p in alive.iter() {
+                for &p in alive[..n_alive].iter() {
                     let at = p + n + depth;
                     if at >= ctx.len() {
                         continue;
                     }
                     alive_here += 1;
                     let t = ctx[at];
-                    let votes = alive
+                    let votes = alive[..n_alive]
                         .iter()
                         .filter(|&&q| q + n + depth < ctx.len() && ctx[q + n + depth] == t)
                         .count();
@@ -220,20 +251,28 @@ impl SuffixIndex {
                     }
                 }
                 let Some((tok, votes)) = best else { break };
-                d.toks.push(tok);
-                d.cells.push(Cell {
+                out.toks.push(tok);
+                out.cells.push(Cell {
                     order: oi as u8,
                     agree: (votes == alive_here) as u8,
                     depth: depth.min(DEPTHS - 1) as u8,
                     hot: self.hot as u8,
                 });
-                alive.retain(|&p| p + n + depth < ctx.len() && ctx[p + n + depth] == tok);
+                // Only the survivors that continue with this token remain.
+                let mut m = 0usize;
+                for i in 0..n_alive {
+                    let p = alive[i];
+                    if p + n + depth < ctx.len() && ctx[p + n + depth] == tok {
+                        alive[m] = p;
+                        m += 1;
+                    }
+                }
+                n_alive = m;
             }
-            if !d.toks.is_empty() {
-                return d;
+            if !out.toks.is_empty() {
+                return;
             }
         }
-        Draft::default()
     }
 
     /// Book what verification decided: `accepted` of the drafted tokens survived, so

@@ -180,14 +180,37 @@ impl Proposal {
     }
 }
 
+/// What the engine does with a drafter's proposal beyond pricing it.
+///
+/// The engine owns the price (it measures its own forward passes), but a
+/// drafter knows what it is: the DSpark head has a switch that pins the draft
+/// count for a measurement, and the suffix index needs a probe now and then
+/// because a confidence that is never tested never recovers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DraftPolicy {
+    /// An exact number of draft tokens to verify, whatever the confidences say
+    /// (`PEREGRINE_DSPARK_K` pins the DSpark head's depth for a measurement).
+    pub pinned_k: Option<usize>,
+    /// Park drafting for a while when a round does not pay for itself: the
+    /// DSpark head's rule, as the session applies it.
+    pub park: bool,
+    /// Verify a couple of drafts every `PROBE_EVERY`th step even when the price
+    /// says not to: the suffix index's rule.
+    pub probe: bool,
+}
+
 /// One way of proposing tokens.
 ///
 /// A drafter is told what the target committed and what was rolled back, and
 /// asks for what it needs ([`Drafter::needs`]). It proposes into a buffer the
 /// engine owns ([`Proposal`]) and keeps whatever bookkeeping it needs — the
-/// cells a suffix draft is booked to, a DSpark block's context, the hidden
-/// state an MTP row is owed — inside itself: the engine must not have to know
-/// what a drafter draws drafts with.
+/// cells a suffix draft is booked to, a DSpark block's context, the MTP
+/// block's own cache — inside itself: the engine must not have to know what a
+/// drafter draws drafts with.
+///
+/// The engine verifies what a drafter proposes: it asks the drafter, prices
+/// the proposal (how much of it is worth verifying) and checks it against the
+/// target's own samples. A draft that does not survive is rolled back.
 ///
 /// The interface is unstable until 1.0 (ADR 0005).
 pub trait Drafter: Send {
@@ -235,6 +258,15 @@ pub trait Drafter: Send {
     fn tap_layers(&self) -> &[usize] {
         &[]
     }
+
+    /// What the engine does with this drafter's proposal beyond pricing it.
+    ///
+    /// The default: the engine prices the proposal with [`choose_k`] over the
+    /// drafter's confidences, verifies what is worth verifying, and parks
+    /// nothing.
+    fn policy(&self) -> DraftPolicy {
+        DraftPolicy::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +284,8 @@ struct Pending {
     cells: Vec<crate::suffix::Cell>,
     /// How many of them the target has committed and matched.
     accepted: usize,
+    /// Whether a proposal is under way.
+    live: bool,
 }
 
 /// Suffix-indexed drafting as a [`Drafter`]: the longest match of the
@@ -262,13 +296,18 @@ struct Pending {
 /// ([`Drafter::rollback`]). What it proposes is the match's continuation with
 /// the confidence the index has learned for each of its tokens; how much of it
 /// is verified is the engine's decision ([`choose_k`]).
+///
+/// Nothing here allocates per proposal: the index's proposal is written into a
+/// buffer the drafter owns, and so is the proposal being verified.
 pub struct SuffixDrafter {
     /// The n-gram index over the corpus, and the confidence it has learned.
     index: crate::suffix::SuffixIndex,
     /// The committed tokens: the corpus the index searches.
     ctx: Vec<u32>,
     /// The proposal being verified, if any.
-    pending: Option<Pending>,
+    pending: Pending,
+    /// The proposal the index makes, reused so a draft costs no allocation.
+    draft: crate::suffix::Draft,
     /// The shortest suffix accepted as a match; 0 disables drafting.
     min_order: usize,
     /// The most tokens one proposal may hold.
@@ -284,7 +323,14 @@ impl SuffixDrafter {
         SuffixDrafter {
             index: crate::suffix::SuffixIndex::new(),
             ctx: Vec::new(),
-            pending: None,
+            pending: Pending {
+                anchor_pos: 0,
+                toks: Vec::new(),
+                cells: Vec::new(),
+                accepted: 0,
+                live: false,
+            },
+            draft: crate::suffix::Draft::default(),
             min_order,
             max_len,
         }
@@ -311,6 +357,16 @@ impl Drafter for SuffixDrafter {
         }
     }
 
+    fn policy(&self) -> DraftPolicy {
+        // The suffix index's confidences are learned from what verification
+        // accepted: a confidence that is never tested never recovers, so the
+        // engine probes now and then (as the session does).
+        DraftPolicy {
+            probe: true,
+            ..DraftPolicy::default()
+        }
+    }
+
     fn propose(
         &mut self,
         anchor: u32,
@@ -321,31 +377,31 @@ impl Drafter for SuffixDrafter {
         out: &mut Proposal,
     ) {
         out.clear();
-        self.pending = None;
+        self.pending.live = false;
         let k = k_max.min(self.max_len);
         if k == 0 || self.min_order == 0 || self.ctx.is_empty() {
             return;
         }
         self.index.sync(&self.ctx, self.min_order);
-        let d = self.index.propose(&self.ctx, anchor, k, self.min_order);
-        if d.toks.is_empty() {
+        self.index
+            .propose_into(&self.ctx, anchor, k, self.min_order, &mut self.draft);
+        if self.draft.toks.is_empty() {
             // No match: whatever run was under way is over.
             self.index.cool();
             return;
         }
-        out.toks.extend_from_slice(&d.toks);
-        for &c in &d.cells {
+        out.toks.extend_from_slice(&self.draft.toks);
+        for &c in &self.draft.cells {
             out.conf.push(self.index.conf(c));
         }
-        let mut pending = Pending {
-            anchor_pos,
-            toks: Vec::with_capacity(d.toks.len()),
-            cells: Vec::with_capacity(d.cells.len()),
-            accepted: 0,
-        };
-        pending.toks.extend_from_slice(&d.toks);
-        pending.cells.extend_from_slice(&d.cells);
-        self.pending = Some(pending);
+        let p = &mut self.pending;
+        p.anchor_pos = anchor_pos;
+        p.toks.clear();
+        p.toks.extend_from_slice(&self.draft.toks);
+        p.cells.clear();
+        p.cells.extend_from_slice(&self.draft.cells);
+        p.accepted = 0;
+        p.live = true;
     }
 
     fn commit(&mut self, pos: usize, token: u32, _taps: &[f32], _hidden: &[f32], _pool: &Pool) {
@@ -358,9 +414,10 @@ impl Drafter for SuffixDrafter {
         }
         // Was it one of the drafted tokens? A match is an acceptance, a
         // mismatch ends the run: the tokens after it were never tested.
-        let Some(p) = self.pending.as_mut() else {
+        let p = &mut self.pending;
+        if !p.live {
             return;
-        };
+        }
         let Some(j) = pos.checked_sub(p.anchor_pos + 1) else {
             return;
         };
@@ -371,16 +428,15 @@ impl Drafter for SuffixDrafter {
             p.accepted = j + 1;
             if p.accepted == p.toks.len() {
                 // The whole draft survived.
-                let cells = std::mem::take(&mut p.cells);
-                self.index.observe(&cells, p.accepted);
-                self.pending = None;
+                let accepted = p.accepted;
+                self.index.observe(&p.cells, accepted);
+                p.live = false;
             }
         } else {
             // Rejected at depth `j`: the tokens before it were accepted, this
             // one was not, and the rest were never tested.
-            let cells = std::mem::take(&mut p.cells);
-            self.index.observe(&cells, j);
-            self.pending = None;
+            self.index.observe(&p.cells, j);
+            p.live = false;
         }
     }
 
@@ -390,17 +446,15 @@ impl Drafter for SuffixDrafter {
         }
         // A proposal whose positions were not committed was not verified: the
         // run it belonged to is over.
-        if let Some(p) = &self.pending {
-            if p.anchor_pos + 1 >= pos {
-                self.index.cool();
-                self.pending = None;
-            }
+        if self.pending.live && self.pending.anchor_pos + 1 >= pos {
+            self.index.cool();
+            self.pending.live = false;
         }
     }
 
     fn reset(&mut self) {
         self.ctx.clear();
-        self.pending = None;
+        self.pending.live = false;
         // The corpus is forgotten; what the index learned about how reliable
         // each kind of match is is kept.
         self.index.clear();
@@ -468,6 +522,18 @@ impl Drafter for DsparkDrafter {
         &self.drafter.cfg.target_layer_ids
     }
 
+    fn policy(&self) -> DraftPolicy {
+        DraftPolicy {
+            // `PEREGRINE_DSPARK_K` pins the draft count for a measurement: exactly
+            // that many drafts are verified, whatever the confidences say.
+            pinned_k: crate::options::get().dspark.k,
+            // A drafting round that does not pay for itself parks drafting for a
+            // while, as the session does with this head.
+            park: true,
+            probe: false,
+        }
+    }
+
     fn propose(
         &mut self,
         anchor: u32,
@@ -528,6 +594,10 @@ impl Drafter for DsparkDrafter {
 /// that are committed are fed as they are committed; the anchor's row is fed
 /// with the proposal, because the anchor is not committed yet when it is
 /// proposed.
+///
+/// The committed rows wait in a buffer and are fed in one batch: the block
+/// reads its weights once per call, so a row at a time would read them once
+/// per token. The buffer is the engine's own — a draft costs no allocation.
 #[cfg(feature = "mtp")]
 pub struct MtpDrafter {
     model: std::sync::Arc<crate::model::Model>,
@@ -536,22 +606,18 @@ pub struct MtpDrafter {
     /// The hidden state of the last committed position: the block's row for
     /// the anchor reads it.
     hprev: Vec<f32>,
-    /// The row an accepted draft leaves owed.
-    owed: Option<Owed>,
-    /// The last proposal: the anchor's position and the token proposed after it.
-    proposal: Option<(usize, u32)>,
+    /// The next position the block's cache needs: the committed rows before it
+    /// are fed, or wait in the buffer.
+    next_pos: usize,
+    /// The committed rows the block has not seen yet: their tokens, their
+    /// positions, and the hidden state each of their rows reads.
+    pending_toks: Vec<u32>,
+    pending_pos: Vec<usize>,
+    pending_hidden: Vec<f32>,
+    /// Whether the block has failed: a broken block drafts nothing.
+    broken: bool,
     /// The block's own forward statistics.
     stats: crate::model::StepStats,
-}
-
-/// The row an accepted draft leaves owed: the token that survived, the hidden
-/// state of the position before it (what the block's row at that position
-/// reads) and the position the row sits at.
-#[cfg(feature = "mtp")]
-struct Owed {
-    token: u32,
-    hidden: Vec<f32>,
-    pos: usize,
 }
 
 #[cfg(feature = "mtp")]
@@ -568,8 +634,11 @@ impl MtpDrafter {
             model,
             ms,
             hprev: vec![0.0; d],
-            owed: None,
-            proposal: None,
+            next_pos: 0,
+            pending_toks: Vec::new(),
+            pending_pos: Vec::new(),
+            pending_hidden: Vec::new(),
+            broken: false,
             stats: crate::model::StepStats::default(),
         })
     }
@@ -577,24 +646,31 @@ impl MtpDrafter {
     /// The hidden state of a position, exactly `d_model` wide.
     fn set_hidden(&mut self, hidden: &[f32]) {
         let d = self.model.cfg.d_model;
-        self.hprev.clear();
-        self.hprev.resize(d, 0.0);
         let n = hidden.len().min(d);
         self.hprev[..n].copy_from_slice(&hidden[..n]);
+        self.hprev[n..].fill(0.0);
     }
 
-    /// Feed the block's row for `pos`: the token committed there and the hidden
-    /// state of the position before it.
-    fn feed_row(&mut self, pos: usize, token: u32, hidden: &[f32], pool: &Pool) {
-        let _ = self.model.mtp_forward(
+    /// Feed the block the rows waiting in the buffer: the committed positions
+    /// it has not seen. One call, one read of the block's weights.
+    fn flush(&mut self, pool: &Pool) -> Result<(), String> {
+        if self.pending_toks.is_empty() {
+            return Ok(());
+        }
+        let r = self.model.mtp_forward(
             &mut self.ms,
             pool,
-            &[token],
-            hidden,
-            &[pos],
+            &self.pending_toks,
+            &self.pending_hidden,
+            &self.pending_pos,
             false,
             &mut self.stats,
         );
+        self.pending_toks.clear();
+        self.pending_pos.clear();
+        self.pending_hidden.clear();
+        self.next_pos = self.ms.kv.filled();
+        r.map(|_| ())
     }
 }
 
@@ -617,70 +693,63 @@ impl Drafter for MtpDrafter {
         out: &mut Proposal,
     ) {
         out.clear();
-        if k_max == 0 {
+        if k_max == 0 || self.broken {
             return;
         }
         let d = self.model.cfg.d_model;
-        let mut tokens = Vec::with_capacity(2);
-        let mut hidden = Vec::with_capacity(2 * d);
-        let mut positions = Vec::with_capacity(2);
-        // The row an accepted draft left owed comes first: the block's rows
-        // must continue its cache in order.
-        if let Some(o) = self.owed.take() {
-            tokens.push(o.token);
-            hidden.extend_from_slice(&o.hidden);
-            positions.push(o.pos);
+        // The anchor's row joins the committed rows the block has not seen: one
+        // call, one read of the block's weights. When they do not fit in one
+        // call, the committed rows go first and the anchor follows alone.
+        if self.pending_toks.len() + 1 > crate::model::mtp::MTP_MAX_ROWS
+            && self.flush(pool).is_err()
+        {
+            self.broken = true;
+            return;
         }
-        tokens.push(anchor);
-        hidden.extend_from_slice(&self.hprev);
-        positions.push(anchor_pos);
-        match self.model.mtp_forward(
+        self.pending_toks.push(anchor);
+        self.pending_pos.push(anchor_pos);
+        self.pending_hidden.extend_from_slice(&self.hprev[..d]);
+        let r = self.model.mtp_forward(
             &mut self.ms,
             pool,
-            &tokens,
-            &hidden,
-            &positions,
+            &self.pending_toks,
+            &self.pending_hidden,
+            &self.pending_pos,
             true,
             &mut self.stats,
-        ) {
+        );
+        self.pending_toks.clear();
+        self.pending_pos.clear();
+        self.pending_hidden.clear();
+        self.next_pos = self.ms.kv.filled();
+        match r {
             Ok(Some(t)) => {
                 out.toks.push(t);
                 // The block has no confidence head: its single draft is always
                 // verified, so it is as good as it gets.
                 out.conf.push(1.0);
-                self.proposal = Some((anchor_pos, t));
             }
             // Not fatal: the slot decodes plainly from here.
             Ok(None) => {}
-            Err(_) => {}
+            Err(_) => self.broken = true,
         }
     }
 
     fn commit(&mut self, pos: usize, token: u32, _taps: &[f32], hidden: &[f32], pool: &Pool) {
-        // Was the committed token the drafted one? Then it survived, and the
-        // block owes a row for it: the row reads the hidden state of the
-        // position before it, which is the last committed one.
-        let mut owed = None;
-        if let Some((anchor_pos, drafted)) = self.proposal {
-            if pos == anchor_pos + 1 {
-                if drafted == token {
-                    owed = Some(Owed {
-                        token,
-                        hidden: self.hprev.clone(),
-                        pos,
-                    });
-                }
-                self.proposal = None;
+        if pos == self.next_pos && !self.broken {
+            // A position the block's cache has not seen: its row is the token
+            // committed there and the hidden state of the position before it,
+            // which is what the block's row at that position reads.
+            let d = self.model.cfg.d_model;
+            self.pending_toks.push(token);
+            self.pending_pos.push(pos);
+            self.pending_hidden.extend_from_slice(&self.hprev[..d]);
+            self.next_pos += 1;
+            if self.pending_toks.len() >= crate::model::mtp::MTP_MAX_ROWS
+                && self.flush(pool).is_err()
+            {
+                self.broken = true;
             }
-        }
-        if owed.is_none() && pos == self.ms.kv.filled() {
-            // A position no proposal covered: the block's row for it is fed
-            // now, as the engine's cache catch-up does.
-            let h = self.hprev.clone();
-            self.feed_row(pos, token, &h, pool);
-        }
-        if let Some(o) = owed {
-            self.owed = Some(o);
         }
         if !hidden.is_empty() {
             self.set_hidden(hidden);
@@ -690,20 +759,28 @@ impl Drafter for MtpDrafter {
     fn rollback(&mut self, pos: usize) {
         // The block's cache drops the positions that were not committed.
         self.model.mtp_truncate(&mut self.ms, pos);
-        if let Some((anchor_pos, _)) = self.proposal {
-            if anchor_pos + 1 >= pos {
-                self.proposal = None;
-            }
-        }
-        if self.owed.as_ref().is_some_and(|o| o.pos >= pos) {
-            self.owed = None;
+        // The rows waiting in the buffer go back with the cache.
+        let start = self.next_pos.saturating_sub(self.pending_toks.len());
+        let keep = pos.saturating_sub(start).min(self.pending_toks.len());
+        self.pending_toks.truncate(keep);
+        self.pending_pos.truncate(keep);
+        let d = self.model.cfg.d_model;
+        self.pending_hidden.truncate(keep * d);
+        self.next_pos = start + keep;
+        if self.next_pos != self.ms.kv.filled() {
+            // The cache was cut below the rows the block had: it cannot catch
+            // up again, and drafts nothing from here.
+            self.broken = true;
         }
     }
 
     fn reset(&mut self) {
         self.model.mtp_truncate(&mut self.ms, 0);
-        self.proposal = None;
-        self.owed = None;
+        self.pending_toks.clear();
+        self.pending_pos.clear();
+        self.pending_hidden.clear();
+        self.next_pos = 0;
+        self.broken = false;
         self.set_hidden(&[]);
     }
 }
