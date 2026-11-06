@@ -12,7 +12,9 @@
 //! sequence's `KvCache` (so several users batched in one pass each carry their own), and the rotation.
 
 use super::*;
-use crate::hadamard::fwht;
+use crate::blocks::par::{RecScratch, RowPtrs, SnapPtrs};
+use crate::blocks::recurrent::{self, RecurrentCfg};
+use crate::blocks::rotate::{Rotation, RowPrep, VPerm};
 use std::sync::atomic::{AtomicU64, Ordering as AO};
 
 // Profiling buckets (`PEREGRINE_PROF=1`): wall nanoseconds per part of the hybrid pass, read by `profile()`.
@@ -101,6 +103,16 @@ impl HybridCfg {
     fn is_attn(&self, layer: usize) -> bool {
         (layer + 1) % self.interval == 0
     }
+    /// The Gated DeltaNet geometry, for the recurrent block's steps.
+    pub(crate) fn recurrent(&self) -> RecurrentCfg {
+        RecurrentCfg {
+            n_k_heads: self.n_k_heads,
+            n_v_heads: self.n_v_heads,
+            dk: self.dk,
+            dv: self.dv,
+            d_conv: self.d_conv,
+        }
+    }
 }
 
 pub(super) enum Mixer {
@@ -143,8 +155,8 @@ pub(super) struct HLayer {
 pub(super) struct Hybrid {
     pub cfg: HybridCfg,
     layers: Vec<HLayer>,
-    /// `signs / √block` per input width.
-    signs: Vec<(usize, Vec<f32>)>,
+    /// The Hadamard rotation's data: the sign vector of every input width and the block size.
+    rot: Rotation,
     /// `ssm_out`'s input is permuted from tiled to grouped v-head order before its rotation.
     v_grouped: bool,
 }
@@ -164,6 +176,11 @@ pub struct HyScratch {
     rot_w: usize,
     /// GDN output per row, `value_dim`.
     o: Vec<f32>,
+    /// Runs of rows sharing one cache, and the caches already seen, reused every call.
+    runs: Vec<(usize, usize, usize)>,
+    seen: Vec<usize>,
+    /// Recurrent-state pointers for the delta-rule and conv workers, reused every layer.
+    ptrs: RecScratch,
 }
 
 impl HyScratch {
@@ -180,29 +197,13 @@ impl HyScratch {
             rot: vec![0.0; b * rot_w],
             rot_w,
             o: vec![0.0; b * h.value_dim()],
+            runs: Vec::with_capacity(b),
+            seen: Vec::with_capacity(b),
+            ptrs: RecScratch {
+                rec: vec![(std::ptr::null_mut(), std::ptr::null_mut()); b],
+                snap: vec![None; b],
+            },
         }
-    }
-}
-
-/// A per-row step fused into a rotation's pass: `(row index, row)`.
-type RowPrep<'a> = dyn Fn(usize, &mut [f32]) + Sync + 'a;
-
-/// Raw per-row state pointers for the delta-rule workers.
-#[derive(Clone, Copy)]
-struct RowPtrs(*const (*mut f32, *mut f32));
-// SAFETY: each (row's state, head) region is written by exactly one task; rows of a shared cache are processed in
-// order by the task that owns the head.
-unsafe impl Send for RowPtrs {}
-unsafe impl Sync for RowPtrs {}
-
-impl RowPtrs {
-    /// Row `b`'s (state, conv) pointers. A method, so a closure captures the wrapper (Send + Sync), not its field.
-    ///
-    /// # Safety
-    /// `b` must be inside the pointer array, which must outlive the call.
-    #[inline(always)]
-    unsafe fn at(self, b: usize) -> (*mut f32, *mut f32) {
-        *self.0.add(b)
     }
 }
 
@@ -411,7 +412,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
     let mut tb_span = 0usize;
     #[cfg(target_arch = "x86_64")]
     {
-        let want = !ptq1 && crate::tern::have_zmm() && crate::options::get().tiles;
+        let want = !ptq1 && crate::table::MatKernels::get().tiles() && crate::options::get().tiles;
         let mut mats: Vec<&mut TensorInfo> = Vec::new();
         for l in layers.iter_mut() {
             mats.extend([&mut l.gate, &mut l.up, &mut l.down]);
@@ -478,7 +479,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
     let hy = Hybrid {
         cfg: hc,
         layers,
-        signs,
+        rot: Rotation::new(signs, hc.had_block),
         v_grouped,
     };
     for w in [d_model, n_ff, hc.value_dim(), cfg.q_dim()] {
@@ -490,7 +491,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
         None
     };
     Ok(Model {
-        g,
+        w: Weights { g, tiles },
         cfg,
         tk,
         tok_embd,
@@ -503,56 +504,32 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
         layers: Vec::new(),
         mtp,
         hy: Some(hy),
-        tiles,
     })
 }
 
 impl Hybrid {
+    /// The Hadamard sign vector of an input width.
+    #[inline]
     fn signs_for(&self, width: usize) -> Result<&[f32], String> {
-        self.signs
-            .iter()
-            .find(|(w, _)| *w == width)
-            .map(|(_, s)| s.as_slice())
-            .ok_or_else(|| format!("no Hadamard sign vector for input width {width}"))
+        self.rot.signs_for(width)
+    }
+    /// The tiled→grouped v-head permutation, when the call asks for it.
+    #[inline]
+    fn vperm(&self, perm: bool) -> Option<VPerm> {
+        perm.then_some(VPerm {
+            dv: self.cfg.dv,
+            n_k_heads: self.cfg.n_k_heads,
+            n_v_heads: self.cfg.n_v_heads,
+        })
     }
 }
 
 /// Runs of at most this many rows of one cache attend one row at a time (see the attention call).
 const SHORT_RUN: usize = 4;
 
-#[inline]
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
-
-#[inline]
-fn softplus(x: f32) -> f32 {
-    if x > 20.0 {
-        x
-    } else {
-        (1.0 + x.exp()).ln()
-    }
-}
-
-/// `Σ a·b` over 128-ish slices, in eight-lane order (the reference sums in order; the difference is rounding).
-#[inline]
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    let mut acc = [0.0f32; 8];
-    let n = a.len() / 8 * 8;
-    for i in (0..n).step_by(8) {
-        for l in 0..8 {
-            acc[l] += a[i + l] * b[i + l];
-        }
-    }
-    let mut s = acc.iter().sum::<f32>();
-    for i in n..a.len() {
-        s += a[i] * b[i];
-    }
-    s
-}
-
 impl Model {
     /// Row `token` of the (latent) embedding table in the primal basis: dequantised, then `s ⊙ H·row`.
+    #[inline]
     pub(super) fn embed_primal(
         &self,
         token: u32,
@@ -562,12 +539,7 @@ impl Model {
         let hy = self.hy();
         let se = hy.signs_for(self.cfg.d_model)?;
         self.embed(token, row, stats);
-        for ch in row.chunks_exact_mut(hy.cfg.had_block) {
-            fwht(ch);
-        }
-        for (v, s) in row.iter_mut().zip(se) {
-            *v *= s;
-        }
+        hy.rot.rotate_embedding(row, se);
         Ok(())
     }
 
@@ -590,11 +562,15 @@ impl Model {
             return Err("the hybrid head is dense".into());
         };
         let rows = rows.min(h.dims[1] as usize) / 16 * 16;
-        let mut part = h.clone();
-        part.dims[1] = rows as u64;
         self.rotate_rows(hs, acts, y, d, nb, false, pool, stats);
-        self.mm(
-            &[(&part, logits.as_mut_ptr())],
+        // The head reads only its first `rows` output rows; narrowing the job keeps the full `TensorInfo`
+        // borrowed instead of cloning it, which would allocate on every draft step.
+        self.mm_jobs(
+            &[MatJob {
+                w: h,
+                out: OutPtr(logits.as_mut_ptr()),
+                rows: Some(rows),
+            }],
             &acts[..nb],
             nb,
             pool,
@@ -655,54 +631,21 @@ impl Model {
         pool: &Pool,
         stats: &mut StepStats,
     ) {
-        let hy = self.hy();
-        let hc = hy.cfg;
         let _t = Tick::new(2);
-        let ss = hy.signs_for(w).expect("sign vector checked at load");
-        let blk = hc.had_block;
-        let rw = hs.rot_w;
-        let rot = SharedBuf(hs.rot.as_mut_ptr());
-        let ap = SharedActs(acts.as_mut_ptr());
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let body = |_wk: usize, _nw: usize| loop {
-            let b = next.fetch_add(1, AO::Relaxed);
-            if b >= nb {
-                break;
-            }
-            // SAFETY: row `b` of `src`, of `rot` and `acts[b]` is claimed by this worker alone.
-            let x = unsafe { src.slice(b * w, w) };
-            if let Some(f) = pre {
-                f(b, x);
-            }
-            let r = unsafe { rot.slice(b * rw, w) };
-            if perm {
-                let (hd, nk, rep) = (hc.dv, hc.n_k_heads, hc.n_v_heads / hc.n_k_heads);
-                for rr in 0..rep {
-                    for gg in 0..nk {
-                        let s = (rr * nk + gg) * hd;
-                        let d = (gg * rep + rr) * hd;
-                        r[d..d + hd].copy_from_slice(&x[s..s + hd]);
-                    }
-                }
-                for (v, s) in r.iter_mut().zip(ss) {
-                    *v *= s;
-                }
-            } else {
-                for ((v, &xi), s) in r.iter_mut().zip(x.iter()).zip(ss) {
-                    *v = xi * s;
-                }
-            }
-            for c in r.chunks_exact_mut(blk) {
-                fwht(c);
-            }
-            unsafe { ap.get(b) }.fill(r);
-        };
-        if nb >= ROW_PARALLEL && pool.width() > 1 {
-            pool.run(body);
-            stats.barriers += 1;
-        } else {
-            body(0, 1);
-        }
+        let hy = self.hy();
+        hy.rot.rotate_rows_pre(
+            &mut hs.rot,
+            hs.rot_w,
+            acts,
+            src,
+            w,
+            nb,
+            hy.vperm(perm),
+            pre,
+            nb >= ROW_PARALLEL && pool.width() > 1,
+            pool,
+            stats,
+        );
     }
 
     pub(super) fn mm(
@@ -713,14 +656,32 @@ impl Model {
         pool: &Pool,
         stats: &mut StepStats,
     ) {
-        let mut mj = [None; 4];
-        for (i, (w, o)) in jobs.iter().enumerate() {
-            mj[i] = Some(MatJob { w, out: OutPtr(*o) });
-        }
-        let mj: Vec<MatJob> = mj.iter().flatten().copied().collect();
+        assert!(!jobs.is_empty() && jobs.len() <= 4);
+        let mj: [MatJob; 4] = std::array::from_fn(|i| {
+            let (w, o) = jobs[i.min(jobs.len() - 1)];
+            MatJob {
+                w,
+                out: OutPtr(o),
+                rows: None,
+            }
+        });
+        let mj = &mj[..jobs.len()];
+        self.mm_jobs(mj, acts, nb, pool, stats);
+    }
+
+    /// One matmul group with its jobs already described, so a caller can narrow a matrix's output rows (the MTP
+    /// draft head) without cloning its `TensorInfo` — that clone allocated a `String` and a `Vec` per draft step.
+    fn mm_jobs(
+        &self,
+        mj: &[MatJob],
+        acts: &[QuantAct],
+        nb: usize,
+        pool: &Pool,
+        stats: &mut StepStats,
+    ) {
         let _t = Tick::new(3);
         let t0 = prof_on().then(Instant::now);
-        self.matmul_group(&mj, acts, nb, pool, stats);
+        self.matmul_group(mj, acts, nb, pool, stats);
         if let Some(t0) = t0 {
             let bytes: u64 = mj.iter().map(|j| j.w.bytes()).sum();
             let k = if bytes < 8 << 20 {
@@ -762,22 +723,30 @@ impl Model {
         // A recurrent state advances one token at a time: each cache's rows must be one run of consecutive
         // positions starting where the cache ends, or the state would silently describe another sequence.
         {
-            let runs = caches.runs(nb);
-            let mut seen: Vec<usize> = Vec::with_capacity(runs.len());
-            for &(r0, len, ci) in &runs {
-                let ok = !seen.contains(&ci)
-                    && positions[r0] == caches.cache(ci).filled()
-                    && (1..len).all(|k| positions[r0 + k] == positions[r0] + k);
-                if !ok {
-                    st8.hy = Some(hs);
-                    return Err(format!(
-                        "rows {r0}..{} do not continue their recurrent cache in order (cache holds {}, row starts at {})",
-                        r0 + len,
-                        caches.cache(ci).filled(),
-                        positions[r0]
-                    ));
+            caches.runs_into(nb, &mut hs.runs);
+            let mut err = None;
+            {
+                let seen = &mut hs.seen;
+                seen.clear();
+                for &(r0, len, ci) in &hs.runs {
+                    let ok = !seen.contains(&ci)
+                        && positions[r0] == caches.cache(ci).filled()
+                        && (1..len).all(|k| positions[r0 + k] == positions[r0] + k);
+                    if !ok {
+                        err = Some(format!(
+                            "rows {r0}..{} do not continue their recurrent cache in order (cache holds {}, row starts at {})",
+                            r0 + len,
+                            caches.cache(ci).filled(),
+                            positions[r0]
+                        ));
+                        break;
+                    }
+                    seen.push(ci);
                 }
-                seen.push(ci);
+            }
+            if let Some(e) = err {
+                st8.hy = Some(hs);
+                return Err(e);
             }
         }
 
@@ -787,12 +756,7 @@ impl Model {
         for (i, &t) in tokens.iter().enumerate() {
             let row = &mut st8.x[i * d..(i + 1) * d];
             self.embed(t, row, stats);
-            for ch in row.chunks_exact_mut(hc.had_block) {
-                fwht(ch);
-            }
-            for (v, s) in row.iter_mut().zip(se) {
-                *v *= s;
-            }
+            hy.rot.rotate_embedding(row, se);
         }
 
         drop(te);
@@ -840,8 +804,8 @@ impl Model {
                     restride(&mut hs.big, hc.conv_dim(), hs.big_w, nb);
                     restride(&mut hs.z, hc.value_dim(), hs.z_w, nb);
                     self.gdn(
-                        &mut hs, st8, caches, ab, conv, dt_bias, a, norm, *idx, positions, nb,
-                        pool, stats,
+                        &mut hs, &st8.xb, caches, ab, conv, dt_bias, a, *idx, positions, nb, pool,
+                        stats,
                     );
                     let vd = hc.value_dim();
                     let mut o = std::mem::take(&mut hs.o);
@@ -850,7 +814,14 @@ impl Model {
                         let zw = hs.z_w;
                         let zr: &[f32] = &z;
                         let pre = |b: usize, row: &mut [f32]| {
-                            self.gated_norm_row(row, &zr[b * zw..b * zw + vd], norm)
+                            recurrent::gated_norm_row(
+                                row,
+                                &zr[b * zw..b * zw + vd],
+                                norm,
+                                hc.n_v_heads,
+                                hc.dv,
+                                c.eps,
+                            )
                         };
                         let op = SharedBuf(o.as_mut_ptr());
                         self.rotate_rows_pre(
@@ -1161,18 +1132,18 @@ impl Model {
     }
 
     /// The Gated DeltaNet core for one layer: conv, gates, delta rule and gated norm, from `hs.big` (qkv), `hs.z`
-    /// and the unrotated normed input `st8.xb`, into `hs.o`.
+    /// and the unrotated normed input `xb`, into `hs.o`. The steps themselves are the recurrent block's free
+    /// functions; this is the order they run in.
     #[allow(clippy::too_many_arguments)]
     fn gdn(
         &self,
         hs: &mut HyScratch,
-        st8: &mut State,
+        xb: &[f32],
         caches: &mut Caches,
         ab_w: &[f32],
         conv_w: &[f32],
         dt_bias: &[f32],
         a_log: &[f32],
-        norm_w: &[f32],
         idx: usize,
         positions: &[usize],
         nb: usize,
@@ -1180,271 +1151,81 @@ impl Model {
         stats: &mut StepStats,
     ) {
         let c = self.cfg;
-        let hc = self.hy().cfg;
-        let (d, nv, nk, dk, dv) = (c.d_model, hc.n_v_heads, hc.n_k_heads, hc.dk, hc.dv);
-        let (kd, vd, cd, taps) = (hc.key_dim(), hc.value_dim(), hc.conv_dim(), hc.d_conv - 1);
+        let rc = self.hy().cfg.recurrent();
+        let (d, nv) = (c.d_model, rc.n_v_heads);
 
         // β and α: `[2·n_v][d]` f32 against the unrotated normed rows, split across the pool by output.
         {
             let _t = Tick::new(4);
-            let xb: &[f32] = &st8.xb;
-            let out = SharedBuf(hs.ab.as_mut_ptr());
-            let n_out = 2 * nv;
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            pool.run(|_wk, _nw| loop {
-                let lo = next.fetch_add(4, AO::Relaxed);
-                if lo >= n_out {
-                    break;
-                }
-                for r in lo..(lo + 4).min(n_out) {
-                    let w = &ab_w[r * d..(r + 1) * d];
-                    for b in 0..nb {
-                        // SAFETY: output (b, r) belongs to the worker claiming r.
-                        let v = crate::vmath::dot_f32(w, &xb[b * d..(b + 1) * d]);
-                        unsafe { out.slice(b * n_out + r, 1)[0] = v };
-                    }
-                }
-            });
-            stats.barriers += 1;
-            stats.bytes_weights += (ab_w.len() * 4) as u64;
-            stats.macs += (ab_w.len() * nb) as u64;
+            recurrent::beta_alpha(&mut hs.ab, ab_w, xb, d, nv, nb, pool, stats);
         }
+
+        // The state and conv pointers of every row, taken once per cache (rows of one cache share them):
+        // re-borrowing a cache per row would invalidate the pointers taken before.
+        caches.runs_into(nb, &mut hs.runs);
+        recurrent::rec_ptrs(
+            &hs.runs,
+            |ci| caches.cache_mut(ci).recurrent_ptrs(idx),
+            &mut hs.ptrs.rec,
+        );
+        recurrent::snap_ptrs(
+            &hs.runs,
+            |ci| caches.cache_mut(ci).snapshot_ptrs(idx),
+            &mut hs.ptrs.snap,
+        );
+        let (rp, spp) = (
+            RowPtrs(hs.ptrs.rec.as_ptr()),
+            SnapPtrs(hs.ptrs.snap.as_ptr()),
+        );
 
         // Conv, SiLU, L2 norms and the gate maths, row by row in order: a shared cache's conv history advances
         // one token per row.
-        let q_scale = 1.0 / (dk as f32).sqrt();
         let tc = Tick::new(5);
-        // Conv: channels are independent, so a worker takes a channel range and runs every row through it in
-        // order (a shared cache's history advances one token per row). The history is a ring of `taps` planes of
-        // `cd` channels: the input at position p sits in plane p mod taps, so the oldest of the window ending at
-        // `pos` is plane pos mod taps, the one this token overwrites after the sum.
-        {
-            let ptrs = rec_ptrs(caches, idx, nb);
-            let rp = RowPtrs(ptrs.as_ptr());
-            let snaps = snap_ptrs(caches, idx, nb);
-            let spp = SnapPtrs(snaps.as_ptr());
-            let bigp = SharedBuf(hs.big.as_mut_ptr());
-            let bw = hs.big_w;
-            let wcur = &conv_w[taps * cd..(taps + 1) * cd];
-            const C: usize = 256;
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            pool.run(|_wk, _nw| {
-                let mut acc = [0.0f32; C];
-                loop {
-                    let c0 = next.fetch_add(C, AO::Relaxed);
-                    if c0 >= cd {
-                        break;
-                    }
-                    let c1 = (c0 + C).min(cd);
-                    for b in 0..nb {
-                        // SAFETY: channels c0..c1 of every row's buffer and history are this worker's.
-                        let (_, hp) = unsafe { rp.at(b) };
-                        let pos = positions[b];
-                        let y = unsafe { bigp.slice(b * bw + c0, c1 - c0) };
-                        for (i, ch) in (c0..c1).enumerate() {
-                            acc[i] = y[i] * wcur[ch];
-                        }
-                        for t in 0..taps {
-                            let plane = (pos + t) % taps;
-                            let hist = unsafe {
-                                std::slice::from_raw_parts(hp.add(plane * cd + c0), c1 - c0)
-                            };
-                            let wt = &conv_w[t * cd + c0..t * cd + c1];
-                            for i in 0..c1 - c0 {
-                                acc[i] += hist[i] * wt[i];
-                            }
-                        }
-                        let slot = pos % taps;
-                        let dst = unsafe {
-                            std::slice::from_raw_parts_mut(hp.add(slot * cd + c0), c1 - c0)
-                        };
-                        dst.copy_from_slice(y);
-                        y.copy_from_slice(&acc[..c1 - c0]);
-                        // A speculative verification's snapshot: this range of the history after its row.
-                        if let Some((sp, _, sconv)) = unsafe { spp.at(b) } {
-                            if pos == sp {
-                                for t in 0..taps {
-                                    unsafe {
-                                        std::ptr::copy_nonoverlapping(
-                                            hp.add(t * cd + c0),
-                                            sconv.add(t * cd + c0),
-                                            c1 - c0,
-                                        )
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-            stats.barriers += 1;
-        }
-        // SiLU, the q/k L2 norms and the gate maths, per row (rows are independent now).
-        {
-            let bigp = SharedBuf(hs.big.as_mut_ptr());
-            let abp = SharedBuf(hs.ab.as_mut_ptr());
-            let bw = hs.big_w;
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let body = |_wk: usize, _nw: usize| loop {
-                let b = next.fetch_add(1, AO::Relaxed);
-                if b >= nb {
-                    break;
-                }
-                // SAFETY: row b of `big` and of `ab` is claimed by this worker.
-                let y = unsafe { bigp.slice(b * bw, cd) };
-                crate::vmath::silu(y);
-                for (base, scale) in [(0usize, q_scale), (kd, 1.0)] {
-                    for h in 0..nk {
-                        let v = &mut y[base + h * dk..base + (h + 1) * dk];
-                        let n = crate::vmath::sumsq_f64(v).sqrt() as f32;
-                        let inv = 1.0 / n.max(1e-6) * scale;
-                        for x in v.iter_mut() {
-                            *x *= inv;
-                        }
-                    }
-                }
-                let ab = unsafe { abp.slice(b * 2 * nv, 2 * nv) };
-                for h in 0..nv {
-                    let beta = sigmoid(ab[h]);
-                    let g = a_log[h] * softplus(ab[nv + h] + dt_bias[h]);
-                    ab[h] = beta;
-                    ab[nv + h] = g.exp();
-                }
-            };
-            if nb >= ROW_PARALLEL && pool.width() > 1 {
-                pool.run(body);
-                stats.barriers += 1;
-            } else {
-                body(0, 1);
-            }
-        }
-
+        recurrent::causal_conv(
+            &mut hs.big,
+            hs.big_w,
+            conv_w,
+            rp,
+            spp,
+            &rc,
+            nb,
+            positions,
+            pool,
+            stats,
+        );
+        recurrent::silu_norm_gates(
+            &mut hs.big,
+            hs.big_w,
+            &mut hs.ab,
+            dt_bias,
+            a_log,
+            &rc,
+            nb,
+            nb >= ROW_PARALLEL && pool.width() > 1,
+            pool,
+            stats,
+        );
         drop(tc);
+
         let td = Tick::new(6);
-        // Delta rule: tasks are v-heads; a task runs its head through every row in order.
-        let ptrs = rec_ptrs(caches, idx, nb);
-        let rp = RowPtrs(ptrs.as_ptr());
-        let snaps = snap_ptrs(caches, idx, nb);
-        let spp = SnapPtrs(snaps.as_ptr());
-        let big: &[f32] = &hs.big;
-        let abv: &[f32] = &hs.ab;
-        let out = SharedBuf(hs.o.as_mut_ptr());
-        let bw = hs.big_w;
-        let shared = matches!(caches, Caches::Shared(_));
-        // Two tasks per head (each half of the state's rows), claimed dynamically so fast cores take more.
-        const SPLIT: usize = 2;
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        pool.run(|_wk, _nw| loop {
-            let task = next.fetch_add(1, AO::Relaxed);
-            if task >= nv * SPLIT {
-                break;
-            }
-            let (hv, part) = (task / SPLIT, task % SPLIT);
-            let (j0, j1) = (part * dv / SPLIT, (part + 1) * dv / SPLIT);
-            for b in 0..nb {
-                // SAFETY: `ptrs` outlives the call; rows j0..j1 of head `hv` of row `b`'s state are this task's.
-                let (sp, _) = unsafe { rp.at(b) };
-                let s = unsafe {
-                    std::slice::from_raw_parts_mut(sp.add((hv * dv + j0) * dk), (j1 - j0) * dk)
-                };
-                let y = &big[b * bw..];
-                let kh = hv % nk;
-                let q = &y[kh * dk..(kh + 1) * dk];
-                let k = &y[kd + kh * dk..kd + (kh + 1) * dk];
-                let v = &y[2 * kd + hv * dv..2 * kd + (hv + 1) * dv];
-                let beta = abv[b * 2 * nv + hv];
-                let decay = abv[b * 2 * nv + nv + hv];
-                let o = unsafe { out.slice(b * vd + hv * dv + j0, j1 - j0) };
-                delta_head(s, q, k, &v[j0..j1], beta, decay, o, dk);
-                // A speculative verification's snapshot: this task's slice of the state after its row.
-                if let Some((sp, sstate, _)) = unsafe { spp.at(b) } {
-                    if positions[b] == sp {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                s.as_ptr(),
-                                sstate.add((hv * dv + j0) * dk),
-                                s.len(),
-                            )
-                        };
-                    }
-                }
-            }
-        });
-        let _ = shared;
-        stats.barriers += 1;
-        stats.bytes_kv += (2
-            * hc.state_floats()
-            * 4
-            * if matches!(caches, Caches::Shared(_)) {
-                1
-            } else {
-                nb
-            }) as u64;
-        stats.macs += (4 * nv * dv * dk * nb) as u64;
-
+        // The delta rule: tasks are v-heads; a task runs its head through every row in order.
+        recurrent::delta_rule(
+            &hs.big,
+            hs.big_w,
+            &hs.ab,
+            &mut hs.o,
+            rp,
+            spp,
+            &rc,
+            nb,
+            positions,
+            matches!(caches, Caches::Shared(_)),
+            pool,
+            stats,
+        );
         drop(td);
-        // The gated RMSNorm runs in the ssm_out rotation's pass (`gated_norm_row`).
-        let _ = norm_w;
+        // The gated RMSNorm runs in the ssm_out rotation's pass (`recurrent::gated_norm_row`).
     }
-
-    /// Gated RMSNorm of one row of the GDN output, per head: rms(o_h)·w ⊙ silu(z_h).
-    fn gated_norm_row(&self, o: &mut [f32], z: &[f32], norm_w: &[f32]) {
-        let hc = self.hy().cfg;
-        let (nv, dv) = (hc.n_v_heads, hc.dv);
-        for h in 0..nv {
-            let oh = &mut o[h * dv..(h + 1) * dv];
-            let zh = &z[h * dv..(h + 1) * dv];
-            let ss = crate::vmath::sumsq_f64(oh) / dv as f64;
-            let inv = (1.0 / (ss + self.cfg.eps as f64).sqrt()) as f32;
-            for i in 0..dv {
-                oh[i] *= inv * norm_w[i];
-            }
-            crate::vmath::mul_silu(oh, zh);
-        }
-    }
-}
-
-/// Every row's (state, conv) pointers for recurrent layer `idx`, taken once per cache (rows of one cache share
-/// them): re-borrowing a cache per row would invalidate the pointers taken before.
-fn rec_ptrs(caches: &mut Caches, idx: usize, nb: usize) -> Vec<(*mut f32, *mut f32)> {
-    let mut out = vec![(std::ptr::null_mut(), std::ptr::null_mut()); nb];
-    for (r0, len, ci) in caches.runs(nb) {
-        let p = caches.cache_mut(ci).recurrent_ptrs(idx);
-        for slot in &mut out[r0..r0 + len] {
-            *slot = p;
-        }
-    }
-    out
-}
-
-/// Per row, the snapshot request of its cache for recurrent layer `idx`: (position, state, conv) pointers.
-#[derive(Clone, Copy)]
-struct SnapPtrs(*const Option<(usize, *mut f32, *mut f32)>);
-// SAFETY: as `RowPtrs`: each snapshot region is written by the task that owns it (a head slice, a channel range).
-unsafe impl Send for SnapPtrs {}
-unsafe impl Sync for SnapPtrs {}
-impl SnapPtrs {
-    /// # Safety
-    /// `b` must be inside the array, which must outlive the call.
-    #[inline(always)]
-    unsafe fn at(self, b: usize) -> Option<(usize, *mut f32, *mut f32)> {
-        *self.0.add(b)
-    }
-}
-
-fn snap_ptrs(
-    caches: &mut Caches,
-    idx: usize,
-    nb: usize,
-) -> Vec<Option<(usize, *mut f32, *mut f32)>> {
-    let mut out = vec![None; nb];
-    for (r0, len, ci) in caches.runs(nb) {
-        let p = caches.cache_mut(ci).snapshot_ptrs(idx);
-        for slot in &mut out[r0..r0 + len] {
-            *slot = p;
-        }
-    }
-    out
 }
 
 /// Matmul outputs land at row stride `from` (the matrix's row count); move them to stride `to` in place.
@@ -1454,167 +1235,5 @@ fn restride(buf: &mut [f32], from: usize, to: usize, nb: usize) {
     }
     for b in (0..nb).rev() {
         buf.copy_within(b * from..(b + 1) * from, b * to);
-    }
-}
-
-/// One v-head's delta rule for one token, row by row of the state `S` (`[dv][dk]`, row j = output j):
-/// `S ← e^g S; δ_j = β (v_j − S_j·k); S_j ← S_j + δ_j k; o_j = S_j·q`, in two passes over each row: the first
-/// takes `S_j·k` before decaying (`(e^g S_j)·k = e^g (S_j·k)`), the second writes the decayed, updated row and
-/// takes its dot with `q` on the way.
-#[allow(clippy::too_many_arguments)]
-fn delta_head(
-    s: &mut [f32],
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    beta: f32,
-    decay: f32,
-    o: &mut [f32],
-    dk: usize,
-) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if dk % 64 == 0 && crate::tern::have_vnni() {
-            // SAFETY: AVX-512F checked (implied by the VNNI check); rows are dk long, a multiple of 64.
-            unsafe { delta_head_avx512(s, q, k, v, beta, decay, o, dk) };
-            return;
-        }
-        if dk % 16 == 0 && crate::simd::have_batched() {
-            // SAFETY: AVX2 + FMA checked; every row is dk long and dk is a multiple of 16.
-            unsafe { delta_head_avx2(s, q, k, v, beta, decay, o, dk) };
-            return;
-        }
-    }
-    for j in 0..o.len() {
-        let row = &mut s[j * dk..(j + 1) * dk];
-        let delta = (v[j] - decay * dot(row, k)) * beta;
-        for (x, &kk) in row.iter_mut().zip(k) {
-            *x = *x * decay + delta * kk;
-        }
-        o[j] = dot(row, q);
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-#[allow(clippy::too_many_arguments)]
-unsafe fn delta_head_avx2(
-    s: &mut [f32],
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    beta: f32,
-    decay: f32,
-    o: &mut [f32],
-    dk: usize,
-) {
-    use std::arch::x86_64::*;
-    let dec = _mm256_set1_ps(decay);
-    for j in 0..o.len() {
-        let row = s.as_mut_ptr().add(j * dk);
-        let (mut a0, mut a1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
-        let mut i = 0;
-        while i < dk {
-            a0 = _mm256_fmadd_ps(
-                _mm256_loadu_ps(row.add(i)),
-                _mm256_loadu_ps(k.as_ptr().add(i)),
-                a0,
-            );
-            a1 = _mm256_fmadd_ps(
-                _mm256_loadu_ps(row.add(i + 8)),
-                _mm256_loadu_ps(k.as_ptr().add(i + 8)),
-                a1,
-            );
-            i += 16;
-        }
-        let sk = crate::simd::hsum_ps(_mm256_add_ps(a0, a1));
-        let delta = _mm256_set1_ps((v[j] - decay * sk) * beta);
-        let (mut b0, mut b1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
-        let mut i = 0;
-        while i < dk {
-            let r0 = _mm256_fmadd_ps(
-                delta,
-                _mm256_loadu_ps(k.as_ptr().add(i)),
-                _mm256_mul_ps(_mm256_loadu_ps(row.add(i)), dec),
-            );
-            let r1 = _mm256_fmadd_ps(
-                delta,
-                _mm256_loadu_ps(k.as_ptr().add(i + 8)),
-                _mm256_mul_ps(_mm256_loadu_ps(row.add(i + 8)), dec),
-            );
-            _mm256_storeu_ps(row.add(i), r0);
-            _mm256_storeu_ps(row.add(i + 8), r1);
-            b0 = _mm256_fmadd_ps(r0, _mm256_loadu_ps(q.as_ptr().add(i)), b0);
-            b1 = _mm256_fmadd_ps(r1, _mm256_loadu_ps(q.as_ptr().add(i + 8)), b1);
-            i += 16;
-        }
-        o[j] = crate::simd::hsum_ps(_mm256_add_ps(b0, b1));
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx2,fma")]
-#[allow(clippy::too_many_arguments)]
-unsafe fn delta_head_avx512(
-    s: &mut [f32],
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    beta: f32,
-    decay: f32,
-    o: &mut [f32],
-    dk: usize,
-) {
-    use std::arch::x86_64::*;
-    let dec = _mm512_set1_ps(decay);
-    for j in 0..o.len() {
-        let row = s.as_mut_ptr().add(j * dk);
-        let (mut a0, mut a1) = (_mm512_setzero_ps(), _mm512_setzero_ps());
-        let mut i = 0;
-        while i < dk {
-            a0 = _mm512_fmadd_ps(
-                _mm512_loadu_ps(row.add(i)),
-                _mm512_loadu_ps(k.as_ptr().add(i)),
-                a0,
-            );
-            a1 = _mm512_fmadd_ps(
-                _mm512_loadu_ps(row.add(i + 16)),
-                _mm512_loadu_ps(k.as_ptr().add(i + 16)),
-                a1,
-            );
-            a0 = _mm512_fmadd_ps(
-                _mm512_loadu_ps(row.add(i + 32)),
-                _mm512_loadu_ps(k.as_ptr().add(i + 32)),
-                a0,
-            );
-            a1 = _mm512_fmadd_ps(
-                _mm512_loadu_ps(row.add(i + 48)),
-                _mm512_loadu_ps(k.as_ptr().add(i + 48)),
-                a1,
-            );
-            i += 64;
-        }
-        let sk = _mm512_reduce_add_ps(_mm512_add_ps(a0, a1));
-        let delta = _mm512_set1_ps((v[j] - decay * sk) * beta);
-        let (mut b0, mut b1) = (_mm512_setzero_ps(), _mm512_setzero_ps());
-        let mut i = 0;
-        while i < dk {
-            for u in 0..4 {
-                let at = i + 16 * u;
-                let r = _mm512_fmadd_ps(
-                    delta,
-                    _mm512_loadu_ps(k.as_ptr().add(at)),
-                    _mm512_mul_ps(_mm512_loadu_ps(row.add(at)), dec),
-                );
-                _mm512_storeu_ps(row.add(at), r);
-                if u % 2 == 0 {
-                    b0 = _mm512_fmadd_ps(r, _mm512_loadu_ps(q.as_ptr().add(at)), b0);
-                } else {
-                    b1 = _mm512_fmadd_ps(r, _mm512_loadu_ps(q.as_ptr().add(at)), b1);
-                }
-            }
-            i += 64;
-        }
-        o[j] = _mm512_reduce_add_ps(_mm512_add_ps(b0, b1));
     }
 }

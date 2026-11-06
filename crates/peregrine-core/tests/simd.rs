@@ -59,7 +59,7 @@ fn simd_and_scalar_agree_on_every_row_of_real_tensors() {
         "token_embd.weight",      // Q8_0
         "blk.0.attn_q.weight",    // Q5_0
         "blk.0.ffn_down.weight",  // Q6_K
-        "blk.12.ffn_down.weight", // Q4_K
+        "blk.10.ffn_down.weight", // Q4_K
     ];
     let mut seen: Vec<Format> = Vec::new();
     let mut rows_checked = 0usize;
@@ -137,7 +137,7 @@ fn both_paths_are_exactly_zero_on_a_zero_activation() {
     for name in [
         "blk.0.attn_q.weight",
         "blk.0.ffn_down.weight",
-        "blk.12.ffn_down.weight",
+        "blk.10.ffn_down.weight",
     ] {
         let t = g.tensor(name).expect(name);
         let n = t.dims[0] as usize;
@@ -174,8 +174,8 @@ fn sane(fmt: Format, w: &mut [u8]) {
     let fix = |b: &mut [u8], at: usize| b[at + 1] = (b[at + 1] & 0x0F) | 0x30;
     for blk in w.chunks_exact_mut(fmt.block_bytes()) {
         match fmt {
-            Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
-            Format::Q4_K => {
+            Format::Q8_0 | Format::Q5_0 | Format::Q4_0 => fix(blk, 0),
+            Format::Q4_K | Format::Q5_K => {
                 fix(blk, 0);
                 fix(blk, 2);
             }
@@ -190,8 +190,10 @@ fn batched_kernels_match_the_scalar_specification_at_every_batch_width() {
     use peregrine_core::quant::dot_batch;
     for (fmt, n) in [
         (Format::Q8_0, 960),
+        (Format::Q4_0, 960),
         (Format::Q5_0, 960),
         (Format::Q4_K, 2560),
+        (Format::Q5_K, 2560),
         (Format::Q6_K, 2560),
     ] {
         let mut w = prng_bytes(0xBEEF_0000 + n as u64, row_bytes(fmt, n));
@@ -233,7 +235,7 @@ fn batched_kernels_agree_on_rows_of_the_real_model() {
         "token_embd.weight",
         "blk.0.attn_q.weight",
         "blk.0.ffn_down.weight",
-        "blk.12.ffn_down.weight",
+        "blk.10.ffn_down.weight",
     ] {
         let t = g.tensor(name).expect(name);
         let n = t.dims[0] as usize;
