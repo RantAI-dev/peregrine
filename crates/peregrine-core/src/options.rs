@@ -41,6 +41,17 @@ pub struct DsparkOptions {
     pub dump: Option<PathBuf>,
 }
 
+/// The switches a tuning profile may set: `(environment variable, profile key)`. All are output-neutral —
+/// the golden tests check that tokens do not depend on the thread count, and spinning and prefetch only move
+/// time. Activation-layout switches such as `PEREGRINE_TQ_SPAN` / `PEREGRINE_TB_SPAN` change the quantised
+/// activations, hence the tokens, and are deliberately absent.
+pub const TUNABLE: &[(&str, &str)] = &[
+    ("PEREGRINE_SPIN_US", "spin_us"),
+    ("PEREGRINE_YIELD_US", "yield_us"),
+    ("PEREGRINE_DECODE_THREADS", "decode_threads"),
+    ("PEREGRINE_PF", "prefetch_bytes"),
+];
+
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineOptions {
@@ -151,6 +162,36 @@ impl EngineOptions {
     /// The options from the environment, with each switch's historical parsing rule.
     pub fn from_env() -> Self {
         Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// The options from the environment and an optional tuning profile:
+    /// environment variables win over the profile, the profile wins over defaults.
+    pub fn from_env_and_profile(profile: Option<&crate::profile::Profile>) -> Self {
+        Self::from_chained(|k| std::env::var(k).ok(), profile)
+    }
+
+    /// Build options from a custom key-lookup (e.g. environment) and a profile:
+    /// `get` wins over the profile, the profile wins over defaults.
+    pub fn from_chained(
+        get: impl Fn(&str) -> Option<String>,
+        profile: Option<&crate::profile::Profile>,
+    ) -> Self {
+        Self::from_lookup(|k| {
+            if let Some(v) = get(k) {
+                return Some(v);
+            }
+            let prof = profile?;
+            // Only settings that cannot change a token are read from a profile (ADR 0003, ADR 0005):
+            // thread counts, spin windows and prefetch distance. Anything else in the file is ignored.
+            let key_name = TUNABLE
+                .iter()
+                .find(|(env, _)| *env == k)
+                .map(|(_, key)| *key)?;
+            if let Some(val) = prof.get(key_name) {
+                return Some(val.to_string());
+            }
+            None
+        })
     }
 
     /// The options from any key → value lookup (the environment, a file, a test's map).
@@ -441,5 +482,69 @@ mod tests {
             nd,
             vec![("spin_us", "50".to_string()), ("mix", "false".to_string())]
         );
+    }
+
+    #[test]
+    fn env_over_profile_over_default_precedence() {
+        let prof = crate::profile::Profile {
+            peregrine_version: "0.1.0".into(),
+            cpu: "Test CPU".into(),
+            cpu_features: "x86_64-avx2".into(),
+            model_size: 1024,
+            model_fnv: 0x1234,
+            created: 1700000000,
+            options: vec![
+                ("spin_us".into(), "500".into()),
+                ("prefetch_bytes".into(), "2048".into()),
+                ("decode_threads".into(), "4".into()),
+            ],
+        };
+
+        // 1. Profile wins over default (env is empty)
+        let o1 = EngineOptions::from_chained(|_| None, Some(&prof));
+        assert_eq!(o1.spin_us, 500);
+        assert_eq!(o1.prefetch_bytes, 2048);
+        assert_eq!(o1.decode_threads, Some(4));
+        assert_eq!(o1.tb_span, 32); // unmentioned defaults to 32
+
+        // 2. Env wins over profile
+        let env_map: HashMap<String, String> = [
+            ("PEREGRINE_SPIN_US".to_string(), "200".to_string()),
+            ("PEREGRINE_TB_SPAN".to_string(), "64".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let o2 = EngineOptions::from_chained(|k| env_map.get(k).cloned(), Some(&prof));
+        assert_eq!(o2.spin_us, 200); // env wins over profile (200 vs 500)
+        assert_eq!(o2.prefetch_bytes, 2048); // profile wins over default (2048 vs default)
+        assert_eq!(o2.decode_threads, Some(4)); // profile wins over default
+        assert_eq!(o2.tb_span, 64); // env wins over default
+    }
+
+    #[test]
+    fn a_profile_cannot_set_an_output_changing_option() {
+        let prof = crate::profile::Profile {
+            peregrine_version: "x".into(),
+            cpu: "x".into(),
+            cpu_features: "x".into(),
+            model_size: 0,
+            model_fnv: 0,
+            created: 0,
+            options: vec![
+                ("tb_span".into(), "64".into()),
+                ("tq_span".into(), "64".into()),
+                ("exact".into(), "true".into()),
+                ("mtp".into(), "false".into()),
+                ("spin_us".into(), "7".into()),
+            ],
+        };
+        let o = EngineOptions::from_chained(|_| None, Some(&prof));
+        let d = EngineOptions::default();
+        assert_eq!(
+            (o.tb_span, o.tq_span, o.exact, o.mtp),
+            (d.tb_span, d.tq_span, d.exact, d.mtp)
+        );
+        assert_eq!(o.spin_us, 7);
     }
 }
