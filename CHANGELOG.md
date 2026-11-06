@@ -18,6 +18,7 @@ All notable changes to this project are documented here. The format follows
 - `peregrine-server`: OpenAI-compatible chat API (streaming, `n > 1`, `logprobs`, `/metrics`).
 - Golden-output tests per kernel tier.
 - `peregrine-bench`: the micro-benchmarks and experiments, moved out of the engine library.
+- The `peregrine` facade crate and command: `peregrine serve`, `peregrine inspect <model>`, `peregrine tier`.
 - Synthetic test models (llama, qwen3 in six formats; qwen35 hybrid in PQ2_0 / PTQ1_0) generated at test time,
   so CI runs every model code path and format without model files.
 - Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
