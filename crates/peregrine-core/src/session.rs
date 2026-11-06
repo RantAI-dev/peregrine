@@ -1196,6 +1196,135 @@ impl Session {
         telem.wall_s = turn_start.elapsed().as_secs_f64();
         Ok((out, telem))
     }
+
+    /// Prefill a fixed synthetic prompt of `prompt_tokens` and decode `decode_tokens` greedy tokens.
+    /// Returns prefill tok/s, decode tok/s, and bytes/token (from telemetry).
+    pub fn bench(
+        &mut self,
+        prompt_tokens: usize,
+        decode_tokens: usize,
+    ) -> Result<BenchReport, String> {
+        const PROMPT_SEED: [u32; 24] = [
+            11, 300, 42, 7, 199, 256, 3, 88, 120, 5, 64, 31, 2, 270, 150, 9, 77, 1, 18, 240, 33,
+            61, 100, 12,
+        ];
+        let n_vocab = self.model.cfg.n_vocab;
+        let p = prompt_tokens.max(1);
+        let ptoks: Vec<u32> = (0..p)
+            .map(|i| PROMPT_SEED[i % PROMPT_SEED.len()] % n_vocab as u32)
+            .collect();
+
+        if ptoks.len() + decode_tokens > self.cfg.max_ctx {
+            return Err(format!(
+                "benchmark requires {} context positions ({} prompt + {} decode), but max_ctx is {}",
+                ptoks.len() + decode_tokens,
+                ptoks.len(),
+                decode_tokens,
+                self.cfg.max_ctx
+            ));
+        }
+
+        self.reset();
+        self.ctx.clear();
+
+        // Prefill
+        let mut pre = StepStats::default();
+        let t_pre = Instant::now();
+        let mut fed = 0;
+        while fed < ptoks.len() {
+            let take = PREFILL_CHUNK.min(ptoks.len() - fed);
+            let last = fed + take == ptoks.len();
+            let start = fed;
+            let want: &[usize] = if last { &[take - 1] } else { &[] };
+            let Session {
+                model,
+                st,
+                kv,
+                pool,
+                ..
+            } = self;
+            model.forward(st, kv, pool, &ptoks[fed..fed + take], start, want, &mut pre)?;
+            fed += take;
+        }
+        let prefill_s = t_pre.elapsed().as_secs_f64();
+        self.ctx.extend_from_slice(&ptoks);
+
+        // First greedy token from prefill logits
+        let argmax = |row: &[f32]| -> u32 {
+            let mut best = 0;
+            for (i, &x) in row.iter().enumerate() {
+                if x > row[best] {
+                    best = i;
+                }
+            }
+            best as u32
+        };
+        let mut next = argmax(&self.st.logits[..n_vocab]);
+
+        // Decode
+        let mut decode_s = 0.0;
+        let mut total_bytes_weights = 0u64;
+        let mut total_bytes_kv = 0u64;
+        let start_pos = self.ctx.len();
+
+        for step in 0..decode_tokens {
+            let td = Instant::now();
+            let mut ss = StepStats::default();
+            let pos = start_pos + step;
+            let Session {
+                model,
+                st,
+                kv,
+                pool,
+                pool1,
+                ..
+            } = self;
+            let p = pool1.as_ref().unwrap_or(pool);
+            model.forward(st, kv, p, &[next], pos, &[0], &mut ss)?;
+            decode_s += td.elapsed().as_secs_f64();
+            total_bytes_weights += ss.bytes_weights;
+            total_bytes_kv += ss.bytes_kv;
+            next = argmax(&self.st.logits[..n_vocab]);
+        }
+
+        let prefill_tok_s = if prefill_s > 0.0 {
+            ptoks.len() as f64 / prefill_s
+        } else {
+            0.0
+        };
+        let decode_tok_s = if decode_s > 0.0 {
+            decode_tokens as f64 / decode_s
+        } else {
+            0.0
+        };
+        let bytes_per_token = if decode_tokens > 0 {
+            (total_bytes_weights + total_bytes_kv) as f64 / decode_tokens as f64
+        } else {
+            0.0
+        };
+
+        Ok(BenchReport {
+            prompt_tokens: ptoks.len(),
+            decode_tokens,
+            prefill_s,
+            decode_s,
+            prefill_tok_s,
+            decode_tok_s,
+            bytes_per_token,
+        })
+    }
+}
+
+/// What one benchmark measurement produced.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BenchReport {
+    pub prompt_tokens: usize,
+    pub decode_tokens: usize,
+    pub prefill_s: f64,
+    pub decode_s: f64,
+    pub prefill_tok_s: f64,
+    pub decode_tok_s: f64,
+    pub bytes_per_token: f64,
 }
 
 /// `PEREGRINE_DSPARK_DUMP=<dir>`: write the prompt's tapped hidden states and the first
