@@ -15,9 +15,11 @@
 
 pub mod dense;
 pub mod qwen35;
+pub mod qwen3moe;
 
 pub use dense::DenseFamily;
 pub use qwen35::Qwen35Family;
+pub use qwen3moe::Qwen3MoeFamily;
 
 // Re-exports for consumers expecting `hybrid` and `mtp`
 pub mod hybrid {
@@ -36,10 +38,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Architecture names this crate implements, for compatibility probe messages.
-pub const ARCHS: &[&str] = &["llama", "qwen2", "qwen3", "qwen35"];
+pub const ARCHS: &[&str] = &["llama", "qwen2", "qwen3", "qwen35", "qwen3moe"];
 
 /// Table of model families implemented by Peregrine.
-pub static FAMILIES: &[&dyn Family] = &[&DenseFamily, &Qwen35Family];
+pub static FAMILIES: &[&dyn Family] = &[&DenseFamily, &Qwen35Family, &Qwen3MoeFamily];
 
 /// Load a model from a parsed GGUF file using the built-in model families.
 pub fn load(g: Gguf) -> Result<Model, String> {

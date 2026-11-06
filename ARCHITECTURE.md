@@ -58,7 +58,7 @@ bound by compute. That split drives most design choices.
 | `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, LittleBit accounting, and parameterized loading via family table. |
 | `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
 | `model/mtp.rs` | Re-exports for the multi-token-prediction head traits. |
-| `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU), `rope`, `attn` (attention scratch, row prep, KV write, attention), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
+| `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU), `moe` (the router and the expert feed-forward), `rope`, `attn` (attention scratch, row prep, KV write, attention), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
 | `attn.rs` | Grouped online-softmax attention. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state, snapshots for speculation, and the prefix store that reuses a shared prompt beginning. |
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
@@ -74,8 +74,9 @@ bound by compute. That split drives most design choices.
 
 | Module | Role |
 |---|---|
-| `dense/` | Dense transformer architectures: Llama, Qwen2, Qwen3. |
+| `dense/` | Dense transformer architectures: Llama, Qwen2, Qwen3. `dense/layer.rs` holds the attention path and the output head the dense and the MoE families share. |
 | `qwen35/` | Hybrid architectures: Gated DeltaNet linear attention + softmax attention, Hadamard rotation, MTP head. |
+| `qwen3moe/` | Mixture of experts: Qwen3's attention and a bank of experts (the router and the expert feed-forward), over the shared `blocks::moe`. |
 | `lib.rs` | `FAMILIES` table, model loading (`load`, `open`, `open_with`), compatibility checks (`check_compatible`, `check_compatible_with`, `compatibility`), and session opening (`session::open`). |
 | `tests/` | Synthetic model generation, golden output regression tests, no-allocation tests, batching and speculative decoding integration tests. |
 
