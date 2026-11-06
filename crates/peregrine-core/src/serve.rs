@@ -44,7 +44,7 @@ pub const PREFILL_CHUNK: usize = 64;
 fn mixed() -> bool {
     use std::sync::OnceLock;
     static M: OnceLock<bool> = OnceLock::new();
-    *M.get_or_init(|| std::env::var("PEREGRINE_MIX").map_or(true, |v| v != "0"))
+    *M.get_or_init(|| crate::options::get().mix)
 }
 
 /// Users served at once by default. Above the machine's roofline ridge (about seven rows) another user adds no
@@ -159,7 +159,7 @@ struct Spec {
 
 /// MTP speculation for a lone user; `PEREGRINE_MTP=0` turns it off.
 fn mtp_enabled() -> bool {
-    std::env::var("PEREGRINE_MTP").map_or(true, |v| v != "0")
+    crate::options::get().mtp
 }
 
 impl Slot {

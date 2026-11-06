@@ -38,7 +38,7 @@ static PROF: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 fn prof_on() -> bool {
     use std::sync::OnceLock;
     static P: OnceLock<bool> = OnceLock::new();
-    *P.get_or_init(|| std::env::var("PEREGRINE_PROF").is_ok_and(|v| v == "1"))
+    *P.get_or_init(|| crate::options::get().prof)
 }
 struct Tick(Option<Instant>, usize);
 impl Tick {
@@ -411,9 +411,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
     let mut tb_span = 0usize;
     #[cfg(target_arch = "x86_64")]
     {
-        let want = !ptq1
-            && crate::tern::have_zmm()
-            && std::env::var("PEREGRINE_TILES").map_or(true, |v| v != "0");
+        let want = !ptq1 && crate::tern::have_zmm() && crate::options::get().tiles;
         let mut mats: Vec<&mut TensorInfo> = Vec::new();
         for l in layers.iter_mut() {
             mats.extend([&mut l.gate, &mut l.up, &mut l.down]);
@@ -443,11 +441,7 @@ pub(super) fn load(g: Gguf) -> Result<Model, String> {
                 t.tile_off = Some(at);
                 at += len;
             }
-            tb_span = std::env::var("PEREGRINE_TB_SPAN")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|v| [32usize, 64, 128].contains(v))
-                .unwrap_or(32);
+            tb_span = crate::options::get().tb_span;
         }
     }
     let hc = HybridCfg {

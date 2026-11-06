@@ -390,14 +390,9 @@ unsafe fn f16_at4(p: *const u8) -> f32 {
 /// `PEREGRINE_PF` (bytes, 0 = off) is the A/B switch it was tuned with.
 fn prefetch_distance() -> usize {
     static PF: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *PF.get_or_init(|| {
-        std::env::var("PEREGRINE_PF")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(PF_DEFAULT)
-    })
+    *PF.get_or_init(|| crate::options::get().prefetch_bytes)
 }
-const PF_DEFAULT: usize = 1024;
+// The default distance, 1024 bytes, is `options::PF_DEFAULT`.
 
 /// Hint `lines` cache lines starting `pf` bytes past `p`. A prefetch never faults, so
 /// running past the end of the tensor is harmless; `wrapping_add` keeps the pointer
@@ -604,11 +599,7 @@ unsafe fn tile_q6_k<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]
 #[inline]
 fn wide_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("PEREGRINE_NO_WIDE")
-            .map(|v| v != "1")
-            .unwrap_or(true)
-    })
+    *ON.get_or_init(|| crate::options::get().wide)
 }
 
 /// Widest batch the wide kernels take in one call; `model::MAX_BATCH` must not exceed it.

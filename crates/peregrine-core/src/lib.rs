@@ -26,6 +26,7 @@ pub mod hadamard;
 pub mod kv;
 pub mod lbq;
 pub mod model;
+pub mod options;
 pub mod pool;
 pub mod prefix;
 pub mod quant;

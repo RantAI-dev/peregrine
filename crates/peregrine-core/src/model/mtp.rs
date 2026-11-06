@@ -117,13 +117,7 @@ impl Model {
         let c = self.cfg;
         let hc = self.hy_cfg();
         let dense = Config { hybrid: None, ..c };
-        let draft_vocab = std::env::var("PEREGRINE_MTP_VOCAB")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32768usize)
-            .min(c.n_vocab)
-            / 16
-            * 16;
+        let draft_vocab = crate::options::get().mtp_vocab.min(c.n_vocab) / 16 * 16;
         let tacts = (0..MTP_MAX_ROWS)
             .map(|_| {
                 let mut a = QuantAct::with_capacity(c.d_model);

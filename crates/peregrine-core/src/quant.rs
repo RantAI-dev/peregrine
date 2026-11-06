@@ -115,20 +115,14 @@ pub struct QuantAct {
 pub fn span_override() -> usize {
     use std::sync::OnceLock;
     static S: OnceLock<usize> = OnceLock::new();
-    *S.get_or_init(|| {
-        std::env::var("PEREGRINE_TQ_SPAN")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v| [16, 32, 64, 128].contains(v))
-            .unwrap_or(16)
-    })
+    *S.get_or_init(|| crate::options::get().tq_span)
 }
 
 /// `PEREGRINE_EXACT=1`: ternary matmuls in f32 against the decoded weights (slow; a measurement switch).
 pub fn exact_ternary() -> bool {
     use std::sync::OnceLock;
     static E: OnceLock<bool> = OnceLock::new();
-    *E.get_or_init(|| std::env::var("PEREGRINE_EXACT").is_ok_and(|v| v == "1"))
+    *E.get_or_init(|| crate::options::get().exact)
 }
 
 /// Byte offset of group `g`'s planes in `QuantAct::tp` (pairs of groups interleaved by plane).

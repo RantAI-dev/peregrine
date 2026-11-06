@@ -216,7 +216,7 @@ impl Gguf {
         // pages. A decode step streams every weight once; with 4 KB page-cache pages that is a TLB miss per 4 KB,
         // with 2 MB pages one per 2 MB. Costs one copy at load and the page cache's copy can then be dropped.
         #[cfg(target_os = "linux")]
-        let map = if std::env::var("PEREGRINE_HUGEPAGES").is_ok_and(|v| v == "1") {
+        let map = if crate::options::get().hugepages {
             let mut anon = memmap2::MmapMut::map_anon(map.len())
                 .map_err(|e| format!("gguf: anon map: {e}"))?;
             let _ = anon.advise(memmap2::Advice::HugePage);
