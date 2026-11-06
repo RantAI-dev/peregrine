@@ -3,18 +3,20 @@
 use std::sync::atomic::{AtomicU64, Ordering as AO};
 use std::time::Instant;
 
-use crate::blocks::linear::MatJob;
-use crate::blocks::norm::head_rmsnorm;
-use crate::blocks::par::{Disjoint, RecScratch, RowPtrs, SnapPtrs};
-use crate::blocks::recurrent;
-use crate::blocks::rotate::{RowPrep, VPerm};
-use crate::blocks::ROW_PARALLEL;
-use crate::families::qwen35::load::{HybridCfg, Mixer};
-use crate::families::qwen35::Qwen35;
-use crate::gguf::TensorInfo;
-use crate::model::{Caches, Config, State, StepStats, Weights};
-use crate::pool::Pool;
-use crate::quant::QuantAct;
+use crate::qwen35::load::{HybridCfg, Mixer};
+use crate::qwen35::Qwen35;
+use peregrine_core::blocks;
+use peregrine_core::blocks::linear::MatJob;
+use peregrine_core::blocks::norm::head_rmsnorm;
+use peregrine_core::blocks::par::{Disjoint, RecScratch, RowPtrs, SnapPtrs};
+use peregrine_core::blocks::recurrent;
+use peregrine_core::blocks::rotate::{RowPrep, VPerm};
+use peregrine_core::blocks::ROW_PARALLEL;
+use peregrine_core::gguf::TensorInfo;
+use peregrine_core::model::{Caches, Config, State, StepStats, Weights};
+use peregrine_core::pool::Pool;
+use peregrine_kernels::quant::QuantAct;
+use peregrine_kernels::{table, vmath};
 
 // Profiling buckets (`PEREGRINE_PROF=1`): wall nanoseconds per part of the hybrid pass, read by `profile()`.
 const PROF_NAMES: [&str; 16] = [
@@ -40,7 +42,7 @@ static PROF: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 fn prof_on() -> bool {
     use std::sync::OnceLock;
     static P: OnceLock<bool> = OnceLock::new();
-    *P.get_or_init(|| crate::options::get().prof)
+    *P.get_or_init(|| peregrine_core::options::get().prof)
 }
 
 struct Tick(Option<Instant>, usize);
@@ -221,7 +223,7 @@ impl Qwen35 {
     ) {
         let _t = Tick::new(3);
         let t0 = prof_on().then(Instant::now);
-        crate::blocks::linear::matmul_group(w, mj, acts, nb, pool, stats);
+        blocks::linear::matmul_group(w, mj, acts, nb, pool, stats);
         if let Some(t0) = t0 {
             let bytes: u64 = mj.iter().map(|j| j.w.bytes()).sum();
             let k = if bytes < 8 << 20 {
@@ -276,7 +278,7 @@ impl Qwen35 {
         }
         for a in acts.iter_mut().take(nb) {
             a.ternary = true;
-            a.ptq1 = self.cfg.ptq1 && crate::table::MatKernels::get().ptq1_layout();
+            a.ptq1 = self.cfg.ptq1 && table::MatKernels::get().ptq1_layout();
             a.tb_span = self.cfg.tb_span;
         }
         let hs = fam
@@ -313,7 +315,7 @@ impl Qwen35 {
         let se = self.signs_for(d)?;
         for (i, &t) in tokens.iter().enumerate() {
             let row = &mut x[i * d..(i + 1) * d];
-            crate::blocks::embed::embed(&self.tok_embd, w, t, row, stats);
+            blocks::embed::embed(&self.tok_embd, w, t, row, stats);
             self.rot.rotate_embedding(row, se);
         }
         drop(te);
@@ -323,7 +325,7 @@ impl Qwen35 {
             {
                 let nw: &TensorInfo = &l.attn_norm;
                 let pre = |b: usize, row: &mut [f32]| {
-                    crate::blocks::norm::rmsnorm_into(w, nw, c.eps, &x[b * d..(b + 1) * d], row)
+                    blocks::norm::rmsnorm_into(w, nw, c.eps, &x[b * d..(b + 1) * d], row)
                 };
                 self.rotate_rows_pre(hs, acts, xb, d, nb, false, Some(&pre), pool, stats);
                 stats.bytes_weights += l.attn_norm.bytes();
@@ -422,7 +424,7 @@ impl Qwen35 {
                         let big: &[f32] = &hs.big;
                         let zw = hs.z_w;
                         let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
-                        crate::blocks::par::for_row_chunks_3(
+                        blocks::par::for_row_chunks_3(
                             pool,
                             parallel,
                             q,
@@ -432,7 +434,7 @@ impl Qwen35 {
                             &mut hs.z,
                             zw,
                             nb,
-                            crate::blocks::par::Sched::Dynamic(1),
+                            blocks::par::Sched::Dynamic(1),
                             |_wk, rows, q_chunk, k_chunk, z_chunk| {
                                 for (i, b) in rows.enumerate() {
                                     let q_row = &mut q_chunk[i * qd..(i + 1) * qd];
@@ -451,7 +453,7 @@ impl Qwen35 {
                                     for row in k_row.chunks_exact_mut(hd) {
                                         head_rmsnorm(row, k_norm, c.eps);
                                     }
-                                    crate::blocks::rope::rope(
+                                    blocks::rope::rope(
                                         rope,
                                         q_row,
                                         c.n_head,
@@ -460,7 +462,7 @@ impl Qwen35 {
                                         c.rope_dim,
                                         c.rope_neox,
                                     );
-                                    crate::blocks::rope::rope(
+                                    blocks::rope::rope(
                                         rope,
                                         k_row,
                                         c.n_kv_head,
@@ -490,7 +492,7 @@ impl Qwen35 {
                     for (r0, len, ci) in caches.runs(nb) {
                         if len <= SHORT_RUN {
                             for k_idx in 0..len {
-                                crate::blocks::attn::attend(
+                                blocks::attn::attend(
                                     c,
                                     attn,
                                     q,
@@ -505,7 +507,7 @@ impl Qwen35 {
                                 );
                             }
                         } else {
-                            crate::blocks::attn::attend(
+                            blocks::attn::attend(
                                 c,
                                 attn,
                                 q,
@@ -527,7 +529,7 @@ impl Qwen35 {
                         let zw = hs.z_w;
                         let zr: &[f32] = &z;
                         let pre = |b: usize, row: &mut [f32]| {
-                            crate::vmath::mul_sigmoid(row, &zr[b * zw..b * zw + qd])
+                            vmath::mul_sigmoid(row, &zr[b * zw..b * zw + qd])
                         };
                         self.rotate_rows_pre(hs, acts, xb, qd, nb, false, Some(&pre), pool, stats);
                         hs.z = z;
@@ -543,7 +545,7 @@ impl Qwen35 {
             {
                 let nw: &TensorInfo = &l.post_norm;
                 let pre = |b: usize, row: &mut [f32]| {
-                    crate::blocks::norm::rmsnorm_into(w, nw, c.eps, &x[b * d..(b + 1) * d], row)
+                    blocks::norm::rmsnorm_into(w, nw, c.eps, &x[b * d..(b + 1) * d], row)
                 };
                 self.rotate_rows_pre(hs, acts, xb, d, nb, false, Some(&pre), pool, stats);
                 stats.bytes_weights += l.post_norm.bytes();
@@ -559,23 +561,22 @@ impl Qwen35 {
             let f = c.n_ff;
             if nb >= ROW_PARALLEL {
                 let up: &[f32] = hb2;
-                let pre =
-                    |b: usize, row: &mut [f32]| crate::vmath::swiglu(row, &up[b * f..(b + 1) * f]);
+                let pre = |b: usize, row: &mut [f32]| vmath::swiglu(row, &up[b * f..(b + 1) * f]);
                 self.rotate_rows_pre(hs, acts, hb, f, nb, false, Some(&pre), pool, stats);
             } else {
                 let tf = Tick::new(9);
                 {
                     let total = nb * f;
                     let up: &[f32] = hb2;
-                    crate::blocks::par::for_row_chunks(
+                    blocks::par::for_row_chunks(
                         pool,
                         true,
                         &mut hb[..total],
                         1,
                         total,
-                        crate::blocks::par::Sched::StaticAligned(8),
+                        blocks::par::Sched::StaticAligned(8),
                         |_wk, range, gs| {
-                            crate::vmath::swiglu(gs, &up[range]);
+                            vmath::swiglu(gs, &up[range]);
                         },
                     );
                     stats.barriers += 1;
@@ -602,7 +603,7 @@ impl Qwen35 {
             hidden.resize(nb * d, 0.0);
             for b in 0..nb {
                 let (xv, hv) = (&*x, &mut **hidden);
-                crate::blocks::norm::rmsnorm_into(
+                blocks::norm::rmsnorm_into(
                     w,
                     &self.out_norm,
                     c.eps,
@@ -624,7 +625,7 @@ impl Qwen35 {
                     return Err(format!("logits requested for row {b} of a {nb}-row batch"));
                 }
                 let (xv, xbv) = (&*x, &mut **xb);
-                crate::blocks::norm::rmsnorm_into(
+                blocks::norm::rmsnorm_into(
                     w,
                     &self.out_norm,
                     c.eps,

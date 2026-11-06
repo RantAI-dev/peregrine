@@ -21,9 +21,8 @@
 
 pub mod arch;
 pub mod attn;
-mod blocks;
+pub mod blocks;
 pub mod dspark;
-pub mod families;
 pub mod gguf;
 pub mod kv;
 pub mod lbq;
@@ -58,24 +57,13 @@ pub use session::{BenchReport, Session, SessionCfg};
 /// pairing, because every way of failing it — another architecture, another
 /// tokenizer, another chat template — otherwise surfaces at the first token as an
 /// error or, worse, as fluent text from a prompt the model never saw.
-///
-/// What is implemented, and therefore what this accepts:
-/// * the `llama` and `qwen2` architectures (`model::ARCHS`);
-/// * a `gpt2` byte-level BPE vocabulary with the `smollm`, `llama-bpe` or `qwen2`
-///   pre-tokenizer (`tokenizer::PRE_TYPES`) — each transcribed from llama.cpp and
-///   checked against `llama-tokenize`; a near-miss tokenizer produces confident
-///   wrong text, so nothing else is approximated;
-/// * a chat template (`template::TEMPLATES`), detected from the
-///   file's own `tokenizer.chat_template`;
-/// * rope scaling only as Llama 3's factor table or a linear factor;
-/// * tensors in F32, F16, Q5_0, Q8_0, Q4_K or Q6_K (`Gguf::open` refuses others).
-pub fn compatibility(path: &std::path::Path) -> Result<(), String> {
+pub fn compatibility(path: &std::path::Path, families: &[&dyn arch::Family]) -> Result<(), String> {
     let g = Gguf::open(path)?;
-    check_compatible(&g)
+    check_compatible(&g, families)
 }
 
-pub fn check_compatible(g: &Gguf) -> Result<(), String> {
-    check_compatible_with(g, None)
+pub fn check_compatible(g: &Gguf, families: &[&dyn arch::Family]) -> Result<(), String> {
+    check_compatible_with(g, None, families)
 }
 
 /// The same check, with the chat template the caller chose (`--chat-template`).
@@ -83,12 +71,20 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
 /// A file that declares no template at all — or one whose template this engine
 /// does not render — is refused with a message naming the option: the template
 /// is the one thing the file cannot say, and the engine will not guess it.
-pub fn check_compatible_with(g: &Gguf, template: Option<template::Template>) -> Result<(), String> {
+pub fn check_compatible_with(
+    g: &Gguf,
+    template: Option<template::Template>,
+    families: &[&dyn arch::Family],
+) -> Result<(), String> {
     let arch = g.str("general.architecture").unwrap_or("unknown");
-    if !arch::FAMILIES.iter().any(|f| f.names().contains(&arch)) {
+    if !families.iter().any(|f| f.names().contains(&arch)) {
+        let arch_names: Vec<&str> = families
+            .iter()
+            .flat_map(|f| f.names().iter().copied())
+            .collect();
         return Err(format!(
             "architecture {arch:?} — Peregrine implements {}",
-            model::ARCHS.join(", ")
+            arch_names.join(", ")
         ));
     }
     let tok = g.str("tokenizer.ggml.model").unwrap_or("unknown");

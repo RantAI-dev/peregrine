@@ -66,37 +66,37 @@ impl StepStats {
 /// Reusable scratch. Allocated once per session so a decode step does no allocation.
 pub struct State {
     pub x: Vec<f32>,
-    pub(crate) xb: Vec<f32>,
-    pub(crate) xb2: Vec<f32>,
-    pub(crate) hb: Vec<f32>,
-    pub(crate) hb2: Vec<f32>,
-    pub(crate) q: Vec<f32>,
-    pub(crate) k: Vec<f32>,
-    pub(crate) v: Vec<f32>,
+    pub xb: Vec<f32>,
+    pub xb2: Vec<f32>,
+    pub hb: Vec<f32>,
+    pub hb2: Vec<f32>,
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
     /// Attention's scratch: per worker, and for split heads.
-    pub(crate) attn: AttnScratch,
+    pub attn: AttnScratch,
     /// `(cos, sin)` of every rotary angle for every position, computed once. Rope was
     /// recomputing `powf`, `sin` and `cos` for every pair of every head at every
     /// layer of every token — 20 000 transcendental calls per decode step.
-    pub(crate) rope: Vec<f32>,
-    pub(crate) acts: Vec<QuantAct>,
+    pub rope: Vec<f32>,
+    pub acts: Vec<QuantAct>,
     pub logits: Vec<f32>,
-    pub(crate) max_batch: usize,
+    pub max_batch: usize,
     /// `start_pos..start_pos + n` for a `Model::forward` call, filled in place so the
     /// convenience wrapper does not allocate a position vector per call.
-    pub(crate) positions: Vec<usize>,
+    pub positions: Vec<usize>,
     /// Layers whose output (the residual stream after the layer) `forward` copies
     /// out, in this order — what a DSpark drafter conditions on. Empty: no copy.
-    pub(crate) tap_layers: Vec<usize>,
+    pub tap_layers: Vec<usize>,
     /// `[batch row][tap][d_model]`, written by every `forward` while taps are set.
     pub tap: Vec<f32>,
     /// LittleBit intermediates — the per-stage `g ⊙ x` copies (reused for `ℓ ⊙ t`)
     /// and the raw latents. Sized by `Model::lb_scratch` after the model is known;
     /// empty when nothing was converted, so the dense path pays nothing.
-    pub(crate) lb_x: Vec<f32>,
-    pub(crate) lb_t: Vec<f32>,
+    pub lb_x: Vec<f32>,
+    pub lb_t: Vec<f32>,
     // family scratch (`HyScratch` today), an opaque box taken by split borrow.
-    pub(crate) fam: Option<Box<dyn Any + Send + Sync>>,
+    pub fam: Option<Box<dyn Any + Send + Sync>>,
     // when set, a hybrid forward writes every row's final normed hidden state (`output_norm(x)`, the
     // MTP block's input) to `hidden`, `[row][d_model]`.
     pub want_hidden: bool,
@@ -229,7 +229,7 @@ pub enum Caches<'a> {
 }
 
 /// Iterator over [`Caches::runs`]: runs of consecutive rows that share one cache, yielded without allocating.
-pub(crate) struct Runs<'a> {
+pub struct Runs<'a> {
     /// The `Mapped` shape's cache index per row; `None` for one shared cache or one cache per row.
     map: Option<&'a [usize]>,
     /// Every row writes one cache (`Caches::Shared`).
@@ -242,6 +242,7 @@ pub(crate) struct Runs<'a> {
 impl Iterator for Runs<'_> {
     type Item = (usize, usize, usize);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.shared {
             if self.done || self.nb == 0 {
@@ -280,7 +281,7 @@ impl Iterator for Runs<'_> {
 
 impl<'a> Caches<'a> {
     #[inline]
-    pub(crate) fn get(&self, b: usize) -> &KvCache {
+    pub fn get(&self, b: usize) -> &KvCache {
         match self {
             Caches::Shared(kv) => kv,
             Caches::PerRow(kvs) => kvs[b],
@@ -288,7 +289,7 @@ impl<'a> Caches<'a> {
         }
     }
     #[inline]
-    pub(crate) fn get_mut(&mut self, b: usize) -> &mut KvCache {
+    pub fn get_mut(&mut self, b: usize) -> &mut KvCache {
         match self {
             Caches::Shared(kv) => kv,
             Caches::PerRow(kvs) => kvs[b],
@@ -300,7 +301,8 @@ impl<'a> Caches<'a> {
     /// An iterator, not a `Vec`: the dense and hybrid decode loops call this once per layer, and a decode step
     /// must not allocate. Callers that also need the caches mutably use [`Caches::runs_into`] with a reused
     /// buffer instead (the iterator borrows the caches, so it cannot be held across `cache_mut`).
-    pub(crate) fn runs(&self, nb: usize) -> Runs<'a> {
+    #[inline]
+    pub fn runs(&self, nb: usize) -> Runs<'a> {
         Runs {
             map: match self {
                 Caches::Mapped(_, map) => {
@@ -318,26 +320,30 @@ impl<'a> Caches<'a> {
 
     /// `runs`, written into `out` (cleared first) so a caller that also needs mutable cache access can hold
     /// the runs without keeping the caches borrowed. `out` keeps its capacity across calls.
-    pub(crate) fn runs_into(&self, nb: usize, out: &mut Vec<(usize, usize, usize)>) {
+    #[inline]
+    pub fn runs_into(&self, nb: usize, out: &mut Vec<(usize, usize, usize)>) {
         out.clear();
         out.extend(self.runs(nb));
     }
     /// The cache of run `c`, mutably.
-    pub(crate) fn cache_mut(&mut self, c: usize) -> &mut KvCache {
+    #[inline]
+    pub fn cache_mut(&mut self, c: usize) -> &mut KvCache {
         match self {
             Caches::Shared(kv) => kv,
             Caches::PerRow(kvs) | Caches::Mapped(kvs, _) => kvs[c],
         }
     }
     /// The cache of run `c` (as numbered by `runs`).
-    pub(crate) fn cache(&self, c: usize) -> &KvCache {
+    #[inline]
+    pub fn cache(&self, c: usize) -> &KvCache {
         match self {
             Caches::Shared(kv) => kv,
             Caches::PerRow(kvs) | Caches::Mapped(kvs, _) => kvs[c],
         }
     }
     /// Rows this holds caches for, or None when one cache serves every row.
-    pub(crate) fn rows(&self) -> Option<usize> {
+    #[inline]
+    pub fn rows(&self) -> Option<usize> {
         match self {
             Caches::Shared(_) => None,
             Caches::PerRow(kvs) => Some(kvs.len()),

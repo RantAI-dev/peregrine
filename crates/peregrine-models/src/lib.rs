@@ -1,7 +1,17 @@
 //! Model architecture implementations for Peregrine (ADR 0005, ADR 0006).
 //!
-//! Architectures are implemented behind the [`Architecture`] trait from `peregrine-core`.
-//! Loading model files into a [`Model`] or [`Session`] is wired through this crate.
+//! Architectures are implemented behind the [`peregrine_core::arch::Architecture`] trait from `peregrine-core`.
+//! Loading model files into a [`Model`] or [`peregrine_core::session::Session`] is wired through this crate.
+
+// The workspace builds with `-D warnings`; these idioms are kept as they are.
+// `chunks_exact_to_as_chunks` exists only in newer clippy (CI's stable is ahead of older local toolchains).
+#![allow(
+    unknown_lints,
+    clippy::needless_range_loop,
+    clippy::manual_is_multiple_of,
+    clippy::unnecessary_map_or,
+    clippy::chunks_exact_to_as_chunks
+)]
 
 pub mod dense;
 pub mod qwen35;
@@ -14,26 +24,22 @@ pub mod hybrid {
     pub use crate::qwen35::{profile, HyScratch, HybridCfg};
 }
 pub mod mtp {
-    pub use peregrine_core::arch::{MtpHead, MtpState, MTP_MAX_ROWS};
     pub use crate::qwen35::mtp::Mtp;
+    pub use peregrine_core::arch::{MtpHead, MtpState, MTP_MAX_ROWS};
 }
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use peregrine_core::arch::Family;
 use peregrine_core::gguf::Gguf;
 use peregrine_core::model::Model;
-use peregrine_core::session::{Session, SessionCfg};
 use peregrine_core::template::Template;
+use std::path::Path;
+use std::sync::Arc;
 
 /// Architecture names this crate implements, for compatibility probe messages.
 pub const ARCHS: &[&str] = &["llama", "qwen2", "qwen3", "qwen35"];
 
 /// Table of model families implemented by Peregrine.
-pub static FAMILIES: &[&dyn Family] = &[
-    &dense::DenseFamily,
-    &qwen35::Qwen35Family,
-];
+pub static FAMILIES: &[&dyn Family] = &[&DenseFamily, &Qwen35Family];
 
 /// Load a model from a parsed GGUF file using the built-in model families.
 pub fn load(g: Gguf) -> Result<Model, String> {
@@ -57,10 +63,10 @@ pub fn compatibility(path: &Path) -> Result<(), String> {
 
 /// Kept model caching helpers wired to Peregrine's built-in model families.
 pub mod keep {
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
     use peregrine_core::model::Model;
     use peregrine_core::template::Template;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     /// The model at `path`: the kept one when it is the same file, else freshly loaded.
     pub fn open(path: &Path) -> Result<Arc<Model>, String> {
@@ -119,8 +125,8 @@ pub fn open_with_template(
 }
 
 pub mod session {
-    use std::path::Path;
     use peregrine_core::session::{Session, SessionCfg};
+    use std::path::Path;
 
     /// Open a model at `path` and initialize a single-user `Session`.
     pub fn open(path: &Path, cfg: SessionCfg) -> Result<Session, String> {
