@@ -183,7 +183,7 @@ impl Gguf {
             let kind = Format::from_id(tid).ok_or_else(|| {
                 format!(
                     "gguf: tensor {name} uses ggml type {tid}, which Peregrine does not \
-                     implement. Supported: F32, F16, Q5_0, Q8_0, Q4_K, Q6_K."
+                     implement. Supported: F32, F16, Q4_0, Q5_0, Q8_0, Q4_K, Q6_K."
                 )
             })?;
             let offset = c.u64()?;
@@ -478,6 +478,7 @@ mod tests {
     #[test]
     fn block_geometry_matches_ggml() {
         // The sizes ggml static_asserts. A wrong one here misreads every tensor.
+        assert_eq!((Format::Q4_0.block(), Format::Q4_0.block_bytes()), (32, 18));
         assert_eq!((Format::Q5_0.block(), Format::Q5_0.block_bytes()), (32, 22));
         assert_eq!((Format::Q8_0.block(), Format::Q8_0.block_bytes()), (32, 34));
         assert_eq!(
@@ -489,6 +490,7 @@ mod tests {
             (256, 210)
         );
         // And the bpw figures the spec quotes.
+        assert_eq!(Format::Q4_0.bpw(), 4.5);
         assert_eq!(Format::Q4_K.bpw(), 4.5);
         assert_eq!(Format::Q5_0.bpw(), 5.5);
         assert_eq!(Format::Q8_0.bpw(), 8.5);

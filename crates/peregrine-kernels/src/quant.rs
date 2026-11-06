@@ -837,6 +837,16 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        Format::Q4_0 => {
+            for (blk, out) in w.chunks_exact(18).zip(y.chunks_exact_mut(32)) {
+                let d = h(blk, 0);
+                let qs = &blk[2..18];
+                for j in 0..16 {
+                    out[j] = d * ((qs[j] & 0x0F) as i32 - 8) as f32;
+                    out[j + 16] = d * ((qs[j] >> 4) as i32 - 8) as f32;
+                }
+            }
+        }
         Format::Q5_0 => {
             for (blk, out) in w.chunks_exact(22).zip(y.chunks_exact_mut(32)) {
                 let d = h(blk, 0);
@@ -981,6 +991,22 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
                 }
                 // Signed codes already, so no bias term.
                 acc += h(blk, 0) * a.d[b] * s as f32;
+            }
+            acc
+        }
+        Format::Q4_0 => {
+            let mut acc = 0.0f32;
+            for (b, blk) in w.chunks_exact(18).enumerate() {
+                let qs = &blk[2..18];
+                let aq = &a.q[b * 32..b * 32 + 32];
+                let mut s = 0i32;
+                for j in 0..16 {
+                    s += (qs[j] & 0x0F) as i32 * aq[j] as i32;
+                    s += (qs[j] >> 4) as i32 * aq[j + 16] as i32;
+                }
+                // Bias identity: codes are [0,15] with offset 8, so subtract
+                // 8·Σa once for the whole block instead of per weight.
+                acc += h(blk, 0) * a.d[b] * (s - 8 * a.sums[b]) as f32;
             }
             acc
         }
@@ -1268,7 +1294,7 @@ mod tests {
         let sz = fmt.block_bytes();
         for blk in w.chunks_exact_mut(sz) {
             match fmt {
-                Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
+                Format::Q4_0 | Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
                 Format::Q4_K => {
                     fix(blk, 0);
                     fix(blk, 2);
@@ -1363,6 +1389,11 @@ mod tests {
     }
 
     #[test]
+    fn fused_dot_matches_reference_decode_q4_0() {
+        fused_equals_reference(Format::Q4_0, 960);
+    }
+
+    #[test]
     fn fused_dot_matches_reference_decode_q5_0() {
         fused_equals_reference(Format::Q5_0, 960);
     }
@@ -1425,5 +1456,8 @@ mod tests {
         let mut w = prng(7, row_bytes(Format::Q5_0, 32));
         sane_scales(Format::Q5_0, &mut w);
         assert_eq!(dot_scalar(Format::Q5_0, &w, &a), 0.0);
+        let mut w4 = prng(7, row_bytes(Format::Q4_0, 32));
+        sane_scales(Format::Q4_0, &mut w4);
+        assert_eq!(dot_scalar(Format::Q4_0, &w4, &a), 0.0);
     }
 }

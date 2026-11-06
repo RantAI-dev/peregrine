@@ -12,6 +12,7 @@
 pub enum Format {
     F32,
     F16,
+    Q4_0,
     Q5_0,
     Q8_0,
     Q4_K,
@@ -30,6 +31,7 @@ impl Format {
         Some(match id {
             0 => Format::F32,
             1 => Format::F16,
+            2 => Format::Q4_0,
             6 => Format::Q5_0,
             8 => Format::Q8_0,
             12 => Format::Q4_K,
@@ -45,7 +47,7 @@ impl Format {
     pub const fn block(self) -> usize {
         match self {
             Format::F32 | Format::F16 | Format::BF16 => 1,
-            Format::Q5_0 | Format::Q8_0 => 32,
+            Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => 32,
             Format::Q4_K | Format::Q6_K => 256,
             Format::PQ2_0 | Format::PTQ1_0 => 128,
         }
@@ -57,6 +59,7 @@ impl Format {
             Format::F32 => 4,
             Format::F16 => 2,
             Format::BF16 => 2,
+            Format::Q4_0 => 18,   // f16 d + u8 qs[16]
             Format::Q5_0 => 22,   // f16 d + u8 qh[4] + u8 qs[16]
             Format::Q8_0 => 34,   // f16 d + i8 qs[32]
             Format::Q4_K => 144,  // f16 d + f16 dmin + u8 scales[12] + u8 qs[128]
@@ -77,6 +80,7 @@ impl Format {
         match self {
             Format::F32 => "F32",
             Format::F16 => "F16",
+            Format::Q4_0 => "Q4_0",
             Format::Q5_0 => "Q5_0",
             Format::Q8_0 => "Q8_0",
             Format::Q4_K => "Q4_K",
