@@ -20,7 +20,7 @@ pub enum Format {
     Q6_K,
     /// GGML's non-linear 4-bit format with 16-entry lookup table, 32 weights in 18 bytes (f16 d, 16 bytes qs).
     IQ4_NL,
-    /// GGML's non-linear 4-bit format with 6-bit sub-block scales, 256 weights in 136 bytes (f16 d, u16 scales_h, u8 scales_l[4], u8 qs[128]).
+    /// GGML's non-linear 4-bit format with 6-bit sub-block scales, 256 weights in 136 bytes (`f16 d, u16 scales_h, u8 scales_l[4], u8 qs[128]`).
     IQ4_XS,
     // PrismML's ternary formats (Bonsai 2), group size 128. PQ2_0: f16 scale, then 32 bytes of 2-bit
     // codes, weight j in bits 2(j%4) of byte j/4, value code − 1. PTQ1_0: 24 + 2 bytes of base-3 trits, then f16.
