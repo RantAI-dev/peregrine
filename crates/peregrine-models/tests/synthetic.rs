@@ -16,8 +16,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{
-    write_dense, write_gemma3, write_gemma3_named, write_hybrid, write_hybrid_accepting,
-    write_rope_dense, Dense, Gemma3Config, Rope,
+    write_dense, write_gemma3, write_gemma3_named, write_hybrid, write_hybrid_accepting, write_moe,
+    write_rope_dense, Dense, Gemma3Config, MoeShape, Rope,
 };
 
 const PROMPT: [u32; 24] = [
@@ -583,6 +583,10 @@ fn batching_is_invariant_across_slots() {
             write_hybrid(&dir, Format::PQ2_0, 4401, false),
             "qwen35-PQ2_0",
         ),
+        (
+            write_moe(&dir, Format::Q8_0, 4402, MoeShape::default()),
+            "qwen3moe-Q8_0",
+        ),
     ];
     for (path, label) in &models {
         let model = load_arc(path);
@@ -625,6 +629,10 @@ fn perrow_batching_through_engine() {
         (
             write_hybrid(&dir, Format::PQ2_0, 4411, false),
             "qwen35-PQ2_0/perrow",
+        ),
+        (
+            write_moe(&dir, Format::Q8_0, 4412, MoeShape::default()),
+            "qwen3moe-Q8_0/perrow",
         ),
     ];
     for (path, label) in &models {
@@ -709,17 +717,15 @@ fn hybrid_mtp_accepting_variant_accepts_drafts_losslessly() {
 /// A qwen3moe file — a mixture-of-experts model — written the way llama.cpp v0.9.0 expects it
 /// (`src/models/qwen3moe.cpp`, `src/llama-arch.cpp`).
 ///
-/// The engine has no qwen3moe family yet, so this test does two things. It checks that the file
-/// is written and read back exactly as intended: the metadata llama.cpp reads, and the
+/// The engine runs the file now, so this test does two things. It checks that the file is
+/// written and read back exactly as intended: the metadata llama.cpp reads, and the
 /// three-dimensional expert tensors in llama.cpp's dimension order (the expert index runs
 /// slowest, so one expert is a contiguous run of rows — a 2D matrix with no new kernel). And it
-/// checks that the engine refuses the file *by name*: a refusal that does not say which
-/// architecture it cannot run is a bad refusal.
-///
-/// When the family lands (S2.5 step 2), the refusal half becomes the ordinary `check` of every
-/// other synthetic model.
+/// runs the ordinary `check` of every other synthetic model: the file loads, a prefill gives
+/// finite logits, two runs agree, the result is the same on 1, 2 and 4 threads, and it matches
+/// the stored golden for the current kernel tier.
 #[test]
-fn qwen3moe_file_is_written_and_refused_by_name() {
+fn qwen3moe_models_load_and_match_their_goldens() {
     use support::models::{write_moe, MoeShape};
 
     let dir = tmpdir("moe");
@@ -800,15 +806,11 @@ fn qwen3moe_file_is_written_and_refused_by_name() {
                 Err(e) => failures.push(format!("{name}: {e}")),
             }
         }
-        match peregrine_models::check_compatible(&g) {
-            Ok(()) => failures.push(format!(
-                "{name}: the engine accepted a qwen3moe file it cannot run"
-            )),
-            Err(e) if e.contains("qwen3moe") => {}
-            Err(e) => failures.push(format!(
-                "{name}: refused without naming the architecture: {e}"
-            )),
+        // The engine accepts the file, and runs it.
+        if let Err(e) = peregrine_models::check_compatible(&g) {
+            failures.push(format!("{name}: refused: {e}"));
         }
+        failures.extend(check(&path, &name));
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
@@ -1007,4 +1009,45 @@ fn gemma3_rope_linear_matches_golden() {
         "gemma3-rope-linear failed:\n{}",
         failures.unwrap_or_default()
     );
+}
+
+/// A qwen3moe file that does not say how wide the experts are is refused by name.
+///
+/// llama.cpp reads `expert_feed_forward_length` for this architecture and falls back to
+/// `feed_forward_length / expert_used_count` when it is absent
+/// (`src/models/qwen3moe.cpp`). Peregrine refuses the file instead: the dense
+/// `feed_forward_length` a qwen3moe file also carries is not the experts' width, and guessing
+/// it would run the wrong feed-forward.
+#[test]
+fn a_qwen3moe_file_without_the_expert_width_is_refused() {
+    use support::vocab::add_tokenizer_metadata;
+    use support::writer::GgufWriter;
+
+    let dir = tmpdir("moe-refuse");
+    let path = dir.join("qwen3moe-no-expert-ff.gguf");
+    let mut w = GgufWriter::new();
+    w.str("general.architecture", "qwen3moe");
+    w.str("general.name", "synthetic-qwen3moe-no-expert-ff");
+    w.u32("qwen3moe.block_count", 2);
+    w.u32("qwen3moe.embedding_length", 256);
+    w.u32("qwen3moe.attention.head_count", 8);
+    w.u32("qwen3moe.attention.head_count_kv", 4);
+    // The dense width the file also carries — not the experts' width.
+    w.u32("qwen3moe.feed_forward_length", 512);
+    w.u32("qwen3moe.expert_count", 8);
+    w.u32("qwen3moe.expert_used_count", 2);
+    w.u32("qwen3moe.vocab_size", 320);
+    add_tokenizer_metadata(&mut w, "qwen2");
+    w.write_to_file(&path).expect("write the test model");
+
+    let g = Gguf::open(&path).expect("open the test model");
+    let err = match peregrine_models::load(g) {
+        Ok(_) => panic!("the engine loaded a qwen3moe file without the experts' width"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("expert_feed_forward_length"),
+        "refused without naming the key: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
