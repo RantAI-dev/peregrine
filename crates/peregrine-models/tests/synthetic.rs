@@ -799,7 +799,7 @@ fn qwen3moe_file_is_written_and_refused_by_name() {
                 Err(e) => failures.push(format!("{name}: {e}")),
             }
         }
-        match peregrine_core::check_compatible(&g) {
+        match peregrine_models::check_compatible(&g) {
             Ok(()) => failures.push(format!(
                 "{name}: the engine accepted a qwen3moe file it cannot run"
             )),
