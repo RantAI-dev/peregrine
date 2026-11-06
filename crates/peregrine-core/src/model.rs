@@ -509,7 +509,7 @@ pub struct TileStore {
 
 impl TileStore {
     pub fn new(len: usize) -> TileStore {
-        let huge = std::env::var("PEREGRINE_TILE_HUGEPAGES").map_or(true, |v| v != "0");
+        let huge = crate::options::get().tile_hugepages;
         if huge && len > 0 {
             if let Ok(m) = memmap2::MmapMut::map_anon(len) {
                 #[cfg(target_os = "linux")]
@@ -632,7 +632,7 @@ struct LinJob<'a> {
 fn dynamic_rows() -> bool {
     use std::sync::OnceLock;
     static D: OnceLock<bool> = OnceLock::new();
-    *D.get_or_init(|| std::env::var("PEREGRINE_DYNAMIC").map_or(true, |v| v != "0"))
+    *D.get_or_init(|| crate::options::get().dynamic_rows)
 }
 
 /// Largest batch one matmul call accepts. A stack array of this many scratch floats

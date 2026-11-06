@@ -262,7 +262,7 @@ impl KvCache {
             rotated: prec == KvPrec::I8
                 && head_dim.is_power_of_two()
                 && head_dim <= MAX_ROTATED_DIM
-                && std::env::var("PEREGRINE_KV_ROTATE").as_deref() != Ok("0"),
+                && crate::options::get().kv_rotate,
             len: 0,
             rec: None,
         }

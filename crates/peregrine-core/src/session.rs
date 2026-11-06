@@ -840,12 +840,10 @@ impl Session {
         };
         telem.prefill_phases.sample_s += ts.elapsed().as_secs_f64();
         telem.prefill_s = t0.elapsed().as_secs_f64();
-        let trace = std::env::var_os("PEREGRINE_TRACE").is_some();
+        let trace = crate::options::get().trace;
         // Lossless at every temperature: see the module docs and `sample.rs`.
         let speculating = self.cfg.speculate || self.dspark.is_some();
-        let fixed_k: Option<usize> = std::env::var("PEREGRINE_DSPARK_K")
-            .ok()
-            .and_then(|v| v.parse().ok());
+        let fixed_k: Option<usize> = crate::options::get().dspark.k;
         let mut step = 0u32;
 
         let stops = self.stops.clone();
@@ -1161,7 +1159,7 @@ impl Session {
         }
         let tail = utf8.finish();
         out.push_str(&tail);
-        if std::env::var_os("PEREGRINE_TRACE").is_some() {
+        if crate::options::get().trace {
             let ms: Vec<String> = self
                 .vcost
                 .ema
@@ -1186,7 +1184,7 @@ impl Session {
 /// draft to `<dir>`, so the PyTorch reference (`tests/dspark_reference.py`) can replay
 /// the drafter on exactly the inputs this engine gave it.
 fn dump_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("PEREGRINE_DSPARK_DUMP").map(std::path::PathBuf::from)
+    crate::options::get().dspark.dump.clone()
 }
 
 fn dump_prefill(toks: &[u32], taps: &[f32], start: usize) {

@@ -39,6 +39,10 @@ struct Args {
     /// The GGUF file (llama, qwen2 or qwen3; F32/F16/Q8_0/Q5_0/Q4_K/Q6_K tensors).
     #[arg(short = 'm', long)]
     model: std::path::PathBuf,
+    /// An engine option, as `NAME=VALUE` with the name of its `PEREGRINE_<NAME>` variable (for example
+    /// `--opt MTP=0`). Overrides the environment; repeatable. Every option is listed at startup.
+    #[arg(long = "opt", value_name = "NAME=VALUE")]
+    opts: Vec<String>,
     /// The model id reported by /v1/models and expected in requests (any id is accepted).
     #[arg(long, default_value = "peregrine")]
     alias: String,
@@ -76,6 +80,8 @@ struct Args {
 }
 
 struct App {
+    /// `/metrics` lines naming every engine option (`peregrine_option{name,value} 1`).
+    option_metrics: String,
     /// The engine thread's queue: every request is served there, several at a time.
     jobs: std::sync::mpsc::Sender<EngineMsg>,
     engine: Arc<EngineShared>,
@@ -107,6 +113,34 @@ async fn main() {
         )
         .init();
     let a = Args::parse();
+    let opts = match engine_options(&a.opts) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("peregrine-server: {e}");
+            std::process::exit(2);
+        }
+    };
+    let changed = opts.non_default();
+    tracing::info!(
+        "engine options: {}",
+        if changed.is_empty() {
+            "all defaults".to_string()
+        } else {
+            changed
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    );
+    tracing::debug!("engine options in full:\n{}", opts.describe());
+    let option_metrics: String = opts
+        .pairs()
+        .iter()
+        .map(|(k, v)| format!("peregrine_option{{name=\"{k}\",value=\"{v}\"}} 1\n"))
+        .collect();
+    peregrine_core::options::init(opts)
+        .expect("engine options are set once, before the model loads");
     let threads = a
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
@@ -160,6 +194,7 @@ async fn main() {
             .expect("spawn the engine thread");
     }
     let app = Arc::new(App {
+        option_metrics,
         think_open: model.tk.id_of("<think>"),
         think_close: model.tk.id_of("</think>"),
         stop: template.stop_ids(&model.tk),
@@ -223,7 +258,7 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
 
 async fn metrics(State(s): State<Arc<App>>) -> String {
     format!(
-        "# Peregrine server\nllamacpp:requests_processing {}\nllamacpp:requests_deferred {}\nperegrine_slots_total {}\nperegrine_requests_total {}\nperegrine_tokens_predicted_total {}\nperegrine_decode_steps_total {}\nperegrine_decode_rows_total {}\nperegrine_mtp_drafts_total {}\nperegrine_mtp_accepted_total {}\nperegrine_uptime_seconds {}\n",
+        "# Peregrine server\nllamacpp:requests_processing {}\nllamacpp:requests_deferred {}\nperegrine_slots_total {}\nperegrine_requests_total {}\nperegrine_tokens_predicted_total {}\nperegrine_decode_steps_total {}\nperegrine_decode_rows_total {}\nperegrine_mtp_drafts_total {}\nperegrine_mtp_accepted_total {}\nperegrine_uptime_seconds {}\n{}",
         s.engine.active.load(Ordering::SeqCst),
         s.engine.waiting.load(Ordering::SeqCst),
         s.max_slots,
@@ -233,8 +268,33 @@ async fn metrics(State(s): State<Arc<App>>) -> String {
         s.engine.rows.load(Ordering::SeqCst),
         s.engine.drafts.load(Ordering::SeqCst),
         s.engine.hits.load(Ordering::SeqCst),
-        s.started.elapsed().as_secs()
+        s.started.elapsed().as_secs(),
+        s.option_metrics
     )
+}
+
+/// The engine options: the environment's `PEREGRINE_*` variables, overridden by `--opt NAME=VALUE`.
+fn engine_options(cli: &[String]) -> Result<peregrine_core::options::EngineOptions, String> {
+    let mut over = HashMap::new();
+    for o in cli {
+        let (k, v) = o
+            .split_once('=')
+            .ok_or_else(|| format!("--opt {o:?}: expected NAME=VALUE"))?;
+        let k = k
+            .trim()
+            .trim_start_matches("PEREGRINE_")
+            .to_ascii_uppercase();
+        if !peregrine_core::options::NAMES.contains(&k.as_str()) {
+            return Err(format!(
+                "--opt {k}: unknown option; known: {}",
+                peregrine_core::options::NAMES.join(", ")
+            ));
+        }
+        over.insert(format!("PEREGRINE_{k}"), v.to_string());
+    }
+    Ok(peregrine_core::options::EngineOptions::from_lookup(|k| {
+        over.get(k).cloned().or_else(|| std::env::var(k).ok())
+    }))
 }
 
 fn bad(msg: impl Into<String>) -> Response {

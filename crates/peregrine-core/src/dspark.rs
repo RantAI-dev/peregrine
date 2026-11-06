@@ -124,10 +124,7 @@ impl DSparkConfig {
                 .get("confidence_head_with_markov")
                 .and_then(Json::as_bool)
                 .unwrap_or(false),
-            logits_start: std::env::var("PEREGRINE_DSPARK_LOGITS_START")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+            logits_start: crate::options::get().dspark.logits_start,
         };
         if !c.n_head.is_multiple_of(c.n_kv_head) || c.block_size == 0 || c.block_size > 32 {
             return Err(format!("implausible drafter shape: {c:?}"));
@@ -148,9 +145,7 @@ struct QW {
 /// `PEREGRINE_DSPARK_QUANT=q8` keeps the drafter at Q8_0 (the A/B switch Q4_K was
 /// measured against).
 fn drafter_format(cols: usize) -> Format {
-    let q8 = std::env::var("PEREGRINE_DSPARK_QUANT")
-        .map(|v| v == "q8")
-        .unwrap_or(false);
+    let q8 = crate::options::get().dspark.quant_q8;
     if !q8 && cols.is_multiple_of(256) {
         Format::Q4_K
     } else {
@@ -510,9 +505,7 @@ impl Drafter {
             conf_b,
             ctx_len: 0,
             inv_freq,
-            conf_on_normed: std::env::var("PEREGRINE_DSPARK_CONF_PRENORM")
-                .map(|v| v != "1")
-                .unwrap_or(true),
+            conf_on_normed: crate::options::get().dspark.conf_on_normed,
             stats: DraftStats::default(),
             weight_bytes: 0,
             cfg,
@@ -690,9 +683,9 @@ impl Drafter {
         // `PEREGRINE_DSPARK_WIDTH` runs a narrower block than the trained one (the draft
         // is speed-only — the target verifies every token — so this trades acceptance
         // for drafter compute, measured rather than assumed).
-        let width = std::env::var("PEREGRINE_DSPARK_WIDTH")
-            .ok()
-            .and_then(|v| v.parse().ok())
+        let width = crate::options::get()
+            .dspark
+            .width
             // Default: one slot past the last verified draft. Measured on Qwen3-4B:
             // width 4 for three drafts kept acceptance (54% vs 58% chat, equal on code)
             // and cut the block forward by ~30%.
@@ -857,7 +850,7 @@ impl Drafter {
             tokens.push(tok);
             prev = tok;
         }
-        if std::env::var_os("PEREGRINE_DSPARK_PROF").is_some() {
+        if crate::options::get().dspark.prof {
             let t = t0.elapsed();
             eprintln!(
                 "[dspark] layers {:.1} ms, head {:.1} ms, markov+conf {:.1} ms (k={k}, ctx={off})",

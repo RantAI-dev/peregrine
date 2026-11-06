@@ -58,12 +58,9 @@ unsafe fn trampoline<F: Fn(usize, usize) + Sync>(p: *const (), w: usize, n: usiz
 /// failed only when the suite ran its tests in parallel). So a waiter spins with a
 /// pause instruction for `SPIN`, then yields its core to anything runnable until
 /// `YIELD`, and only then parks.
-// 1000 µs. On the Ryzen AI 9 HX 370 under WSL2 a hybrid (Bonsai 2) decode step has serial stretches
-// between its matmuls that outlast 50 µs, and every park then paid a VM wake-up: 2.9 tok/s at 50 µs, 10.9 at
-// 500 µs, 11.4 at 1000 µs (12 threads). An idle engine still parks after the window.
-const SPIN_DEFAULT_US: u64 = 1000;
-const YIELD_DEFAULT_US: u64 = 0;
-
+///
+/// The default windows and their measurements are in `options.rs` (`SPIN_DEFAULT_US`).
+///
 /// The spin and yield windows. `PEREGRINE_SPIN_US` / `PEREGRINE_YIELD_US`
 /// override them (0 and 0 park at once, which is the original condvar pool), so the
 /// trade-off can be measured on a given machine instead of assumed.
@@ -71,15 +68,10 @@ fn windows() -> (Duration, Duration) {
     use std::sync::OnceLock;
     static W: OnceLock<(Duration, Duration)> = OnceLock::new();
     *W.get_or_init(|| {
-        let env = |k: &str, d: u64| {
-            std::env::var(k)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(d)
-        };
+        let o = crate::options::get();
         (
-            Duration::from_micros(env("PEREGRINE_SPIN_US", SPIN_DEFAULT_US)),
-            Duration::from_micros(env("PEREGRINE_YIELD_US", YIELD_DEFAULT_US)),
+            Duration::from_micros(o.spin_us),
+            Duration::from_micros(o.yield_us),
         )
     })
 }
@@ -393,10 +385,8 @@ pub fn physical_cores() -> Option<usize> {
 /// (after its spin window) instead of spinning beside the other. `PEREGRINE_DECODE_THREADS` sets the width
 /// (default: the physical cores); `None` when it would not be narrower than `threads`.
 pub fn narrow_pool(threads: usize) -> Option<Pool> {
-    let want = std::env::var("PEREGRINE_DECODE_THREADS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| v > 0)
+    let want = crate::options::get()
+        .decode_threads
         .or_else(physical_cores)?;
     (want < threads).then(|| Pool::new(want))
 }

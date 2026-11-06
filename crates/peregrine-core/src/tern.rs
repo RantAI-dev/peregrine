@@ -220,7 +220,7 @@ pub fn have_zmm() -> bool {
 fn zmm_enabled() -> bool {
     use std::sync::OnceLock;
     static Z: OnceLock<bool> = OnceLock::new();
-    *Z.get_or_init(|| std::env::var("PEREGRINE_ZMM").map_or(true, |v| v != "0"))
+    *Z.get_or_init(|| crate::options::get().zmm)
 }
 
 /// The 128 trits of a PTQ1_0 group as unsigned codes {0, 1, 2} in natural order, four 32-byte vectors.

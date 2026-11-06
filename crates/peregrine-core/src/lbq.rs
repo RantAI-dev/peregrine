@@ -443,9 +443,7 @@ pub fn i8_enabled() -> bool {
         1 => false,
         2 => true,
         _ => {
-            let on = std::env::var("PEREGRINE_LB_I8")
-                .map(|v| v != "0")
-                .unwrap_or(true);
+            let on = crate::options::get().lb_i8;
             let _ = I8_MODE.compare_exchange(0, if on { 2 } else { 1 }, Relaxed, Relaxed);
             I8_MODE.load(Relaxed) == 2
         }
@@ -573,10 +571,10 @@ const MAGIC: &[u8; 4] = b"SLB1";
 /// overriding (a path) or disabling (`0`). `keep::open` keys its cache on this
 /// file's identity too, so converting a model invalidates the kept dense load.
 pub fn sidecar_path(gguf_path: &Path) -> Option<PathBuf> {
-    match std::env::var("PEREGRINE_LB").ok().as_deref() {
-        Some("0") => None,
-        Some(p) if !p.is_empty() && p != "1" => Some(PathBuf::from(p)),
-        _ => Some(default_sidecar_path(gguf_path)),
+    match &crate::options::get().lb_sidecar {
+        crate::options::LbSidecar::Off => None,
+        crate::options::LbSidecar::Path(p) => Some(p.clone()),
+        crate::options::LbSidecar::BesideModel => Some(default_sidecar_path(gguf_path)),
     }
 }
 
