@@ -201,7 +201,7 @@ pub fn matmul_group(
 /// output row — via `lb_group`. `xs` is the same activation `acts` was
 /// quantised from: the LittleBit path works on floats (its per-column scale
 /// `g` is applied before the signs), while the dense path keeps its int8 form.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused_variables)]
 pub fn linear_group(
     w: &Weights,
     slb: Option<&Slb>,
@@ -217,19 +217,22 @@ pub fn linear_group(
 ) {
     debug_assert!(jobs.len() <= 4);
     let mut dense: [Option<MatJob>; 4] = [None; 4];
+    #[cfg(feature = "littlebit")]
     let mut lb: [(usize, OutPtr<'_>); 4] = [(0, jobs[0].out); 4];
-    let (mut nd, mut nl) = (0usize, 0usize);
+    let mut nd = 0usize;
+    #[cfg(feature = "littlebit")]
+    let mut nl = 0usize;
     for j in jobs {
-        match j.lin {
-            Linear::Dense(w) => {
-                dense[nd] = Some(MatJob {
-                    w,
-                    out: j.out,
-                    rows: None,
-                });
-                nd += 1;
-            }
-            Linear::Lb(ti) => {
+        if let Some(w) = j.lin.dense() {
+            dense[nd] = Some(MatJob {
+                w,
+                out: j.out,
+                rows: None,
+            });
+            nd += 1;
+        } else {
+            #[cfg(feature = "littlebit")]
+            if let Linear::Lb(ti) = j.lin {
                 lb[nl] = (*ti, j.out);
                 nl += 1;
             }
@@ -239,6 +242,7 @@ pub fn linear_group(
         let dj: [MatJob; 4] = std::array::from_fn(|i| dense[i.min(nd - 1)].unwrap());
         matmul_group(w, &dj[..nd], acts, nb, pool, st);
     }
+    #[cfg(feature = "littlebit")]
     if nl > 0 {
         lb_group(slb, &lb[..nl], xs, xstride, nb, lbx, lbt, pool, st);
     }
@@ -254,6 +258,7 @@ pub fn linear_group(
 /// two runs every output row, summing its stages: `out = Σ_s h_i·(Σ ±t′)`.
 /// Weight traffic counted: the bit matrices plus the decoded f32 scales, once
 /// per call — like the dense path, independent of batch size.
+#[cfg(feature = "littlebit")]
 #[allow(clippy::too_many_arguments)]
 pub fn lb_group(
     slb: Option<&Slb>,
