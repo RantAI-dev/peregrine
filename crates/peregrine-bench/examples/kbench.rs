@@ -30,12 +30,13 @@ fn sane(fmt: Format, w: &mut [u8]) {
     let fix = |b: &mut [u8], at: usize| b[at + 1] = (b[at + 1] & 0x0F) | 0x30;
     for blk in w.chunks_exact_mut(fmt.block_bytes()) {
         match fmt {
-            Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
+            Format::Q8_0 | Format::Q5_0 | Format::IQ4_NL => fix(blk, 0),
             Format::Q4_K | Format::Q5_K => {
                 fix(blk, 0);
                 fix(blk, 2);
             }
             Format::Q6_K => fix(blk, 208),
+            Format::IQ4_XS => fix(blk, 0),
             _ => {}
         }
     }
@@ -71,6 +72,8 @@ fn main() {
         Format::Q4_K,
         Format::Q5_K,
         Format::Q6_K,
+        Format::IQ4_NL,
+        Format::IQ4_XS,
     ] {
         let rb = row_bytes(fmt, k);
         let mut w = prng_bytes(7, rb * rows);
