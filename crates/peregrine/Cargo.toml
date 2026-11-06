@@ -20,6 +20,10 @@ required-features = ["cli"]
 name = "cli_bench"
 required-features = ["cli"]
 
+[[test]]
+name = "support_cmd"
+required-features = ["cli"]
+
 [features]
 default = [
     "cli",
