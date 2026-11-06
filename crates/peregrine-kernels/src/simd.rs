@@ -39,7 +39,8 @@ use std::arch::x86_64::*;
 /// this is a load of a relaxed atomic after the first call.
 #[inline]
 pub fn have_avx2() -> bool {
-    crate::cpu_has!("avx2")
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::cpu_has!("avx2"))
 }
 
 #[inline(always)]
@@ -316,7 +317,8 @@ pub const TILE: usize = 4;
 /// scale conversion (every AVX2 CPU since Haswell has both).
 #[inline]
 pub fn have_batched() -> bool {
-    crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c")
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c"))
 }
 
 /// The sum of the eight lanes of `v`.

@@ -4,6 +4,8 @@
 //! detection AND the tier cap from `PEREGRINE_ISA` (`scalar`, `avx2`, `avx512`; default `native`, no cap).
 //! Forcing a lower tier runs that tier's kernels on any machine that has it, so one host can test every
 //! tier below its own, and two hosts can be checked against each other on a shared tier.
+//!
+//! Hot paths ask cached answers (`simd::have_batched`, `tern::have_zmm`, ...), never `cpu_has!` per row.
 
 use std::sync::OnceLock;
 
@@ -19,6 +21,7 @@ pub enum Tier {
 }
 
 /// The highest tier kernels may use: `PEREGRINE_ISA`, or no cap.
+#[inline]
 pub fn cap() -> Tier {
     static CAP: OnceLock<Tier> = OnceLock::new();
     *CAP.get_or_init(|| crate::options::get().isa.unwrap_or(Tier::Avx512))
@@ -36,6 +39,7 @@ pub fn parse_isa(v: Option<&str>) -> Option<Tier> {
 
 /// The tier a CPU feature belongs to. Unknown features count as the top tier, so a cap never lets one
 /// through by accident.
+#[inline]
 pub fn tier_of(feature: &str) -> Tier {
     match feature {
         "sse2" | "sse3" | "ssse3" | "sse4.1" | "sse4.2" | "popcnt" => Tier::Scalar,
@@ -45,6 +49,7 @@ pub fn tier_of(feature: &str) -> Tier {
 }
 
 /// Whether the cap lets kernels use `feature` (detection is separate).
+#[inline]
 pub fn allowed(feature: &str) -> bool {
     tier_of(feature) <= cap()
 }
