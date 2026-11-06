@@ -31,7 +31,7 @@ fn sane(fmt: Format, w: &mut [u8]) {
     for blk in w.chunks_exact_mut(fmt.block_bytes()) {
         match fmt {
             Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
-            Format::Q4_K => {
+            Format::Q4_K | Format::Q5_K => {
                 fix(blk, 0);
                 fix(blk, 2);
             }
@@ -65,7 +65,13 @@ fn main() {
         "{:<6} {:>6} {:>12} {:>10} {:>12} {:>10} {:>12} {:>12}",
         "format", "acts", "ns/row", "GB/s", "ns/row×4", "GB/s×4", "ns/row×32", "ns/act×32"
     );
-    for fmt in [Format::Q8_0, Format::Q5_0, Format::Q4_K, Format::Q6_K] {
+    for fmt in [
+        Format::Q8_0,
+        Format::Q5_0,
+        Format::Q4_K,
+        Format::Q5_K,
+        Format::Q6_K,
+    ] {
         let rb = row_bytes(fmt, k);
         let mut w = prng_bytes(7, rb * rows);
         sane(fmt, &mut w);

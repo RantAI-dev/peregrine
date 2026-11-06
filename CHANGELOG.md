@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Support for GGML's Q5_K weight format (AVX2 single-row and batched kernels, scalar reference).
 - Support for SentencePiece (llama) tokenizers transcribed from llama.cpp (S2.3a).
 - Support for GGML's Q4_0 weight format (AVX2 and scalar kernels).
 - `peregrine-core`: CPU inference engine for GGUF models.
