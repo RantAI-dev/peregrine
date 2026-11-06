@@ -54,11 +54,16 @@ fn argmax(xs: &[f32]) -> u32 {
 
 /// Prefill `PROMPT`, then decode greedily: the golden text of one run.
 fn run(model: &Model, threads: usize) -> String {
+    run_with(model, threads, KvPrec::F16)
+}
+
+/// The same, with a chosen KV cache precision.
+fn run_with(model: &Model, threads: usize, prec: KvPrec) -> String {
     let c = model.cfg;
     let pool = Pool::new(threads);
     let n = PROMPT.len();
-    let mut st = model.new_state(128, n, 256, threads);
-    let mut kv = model.new_cache(KvPrec::F16, 256);
+let mut st = model.new_state(128, n, 256, threads);
+    let mut kv = model.new_cache(prec, 256);
     let mut ss = StepStats::default();
     let want: Vec<usize> = (0..n).collect();
     model
@@ -158,6 +163,58 @@ fn check_model(model: Model, name: &str) -> Option<String> {
         eprintln!("synthetic: {name} ok (no golden for tier {tier})");
     }
     None
+}
+
+/// The f32 KV cache (opt-in, for a like-for-like comparison against another
+/// engine): the synthetic models give finite logits, the same ones whatever the
+/// thread count, and — the point of the option — numbers that differ from the
+/// f16 cache's, because the keys and values are no longer rounded.
+#[test]
+fn the_f32_kv_cache_gives_finite_logits_at_any_thread_count() {
+    let dir = tmpdir("f32kv");
+    let mut failures = Vec::new();
+    for (i, (arch, fmt)) in [
+        ("llama", Format::Q8_0),
+        ("qwen3", Format::Q8_0),
+        ("qwen2", Format::F16),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = write_dense(&dir, arch, fmt, 8200 + i as u64, Dense::default());
+        let name = format!("{arch}-{}-f32kv", fmt.label());
+        let model = match Gguf::open(&path).and_then(peregrine_models::load) {
+            Ok(m) => m,
+            Err(e) => {
+                failures.push(format!("{name}: does not load: {e}"));
+                continue;
+            }
+        };
+        // `run_with` asserts that every logit is finite.
+        let a = run_with(&model, 4, KvPrec::F32);
+        if run_with(&model, 4, KvPrec::F32) != a {
+            failures.push(format!("{name}: two runs differ"));
+        }
+        for t in [1, 2] {
+            if run_with(&model, t, KvPrec::F32) != a {
+                failures.push(format!("{name}: {t} threads differ from 4"));
+            }
+        }
+        // The f32 cache is a different computation: it must not be a copy of the
+        // f16 one, or the option would do nothing.
+        let f16 = run_with(&model, 4, KvPrec::F16);
+        if f16 == a {
+            failures.push(format!(
+                "{name}: the f32 cache gave the f16 cache's numbers"
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "the f32 KV cache failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
