@@ -20,6 +20,7 @@
 )]
 
 pub mod attn;
+mod blocks;
 pub mod dspark;
 pub mod gguf;
 pub mod kv;
