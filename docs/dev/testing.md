@@ -30,10 +30,18 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 
 ## CPU tiers
 
-Kernels are chosen by the CPU's features at run time, so a test run only covers the tier of the machine it
-runs on. Until the forced-tier switch (S0.3) exists:
+Kernels are chosen at run time from the CPU's features, capped by `PEREGRINE_ISA` (`scalar`, `avx2`,
+`avx512`; default `native`). Every feature check goes through `cpu_has!` (`crates/peregrine-core/src/cpu.rs`),
+so a cap reaches every kernel.
 
-- the AVX2 tier is covered on an AVX2-only host (H2 in `docs/targets.md`);
-- the AVX-512 tiers are covered on an AVX-512 host (H1, Zen 4/5 or recent Xeon).
+```sh
+PEREGRINE_ISA=scalar cargo xtest    # portable code only
+PEREGRINE_ISA=avx2   cargo xtest    # the AVX2 tier, also on an AVX-512 machine
+```
 
-CI runs x86-64 Linux, aarch64 Linux and aarch64 macOS.
+Goldens are stored per effective tier (`cpu::tier_name()`), so a forced run is compared with that tier's
+goldens. Two machines must agree on a shared tier: the AVX-512 host forced to `avx2` reproduces the AVX2
+host's goldens.
+
+CI runs the native tier on x86-64 Linux, aarch64 Linux and aarch64 macOS, and the `scalar` and `avx2` tiers
+on x86-64 Linux.

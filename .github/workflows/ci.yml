@@ -53,6 +53,23 @@ jobs:
         if: runner.arch != 'X64'
         run: cargo test --workspace --lib --bins --tests --release --locked
 
+  # Every kernel tier below the runner's own, forced with PEREGRINE_ISA (S0.3). The native tier runs in
+  # `test`; the CPU's features are printed so the log shows which tiers were real.
+  tiers:
+    strategy:
+      fail-fast: false
+      matrix: { isa: [scalar, avx2] }
+    name: tier (${{ matrix.isa }})
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: CPU features
+        run: grep -m1 -o -E 'avx2|avx512[a-z_]*|gfni|avx_vnni' /proc/cpuinfo | sort -u | tr '\n' ' '; grep -m1 'model name' /proc/cpuinfo
+      - run: cargo test --workspace --release --locked
+        env:
+          PEREGRINE_ISA: ${{ matrix.isa }}
+
   # The oldest compiler we promise to build with (workspace `rust-version`).
   msrv:
     runs-on: ubuntu-24.04
@@ -74,7 +91,7 @@ jobs:
   # One job the branch protection rule can require, whatever the matrix becomes.
   ci-ok:
     if: always()
-    needs: [lint, test, msrv, supply-chain]
+    needs: [lint, test, tiers, msrv, supply-chain]
     runs-on: ubuntu-24.04
     steps:
       - run: '[ "${{ contains(needs.*.result, ''failure'') || contains(needs.*.result, ''cancelled'') }}" = "false" ]'
