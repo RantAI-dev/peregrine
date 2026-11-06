@@ -176,6 +176,7 @@ fn dense_models_in_every_format() {
         Format::Q5_K,
         Format::IQ4_NL,
         Format::IQ4_XS,
+        Format::MXFP4,
     ];
     for arch in ["llama", "qwen3"] {
         for (i, &fmt) in formats.iter().enumerate() {
@@ -724,7 +725,10 @@ fn qwen3moe_file_is_written_and_refused_by_name() {
     let dir = tmpdir("moe");
     let s = MoeShape::default();
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::F16, Format::Q8_0].into_iter().enumerate() {
+    for (i, fmt) in [Format::F16, Format::Q8_0, Format::MXFP4]
+        .into_iter()
+        .enumerate()
+    {
         let name = format!("qwen3moe-{}", fmt.label());
         let path = write_moe(&dir, fmt, 5000 + i as u64, s);
         let g = match Gguf::open(&path) {
@@ -815,4 +819,86 @@ fn qwen3moe_file_is_written_and_refused_by_name() {
         "synthetic qwen3moe models failed:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn mxfp4_oracle_matches_llama_cpp() {
+    use std::process::Command;
+    use support::models::{write_moe, MoeShape};
+
+    let quantize_bin = Path::new("/var/tmp/llama.cpp/build/bin/llama-quantize");
+    if !quantize_bin.exists() {
+        eprintln!("SKIPPED: llama-quantize binary not found at {quantize_bin:?}");
+        return;
+    }
+
+    let dir = tmpdir("oracle-mxfp4");
+    let s = MoeShape::default();
+    let f32_path = write_moe(&dir, Format::F32, 9876, s);
+    let mxfp4_path = dir.join("mxfp4.gguf");
+    let requant_path = dir.join("requant_f32.gguf");
+
+    // 1. Quantize F32 to MXFP4_MOE
+    let status = Command::new(quantize_bin)
+        .arg(&f32_path)
+        .arg(&mxfp4_path)
+        .arg("MXFP4_MOE")
+        .status()
+        .expect("run llama-quantize to MXFP4_MOE");
+    assert!(status.success(), "llama-quantize to MXFP4_MOE failed");
+
+    // 2. Requantize MXFP4 to F32
+    let status = Command::new(quantize_bin)
+        .arg("--allow-requantize")
+        .arg(&mxfp4_path)
+        .arg(&requant_path)
+        .arg("F32")
+        .status()
+        .expect("run llama-quantize to F32");
+    assert!(
+        status.success(),
+        "llama-quantize --allow-requantize to F32 failed"
+    );
+
+    // 3. Open both models
+    let g_mxfp4 = Gguf::open(&mxfp4_path).expect("open mxfp4 model");
+    let g_f32 = Gguf::open(&requant_path).expect("open requant f32 model");
+
+    let mut checked_tensors = 0;
+    let mut total_weights = 0;
+    for (name, t_mxfp4) in &g_mxfp4.tensors {
+        if t_mxfp4.kind != Format::MXFP4 {
+            continue;
+        }
+        let t_f32 = g_f32.tensor(name).expect(name);
+        assert_eq!(t_f32.kind, Format::F32);
+        assert_eq!(t_mxfp4.dims, t_f32.dims);
+
+        let mxfp4_bytes = g_mxfp4.bytes(t_mxfp4);
+        let f32_bytes = g_f32.bytes(t_f32);
+        let numel: usize = t_mxfp4.dims.iter().product::<u64>() as usize;
+
+        let mut deq = vec![0.0f32; numel];
+        peregrine_core::quant::dequant_row(Format::MXFP4, mxfp4_bytes, &mut deq);
+
+        for i in 0..numel {
+            let want = f32::from_le_bytes(f32_bytes[i * 4..(i + 1) * 4].try_into().unwrap());
+            assert_eq!(
+                deq[i].to_bits(),
+                want.to_bits(),
+                "mismatch at element {i} of {name}: got {} ({:#010x}) vs llama.cpp {} ({:#010x})",
+                deq[i],
+                deq[i].to_bits(),
+                want,
+                want.to_bits()
+            );
+        }
+        checked_tensors += 1;
+        total_weights += numel;
+    }
+    assert!(checked_tensors > 0, "no MXFP4 tensors found to check");
+    eprintln!(
+        "oracle: {checked_tensors} tensors ({total_weights} weights) bit-identical to llama.cpp"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
