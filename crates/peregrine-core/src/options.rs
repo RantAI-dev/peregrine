@@ -107,8 +107,7 @@ pub struct EngineOptions {
 /// stretches between its matmuls that outlast 50 µs, and every park then paid a VM wake-up: 2.9 tok/s at
 /// 50 µs, 10.9 at 500 µs, 11.4 at 1000 µs (12 threads).
 pub const SPIN_DEFAULT_US: u64 = 1000;
-/// Default prefetch distance (bytes), the value the k-quant kernels were tuned with.
-pub const PF_DEFAULT: usize = 1024;
+pub use peregrine_kernels::options::PF_DEFAULT;
 
 impl Default for EngineOptions {
     fn default() -> Self {
@@ -170,12 +169,7 @@ impl EngineOptions {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.yield_us),
             decode_threads: num("DECODE_THREADS").filter(|&v| v > 0),
-            isa: match s("ISA").as_deref() {
-                Some("scalar") => Some(crate::cpu::Tier::Scalar),
-                Some("avx2") => Some(crate::cpu::Tier::Avx2),
-                Some("avx512") => Some(crate::cpu::Tier::Avx512),
-                _ => None,
-            },
+            isa: crate::cpu::parse_isa(s("ISA").as_deref()),
             zmm: unless("ZMM", "0"),
             wide: unless("NO_WIDE", "1"),
             tiles: unless("TILES", "0"),
@@ -329,19 +323,40 @@ pub const NAMES: &[&str] = &[
     "TRACE",
 ];
 
+impl EngineOptions {
+    /// The switches the kernels read.
+    pub fn kernel(&self) -> peregrine_kernels::options::KernelOptions {
+        peregrine_kernels::options::KernelOptions {
+            isa: self.isa,
+            zmm: self.zmm,
+            wide: self.wide,
+            prefetch_bytes: self.prefetch_bytes,
+            tq_span: self.tq_span,
+            exact: self.exact,
+        }
+    }
+}
+
 static OPTIONS: OnceLock<EngineOptions> = OnceLock::new();
 
 /// The process's options: those given to [`init`], else the environment's, read on first use.
 pub fn get() -> &'static EngineOptions {
-    OPTIONS.get_or_init(EngineOptions::from_env)
+    OPTIONS.get_or_init(|| {
+        let o = EngineOptions::from_env();
+        // The kernels read the same values; if they already read them, they read the same environment.
+        let _ = peregrine_kernels::options::init(o.kernel());
+        o
+    })
 }
 
 /// Set the process's options. Must run before anything reads them; an `Err` means they were already set
 /// (by an earlier `init` or a first read) and are unchanged.
 pub fn init(opts: EngineOptions) -> Result<(), &'static str> {
+    let kernel = opts.kernel();
     OPTIONS
         .set(opts)
-        .map_err(|_| "engine options were already set or read")
+        .map_err(|_| "engine options were already set or read")?;
+    peregrine_kernels::options::init(kernel).map_err(|_| "kernel options were already read")
 }
 
 #[cfg(test)]

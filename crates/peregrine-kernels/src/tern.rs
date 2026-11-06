@@ -372,7 +372,7 @@ pub unsafe fn dot_batch_ptq1(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
             tiled!(ptq1_zmm, w, acts, out)
         } else {
             for (b, a) in acts.iter().enumerate() {
-                out[b] = crate::quant::dot_scalar(crate::gguf::Format::PTQ1_0, w, a);
+                out[b] = crate::quant::dot_scalar(crate::format::Format::PTQ1_0, w, a);
             }
         }
         return;

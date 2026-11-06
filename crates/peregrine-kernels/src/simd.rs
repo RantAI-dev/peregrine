@@ -31,7 +31,7 @@
 
 #![cfg(target_arch = "x86_64")]
 
-use crate::gguf::{f16, Format};
+use crate::format::{f16, Format};
 use crate::quant::QuantAct;
 use std::arch::x86_64::*;
 
@@ -319,8 +319,12 @@ pub fn have_batched() -> bool {
     crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c")
 }
 
+/// The sum of the eight lanes of `v`.
+///
+/// # Safety
+/// AVX must be available (it is wherever an `__m256` exists in a caller compiled for AVX2).
 #[inline(always)]
-pub(crate) unsafe fn hsum_ps(v: __m256) -> f32 {
+pub unsafe fn hsum_ps(v: __m256) -> f32 {
     let lo = _mm256_castps256_ps128(v);
     let hi = _mm256_extractf128_ps(v, 1);
     let s = _mm_add_ps(lo, hi);

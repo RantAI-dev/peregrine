@@ -34,7 +34,7 @@
 //! produces fluent, wrong text. `tests/oracle.rs` checks these against the real
 //! weight file, and the AVX2 kernels in `simd.rs` are checked against these.
 
-use crate::gguf::{f16, Format};
+use crate::format::{f16, Format};
 
 /// An activation vector quantised to int8 in blocks of 32.
 ///

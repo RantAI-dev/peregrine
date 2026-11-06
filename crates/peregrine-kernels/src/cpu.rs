@@ -24,6 +24,16 @@ pub fn cap() -> Tier {
     *CAP.get_or_init(|| crate::options::get().isa.unwrap_or(Tier::Avx512))
 }
 
+/// `PEREGRINE_ISA`'s value as a tier: `scalar`, `avx2`, `avx512`; anything else (or unset) is no cap.
+pub fn parse_isa(v: Option<&str>) -> Option<Tier> {
+    match v {
+        Some("scalar") => Some(Tier::Scalar),
+        Some("avx2") => Some(Tier::Avx2),
+        Some("avx512") => Some(Tier::Avx512),
+        _ => None,
+    }
+}
+
 /// The tier a CPU feature belongs to. Unknown features count as the top tier, so a cap never lets one
 /// through by accident.
 pub fn tier_of(feature: &str) -> Tier {

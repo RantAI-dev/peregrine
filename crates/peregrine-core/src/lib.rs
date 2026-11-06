@@ -20,32 +20,29 @@
 )]
 
 pub mod attn;
-pub mod cpu;
 pub mod dspark;
 pub mod gguf;
-pub mod hadamard;
 pub mod kv;
 pub mod lbq;
 pub mod model;
 pub mod options;
 pub mod pool;
 pub mod prefix;
-pub mod quant;
 pub mod safetensors;
 pub mod sample;
 pub mod serve;
 pub mod session;
-#[cfg(target_arch = "x86_64")]
-pub mod simd;
 pub mod suffix;
 pub mod telem;
 pub mod template;
-#[cfg(target_arch = "x86_64")]
-pub mod tern;
 pub mod tokenizer;
-pub mod vmath;
 
 pub use gguf::{Format, Gguf};
+// The kernels live in `peregrine-kernels`; they keep their paths here.
+pub use peregrine_kernels::cpu_has;
+pub use peregrine_kernels::{cpu, hadamard, quant, vmath};
+#[cfg(target_arch = "x86_64")]
+pub use peregrine_kernels::{simd, tern};
 pub use session::{Session, SessionCfg};
 
 /// Whether this engine can run the GGUF at `path`, read from its header alone.
