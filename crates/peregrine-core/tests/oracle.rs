@@ -12,19 +12,74 @@
 //! own dequantisation code, not by a second transcription of it:
 //!
 //! ```text
-//! llama-quantize --allow-requantize SmolLM2-360M-Instruct.Q4_K_M.gguf out.gguf F32 4
+//! llama-quantize --allow-requantize SmolLM2-360M-Instruct.Q4_K_M.gguf smol-f32.gguf F32 4
 //! ```
 //!
-//! and then a 2048-element window of each of five tensors — one per weight format
-//! the model uses — was copied out. The windows start at element 4096 rather than 0
-//! so that they exercise block-offset arithmetic rather than only the first block.
+//! with llama.cpp v0.9.0 (commit cd959bae99ff4bed22bef2604f45241c09bbb8c8), and then a
+//! window of up to 2048 elements of one tensor per weight format the model uses was
+//! copied out byte for byte. The windows start at element 4096 where the tensor is long
+//! enough, so they exercise block-offset arithmetic rather than only the first block.
+//! The Q4_K window is `blk.10.ffn_down`: in this upload `blk.12.ffn_down` is Q6_K, and
+//! every format the model contains must stay covered.
 //!
-//! The model file itself is 270 MB and is not in the repository. Point
+//! The fixture is pinned to one exact model file — mradermacher's upload,
+//! <https://huggingface.co/mradermacher/SmolLM2-360M-Instruct-GGUF> — 270590976 bytes,
+//! SHA-256 `ade7aee1e5bd7c3b8f1fedafc61a1a0be31e8afa64e006607cd202323e2ccce0`. Another
+//! Q4_K_M upload is not interchangeable: the previous fixture, cut from a different
+//! upload, stored `blk.12.ffn_down` as Q4_K and differed in one F32 norm weight. So a
+//! different local file fails here with the expected hash, rather than as a kernel bug.
+//!
+//! The model file itself is 258 MiB and is not in the repository. Point
 //! `PEREGRINE_MODEL` at it, or leave it at the default path below.
 
 use peregrine_core::gguf::{Format, Gguf};
 use peregrine_core::quant::dequant_row;
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+/// Identity of the model the fixture was cut from. The full SHA-256 is checked by hand
+/// (there is no hashing dependency); the test itself compares the size and an FNV-1a of
+/// the first and last MiB, which is enough to tell uploads apart at negligible cost.
+const MODEL_SIZE: u64 = 270_590_976;
+const MODEL_SHA256: &str = "ade7aee1e5bd7c3b8f1fedafc61a1a0be31e8afa64e006607cd202323e2ccce0";
+const MODEL_FNV1A_FIRST_MIB: u64 = 12_794_659_150_644_441_972;
+const MODEL_FNV1A_LAST_MIB: u64 = 9_807_110_217_639_181_536;
+const MODEL_URL: &str = "https://huggingface.co/mradermacher/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct.Q4_K_M.gguf";
+const MIB: u64 = 1 << 20;
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Fail, with the expected identity, when the file at `path` is not the pinned upload.
+fn verify_pinned_model(path: &Path) {
+    let len = std::fs::metadata(path).expect("stat model").len();
+    let mut file = std::fs::File::open(path).expect("open model");
+    let mut first = vec![0u8; MIB as usize];
+    let mut last = vec![0u8; MIB as usize];
+    let (got_first, got_last) = if len >= 2 * MIB {
+        file.read_exact(&mut first).expect("read first MiB");
+        file.seek(SeekFrom::End(-(MIB as i64)))
+            .expect("seek last MiB");
+        file.read_exact(&mut last).expect("read last MiB");
+        (fnv1a64(&first), fnv1a64(&last))
+    } else {
+        (0, 0)
+    };
+    assert!(
+        len == MODEL_SIZE && got_first == MODEL_FNV1A_FIRST_MIB && got_last == MODEL_FNV1A_LAST_MIB,
+        "\n  model file {path:?} is not the pinned SmolLM2-360M-Instruct.Q4_K_M.gguf.\n  \
+         expected: size {MODEL_SIZE}, SHA-256 {MODEL_SHA256}\n            \
+         first/last MiB FNV-1a {MODEL_FNV1A_FIRST_MIB:#018x} / {MODEL_FNV1A_LAST_MIB:#018x}\n  \
+         got:      size {len}, first/last MiB FNV-1a {got_first:#018x} / {got_last:#018x}\n  \
+         download the exact file from {MODEL_URL}\n"
+    );
+}
 
 fn model_path() -> PathBuf {
     std::env::var_os("PEREGRINE_MODEL")
@@ -59,6 +114,7 @@ fn dequantisation_matches_llama_cpp_on_the_real_model() {
         );
         return;
     }
+    verify_pinned_model(&path);
     let g = Gguf::open(&path).expect("open model");
 
     let tsv = include_str!("fixtures/dequant-golden.tsv");
@@ -152,6 +208,7 @@ fn the_model_loads_with_the_shape_the_spec_describes() {
         eprintln!("  SKIPPED: needs the model at {path:?}");
         return;
     }
+    verify_pinned_model(&path);
     let g = Gguf::open(&path).expect("open model");
 
     assert_eq!(g.str("general.architecture").unwrap(), "llama");

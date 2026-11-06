@@ -59,7 +59,7 @@ fn simd_and_scalar_agree_on_every_row_of_real_tensors() {
         "token_embd.weight",      // Q8_0
         "blk.0.attn_q.weight",    // Q5_0
         "blk.0.ffn_down.weight",  // Q6_K
-        "blk.12.ffn_down.weight", // Q4_K
+        "blk.10.ffn_down.weight", // Q4_K
     ];
     let mut seen: Vec<Format> = Vec::new();
     let mut rows_checked = 0usize;
@@ -137,7 +137,7 @@ fn both_paths_are_exactly_zero_on_a_zero_activation() {
     for name in [
         "blk.0.attn_q.weight",
         "blk.0.ffn_down.weight",
-        "blk.12.ffn_down.weight",
+        "blk.10.ffn_down.weight",
     ] {
         let t = g.tensor(name).expect(name);
         let n = t.dims[0] as usize;
@@ -234,7 +234,7 @@ fn batched_kernels_agree_on_rows_of_the_real_model() {
         "token_embd.weight",
         "blk.0.attn_q.weight",
         "blk.0.ffn_down.weight",
-        "blk.12.ffn_down.weight",
+        "blk.10.ffn_down.weight",
     ] {
         let t = g.tensor(name).expect(name);
         let n = t.dims[0] as usize;
