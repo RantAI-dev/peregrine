@@ -13,7 +13,8 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    against its scalar reference. They need no model files and always run.
 2. **Synthetic model tests** (`tests/synthetic.rs`): tiny random GGUFs written at test time by
    `tests/support/` — llama and qwen3 in F32, F16, Q8_0, Q5_0, Q4_K and Q6_K, and the qwen35 hybrid (Gated
-   DeltaNet, gated attention, Hadamard rotation) in PQ2_0 and PTQ1_0. Each must load, give finite logits, be
+   DeltaNet, gated attention, Hadamard rotation) in PQ2_0 and PTQ1_0, plus that hybrid with one Q8_0 MTP
+   (NextN) block whose speculation must be lossless. Each must load, give finite logits, be
    bit-identical across runs and across 1, 2 and 4 threads, decode greedily the same way twice, and match its
    golden for the current tier (`tests/golden/synthetic/<tier>/`). They need no model files, so they run in
    CI on every tier; the `x86_64-avx2` and scalar (`x86_64`) goldens were recorded on an Intel host and

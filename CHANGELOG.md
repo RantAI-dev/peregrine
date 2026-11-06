@@ -20,7 +20,8 @@ All notable changes to this project are documented here. The format follows
 - `peregrine-bench`: the micro-benchmarks and experiments, moved out of the engine library.
 - The `peregrine` facade crate and command: `peregrine serve`, `peregrine inspect <model>`, `peregrine tier`.
 - Synthetic test models (llama, qwen3 in six formats; qwen35 hybrid in PQ2_0 / PTQ1_0) generated at test time,
-  so CI runs every model code path and format without model files.
+  so CI runs every model code path and format without model files; the qwen35 hybrid also has an MTP (NextN)
+  variant that runs lossless speculation with it on and off.
 - Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
   semantics); sampling fields the engine does not implement are refused with a 400 instead of ignored.
 - `PEREGRINE_ISA` caps the kernel tier (`scalar`, `avx2`, `avx512`); CI tests the lower tiers.
