@@ -1,0 +1,23 @@
+name: Performance report
+description: Slower than expected, or slower than another engine on the same file.
+labels: [perf, triage]
+body:
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Numbers
+      description: Peregrine and the other engine on the same model file, same machine, each at its best thread count. Include tok/s and bytes/token if reported.
+      render: text
+    validations: { required: true }
+  - type: textarea
+    id: machine
+    attributes:
+      label: Machine
+      description: CPU model, cores, RAM type and speed, OS, bare metal or VM, and anything else running.
+    validations: { required: true }
+  - type: textarea
+    id: commands
+    attributes:
+      label: Exact commands
+      render: text
+    validations: { required: true }

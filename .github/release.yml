@@ -1,0 +1,17 @@
+# Categories for GitHub's generated release notes (labels from docs/dev/github.md).
+changelog:
+  exclude:
+    labels: [skip-changelog]
+  categories:
+    - title: Breaking changes
+      labels: [breaking]
+    - title: Performance
+      labels: [perf]
+    - title: Model and format support
+      labels: [models, formats]
+    - title: CPU support
+      labels: [isa]
+    - title: Fixes
+      labels: [bug]
+    - title: Other changes
+      labels: ["*"]

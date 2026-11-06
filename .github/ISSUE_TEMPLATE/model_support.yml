@@ -1,0 +1,22 @@
+name: Model or format support
+description: Ask for an architecture, weight format, tokenizer or chat template.
+labels: [models, triage]
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: Hugging Face link to the GGUF (or the original weights).
+    validations: { required: true }
+  - type: textarea
+    id: missing
+    attributes:
+      label: What fails
+      description: The error Peregrine prints (it names the first unsupported architecture, format, tokenizer or template).
+      render: text
+    validations: { required: true }
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+      description: Who runs this model on CPUs, and how popular it is (downloads help us prioritise).

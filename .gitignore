@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+# Model files are never committed; see docs/dev/testing.md for where tests look for them.
+/models/
+*.gguf
+*.slb
+# Benchmark scratch output; curated results go under benchmarks/results/.
+/benchmarks/out/
+.DS_Store
+.idea/
+.vscode/

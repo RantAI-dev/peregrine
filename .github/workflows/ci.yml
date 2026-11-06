@@ -1,0 +1,80 @@
+# Every push to main and every PR. Actions are pinned to commits (the comment names the release);
+# Dependabot keeps them current.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --release --locked -- -D warnings
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Release mode: the kernels are tested as they ship, and debug-mode SIMD tests are too slow.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, name: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, name: linux-aarch64 }
+          - { os: macos-15, name: macos-aarch64 }
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: test (x86-64, every target)
+        if: runner.arch == 'X64'
+        run: cargo test --workspace --release --locked
+      # The examples are x86-only benchmarks (moving to peregrine-bench, roadmap S1.6); the library,
+      # binaries and tests must build warning-free and pass everywhere.
+      - name: clippy (non-x86)
+        if: runner.arch != 'X64'
+        run: cargo clippy --workspace --lib --bins --tests --release --locked -- -D warnings
+      - name: test (non-x86, lib + bins + tests)
+        if: runner.arch != 'X64'
+        run: cargo test --workspace --lib --bins --tests --release --locked
+
+  # The oldest compiler we promise to build with (workspace `rust-version`).
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with: { toolchain: "1.96" }
+      - run: rm rust-toolchain.toml
+      - run: cargo +1.96 check --workspace --all-targets --locked
+
+  # Licenses, advisories, sources and banned crates (deny.toml).
+  supply-chain:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with: { command: check }
+
+  # One job the branch protection rule can require, whatever the matrix becomes.
+  ci-ok:
+    if: always()
+    needs: [lint, test, msrv, supply-chain]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: '[ "${{ contains(needs.*.result, ''failure'') || contains(needs.*.result, ''cancelled'') }}" = "false" ]'

@@ -1,0 +1,8 @@
+Peregrine
+Copyright 2026 RantAI and the Peregrine contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Kernel layouts and file formats follow, and were checked against, the GGUF
+format and llama.cpp (MIT License, Copyright the ggml authors) and PrismML's
+Bonsai 2 formats PQ2_0 and PTQ1_0. No code from those projects is included.

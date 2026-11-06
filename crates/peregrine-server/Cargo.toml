@@ -1,0 +1,30 @@
+[package]
+name = "peregrine-server"
+description = "OpenAI-compatible HTTP server for the Peregrine CPU inference engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "peregrine-server"
+path = "src/main.rs"
+
+[dependencies]
+peregrine-core = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+# Review routing. Kernels and anything `unsafe` need a second, kernel-literate reviewer.
+*                                   @kleopasevan
+/crates/peregrine-core/src/tern.rs  @kleopasevan
+/crates/peregrine-core/src/simd.rs  @kleopasevan
+/crates/peregrine-core/src/quant.rs @kleopasevan
+/crates/peregrine-core/src/vmath.rs @kleopasevan
+/.github/                           @kleopasevan
+/deny.toml                          @kleopasevan
+/rust-toolchain.toml                @kleopasevan

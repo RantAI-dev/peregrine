@@ -1,0 +1,24 @@
+[package]
+name = "peregrine-core"
+description = "Peregrine: a CPU inference engine for language models that reports the bytes it moved per token"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["llm", "inference", "cpu", "gguf", "simd"]
+categories = ["science", "algorithms"]
+publish = false
+
+# memmap2 is the only dependency, on purpose (docs/adr/0002-dependency-policy.md). Everything else this crate
+# needs is either trivial (f16 conversion is twenty lines) or a liability: a tensor framework would bring back
+# the materialise-a-dequantised-buffer pattern the engine exists to avoid, and rayon would make thread and
+# barrier counts unpredictable when both are quantities this engine measures and reports.
+[dependencies]
+memmap2 = { workspace = true }
+
+[lints]
+workspace = true

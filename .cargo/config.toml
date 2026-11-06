@@ -1,0 +1,6 @@
+# Repo-wide cargo settings only. Machine-specific choices (linker, sccache, jobs) belong in
+# ~/.cargo/config.toml, never here.
+[alias]
+xclippy = "clippy --workspace --all-targets --release --locked -- -D warnings"
+xtest = "test --workspace --release --locked"
+quick = "build --profile quick"

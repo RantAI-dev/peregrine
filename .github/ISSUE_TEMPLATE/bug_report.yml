@@ -1,0 +1,29 @@
+name: Bug report
+description: Wrong output, a crash, or a model that should load but does not.
+labels: [bug, triage]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got.
+    validations: { required: true }
+  - type: input
+    id: model
+    attributes:
+      label: Model file
+      description: Name and source, e.g. `Qwen3-4B-Q4_K_M.gguf` from huggingface.co/Qwen/...
+    validations: { required: true }
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Paste the startup banner of `peregrine-server` (version, CPU features, options), plus OS and CPU model.
+      render: text
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Command line and request body. Greedy (temperature 0) repros are best.
+      render: text

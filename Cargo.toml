@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/peregrine-core", "crates/peregrine-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "Apache-2.0"
+authors = ["RantAI and the Peregrine contributors"]
+repository = "https://github.com/RantAI-dev/peregrine"
+homepage = "https://github.com/RantAI-dev/peregrine"
+
+# One place for every version. Crates say `foo = { workspace = true }`.
+[workspace.dependencies]
+peregrine-core = { path = "crates/peregrine-core", version = "0.1.0" }
+
+memmap2 = "0.9"
+
+axum = { version = "0.8.9", features = ["ws"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.53.3", features = ["full"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+
+[workspace.lints.rust]
+unexpected_cfgs = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "allow" # target: "warn" once unsafe lives only in the kernels crate (roadmap S1.3)
+
+# Profiles. `release` is what published numbers are measured with; change it only with an A/B on the
+# benchmark harness (docs/adr/0001-build-with-cargo.md).
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 16
+
+# Daily work: release-speed code with fast rebuilds. Not for published numbers.
+#   cargo build --profile quick
+[profile.quick]
+inherits = "release"
+codegen-units = 256
+incremental = true
+
+# Candidate distribution profile (roadmap: build-profile A/B). Adopted only on a measured gain.
+#   cargo build --profile dist
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

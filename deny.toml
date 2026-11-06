@@ -1,0 +1,43 @@
+# cargo-deny policy, checked in CI (`cargo deny check`).
+# Permissive licenses only, crates.io only, RustSec advisories are errors.
+# Rationale: docs/adr/0002-dependency-policy.md.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# The engine's hot path takes no new dependency without an ADR.
+deny = [
+  { crate = "rayon", reason = "the engine owns its thread pool (ADR 0002)" },
+  { crate = "openblas-src", reason = "the engine owns its kernels (ADR 0002)" },
+  { crate = "intel-mkl-src", reason = "the engine owns its kernels (ADR 0002)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

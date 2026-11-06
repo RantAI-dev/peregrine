@@ -1,0 +1,6 @@
+# The compiler that builds published numbers. Codegen changes between releases move kernel speed
+# (a rustc update once made `array::from_fn` stop inlining and cost 4x decode), so the toolchain is
+# pinned and bumped in its own PR with a benchmark run. The MSRV in Cargo.toml is checked separately in CI.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
