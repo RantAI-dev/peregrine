@@ -9,6 +9,10 @@
 //! layer, `Model::forward` collected a position vector per call, the hybrid pass built four pointer vectors and a
 //! `seen` vector per Gated DeltaNet layer, and the MTP block allocated `e`, `qg`, `gate`, two `to_vec` rows and
 //! `y` per draft.
+//!
+//! One MTP *verification* step is covered too: the drafter proposes into a buffer the caller owns and the
+//! engine commits, the way `Engine::verify_step` asks of it. The proposal is the engine's own buffer and the
+//! drafter's scratch is reused, so neither allocates.
 
 mod support;
 
@@ -19,6 +23,7 @@ use peregrine_core::pool::Pool;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use support::models::{write_dense, write_hybrid, Dense};
 
 /// Allocations counted while `COUNTING` was set.
@@ -72,9 +77,9 @@ fn tmpdir(test: &str) -> PathBuf {
     d
 }
 
-fn load(path: &Path) -> Model {
+fn load(path: &Path) -> Arc<Model> {
     let g = Gguf::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    peregrine_models::load(g).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    Arc::new(peregrine_models::load(g).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
 }
 
 /// No model file here carries a tokenizer vocabulary large enough for the prompt used by the synthetic tests;
@@ -127,6 +132,37 @@ fn check_mtp_draft(model: &Model, threads: usize) -> usize {
     })
 }
 
+/// One MTP verification step: the drafter proposes into the caller's buffer
+/// and the engine commits what was sampled, the way `Engine::verify_step`
+/// asks of it.
+///
+/// The proposal is written into a buffer the caller owns and reused, and the
+/// drafter keeps its own scratch: neither allocates per step.
+fn check_mtp_verify(model: &Arc<Model>, threads: usize) -> usize {
+    use peregrine_core::draft::{Drafter, MtpDrafter, Proposal};
+    let c = model.cfg;
+    let pool = Pool::new(threads);
+    let mut drafter = MtpDrafter::new(model.clone(), 512, threads).unwrap();
+    let mut out = Proposal::default();
+    let hidden = vec![0.0f32; c.d_model];
+    // The sampler's stand-in: the MTP block does not draw with it.
+    let mut pick = |_i: usize, _logits: &[f32]| 0u32;
+    let mut step = |drafter: &mut MtpDrafter, out: &mut Proposal, pos: usize| {
+        // The target's committed row: the token and the hidden state of the
+        // position before it.
+        drafter.commit(pos, TOKEN, &[], &hidden, &pool);
+        drafter.propose(TOKEN, pos + 1, 1, &pool, &mut pick, out);
+    };
+    for pos in 0..8 {
+        step(&mut drafter, &mut out, pos);
+    }
+    allocations_during(|| {
+        for pos in 8..12 {
+            step(&mut drafter, &mut out, pos);
+        }
+    })
+}
+
 #[test]
 fn a_decode_step_allocates_nothing() {
     // Prove the counter sees allocations, so a silently broken allocator cannot make this test vacuous.
@@ -172,6 +208,12 @@ fn a_decode_step_allocates_nothing() {
             if n != 0 {
                 failures.push(format!(
                     "qwen35-MTP draft, {threads} threads: {n} allocations per step"
+                ));
+            }
+            let n = check_mtp_verify(&mtp, threads);
+            if n != 0 {
+                failures.push(format!(
+                    "qwen35-MTP verification, {threads} threads: {n} allocations per step"
                 ));
             }
         }
