@@ -271,6 +271,14 @@ impl Qwen35 {
             hidden,
             ..
         } = st8;
+        if fam.is_none() {
+            *fam = Some(Box::new(HyScratch::new(c, &self.cfg, st8.max_batch)));
+        }
+        for a in acts.iter_mut().take(nb) {
+            a.ternary = true;
+            a.ptq1 = self.cfg.ptq1 && crate::table::MatKernels::get().ptq1_layout();
+            a.tb_span = self.cfg.tb_span;
+        }
         let hs = fam
             .as_mut()
             .and_then(|f| f.downcast_mut::<HyScratch>())
