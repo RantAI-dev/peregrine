@@ -76,9 +76,7 @@ unsafe fn encode_f16_avx(x: &[f32], out: &mut [u8]) {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 fn vector_path() -> bool {
-    is_x86_feature_detected!("avx2")
-        && is_x86_feature_detected!("fma")
-        && is_x86_feature_detected!("f16c")
+    crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c")
 }
 
 // the first `len` positions of a cache, packed (no gaps between the per-head regions).

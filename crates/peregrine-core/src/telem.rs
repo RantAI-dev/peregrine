@@ -194,8 +194,7 @@ fn probe_flops(threads: usize) -> f64 {
 fn fma_burst(seed: usize, iters: u64) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
-        {
+        if crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
             // SAFETY: the features the function is compiled for were just detected.
             return unsafe { fma_burst_avx2(seed, iters / 4) };
         }
