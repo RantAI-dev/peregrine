@@ -595,6 +595,111 @@ mod tests {
         assert_eq!(t.assistant_open(false), "");
     }
 
+    /// The template `TheBloke/Mistral-7B-Instruct-v0.2-GGUF` carries, read from
+    /// the file's own `tokenizer.chat_template`: the pre-update Mistral template,
+    /// with no system branch. The same string is in llama.cpp's
+    /// test-chat-template.cpp, v0.9.0 (MIT-licensed), as
+    /// "mistralai/Mistral-7B-Instruct-v0.2 (NOTE: Old pre-v1 without a system prompt)".
+    const MISTRAL_V0_TMPL: &str = "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}";
+
+    #[test]
+    fn mistral_v0_renders_expected_output_matching_llama_cpp() {
+        let t = Template::MistralV0;
+        let rendered = render_chat_prompt(t, Some(SYSTEM_MSG), &PAIRS, FINAL_USER);
+        // expected_output from llama.cpp's test-chat-template.cpp, v0.9.0
+        // ("mistralai/Mistral-7B-Instruct-v0.2 (NOTE: Old pre-v1 without a system
+        // prompt)"): the template has no system branch, so the system message is
+        // folded into the first user turn, with a newline between the two.
+        let expected = "[INST] You are a helpful assistant\n\
+                        Hello [/INST]Hi there</s>[INST] Who are you [/INST]   \
+                        I am an assistant   </s>[INST] Another question [/INST]";
+        assert_eq!(rendered, expected);
+
+        // The same conversation without a system message, as llama-server's
+        // /apply-template renders it for TheBloke's file (v0.9.0, --jinja):
+        // "[INST] Hello [/INST]Hi there</s>[INST] Another question [/INST]".
+        assert_eq!(
+            render_chat_prompt(t, None, &PAIRS, FINAL_USER),
+            "[INST] Hello [/INST]Hi there</s>[INST] Who are you [/INST]   \
+             I am an assistant   </s>[INST] Another question [/INST]"
+        );
+
+        // The template writes no system block of its own.
+        assert_eq!(t.system_block(Some(SYSTEM_MSG), "x"), "");
+        assert_eq!(t.user_turn("Hello"), "[INST] Hello [/INST]");
+        assert_eq!(t.assistant_turn("Hi there"), "Hi there</s>");
+        assert_eq!(t.close_previous(), "</s>");
+        assert_eq!(t.assistant_open(false), "");
+        assert_eq!(t.default_system("Mistral 7B"), None);
+    }
+
+    #[test]
+    fn the_pre_update_mistral_template_is_detected() {
+        assert_eq!(
+            Template::detect_from_str(MISTRAL_V0_TMPL),
+            Ok(Template::MistralV0)
+        );
+        // The updated template (the one `mistralai/Mistral-7B-Instruct-v0.2`
+        // declares today) is still the v1 one.
+        let mistral_v1_tmpl = "{{ bos_token }}{%- for message in messages %}{%- if message['role'] == 'user' %}{%- if loop.first and system_message is defined %}{{- ' [INST] ' + system_message + '\\n\\n' + message['content'] + ' [/INST]' }}{%- else %}{{- ' [INST] ' + message['content'] + ' [/INST]' }}{%- endif %}{%- elif message['role'] == 'assistant' %}{{- ' ' + message['content'] + eos_token}}{%- endif %}{%- endfor %}";
+        assert_eq!(
+            Template::detect_from_str(mistral_v1_tmpl),
+            Ok(Template::MistralV1)
+        );
+    }
+
+    #[test]
+    fn llama2_plain_renders_what_llama_servers_llama2_renders() {
+        let t = Template::Llama2Plain;
+        // llama-server v0.9.0's /apply-template with `--chat-template llama2`
+        // (the built-in name, which is this format):
+        //   "[INST] What is the capital of France? [/INST]" without a system
+        //   message, and with one:
+        //   "[INST] You are a helpful assistant.\nWhat is the capital of France? [/INST]"
+        assert_eq!(
+            t.render(
+                Some(SYSTEM_MSG),
+                &[],
+                "What is the capital of France?",
+                "x",
+                false,
+                None
+            ),
+            "[INST] You are a helpful assistant\nWhat is the capital of France? [/INST]"
+        );
+        assert_eq!(
+            t.render(
+                None,
+                &[],
+                "What is the capital of France?",
+                "x",
+                false,
+                None
+            ),
+            "[INST] What is the capital of France? [/INST]"
+        );
+        // Two turns: "[INST] Hello [/INST]Hi there</s>[INST] Another question [/INST]"
+        assert_eq!(
+            render_chat_prompt(t, None, &[("Hello", "Hi there")], FINAL_USER),
+            "[INST] Hello [/INST]Hi there</s>[INST] Another question [/INST]"
+        );
+    }
+
+    #[test]
+    fn template_names_round_trip() {
+        for name in TEMPLATES {
+            let t = Template::from_name(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(t.name(), *name, "{name}");
+        }
+        assert_eq!(Template::from_name("llama2"), Some(Template::Llama2Plain));
+        assert_eq!(
+            Template::from_name("llama2-sys-bos"),
+            Some(Template::Llama2)
+        );
+        assert_eq!(Template::from_name("mistral-v0"), Some(Template::MistralV0));
+        assert_eq!(Template::from_name("nonesuch"), None);
+    }
+
     #[test]
     fn detection_from_real_jinja_templates() {
         // Real templates from llama.cpp's test-chat-template.cpp, v0.9.0 (MIT-licensed):

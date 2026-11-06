@@ -1028,6 +1028,27 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_template_option_names_a_template() {
+        use clap::Parser;
+        let a = super::Args::try_parse_from([
+            "peregrine-server",
+            "-m",
+            "model.gguf",
+            "--chat-template",
+            "llama2",
+        ])
+        .unwrap();
+        assert_eq!(a.chat_template.as_deref(), Some("llama2"));
+        assert_eq!(
+            peregrine_core::template::Template::from_name(a.chat_template.as_deref().unwrap()),
+            Some(peregrine_core::template::Template::Llama2Plain)
+        );
+        // Without the option, the file's own template is used.
+        let a = super::Args::try_parse_from(["peregrine-server", "-m", "model.gguf"]).unwrap();
+        assert_eq!(a.chat_template, None);
+    }
+
+    #[test]
     fn penalties_are_off_unless_asked_for() {
         let p = plan(&body(json!({}))).unwrap();
         assert_eq!(p.penalties, Penalties::default());
