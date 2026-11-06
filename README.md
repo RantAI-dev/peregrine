@@ -40,6 +40,11 @@ Measured on a Ryzen AI 9 HX 370 (WSL2), Bonsai 2 9B: **23.5 tok/s single user, 2
 speculation**, about 75 tok/s total at 10 users. The full table, method and competitors are in
 [docs/targets.md](docs/targets.md).
 
+Checked against llama.cpp v0.9.0 on the same file, for **Llama 3.2 1B Instruct** and **Qwen 2.5 0.5B
+Instruct** (Q4_K_M): the tokenizer produces the same token ids, greedy decoding produces the same token
+ids except where the top two logits are closer than the two implementations' own rounding difference,
+and the chat path returns the same prompt token count and the same answer.
+
 ## Quick start
 
 ```sh
