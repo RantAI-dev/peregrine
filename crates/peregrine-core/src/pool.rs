@@ -280,6 +280,8 @@ impl Pool {
     /// borrows live on the caller's stack, so unwinding earlier would free them under
     /// the workers (and leave `remaining` counting into the next job).
     pub fn run<F: Fn(usize, usize) + Sync>(&self, f: F) {
+        #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
+        crate::blocks::par::bump_epoch();
         if self.n == 1 {
             f(0, 1);
             return;
@@ -323,6 +325,7 @@ impl Pool {
             self.inner.caller_sleeping.store(false, Ordering::SeqCst);
         }
         let _ = spins;
+        crate::blocks::par::bump_epoch();
         let poisoned = self.inner.poisoned.swap(false, Ordering::AcqRel);
         if let Err(p) = mine {
             std::panic::resume_unwind(p);
