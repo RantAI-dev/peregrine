@@ -21,6 +21,8 @@
 //! metadata, which at Q4_K is 12.5% of the traffic.
 
 use crate::attn;
+use crate::blocks::attn::AttnScratch;
+use crate::blocks::par::{OutPtr, SharedActs, SharedBuf, SharedMl, SharedScratch};
 use crate::gguf::{f16, Format, Gguf, TensorInfo};
 use crate::kv::KvCache;
 use crate::lbq::Slb;
@@ -201,7 +203,8 @@ struct Layer {
 }
 
 pub struct Model {
-    g: Gguf,
+    /// The file and the repacked weights: what every forward reads matrices from.
+    w: Weights,
     pub cfg: Config,
     pub tk: Tokenizer,
     tok_embd: TensorInfo,
@@ -221,11 +224,31 @@ pub struct Model {
     layers: Vec<Layer>,
     // the hybrid model's layers and rotation (`hybrid.rs`); None for the dense architectures.
     hy: Option<hybrid::Hybrid>,
-    // PQ2_0 matrices repacked into 16-row tiles at load (`TensorInfo::tile_off` points here); empty if not.
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
-    tiles: TileStore,
     // the MTP (NextN) block of a hybrid file that carries one (`*-MTP-Q8_0.gguf`).
     mtp: Option<mtp::Mtp>,
+}
+
+/// The weights a forward pass reads: the memory-mapped file and the matrices repacked from it at load.
+/// Split from `Model` so layer code can take the weights without the rest of the model (ADR 0006).
+pub(crate) struct Weights {
+    pub(crate) g: Gguf,
+    // PQ2_0 matrices repacked into 16-row tiles at load (`TensorInfo::tile_off` points here); empty if not.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
+    pub(crate) tiles: TileStore,
+}
+
+impl Weights {
+    /// A tensor's bytes in the mapped file.
+    #[inline]
+    pub(crate) fn bytes(&self, t: &TensorInfo) -> &[u8] {
+        self.g.bytes(t)
+    }
+    /// The repacked tile store (see `TensorInfo::tile_off`).
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    #[inline]
+    pub(crate) fn tiles(&self) -> &[u8] {
+        self.tiles.bytes()
+    }
 }
 
 /// Reusable scratch. Allocated once per session so a decode step does no allocation.
@@ -238,13 +261,8 @@ pub struct State {
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
-    /// One attention scratch per worker (decoded K/V tiles, the task's queries and
-    /// its running softmax state) — see `attn.rs`.
-    attn: Vec<attn::Scratch>,
-    /// Partial `(o, m, l)` per (KV head, position chunk, query row) when a call splits
-    /// a head's positions across workers; merged by `attn::combine_row`.
-    attn_part: Vec<f32>,
-    attn_ml: Vec<(f32, f64)>,
+    /// Attention's scratch: per worker, and for split heads.
+    attn: AttnScratch,
     /// `(cos, sin)` of every rotary angle for every position, computed once. Rope was
     /// recomputing `powf`, `sin` and `cos` for every pair of every head at every
     /// layer of every token — 20 000 transcendental calls per decode step.
@@ -318,14 +336,7 @@ impl State {
             q: vec![0.0; b * cfg.n_head * cfg.head_dim],
             k: vec![0.0; b * cfg.kv_dim()],
             v: vec![0.0; b * cfg.kv_dim()],
-            attn: (0..threads.max(1))
-                .map(|_| attn::Scratch::new(b * cfg.gqa(), cfg.head_dim))
-                .collect(),
-            attn_part: vec![
-                0.0;
-                cfg.n_kv_head * attn::MAX_CHUNKS * attn::MAX_PARTIAL_ROWS * cfg.head_dim
-            ],
-            attn_ml: vec![(0.0, 0.0); cfg.n_kv_head * attn::MAX_CHUNKS * attn::MAX_PARTIAL_ROWS],
+            attn: AttnScratch::new(cfg, b, threads),
             rope,
             acts: (0..b)
                 .map(|_| {
@@ -388,109 +399,6 @@ fn head_rmsnorm(x: &mut [f32], w: &[f32], eps: f32) {
     let inv = (1.0 / (ss + eps as f64).sqrt()) as f32;
     for (v, g) in x.iter_mut().zip(w) {
         *v = *v * inv * g;
-    }
-}
-
-/// A write cursor into the matmul's output, shared across workers.
-///
-/// Raw rather than a `&mut [f32]` split because the split is by row *stride*
-/// (`b*rows + r`), not by a contiguous slice: with a batch, each worker writes an
-/// interleaved set of ranges that `split_at_mut` cannot express. Disjointness is
-/// guaranteed by `pool::share` instead, and tested there.
-#[derive(Clone, Copy)]
-struct OutPtr(*mut f32);
-// SAFETY: workers write only indices inside their own share, which are disjoint.
-unsafe impl Send for OutPtr {}
-unsafe impl Sync for OutPtr {}
-
-impl OutPtr {
-    /// # Safety
-    /// `i` must be inside the output buffer and must belong to the calling worker's
-    /// share, so no two workers ever write the same index.
-    ///
-    /// This is a method rather than a bare field access on purpose: with edition
-    /// 2021's disjoint closure capture, writing `dst.0` inside the worker closure
-    /// captures the `*mut f32` field instead of the wrapper, and the closure then
-    /// fails `Sync` however the wrapper is marked.
-    #[inline(always)]
-    unsafe fn set(self, i: usize, v: f32) {
-        *self.0.add(i) = v;
-    }
-}
-
-/// A shared base pointer from which workers carve out *disjoint* sub-slices: one
-/// head's output, or one worker's softmax row. Same contract as `OutPtr`, for ranges.
-#[derive(Clone, Copy)]
-struct SharedBuf(*mut f32);
-// SAFETY: every user takes sub-ranges no other worker takes (asserted by construction:
-// ranges are keyed by the task or worker index).
-unsafe impl Send for SharedBuf {}
-unsafe impl Sync for SharedBuf {}
-
-impl SharedBuf {
-    /// # Safety
-    /// `off..off+len` must be inside the buffer and used by exactly one worker.
-    #[inline(always)]
-    unsafe fn slice<'a>(self, off: usize, len: usize) -> &'a mut [f32] {
-        std::slice::from_raw_parts_mut(self.0.add(off), len)
-    }
-    /// Shared read of a range no worker is writing — the LittleBit stage buffers,
-    /// written in one phase and read by every worker in the next.
-    ///
-    /// # Safety
-    /// `off..off+len` must be inside the buffer, and nothing may write it while
-    /// the returned slice lives.
-    #[inline(always)]
-    unsafe fn slice_ref<'a>(self, off: usize, len: usize) -> &'a [f32] {
-        std::slice::from_raw_parts(self.0.add(off), len)
-    }
-}
-
-/// Disjoint per-row access to the activation scratch, for the row-parallel prologues.
-#[derive(Clone, Copy)]
-struct SharedActs(*mut QuantAct);
-// SAFETY: as `SharedBuf` — each index is taken by exactly one worker.
-unsafe impl Send for SharedActs {}
-unsafe impl Sync for SharedActs {}
-
-impl SharedActs {
-    /// # Safety
-    /// `i` must be in bounds and used by exactly one worker.
-    #[inline(always)]
-    unsafe fn get<'a>(self, i: usize) -> &'a mut QuantAct {
-        &mut *self.0.add(i)
-    }
-}
-
-/// Disjoint per-worker access to the attention scratch: worker `w` takes index `w`.
-#[derive(Clone, Copy)]
-struct SharedScratch(*mut attn::Scratch);
-// SAFETY: as `SharedBuf` — each worker takes only its own index.
-unsafe impl Send for SharedScratch {}
-unsafe impl Sync for SharedScratch {}
-
-impl SharedScratch {
-    /// # Safety
-    /// `w` must be in bounds and used by exactly one worker.
-    #[inline(always)]
-    unsafe fn get<'a>(self, w: usize) -> &'a mut attn::Scratch {
-        &mut *self.0.add(w)
-    }
-}
-
-/// Disjoint slots of the partial-softmax `(m, l)` buffer, keyed by task row.
-#[derive(Clone, Copy)]
-struct SharedMl(*mut (f32, f64));
-// SAFETY: each slot is written by the one task that owns its (head, chunk, row).
-unsafe impl Send for SharedMl {}
-unsafe impl Sync for SharedMl {}
-
-impl SharedMl {
-    /// # Safety
-    /// `i` must be in bounds and owned by the calling task.
-    #[inline(always)]
-    unsafe fn set(self, i: usize, v: (f32, f64)) {
-        *self.0.add(i) = v;
     }
 }
 
@@ -937,7 +845,10 @@ impl Model {
         }
 
         Ok(Model {
-            g,
+            w: Weights {
+                g,
+                tiles: TileStore::default(),
+            },
             cfg,
             tk,
             tok_embd,
@@ -949,7 +860,6 @@ impl Model {
             rope_factors,
             layers,
             hy: None,
-            tiles: TileStore::default(),
             mtp: None,
         })
     }
@@ -1063,25 +973,25 @@ impl Model {
     }
 
     pub fn weight_bytes(&self) -> u64 {
-        self.g.total_weight_bytes() - self.lb_replaced
+        self.w.g.total_weight_bytes() - self.lb_replaced
             + self.lb.as_ref().map_or(0, |s| s.data_bytes)
     }
 
     /// The file's metadata, for the template detector and the host's telemetry.
     pub fn gguf(&self) -> &Gguf {
-        &self.g
+        &self.w.g
     }
 
     /// `general.name`, or an empty string.
     pub fn name(&self) -> &str {
-        self.g.str("general.name").unwrap_or("")
+        self.w.g.str("general.name").unwrap_or("")
     }
 
     /// Formats present in this model and how many tensors use each — the input to
     /// the mixed-precision report.
     pub fn format_mix(&self) -> Vec<(Format, usize, u64)> {
         let mut out: Vec<(Format, usize, u64)> = Vec::new();
-        for t in self.g.tensors.values() {
+        for t in self.w.g.tensors.values() {
             match out.iter_mut().find(|e| e.0 == t.kind) {
                 Some(e) => {
                     e.1 += 1;
@@ -1100,7 +1010,7 @@ impl Model {
     /// Q4_K_M while the tensors are mostly Q5_0.
     pub fn effective_bpw(&self) -> f64 {
         let bytes = self.weight_bytes();
-        let params: u64 = self.g.tensors.values().map(|t| t.numel()).sum();
+        let params: u64 = self.w.g.tensors.values().map(|t| t.numel()).sum();
         if params == 0 {
             0.0
         } else {
@@ -1114,7 +1024,7 @@ impl Model {
         let t = &self.tok_embd;
         let n = t.dims[0] as usize;
         let rb = row_bytes(t.kind, n);
-        let all = self.g.bytes(t);
+        let all = self.w.bytes(t);
         let off = token as usize * rb;
         crate::quant::dequant_row(t.kind, &all[off..off + rb], &mut out[..n]);
         st.bytes_weights += rb as u64;
@@ -1176,8 +1086,8 @@ impl Model {
                         debug_assert!(r % 16 == 0 && rz % 16 == 0);
                         while r < rz {
                             let nt = TPC.min((rz - r) / 16);
-                            let w = &self.tiles.bytes()
-                                [toff + (r / 16) * tb..toff + (r / 16 + nt) * tb];
+                            let w =
+                                &self.w.tiles()[toff + (r / 16) * tb..toff + (r / 16 + nt) * tb];
                             mk.tiles_pq2(w, ng, nt, acts, &mut blk[..16 * nt * nb]);
                             for i in 0..16 * nt {
                                 for b in 0..nb {
@@ -1190,7 +1100,7 @@ impl Model {
                     }
                     MatPath::RowsPq2 | MatPath::RowsPtq1 => {
                         // A block of rows per kernel call (the dispatch is paid per block, not per row).
-                        let bytes = self.g.bytes(j.w);
+                        let bytes = self.w.bytes(j.w);
                         const BLK: usize = 32;
                         let mut blk = [0.0f32; BLK * MAX_BATCH];
                         while r < rz {
@@ -1211,7 +1121,7 @@ impl Model {
                         }
                     }
                     MatPath::PerRow => {
-                        let bytes = self.g.bytes(j.w);
+                        let bytes = self.w.bytes(j.w);
                         for r in r..rz {
                             mk.row(j.w.kind, &bytes[r * rb..(r + 1) * rb], acts, &mut tmp[..nb]);
                             for (b, &v) in tmp[..nb].iter().enumerate() {
@@ -1535,7 +1445,7 @@ impl Model {
 
     fn rmsnorm_into(&self, x: &[f32], w: &TensorInfo, out: &mut [f32]) {
         let n = x.len();
-        let wb = self.g.bytes(w);
+        let wb = self.w.bytes(w);
         let ss = crate::vmath::sumsq_f64(x) / n as f64;
         let inv = (1.0 / (ss + self.cfg.eps as f64).sqrt()) as f32;
         match w.kind {
@@ -2050,9 +1960,9 @@ impl Model {
         let q: &[f32] = &st8.q[row0 * qd..];
         // SAFETY: `row0 * qd` is inside `xb`, which holds `max_batch` rows of at least `qd` floats.
         let out = SharedBuf(unsafe { st8.xb.as_mut_ptr().add(row0 * qd) });
-        let scratch = SharedScratch(st8.attn.as_mut_ptr());
-        let part = SharedBuf(st8.attn_part.as_mut_ptr());
-        let part_ml = SharedMl(st8.attn_ml.as_mut_ptr());
+        let scratch = SharedScratch(st8.attn.per_worker.as_mut_ptr());
+        let part = SharedBuf(st8.attn.part.as_mut_ptr());
+        let part_ml = SharedMl(st8.attn.ml.as_mut_ptr());
         let body = |wk: usize, nw: usize| {
             let (lo, hi) = share(tasks, wk, nw);
             // SAFETY: worker `wk` alone uses scratch `wk` (the pool has as many workers
@@ -2095,8 +2005,8 @@ impl Model {
                         let mut parts = [(none, f32::NEG_INFINITY, 0.0f64); attn::MAX_CHUNKS];
                         for (pi, p) in parts.iter_mut().enumerate().take(plan.pos_chunks) {
                             let slot = (kh * plan.pos_chunks + pi) * rows_all + b * gqa + g;
-                            let (m, l) = st8.attn_ml[slot];
-                            *p = (&st8.attn_part[slot * hd..(slot + 1) * hd], m, l);
+                            let (m, l) = st8.attn.ml[slot];
+                            *p = (&st8.attn.part[slot * hd..(slot + 1) * hd], m, l);
                         }
                         let h = kh * gqa + g;
                         let dst =
