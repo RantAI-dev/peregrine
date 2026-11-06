@@ -498,6 +498,10 @@ mod tests {
             (256, 144)
         );
         assert_eq!(
+            (Format::Q5_K.block(), Format::Q5_K.block_bytes()),
+            (256, 176)
+        );
+        assert_eq!(
             (Format::Q6_K.block(), Format::Q6_K.block_bytes()),
             (256, 210)
         );
@@ -505,6 +509,7 @@ mod tests {
         assert_eq!(Format::Q4_0.bpw(), 4.5);
         assert_eq!(Format::Q4_K.bpw(), 4.5);
         assert_eq!(Format::Q5_0.bpw(), 5.5);
+        assert_eq!(Format::Q5_K.bpw(), 5.5);
         assert_eq!(Format::Q8_0.bpw(), 8.5);
         assert!((Format::Q6_K.bpw() - 6.5625).abs() < 1e-9);
     }
