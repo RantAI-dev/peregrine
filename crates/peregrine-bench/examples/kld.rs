@@ -408,7 +408,7 @@ impl Loaded {
 fn load_model(path: &Path, threads: usize, n_ctx: usize, prefill: usize) -> Result<Loaded, String> {
     let g = Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let add_bos = llama_add_bos(&g);
-    let model = Model::load(g).map_err(|e| format!("{}: {e}", path.display()))?;
+    let model = peregrine_models::load(g).map_err(|e| format!("{}: {e}", path.display()))?;
     let c = model.cfg;
     let pool = Pool::new(threads);
     let n_vocab = c.n_vocab;
