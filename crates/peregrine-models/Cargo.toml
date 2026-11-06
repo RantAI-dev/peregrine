@@ -57,6 +57,10 @@ name = "dspark"
 required-features = ["dspark", "arch-qwen"]
 
 [[test]]
+name = "drafters"
+required-features = ["arch-qwen", "arch-qwen35", "dspark", "mtp", "fmt-legacy", "fmt-ternary"]
+
+[[test]]
 name = "engine"
 required-features = ["arch-qwen", "fmt-kquant"]
 
