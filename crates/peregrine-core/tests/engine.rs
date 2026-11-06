@@ -144,6 +144,12 @@ fn generates_a_correct_answer() {
 /// measuring its own kernel, and its roofline claims do not apply to itself.
 #[test]
 fn sustains_throughput_comparable_to_llama_cpp() {
+    // The reference figure is for the native kernels; a capped tier (`PEREGRINE_ISA=scalar`)
+    // measures a slower kernel on purpose.
+    if std::env::var("PEREGRINE_ISA").is_ok_and(|v| !v.is_empty() && v != "native") {
+        eprintln!("  SKIPPED: A3 measures the native kernel tier; PEREGRINE_ISA caps it");
+        return;
+    }
     let _serial = serial();
     let Some(mut s) = open(SessionCfg {
         max_tokens: 40,
