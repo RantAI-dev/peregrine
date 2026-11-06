@@ -72,6 +72,13 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
             .to_string()
     })? as usize;
     let w_scale = g.f32(&k("expert_weights_scale")).unwrap_or(0.0);
+    // llama.cpp does not apply `expert_weights_scale` to qwen3moe, so a file with a real scale would
+    // run differently here and there; every published qwen3moe file carries 0. Refuse instead of guessing.
+    if w_scale != 0.0 && w_scale != 1.0 {
+        return Err(format!(
+            "qwen3moe.expert_weights_scale = {w_scale}: only 0 or 1 (no scaling) is supported"
+        ));
+    }
 
     if let Ok(t) = g.str(&k("rope.scaling.type")) {
         if t != "none" && t != "linear" {
