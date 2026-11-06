@@ -71,9 +71,16 @@ bound by compute. That split drives most design choices.
 The micro-benchmarks and one-off experiments, as examples of this crate (`cargo run --release -p
 peregrine-bench --example <name>`); most are x86-64 only. Nothing depends on it.
 
+### `crates/peregrine`: the facade and the `peregrine` command
+
+What applications depend on: re-exports the engine (`peregrine::engine`), the kernels and, with the default
+`server` feature, the server. The `peregrine` binary (`cli` feature) has `serve`, `inspect` (a model file's
+architecture, formats and whether this build runs it) and `tier` (the kernel tier and every option).
+
 ### `crates/peregrine-server`: HTTP
 
-One binary. Maps the OpenAI chat request onto `Engine` slots, streams with SSE, and exposes `/metrics`.
+A library (`run`, `Args`) and a thin binary. Maps the OpenAI chat request onto `Engine` slots, streams with SSE,
+and exposes `/metrics`.
 
 ## Invariants
 

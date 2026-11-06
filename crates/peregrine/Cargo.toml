@@ -1,0 +1,34 @@
+[package]
+name = "peregrine"
+description = "Peregrine: a CPU inference engine for language models (facade crate and the `peregrine` command)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+publish = false
+
+[[bin]]
+name = "peregrine"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli", "server"]
+# The OpenAI-compatible HTTP server (`peregrine serve`, `peregrine::server`).
+server = ["dep:peregrine-server", "dep:tokio"]
+# The `peregrine` command line.
+cli = ["dep:clap"]
+
+[dependencies]
+peregrine-core = { workspace = true }
+peregrine-kernels = { workspace = true }
+peregrine-server = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[lints]
+workspace = true

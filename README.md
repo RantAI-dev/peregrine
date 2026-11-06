@@ -45,7 +45,8 @@ speculation**, about 75 tok/s total at 10 users. The full table, method and comp
 ```sh
 git clone https://github.com/RantAI-dev/peregrine && cd peregrine
 cargo build --release
-./target/release/peregrine-server -m path/to/model.gguf --port 8201
+./target/release/peregrine inspect path/to/model.gguf      # what it is, and whether it runs
+./target/release/peregrine serve -m path/to/model.gguf --port 8201
 curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"Hello"}]}'
 ```

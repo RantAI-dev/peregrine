@@ -10,6 +10,9 @@ repository.workspace = true
 homepage.workspace = true
 publish = false
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "peregrine-server"
 path = "src/main.rs"
