@@ -59,7 +59,7 @@ pub use session::{Session, SessionCfg};
 ///   pre-tokenizer (`tokenizer::PRE_TYPES`) — each transcribed from llama.cpp and
 ///   checked against `llama-tokenize`; a near-miss tokenizer produces confident
 ///   wrong text, so nothing else is approximated;
-/// * a ChatML or Llama 3 chat template (`template::TEMPLATES`), detected from the
+/// * a chat template (`template::TEMPLATES`), detected from the
 ///   file's own `tokenizer.chat_template`;
 /// * rope scaling only as Llama 3's factor table or a linear factor;
 /// * tensors in F32, F16, Q5_0, Q8_0, Q4_K or Q6_K (`Gguf::open` refuses others).
@@ -96,9 +96,7 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
             return Err(format!("rope scaling {t:?} is not implemented"));
         }
     }
-    if tok == "gpt2" || g.str("tokenizer.chat_template").is_ok() {
-        template::Template::detect(g)?;
-    }
+    template::Template::detect(g)?;
     Ok(())
 }
 

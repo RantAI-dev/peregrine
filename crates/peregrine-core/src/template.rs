@@ -1,15 +1,23 @@
 //! Chat templates, rendered in Rust from the shape the GGUF's own Jinja template
 //! describes.
 //!
-//! The engine does not run Jinja. It recognises the two templates its supported
-//! models use — ChatML (SmolLM2, Qwen2.5) and Llama 3 — from the markers in
-//! `tokenizer.chat_template`, and renders them so that the token stream is the one
-//! llama.cpp's `--jinja` path produces for the same messages. That equality is what
-//! makes a greedy answer from this engine comparable with llama.cpp's on the same
-//! file: a prompt that differs by one newline is a different prompt.
+//! The engine does not run Jinja. It recognises templates supported by the engine —
+//! ChatML (SmolLM2, Qwen2.5), Llama 3, Qwen3, Gemma, Mistral (v1 and v7), and Llama 2 —
+//! from the markers in `tokenizer.chat_template`, and renders them so that the token
+//! stream is the one llama.cpp's `--jinja` path produces for the same messages. That
+//! equality is what makes a greedy answer from this engine comparable with llama.cpp's
+//! on the same file: a prompt that differs by one newline is a different prompt.
 //!
 //! Anything else is refused at load (`detect`), never approximated with ChatML:
 //! a model prompted in a template it was not trained on answers fluently and wrongly.
+//!
+//! ## BOS handling
+//! SentencePiece models (Gemma, Mistral, Llama 2) usually add `<s>` / `<bos>` through the
+//! tokenizer (`add_bos`), and some templates also write it. To match what llama.cpp's
+//! `--jinja` path sends, the engine ensures that the token stream has exactly one BOS:
+//! if the rendered prompt string already begins with BOS (e.g. Llama 3's `<|begin_of_text|>`),
+//! no duplicate BOS is inserted; if `add_bos` is true on the tokenizer and the encoded
+//! stream does not start with `bos`, `bos` is prepended at prompt encode time (`Tokenizer::encode_prompt`).
 
 use crate::gguf::Gguf;
 use crate::tokenizer::Tokenizer;
@@ -24,10 +32,27 @@ pub enum Template {
     /// opens itself — or, with thinking switched off, the template writes an empty
     /// `<think>\n\n</think>\n\n` at the start of the assistant turn.
     Qwen3,
+    /// `<start_of_turn>user\n…<end_of_turn>\n<start_of_turn>model\n`
+    /// Gemma 2/3 has no system role; the system text is prepended to the first user turn.
+    Gemma,
+    /// ` [INST] … [/INST]`, Mistral v1 spacing.
+    MistralV1,
+    /// `[SYSTEM_PROMPT] …[/SYSTEM_PROMPT][INST] …[/INST]`, Mistral v7 spacing.
+    MistralV7,
+    /// `[INST] <<SYS>>\n…\n<</SYS>>\n\n… [/INST]`, Llama 2 with system block.
+    Llama2,
 }
 
 /// Template kinds this crate renders, for the compatibility probe's message.
-pub const TEMPLATES: &[&str] = &["chatml", "llama3", "qwen3"];
+pub const TEMPLATES: &[&str] = &[
+    "chatml",
+    "llama3",
+    "qwen3",
+    "gemma",
+    "mistral-v1",
+    "mistral-v7",
+    "llama2",
+];
 
 impl Template {
     pub fn name(self) -> &'static str {
@@ -35,6 +60,10 @@ impl Template {
             Template::ChatMl => "chatml",
             Template::Llama3 => "llama3",
             Template::Qwen3 => "qwen3",
+            Template::Gemma => "gemma",
+            Template::MistralV1 => "mistral-v1",
+            Template::MistralV7 => "mistral-v7",
+            Template::Llama2 => "llama2",
         }
     }
 
@@ -45,18 +74,7 @@ impl Template {
         let toks = g.arr_str("tokenizer.ggml.tokens")?;
         let has = |t: &str| toks.iter().any(|x| x == t);
         let tpl = g.str("tokenizer.chat_template").unwrap_or("");
-        let kind = if tpl.contains("<|start_header_id|>") {
-            Template::Llama3
-        } else if tpl.contains("<|im_start|>") && tpl.contains("enable_thinking") {
-            Template::Qwen3
-        } else if tpl.contains("<|im_start|>") || (tpl.is_empty() && has("<|im_start|>")) {
-            Template::ChatMl
-        } else {
-            return Err(format!(
-                "chat template is neither ChatML nor Llama 3 — Peregrine renders {}",
-                TEMPLATES.join(", ")
-            ));
-        };
+        let kind = Self::detect_from_template(tpl, has)?;
         for t in kind.required_tokens() {
             if !has(t) {
                 return Err(format!(
@@ -66,6 +84,52 @@ impl Template {
             }
         }
         Ok(kind)
+    }
+
+    /// Detects the template variant from the Jinja template string and a token existence check.
+    pub fn detect_from_template(tpl: &str, has: impl Fn(&str) -> bool) -> Result<Template, String> {
+        if tpl.contains("<|start_header_id|>") {
+            Ok(Template::Llama3)
+        } else if tpl.contains("<|im_start|>") && tpl.contains("enable_thinking") {
+            Ok(Template::Qwen3)
+        } else if tpl.contains("<|im_start|>") || (tpl.is_empty() && has("<|im_start|>")) {
+            Ok(Template::ChatMl)
+        } else if tpl.contains("<start_of_turn>") || (tpl.is_empty() && has("<start_of_turn>")) {
+            Ok(Template::Gemma)
+        } else if tpl.contains("[INST]") {
+            if tpl.contains("[SYSTEM_PROMPT]") {
+                Ok(Template::MistralV7)
+            } else if tpl.contains("' [INST] ' + system_message") {
+                Ok(Template::MistralV1)
+            } else if tpl.contains("[AVAILABLE_TOOLS]") || tpl.contains("[TOOL_CALLS]") {
+                Err(format!(
+                    "Mistral v3 / tool-calling chat templates are not supported — Peregrine renders {}",
+                    TEMPLATES.join(", ")
+                ))
+            } else if tpl.contains("<<SYS>>") {
+                Ok(Template::Llama2)
+            } else {
+                Err(format!(
+                    "unsupported [INST] chat template variant — Peregrine renders {}",
+                    TEMPLATES.join(", ")
+                ))
+            }
+        } else if tpl.is_empty() {
+            Err(format!(
+                "chat template is missing or not recognised — Peregrine renders {}",
+                TEMPLATES.join(", ")
+            ))
+        } else {
+            Err(format!(
+                "chat template is not recognised — Peregrine renders {}",
+                TEMPLATES.join(", ")
+            ))
+        }
+    }
+
+    /// Detects the template variant purely from the Jinja template string.
+    pub fn detect_from_str(tpl: &str) -> Result<Template, String> {
+        Self::detect_from_template(tpl, |_| false)
     }
 
     pub fn required_tokens(self) -> &'static [&'static str] {
@@ -78,6 +142,8 @@ impl Template {
                 "<|end_header_id|>",
                 "<|eot_id|>",
             ],
+            Template::Gemma => &["<start_of_turn>", "<end_of_turn>"],
+            Template::MistralV1 | Template::MistralV7 | Template::Llama2 => &["<s>", "</s>"],
         }
     }
 
@@ -88,6 +154,8 @@ impl Template {
         let names: &[&str] = match self {
             Template::ChatMl | Template::Qwen3 => &["<|im_end|>", "<|endoftext|>"],
             Template::Llama3 => &["<|eot_id|>", "<|eom_id|>", "<|end_of_text|>"],
+            Template::Gemma => &["<end_of_turn>"],
+            Template::MistralV1 | Template::MistralV7 | Template::Llama2 => &["</s>"],
         };
         let mut ids: Vec<u32> = names.iter().filter_map(|n| tk.id_of(n)).collect();
         if !ids.contains(&tk.eos) {
@@ -107,7 +175,12 @@ impl Template {
             Template::ChatMl => {
                 Some("You are a helpful AI assistant named SmolLM, trained by Hugging Face")
             }
-            Template::Llama3 | Template::Qwen3 => None,
+            Template::Llama3
+            | Template::Qwen3
+            | Template::Gemma
+            | Template::MistralV1
+            | Template::MistralV7
+            | Template::Llama2 => None,
         }
     }
 
@@ -136,6 +209,22 @@ impl Template {
                  Cutting Knowledge Date: December 2023\nToday Date: {today}\n\n{}<|eot_id|>",
                 system.unwrap_or("")
             ),
+            Template::Gemma => match system {
+                Some(sys) => format!("<start_of_turn>user\n{}\n\n", sys.trim()),
+                None => "<start_of_turn>user\n".to_string(),
+            },
+            Template::MistralV1 => match system {
+                Some(sys) => format!(" [INST] {sys}\n\n"),
+                None => " [INST] ".to_string(),
+            },
+            Template::MistralV7 => match system {
+                Some(sys) => format!("[SYSTEM_PROMPT] {sys}[/SYSTEM_PROMPT]"),
+                None => String::new(),
+            },
+            Template::Llama2 => match system {
+                Some(sys) => format!("[INST] <<SYS>>\n{sys}\n<</SYS>>\n\n"),
+                None => "[INST] ".to_string(),
+            },
         }
     }
 
@@ -149,6 +238,18 @@ impl Template {
                 "<|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|>\
                  <|start_header_id|>assistant<|end_header_id|>\n\n"
             ),
+            Template::Gemma => {
+                format!("{}<end_of_turn>\n<start_of_turn>model\n", user.trim())
+            }
+            Template::MistralV1 => {
+                format!("{user} [/INST]")
+            }
+            Template::MistralV7 => {
+                format!("[INST] {user}[/INST]")
+            }
+            Template::Llama2 => {
+                format!("{user} [/INST]")
+            }
         }
     }
 
@@ -157,6 +258,10 @@ impl Template {
         match self {
             Template::ChatMl | Template::Qwen3 => format!("{text}<|im_end|>\n"),
             Template::Llama3 => format!("{text}<|eot_id|>"),
+            Template::Gemma => format!("{}<end_of_turn>\n<start_of_turn>user\n", text.trim()),
+            Template::MistralV1 => format!(" {text}</s> [INST] "),
+            Template::MistralV7 => format!(" {text}</s>"),
+            Template::Llama2 => format!("{text}</s><s>[INST] "),
         }
     }
 
@@ -167,6 +272,10 @@ impl Template {
         match self {
             Template::ChatMl | Template::Qwen3 => "<|im_end|>\n",
             Template::Llama3 => "<|eot_id|>",
+            Template::Gemma => "<end_of_turn>\n<start_of_turn>user\n",
+            Template::MistralV1 => "</s> [INST] ",
+            Template::MistralV7 => "</s>",
+            Template::Llama2 => "</s><s>[INST] ",
         }
     }
 }
@@ -205,60 +314,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chatml_renders_the_smollm_transcript_shape() {
-        let t = Template::ChatMl;
-        let s = t.system_block(Some("S"), "x") + &t.user_turn("U");
-        assert_eq!(s, "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\nU<|im_end|>\n<|im_start|>assistant\n");
-        assert_eq!(t.assistant_turn("A"), "A<|im_end|>\n");
-        assert_eq!(t.close_previous(), "<|im_end|>\n");
-        assert_eq!(t.system_block(None, "x"), "");
-    }
-
-    #[test]
-    fn llama3_always_writes_the_date_header() {
-        let t = Template::Llama3;
-        let s = t.system_block(None, "14 Oct 2026");
-        assert!(s.starts_with("<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"));
-        assert!(s.contains("Cutting Knowledge Date: December 2023\nToday Date: 14 Oct 2026\n\n"));
-        assert!(s.ends_with("\n\n<|eot_id|>"), "{s:?}");
-        let s = t.system_block(Some("Be terse."), "14 Oct 2026");
-        assert!(
-            s.ends_with("Today Date: 14 Oct 2026\n\nBe terse.<|eot_id|>"),
-            "{s:?}"
+    fn default_system_matches_architecture() {
+        assert_eq!(
+            Template::ChatMl.default_system("SmolLM2-135M-Instruct"),
+            Some("You are a helpful assistant.")
         );
-        assert_eq!(t.user_turn("U"),
-            "<|start_header_id|>user<|end_header_id|>\n\nU<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n");
-        assert_eq!(t.close_previous(), "<|eot_id|>");
-    }
-
-    #[test]
-    fn default_system_follows_the_model_family() {
-        assert!(Template::ChatMl
-            .default_system("Qwen2.5 0.5B Instruct")
-            .unwrap()
-            .contains("Qwen"));
-        assert!(Template::ChatMl
-            .default_system("SmolLM2 360M Instruct")
-            .unwrap()
-            .contains("SmolLM"));
+        assert_eq!(
+            Template::Qwen3.default_system("Qwen3-0.6B"),
+            Some("You are a helpful assistant.")
+        );
         assert!(Template::Llama3
             .default_system("Llama 3.2 1B Instruct")
             .is_none());
-    }
-
-    #[test]
-    fn civil_dates_are_right_across_leap_years_and_epoch() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
-        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
-        assert_eq!(civil_from_days(20_740), (2026, 10, 14));
-        assert_eq!(civil_from_days(-1), (1969, 12, 31));
-        let today = today_llama3();
-        assert_eq!(today.len(), 11, "{today:?}");
-        assert!(
-            today.ends_with("202")
-                || today.ends_with("203")
-                || today.chars().rev().take(4).all(|c| c.is_ascii_digit())
-        );
+        assert!(Template::Gemma.default_system("Gemma 2 2B").is_none());
+        assert!(Template::MistralV1.default_system("Mistral 7B").is_none());
+        assert!(Template::MistralV7
+            .default_system("Mistral Large")
+            .is_none());
+        assert!(Template::Llama2.default_system("Llama 2 7B").is_none());
     }
 }

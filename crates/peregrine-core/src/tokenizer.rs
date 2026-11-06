@@ -469,6 +469,21 @@ impl Tokenizer {
         out
     }
 
+    /// Encodes a chat prompt into tokens, ensuring that the token stream has exactly
+    /// one BOS token if `add_bos` is set.
+    ///
+    /// SentencePiece models usually add `<s>` / `<bos>` through the tokenizer
+    /// (`add_bos`), and some templates also write it. If the encoded text already
+    /// begins with `self.bos`, no duplicate is added; if `add_bos` is true and the
+    /// stream does not begin with `self.bos`, `self.bos` is prepended.
+    pub fn encode_prompt(&self, text: &str) -> Vec<u32> {
+        let mut toks = self.encode(text);
+        if self.add_bos && toks.first().copied() != Some(self.bos) {
+            toks.insert(0, self.bos);
+        }
+        toks
+    }
+
     pub fn encode_into(&self, text: &str, out: &mut Vec<u32>) {
         match &self.algo {
             TokenizerAlgo::Bpe(bpe) => {
