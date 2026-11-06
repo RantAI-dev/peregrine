@@ -154,6 +154,35 @@ pub fn generate_weights(fmt: Format, numel: usize, rng: &mut Rng) -> Vec<u8> {
             }
             out
         }
+        Format::IQ4_NL => {
+            let num_blocks = numel / 32;
+            let mut out = Vec::with_capacity(num_blocks * 18);
+            for _ in 0..num_blocks {
+                let d = to_f16(rng.f32_range(0.001, 0.003));
+                out.extend_from_slice(&d.to_le_bytes());
+                for _ in 0..16 {
+                    out.push(rng.next_u8());
+                }
+            }
+            out
+        }
+        Format::IQ4_XS => {
+            let num_blocks = numel / 256;
+            let mut out = Vec::with_capacity(num_blocks * 136);
+            for _ in 0..num_blocks {
+                let d = to_f16(rng.f32_range(0.0005, 0.002));
+                out.extend_from_slice(&d.to_le_bytes());
+                let sh = rng.next_u32() as u16;
+                out.extend_from_slice(&sh.to_le_bytes());
+                for _ in 0..4 {
+                    out.push(rng.next_u8());
+                }
+                for _ in 0..128 {
+                    out.push(rng.next_u8());
+                }
+            }
+            out
+        }
         Format::PQ2_0 => {
             let num_blocks = numel / 128;
             let mut out = Vec::with_capacity(num_blocks * 34);
