@@ -56,7 +56,8 @@ bound by compute. That split drives most design choices.
 | `tokenizer.rs`, `template.rs` | Byte-level BPE with the pre-tokenizers transcribed from llama.cpp; chat templates rendered in Rust so the token stream equals llama.cpp's `--jinja` output. |
 | `arch.rs` | The `Architecture`, `MtpHead` and `Family` traits, and the family dispatch table (ADR 0006). |
 | `families/` | Architecture implementations behind the `Architecture` trait: `dense` (Llama, Qwen2, Qwen3) and `qwen35` (Gated DeltaNet + attention, Hadamard rotation, MTP). |
-| `model.rs` | `Model`: facade delegating to the `Architecture` trait, tile store for repacked weights, and LittleBit accounting. |
+| `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, and LittleBit accounting. |
+| `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
 | `model/hybrid.rs` | Re-exports for Qwen 3.5 / Bonsai 2 (`families/qwen35`). |
 | `model/mtp.rs` | Re-exports for the multi-token-prediction head (`families/qwen35/mtp.rs`). |
 | `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU), `rope`, `attn` (attention scratch, row prep, KV write, attention), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |

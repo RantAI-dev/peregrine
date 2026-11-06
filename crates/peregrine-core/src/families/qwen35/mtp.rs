@@ -130,7 +130,6 @@ impl MtpHead for Mtp {
     ) -> Result<MtpState, String> {
         let c = *cfg;
         let hc = self.hc;
-        let dense = Config { hybrid: None, ..c };
         let draft_vocab = crate::options::get().mtp_vocab.min(c.n_vocab) / 16 * 16;
         let tacts = (0..MTP_MAX_ROWS)
             .map(|_| {
@@ -142,7 +141,7 @@ impl MtpHead for Mtp {
             })
             .collect();
         let inner = Qwen35MtpState {
-            st: State::new(&dense, MTP_MAX_ROWS, 1, max_ctx, threads, None),
+            st: State::new(&c, MTP_MAX_ROWS, 1, max_ctx, threads, None),
             hs: HyScratch::new(&c, &hc, MTP_MAX_ROWS),
             tacts,
             cat: vec![0.0; MTP_MAX_ROWS * 2 * c.d_model],

@@ -6,9 +6,43 @@ use crate::arch::{Architecture, Family, Loaded};
 use crate::blocks::linear::LinJob;
 use crate::blocks::par::Disjoint;
 use crate::gguf::{Gguf, TensorInfo};
-use crate::model::{Arch, Caches, Config, Linear, State, StepStats, TileStore, Weights};
+use crate::model::{Caches, Config, Linear, State, StepStats, TileStore, Weights};
 use crate::pool::Pool;
 use crate::tokenizer::Tokenizer;
+
+/// The dense transformer architectures implemented by Peregrine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arch {
+    Llama,
+    Qwen2,
+    /// Qwen3: no attention biases, a per-head RMSNorm on queries and keys before
+    /// rotation, and a head width independent of the model width (Qwen3-4B runs 32
+    /// heads of 128 over a 2560-wide residual).
+    Qwen3,
+}
+
+impl Arch {
+    pub fn from_name(name: &str) -> Option<Arch> {
+        Some(match name {
+            "llama" => Arch::Llama,
+            "qwen2" => Arch::Qwen2,
+            "qwen3" => Arch::Qwen3,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Arch::Llama => "llama",
+            Arch::Qwen2 => "qwen2",
+            Arch::Qwen3 => "qwen3",
+        }
+    }
+
+    pub fn key_prefix(self) -> &'static str {
+        self.name()
+    }
+}
 
 pub(crate) struct DenseLayer {
     pub(crate) attn_norm: TensorInfo,
@@ -107,9 +141,10 @@ impl Dense {
             .filter(|f| *f > 0.0)
             .map(|f| 1.0 / f);
         let cfg = Config {
-            arch,
+            arch_name: arch.name(),
             rope_neox: arch != Arch::Llama,
             n_layer,
+            n_kv_layer: n_layer,
             n_head,
             n_kv_head,
             head_dim,
@@ -122,7 +157,6 @@ impl Dense {
                 .unwrap_or(1e-5),
             rope_base: g.f32(&k("rope.freq_base")).unwrap_or(10000.0),
             ctx_train: g.u32(&k("context_length")).unwrap_or(2048) as usize,
-            hybrid: None,
         };
         let mut rope_factors: Option<Vec<f32>> = rope_scale.map(|s| vec![1.0 / s; rope_dim / 2]);
         if let Ok(t) = g.tensor("rope_freqs.weight") {
@@ -146,7 +180,7 @@ impl Dense {
         let get = |n: &str| -> Result<TensorInfo, String> { g.tensor(n).cloned() };
         let bias = |n: &str| -> Result<Option<Vec<f32>>, String> {
             match arch {
-                Arch::Llama | Arch::Qwen3 | Arch::Qwen35 => Ok(None),
+                Arch::Llama | Arch::Qwen3 => Ok(None),
                 Arch::Qwen2 => {
                     let t = get(n)?;
                     let mut v = vec![0.0f32; t.numel() as usize];

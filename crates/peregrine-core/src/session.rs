@@ -332,18 +332,7 @@ impl Session {
         } else {
             kv
         };
-        let mut st = State::new(
-            &c,
-            max_batch,
-            logit_rows,
-            max_ctx,
-            threads,
-            model.rope_factors.as_deref(),
-        );
-        {
-            let (lx, lt) = model.lb_scratch(max_batch);
-            st.set_lb_scratch(lx, lt);
-        }
+        let mut st = model.new_state(max_batch, logit_rows, max_ctx, threads);
         // Probe with the same width the engine will actually run at: a bandwidth
         // figure measured single-threaded is not the denominator a four-thread
         // decode step should be judged against.
