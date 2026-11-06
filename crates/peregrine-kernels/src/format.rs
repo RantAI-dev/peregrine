@@ -150,6 +150,32 @@ impl Format {
             _ => false,
         }
     }
+
+    /// Every weight format known to the engine, in canonical display order.
+    pub const ALL: &[Format] = &[
+        Format::F32,
+        Format::F16,
+        Format::BF16,
+        Format::Q4_0,
+        Format::Q5_0,
+        Format::Q8_0,
+        Format::Q4_K,
+        Format::Q5_K,
+        Format::Q6_K,
+        Format::IQ4_NL,
+        Format::IQ4_XS,
+        Format::PQ2_0,
+        Format::PTQ1_0,
+    ];
+
+    /// Formats supported in this build (whose required feature is enabled).
+    pub fn supported() -> Vec<Format> {
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(|f| f.is_supported())
+            .collect()
+    }
 }
 
 /// IEEE-754 binary16 to binary32.

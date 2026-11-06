@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
 - Support for GGML's Q2_K and Q3_K weight formats (AVX2 single-row and batched kernels, scalar reference).
 - `peregrine-bench` example `kld`: KL divergence and top-1 agreement against llama.cpp on real text (`docs/dev/accuracy.md`); first results in `docs/targets.md`.
 - `peregrine bench`, `peregrine tune` and tuning profiles (S1.7).
+- The `qwen3moe` mixture-of-experts family (S2.5 step 3): the synthetic models load, run, and give the
+  same tokens alone and batched; the check against llama.cpp on a real file is step 4.
 - Support for GGML's IQ4_NL and IQ4_XS weight formats (AVX2 single-row and batched kernels, scalar reference).
 - Support for GGML's Q5_K weight format (AVX2 single-row and batched kernels, scalar reference).
 - Support for Gemma, Mistral (v1, v7), and Llama 2 chat templates with exact llama.cpp parity (S2.3b).
@@ -34,6 +36,14 @@ All notable changes to this project are documented here. The format follows
   variant that runs lossless speculation with it on and off.
 - Synthetic coverage for Qwen2 attention biases, Llama 3.x and linear rope scaling, engine batching (shared
   prefixes, mixed prefill/decode, mapped and per-row caches), LittleBit sidecars and accepted MTP drafts.
+- Synthetic coverage of what the two runtimes do differently, pinned before ADR 0007 makes the engine the
+  only one: the same prompt through `Session` and a one-slot `Engine`, the taps a DSpark drafter needs, a
+  second user arriving mid-speculation, and the prefix store with a drafter attached.
+- `peregrine-core`: the `Drafter` interface (ADR 0007) — one way of proposing tokens, told what the target
+  committed and what was rolled back — with wrappers over today's drafters (the suffix index, DeepSeek's
+  DSpark head, the model's own MTP block). Unstable until 1.0.
+- `SlotCfg`: the sampling `turn` (mixed into the position key) and the KV rotation choice, so a conversation
+  can be given the same settings it uses today.
 - Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
   semantics); sampling fields the engine does not implement are refused with a 400 instead of ignored.
 - `PEREGRINE_ISA` caps the kernel tier (`scalar`, `avx2`, `avx512`); CI tests the lower tiers.

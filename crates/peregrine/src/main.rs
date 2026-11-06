@@ -28,6 +28,12 @@ enum Cmd {
     Tune(peregrine::tune::TuneArgs),
     /// The CPU kernel tier and every engine option in effect.
     Tier,
+    /// Describe supported architectures, formats, tokenizers, templates, and CPU tiers.
+    Support {
+        /// Format as Markdown table for README.md.
+        #[arg(long)]
+        markdown: bool,
+    },
 }
 
 fn main() {
@@ -61,5 +67,6 @@ fn main() {
             }
         }
         Cmd::Tier => print!("{}", peregrine::describe_runtime()),
+        Cmd::Support { markdown } => print!("{}", peregrine::support(markdown)),
     }
 }

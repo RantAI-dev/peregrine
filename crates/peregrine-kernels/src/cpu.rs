@@ -20,6 +20,23 @@ pub enum Tier {
     Avx512,
 }
 
+impl Tier {
+    /// String name of the kernel tier: `scalar`, `avx2`, `avx512`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Tier::Scalar => "scalar",
+            Tier::Avx2 => "avx2",
+            Tier::Avx512 => "avx512",
+        }
+    }
+}
+
+impl std::fmt::Display for Tier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The highest tier kernels may use: `PEREGRINE_ISA`, or no cap.
 #[inline]
 pub fn cap() -> Tier {
