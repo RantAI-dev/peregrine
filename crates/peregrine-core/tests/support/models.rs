@@ -1,0 +1,316 @@
+//! Builders for tiny synthetic models: shapes small enough to run in milliseconds, large enough that
+//! every block format and the batched kernel paths accept them.
+
+use super::vocab::{self, TemplateKind, VOCAB_SIZE};
+use super::weights::{generate_norm, generate_weights, Rng};
+use super::writer::GgufWriter;
+use peregrine_core::gguf::Format;
+use std::path::{Path, PathBuf};
+
+/// A dense (llama-family) model's shape.
+#[derive(Clone, Copy, Debug)]
+pub struct Dense {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+}
+
+impl Default for Dense {
+    fn default() -> Self {
+        // Every matrix row is a multiple of 256 (the K-quant block), heads are 32 wide.
+        Dense {
+            d_model: 256,
+            n_layer: 2,
+            n_head: 8,
+            n_head_kv: 4,
+            n_ff: 512,
+            ctx: 512,
+        }
+    }
+}
+
+/// Write a dense `arch` model ("llama" or "qwen3") whose matrices are all `fmt`, seeded by `seed`.
+pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let head_dim = s.d_model / s.n_head;
+    w.str("general.architecture", arch);
+    w.str("general.name", &format!("synthetic-{arch}-{}", fmt.label()));
+    let k = |x: &str| format!("{arch}.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("attention.head_count_kv"), s.n_head_kv as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.u32(&k("rope.dimension_count"), head_dim as u32);
+    w.f32(&k("rope.freq_base"), 10000.0);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
+    if arch == "qwen3" {
+        w.u32(&k("attention.key_length"), head_dim as u32);
+        w.u32(&k("attention.value_length"), head_dim as u32);
+    }
+    let (pre, tpl) = if arch == "llama" {
+        ("llama-bpe", TemplateKind::Llama3)
+    } else {
+        ("qwen2", TemplateKind::Qwen3)
+    };
+    vocab::add_tokenizer_metadata(&mut w, pre);
+    w.str("tokenizer.chat_template", vocab::chat_template(tpl));
+
+    let kv = s.n_head_kv * head_dim;
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    for i in 0..s.n_layer {
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_q.weight"),
+            s.d_model,
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_k.weight"),
+            s.d_model,
+            kv,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_v.weight"),
+            s.d_model,
+            kv,
+        );
+        if arch == "qwen3" {
+            norm(
+                &mut w,
+                &mut rng,
+                &format!("blk.{i}.attn_q_norm.weight"),
+                head_dim,
+            );
+            norm(
+                &mut w,
+                &mut rng,
+                &format!("blk.{i}.attn_k_norm.weight"),
+                head_dim,
+            );
+        }
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_output.weight"),
+            s.d_model,
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_gate.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_up.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_down.weight"),
+            s.n_ff,
+            s.d_model,
+        );
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+    mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
+    let path = dir.join(format!("{arch}-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
+/// Write a `qwen35` hybrid model (Gated DeltaNet layers, one gated-attention layer in every
+/// `interval`, Hadamard-rotated ternary matmuls) with every matmul in `fmt` (PQ2_0 or PTQ1_0).
+///
+/// Geometry: d_model 256, FFN 512, 4 layers (attention at layer 3), attention 4 heads × 64 with 2 KV
+/// heads, GDN 2 key heads and 4 value heads of width 64, Hadamard block 64. Every width is a multiple of
+/// 256, which the PTQ1_0 activation layout needs, and every matrix has a multiple of 16 rows, which the
+/// AVX-512 tile path needs.
+pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
+    assert!(matches!(fmt, Format::PQ2_0 | Format::PTQ1_0));
+    let (d_model, n_ff, n_layer, interval) = (256usize, 512usize, 4usize, 4usize);
+    let (n_head, n_kv, head_dim, rope_dim) = (4usize, 2usize, 64usize, 32usize);
+    let (n_k, n_v, ds, d_conv) = (2usize, 4usize, 64usize, 4usize);
+    let (key_dim, value_dim) = (n_k * ds, n_v * ds);
+    let conv_dim = 2 * key_dim + value_dim;
+    let q_dim = n_head * head_dim;
+    let had_block = 64usize;
+
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    w.str("general.architecture", "qwen35");
+    w.str("general.name", &format!("synthetic-qwen35-{}", fmt.label()));
+    let k = |x: &str| format!("qwen35.{x}");
+    w.u32(&k("block_count"), n_layer as u32);
+    w.u32(&k("embedding_length"), d_model as u32);
+    w.u32(&k("attention.head_count"), n_head as u32);
+    w.u32(&k("attention.head_count_kv"), n_kv as u32);
+    w.u32(&k("attention.key_length"), head_dim as u32);
+    w.u32(&k("attention.value_length"), head_dim as u32);
+    w.u32(&k("feed_forward_length"), n_ff as u32);
+    w.u32(&k("rope.dimension_count"), rope_dim as u32);
+    w.u32(&k("full_attention_interval"), interval as u32);
+    w.u32(&k("ssm.group_count"), n_k as u32);
+    w.u32(&k("ssm.time_step_rank"), n_v as u32);
+    w.u32(&k("ssm.state_size"), ds as u32);
+    w.u32(&k("ssm.conv_kernel"), d_conv as u32);
+    w.u32(&k("ssm.inner_size"), value_dim as u32);
+    w.u32(&k("context_length"), 512);
+    w.f32(&k("rope.freq_base"), 1e7);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
+    w.u32("prism.hadamard.block_size", had_block as u32);
+    w.str(
+        "prism.hadamard.transform",
+        "normalized-sylvester-walsh-hadamard",
+    );
+    w.str("prism.hadamard.sign_mode", "explicit");
+    // One sign vector per distinct matmul input width: d_model = value = query = 256, FFN = 512.
+    let widths = [256i32, 512];
+    let signs: Vec<i32> = (0..widths.iter().sum::<i32>())
+        .map(|_| if rng.next_u32() & 1 == 0 { 1 } else { -1 })
+        .collect();
+    w.arr_i32("prism.hadamard.sign_widths", &widths);
+    w.arr_i32("prism.hadamard.sign_values", &signs);
+    vocab::add_tokenizer_metadata(&mut w, "qwen35");
+    w.str(
+        "tokenizer.chat_template",
+        vocab::chat_template(TemplateKind::Qwen3),
+    );
+
+    let tern = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let f32m = |w: &mut GgufWriter, rng: &mut Rng, name: &str, dims: &[u64], lo: f32, hi: f32| {
+        let n: u64 = dims.iter().product();
+        let data: Vec<u8> = (0..n)
+            .flat_map(|_| rng.f32_range(lo, hi).to_le_bytes())
+            .collect();
+        w.add_tensor(name, dims, Format::F32, data);
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    w.add_tensor(
+        "token_embd.weight",
+        &[d_model as u64, VOCAB_SIZE as u64],
+        Format::F16,
+        generate_weights(Format::F16, d_model * VOCAB_SIZE, &mut rng),
+    );
+    for i in 0..n_layer {
+        let p = |s: &str| format!("blk.{i}.{s}");
+        norm(&mut w, &mut rng, &p("attn_norm.weight"), d_model);
+        if (i + 1) % interval == 0 {
+            // Gated attention: q and its gate interleaved per head, so attn_q has 2 × q_dim rows.
+            tern(&mut w, &mut rng, &p("attn_q.weight"), d_model, 2 * q_dim);
+            tern(
+                &mut w,
+                &mut rng,
+                &p("attn_k.weight"),
+                d_model,
+                n_kv * head_dim,
+            );
+            tern(
+                &mut w,
+                &mut rng,
+                &p("attn_v.weight"),
+                d_model,
+                n_kv * head_dim,
+            );
+            norm(&mut w, &mut rng, &p("attn_q_norm.weight"), head_dim);
+            norm(&mut w, &mut rng, &p("attn_k_norm.weight"), head_dim);
+            tern(&mut w, &mut rng, &p("attn_output.weight"), q_dim, d_model);
+        } else {
+            tern(&mut w, &mut rng, &p("attn_qkv.weight"), d_model, conv_dim);
+            tern(&mut w, &mut rng, &p("attn_gate.weight"), d_model, value_dim);
+            f32m(
+                &mut w,
+                &mut rng,
+                &p("ssm_beta.weight"),
+                &[d_model as u64, n_v as u64],
+                -0.05,
+                0.05,
+            );
+            f32m(
+                &mut w,
+                &mut rng,
+                &p("ssm_alpha.weight"),
+                &[d_model as u64, n_v as u64],
+                -0.05,
+                0.05,
+            );
+            f32m(
+                &mut w,
+                &mut rng,
+                &p("ssm_conv1d.weight"),
+                &[d_conv as u64, conv_dim as u64],
+                -0.3,
+                0.3,
+            );
+            f32m(
+                &mut w,
+                &mut rng,
+                &p("ssm_dt.bias"),
+                &[n_v as u64],
+                -0.5,
+                0.5,
+            );
+            f32m(&mut w, &mut rng, &p("ssm_a"), &[n_v as u64], -1.0, -0.1);
+            norm(&mut w, &mut rng, &p("ssm_norm.weight"), ds);
+            tern(&mut w, &mut rng, &p("ssm_out.weight"), value_dim, d_model);
+        }
+        norm(&mut w, &mut rng, &p("post_attention_norm.weight"), d_model);
+        tern(&mut w, &mut rng, &p("ffn_gate.weight"), d_model, n_ff);
+        tern(&mut w, &mut rng, &p("ffn_up.weight"), d_model, n_ff);
+        tern(&mut w, &mut rng, &p("ffn_down.weight"), n_ff, d_model);
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", d_model);
+    tern(&mut w, &mut rng, "output.weight", d_model, VOCAB_SIZE);
+    let path = dir.join(format!("qwen35-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
