@@ -252,6 +252,9 @@ pub struct State {
     acts: Vec<QuantAct>,
     pub logits: Vec<f32>,
     max_batch: usize,
+    /// `start_pos..start_pos + n` for a `Model::forward` call, filled in place so the
+    /// convenience wrapper does not allocate a position vector per call.
+    positions: Vec<usize>,
     /// Layers whose output (the residual stream after the layer) `forward` copies
     /// out, in this order — what a DSpark drafter conditions on. Empty: no copy.
     tap_layers: Vec<usize>,
@@ -341,6 +344,7 @@ impl State {
             // accepting drafts it should have rejected.
             logits: vec![0.0; max_logit_rows.max(1) * cfg.n_vocab],
             max_batch: b,
+            positions: vec![0; b],
             tap_layers: Vec::new(),
             tap: Vec::new(),
             lb_x: Vec::new(),
@@ -543,6 +547,18 @@ impl TileStore {
 struct MatJob<'a> {
     w: &'a TensorInfo,
     out: OutPtr,
+    /// Output rows to compute, when fewer than the matrix's full `dims[1]` (the MTP draft head reads only the
+    /// first part of the vocabulary). Kept here rather than in a cloned `TensorInfo`, whose `String` and `dims`
+    /// would allocate on every draft step.
+    rows: Option<usize>,
+}
+
+impl MatJob<'_> {
+    /// The number of output rows this job computes.
+    #[inline(always)]
+    fn rows(&self) -> usize {
+        self.rows.unwrap_or(self.w.dims[1] as usize)
+    }
 }
 
 // where each row of a batch writes and reads its attention cache.
@@ -561,7 +577,57 @@ pub enum Caches<'a> {
     Mapped(&'a mut [&'a mut KvCache], &'a [usize]),
 }
 
-impl Caches<'_> {
+/// Iterator over [`Caches::runs`]: runs of consecutive rows that share one cache, yielded without allocating.
+struct Runs<'a> {
+    /// The `Mapped` shape's cache index per row; `None` for one shared cache or one cache per row.
+    map: Option<&'a [usize]>,
+    /// Every row writes one cache (`Caches::Shared`).
+    shared: bool,
+    nb: usize,
+    next: usize,
+    done: bool,
+}
+
+impl Iterator for Runs<'_> {
+    type Item = (usize, usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.shared {
+            if self.done || self.nb == 0 {
+                return None;
+            }
+            self.done = true;
+            return Some((0, self.nb, 0));
+        }
+        match self.map {
+            None => {
+                // `PerRow`: one row per run.
+                if self.next >= self.nb {
+                    None
+                } else {
+                    let r = (self.next, 1, self.next);
+                    self.next += 1;
+                    Some(r)
+                }
+            }
+            Some(map) => {
+                let start = self.next;
+                if start >= map.len() {
+                    return None;
+                }
+                let c = map[start];
+                let mut end = start + 1;
+                while end < map.len() && map[end] == c {
+                    end += 1;
+                }
+                self.next = end;
+                Some((start, end - start, c))
+            }
+        }
+    }
+}
+
+impl<'a> Caches<'a> {
     #[inline]
     fn get(&self, b: usize) -> &KvCache {
         match self {
@@ -579,21 +645,31 @@ impl Caches<'_> {
         }
     }
     /// Runs of consecutive rows sharing one cache: `(first row, rows, cache)` (one run per row for `PerRow`).
-    fn runs(&self, nb: usize) -> Vec<(usize, usize, usize)> {
-        match self {
-            Caches::Shared(_) => vec![(0, nb, 0)],
-            Caches::PerRow(_) => (0..nb).map(|b| (b, 1, b)).collect(),
-            Caches::Mapped(_, map) => {
-                let mut out: Vec<(usize, usize, usize)> = Vec::new();
-                for (b, &c) in map.iter().enumerate().take(nb) {
-                    match out.last_mut() {
-                        Some(r) if r.2 == c && r.0 + r.1 == b => r.1 += 1,
-                        _ => out.push((b, 1, c)),
-                    }
+    ///
+    /// An iterator, not a `Vec`: the dense and hybrid decode loops call this once per layer, and a decode step
+    /// must not allocate. Callers that also need the caches mutably use [`Caches::runs_into`] with a reused
+    /// buffer instead (the iterator borrows the caches, so it cannot be held across `cache_mut`).
+    fn runs(&self, nb: usize) -> Runs<'a> {
+        Runs {
+            map: match self {
+                Caches::Mapped(_, map) => {
+                    let map: &'a [usize] = map;
+                    Some(&map[..map.len().min(nb)])
                 }
-                out
-            }
+                _ => None,
+            },
+            shared: matches!(self, Caches::Shared(_)),
+            nb,
+            next: 0,
+            done: false,
         }
+    }
+
+    /// `runs`, written into `out` (cleared first) so a caller that also needs mutable cache access can hold
+    /// the runs without keeping the caches borrowed. `out` keeps its capacity across calls.
+    fn runs_into(&self, nb: usize, out: &mut Vec<(usize, usize, usize)>) {
+        out.clear();
+        out.extend(self.runs(nb));
     }
     /// The cache of run `c`, mutably.
     fn cache_mut(&mut self, c: usize) -> &mut KvCache {
@@ -1062,7 +1138,7 @@ impl Model {
             "batch of {nb} exceeds the matmul scratch of {MAX_BATCH}"
         );
         let t0 = Instant::now();
-        let total: usize = jobs.iter().map(|j| j.w.dims[1] as usize).sum();
+        let total: usize = jobs.iter().map(|j| j.rows()).sum();
         let acts = &acts[..nb];
         // Each matrix's kernel is chosen once, from the kernel table: by format, storage (tiles or rows),
         // activation layout and CPU. Tiled matrices are worked in whole 16-row tiles, so every range below
@@ -1082,7 +1158,7 @@ impl Model {
             let mut off = 0usize;
             for (j, &path) in jobs.iter().zip(paths) {
                 let n = j.w.dims[0] as usize;
-                let rows = j.w.dims[1] as usize;
+                let rows = j.rows();
                 let (a, z) = (lo.max(off), hi.min(off + rows));
                 if a >= z {
                     off += rows;
@@ -1186,7 +1262,7 @@ impl Model {
         // however many activations reused them.
         for j in jobs {
             let n = j.w.dims[0] as usize;
-            let rows = j.w.dims[1] as usize;
+            let rows = j.rows();
             st.bytes_weights += (rows * row_bytes(j.w.kind, n)) as u64;
             st.macs += (rows * n * nb) as u64;
         }
@@ -1221,7 +1297,11 @@ impl Model {
         for j in jobs {
             match j.lin {
                 Linear::Dense(w) => {
-                    dense[nd] = Some(MatJob { w, out: j.out });
+                    dense[nd] = Some(MatJob {
+                        w,
+                        out: j.out,
+                        rows: None,
+                    });
                     nd += 1;
                 }
                 Linear::Lb(ti) => {
@@ -1677,16 +1757,28 @@ impl Model {
         want_logits: &[usize],
         stats: &mut StepStats,
     ) -> Result<(), String> {
-        let positions: Vec<usize> = (start_pos..start_pos + tokens.len()).collect();
-        self.forward_rows(
+        // Fill the state-owned buffer instead of collecting a `Vec` per call: `forward` is the decode entry point
+        // and a per-token allocation breaks invariant 4.
+        let n = tokens.len();
+        let mut positions = std::mem::take(&mut st8.positions);
+        let fits = n <= positions.len();
+        if fits {
+            for (i, p) in positions[..n].iter_mut().enumerate() {
+                *p = start_pos + i;
+            }
+        }
+        let pos: &[usize] = if fits { &positions[..n] } else { &[] };
+        let r = self.forward_rows(
             st8,
             &mut Caches::Shared(kv),
             pool,
             tokens,
-            &positions,
+            pos,
             want_logits,
             stats,
-        )
+        );
+        st8.positions = positions;
+        r
     }
 
     // the general pass. Row `b` carries `tokens[b]` at `positions[b]` of the sequence whose cache
