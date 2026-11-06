@@ -45,6 +45,11 @@ All notable changes to this project are documented here. The format follows
 - `peregrine-core`: one verification step in the engine — the slot's drafter proposes, the engine prices the
   proposal against the verify-cost model and verifies it against the target's own samples. MTP speculation
   runs through it, so the engine no longer knows what a draft is (ADR 0007, S1.4 step 3).
+- `peregrine-core`: the engine speculates with the suffix index and with DeepSeek's DSpark head, through the
+  same verification step the MTP block goes through. `SlotCfg` names the drafter a slot asks for (none, MTP,
+  suffix, DSpark with its directory); the per-slot drafter is built when the slot is admitted, and the engine
+  prices the proposal, cuts the accepted run where the turn ends, and parks the DSpark head's drafting when a
+  round does not pay for itself (ADR 0007, S1.4 steps 4-5).
 - `SlotCfg`: the sampling `turn` (mixed into the position key) and the KV rotation choice, so a conversation
   can be given the same settings it uses today.
 - Sampling penalties (`presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n`, llama.cpp
