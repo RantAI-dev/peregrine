@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Support for Gemma, Mistral (v1, v7), and Llama 2 chat templates with exact llama.cpp parity (S2.3b).
 - Support for SentencePiece (llama) tokenizers transcribed from llama.cpp (S2.3a).
 - Support for GGML's Q4_0 weight format (AVX2 and scalar kernels).
 - `peregrine-core`: CPU inference engine for GGUF models.

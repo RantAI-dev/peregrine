@@ -629,13 +629,13 @@ impl Session {
             let toks = self
                 .model
                 .tk
-                .encode(&self.full_prompt(&self.history.clone(), user));
+                .encode_prompt(&self.full_prompt(&self.history.clone(), user));
             let l = self.reuse_prefix(&toks);
             self.prefix_reused = l;
             toks[l..].to_vec()
         } else if !self.started {
             // A fresh or reset conversation: the system block may be in the cache.
-            let toks = self.model.tk.encode(&self.build_prompt(user));
+            let toks = self.model.tk.encode_prompt(&self.build_prompt(user));
             let l = self.reuse_prefix(&toks);
             self.prefix_reused = l;
             toks[l..].to_vec()
@@ -649,7 +649,7 @@ impl Session {
             let toks = self
                 .model
                 .tk
-                .encode(&self.full_prompt(&self.history[drop..], user));
+                .encode_prompt(&self.full_prompt(&self.history[drop..], user));
             let last = drop == self.history.len();
             if toks.len() + reserve <= max || (last && toks.len() + 1 < max) {
                 self.history.drain(..drop);
@@ -666,7 +666,11 @@ impl Session {
                 return Ok((toks[l..].to_vec(), drop));
             }
         }
-        let alone = self.model.tk.encode(&self.full_prompt(&[], user)).len();
+        let alone = self
+            .model
+            .tk
+            .encode_prompt(&self.full_prompt(&[], user))
+            .len();
         Err(format!(
             "this message needs {alone} positions on its own, more than the {max}-token \
              context holds — raise the context length in Settings"
