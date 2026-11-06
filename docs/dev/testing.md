@@ -34,6 +34,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 |---|---|
 | SmolLM2-360M-Instruct Q4_K_M, Qwen3-4B Q4_K_M | `$PEREGRINE_MODEL`, or `~/models/` |
 | Qwen3-1.7B Q4_K_M | `models/` at the repository root |
+| Qwen2.5-0.5B-Instruct Q4_K_M, Llama-3.2-1B-Instruct Q4_K_M | `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
 
@@ -42,6 +43,22 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 The SmolLM2 A1 oracle fixture is cut from one exact file: mradermacher's
 `SmolLM2-360M-Instruct.Q4_K_M.gguf` (SHA-256 `ade7aee1e5bd7c3b8f1fedafc61a1a0be31e8afa64e006607cd202323e2ccce0`),
 and `tests/oracle.rs` refuses any other upload.
+
+### The two tokenizer oracle files
+
+`tests/tokenize.rs` checks the tokenizer of two more models against token ids taken from llama.cpp's
+`llama-tokenize`. It needs both files in `~/models/`, under exactly these names:
+
+| File | Download | Bytes | SHA-256 |
+|---|---|---|---|
+| `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf` | <https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf> | 397808192 | `6eb923e7d26e9cea28811e1a8e852009b21242fb157b26149d3b188f3a8c8653` |
+| `Llama-3.2-1B-Instruct-Q4_K_M.gguf` | <https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf> | 807694464 | `6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83` |
+
+Both were checked against llama.cpp v0.9.0 (`cd959ba`) with `llama-tokenize --no-bos --ids`: all twelve
+fixture strings tokenise to the same ids as the fixture files
+`tests/fixtures/tokenize-golden-qwen2.tsv` and `tests/fixtures/tokenize-golden-llama3.tsv`. The two
+models are also checked end to end against llama.cpp on the same files (greedy decoding, the chat
+path and the goldens under `tests/golden/<tier>/`).
 
 ### Tokenizer test vocabularies
 
