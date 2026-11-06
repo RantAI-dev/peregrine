@@ -47,14 +47,32 @@
 //! General_Category, and shipping a category table to close a gap this narrow would
 //! cost more than it buys — but it is a real difference and it is recorded here
 //! rather than discovered later.
+//!
+//! # SPM (SentencePiece)
+//!
+//! SentencePiece BPE (`tokenizer.ggml.model = "llama"`), transcribed from
+//! llama.cpp release tag `v0.9.0` (commit `cd959bae99ff4bed22bef2604f45241c09bbb8c8`):
+//! `src/llama-vocab.cpp` (`llm_tokenizer_spm`, `llm_tokenizer_spm_session`).
+//!
+//! The algorithm operates on symbol lists linked as a doubly-linked chain,
+//! prioritising bigrams by vocabulary score (breaking ties by earlier position
+//! in the input), resegmenting unmerged symbols, and falling back to `<0xXX>`
+//! byte tokens for code points not in the vocabulary. Leading whitespace escaping
+//! (` ` / U+2581) and space prefixing (`add_space_prefix`) match llama.cpp's
+//! exact behavior.
 
 use crate::gguf::Gguf;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 
-/// GGUF token types. Only the distinction between "normal" and "matched atomically"
-/// matters here.
+/// GGUF token types.
+#[allow(dead_code)]
+const TYPE_NORMAL: i32 = 1;
+const TYPE_UNKNOWN: i32 = 2;
 const TYPE_CONTROL: i32 = 3;
 const TYPE_USER_DEFINED: i32 = 4;
+#[allow(dead_code)]
+const TYPE_UNUSED: i32 = 5;
+const TYPE_BYTE: i32 = 6;
 
 /// Which pre-tokenizer regex set the vocabulary was trained with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +85,8 @@ pub enum PreType {
     Qwen2,
     /// `qwen35`: `qwen2` with combining marks counted as letters (Qwen3.5, Bonsai 2).
     Qwen35,
+    /// `default`: SentencePiece (SPM) or models without a custom BPE pre-tokenizer.
+    Default,
 }
 
 impl PreType {
@@ -76,6 +96,7 @@ impl PreType {
             "llama-bpe" => PreType::Llama3,
             "qwen2" => PreType::Qwen2,
             "qwen35" => PreType::Qwen35,
+            "default" => PreType::Default,
             _ => return None,
         })
     }
@@ -85,23 +106,80 @@ impl PreType {
             PreType::Llama3 => "llama-bpe",
             PreType::Qwen2 => "qwen2",
             PreType::Qwen35 => "qwen35",
+            PreType::Default => "default",
         }
     }
 }
 
 /// Pre-tokenizer names this crate implements, for the compatibility probe's message.
-pub const PRE_TYPES: &[&str] = &["smollm", "llama-bpe", "qwen2", "qwen35"];
+pub const PRE_TYPES: &[&str] = &["smollm", "llama-bpe", "qwen2", "qwen35", "default"];
 
-pub struct Tokenizer {
-    /// id → stored piece, in the byte-to-char alphabet (so a leading space is `Ġ`).
-    pieces: Vec<String>,
-    ids: HashMap<String, u32>,
-    /// (left, right) → merge rank. Lower merges first.
+struct BpeData {
     ranks: HashMap<(String, String), u32>,
-    /// Literal text → id for tokens matched atomically, longest first.
-    specials: Vec<(String, u32)>,
     byte_enc: [char; 256],
     byte_dec: HashMap<char, u8>,
+}
+
+struct SpmData {
+    scores: Vec<f32>,
+    #[allow(dead_code)]
+    token_types: Vec<i32>,
+    byte_tokens: [u32; 256],
+    decoded_pieces: Vec<Vec<u8>>,
+    #[allow(dead_code)]
+    unk_id: u32,
+    add_space_prefix: bool,
+    remove_extra_whitespaces: bool,
+}
+
+enum TokenizerAlgo {
+    Bpe(BpeData),
+    Spm(SpmData),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Symbol {
+    start: u32,
+    len: u32,
+    prev: i32,
+    next: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bigram {
+    left: i32,
+    right: i32,
+    score: f32,
+    size: u32,
+}
+
+impl Eq for Bigram {}
+
+impl Ord for Bigram {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.left.cmp(&self.left))
+    }
+}
+
+impl PartialOrd for Bigram {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Default)]
+struct SpmScratch {
+    symbols: Vec<Symbol>,
+    work_queue: BinaryHeap<Bigram>,
+    todo: Vec<(u32, u32)>,
+}
+
+pub struct Tokenizer {
+    pieces: Vec<String>,
+    ids: HashMap<String, u32>,
+    specials: Vec<(String, u32)>,
     pub bos: u32,
     pub eos: u32,
     /// `tokenizer.ggml.add_bos_token`: whether a prompt starts with `bos`. Llama 3
@@ -109,6 +187,7 @@ pub struct Tokenizer {
     pub add_bos: bool,
     pub pre: PreType,
     pub n_vocab: usize,
+    algo: TokenizerAlgo,
 }
 
 /// The GPT-2 byte alphabet: every byte maps to a printable code point so that BPE
@@ -136,30 +215,13 @@ fn byte_alphabet() -> ([char; 256], HashMap<char, u8>) {
 impl Tokenizer {
     pub fn from_gguf(g: &Gguf) -> Result<Tokenizer, String> {
         let model = g.str("tokenizer.ggml.model")?;
-        if model != "gpt2" {
+        if model != "gpt2" && model != "llama" {
             return Err(format!(
                 "tokenizer model {model:?} is not implemented — Peregrine reads gpt2 \
-                 byte-level BPE vocabularies"
+                 byte-level BPE and llama SentencePiece vocabularies"
             ));
         }
-        let pre_name = g.str("tokenizer.ggml.pre").unwrap_or("smollm");
-        let pre = PreType::from_name(pre_name).ok_or_else(|| {
-            format!(
-                "pre-tokenizer {pre_name:?} is not implemented — Peregrine reads {}",
-                PRE_TYPES.join(", ")
-            )
-        })?;
         let toks = g.arr_str("tokenizer.ggml.tokens")?;
-        let types = g.arr_i32("tokenizer.ggml.token_type")?;
-        if toks.len() != types.len() {
-            return Err(format!(
-                "vocab has {} tokens but {} token types",
-                toks.len(),
-                types.len()
-            ));
-        }
-        let merges = g.arr_str("tokenizer.ggml.merges")?;
-
         let pieces: Vec<String> = toks.to_vec();
         let mut ids = HashMap::with_capacity(pieces.len());
         for (i, p) in pieces.iter().enumerate() {
@@ -168,47 +230,237 @@ impl Tokenizer {
             ids.entry(p.clone()).or_insert(i as u32);
         }
 
-        let mut ranks = HashMap::with_capacity(merges.len());
-        for (rank, m) in merges.iter().enumerate() {
-            let (l, r) = m
-                .split_once(' ')
-                .ok_or_else(|| format!("merge {rank} is not a pair: {m:?}"))?;
-            ranks.insert((l.to_string(), r.to_string()), rank as u32);
-        }
+        if model == "gpt2" {
+            let pre_name = g.str("tokenizer.ggml.pre").unwrap_or("smollm");
+            let pre = PreType::from_name(pre_name).ok_or_else(|| {
+                format!(
+                    "pre-tokenizer {pre_name:?} is not implemented — Peregrine reads {}",
+                    PRE_TYPES.join(", ")
+                )
+            })?;
+            let types = g.arr_i32("tokenizer.ggml.token_type")?;
+            if toks.len() != types.len() {
+                return Err(format!(
+                    "vocab has {} tokens but {} token types",
+                    toks.len(),
+                    types.len()
+                ));
+            }
+            let merges = g.arr_str("tokenizer.ggml.merges")?;
 
-        // Control and user-defined tokens are matched against the raw text before
-        // any splitting, so that `<|im_start|>` stays one token instead of being
-        // shredded into punctuation by the regex.
+            let mut ranks = HashMap::with_capacity(merges.len());
+            for (rank, m) in merges.iter().enumerate() {
+                let (l, r) = m
+                    .split_once(' ')
+                    .ok_or_else(|| format!("merge {rank} is not a pair: {m:?}"))?;
+                ranks.insert((l.to_string(), r.to_string()), rank as u32);
+            }
+
+            // Control and user-defined tokens are matched against the raw text before
+            // any splitting, so that `<|im_start|>` stays one token instead of being
+            // shredded into punctuation by the regex.
+            let mut specials: Vec<(String, u32)> = pieces
+                .iter()
+                .zip(types.iter())
+                .enumerate()
+                .filter(|(_, (_, &t))| t == TYPE_CONTROL || t == TYPE_USER_DEFINED)
+                .map(|(i, (p, _))| (p.clone(), i as u32))
+                .collect();
+            // Longest first, so `<|im_start|>` is preferred over a shorter prefix.
+            specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+
+            let (byte_enc, byte_dec) = byte_alphabet();
+            let n_vocab = pieces.len();
+            Ok(Tokenizer {
+                pieces,
+                ids,
+                specials,
+                bos: g.u32("tokenizer.ggml.bos_token_id").unwrap_or(1),
+                eos: g.u32("tokenizer.ggml.eos_token_id").unwrap_or(2),
+                // llama.cpp turns `add_bos` on for `llama-bpe` whatever the file says
+                // (`llama-vocab.cpp`, the LLAMA3 pre-type branch), and the Llama 3
+                // template writes the token itself; the flag is reported, not acted on.
+                add_bos: g
+                    .bool("tokenizer.ggml.add_bos_token")
+                    .unwrap_or(pre == PreType::Llama3),
+                pre,
+                n_vocab,
+                algo: TokenizerAlgo::Bpe(BpeData {
+                    ranks,
+                    byte_enc,
+                    byte_dec,
+                }),
+            })
+        } else {
+            // llama (SentencePiece)
+            let pre_name = g.str("tokenizer.ggml.pre").unwrap_or("default");
+            let pre = PreType::from_name(pre_name).unwrap_or(PreType::Default);
+
+            let types: Vec<i32> = if let Ok(t) = g.arr_i32("tokenizer.ggml.token_type") {
+                if t.len() != pieces.len() {
+                    return Err(format!(
+                        "vocab has {} tokens but {} token types",
+                        pieces.len(),
+                        t.len()
+                    ));
+                }
+                t.to_vec()
+            } else {
+                vec![TYPE_NORMAL; pieces.len()]
+            };
+
+            let scores: Vec<f32> = if let Ok(s) = g.arr_f32("tokenizer.ggml.scores") {
+                s.to_vec()
+            } else if let Ok(s) = g.arr_i32("tokenizer.ggml.scores") {
+                s.iter().map(|&x| x as f32).collect()
+            } else {
+                vec![0.0; pieces.len()]
+            };
+
+            let unk_id = g.u32("tokenizer.ggml.unknown_token_id").unwrap_or(0);
+            let bos = g.u32("tokenizer.ggml.bos_token_id").unwrap_or(1);
+            let eos = g.u32("tokenizer.ggml.eos_token_id").unwrap_or(2);
+            let add_bos = g.bool("tokenizer.ggml.add_bos_token").unwrap_or(true);
+            let add_space_prefix = g.bool("tokenizer.ggml.add_space_prefix").unwrap_or(true);
+            let remove_extra_whitespaces = g
+                .bool("tokenizer.ggml.remove_extra_whitespaces")
+                .unwrap_or(false);
+
+            let mut specials: Vec<(String, u32)> = pieces
+                .iter()
+                .zip(types.iter())
+                .enumerate()
+                .filter(|(_, (_, &t))| {
+                    t == TYPE_CONTROL || t == TYPE_USER_DEFINED || t == TYPE_UNKNOWN
+                })
+                .map(|(i, (p, _))| (p.clone(), i as u32))
+                .collect();
+            specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+
+            let mut byte_tokens = [unk_id; 256];
+            for b in 0..=255u8 {
+                let hex_token = format!("<0x{:02X}>", b);
+                if let Some(&id) = ids.get(&hex_token) {
+                    byte_tokens[b as usize] = id;
+                } else if let Some(&id) = ids.get((b as char).to_string().as_str()) {
+                    byte_tokens[b as usize] = id;
+                }
+            }
+
+            let decoded_pieces: Vec<Vec<u8>> = pieces
+                .iter()
+                .zip(types.iter())
+                .map(|(p, &t)| {
+                    if t == TYPE_BYTE
+                        || (p.len() == 6
+                            && p.starts_with("<0x")
+                            && p.ends_with('>')
+                            && u8::from_str_radix(&p[3..5], 16).is_ok())
+                    {
+                        vec![u8::from_str_radix(&p[3..5], 16).unwrap()]
+                    } else if t == TYPE_CONTROL || t == TYPE_USER_DEFINED || t == TYPE_UNKNOWN {
+                        p.as_bytes().to_vec()
+                    } else {
+                        p.replace('\u{2581}', " ").into_bytes()
+                    }
+                })
+                .collect();
+
+            let n_vocab = pieces.len();
+            Ok(Tokenizer {
+                pieces,
+                ids,
+                specials,
+                bos,
+                eos,
+                add_bos,
+                pre,
+                n_vocab,
+                algo: TokenizerAlgo::Spm(SpmData {
+                    scores,
+                    token_types: types,
+                    byte_tokens,
+                    decoded_pieces,
+                    unk_id,
+                    add_space_prefix,
+                    remove_extra_whitespaces,
+                }),
+            })
+        }
+    }
+
+    /// Test helper: build an SPM tokenizer directly from raw parts without a GGUF file.
+    pub fn from_spm_parts(
+        pieces: Vec<String>,
+        scores: Vec<f32>,
+        token_types: Vec<i32>,
+        bos: u32,
+        eos: u32,
+        unk_id: u32,
+        add_space_prefix: bool,
+    ) -> Tokenizer {
+        let mut ids = HashMap::with_capacity(pieces.len());
+        for (i, p) in pieces.iter().enumerate() {
+            ids.entry(p.clone()).or_insert(i as u32);
+        }
         let mut specials: Vec<(String, u32)> = pieces
             .iter()
-            .zip(types.iter())
+            .zip(token_types.iter())
             .enumerate()
-            .filter(|(_, (_, &t))| t == TYPE_CONTROL || t == TYPE_USER_DEFINED)
+            .filter(|(_, (_, &t))| t == TYPE_CONTROL || t == TYPE_USER_DEFINED || t == TYPE_UNKNOWN)
             .map(|(i, (p, _))| (p.clone(), i as u32))
             .collect();
-        // Longest first, so `<|im_start|>` is preferred over a shorter prefix.
         specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
 
-        let (byte_enc, byte_dec) = byte_alphabet();
+        let mut byte_tokens = [unk_id; 256];
+        for b in 0..=255u8 {
+            let hex_token = format!("<0x{:02X}>", b);
+            if let Some(&id) = ids.get(&hex_token) {
+                byte_tokens[b as usize] = id;
+            } else if let Some(&id) = ids.get((b as char).to_string().as_str()) {
+                byte_tokens[b as usize] = id;
+            }
+        }
+
+        let decoded_pieces: Vec<Vec<u8>> = pieces
+            .iter()
+            .zip(token_types.iter())
+            .map(|(p, &t)| {
+                if t == TYPE_BYTE
+                    || (p.len() == 6
+                        && p.starts_with("<0x")
+                        && p.ends_with('>')
+                        && u8::from_str_radix(&p[3..5], 16).is_ok())
+                {
+                    vec![u8::from_str_radix(&p[3..5], 16).unwrap()]
+                } else if t == TYPE_CONTROL || t == TYPE_USER_DEFINED || t == TYPE_UNKNOWN {
+                    p.as_bytes().to_vec()
+                } else {
+                    p.replace('\u{2581}', " ").into_bytes()
+                }
+            })
+            .collect();
+
         let n_vocab = pieces.len();
-        Ok(Tokenizer {
+        Tokenizer {
             pieces,
             ids,
-            ranks,
             specials,
-            byte_enc,
-            byte_dec,
-            bos: g.u32("tokenizer.ggml.bos_token_id").unwrap_or(1),
-            eos: g.u32("tokenizer.ggml.eos_token_id").unwrap_or(2),
-            // llama.cpp turns `add_bos` on for `llama-bpe` whatever the file says
-            // (`llama-vocab.cpp`, the LLAMA3 pre-type branch), and the Llama 3
-            // template writes the token itself; the flag is reported, not acted on.
-            add_bos: g
-                .bool("tokenizer.ggml.add_bos_token")
-                .unwrap_or(pre == PreType::Llama3),
-            pre,
+            bos,
+            eos,
+            add_bos: true,
+            pre: PreType::Default,
             n_vocab,
-        })
+            algo: TokenizerAlgo::Spm(SpmData {
+                scores,
+                token_types,
+                byte_tokens,
+                decoded_pieces,
+                unk_id,
+                add_space_prefix,
+                remove_extra_whitespaces: false,
+            }),
+        }
     }
 
     pub fn encode(&self, text: &str) -> Vec<u32> {
@@ -218,43 +470,245 @@ impl Tokenizer {
     }
 
     pub fn encode_into(&self, text: &str, out: &mut Vec<u32>) {
-        let mut p = 0usize;
-        while p < text.len() {
-            // Atomic special tokens first.
-            let mut hit = None;
-            for (s, id) in &self.specials {
-                if !s.is_empty() && text[p..].starts_with(s.as_str()) {
-                    hit = Some((s.len(), *id));
-                    break;
+        match &self.algo {
+            TokenizerAlgo::Bpe(bpe) => {
+                let mut p = 0usize;
+                while p < text.len() {
+                    // Atomic special tokens first.
+                    let mut hit = None;
+                    for (s, id) in &self.specials {
+                        if !s.is_empty() && text[p..].starts_with(s.as_str()) {
+                            hit = Some((s.len(), *id));
+                            break;
+                        }
+                    }
+                    if let Some((len, id)) = hit {
+                        out.push(id);
+                        p += len;
+                        continue;
+                    }
+                    // Otherwise accumulate a plain run up to the next special, and split it.
+                    let mut q = p;
+                    while q < text.len() {
+                        if text.is_char_boundary(q)
+                            && self
+                                .specials
+                                .iter()
+                                .any(|(s, _)| !s.is_empty() && text[q..].starts_with(s.as_str()))
+                        {
+                            break;
+                        }
+                        q += 1;
+                        while q < text.len() && !text.is_char_boundary(q) {
+                            q += 1;
+                        }
+                    }
+                    self.encode_plain_bpe(&text[p..q], bpe, out);
+                    p = q;
                 }
             }
-            if let Some((len, id)) = hit {
-                out.push(id);
-                p += len;
-                continue;
-            }
-            // Otherwise accumulate a plain run up to the next special, and split it.
-            let mut q = p;
-            while q < text.len() {
-                if text.is_char_boundary(q)
-                    && self
-                        .specials
-                        .iter()
-                        .any(|(s, _)| !s.is_empty() && text[q..].starts_with(s.as_str()))
-                {
-                    break;
+            TokenizerAlgo::Spm(spm) => {
+                let mut p = 0usize;
+                let mut is_prev_special = true;
+                let mut scratch = SpmScratch::default();
+                let mut buf = String::new();
+                while p < text.len() {
+                    let mut hit = None;
+                    for (s, id) in &self.specials {
+                        if !s.is_empty() && text[p..].starts_with(s.as_str()) {
+                            hit = Some((s.len(), *id));
+                            break;
+                        }
+                    }
+                    if let Some((len, id)) = hit {
+                        out.push(id);
+                        p += len;
+                        is_prev_special = true;
+                        continue;
+                    }
+                    let mut q = p;
+                    while q < text.len() {
+                        if text.is_char_boundary(q)
+                            && self
+                                .specials
+                                .iter()
+                                .any(|(s, _)| !s.is_empty() && text[q..].starts_with(s.as_str()))
+                        {
+                            break;
+                        }
+                        q += 1;
+                        while q < text.len() && !text.is_char_boundary(q) {
+                            q += 1;
+                        }
+                    }
+                    self.encode_fragment_spm(
+                        &text[p..q],
+                        spm,
+                        is_prev_special,
+                        &mut buf,
+                        &mut scratch,
+                        out,
+                    );
+                    is_prev_special = false;
+                    p = q;
                 }
-                q += 1;
-                while q < text.len() && !text.is_char_boundary(q) {
-                    q += 1;
-                }
             }
-            self.encode_plain(&text[p..q], out);
-            p = q;
         }
     }
 
-    fn encode_plain(&self, text: &str, out: &mut Vec<u32>) {
+    fn encode_fragment_spm(
+        &self,
+        raw_piece: &str,
+        spm: &SpmData,
+        is_prev_special: bool,
+        buf: &mut String,
+        scratch: &mut SpmScratch,
+        out: &mut Vec<u32>,
+    ) {
+        if raw_piece.is_empty() {
+            return;
+        }
+        buf.clear();
+        if spm.add_space_prefix && is_prev_special {
+            buf.push('\u{2581}');
+        }
+        if spm.remove_extra_whitespaces {
+            let mut in_ws = false;
+            for ch in raw_piece.chars() {
+                if ch == ' ' {
+                    if !in_ws {
+                        buf.push('\u{2581}');
+                        in_ws = true;
+                    }
+                } else {
+                    in_ws = false;
+                    buf.push(ch);
+                }
+            }
+        } else {
+            for ch in raw_piece.chars() {
+                if ch == ' ' {
+                    buf.push('\u{2581}');
+                } else {
+                    buf.push(ch);
+                }
+            }
+        }
+        self.tokenize_spm_text(buf, spm, scratch, out);
+    }
+
+    fn tokenize_spm_text(
+        &self,
+        text: &str,
+        spm: &SpmData,
+        scratch: &mut SpmScratch,
+        out: &mut Vec<u32>,
+    ) {
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return;
+        }
+        scratch.symbols.clear();
+        scratch.work_queue.clear();
+        let mut rev_merge: HashMap<&str, (u32, u32)> = HashMap::with_capacity(32);
+
+        let mut offs = 0usize;
+        let mut idx = 0i32;
+        while offs < bytes.len() {
+            let len = unicode_len_utf8(bytes[offs]).min(bytes.len() - offs);
+            let prev = idx - 1;
+            let next = if offs + len == bytes.len() {
+                -1
+            } else {
+                idx + 1
+            };
+            scratch.symbols.push(Symbol {
+                start: offs as u32,
+                len: len as u32,
+                prev,
+                next,
+            });
+            offs += len;
+            idx += 1;
+        }
+
+        for i in 1..scratch.symbols.len() {
+            try_add_bigram(
+                (i - 1) as i32,
+                i as i32,
+                text,
+                &self.ids,
+                &spm.scores,
+                scratch,
+                &mut rev_merge,
+            );
+        }
+
+        while let Some(bigram) = scratch.work_queue.pop() {
+            let left_idx = bigram.left as usize;
+            let right_idx = bigram.right as usize;
+            let left_len = scratch.symbols[left_idx].len;
+            let right_len = scratch.symbols[right_idx].len;
+
+            if left_len == 0 || right_len == 0 || left_len + right_len != bigram.size {
+                continue;
+            }
+
+            scratch.symbols[left_idx].len += right_len;
+            scratch.symbols[right_idx].len = 0;
+
+            let next = scratch.symbols[right_idx].next;
+            scratch.symbols[left_idx].next = next;
+            if next >= 0 {
+                scratch.symbols[next as usize].prev = bigram.left;
+            }
+
+            let prev = scratch.symbols[left_idx].prev;
+            try_add_bigram(
+                prev,
+                bigram.left,
+                text,
+                &self.ids,
+                &spm.scores,
+                scratch,
+                &mut rev_merge,
+            );
+            try_add_bigram(
+                bigram.left,
+                next,
+                text,
+                &self.ids,
+                &spm.scores,
+                scratch,
+                &mut rev_merge,
+            );
+        }
+
+        scratch.todo.clear();
+        let mut curr = if scratch.symbols.is_empty() { -1 } else { 0 };
+        while curr != -1 {
+            let sym = scratch.symbols[curr as usize];
+            scratch.todo.push((sym.start, sym.len));
+            while let Some((start, len)) = scratch.todo.pop() {
+                let slice = &text[start as usize..(start + len) as usize];
+                if let Some(&id) = self.ids.get(slice) {
+                    out.push(id);
+                    continue;
+                }
+                if let Some(&(left_len, right_len)) = rev_merge.get(slice) {
+                    scratch.todo.push((start + left_len, right_len));
+                    scratch.todo.push((start, left_len));
+                    continue;
+                }
+                for &b in slice.as_bytes() {
+                    out.push(spm.byte_tokens[b as usize]);
+                }
+            }
+            curr = scratch.symbols[curr as usize].next;
+        }
+    }
+
+    fn encode_plain_bpe(&self, text: &str, bpe: &BpeData, out: &mut Vec<u32>) {
         match self.pre {
             PreType::SmolLm => {
                 for chunk in split_numbers(text) {
@@ -265,31 +719,32 @@ impl Tokenizer {
                             // splitter does for text its patterns do not cover.
                             chunk[p..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)
                         });
-                        self.bpe(&chunk[p..p + take], out);
+                        self.bpe(&chunk[p..p + take], bpe, out);
                         p += take;
                     }
                 }
             }
             PreType::Llama3 => {
                 for piece in split_llama3(text, 3) {
-                    self.bpe(piece, out);
+                    self.bpe(piece, bpe, out);
                 }
             }
             PreType::Qwen2 => {
                 for piece in split_llama3(text, 1) {
-                    self.bpe(piece, out);
+                    self.bpe(piece, bpe, out);
                 }
             }
             PreType::Qwen35 => {
                 for piece in split_with(text, 1, true) {
-                    self.bpe(piece, out);
+                    self.bpe(piece, bpe, out);
                 }
             }
+            PreType::Default => {}
         }
     }
 
     /// Byte-level BPE over one pre-tokenized piece.
-    fn bpe(&self, piece: &str, out: &mut Vec<u32>) {
+    fn bpe(&self, piece: &str, bpe: &BpeData, out: &mut Vec<u32>) {
         if piece.is_empty() {
             return;
         }
@@ -297,7 +752,7 @@ impl Tokenizer {
         let mut syms: Vec<String> = piece
             .as_bytes()
             .iter()
-            .map(|&b| self.byte_enc[b as usize].to_string())
+            .map(|&b| bpe.byte_enc[b as usize].to_string())
             .collect();
 
         // `ignore_merges` (llama.cpp, Llama 3 only): a piece that is itself a
@@ -317,7 +772,7 @@ impl Tokenizer {
         loop {
             let mut best: Option<(usize, u32)> = None;
             for i in 0..syms.len().saturating_sub(1) {
-                if let Some(&r) = self.ranks.get(&(syms[i].clone(), syms[i + 1].clone())) {
+                if let Some(&r) = bpe.ranks.get(&(syms[i].clone(), syms[i + 1].clone())) {
                     if best.is_none_or(|(_, br)| r < br) {
                         best = Some((i, r));
                     }
@@ -348,21 +803,47 @@ impl Tokenizer {
 
     /// Raw bytes of one token, before UTF-8 validation.
     pub fn token_bytes(&self, id: u32) -> Vec<u8> {
-        match self.pieces.get(id as usize) {
-            Some(p) => p
-                .chars()
-                .filter_map(|c| self.byte_dec.get(&c).copied())
-                .collect(),
-            None => Vec::new(),
+        match &self.algo {
+            TokenizerAlgo::Bpe(bpe) => match self.pieces.get(id as usize) {
+                Some(p) => p
+                    .chars()
+                    .filter_map(|c| bpe.byte_dec.get(&c).copied())
+                    .collect(),
+                None => Vec::new(),
+            },
+            TokenizerAlgo::Spm(spm) => spm
+                .decoded_pieces
+                .get(id as usize)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 
     pub fn decode(&self, ids: &[u32]) -> String {
-        let mut bytes = Vec::new();
-        for &id in ids {
-            bytes.extend_from_slice(&self.token_bytes(id));
+        match &self.algo {
+            TokenizerAlgo::Bpe(_) => {
+                let mut bytes = Vec::new();
+                for &id in ids {
+                    bytes.extend_from_slice(&self.token_bytes(id));
+                }
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+            TokenizerAlgo::Spm(spm) => {
+                let mut bytes = Vec::new();
+                let mut remove_space = spm.add_space_prefix;
+                for &id in ids {
+                    let piece_bytes = self.token_bytes(id);
+                    let slice = if remove_space && piece_bytes.first() == Some(&b' ') {
+                        &piece_bytes[1..]
+                    } else {
+                        &piece_bytes[..]
+                    };
+                    remove_space = false;
+                    bytes.extend_from_slice(slice);
+                }
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
         }
-        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     pub fn is_special(&self, id: u32) -> bool {
@@ -382,7 +863,46 @@ impl Tokenizer {
     }
 
     pub fn n_byte_tokens(&self) -> usize {
-        self.byte_dec.len()
+        match &self.algo {
+            TokenizerAlgo::Bpe(bpe) => bpe.byte_dec.len(),
+            TokenizerAlgo::Spm(_) => 256,
+        }
+    }
+}
+
+#[inline]
+fn unicode_len_utf8(b: u8) -> usize {
+    const LOOKUP: [usize; 16] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 4];
+    LOOKUP[(b >> 4) as usize]
+}
+
+#[inline]
+fn try_add_bigram<'a>(
+    left: i32,
+    right: i32,
+    text: &'a str,
+    ids: &HashMap<String, u32>,
+    scores: &[f32],
+    scratch: &mut SpmScratch,
+    rev_merge: &mut HashMap<&'a str, (u32, u32)>,
+) {
+    if left < 0 || right < 0 {
+        return;
+    }
+    let left_sym = scratch.symbols[left as usize];
+    let right_sym = scratch.symbols[right as usize];
+    let start = left_sym.start as usize;
+    let size = left_sym.len + right_sym.len;
+    let slice = &text[start..start + size as usize];
+    if let Some(&id) = ids.get(slice) {
+        let score = scores.get(id as usize).copied().unwrap_or(0.0);
+        scratch.work_queue.push(Bigram {
+            left,
+            right,
+            score,
+            size,
+        });
+        rev_merge.insert(slice, (left_sym.len, right_sym.len));
     }
 }
 

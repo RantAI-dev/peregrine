@@ -40,7 +40,7 @@ pub mod tokenizer;
 pub use gguf::{Format, Gguf};
 // The kernels live in `peregrine-kernels`; they keep their paths here.
 pub use peregrine_kernels::cpu_has;
-pub use peregrine_kernels::{cpu, hadamard, quant, table, vmath};
+pub use peregrine_kernels::{cpu, delta, hadamard, quant, table, vmath};
 #[cfg(target_arch = "x86_64")]
 pub use peregrine_kernels::{simd, tern};
 pub use session::{Session, SessionCfg};
@@ -77,24 +77,28 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
         ));
     }
     let tok = g.str("tokenizer.ggml.model").unwrap_or("unknown");
-    if tok != "gpt2" {
+    if tok != "gpt2" && tok != "llama" {
         return Err(format!(
-            "tokenizer {tok:?} — Peregrine reads gpt2 byte-level BPE vocabularies"
+            "tokenizer {tok:?} — Peregrine reads gpt2 (BPE) and llama (SentencePiece) vocabularies"
         ));
     }
-    let pre = g.str("tokenizer.ggml.pre").unwrap_or("smollm");
-    if tokenizer::PreType::from_name(pre).is_none() {
-        return Err(format!(
-            "pre-tokenizer {pre:?} — Peregrine implements {}",
-            tokenizer::PRE_TYPES.join(", ")
-        ));
+    if tok == "gpt2" {
+        let pre = g.str("tokenizer.ggml.pre").unwrap_or("smollm");
+        if tokenizer::PreType::from_name(pre).is_none() {
+            return Err(format!(
+                "pre-tokenizer {pre:?} — Peregrine implements {}",
+                tokenizer::PRE_TYPES.join(", ")
+            ));
+        }
     }
     if let Ok(t) = g.str(&format!("{arch}.rope.scaling.type")) {
         if t != "none" && t != "linear" {
             return Err(format!("rope scaling {t:?} is not implemented"));
         }
     }
-    template::Template::detect(g)?;
+    if tok == "gpt2" || g.str("tokenizer.chat_template").is_ok() {
+        template::Template::detect(g)?;
+    }
     Ok(())
 }
 

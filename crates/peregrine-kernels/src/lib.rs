@@ -14,6 +14,7 @@
 )]
 
 pub mod cpu;
+pub mod delta;
 pub mod format;
 pub mod hadamard;
 pub mod options;
