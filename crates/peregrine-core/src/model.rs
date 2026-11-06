@@ -21,6 +21,7 @@
 //! metadata, which at Q4_K is 12.5% of the traffic.
 
 use crate::attn;
+use crate::blocks::par::{OutPtr, SharedActs, SharedBuf, SharedMl, SharedScratch};
 use crate::gguf::{f16, Format, Gguf, TensorInfo};
 use crate::kv::KvCache;
 use crate::lbq::Slb;
@@ -388,109 +389,6 @@ fn head_rmsnorm(x: &mut [f32], w: &[f32], eps: f32) {
     let inv = (1.0 / (ss + eps as f64).sqrt()) as f32;
     for (v, g) in x.iter_mut().zip(w) {
         *v = *v * inv * g;
-    }
-}
-
-/// A write cursor into the matmul's output, shared across workers.
-///
-/// Raw rather than a `&mut [f32]` split because the split is by row *stride*
-/// (`b*rows + r`), not by a contiguous slice: with a batch, each worker writes an
-/// interleaved set of ranges that `split_at_mut` cannot express. Disjointness is
-/// guaranteed by `pool::share` instead, and tested there.
-#[derive(Clone, Copy)]
-struct OutPtr(*mut f32);
-// SAFETY: workers write only indices inside their own share, which are disjoint.
-unsafe impl Send for OutPtr {}
-unsafe impl Sync for OutPtr {}
-
-impl OutPtr {
-    /// # Safety
-    /// `i` must be inside the output buffer and must belong to the calling worker's
-    /// share, so no two workers ever write the same index.
-    ///
-    /// This is a method rather than a bare field access on purpose: with edition
-    /// 2021's disjoint closure capture, writing `dst.0` inside the worker closure
-    /// captures the `*mut f32` field instead of the wrapper, and the closure then
-    /// fails `Sync` however the wrapper is marked.
-    #[inline(always)]
-    unsafe fn set(self, i: usize, v: f32) {
-        *self.0.add(i) = v;
-    }
-}
-
-/// A shared base pointer from which workers carve out *disjoint* sub-slices: one
-/// head's output, or one worker's softmax row. Same contract as `OutPtr`, for ranges.
-#[derive(Clone, Copy)]
-struct SharedBuf(*mut f32);
-// SAFETY: every user takes sub-ranges no other worker takes (asserted by construction:
-// ranges are keyed by the task or worker index).
-unsafe impl Send for SharedBuf {}
-unsafe impl Sync for SharedBuf {}
-
-impl SharedBuf {
-    /// # Safety
-    /// `off..off+len` must be inside the buffer and used by exactly one worker.
-    #[inline(always)]
-    unsafe fn slice<'a>(self, off: usize, len: usize) -> &'a mut [f32] {
-        std::slice::from_raw_parts_mut(self.0.add(off), len)
-    }
-    /// Shared read of a range no worker is writing — the LittleBit stage buffers,
-    /// written in one phase and read by every worker in the next.
-    ///
-    /// # Safety
-    /// `off..off+len` must be inside the buffer, and nothing may write it while
-    /// the returned slice lives.
-    #[inline(always)]
-    unsafe fn slice_ref<'a>(self, off: usize, len: usize) -> &'a [f32] {
-        std::slice::from_raw_parts(self.0.add(off), len)
-    }
-}
-
-/// Disjoint per-row access to the activation scratch, for the row-parallel prologues.
-#[derive(Clone, Copy)]
-struct SharedActs(*mut QuantAct);
-// SAFETY: as `SharedBuf` — each index is taken by exactly one worker.
-unsafe impl Send for SharedActs {}
-unsafe impl Sync for SharedActs {}
-
-impl SharedActs {
-    /// # Safety
-    /// `i` must be in bounds and used by exactly one worker.
-    #[inline(always)]
-    unsafe fn get<'a>(self, i: usize) -> &'a mut QuantAct {
-        &mut *self.0.add(i)
-    }
-}
-
-/// Disjoint per-worker access to the attention scratch: worker `w` takes index `w`.
-#[derive(Clone, Copy)]
-struct SharedScratch(*mut attn::Scratch);
-// SAFETY: as `SharedBuf` — each worker takes only its own index.
-unsafe impl Send for SharedScratch {}
-unsafe impl Sync for SharedScratch {}
-
-impl SharedScratch {
-    /// # Safety
-    /// `w` must be in bounds and used by exactly one worker.
-    #[inline(always)]
-    unsafe fn get<'a>(self, w: usize) -> &'a mut attn::Scratch {
-        &mut *self.0.add(w)
-    }
-}
-
-/// Disjoint slots of the partial-softmax `(m, l)` buffer, keyed by task row.
-#[derive(Clone, Copy)]
-struct SharedMl(*mut (f32, f64));
-// SAFETY: each slot is written by the one task that owns its (head, chunk, row).
-unsafe impl Send for SharedMl {}
-unsafe impl Sync for SharedMl {}
-
-impl SharedMl {
-    /// # Safety
-    /// `i` must be in bounds and owned by the calling task.
-    #[inline(always)]
-    unsafe fn set(self, i: usize, v: (f32, f64)) {
-        *self.0.add(i) = v;
     }
 }
 

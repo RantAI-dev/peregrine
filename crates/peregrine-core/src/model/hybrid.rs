@@ -12,6 +12,7 @@
 //! sequence's `KvCache` (so several users batched in one pass each carry their own), and the rotation.
 
 use super::*;
+use crate::blocks::par::{RecScratch, RowPtrs, SnapPtrs};
 use crate::hadamard::fwht;
 use std::sync::atomic::{AtomicU64, Ordering as AO};
 
@@ -149,24 +150,6 @@ pub(super) struct Hybrid {
     v_grouped: bool,
 }
 
-/// Per-row raw pointers into the caches' recurrent state, and the snapshots a speculative verification asks
-/// for, kept beside the other hybrid scratch so a decode step reuses them instead of allocating four vectors
-/// per Gated DeltaNet layer.
-struct RecScratch {
-    /// Row `b`'s `(state, conv)` pointers for the recurrent layer being processed.
-    rec: Vec<(*mut f32, *mut f32)>,
-    /// Row `b`'s snapshot request `(position, state, conv)`, if its cache asked for one.
-    snap: Vec<Option<(usize, *mut f32, *mut f32)>>,
-}
-
-// SAFETY: the vectors only hold pointers into the `KvCache`s passed to the same `forward_hybrid` call; they are
-// rewritten by every `gdn`. `State` owns them and only one thread uses it at a time; the pool closures see copies
-// through `RowPtrs`/`SnapPtrs`, whose `Send`/`Sync` impls carry the disjoint-write argument. The `Send` impl keeps
-// `State` (and the `Engine` holding it) movable between threads like the rest of the scratch.
-unsafe impl Send for RecScratch {}
-// SAFETY: as `Send`; shared access only reads the vector's values (pointer copies) and never dereferences them.
-unsafe impl Sync for RecScratch {}
-
 /// Scratch for the hybrid pass, beside `State`'s own buffers.
 pub struct HyScratch {
     /// `attn_q` output (q and gate interleaved per head) or the GDN `attn_qkv` output, per row.
@@ -215,25 +198,6 @@ impl HyScratch {
 
 /// A per-row step fused into a rotation's pass: `(row index, row)`.
 type RowPrep<'a> = dyn Fn(usize, &mut [f32]) + Sync + 'a;
-
-/// Raw per-row state pointers for the delta-rule workers.
-#[derive(Clone, Copy)]
-struct RowPtrs(*const (*mut f32, *mut f32));
-// SAFETY: each (row's state, head) region is written by exactly one task; rows of a shared cache are processed in
-// order by the task that owns the head.
-unsafe impl Send for RowPtrs {}
-unsafe impl Sync for RowPtrs {}
-
-impl RowPtrs {
-    /// Row `b`'s (state, conv) pointers. A method, so a closure captures the wrapper (Send + Sync), not its field.
-    ///
-    /// # Safety
-    /// `b` must be inside the pointer array, which must outlive the call.
-    #[inline(always)]
-    unsafe fn at(self, b: usize) -> (*mut f32, *mut f32) {
-        *self.0.add(b)
-    }
-}
 
 fn f32_vec(g: &Gguf, t: &TensorInfo) -> Vec<f32> {
     let mut v = vec![0.0f32; t.numel() as usize];
@@ -1470,21 +1434,6 @@ fn rec_ptrs(
         for slot in &mut out[r0..r0 + len] {
             *slot = p;
         }
-    }
-}
-
-/// Per row, the snapshot request of its cache for recurrent layer `idx`: (position, state, conv) pointers.
-#[derive(Clone, Copy)]
-struct SnapPtrs(*const Option<(usize, *mut f32, *mut f32)>);
-// SAFETY: as `RowPtrs`: each snapshot region is written by the task that owns it (a head slice, a channel range).
-unsafe impl Send for SnapPtrs {}
-unsafe impl Sync for SnapPtrs {}
-impl SnapPtrs {
-    /// # Safety
-    /// `b` must be inside the array, which must outlive the call.
-    #[inline(always)]
-    unsafe fn at(self, b: usize) -> Option<(usize, *mut f32, *mut f32)> {
-        *self.0.add(b)
     }
 }
 
