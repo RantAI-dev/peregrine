@@ -54,6 +54,137 @@ fn uniform(key: u64, i: u32) -> f64 {
     ((h >> 11) as f64 + 0.5) / (1u64 << 53) as f64
 }
 
+/// llama.cpp-compatible repetition penalties.
+///
+/// They act on the raw logits before temperature, top-k, top-p and min-p, and before
+/// the greedy argmax. Every default is the no-op value, so a request that sets none
+/// takes the same code path and produces the same bits it did before they existed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Penalties {
+    /// `presence_penalty`: subtracted once from every token that occurs in the window.
+    pub presence: f32,
+    /// `frequency_penalty`: subtracted once per occurrence in the window.
+    pub frequency: f32,
+    /// `repeat_penalty`: divides positive logits and multiplies non-positive ones. 1 = off.
+    pub repeat: f32,
+    /// `repeat_last_n`: tokens in the window. 0 = off, -1 = the whole sequence.
+    pub last_n: i32,
+}
+
+impl Default for Penalties {
+    fn default() -> Self {
+        Penalties {
+            presence: 0.0,
+            frequency: 0.0,
+            repeat: 1.0,
+            last_n: 64,
+        }
+    }
+}
+
+impl Penalties {
+    /// Whether these penalties can change a logit. When they cannot, the sampler runs
+    /// the pre-penalty path exactly, without copying the row or scanning a window.
+    pub fn is_off(&self) -> bool {
+        self.last_n == 0 || (self.presence == 0.0 && self.frequency == 0.0 && self.repeat == 1.0)
+    }
+}
+
+/// Apply `pen` to `logits` for the `(token, count)` pairs of the window.
+///
+/// llama.cpp's order: scale by `repeat_penalty` first, then subtract the frequency and
+/// presence penalties. The same order matters when a token is both repeated and subject
+/// to a presence penalty, so this is transcribed rather than rearranged.
+pub fn apply_penalties(logits: &mut [f32], pen: &Penalties, window: &[(u32, u32)]) {
+    for &(token, count) in window {
+        let Some(logit) = logits.get_mut(token as usize) else {
+            // A token id outside the row cannot come from this model's tokenizer; skip
+            // rather than panic if a caller passes a window from elsewhere.
+            continue;
+        };
+        if pen.repeat != 1.0 {
+            *logit = if *logit > 0.0 {
+                *logit / pen.repeat
+            } else {
+                *logit * pen.repeat
+            };
+        }
+        *logit -= count as f32 * pen.frequency + if count > 0 { pen.presence } else { 0.0 };
+    }
+}
+
+/// A slot's rolling token history and the counts of its penalty window, reused every token.
+///
+/// The window is rebuilt from the history when a token is sampled: O(window), never
+/// O(vocabulary). The dense count buffer, the distinct-token list and the output pairs
+/// are kept between calls, so after the first penalised token sampling allocates nothing.
+#[derive(Default)]
+pub struct PenaltyState {
+    history: Vec<u32>,
+    counts: Vec<u32>,
+    tokens: Vec<u32>,
+    window: Vec<(u32, u32)>,
+}
+
+impl PenaltyState {
+    /// Begin a sequence: the prompt tokens form the first window.
+    ///
+    /// `max_new` reserves room for the tokens the request may generate, so the history
+    /// does not grow (and reallocate) in the decode loop.
+    pub fn start(&mut self, prompt: &[u32], max_new: usize) {
+        self.history.clear();
+        self.history.reserve(prompt.len().saturating_add(max_new));
+        self.history.extend_from_slice(prompt);
+        self.window.clear();
+        // `counts` is cleared lazily by `prepare`, through `tokens`: keep that list so the counts it
+        // names are zeroed on the next window. Nothing here allocates.
+    }
+
+    /// Add a token the sequence has just taken.
+    pub fn push(&mut self, token: u32) {
+        self.history.push(token);
+    }
+
+    /// Rebuild the `(token, count)` pairs of the last `last_n` tokens (-1: all) and
+    /// return them. `n_vocab` bounds the reused count buffer.
+    pub fn prepare(&mut self, last_n: i32, n_vocab: usize) -> &[(u32, u32)] {
+        self.window.clear();
+        if last_n == 0 {
+            return &self.window;
+        }
+        if self.counts.len() < n_vocab {
+            self.counts.resize(n_vocab, 0);
+        }
+        // Clear only the tokens the previous window touched: O(distinct), not O(vocab).
+        for &token in &self.tokens {
+            self.counts[token as usize] = 0;
+        }
+        self.tokens.clear();
+        let from = if last_n < 0 {
+            0
+        } else {
+            self.history.len().saturating_sub(last_n as usize)
+        };
+        for &token in &self.history[from..] {
+            let count = &mut self.counts[token as usize];
+            if *count == 0 {
+                self.tokens.push(token);
+            }
+            *count += 1;
+        }
+        self.window.reserve(self.tokens.len());
+        for &token in &self.tokens {
+            self.window.push((token, self.counts[token as usize]));
+        }
+        &self.window
+    }
+
+    /// The window most recently built by [`prepare`](Self::prepare).
+    pub fn window(&self) -> &[(u32, u32)] {
+        &self.window
+    }
+}
+
 /// Reusable scratch, so sampling a row allocates nothing after the first.
 #[derive(Default)]
 pub struct Scratch {
@@ -123,7 +254,62 @@ pub fn sample_filtered(
     if sc.kept.is_empty() {
         return argmax(logits);
     }
-    // The race over the nucleus: argmax p_i / E_i, compared as ln p_i − ln E_i.
+    race(sc, key)
+}
+
+/// [`sample_filtered`] with llama.cpp-compatible repetition penalties applied to the raw
+/// logits first. `window` holds the `(token, count)` pairs of the slot's last tokens;
+/// when `pen` is off this is [`sample_filtered`] exactly, with no copy and no scan.
+// Each argument is a separate sampling control; bundling them would hide which are per request.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_penalized(
+    logits: &[f32],
+    temperature: f32,
+    top_p: f32,
+    top_k: usize,
+    min_p: f32,
+    pen: &Penalties,
+    window: &[(u32, u32)],
+    key: u64,
+    sc: &mut Scratch,
+) -> u32 {
+    if pen.is_off() || window.is_empty() {
+        return sample_filtered(logits, temperature, top_p, top_k, min_p, key, sc);
+    }
+    // The model's logits row must not be edited: other rows of the batch, the caller and
+    // (when asked) the log-probability all read it. Work on the scratch copy instead.
+    sc.p.clear();
+    sc.p.extend_from_slice(logits);
+    apply_penalties(&mut sc.p, pen, window);
+    if temperature <= 0.0 {
+        return argmax(&sc.p);
+    }
+    // The penalised row is the row the sampler saw, so the empty-nucleus fallback must
+    // use it too.
+    let fallback = argmax(&sc.p);
+    let m = crate::vmath::max(&sc.p);
+    let z = crate::vmath::exp_scaled_sum(&mut sc.p, m, 1.0 / temperature);
+    if top_k == 0 && min_p <= 0.0 {
+        nucleus(
+            &sc.p,
+            z,
+            top_p,
+            &mut sc.kept,
+            &mut sc.bin,
+            &mut sc.mass1,
+            &mut sc.mass2,
+        );
+    } else {
+        cut_nucleus(&sc.p, top_p, top_k, min_p, temperature, &mut sc.kept);
+    }
+    if sc.kept.is_empty() {
+        return fallback;
+    }
+    race(sc, key)
+}
+
+/// The race over the nucleus: argmax p_i / E_i, compared as ln p_i − ln E_i.
+fn race(sc: &mut Scratch, key: u64) -> u32 {
     let mut best = sc.kept[0];
     let mut bv = f64::NEG_INFINITY;
     for &i in &sc.kept {
@@ -392,5 +578,108 @@ mod tests {
         for pos in 0..2000 {
             assert_eq!(sample(&l, 1.0, 0.8, position_key(1, 0, pos), &mut sc), 0);
         }
+    }
+
+    #[test]
+    fn penalties_follow_llama_cpps_arithmetic() {
+        // Token 0 occurs twice, token 2 once, token 3 once. With repeat 2, presence 0.5
+        // and frequency 0.25:
+        //   t0: 2/2 - (2*0.25 + 0.5) = 0
+        //   t2: -1*2 - (0.25 + 0.5)  = -2.75
+        //   t3:  0*2 - (0.25 + 0.5)  = -0.75
+        // Token 1 is outside the window and keeps its value.
+        let pen = Penalties {
+            presence: 0.5,
+            frequency: 0.25,
+            repeat: 2.0,
+            last_n: 64,
+        };
+        let mut l = vec![2.0f32, 0.5, -1.0, 0.0];
+        apply_penalties(&mut l, &pen, &[(0, 2), (2, 1), (3, 1)]);
+        assert_eq!(l, vec![0.0, 0.5, -2.75, -0.75]);
+    }
+
+    #[test]
+    fn default_penalties_take_the_exact_pre_penalty_path() {
+        let pen = Penalties::default();
+        assert!(pen.is_off());
+        let l = logits(11, 4096, 7.0);
+        let window = [(0u32, 3u32), (5, 1)];
+        let mut a = Scratch::default();
+        let mut b = Scratch::default();
+        for pos in 0..32 {
+            let k = position_key(5, 1, pos);
+            assert_eq!(
+                sample_penalized(&l, 0.8, 0.95, 40, 0.05, &pen, &window, k, &mut a),
+                sample_filtered(&l, 0.8, 0.95, 40, 0.05, k, &mut b),
+            );
+        }
+        // Greedy too: the defaults must leave the argmax alone.
+        assert_eq!(
+            sample_penalized(&l, 0.0, 0.95, 40, 0.05, &pen, &window, 1, &mut a),
+            argmax(&l)
+        );
+    }
+
+    #[test]
+    fn the_window_is_the_last_repeat_last_n_tokens() {
+        fn window(state: &mut PenaltyState, last_n: i32) -> Vec<(u32, u32)> {
+            state.prepare(last_n, 16).to_vec()
+        }
+        let mut state = PenaltyState::default();
+        state.start(&[1, 2, 3, 4, 5], 0);
+        // 0 = off.
+        assert!(window(&mut state, 0).is_empty());
+        // The last n tokens.
+        assert_eq!(window(&mut state, 2), vec![(4, 1), (5, 1)]);
+        // -1 = the whole sequence.
+        assert_eq!(
+            window(&mut state, -1),
+            vec![(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]
+        );
+        // Counts are rebuilt from scratch: duplicates in the window are counted, tokens
+        // that leave it are forgotten, and a later window does not inherit old counts.
+        state.start(&[7, 7, 8, 7], 0);
+        assert_eq!(window(&mut state, 3), vec![(7, 2), (8, 1)]);
+        assert_eq!(window(&mut state, 1), vec![(7, 1)]);
+        assert_eq!(window(&mut state, -1), vec![(7, 3), (8, 1)]);
+        // A longer sequence keeps only its tail.
+        state.start(&[1, 2, 3, 4, 5, 6], 0);
+        assert_eq!(
+            window(&mut state, 10),
+            vec![(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1)]
+        );
+    }
+
+    #[test]
+    fn greedy_respects_penalties() {
+        let l = [3.0f32, 2.0, 0.0];
+        let pen = Penalties {
+            presence: 5.0,
+            frequency: 0.0,
+            repeat: 1.0,
+            last_n: 64,
+        };
+        let mut sc = Scratch::default();
+        // Token 0 is the raw argmax but its single occurrence costs it 5: 3 - 5 < 2.
+        assert_eq!(
+            sample_penalized(&l, 0.0, 1.0, 0, 0.0, &pen, &[(0, 1)], 9, &mut sc),
+            1
+        );
+        // With the defaults the same row is still greedy on token 0.
+        assert_eq!(
+            sample_penalized(
+                &l,
+                0.0,
+                1.0,
+                0,
+                0.0,
+                &Penalties::default(),
+                &[(0, 1)],
+                9,
+                &mut sc
+            ),
+            0
+        );
     }
 }
