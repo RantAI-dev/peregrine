@@ -21,6 +21,7 @@
 //! metadata, which at Q4_K is 12.5% of the traffic.
 
 use crate::attn;
+use crate::blocks::attn::AttnScratch;
 use crate::blocks::par::{OutPtr, SharedActs, SharedBuf, SharedMl, SharedScratch};
 use crate::gguf::{f16, Format, Gguf, TensorInfo};
 use crate::kv::KvCache;
@@ -260,13 +261,8 @@ pub struct State {
     q: Vec<f32>,
     k: Vec<f32>,
     v: Vec<f32>,
-    /// One attention scratch per worker (decoded K/V tiles, the task's queries and
-    /// its running softmax state) — see `attn.rs`.
-    attn: Vec<attn::Scratch>,
-    /// Partial `(o, m, l)` per (KV head, position chunk, query row) when a call splits
-    /// a head's positions across workers; merged by `attn::combine_row`.
-    attn_part: Vec<f32>,
-    attn_ml: Vec<(f32, f64)>,
+    /// Attention's scratch: per worker, and for split heads.
+    attn: AttnScratch,
     /// `(cos, sin)` of every rotary angle for every position, computed once. Rope was
     /// recomputing `powf`, `sin` and `cos` for every pair of every head at every
     /// layer of every token — 20 000 transcendental calls per decode step.
@@ -340,14 +336,7 @@ impl State {
             q: vec![0.0; b * cfg.n_head * cfg.head_dim],
             k: vec![0.0; b * cfg.kv_dim()],
             v: vec![0.0; b * cfg.kv_dim()],
-            attn: (0..threads.max(1))
-                .map(|_| attn::Scratch::new(b * cfg.gqa(), cfg.head_dim))
-                .collect(),
-            attn_part: vec![
-                0.0;
-                cfg.n_kv_head * attn::MAX_CHUNKS * attn::MAX_PARTIAL_ROWS * cfg.head_dim
-            ],
-            attn_ml: vec![(0.0, 0.0); cfg.n_kv_head * attn::MAX_CHUNKS * attn::MAX_PARTIAL_ROWS],
+            attn: AttnScratch::new(cfg, b, threads),
             rope,
             acts: (0..b)
                 .map(|_| {
@@ -1971,9 +1960,9 @@ impl Model {
         let q: &[f32] = &st8.q[row0 * qd..];
         // SAFETY: `row0 * qd` is inside `xb`, which holds `max_batch` rows of at least `qd` floats.
         let out = SharedBuf(unsafe { st8.xb.as_mut_ptr().add(row0 * qd) });
-        let scratch = SharedScratch(st8.attn.as_mut_ptr());
-        let part = SharedBuf(st8.attn_part.as_mut_ptr());
-        let part_ml = SharedMl(st8.attn_ml.as_mut_ptr());
+        let scratch = SharedScratch(st8.attn.per_worker.as_mut_ptr());
+        let part = SharedBuf(st8.attn.part.as_mut_ptr());
+        let part_ml = SharedMl(st8.attn.ml.as_mut_ptr());
         let body = |wk: usize, nw: usize| {
             let (lo, hi) = share(tasks, wk, nw);
             // SAFETY: worker `wk` alone uses scratch `wk` (the pool has as many workers
@@ -2016,8 +2005,8 @@ impl Model {
                         let mut parts = [(none, f32::NEG_INFINITY, 0.0f64); attn::MAX_CHUNKS];
                         for (pi, p) in parts.iter_mut().enumerate().take(plan.pos_chunks) {
                             let slot = (kh * plan.pos_chunks + pi) * rows_all + b * gqa + g;
-                            let (m, l) = st8.attn_ml[slot];
-                            *p = (&st8.attn_part[slot * hd..(slot + 1) * hd], m, l);
+                            let (m, l) = st8.attn.ml[slot];
+                            *p = (&st8.attn.part[slot * hd..(slot + 1) * hd], m, l);
                         }
                         let h = kh * gqa + g;
                         let dst =
