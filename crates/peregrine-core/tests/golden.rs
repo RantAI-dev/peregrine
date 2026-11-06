@@ -31,8 +31,10 @@ const GREEDY_TOKENS: usize = 24;
 const MAX_CTX: usize = 512;
 
 /// Candidate model files, relative to `models/` (repo) or `~/models/`.
-const MODELS: [&str; 7] = [
+const MODELS: [&str; 9] = [
     "SmolLM2-360M-Instruct.Q4_K_M.gguf",
+    "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+    "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
     "Qwen3-1.7B-Q4_K_M.gguf",
     "Qwen3-4B-Q4_K_M.gguf",
     "bonsai2-2b/Ternary-Bonsai-2-2B-PQ2_0.gguf",
