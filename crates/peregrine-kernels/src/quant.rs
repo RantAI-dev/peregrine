@@ -869,6 +869,91 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        Format::Q2_K => {
+            for (blk, out) in w.chunks_exact(84).zip(y.chunks_exact_mut(256)) {
+                let scales = &blk[0..16];
+                let qs = &blk[16..80];
+                let d = h(blk, 80);
+                let dmin = h(blk, 82);
+                let mut is = 0;
+                for n in 0..2 {
+                    let q = &qs[n * 32..(n + 1) * 32];
+                    for j in 0..4 {
+                        let shift = j * 2;
+                        let sc0 = scales[is];
+                        let dl0 = d * (sc0 & 0x0F) as f32;
+                        let ml0 = dmin * (sc0 >> 4) as f32;
+                        let o0 = &mut out[is * 16..(is + 1) * 16];
+                        for l in 0..16 {
+                            o0[l] = dl0 * ((q[l] >> shift) & 3) as f32 - ml0;
+                        }
+                        is += 1;
+
+                        let sc1 = scales[is];
+                        let dl1 = d * (sc1 & 0x0F) as f32;
+                        let ml1 = dmin * (sc1 >> 4) as f32;
+                        let o1 = &mut out[is * 16..(is + 1) * 16];
+                        for l in 0..16 {
+                            o1[l] = dl1 * ((q[l + 16] >> shift) & 3) as f32 - ml1;
+                        }
+                        is += 1;
+                    }
+                }
+            }
+        }
+        Format::Q3_K => {
+            for (blk, out) in w.chunks_exact(110).zip(y.chunks_exact_mut(256)) {
+                let hmask = &blk[0..32];
+                let qs = &blk[32..96];
+                let scales_raw = &blk[96..108];
+                let d = h(blk, 108);
+
+                let a0 = u32::from_le_bytes(scales_raw[0..4].try_into().unwrap());
+                let a1 = u32::from_le_bytes(scales_raw[4..8].try_into().unwrap());
+                let tmp = u32::from_le_bytes(scales_raw[8..12].try_into().unwrap());
+                const KMASK1: u32 = 0x03030303;
+                const KMASK2: u32 = 0x0f0f0f0f;
+                let s0 = (a0 & KMASK2) | (((tmp >> 0) & KMASK1) << 4);
+                let s1 = (a1 & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
+                let s2 = ((a0 >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
+                let s3 = ((a1 >> 4) & KMASK2) | (((tmp >> 6) & KMASK1) << 4);
+                let mut scales = [0i8; 16];
+                for (chunk_idx, &word) in [s0, s1, s2, s3].iter().enumerate() {
+                    for (i, b) in word.to_le_bytes().into_iter().enumerate() {
+                        scales[chunk_idx * 4 + i] = b as i8;
+                    }
+                }
+
+                let mut is = 0;
+                let mut m = 1u8;
+                for n in 0..2 {
+                    let q = &qs[n * 32..(n + 1) * 32];
+                    for j in 0..4 {
+                        let shift = j * 2;
+                        let dl0 = d * (scales[is] as i32 - 32) as f32;
+                        let o0 = &mut out[is * 16..(is + 1) * 16];
+                        for l in 0..16 {
+                            let hbit = (hmask[l] & m) != 0;
+                            let q_val = ((q[l] >> shift) & 3) as i32 - if hbit { 0 } else { 4 };
+                            o0[l] = dl0 * q_val as f32;
+                        }
+                        is += 1;
+
+                        let dl1 = d * (scales[is] as i32 - 32) as f32;
+                        let o1 = &mut out[is * 16..(is + 1) * 16];
+                        for l in 0..16 {
+                            let hbit = (hmask[l + 16] & m) != 0;
+                            let q_val =
+                                ((q[l + 16] >> shift) & 3) as i32 - if hbit { 0 } else { 4 };
+                            o1[l] = dl1 * q_val as f32;
+                        }
+                        is += 1;
+
+                        m <<= 1;
+                    }
+                }
+            }
+        }
         Format::Q4_K => {
             for (blk, out) in w.chunks_exact(144).zip(y.chunks_exact_mut(256)) {
                 let d = h(blk, 0);
@@ -1089,6 +1174,120 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
                 // Bias identity: codes are [0,31] with offset 16, so subtract
                 // 16·Σa once for the whole block instead of per weight.
                 acc += h(blk, 0) * a.d[b] * (s - 16 * a.sums[b]) as f32;
+            }
+            acc
+        }
+        Format::Q2_K => {
+            assert!(
+                !a.qk.is_empty(),
+                "a k-quant row needs a multiple-of-256 activation"
+            );
+            let mut acc = 0.0f32;
+            for (sb, blk) in w.chunks_exact(84).enumerate() {
+                let scales = &blk[0..16];
+                let qs = &blk[16..80];
+                let d = h(blk, 80);
+                let dmin = h(blk, 82);
+                let aq = &a.qk[sb * 256..sb * 256 + 256];
+                let bs = &a.bsums[sb * 16..sb * 16 + 16];
+                let mut sumi = 0i32;
+                let mut summ = 0i32;
+                let mut is = 0;
+                for n in 0..2 {
+                    let q = &qs[n * 32..(n + 1) * 32];
+                    for j in 0..4 {
+                        let shift = j * 2;
+                        let sc0 = scales[is];
+                        let sc0_val = (sc0 & 0x0F) as i32;
+                        let m0_val = (sc0 >> 4) as i32;
+                        let act0 = &aq[is * 16..(is + 1) * 16];
+                        let mut s0 = 0i32;
+                        for l in 0..16 {
+                            s0 += ((q[l] >> shift) & 3) as i32 * act0[l] as i32;
+                        }
+                        sumi += sc0_val * s0;
+                        summ += m0_val * bs[is] as i32;
+                        is += 1;
+
+                        let sc1 = scales[is];
+                        let sc1_val = (sc1 & 0x0F) as i32;
+                        let m1_val = (sc1 >> 4) as i32;
+                        let act1 = &aq[is * 16..(is + 1) * 16];
+                        let mut s1 = 0i32;
+                        for l in 0..16 {
+                            s1 += ((q[l + 16] >> shift) & 3) as i32 * act1[l] as i32;
+                        }
+                        sumi += sc1_val * s1;
+                        summ += m1_val * bs[is] as i32;
+                        is += 1;
+                    }
+                }
+                acc += a.dk[sb] * (d * sumi as f32 - dmin * summ as f32);
+            }
+            acc
+        }
+        Format::Q3_K => {
+            assert!(
+                !a.qk.is_empty(),
+                "a k-quant row needs a multiple-of-256 activation"
+            );
+            let mut acc = 0.0f32;
+            for (sb, blk) in w.chunks_exact(110).enumerate() {
+                let hmask = &blk[0..32];
+                let qs = &blk[32..96];
+                let scales_raw = &blk[96..108];
+                let d = h(blk, 108);
+
+                let a0 = u32::from_le_bytes(scales_raw[0..4].try_into().unwrap());
+                let a1 = u32::from_le_bytes(scales_raw[4..8].try_into().unwrap());
+                let tmp = u32::from_le_bytes(scales_raw[8..12].try_into().unwrap());
+                const KMASK1: u32 = 0x03030303;
+                const KMASK2: u32 = 0x0f0f0f0f;
+                let s0 = (a0 & KMASK2) | (((tmp >> 0) & KMASK1) << 4);
+                let s1 = (a1 & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
+                let s2 = ((a0 >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
+                let s3 = ((a1 >> 4) & KMASK2) | (((tmp >> 6) & KMASK1) << 4);
+                let mut scales = [0i8; 16];
+                for (chunk_idx, &word) in [s0, s1, s2, s3].iter().enumerate() {
+                    for (i, b) in word.to_le_bytes().into_iter().enumerate() {
+                        scales[chunk_idx * 4 + i] = b as i8;
+                    }
+                }
+
+                let aq = &a.qk[sb * 256..sb * 256 + 256];
+                let mut sumi = 0i32;
+                let mut is = 0;
+                let mut m = 1u8;
+                for n in 0..2 {
+                    let q = &qs[n * 32..(n + 1) * 32];
+                    for j in 0..4 {
+                        let shift = j * 2;
+                        let sc0 = scales[is] as i32 - 32;
+                        let act0 = &aq[is * 16..(is + 1) * 16];
+                        let mut s0 = 0i32;
+                        for l in 0..16 {
+                            let hbit = (hmask[l] & m) != 0;
+                            let code = ((q[l] >> shift) & 3) as i32 - if hbit { 0 } else { 4 };
+                            s0 += code * act0[l] as i32;
+                        }
+                        sumi += sc0 * s0;
+                        is += 1;
+
+                        let sc1 = scales[is] as i32 - 32;
+                        let act1 = &aq[is * 16..(is + 1) * 16];
+                        let mut s1 = 0i32;
+                        for l in 0..16 {
+                            let hbit = (hmask[l + 16] & m) != 0;
+                            let code = ((q[l + 16] >> shift) & 3) as i32 - if hbit { 0 } else { 4 };
+                            s1 += code * act1[l] as i32;
+                        }
+                        sumi += sc1 * s1;
+                        is += 1;
+
+                        m <<= 1;
+                    }
+                }
+                acc += a.dk[sb] * (d * sumi as f32);
             }
             acc
         }
@@ -1444,6 +1643,11 @@ mod tests {
         for blk in w.chunks_exact_mut(sz) {
             match fmt {
                 Format::Q4_0 | Format::Q8_0 | Format::Q5_0 | Format::IQ4_NL => fix(blk, 0),
+                Format::Q2_K => {
+                    fix(blk, 80);
+                    fix(blk, 82);
+                }
+                Format::Q3_K => fix(blk, 108),
                 Format::Q4_K | Format::Q5_K => {
                     fix(blk, 0);
                     fix(blk, 2);
@@ -1484,7 +1688,12 @@ mod tests {
         // per-256 representation for the k-quants, the per-32 one otherwise.
         let kq = matches!(
             fmt,
-            Format::Q4_K | Format::Q5_K | Format::Q6_K | Format::IQ4_XS
+            Format::Q2_K
+                | Format::Q3_K
+                | Format::Q4_K
+                | Format::Q5_K
+                | Format::Q6_K
+                | Format::IQ4_XS
         );
         let mut want = 0.0f64;
         for i in 0..n {
@@ -1549,6 +1758,16 @@ mod tests {
     #[test]
     fn fused_dot_matches_reference_decode_q5_0() {
         fused_equals_reference(Format::Q5_0, 960);
+    }
+
+    #[test]
+    fn fused_dot_matches_reference_decode_q2_k() {
+        fused_equals_reference(Format::Q2_K, 2560);
+    }
+
+    #[test]
+    fn fused_dot_matches_reference_decode_q3_k() {
+        fused_equals_reference(Format::Q3_K, 2560);
     }
 
     #[test]
@@ -1633,6 +1852,107 @@ mod tests {
         assert_eq!(out[48], -6.5);
         assert_eq!(out[128], 2.0);
         assert_eq!(out[144], -254.0);
+    }
+
+    #[test]
+    fn dequant_row_q2_k_matches_hand_computed_block() {
+        let mut blk = vec![0u8; 84];
+        // d = 1.0 (0x3C00) at 80..82, dmin = 0.5 (0x3800) at 82..84
+        blk[80..82].copy_from_slice(&0x3C00u16.to_le_bytes());
+        blk[82..84].copy_from_slice(&0x3800u16.to_le_bytes());
+
+        // scales[0..16]:
+        // subblock 0 (is=0): sc = 4, m = 2 -> 0x24
+        // subblock 1 (is=1): sc = 3, m = 1 -> 0x13
+        // subblock 2 (is=2): sc = 5, m = 4 -> 0x45
+        // subblock 8 (is=8): sc = 2, m = 3 -> 0x32
+        blk[0] = 0x24;
+        blk[1] = 0x13;
+        blk[2] = 0x45;
+        blk[8] = 0x32;
+
+        // qs: 64 bytes at 16..80
+        // qs[0] (is=0, shift=0, and is=2, shift=2):
+        // weights 0 and 32: set qs[0] = 0b00_01_01_11 (low 2 bits = 3, bits 2..3 = 1) -> 0x17
+        blk[16] = 0x17;
+        // qs[1] (weight 1): low 2 bits = 0
+        blk[17] = 0x00;
+        // qs[16] (is=1, shift=0, weight 16): low 2 bits = 2
+        blk[16 + 16] = 0x02;
+        // qs[32] (is=8, shift=0, weight 128): low 2 bits = 3
+        blk[16 + 32] = 0x03;
+
+        let mut out = vec![0.0f32; 256];
+        dequant_row(Format::Q2_K, &blk, &mut out);
+
+        // is=0: dl = 1.0 * 4 = 4.0, ml = 0.5 * 2 = 1.0
+        // weight 0: 4.0 * 3 - 1.0 = 11.0
+        assert_eq!(out[0], 11.0);
+        // weight 1: 4.0 * 0 - 1.0 = -1.0
+        assert_eq!(out[1], -1.0);
+        // is=1: dl = 1.0 * 3 = 3.0, ml = 0.5 * 1 = 0.5
+        // weight 16: 3.0 * 2 - 0.5 = 5.5
+        assert_eq!(out[16], 5.5);
+        // is=2: dl = 1.0 * 5 = 5.0, ml = 0.5 * 4 = 2.0
+        // weight 32: 5.0 * 1 - 2.0 = 3.0
+        assert_eq!(out[32], 3.0);
+        // is=8: dl = 1.0 * 2 = 2.0, ml = 0.5 * 3 = 1.5
+        // weight 128: 2.0 * 3 - 1.5 = 4.5
+        assert_eq!(out[128], 4.5);
+    }
+
+    #[test]
+    fn dequant_row_q3_k_matches_hand_computed_block() {
+        let mut blk = vec![0u8; 110];
+        // d = 1.0 (0x3C00) at 108..110
+        blk[108..110].copy_from_slice(&0x3C00u16.to_le_bytes());
+
+        // scales: 12 bytes at 96..108.
+        // a0 at 96..100, a1 at 100..104, a2 at 104..108
+        // is=0: (0x32 & 0x0F) | (((0x22 >> 0) & 3) << 4) = 2 | (2 << 4) = 34 -> scale - 32 = +2
+        // is=1: (0x1F & 0x0F) | (((0x22 >> 2) & 3) << 4) = 15 | (0 << 4) = 15 -> scale - 32 = -17
+        // is=2: (0x04 & 0x0F) | (((0x02 >> 0) & 3) << 4) = 4 | (2 << 4) = 36 -> scale - 32 = +4
+        // is=8: ((0x32 >> 4) & 0x0F) | (((0x22 >> 4) & 3) << 4) = 3 | (2 << 4) = 35 -> scale - 32 = +3
+        blk[96] = 0x32;
+        blk[97] = 0x1F;
+        blk[98] = 0x04;
+        blk[104] = 0x22;
+        blk[106] = 0x02;
+
+        // hmask: 32 bytes at 0..32
+        // For is=0 (m=1): weight 0 has hbit 1 (hmask[0] & 1 != 0), weight 1 has hbit 0
+        blk[0] = 0x01 | 0x10; // bit 0 for is=0 (weight 0), bit 4 for is=8 (weight 128)
+                              // For is=1 (m=1): weight 16 has hbit 1 (hmask[16] & 1 != 0)
+        blk[16] = 0x01;
+
+        // qs: 64 bytes at 32..96
+        // qs[0] (is=0, shift=0, and is=2, shift=2):
+        // weight 0: low 2 bits = 3. weight 32: bits 2..3 = 2 -> 0b0000_1011 = 0x0B
+        blk[32] = 0x0B;
+        // qs[1] (weight 1): low 2 bits = 2
+        blk[33] = 0x02;
+        // qs[16] (weight 16): low 2 bits = 1
+        blk[32 + 16] = 0x01;
+        // qs[32] (weight 128): low 2 bits = 1
+        blk[32 + 32] = 0x01;
+
+        let mut out = vec![0.0f32; 256];
+        dequant_row(Format::Q3_K, &blk, &mut out);
+
+        // is=0: dl = 1.0 * (34 - 32) = 2.0.
+        // weight 0: q=3, hbit=1 -> code = 3 - 0 = 3 -> 2.0 * 3 = 6.0
+        assert_eq!(out[0], 6.0);
+        // weight 1: q=2, hbit=0 -> code = 2 - 4 = -2 -> 2.0 * (-2) = -4.0
+        assert_eq!(out[1], -4.0);
+        // is=1: dl = 1.0 * (15 - 32) = -17.0.
+        // weight 16: q=1, hbit=1 -> code = 1 - 0 = 1 -> -17.0 * 1 = -17.0
+        assert_eq!(out[16], -17.0);
+        // is=2: dl = 1.0 * (36 - 32) = 4.0.
+        // weight 32: q=2, m=2 -> hmask[0] & 2 = 0 -> hbit=0 -> code = 2 - 4 = -2 -> 4.0 * (-2) = -8.0
+        assert_eq!(out[32], -8.0);
+        // is=8: dl = 1.0 * (35 - 32) = 3.0.
+        // weight 128: q=1, m=16 -> hmask[0] & 16 != 0 -> hbit=1 -> code = 1 - 0 = 1 -> 3.0 * 1 = 3.0
+        assert_eq!(out[128], 3.0);
     }
 
     #[test]
