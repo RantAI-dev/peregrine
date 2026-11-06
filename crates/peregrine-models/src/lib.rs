@@ -15,6 +15,8 @@
 
 #[cfg(any(feature = "arch-llama", feature = "arch-qwen"))]
 pub mod dense;
+#[cfg(feature = "arch-gemma3")]
+pub mod gemma3;
 #[cfg(feature = "arch-qwen35")]
 pub mod qwen35;
 
@@ -24,6 +26,8 @@ pub use dense::DenseFamily;
 pub use dense::LlamaFamily;
 #[cfg(feature = "arch-qwen")]
 pub use dense::QwenFamily;
+#[cfg(feature = "arch-gemma3")]
+pub use gemma3::Gemma3Family;
 #[cfg(feature = "arch-qwen35")]
 pub use qwen35::Qwen35Family;
 
@@ -55,6 +59,8 @@ pub const ARCHS: &[&str] = &[
     "qwen3",
     #[cfg(feature = "arch-qwen35")]
     "qwen35",
+    #[cfg(feature = "arch-gemma3")]
+    "gemma3",
 ];
 
 /// Table of model families implemented by Peregrine.
@@ -65,6 +71,8 @@ pub static FAMILIES: &[&dyn Family] = &[
     &QwenFamily,
     #[cfg(feature = "arch-qwen35")]
     &Qwen35Family,
+    #[cfg(feature = "arch-gemma3")]
+    &Gemma3Family,
 ];
 
 /// Load a model from a parsed GGUF file using the built-in model families.

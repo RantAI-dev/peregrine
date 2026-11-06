@@ -78,6 +78,7 @@ pub fn support_markdown() -> String {
                 "qwen2" => "Qwen 2",
                 "qwen3" => "Qwen 3",
                 "qwen35" => "Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP)",
+                "gemma3" => "Gemma 3",
                 other => other,
             };
             arch_items.push(label);

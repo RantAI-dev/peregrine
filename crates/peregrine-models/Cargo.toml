@@ -19,6 +19,7 @@ default = [
     "arch-llama",
     "arch-qwen",
     "arch-qwen35",
+    "arch-gemma3",
     "fmt-kquant",
     "fmt-ternary",
     "fmt-iq",
@@ -32,6 +33,7 @@ default = [
 arch-llama = []
 arch-qwen = []
 arch-qwen35 = []
+arch-gemma3 = []
 
 # Formats passed through to core and kernels
 fmt-kquant = ["peregrine-core/fmt-kquant", "peregrine-kernels/fmt-kquant"]
