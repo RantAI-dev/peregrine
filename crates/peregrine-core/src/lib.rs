@@ -70,6 +70,15 @@ pub fn compatibility(path: &std::path::Path) -> Result<(), String> {
 }
 
 pub fn check_compatible(g: &Gguf) -> Result<(), String> {
+    check_compatible_with(g, None)
+}
+
+/// The same check, with the chat template the caller chose (`--chat-template`).
+///
+/// A file that declares no template at all — or one whose template this engine
+/// does not render — is refused with a message naming the option: the template
+/// is the one thing the file cannot say, and the engine will not guess it.
+pub fn check_compatible_with(g: &Gguf, template: Option<template::Template>) -> Result<(), String> {
     let arch = g.str("general.architecture").unwrap_or("unknown");
     if model::Arch::from_name(arch).is_none() {
         return Err(format!(
@@ -97,7 +106,16 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
             return Err(format!("rope scaling {t:?} is not implemented"));
         }
     }
-    template::Template::detect(g)?;
+    match template {
+        // The caller named the template: it is used as it is, and the file's own
+        // template (if any) is not read.
+        Some(t) => t.tokens_present(g)?,
+        None => {
+            template::Template::detect(g).map_err(|e| {
+                format!("{e} — a file without a usable chat template needs --chat-template <name>")
+            })?;
+        }
+    }
     Ok(())
 }
 
