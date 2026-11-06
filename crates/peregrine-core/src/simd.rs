@@ -39,7 +39,7 @@ use std::arch::x86_64::*;
 /// this is a load of a relaxed atomic after the first call.
 #[inline]
 pub fn have_avx2() -> bool {
-    is_x86_feature_detected!("avx2")
+    crate::cpu_has!("avx2")
 }
 
 #[inline(always)]
@@ -316,9 +316,7 @@ pub const TILE: usize = 4;
 /// scale conversion (every AVX2 CPU since Haswell has both).
 #[inline]
 pub fn have_batched() -> bool {
-    is_x86_feature_detected!("avx2")
-        && is_x86_feature_detected!("fma")
-        && is_x86_feature_detected!("f16c")
+    crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c")
 }
 
 #[inline(always)]

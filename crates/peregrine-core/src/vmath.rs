@@ -22,7 +22,7 @@ use std::arch::x86_64::*;
 #[cfg(target_arch = "x86_64")]
 #[inline]
 fn vector_ok() -> bool {
-    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+    crate::cpu_has!("avx2") && crate::cpu_has!("fma")
 }
 
 /// Eight `exp`s at once — ggml's `ggml_v_expf`, transcribed.

@@ -278,10 +278,7 @@ pub fn combine_row(parts: &[(&[f32], f32, f64)], rotated: bool, out: &mut [f32])
 fn scores(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32]) {
     #[cfg(target_arch = "x86_64")]
     {
-        if hd.is_multiple_of(8)
-            && is_x86_feature_detected!("avx2")
-            && is_x86_feature_detected!("fma")
-        {
+        if hd.is_multiple_of(8) && crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
             // SAFETY: features checked; `kf` holds at least `vis · hd` floats.
             return unsafe { scores_avx2(q, kf, vis, hd, scale, s) };
         }
@@ -296,10 +293,7 @@ fn scores(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32
 fn mix(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
     #[cfg(target_arch = "x86_64")]
     {
-        if hd.is_multiple_of(8)
-            && is_x86_feature_detected!("avx2")
-            && is_x86_feature_detected!("fma")
-        {
+        if hd.is_multiple_of(8) && crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
             // SAFETY: features checked; `vf` holds at least `p.len() · hd` floats.
             return unsafe { mix_avx2(o, alpha, p, vf, hd) };
         }

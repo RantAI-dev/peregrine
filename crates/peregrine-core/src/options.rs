@@ -53,6 +53,8 @@ pub struct EngineOptions {
     pub decode_threads: Option<usize>,
 
     // Kernels.
+    /// `PEREGRINE_ISA` (`scalar`, `avx2`, `avx512`; default `native`): the highest kernel tier to use.
+    pub isa: Option<crate::cpu::Tier>,
     /// `PEREGRINE_ZMM=0` keeps the 256-bit ternary kernels on an AVX-512 machine.
     pub zmm: bool,
     /// `PEREGRINE_NO_WIDE=1` turns off the wide batched k-quant kernels.
@@ -114,6 +116,7 @@ impl Default for EngineOptions {
             spin_us: SPIN_DEFAULT_US,
             yield_us: 0,
             decode_threads: None,
+            isa: None,
             zmm: true,
             wide: true,
             tiles: true,
@@ -167,6 +170,12 @@ impl EngineOptions {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.yield_us),
             decode_threads: num("DECODE_THREADS").filter(|&v| v > 0),
+            isa: match s("ISA").as_deref() {
+                Some("scalar") => Some(crate::cpu::Tier::Scalar),
+                Some("avx2") => Some(crate::cpu::Tier::Avx2),
+                Some("avx512") => Some(crate::cpu::Tier::Avx512),
+                _ => None,
+            },
             zmm: unless("ZMM", "0"),
             wide: unless("NO_WIDE", "1"),
             tiles: unless("TILES", "0"),
@@ -232,6 +241,15 @@ impl EngineOptions {
             ("spin_us", self.spin_us.to_string()),
             ("yield_us", self.yield_us.to_string()),
             ("decode_threads", opt(self.decode_threads)),
+            (
+                "isa",
+                match self.isa {
+                    None => "native".into(),
+                    Some(crate::cpu::Tier::Scalar) => "scalar".into(),
+                    Some(crate::cpu::Tier::Avx2) => "avx2".into(),
+                    Some(crate::cpu::Tier::Avx512) => "avx512".into(),
+                },
+            ),
             ("zmm", self.zmm.to_string()),
             ("wide", self.wide.to_string()),
             ("tiles", self.tiles.to_string()),
@@ -283,6 +301,7 @@ pub const NAMES: &[&str] = &[
     "SPIN_US",
     "YIELD_US",
     "DECODE_THREADS",
+    "ISA",
     "ZMM",
     "NO_WIDE",
     "TILES",
@@ -367,6 +386,9 @@ mod tests {
         assert!(with(&[("DSPARK_PROF", "0")]).dspark.prof);
         // Inverted DSpark switch.
         assert!(!with(&[("DSPARK_CONF_PRENORM", "1")]).dspark.conf_on_normed);
+        // The tier cap.
+        assert_eq!(with(&[("ISA", "avx2")]).isa, Some(crate::cpu::Tier::Avx2));
+        assert_eq!(with(&[("ISA", "native")]).isa, None);
         // Zero decode threads means "default".
         assert_eq!(with(&[("DECODE_THREADS", "0")]).decode_threads, None);
         assert_eq!(with(&[("DECODE_THREADS", "6")]).decode_threads, Some(6));

@@ -53,35 +53,9 @@ fn find(rel: &str) -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join(rel)).find(|p| p.is_file())
 }
 
-/// The kernel tier this machine runs, as a directory name.
+/// The kernel tier in effect (`PEREGRINE_ISA` can cap it), as a directory name.
 fn tier() -> String {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let mut t = String::from("x86_64");
-        for (name, on) in [
-            (
-                "avx2",
-                is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"),
-            ),
-            (
-                "avx512",
-                is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512vl"),
-            ),
-            ("vnni", is_x86_feature_detected!("avx512vnni")),
-            ("gfni", is_x86_feature_detected!("gfni")),
-            ("vbmi", is_x86_feature_detected!("avx512vbmi")),
-        ] {
-            if on {
-                t.push('-');
-                t.push_str(name);
-            }
-        }
-        t
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        std::env::consts::ARCH.to_string()
-    }
+    peregrine_core::cpu::tier_name()
 }
 
 /// FNV-1a over the bit patterns: any change in any logit changes the hash.

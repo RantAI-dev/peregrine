@@ -34,7 +34,7 @@ pub const TILE: usize = 8;
 
 #[inline]
 pub fn have_vnni() -> bool {
-    is_x86_feature_detected!("avx512vnni") && is_x86_feature_detected!("avx512vl")
+    crate::cpu_has!("avx512vnni") && crate::cpu_has!("avx512vl")
 }
 
 #[inline(always)]
@@ -210,10 +210,7 @@ unsafe fn pq2_zmm<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) 
 
 #[inline]
 pub fn have_zmm() -> bool {
-    have_vnni()
-        && is_x86_feature_detected!("avx512bw")
-        && is_x86_feature_detected!("gfni")
-        && zmm_enabled()
+    have_vnni() && crate::cpu_has!("avx512bw") && crate::cpu_has!("gfni") && zmm_enabled()
 }
 
 /// `PEREGRINE_ZMM=0` keeps the 256-bit kernels (an A/B switch).
@@ -683,7 +680,7 @@ pub unsafe fn dot_rows_pq2(w: &[u8], rb: usize, rows: usize, acts: &[QuantAct], 
 
 #[inline]
 pub fn have_vbmi() -> bool {
-    is_x86_feature_detected!("avx512vbmi") && is_x86_feature_detected!("avx512bw")
+    crate::cpu_has!("avx512vbmi") && crate::cpu_has!("avx512bw")
 }
 
 /// `tp[tp_off(g) + 64s + k] = tq[128g + 4k + s]` for every group, two byte permutes per group.

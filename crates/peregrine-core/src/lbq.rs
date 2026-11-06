@@ -70,7 +70,7 @@ static CRC_TABLE: [u32; 256] = crc_table();
 pub fn crc32c(b: &[u8]) -> u32 {
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("sse4.2") {
+        if crate::cpu_has!("sse4.2") {
             // SAFETY: SSE4.2 checked above.
             return unsafe { crc32c_sse42(b) };
         }
@@ -178,7 +178,7 @@ pub fn lb_dot_batch(bits: &[u8], n: usize, xs: &[f32], stride: usize, nb: usize,
     debug_assert!(xs.len() >= (nb - 1) * stride + n && out.len() >= nb);
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::cpu_has!("avx2") {
             let mut b = 0;
             while b < nb {
                 let t = (nb - b).min(4);
@@ -406,7 +406,7 @@ pub fn lb_dot_i8_batch(
     debug_assert!(rows.len() >= (nb - 1) * stride + i8_row_floats(n));
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if crate::cpu_has!("avx2") {
             let mut b = 0;
             while b < nb {
                 let t = (nb - b).min(4);
@@ -987,8 +987,7 @@ impl Ptr {
 fn dotf(a: &[f32], b: &[f32]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
-        {
+        if crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
             // SAFETY: features checked; equal lengths asserted by the caller's zip use.
             return unsafe { dotf_avx2(a, b) };
         }
@@ -1046,8 +1045,7 @@ unsafe fn dotf_avx2(a: &[f32], b: &[f32]) -> f64 {
 fn axpy(s: f32, x: &[f32], y: &mut [f32]) {
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
-        {
+        if crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
             // SAFETY: features checked.
             unsafe { axpy_avx2(s, x, y) };
             return;
@@ -1097,8 +1095,7 @@ pub fn gemm(m: usize, p: usize, n: usize, a: &[f32], b: &[f32], c: &mut [f32], p
         Ptr(c.as_mut_ptr()),
     );
     #[cfg(target_arch = "x86_64")]
-    let fast =
-        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma");
+    let fast = crate::cpu_has!("avx2") && crate::cpu_has!("fma");
     #[cfg(not(target_arch = "x86_64"))]
     let fast = false;
     pool.run(|wk, nw| {

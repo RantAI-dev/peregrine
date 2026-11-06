@@ -20,6 +20,7 @@
 )]
 
 pub mod attn;
+pub mod cpu;
 pub mod dspark;
 pub mod gguf;
 pub mod hadamard;
@@ -108,8 +109,8 @@ pub fn check_compatible(g: &Gguf) -> Result<(), String> {
 pub fn simd_name() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
-            if std::arch::is_x86_feature_detected!("fma") {
+        if crate::cpu_has!("avx2") {
+            if crate::cpu_has!("fma") {
                 return "avx2+fma";
             }
             return "avx2";
