@@ -890,6 +890,34 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 }
             }
         }
+        Format::Q5_K => {
+            for (blk, out) in w.chunks_exact(176).zip(y.chunks_exact_mut(256)) {
+                let d = h(blk, 0);
+                let dmin = h(blk, 2);
+                let scales = &blk[4..16];
+                let qh = &blk[16..48];
+                let qs = &blk[48..176];
+                for is in 0..8 {
+                    let (sc, m) = scale_min_k4(is, scales);
+                    let d1 = d * sc as f32;
+                    let m1 = dmin * m as f32;
+                    let base = (is / 2) * 32;
+                    let o = &mut out[is * 32..is * 32 + 32];
+                    let u = 1u8 << is;
+                    if is % 2 == 0 {
+                        for l in 0..32 {
+                            let hi = if (qh[l] & u) != 0 { 16 } else { 0 };
+                            o[l] = d1 * ((qs[base + l] & 0x0F) | hi) as f32 - m1;
+                        }
+                    } else {
+                        for l in 0..32 {
+                            let hi = if (qh[l] & u) != 0 { 16 } else { 0 };
+                            o[l] = d1 * ((qs[base + l] >> 4) | hi) as f32 - m1;
+                        }
+                    }
+                }
+            }
+        }
         Format::Q6_K => {
             for (blk, out) in w.chunks_exact(210).zip(y.chunks_exact_mut(256)) {
                 let ql = &blk[0..128];
@@ -1059,6 +1087,47 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
                     } else {
                         for l in 0..32 {
                             s += (qs[base + l] >> 4) as i32 * act[l] as i32;
+                        }
+                    }
+                    sumi += sc as i32 * s;
+                    // w = d·sc·q − dmin·m, so the min contributes −dmin·m·Σa.
+                    summ += m as i32 * (bs[2 * is] as i32 + bs[2 * is + 1] as i32);
+                }
+                acc += a.dk[sb] * (d * sumi as f32 - dmin * summ as f32);
+            }
+            acc
+        }
+        Format::Q5_K => {
+            assert!(
+                !a.qk.is_empty(),
+                "a k-quant row needs a multiple-of-256 activation"
+            );
+            let mut acc = 0.0f32;
+            for (sb, blk) in w.chunks_exact(176).enumerate() {
+                let d = h(blk, 0);
+                let dmin = h(blk, 2);
+                let scales = &blk[4..16];
+                let qh = &blk[16..48];
+                let qs = &blk[48..176];
+                let aq = &a.qk[sb * 256..sb * 256 + 256];
+                let bs = &a.bsums[sb * 16..sb * 16 + 16];
+                let mut sumi = 0i32;
+                let mut summ = 0i32;
+                for is in 0..8 {
+                    let (sc, m) = scale_min_k4(is, scales);
+                    let base = (is / 2) * 32;
+                    let act = &aq[is * 32..is * 32 + 32];
+                    let mut s = 0i32;
+                    let u = 1u8 << is;
+                    if is % 2 == 0 {
+                        for l in 0..32 {
+                            let hi = if (qh[l] & u) != 0 { 16 } else { 0 };
+                            s += (((qs[base + l] & 0x0F) | hi) as i32) * act[l] as i32;
+                        }
+                    } else {
+                        for l in 0..32 {
+                            let hi = if (qh[l] & u) != 0 { 16 } else { 0 };
+                            s += (((qs[base + l] >> 4) | hi) as i32) * act[l] as i32;
                         }
                     }
                     sumi += sc as i32 * s;
@@ -1295,7 +1364,7 @@ mod tests {
         for blk in w.chunks_exact_mut(sz) {
             match fmt {
                 Format::Q4_0 | Format::Q8_0 | Format::Q5_0 => fix(blk, 0),
-                Format::Q4_K => {
+                Format::Q4_K | Format::Q5_K => {
                     fix(blk, 0);
                     fix(blk, 2);
                 }
@@ -1332,7 +1401,7 @@ mod tests {
         // Reference: dot of the decoded weights against the *reconstructed*
         // activation, which is what the fused kernel actually computes — the
         // per-256 representation for the k-quants, the per-32 one otherwise.
-        let kq = matches!(fmt, Format::Q4_K | Format::Q6_K);
+        let kq = matches!(fmt, Format::Q4_K | Format::Q5_K | Format::Q6_K);
         let mut want = 0.0f64;
         for i in 0..n {
             let act = if kq {
@@ -1404,8 +1473,82 @@ mod tests {
     }
 
     #[test]
+    fn fused_dot_matches_reference_decode_q5_k() {
+        fused_equals_reference(Format::Q5_K, 2560);
+    }
+
+    #[test]
     fn fused_dot_matches_reference_decode_q6_k() {
         fused_equals_reference(Format::Q6_K, 2560);
+    }
+
+    #[test]
+    fn dequant_row_q5_k_matches_hand_computed_block() {
+        let mut blk = vec![0u8; 176];
+        // d = 2.0 (0x4000), dmin = 0.5 (0x3800)
+        blk[0..2].copy_from_slice(&0x4000u16.to_le_bytes());
+        blk[2..4].copy_from_slice(&0x3800u16.to_le_bytes());
+        // Sub-block 0: sc = 3, m = 1 -> scales[0] = 3, scales[4] = 1
+        // Sub-block 1: sc = 4, m = 2 -> scales[1] = 4, scales[5] = 2
+        // Sub-block 4 (is = 4, j = 4):
+        // For j >= 4:
+        // scale_min_k4(4): sc = (scales[8] & 0x0F) | ((scales[0] >> 6) << 4)
+        //                  m = (scales[8] >> 4) | ((scales[4] >> 6) << 4)
+        // Set scales[8] = 0x56: sc = 6, m = 5
+        blk[4] = 3;
+        blk[5] = 4;
+        blk[8] = 1;
+        blk[9] = 2;
+        blk[12] = 0x56;
+
+        // qh: 32 bytes at 16..48
+        // For weight 0:
+        // bit 0 of qh[0] is for is=0
+        // bit 1 of qh[0] is for is=1
+        // bit 4 of qh[0] is for is=4
+        // Set qh[0] = 0x11 (bits 0 and 4 set, bit 1 clear)
+        blk[16] = 0x11;
+        // For weight 1:
+        // bit 0 clear, bit 1 set -> qh[1] = 0x02
+        blk[17] = 0x02;
+
+        // qs: 128 bytes at 48..176
+        // Chunk 0 (j=0) covers sub-block 0 (low nibbles) and 1 (high nibbles), weights 0..63:
+        // qs[0]: low nibble = 5, high nibble = 9 -> qs[0] = 0x95
+        // qs[1]: low nibble = 12, high nibble = 1 -> qs[1] = 0x1C
+        blk[48] = 0x95;
+        blk[49] = 0x1C;
+        // Chunk 2 (j=2) covers sub-block 4 (low nibbles) and 5 (high nibbles), weights 128..191:
+        // qs[64]: low nibble = 7, high nibble = 0 -> qs[64] = 0x07
+        blk[48 + 64] = 0x07;
+
+        let mut out = vec![0.0f32; 256];
+        dequant_row(Format::Q5_K, &blk, &mut out);
+
+        // Sub-block 0: is = 0: d1 = 2.0 * 3 = 6.0, m1 = 0.5 * 1 = 0.5
+        // Weight 0: q = low nibble(5) | (qh[0] & 1 ? 16 : 0) = 5 | 16 = 21
+        // Value = 6.0 * 21 - 0.5 = 125.5
+        assert_eq!(out[0], 125.5);
+        // Weight 1: q = low nibble(12) | (qh[1] & 1 ? 16 : 0) = 12 | 0 = 12
+        // Value = 6.0 * 12 - 0.5 = 71.5
+        assert_eq!(out[1], 71.5);
+
+        // Sub-block 1: is = 1: d2 = 2.0 * 4 = 8.0, m2 = 0.5 * 2 = 1.0
+        // Weight 32 (l=0): q = high nibble(9) | (qh[0] & 2 ? 16 : 0) = 9 | 0 = 9
+        // Value = 8.0 * 9 - 1.0 = 71.0
+        assert_eq!(out[32], 71.0);
+        // Weight 33 (l=1): q = high nibble(1) | (qh[1] & 2 ? 16 : 0) = 1 | 16 = 17
+        // Value = 8.0 * 17 - 1.0 = 135.0
+        assert_eq!(out[33], 135.0);
+
+        // Sub-block 4: is = 4: sc = 6, m = 5, d1 = 2.0 * 6 = 12.0, m1 = 0.5 * 5 = 2.5
+        // Weight 128 (l=0): q = low nibble(7) | (qh[0] & 16 ? 16 : 0) = 7 | 16 = 23
+        // Value = 12.0 * 23 - 2.5 = 273.5
+        assert_eq!(out[128], 273.5);
+
+        // Weight 2: all zero codes and bits, but has min:
+        // q = 0, value = 6.0 * 0 - 0.5 = -0.5
+        assert_eq!(out[2], -0.5);
     }
 
     #[test]
