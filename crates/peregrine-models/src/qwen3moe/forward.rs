@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use crate::dense::layer;
 use crate::qwen3moe::{load::MoeCfg, Qwen3Moe};
+use peregrine_core::arch::Architecture;
 use peregrine_core::blocks::moe::{moe_ffn, MoeScratch, MoeWeights};
 use peregrine_core::model::{Caches, Config, State, StepStats, Weights};
 use peregrine_core::pool::Pool;
@@ -22,14 +23,20 @@ pub struct MoeState {
     scratch: MoeScratch,
     /// The rows the scratch was sized for.
     rows: usize,
+    /// Whether the expert activations keep their f32 values (float expert matrices).
+    keep_f32: bool,
 }
 
 impl MoeState {
     /// The scratch for a state that will run batches of `rows` rows.
-    pub fn new(cfg: &MoeCfg, d_model: usize, rows: usize) -> MoeState {
+    pub fn new(cfg: &MoeCfg, d_model: usize, rows: usize, keep_f32: bool) -> MoeState {
+        let mut scratch =
+            MoeScratch::new(rows, cfg.n_expert, cfg.n_expert_used, d_model, cfg.n_ff_exp);
+        scratch.set_keep_f32(keep_f32);
         MoeState {
-            scratch: MoeScratch::new(rows, cfg.n_expert, cfg.n_expert_used, d_model, cfg.n_ff_exp),
+            scratch,
             rows,
+            keep_f32,
         }
     }
 
@@ -38,6 +45,7 @@ impl MoeState {
         if nb > self.rows {
             self.scratch =
                 MoeScratch::new(nb, cfg.n_expert, cfg.n_expert_used, d_model, cfg.n_ff_exp);
+            self.scratch.set_keep_f32(self.keep_f32);
             self.rows = nb;
         }
         &mut self.scratch
@@ -78,6 +86,7 @@ impl Qwen3Moe {
                 &self.cfg,
                 cfg.d_model,
                 st.max_batch,
+                self.act_layout().keep_f32,
             )));
         }
 

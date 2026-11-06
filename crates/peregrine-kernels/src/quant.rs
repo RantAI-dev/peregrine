@@ -33,6 +33,12 @@
 //! wrong: a transposed nibble order still decodes to plausible-looking floats and
 //! produces fluent, wrong text. `tests/oracle.rs` checks these against the real
 //! weight file, and the AVX2 kernels in `simd.rs` are checked against these.
+//!
+//! # Float formats (F32, F16, BF16)
+//!
+//! Unlike the quantised formats, float weight matrices multiply against the full
+//! unquantised `f32` activation row kept in `QuantAct::xf`. Accumulation order is
+//! defined by [`dot_f32_ref`], matching the AVX2 SIMD kernel bit for bit.
 
 use crate::format::{f16, Format};
 
@@ -106,9 +112,10 @@ pub struct QuantAct {
     pub t1a: Vec<i16>,
     pub t1init: Vec<i32>,
     pub t1sc: Vec<f32>,
-    /// The activation itself, kept only under `PEREGRINE_EXACT=1` (a slow f32 reference path for the ternary
-    /// matmuls, which shows what the int8 quantisation costs).
+    /// The unquantised f32 activations (`x`), kept for F32/F16/BF16 matrix multiplies and exact reference paths.
     pub xf: Vec<f32>,
+    /// Keep unquantised f32 activations in `xf` during `fill`.
+    pub keep_f32: bool,
 }
 
 /// `PEREGRINE_TQ_SPAN` (16, 32, 64 or 128): values sharing one activation scale in the ternary layout.
@@ -148,7 +155,7 @@ impl QuantAct {
             tp: Vec::with_capacity(n),
             td: Vec::with_capacity(n / 16 + 1),
             tls: Vec::with_capacity(n / 16 + 1),
-            xf: Vec::new(),
+            xf: Vec::with_capacity(n),
             tb_span: 0,
             tb: Vec::new(),
             tbd: Vec::new(),
@@ -157,6 +164,7 @@ impl QuantAct {
             t1a: Vec::new(),
             t1init: Vec::new(),
             t1sc: Vec::new(),
+            keep_f32: false,
         }
     }
 
@@ -170,10 +178,8 @@ impl QuantAct {
             x.len()
         );
         self.n = x.len();
-        if exact_ternary() {
-            self.xf.clear();
-            self.xf.extend_from_slice(x);
-        }
+        self.xf.clear();
+        self.xf.extend_from_slice(x);
         if self.ptq1 {
             self.fill_ptq1(x);
             return;
@@ -363,6 +369,10 @@ impl QuantAct {
     /// or carries its own min, so an activation zero point would have to be carried
     /// through the bias correction for no accuracy gain.
     pub fn fill(&mut self, x: &[f32]) {
+        if self.keep_f32 {
+            self.xf.clear();
+            self.xf.extend_from_slice(x);
+        }
         if self.ternary {
             self.fill_ternary(x);
             return;
@@ -1014,6 +1024,9 @@ pub fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
         if crate::simd::have_avx2() {
+            if fmt == Format::F16 && !crate::cpu_has!("f16c") {
+                return dot_scalar(fmt, w, a);
+            }
             // SAFETY: feature checked immediately above; lengths are the same ones
             // `dot_scalar` asserts on.
             return unsafe { crate::simd::dot(fmt, w, a) };
@@ -1345,25 +1358,77 @@ pub fn dot_scalar(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             acc
         }
         Format::F32 | Format::F16 | Format::BF16 => {
-            // Not a matmul path — these appear as norm vectors, which are applied
-            // elementwise. Implemented for completeness and used by tests.
-            let mut acc = 0.0f32;
-            let step = fmt.block_bytes();
-            for i in 0..a.n {
-                let wv = match fmt {
-                    Format::F32 => f32::from_le_bytes(w[i * 4..i * 4 + 4].try_into().unwrap()),
-                    Format::BF16 => {
-                        f32::from_bits((u16::from_le_bytes([w[i * 2], w[i * 2 + 1]]) as u32) << 16)
-                    }
-                    _ => h(w, i * step),
-                };
-                acc += wv * a.q[i] as f32 * a.d[i / 32];
-            }
-            acc
+            assert!(
+                a.keep_f32,
+                "float matrix matmul reached with keep_f32 off on QuantAct"
+            );
+            assert_eq!(
+                a.xf.len(),
+                a.n,
+                "activation f32 vector xf must hold a.n values"
+            );
+            dot_f32_ref(fmt, w, &a.xf)
         }
         #[allow(unreachable_patterns)]
         _ => panic!("format {} disabled in this build", fmt.label()),
     }
+}
+
+/// Horizontal sum of an 8-lane f32 accumulator in the fixed tree reduction order of `simd::hsum_ps`.
+///
+/// Accumulation order:
+/// 1. `s0 = acc[0] + acc[4]`, `s1 = acc[1] + acc[5]`, `s2 = acc[2] + acc[6]`, `s3 = acc[3] + acc[7]`
+/// 2. `s02 = s0 + s2`, `s13 = s1 + s3`
+/// 3. `result = s02 + s13`
+#[inline(always)]
+pub fn hsum_8(acc: [f32; 8]) -> f32 {
+    let s0 = acc[0] + acc[4];
+    let s1 = acc[1] + acc[5];
+    let s2 = acc[2] + acc[6];
+    let s3 = acc[3] + acc[7];
+    let s02 = s0 + s2;
+    let s13 = s1 + s3;
+    s02 + s13
+}
+
+/// Reference scalar dot product for float weight formats (F32, F16, BF16) against f32 activations.
+///
+/// # Accumulation Order
+/// Defined to be bit-for-bit identical to the AVX2 kernel across all tiers:
+/// 1. Accumulates into 8 independent f32 partial sums (`acc[i % 8] += w_i * x_i`),
+///    using standard uncontracted IEEE-754 single-precision multiplication and addition
+///    (without FMA contraction, matching `_mm256_mul_ps` followed by `_mm256_add_ps`).
+/// 2. If row length `n` is not a multiple of 8, remaining elements `n % 8` are accumulated
+///    into lanes `0 .. n % 8`.
+/// 3. The 8 accumulator lanes are horizontally reduced using [`hsum_8`].
+pub fn dot_f32_ref(fmt: Format, w: &[u8], x: &[f32]) -> f32 {
+    let n = x.len();
+    debug_assert_eq!(w.len(), row_bytes(fmt, n));
+    let mut acc = [0.0f32; 8];
+    match fmt {
+        Format::F32 => {
+            for (i, &xv) in x.iter().enumerate() {
+                let wv = f32::from_le_bytes(w[i * 4..i * 4 + 4].try_into().unwrap());
+                acc[i % 8] += wv * xv;
+            }
+        }
+        Format::F16 => {
+            for (i, &xv) in x.iter().enumerate() {
+                let h = u16::from_le_bytes([w[i * 2], w[i * 2 + 1]]);
+                let wv = f16(h);
+                acc[i % 8] += wv * xv;
+            }
+        }
+        Format::BF16 => {
+            for (i, &xv) in x.iter().enumerate() {
+                let bits = (u16::from_le_bytes([w[i * 2], w[i * 2 + 1]]) as u32) << 16;
+                let wv = f32::from_bits(bits);
+                acc[i % 8] += wv * xv;
+            }
+        }
+        _ => panic!("dot_f32_ref called on non-float format {:?}", fmt),
+    }
+    hsum_8(acc)
 }
 
 #[cfg(test)]
@@ -1830,5 +1895,14 @@ mod tests {
         let mut w4 = prng(7, row_bytes(Format::Q4_0, 32));
         sane_scales(Format::Q4_0, &mut w4);
         assert_eq!(dot_scalar(Format::Q4_0, &w4, &a), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "float matrix matmul reached with keep_f32 off on QuantAct")]
+    fn float_matmul_panics_when_keep_f32_is_off() {
+        let mut a = QuantAct::with_capacity(32);
+        a.n = 32;
+        let w = [0u8; 128];
+        dot_scalar(Format::F32, &w, &a);
     }
 }

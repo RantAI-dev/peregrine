@@ -169,7 +169,7 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
         return &[];
     }
     match fmt {
-        Format::F32 | Format::F16 | Format::BF16 => &[Tier::Scalar],
+        Format::F32 | Format::F16 | Format::BF16 => &[Tier::Scalar, Tier::Avx2],
         #[cfg(feature = "fmt-legacy")]
         Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => &[Tier::Scalar, Tier::Avx2],
         #[cfg(feature = "fmt-kquant")]
@@ -189,9 +189,9 @@ mod tests {
 
     #[test]
     fn test_kernels_for_tiers() {
-        assert_eq!(kernels_for(Format::F32), &[Tier::Scalar]);
-        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar]);
-        assert_eq!(kernels_for(Format::BF16), &[Tier::Scalar]);
+        assert_eq!(kernels_for(Format::F32), &[Tier::Scalar, Tier::Avx2]);
+        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar, Tier::Avx2]);
+        assert_eq!(kernels_for(Format::BF16), &[Tier::Scalar, Tier::Avx2]);
         #[cfg(feature = "fmt-legacy")]
         {
             assert_eq!(kernels_for(Format::Q4_0), &[Tier::Scalar, Tier::Avx2]);

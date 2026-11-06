@@ -128,9 +128,9 @@ impl State {
         )
     }
 
-    /// Internal constructor called by `Model::new_state` and `State::new`.
+    /// Constructor called by `Model::new_state`, `State::new`, and MTP state builders.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_impl(
+    pub fn new_impl(
         cfg: &Config,
         max_batch: usize,
         max_logit_rows: usize,
@@ -170,6 +170,7 @@ impl State {
                     a.ternary = act_layout.ternary;
                     a.ptq1 = act_layout.ptq1;
                     a.tb_span = act_layout.tb_span;
+                    a.keep_f32 = act_layout.keep_f32;
                     a
                 })
                 .collect(),

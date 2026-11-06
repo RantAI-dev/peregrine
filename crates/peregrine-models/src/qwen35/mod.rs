@@ -55,6 +55,7 @@ impl Architecture for Qwen35 {
             ternary: true,
             ptq1: self.cfg.ptq1 && peregrine_kernels::table::MatKernels::get().ptq1_layout(),
             tb_span: self.cfg.tb_span,
+            keep_f32: false,
         }
     }
 

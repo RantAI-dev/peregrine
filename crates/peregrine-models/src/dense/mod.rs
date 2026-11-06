@@ -4,10 +4,10 @@ pub(crate) mod layer;
 
 use std::time::Instant;
 
-use peregrine_core::arch::{Architecture, Family, Loaded};
+use peregrine_core::arch::{ActLayout, Architecture, Family, Loaded};
 use peregrine_core::blocks::linear::LinJob;
 use peregrine_core::blocks::par::Disjoint;
-use peregrine_core::gguf::{Gguf, TensorInfo};
+use peregrine_core::gguf::{Format, Gguf, TensorInfo};
 use peregrine_core::model::{Caches, Config, Linear, State, StepStats, TileStore, Weights};
 use peregrine_core::pool::Pool;
 use peregrine_core::tokenizer::Tokenizer;
@@ -405,6 +405,23 @@ impl Architecture for Dense {
             f(&[&l.down]);
         }
         f(&[&self.head]);
+    }
+
+    fn act_layout(&self) -> ActLayout {
+        let mut keep_f32 = false;
+        self.linear_groups(&mut |lins| {
+            for lin in lins {
+                if let Some(ti) = lin.dense() {
+                    if matches!(ti.kind, Format::F32 | Format::F16 | Format::BF16) {
+                        keep_f32 = true;
+                    }
+                }
+            }
+        });
+        ActLayout {
+            keep_f32,
+            ..ActLayout::default()
+        }
     }
 
     fn forward_rows(

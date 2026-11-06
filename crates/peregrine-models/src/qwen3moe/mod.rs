@@ -20,7 +20,8 @@ use std::any::Any;
 pub use forward::MoeState;
 pub use load::MoeCfg;
 
-use peregrine_core::arch::{Architecture, Family, Loaded};
+use peregrine_core::arch::{ActLayout, Architecture, Family, Loaded};
+use peregrine_core::gguf::Format;
 use peregrine_core::gguf::{Gguf, TensorInfo};
 use peregrine_core::model::{Caches, Config, Linear, State, StepStats, Weights};
 use peregrine_core::pool::Pool;
@@ -67,8 +68,31 @@ impl Family for Qwen3MoeFamily {
 }
 
 impl Architecture for Qwen3Moe {
+    /// F32/F16/BF16 matrices multiply the f32 activations, which the activation rows must then keep.
+    fn act_layout(&self) -> ActLayout {
+        let float = |t: &TensorInfo| matches!(t.kind, Format::F32 | Format::F16 | Format::BF16);
+        let lin = |l: &Linear| l.dense().is_some_and(float);
+        let keep_f32 = lin(&self.head)
+            || self.layers.iter().any(|l| {
+                [&l.attn.wq, &l.attn.wk, &l.attn.wv, &l.attn.wo]
+                    .into_iter()
+                    .any(lin)
+                    || float(&l.router)
+                    || l.gate.iter().chain(&l.up).chain(&l.down).any(float)
+            });
+        ActLayout {
+            keep_f32,
+            ..ActLayout::default()
+        }
+    }
+
     fn new_scratch(&self, cfg: &Config, max_batch: usize) -> Option<Box<dyn Any + Send + Sync>> {
-        Some(Box::new(MoeState::new(&self.cfg, cfg.d_model, max_batch)))
+        Some(Box::new(MoeState::new(
+            &self.cfg,
+            cfg.d_model,
+            max_batch,
+            self.act_layout().keep_f32,
+        )))
     }
 
     fn linears_mut(
