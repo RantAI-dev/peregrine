@@ -15,7 +15,7 @@ roadmap changes it, says so. If this file and the code disagree, the code wins a
    └──────────────────┬─────────────────────┘
                       │ one forward pass for every active row
                       ▼
-   model::Model ── arch::Architecture ── families/ (dense, qwen35, MTP)
+   model::Model ── arch::Architecture ── peregrine-models (dense, qwen35, MTP)
                       │
      ┌────────────────┼──────────────────┬──────────────┐
      ▼                ▼                  ▼              ▼
@@ -54,12 +54,10 @@ bound by compute. That split drives most design choices.
 |---|---|
 | `gguf.rs`, `safetensors.rs` | Read model files by memory map. `gguf::Format` lists every weight format the engine knows. |
 | `tokenizer.rs`, `template.rs` | Byte-level BPE with the pre-tokenizers transcribed from llama.cpp; chat templates rendered in Rust so the token stream equals llama.cpp's `--jinja` output. |
-| `arch.rs` | The `Architecture`, `MtpHead` and `Family` traits, and the family dispatch table (ADR 0006). |
-| `families/` | Architecture implementations behind the `Architecture` trait: `dense` (Llama, Qwen2, Qwen3) and `qwen35` (Gated DeltaNet + attention, Hadamard rotation, MTP). |
-| `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, and LittleBit accounting. |
+| `arch.rs` | The `Architecture`, `MtpHead` and `Family` traits (ADR 0006). |
+| `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, LittleBit accounting, and parameterized loading via family table. |
 | `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
-| `model/hybrid.rs` | Re-exports for Qwen 3.5 / Bonsai 2 (`families/qwen35`). |
-| `model/mtp.rs` | Re-exports for the multi-token-prediction head (`families/qwen35/mtp.rs`). |
+| `model/mtp.rs` | Re-exports for the multi-token-prediction head traits. |
 | `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU), `rope`, `attn` (attention scratch, row prep, KV write, attention), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
 | `attn.rs` | Grouped online-softmax attention. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state, snapshots for speculation, and the prefix store that reuses a shared prompt beginning. |
@@ -70,7 +68,16 @@ bound by compute. That split drives most design choices.
 | `pool.rs` | The thread pool and barrier. Thread count and barrier count are measured quantities, which is why there is no rayon. |
 | `telem.rs` | Bytes moved, phases and machine ceilings: the numbers every benchmark reports. |
 | `lbq.rs` | LittleBit 1-bit-class weights. Off by default (it fails accuracy without trained factors). |
-| `tests/` | Integration tests. Those that need real model files skip when the files are absent. |
+| `tests/` | Integration tests for core infrastructure (tokenizers, quantization, SIMD, LBQ container). Model-loading integration tests live in `peregrine-models/tests/`. |
+
+### `crates/peregrine-models`: model architectures and family implementations
+
+| Module | Role |
+|---|---|
+| `dense/` | Dense transformer architectures: Llama, Qwen2, Qwen3. |
+| `qwen35/` | Hybrid architectures: Gated DeltaNet linear attention + softmax attention, Hadamard rotation, MTP head. |
+| `lib.rs` | `FAMILIES` table, model loading (`load`, `open`, `open_with`), compatibility checks (`check_compatible`, `check_compatible_with`, `compatibility`), and session opening (`session::open`). |
+| `tests/` | Synthetic model generation, golden output regression tests, no-allocation tests, batching and speculative decoding integration tests. |
 
 ### `crates/peregrine-bench`: benchmarks and experiments
 
@@ -79,7 +86,7 @@ peregrine-bench --example <name>`); most are x86-64 only. Nothing depends on it.
 
 ### `crates/peregrine`: the facade and the `peregrine` command
 
-What applications depend on: re-exports the engine (`peregrine::engine`), the kernels and, with the default
+What applications depend on: re-exports the engine (`peregrine::engine`), the kernels (`peregrine::kernels`), the models (`peregrine::models`), and with the default
 `server` feature, the server. The `peregrine` binary (`cli` feature) has `serve`, `inspect` (a model file's
 architecture, formats and whether this build runs it), `bench` (single-user throughput and bytes/token
 measurement), `tune` (coordinate search over tuning knobs) and `tier` (the kernel tier and every option).

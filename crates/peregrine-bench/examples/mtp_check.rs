@@ -3,7 +3,7 @@
 // cargo run --release -p peregrine-bench --example mtp_check -- <model-MTP.gguf> [threads] [tokens]
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::KvPrec;
-use peregrine_core::model::{Model, State, StepStats};
+use peregrine_core::model::{State, StepStats};
 use peregrine_core::pool::Pool;
 fn argmax(l: &[f32]) -> u32 {
     let mut b = 0;
@@ -16,7 +16,7 @@ fn argmax(l: &[f32]) -> u32 {
 }
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let model = Model::load(Gguf::open(std::path::Path::new(&a[0])).unwrap()).unwrap();
+    let model = peregrine_models::load(Gguf::open(std::path::Path::new(&a[0])).unwrap()).unwrap();
     let threads: usize = a.get(1).and_then(|v| v.parse().ok()).unwrap_or(12);
     let ntok: usize = a.get(2).and_then(|v| v.parse().ok()).unwrap_or(200);
     let c = model.cfg;

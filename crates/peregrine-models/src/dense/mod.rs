@@ -2,13 +2,13 @@
 
 use std::time::Instant;
 
-use crate::arch::{Architecture, Family, Loaded};
-use crate::blocks::linear::LinJob;
-use crate::blocks::par::Disjoint;
-use crate::gguf::{Gguf, TensorInfo};
-use crate::model::{Caches, Config, Linear, State, StepStats, TileStore, Weights};
-use crate::pool::Pool;
-use crate::tokenizer::Tokenizer;
+use peregrine_core::arch::{Architecture, Family, Loaded};
+use peregrine_core::blocks::linear::LinJob;
+use peregrine_core::blocks::par::Disjoint;
+use peregrine_core::gguf::{Gguf, TensorInfo};
+use peregrine_core::model::{Caches, Config, Linear, State, StepStats, TileStore, Weights};
+use peregrine_core::pool::Pool;
+use peregrine_core::tokenizer::Tokenizer;
 
 /// The dense transformer architectures implemented by Peregrine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +87,7 @@ impl Dense {
         let arch = Arch::from_name(arch_name).ok_or_else(|| {
             format!(
                 "Peregrine implements {}; this model is {arch_name:?}",
-                crate::model::ARCHS.join(" and ")
+                crate::ARCHS.join(" and ")
             )
         })?;
         let k = |suffix: &str| format!("{}.{suffix}", arch.key_prefix());
@@ -168,7 +168,7 @@ impl Dense {
                 ));
             }
             let mut f = vec![0.0f32; n];
-            crate::quant::dequant_row(t.kind, g.bytes(t), &mut f);
+            peregrine_kernels::quant::dequant_row(t.kind, g.bytes(t), &mut f);
             if let Some(base) = &rope_factors {
                 for (x, b) in f.iter_mut().zip(base) {
                     *x *= b;
@@ -184,7 +184,7 @@ impl Dense {
                 Arch::Qwen2 => {
                     let t = get(n)?;
                     let mut v = vec![0.0f32; t.numel() as usize];
-                    crate::quant::dequant_row(t.kind, g.bytes(&t), &mut v);
+                    peregrine_kernels::quant::dequant_row(t.kind, g.bytes(&t), &mut v);
                     Ok(Some(v))
                 }
             }
@@ -201,7 +201,7 @@ impl Dense {
                 ));
             }
             let mut v = vec![0.0f32; head_dim];
-            crate::quant::dequant_row(t.kind, g.bytes(&t), &mut v);
+            peregrine_kernels::quant::dequant_row(t.kind, g.bytes(&t), &mut v);
             Ok(Some(v))
         };
         let mut layers = Vec::with_capacity(n_layer);
@@ -350,7 +350,7 @@ impl Architecture for Dense {
         let nb = tokens.len();
         let t_fwd = Instant::now();
         for (i, &t) in tokens.iter().enumerate() {
-            crate::blocks::embed::embed(
+            peregrine_core::blocks::embed::embed(
                 &self.tok_embd,
                 w,
                 t,
@@ -361,7 +361,7 @@ impl Architecture for Dense {
 
         for (li, l) in self.layers.iter().enumerate() {
             // ---- attention ----
-            crate::blocks::norm::norm_rows(
+            peregrine_core::blocks::norm::norm_rows(
                 w,
                 &l.attn_norm,
                 cfg.d_model,
@@ -392,9 +392,9 @@ impl Architecture for Dense {
                         out: Disjoint::new(&mut st.v),
                     },
                 ];
-                crate::blocks::linear::linear_group(
+                peregrine_core::blocks::linear::linear_group(
                     w,
-                    w.lb.as_ref(),
+                    w.lb(),
                     &jobs,
                     acts,
                     xs,
@@ -406,7 +406,7 @@ impl Architecture for Dense {
                     stats,
                 );
             }
-            crate::blocks::attn::prepare_rows(
+            peregrine_core::blocks::attn::prepare_rows(
                 cfg,
                 l.bq.as_deref(),
                 l.bk.as_deref(),
@@ -423,7 +423,7 @@ impl Architecture for Dense {
                 stats,
             );
             let qd = cfg.q_dim();
-            crate::blocks::attn::write_kv_rows(
+            peregrine_core::blocks::attn::write_kv_rows(
                 caches,
                 li,
                 &st.k,
@@ -436,7 +436,7 @@ impl Architecture for Dense {
 
             let t_attn = Instant::now();
             for (r0, len, c) in caches.runs(nb) {
-                crate::blocks::attn::attend(
+                peregrine_core::blocks::attn::attend(
                     cfg,
                     &mut st.attn,
                     &st.q,
@@ -463,9 +463,9 @@ impl Architecture for Dense {
                     lin: &l.wo,
                     out: Disjoint::new(&mut st.xb2),
                 }];
-                crate::blocks::linear::linear_group(
+                peregrine_core::blocks::linear::linear_group(
                     w,
-                    w.lb.as_ref(),
+                    w.lb(),
                     &jobs,
                     acts,
                     &st.xb,
@@ -482,7 +482,7 @@ impl Architecture for Dense {
             }
 
             // ---- feed-forward ----
-            crate::blocks::norm::norm_rows(
+            peregrine_core::blocks::norm::norm_rows(
                 w,
                 &l.ffn_norm,
                 cfg.d_model,
@@ -508,9 +508,9 @@ impl Architecture for Dense {
                         out: Disjoint::new(&mut st.hb2),
                     },
                 ];
-                crate::blocks::linear::linear_group(
+                peregrine_core::blocks::linear::linear_group(
                     w,
-                    w.lb.as_ref(),
+                    w.lb(),
                     &jobs,
                     acts,
                     &st.xb,
@@ -522,7 +522,7 @@ impl Architecture for Dense {
                     stats,
                 );
             }
-            crate::blocks::ffn::swiglu_rows(
+            peregrine_core::blocks::ffn::swiglu_rows(
                 cfg.n_ff,
                 &mut st.hb,
                 &st.hb2,
@@ -539,9 +539,9 @@ impl Architecture for Dense {
                     lin: &l.down,
                     out: Disjoint::new(&mut st.xb2),
                 }];
-                crate::blocks::linear::linear_group(
+                peregrine_core::blocks::linear::linear_group(
                     w,
-                    w.lb.as_ref(),
+                    w.lb(),
                     &jobs,
                     acts,
                     &st.hb,
@@ -585,7 +585,7 @@ impl Architecture for Dense {
             let (xs, xe) = (b * cfg.d_model, (b + 1) * cfg.d_model);
             let (os, oe) = (i * cfg.d_model, (i + 1) * cfg.d_model);
             let (xv, xbv) = (&st.x, &mut st.xb);
-            crate::blocks::norm::rmsnorm(
+            peregrine_core::blocks::norm::rmsnorm(
                 w,
                 &self.out_norm,
                 cfg.eps,
@@ -604,9 +604,9 @@ impl Architecture for Dense {
                 lin: &self.head,
                 out: Disjoint::new(&mut st.logits),
             }];
-            crate::blocks::linear::linear_group(
+            peregrine_core::blocks::linear::linear_group(
                 w,
-                w.lb.as_ref(),
+                w.lb(),
                 &jobs,
                 acts,
                 &st.xb,

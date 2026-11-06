@@ -162,7 +162,7 @@ fn golden_outputs() {
             eprintln!("golden: skip {rel} (no golden for tier {tier}; record one)");
             continue;
         }
-        let model = Model::load(Gguf::open(&path).unwrap()).unwrap();
+        let model = peregrine_models::load(Gguf::open(&path).unwrap()).unwrap();
         let a = run(&model, threads);
         let b = run(&model, 1.max(threads / 2));
         if a != b {

@@ -593,6 +593,7 @@ dependencies = [
  "clap",
  "peregrine-core",
  "peregrine-kernels",
+ "peregrine-models",
  "peregrine-server",
  "serde_json",
  "tokio",
@@ -603,6 +604,7 @@ name = "peregrine-bench"
 version = "0.1.0"
 dependencies = [
  "peregrine-core",
+ "peregrine-models",
 ]
 
 [[package]]
@@ -618,6 +620,14 @@ name = "peregrine-kernels"
 version = "0.1.0"
 
 [[package]]
+name = "peregrine-models"
+version = "0.1.0"
+dependencies = [
+ "peregrine-core",
+ "peregrine-kernels",
+]
+
+[[package]]
 name = "peregrine-server"
 version = "0.1.0"
 dependencies = [
@@ -625,6 +635,7 @@ dependencies = [
  "clap",
  "futures",
  "peregrine-core",
+ "peregrine-models",
  "serde",
  "serde_json",
  "tokio",
