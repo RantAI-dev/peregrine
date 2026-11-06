@@ -154,10 +154,18 @@ fn a_decode_step_allocates_nothing() {
     // The mixture of experts: the router, the expert gather and the slot-ordered sum, all in
     // the scratch the family sized once.
     let moe = load(&write_moe(&dir, Format::Q8_0, 7003, MoeShape::default()));
+    // Gemma 3 in Q8_0: sliding-window and global layers, per-head norms, GeGLU, 4 norms per layer.
+    let gemma3 = load(&support::models::write_gemma3(
+        &dir,
+        Format::Q8_0,
+        7004,
+        support::models::Gemma3Config::default(),
+    ));
     for (name, model) in [
         ("qwen3-Q8_0", &dense),
         ("qwen35-PQ2_0", &hybrid),
         ("qwen3moe-Q8_0", &moe),
+        ("gemma3-Q8_0", &gemma3),
     ] {
         for threads in [1, 4] {
             let n = check_decode(model, threads);
