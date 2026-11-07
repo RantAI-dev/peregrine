@@ -134,9 +134,9 @@ These hold everywhere. A change that breaks one is a bug even if every test pass
 
 ## Cross-cutting concerns
 
-- **CPU dispatch.** Today, feature checks (`have_zmm`, `have_vnni`, `have_batched`, ...) sit beside the
-  layer code. The roadmap (S1.1) replaces them with a kernel table chosen once at load per (format, ISA),
-  moved into a `peregrine-kernels` crate together with all `unsafe` SIMD code (ADR 0005).
+- **CPU dispatch.** Today, feature checks (`have_zmm`, `have_vnni`, `have_avx_vnni`, `have_batched`, ...) sit beside the
+  layer code. Kernel tiers (`scalar`, `avx2`, `avx-vnni`, `avx512`) are capped by `PEREGRINE_ISA` and resolved
+  once at load per (format, ISA) in `peregrine-kernels` together with all `unsafe` SIMD code (ADR 0005).
 - **Configuration.** Engine switches are `PEREGRINE_*` environment variables read where used. The roadmap
   (S0.1) gathers them into one `EngineOptions` struct, printed at startup and recorded in benchmark output.
 - **Testing.** Kernel tests run without models. Model tests need GGUF files (`docs/dev/testing.md`); small

@@ -152,25 +152,27 @@ The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and chec
 ## CPU tiers
 
 Kernels are chosen at run time from the CPU's features, capped by `PEREGRINE_ISA` (`scalar`, `avx2`,
-`avx512`; default `native`). Every feature check goes through `cpu_has!` (`crates/peregrine-core/src/cpu.rs`),
+`avx-vnni`, `avx512`; default `native`). Every feature check goes through `cpu_has!` (`crates/peregrine-kernels/src/cpu.rs`),
 so a cap reaches every kernel.
 
 ```sh
-PEREGRINE_ISA=scalar cargo xtest    # portable code only
-PEREGRINE_ISA=avx2   cargo xtest    # the AVX2 tier, also on an AVX-512 machine
+PEREGRINE_ISA=scalar   cargo xtest    # portable code only
+PEREGRINE_ISA=avx2     cargo xtest    # the AVX2 tier, also on an AVX-512 machine
+PEREGRINE_ISA=avx-vnni cargo xtest    # the AVX-VNNI-256 tier, also on an AVX-512 machine
 ```
 
 Goldens are stored per effective tier (`cpu::tier_name()`), so a forced run is compared with that tier's
 goldens. Two machines must agree on a shared tier: the AVX-512 host forced to `avx2` reproduces the AVX2
-host's goldens.
+host's goldens. The `x86_64-avx2-vnni256` tier aliases directly to `x86_64-avx2` goldens to check bit-identity.
 
 CI runs the native tier on x86-64 Linux, aarch64 Linux and aarch64 macOS, and the `scalar` and `avx2` tiers
 on x86-64 Linux.
 
-GitHub's x86-64 runners have AVX2 but no AVX-512, so the `sde` job runs the kernel tests and the synthetic
-models under Intel's Software Development Emulator with `sde64 -spr` (Sapphire Rapids: AVX-512 F/BW/VL,
-VNNI, GFNI, VBMI). It downloads SDE 10.13.1 from Intel's official mirror, checks the pinned SHA-256, caches
-the unpacked emulator, and fails unless the tier reported by the synthetic tests is
-`x86_64-avx2-avx512-vnni-gfni-vbmi`. SDE is free of charge for any type of use under the Intel Simplified
-Software License. No AVX-512 synthetic goldens are committed yet, so the tests report `ok (no golden for
-tier ...)`; a follow-up records them on a real AVX-512 host.
+GitHub's x86-64 runners have AVX2 but no AVX-512 or AVX-VNNI, so the SDE jobs run the kernel tests and the
+synthetic models under Intel's Software Development Emulator:
+- `sde64 -spr` (Sapphire Rapids: AVX-512 F/BW/VL, VNNI, GFNI, VBMI) fails unless the tier reported is `x86_64-avx2-avx512-vnni-gfni-vbmi`;
+- `sde64 -adl` (Alder Lake: AVX-VNNI 256-bit, no AVX-512) fails unless the tier reported is `x86_64-avx2-vnni256`.
+
+The jobs download SDE 10.13.1 from Intel's official mirror, check the pinned SHA-256, and cache the unpacked emulator.
+SDE is free of charge for any type of use under the Intel Simplified Software License. No AVX-512 synthetic goldens are
+committed yet, so the tests report `ok (no golden for tier ...)`; a follow-up records them on a real AVX-512 host.

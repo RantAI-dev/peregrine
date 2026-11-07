@@ -291,6 +291,7 @@ impl EngineOptions {
                     None => "native".into(),
                     Some(crate::cpu::Tier::Scalar) => "scalar".into(),
                     Some(crate::cpu::Tier::Avx2) => "avx2".into(),
+                    Some(crate::cpu::Tier::AvxVnni) => "avx-vnni".into(),
                     Some(crate::cpu::Tier::Avx512) => "avx512".into(),
                 },
             ),
@@ -455,6 +456,10 @@ mod tests {
         assert!(!with(&[("DSPARK_CONF_PRENORM", "1")]).dspark.conf_on_normed);
         // The tier cap.
         assert_eq!(with(&[("ISA", "avx2")]).isa, Some(crate::cpu::Tier::Avx2));
+        assert_eq!(
+            with(&[("ISA", "avx-vnni")]).isa,
+            Some(crate::cpu::Tier::AvxVnni)
+        );
         assert_eq!(with(&[("ISA", "native")]).isa, None);
         // The KV cache precision; an unknown name leaves the default (f16).
         assert_eq!(with(&[("KV", "f32")]).kv_prec, crate::kv::KvPrec::F32);
