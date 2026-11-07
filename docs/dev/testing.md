@@ -26,8 +26,8 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    tokens alone and batched through `Engine` — and llama.cpp v0.9.0 loads and runs the same file. A
    `gpt-oss` file (4 experts, 2 used, F16 and MXFP4 experts, attention sinks, alternating
    sliding-window and full attention, YaRN rope scaling) is written there too, and llama.cpp v0.9.0
-   gives the same greedy tokens for both. The
-   same tests drive small models through `Engine`:
+   gives the same greedy tokens for both; a variant declares gpt-oss's own Harmony Jinja template and
+   is detected as the `harmony` chat template. The same tests drive small models through `Engine`:
    prompts served alone must produce the same tokens when admitted together (a mixed prefill/decode step,
    both `Caches::Mapped` and, with `PEREGRINE_MIX=0`, `Caches::PerRow`), a shared opening must restore from
    the prefix store, and a LittleBit sidecar built in-test must give finite, deterministic logits. They
@@ -98,6 +98,26 @@ names in `~/models/`:
 The first carries the pre-update Mistral v0.2 template (no system branch), the second declares no chat
 template at all: the first is served as it is, the second with `--chat-template llama2`. Both were compared
 with llama.cpp v0.9.0 on the same files — the rendered prompt, its token ids and the answer.
+
+### gpt-oss and the Harmony template
+
+The synthetic gpt-oss file in `tests/synthetic.rs` is written with gpt-oss's own Jinja template in
+`tokenizer.chat_template` (the fixture `crates/peregrine-core/tests/fixtures/harmony.jinja`, from llama.cpp
+v0.9.0's `models/templates/openai-gpt-oss-120b.jinja`). `Template::detect` must choose `harmony` from it,
+the way llama.cpp detects the `<|start|>` + `<|channel|>` pair (`src/llama-chat.cpp:222-223`, v0.9.0), and
+the stop set must carry the template's `<|return|>` and `<|end|>` (`src/llama-chat.cpp:820-829`).
+`template.rs`'s tests pin the rendered strings — system block, developer block, user and assistant turns,
+and the generation prompt — for a system + user turn, a multi-turn conversation, and a final assistant
+message with no generation prompt. A real gpt-oss file is still the open check; the template's channel
+split into `reasoning_content` and `content` is not implemented yet (see below).
+
+The reasoning split is the follow-up: llama.cpp's gpt-oss handler treats
+`<|channel|>analysis<|message|>` … `<|end|>` as the reasoning span and
+`<|channel|>final<|message|>` … `<|return|>` as the answer (`common/parsers/gpt-oss.cpp`, v0.9.0), while
+Peregrine's server currently splits on the single `<think>` / `</think>` tokens. Serving gpt-oss needs a
+channel-aware split (and the `<|end|>` stop must not end a turn while the analysis channel is open);
+until then the template is rendered exactly but a reasoning model's answer is not sorted into
+`reasoning_content` and `content`.
 
 ### The two SentencePiece oracle files
 

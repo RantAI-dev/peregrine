@@ -36,7 +36,7 @@ own memory-bandwidth ceiling.
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 AVX2, AVX-VNNI (256-bit), AVX-512 (VNNI, GFNI, VBMI); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE, SentencePiece (llama) |
-| Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2 — or named with `--chat-template` for a file that declares none |
+| Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 <!-- support:end -->
 
 ### On the roadmap

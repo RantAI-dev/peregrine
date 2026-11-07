@@ -23,6 +23,12 @@ All notable changes to this project are documented here. The format follows
   *selected* experts, and OpenAI's `swiglu_oai` activation. The `gpt-4o` (o200k) pre-tokenizer is
   transcribed from llama.cpp v0.9.0's regex. The synthetic F16 and MXFP4 files give the same greedy
   tokens as llama.cpp; the check against a real gpt-oss file is pending.
+- OpenAI's Harmony chat template, which gpt-oss's own Jinja template renders (`--chat-template harmony`):
+  the fixed system block, the developer block for the caller's system message, user and assistant
+  turns with the `<|channel|>final<|message|>` header, and the generation prompt. Rendered strings are
+  pinned against llama.cpp v0.9.0; the synthetic gpt-oss file now carries the model's Jinja template
+  and is detected as `harmony`. The reasoning split between the analysis and final channels is a
+  follow-up.
 - Support for plain Qwen 3.5 files (S2.2c): a `qwen35` file with no `prism.hadamard.*` metadata is loaded
   without a rotation, and its ordinary quantised matmuls (Q8_0, F16, ...) run through the dense kernels
   instead of the ternary ones. The synthetic plain file gives the same greedy tokens as llama.cpp v0.9.0;

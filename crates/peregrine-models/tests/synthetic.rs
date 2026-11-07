@@ -1735,6 +1735,35 @@ fn gpt_oss_models_load_and_match_their_goldens() {
     );
 }
 
+/// A synthetic gpt-oss file that declares gpt-oss's own Jinja template: detection
+/// runs on the file's `tokenizer.chat_template`, as it does for a real gpt-oss file,
+/// and the template's two terminators are in the stop set.
+#[test]
+fn gpt_oss_with_its_jinja_template_detects_harmony() {
+    use peregrine_core::template::Template;
+    use peregrine_core::tokenizer::Tokenizer;
+    use support::models::{write_gpt_oss_with_template, GptOssShape};
+
+    let dir = tmpdir("gpt-oss-harmony");
+    let tmpl = include_str!("../../peregrine-core/tests/fixtures/harmony.jinja");
+    let path =
+        write_gpt_oss_with_template(&dir, Format::F16, 9101, GptOssShape::default(), Some(tmpl));
+    let g = Gguf::open(&path).unwrap();
+    assert_eq!(g.str("tokenizer.chat_template").unwrap(), tmpl);
+    assert_eq!(Template::detect(&g), Ok(Template::Harmony));
+
+    let tk = Tokenizer::from_gguf(&g).unwrap();
+    let stops = Template::Harmony.stop_ids(&tk);
+    for name in ["<|return|>", "<|end|>"] {
+        let id = tk
+            .id_of(name)
+            .unwrap_or_else(|| panic!("the vocabulary has {name}"));
+        assert!(stops.contains(&id), "the stop set has {name}");
+    }
+    assert!(stops.contains(&tk.eos), "the model's own EOS is a stop");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The synthetic gpt-oss model's forward, computed from the file's own weights in
 /// f64: the specification the engine's forward must agree with.
 ///
