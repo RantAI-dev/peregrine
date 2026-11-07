@@ -40,10 +40,31 @@ use crate::kv::KvCache;
 pub const BLOCK: usize = 64;
 
 /// The shortest chunk of positions worth a task of its own when positions are split.
-const MIN_CHUNK: usize = 256;
+///
+/// One `BLOCK`: a chunk decodes at least one K/V tile, so a split never pays the
+/// task's fixed cost for less than the tile it was going to read anyway. The
+/// short-context decode is the case this exists for (S3.6): at 512 positions a
+/// two-KV-head model has only two heads to hand out, and a 256-position floor gives
+/// it four tasks on a twelve-worker pool.
+const MIN_CHUNK: usize = 64;
 
 /// Most position chunks per KV head, which bounds the partial-result buffer.
 pub const MAX_CHUNKS: usize = 8;
+
+/// The number of tasks a call with split positions aims for.
+///
+/// A constant, not the pool width. [`combine_row`] is mathematically exact but not
+/// bit-exact against a different chunk count: the merge weighs each partial by
+/// `exp(m_i − m*)`, whereas the unsplit pass applies the online softmax's successive
+/// `α` rescales, so the two round differently. A chunk count that followed the pool
+/// would therefore make a prompt's bits depend on the number of threads the engine
+/// happened to start, and the thread-invariance golden compares exactly that. So the
+/// chunk count is a function of the context length and the model shape only.
+///
+/// Twenty-four is two tasks per worker on the twelve-core reference host, which is
+/// the target the old worker-derived plan aimed for; an eight-worker host (bluefin)
+/// runs three per worker, which costs a little tail imbalance but keeps the bits.
+const TARGET_TASKS: usize = 24;
 
 /// Most query rows (batch rows × `gqa`) a split-position call may hold partials for.
 /// Splitting positions is a decode measure; a prefill batch splits rows instead.
@@ -91,20 +112,39 @@ impl Plan {
     }
 }
 
-/// Divide a call among `workers`. Aim for at least two tasks per worker: rows are
-/// split first (no combine needed), then positions, in chunks of at least
-/// `MIN_CHUNK`. A fork–join costs ~0.5 µs (measured; the 20 µs this used to assume
-/// kept attention on one core, with three spinning, until ~270 positions), so only
-/// tiny calls stay serial, and mid-sized ones fork one task per KV head — the very
-/// computation the serial loop does per head, so the result is bit-identical.
+/// Divide a call among `workers`. Rows are split first (no combine needed), then
+/// positions, into chunks of at least `MIN_CHUNK` and enough of them to reach
+/// `TARGET_TASKS` tasks for the call.
+///
+/// The two halves differ in what may depend on the pool. `row_blocks` may: each task
+/// computes whole rows, and a row's arithmetic does not depend on how many rows share
+/// its task. `pos_chunks` may not: the position chunks are merged by
+/// [`combine_row`], whose summation order changes with the chunk count, so tying it to
+/// `workers` would change a prompt's bits between a four-thread and a twelve-thread
+/// run (and the thread-invariance goldens pin the opposite). It is computed by
+/// `pos_chunks` from the context length and the model shape alone.
+///
+/// A fork–join costs ~0.5 µs (measured; the 20 µs this used to assume kept attention
+/// on one core, with three spinning, until ~270 positions), so only tiny calls stay
+/// serial, and mid-sized ones fork one task per KV head — the very computation the
+/// serial loop does per head, so the result is bit-identical.
 pub fn plan(sh: &Shape<'_>, workers: usize) -> Plan {
     let avg_ctx = sh.start_pos + sh.nb.div_ceil(2);
     let work = sh.nb * sh.n_head * avg_ctx * sh.head_dim * 2;
-    if workers <= 1 || work < 1 << 13 {
+    if work < 1 << 13 {
         return Plan {
             parallel: false,
             row_blocks: 1,
             pos_chunks: 1,
+        };
+    }
+    let chunks = if work < 1 << 19 { 1 } else { pos_chunks(sh) };
+    if workers <= 1 {
+        // The same partition, run serially: the bits must not change with the pool.
+        return Plan {
+            parallel: false,
+            row_blocks: 1,
+            pos_chunks: chunks,
         };
     }
     if work < 1 << 19 {
@@ -115,20 +155,38 @@ pub fn plan(sh: &Shape<'_>, workers: usize) -> Plan {
         };
     }
     let per_head = (2 * workers).div_ceil(sh.n_kv_head);
-    let row_blocks = per_head.min(sh.nb).max(1);
-    let ctx = sh.start_pos + sh.nb;
-    let mut pos_chunks = per_head
-        .div_ceil(row_blocks)
-        .min((ctx / MIN_CHUNK).max(1))
-        .min(MAX_CHUNKS);
-    if sh.nb * sh.gqa() > MAX_PARTIAL_ROWS {
-        pos_chunks = 1;
-    }
+    // Rows carry the rest of the target; when positions already fill it, one block
+    // of rows is enough (and the old plan's row/position split is reproduced).
+    let row_blocks = per_head.div_ceil(chunks).min(sh.nb).max(1);
     Plan {
         parallel: true,
         row_blocks,
-        pos_chunks: pos_chunks.max(1),
+        pos_chunks: chunks,
     }
+}
+
+/// How many position chunks a call gets: the context length and the model shape,
+/// never the pool.
+///
+/// Splitting positions is a *decode* measure: a batch with more than one row already
+/// fills the pool by splitting rows, and, more importantly, a prefill row must give
+/// the same cache and logits whatever `PEREGRINE_PREFILL_CHUNK` read it
+/// (`crates/peregrine-models/tests/prefill_chunk.rs`). The chunk partition of a row
+/// depends on the call's whole context width, so splitting a multi-row call would
+/// make that width — and therefore the prefill chunk — change the arithmetic. One
+/// row is one position count: its context is its own position, so a decode row is
+/// partitioned the same way in every chunking and on every pool.
+///
+/// A chunk is at least `MIN_CHUNK` positions, and the chunk count is capped by the
+/// task target spread over the KV heads and by `MAX_CHUNKS` (the partial buffer).
+fn pos_chunks(sh: &Shape<'_>) -> usize {
+    if sh.nb > 1 || sh.nb * sh.gqa() > MAX_PARTIAL_ROWS {
+        return 1;
+    }
+    let ctx = sh.start_pos + sh.nb;
+    let by_ctx = (ctx / MIN_CHUNK).max(1);
+    let by_heads = TARGET_TASKS.div_ceil(sh.n_kv_head);
+    by_heads.min(by_ctx).clamp(1, MAX_CHUNKS)
 }
 
 /// One task: KV head `kh`, batch rows `b0..b1`, cache positions `p0..p1`.
@@ -906,5 +964,66 @@ mod tests {
                 assert!(p.tasks(&sh) >= workers, "{sh:?} {p:?} leaves workers idle");
             }
         }
+    }
+
+    /// S3.6 step 1: the position chunks at short context, and the rule that they never
+    /// follow the pool.
+    #[test]
+    fn the_position_split_depends_on_the_context_and_shape_not_the_pool() {
+        // Qwen2.5-0.5B: fourteen query heads over two KV heads, 64-wide.
+        let short = |start_pos: usize| Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 1,
+            start_pos,
+            scale: 0.125,
+            window: None,
+            sinks: None,
+        };
+        // At 512 positions the old plan gave a 12-worker pool four tasks; the split
+        // now uses the whole pool without needing a thread count to decide it.
+        let p = plan(&short(511), 12);
+        assert_eq!(p.pos_chunks, 8, "{p:?}");
+        assert_eq!(p.tasks(&short(511)), 16, "{p:?}");
+        assert_eq!(plan(&short(4095), 12).pos_chunks, 8);
+        // Below the task-count gate there is nothing to split.
+        assert_eq!(plan(&short(255), 12).pos_chunks, 1);
+
+        // Every pool width sees the same chunk count at the same context.
+        for pos in [0, 63, 127, 255, 511, 1023, 4095] {
+            let want = plan(&short(pos), 7).pos_chunks;
+            for workers in 1..=64 {
+                assert_eq!(
+                    plan(&short(pos), workers).pos_chunks,
+                    want,
+                    "workers {workers} at position {pos}"
+                );
+            }
+        }
+
+        // A multi-row call splits rows, not positions: the prefill chunk must not
+        // change a row's partition.
+        for nb in [2, 3, 16, 64] {
+            let mut sh = short(511);
+            sh.nb = nb;
+            assert_eq!(plan(&sh, 12).pos_chunks, 1, "nb {nb}");
+        }
+
+        // The 1B's eight KV heads reach three chunks — the old plan's worker-derived
+        // target — now that the 64-position floor lets them.
+        let one_b = Shape {
+            n_head: 32,
+            n_kv_head: 8,
+            head_dim: 64,
+            nb: 1,
+            start_pos: 511,
+            scale: 0.125,
+            window: None,
+            sinks: None,
+        };
+        assert_eq!(plan(&one_b, 12).pos_chunks, 3);
+        assert_eq!(plan(&one_b, 12).tasks(&one_b), 24);
+        assert_eq!(plan(&one_b, 4).tasks(&one_b), 24);
     }
 }
