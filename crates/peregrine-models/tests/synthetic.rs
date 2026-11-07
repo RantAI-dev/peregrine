@@ -1345,7 +1345,8 @@ fn plain_qwen35_mtp_variant_speculates_losslessly() {
     let dir = tmpdir("qwen35-plain-mtp");
     let mut failures = Vec::new();
     for (i, fmt) in [Format::F16, Format::Q8_0].into_iter().enumerate() {
-        let path = write_hybrid_plain_mtp(&dir, fmt, 2000 + i as u64);
+        // The MTP variants have their own seed base, as the Bonsai 2 ones do.
+        let path = write_hybrid_plain_mtp(&dir, fmt, 3000 + i as u64);
         let name = format!("qwen35-plain-mtp-{}", fmt.label());
         failures.extend(check(&path, &name));
         let model = match Gguf::open(&path).and_then(peregrine_models::load) {
