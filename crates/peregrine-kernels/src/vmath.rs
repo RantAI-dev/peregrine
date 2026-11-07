@@ -690,6 +690,202 @@ mod tests {
             .collect()
     }
 
+    /// The gap between `x` and the next `f32` above it: the error's unit.
+    fn ulp(x: f32) -> f64 {
+        let a = x.abs();
+        if a == 0.0 {
+            // The smallest subnormal.
+            return f64::from(f32::from_bits(1));
+        }
+        f64::from(f32::from_bits(a.to_bits() + 1) - a)
+    }
+
+    /// The error of [`tanh`] against the `f64` reference, in ulp of the result.
+    fn tanh_err(x: f32) -> f64 {
+        let got = tanh(x);
+        let want = (x as f64).tanh();
+        (got as f64 - want).abs() / ulp(got)
+    }
+
+    /// Eight `exp`s through the AVX2 path.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn exp8_lanes(x: &[f32; 8]) -> [f32; 8] {
+        let v = exp8(_mm256_loadu_ps(x.as_ptr()));
+        let mut out = [0f32; 8];
+        _mm256_storeu_ps(out.as_mut_ptr(), v);
+        out
+    }
+
+    /// The scalar twin must be the vector routine, bit for bit: it is the same arithmetic
+    /// written once, and the two have to agree on every input, including the ones that
+    /// overflow, underflow and land on a NaN.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn exp_scalar_is_exp8_bit_for_bit() {
+        if !vector_ok() {
+            eprintln!("skipped: no AVX2 and FMA");
+            return;
+        }
+        let mut xs: Vec<f32> = Vec::new();
+        let mut x = -120.0f32;
+        while x <= 120.0 {
+            xs.push(x);
+            x += 0.001_7;
+        }
+        for v in [
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            87.0,
+            88.0,
+            88.5,
+            89.0,
+            100.0,
+            -87.0,
+            -88.0,
+            -103.0,
+            -104.0,
+            -104.5,
+            -200.0,
+            126.0,
+            -126.0,
+            -127.0,
+            -193.0,
+            193.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            xs.push(v);
+        }
+        let mut lane = [0f32; 8];
+        for chunk in xs.chunks(8) {
+            lane[..chunk.len()].copy_from_slice(chunk);
+            // SAFETY: AVX2 and FMA are available (checked above).
+            let got = unsafe { exp8_lanes(&lane) };
+            for (i, &x) in chunk.iter().enumerate() {
+                assert_eq!(
+                    got[i].to_bits(),
+                    exp_scalar(x).to_bits(),
+                    "exp({x}): vector {got:?}, scalar {}",
+                    exp_scalar(x)
+                );
+            }
+        }
+    }
+
+    /// The twin is also an `exp`: the vector routine's accuracy is ggml's, and the scalar
+    /// one inherits it.
+    #[test]
+    fn exp_scalar_is_within_two_ulp_of_libm() {
+        let xs = prng(13, 4099, -90.0, 20.0);
+        for x in xs {
+            let want = x.exp();
+            let got = exp_scalar(x);
+            let err = (got as f64 - want as f64).abs();
+            let u = err / ulp(got);
+            assert!(u <= 2.0, "exp({x}) = {got}, libm {want}, {u} ulp");
+        }
+    }
+
+    /// The accuracy the doc comment claims, measured: max 1.72 ulp over the sweep.
+    #[test]
+    fn tanh_is_within_a_few_ulp_of_the_f64_reference() {
+        let mut worst = 0.0f64;
+        let mut worst_x = 0.0f32;
+        let mut x = -12.0f32;
+        while x <= 12.0 {
+            let e = tanh_err(x);
+            if e > worst {
+                worst = e;
+                worst_x = x;
+            }
+            x += 0.000_13;
+        }
+        // Every 997th `f32` in [0, 1): the polynomial branch, where the relative error is
+        // what matters.
+        let mut bits = 0u32;
+        while bits < 0x3f80_0000 {
+            let x = f32::from_bits(bits);
+            let e = tanh_err(x);
+            if e > worst {
+                worst = e;
+                worst_x = x;
+            }
+            bits += 997;
+        }
+        assert!(
+            worst <= 3.0,
+            "tanh's max error is {worst:.2} ulp at x={worst_x}"
+        );
+        eprintln!("tanh: max error {worst:.2} ulp at x={worst_x:e}");
+    }
+
+    /// The sign is restored, not computed: `tanh` is odd to the bit.
+    #[test]
+    fn tanh_is_odd_to_the_bit() {
+        let mut x = -12.0f32;
+        while x <= 12.0 {
+            assert_eq!(
+                tanh(-x).to_bits(),
+                (-tanh(x)).to_bits(),
+                "tanh({x}) is not odd"
+            );
+            x += 0.000_7;
+        }
+        for x in [
+            1e-30f32,
+            1e-10,
+            0.5,
+            3.0,
+            9.0,
+            1e10,
+            f32::MAX,
+            f32::INFINITY,
+        ] {
+            assert_eq!(tanh(-x).to_bits(), (-tanh(x)).to_bits(), "tanh({x})");
+        }
+    }
+
+    /// `tanh` saturates, and never produces a NaN or an infinity, whatever it is given.
+    #[test]
+    fn tanh_saturates_and_stays_finite() {
+        for x in [9.0f32, 10.0, 20.0, 1e10, 1e30, f32::MAX, f32::INFINITY] {
+            assert_eq!(tanh(x), 1.0, "tanh({x})");
+            assert_eq!(tanh(-x), -1.0, "tanh(-{x})");
+        }
+        for x in [1e-30f32, 1e-20, 1e-10] {
+            assert_eq!(tanh(x), x, "tanh({x})");
+            assert_eq!(tanh(-x), -x, "tanh(-{x})");
+        }
+        assert!(tanh(f32::NAN).is_nan());
+        for x in [
+            -1e30f32, -1e10, -20.0, -9.0, -1.0, -0.5, 0.0, 0.5, 1.0, 9.0, 20.0, 1e10, 1e30,
+        ] {
+            assert!(tanh(x).is_finite(), "tanh({x}) is not finite");
+        }
+    }
+
+    /// GELU is the reason `tanh` exists here: it must stay finite for every input the
+    /// feed-forward can produce, and it must grow with the activation on the positive side.
+    #[test]
+    fn gelu_tanh_is_finite_and_monotone_above_zero() {
+        let mut x = -20.0f32;
+        let mut last = gelu_tanh(x);
+        while x <= 20.0 {
+            let g = gelu_tanh(x);
+            assert!(g.is_finite(), "gelu_tanh({x}) is {g}");
+            if x >= 0.0 {
+                assert!(g >= last, "gelu_tanh({x}) = {g} is below {last}");
+            }
+            last = g;
+            x += 0.001;
+        }
+    }
+
     #[test]
     fn vector_exp_is_within_two_ulp_of_libm_over_the_softmax_range() {
         // Softmax inputs are max-shifted, so ≤ 0; the far tail underflows to 0 in both.
