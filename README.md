@@ -32,7 +32,7 @@ own memory-bandwidth ceiling.
 <!-- support:begin -->
 | | Supported now |
 |---|---|
-| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP; plain file: synthetic check, real file pending), Gemma 3, Qwen 3 MoE, Phi-3 / Phi-4 (synthetic check; real file pending) |
+| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Qwen 3 MoE, Phi-3 / Phi-4 (synthetic check; real file pending) |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 AVX2, AVX-VNNI (256-bit), AVX-512 (VNNI, GFNI, VBMI); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE, SentencePiece (llama) |
@@ -68,6 +68,11 @@ The same holds for **Qwen 3 MoE (Qwen3-30B-A3B)** (Q2_K): the tokenizer produces
 llama.cpp's `llama-tokenize` (22/22 strings), greedy decoding matches bit for bit on prompts 2 and 3
 (32/32 steps) and through 26 tokens on prompt 1 (first divergence at a near-tie of 0.17 logit difference),
 and the chat path returns matching answers with reasoning tokens.
+
+The same holds for plain **Qwen 3.5 (Qwen3.5-2B)** (Q4_K_M): the tokenizer produces the same ids as
+llama.cpp's `llama-tokenize` (22/22 strings), greedy decoding matches bit for bit on prompts 1, 2, and 4
+(32/32 steps, including across a 602-token prompt) and through 27 tokens on prompt 3 (first divergence
+at a near-tie of 0.045 logit difference), and the chat path returns matching answers with reasoning tokens.
 
 ## Quick start
 
