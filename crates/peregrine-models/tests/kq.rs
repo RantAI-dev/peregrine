@@ -2,8 +2,8 @@
 //! tiles at load, and the repacked kernel that multiplies them.
 //!
 //! With the repack on, the loader rewrites every eligible matrix into the repacked
-//! layout and keeps the result in the model's k-quant store, and the Q4_K matrices
-//! are multiplied from it. The repacked kernel reduces a super-block's eight
+//! layout and keeps the result in the model's k-quant store, and the Q4_K and Q6_K
+//! matrices are multiplied from it. The repacked kernel reduces a super-block's eight
 //! position classes in int32, where the ordinary kernel reduces them in float at
 //! the very end, so the two compute the same real number with a different
 //! rounding: the logits move in the last bits (the design note's §4.2).
@@ -126,7 +126,7 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
         // The same file, loaded without the repack, is multiplied the ordinary
         // way. The two compute the same real number with a different rounding,
         // so the logits move in the last bits — not by more than the fold's
-        // last bit, and not at all for the formats the repack does not touch.
+        // last bit.
         let plain = Model::load_with_kq(
             Gguf::open(&path).expect("the model opens"),
             peregrine_models::FAMILIES,
@@ -141,22 +141,15 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
         let (b, acts) = prefill(&model);
         assert_eq!(a.len(), b.len());
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            if fmt == Format::Q4_K {
-                // The repacked kernel's fold: the same real number, rounded
-                // once instead of twice.
-                assert!(
-                    (x - y).abs() <= 1e-3 * x.abs().max(1.0),
-                    "{fmt:?}: logit {i} moved: {x} against {y}"
-                );
-            } else {
-                assert_eq!(
-                    x.to_bits(),
-                    y.to_bits(),
-                    "{fmt:?}: logit {i} moved: {x} against {y}"
-                );
-            }
+            // Both eligible formats now run the repacked kernel, whose fold
+            // rounds once where the ordinary kernel rounds twice: the same
+            // real number, not the same bits.
+            assert!(
+                (x - y).abs() <= 1e-3 * x.abs().max(1.0),
+                "{fmt:?}: logit {i} moved: {x} against {y}"
+            );
         }
-        if fmt == Format::Q4_K && peregrine_kernels::table::MatKernels::get().kq_tiles() {
+        if peregrine_kernels::table::MatKernels::get().kq_tiles() {
             // The repacked tile reads the activation once per eight output rows
             // instead of once per row: the activation traffic falls by the
             // same factor. This is the design note's claim, measured. (Only

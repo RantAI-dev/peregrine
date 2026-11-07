@@ -103,7 +103,7 @@ impl MatKernels {
             MatPath::RowsPtq1
         } else if fmt == Format::PQ2_0 && self.pq2_rows {
             MatPath::RowsPq2
-        } else if kq && self.kq_tiles && fmt == Format::Q4_K {
+        } else if kq && self.kq_tiles && kq_repacked(fmt) {
             // The repacked k-quant tiles: eight output rows at once, against the
             // interleaved activation.
             MatPath::KqTiles
@@ -191,6 +191,85 @@ impl MatKernels {
         }
     }
 
+    /// Eight rows of a repacked Q6_K tile against a batch of four or more
+    /// activations, through the interleaved layout.
+    ///
+    /// `tile` holds `n_sb` tiles of eight rows; `out` receives `out[b · 8 + r]`.
+    pub fn kq_tiles_q6k(
+        &self,
+        tile: &[u8],
+        n_sb: usize,
+        acts: &KqActs,
+        nb: usize,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.kq_tiles,
+            "the repacked k-quant kernel used where it cannot run"
+        );
+        assert!(
+            nb >= 4,
+            "the batched k-quant kernel takes four rows or more"
+        );
+        assert!(
+            acts.rows >= nb,
+            "the interleaved activation holds fewer rows"
+        );
+        assert!(
+            out.len() >= nb * 8,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
+        // `n_sb` tiles and the activation the rows the caller says.
+        unsafe {
+            crate::kqsimd::q6k8_gemm(tile, n_sb, acts, nb, out)
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
+        {
+            let _ = (tile, n_sb);
+            unreachable!("no repacked k-quant kernel on this architecture")
+        }
+    }
+
+    /// Eight rows of a repacked Q6_K tile against one to three activations, in
+    /// the plain per-row layout.
+    ///
+    /// The decode path: the same fold as the batched kernel, so a row's result
+    /// does not depend on the batch it ran in.
+    pub fn kq_tiles_q6k_gemv(
+        &self,
+        tile: &[u8],
+        n_sb: usize,
+        acts: &[QuantAct],
+        nb: usize,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.kq_tiles,
+            "the repacked k-quant kernel used where it cannot run"
+        );
+        assert!(
+            (1..=3).contains(&nb),
+            "the single-row k-quant kernel takes one to three rows"
+        );
+        assert!(
+            out.len() >= nb * 8,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
+        // `n_sb` tiles and the activation the rows the caller says.
+        unsafe {
+            crate::kqsimd::q6k8_gemv(tile, n_sb, acts, nb, out)
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
+        {
+            let _ = (tile, n_sb, acts);
+            unreachable!("no repacked k-quant kernel on this architecture")
+        }
+    }
+
     /// `nt` tiles of a repacked PQ2_0 matrix with `ng` groups of 128 per row, against every activation, into
     /// `out[r·nb + b]` for the tiles' 16·nt rows.
     pub fn tiles_pq2(&self, wt: &[u8], ng: usize, nt: usize, acts: &[QuantAct], out: &mut [f32]) {
@@ -258,6 +337,17 @@ impl MatKernels {
     /// The kernel tiers that provide a dedicated kernel for `fmt`.
     pub fn kernels_for(fmt: Format) -> &'static [Tier] {
         kernels_for(fmt)
+    }
+}
+
+/// Whether a k-quant format has a repacked eight-row kernel.
+///
+/// Q4_K and Q6_K have one (S3.4, steps 2 and 3); Q5_K does not yet.
+pub fn kq_repacked(fmt: Format) -> bool {
+    match fmt {
+        #[cfg(feature = "fmt-kquant")]
+        Format::Q4_K | Format::Q6_K => true,
+        _ => false,
     }
 }
 
@@ -369,8 +459,11 @@ mod tests {
         // repacked goes the old way.
         assert_eq!(all.path(Format::Q4_K, false, true, false), MatPath::KqTiles);
         assert_eq!(all.path(Format::Q4_K, false, false, false), MatPath::PerRow);
-        // The other k-quants are not repacked yet (S3.4 PR 3 and PR 4).
-        assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::PerRow);
+        // The same for Q6_K: the repacked kernel is there too (S3.4, step 3).
+        assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::KqTiles);
+        assert_eq!(all.path(Format::Q6_K, false, false, false), MatPath::PerRow);
+        // Q5_K is not repacked yet (S3.4 PR 4).
+        assert_eq!(all.path(Format::Q5_K, false, true, false), MatPath::PerRow);
         let avx2 = MatKernels {
             tiles: false,
             pq2_rows: true,
