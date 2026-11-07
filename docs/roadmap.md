@@ -25,7 +25,7 @@ Every item keeps the invariants in `ARCHITECTURE.md`: identical tokens and the a
 | S1.1 | `peregrine-kernels`: the kernel table per (format, ISA) chosen once at load, a scalar reference beside every kernel, all SIMD `unsafe` moved here; removes the 14 CPU checks and 9 format branches from model code | 1.5 | S0.2, S0.3 |
 | S1.2 | `Architecture` interface and shared layer blocks (norm, RoPE, attention, FFN, recurrent, head) in `peregrine-core`; dense and hybrid forwards rewritten as two families in `peregrine-models`; `model.rs` / `hybrid.rs` split | 2.0 | S1.1 |
 | S1.3 | One checked helper that hands workers disjoint row ranges; `unsafe` leaves the model code | 0.5 | S1.2 |
-| S1.4 | One runtime: `Session` becomes a one-slot `Engine`; one drafter interface for MTP, DSpark and suffix speculation | 1.5 | S1.2 |
+| S1.4 | One runtime: `Session` becomes a one-slot `Engine`; one drafter interface for MTP, DSpark and suffix speculation — done (ADR 0007) | 1.5 | S1.2 |
 | S1.5 | Features (`arch-*`, `fmt-*`, `mtp`, `dspark`, `littlebit`, `server`), the `peregrine` facade crate with the CLI and server, `cargo hack --each-feature` in CI | 0.5 | S1.2 |
 | S1.6 | `peregrine-bench` for examples and the harness; stale docs fixed | 0.25 | |
 | S1.7 | `peregrine tune` and tuning profiles (CPU, version and model hash recorded; mismatch falls back to defaults) | 0.5 | S1.1, S0.1 |

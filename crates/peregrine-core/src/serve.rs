@@ -78,8 +78,6 @@ pub enum DrafterChoice {
     /// before.
     #[default]
     None,
-    /// The model's own MTP block: the engine's own speculation.
-    Mtp,
     /// Suffix-indexed drafting: the longest match of the conversation's tail,
     /// continued by what followed it last time.
     Suffix {
@@ -737,7 +735,7 @@ impl Engine {
     /// does not load.
     fn make_asked_drafter(&self, choice: &DrafterChoice) -> Result<AskedDrafter, String> {
         match choice {
-            DrafterChoice::None | DrafterChoice::Mtp => Ok(None),
+            DrafterChoice::None => Ok(None),
             DrafterChoice::Suffix { min_order, max_len } => {
                 // A hybrid model's recurrent state rolls back only to its
                 // turn-start checkpoint, so nothing may write positions it later
@@ -1587,7 +1585,8 @@ impl Engine {
     /// anchor's row.
     ///
     /// The accepted run ends where the turn ends: the token that stops the
-    /// turn is emitted but never fed, exactly as `Session::commit` cuts it.
+    /// turn is emitted but never fed, so the cache holds only what the turn
+    /// keeps.
     fn verify_step(&mut self, si: usize) -> Vec<Emission> {
         let t0 = std::time::Instant::now();
         let before = self.stats;
@@ -1783,8 +1782,8 @@ impl Engine {
     /// stay in the cache, and the draft that carried it is not committed. The
     /// same holds for the token that reaches the turn's budget.
     ///
-    /// This is the rule `Session::commit` applies, and the two runtimes must
-    /// cut the same run at the same place.
+    /// The rule the plain decode path applies too: the token that ends the
+    /// turn is not fed, so the cache does not hold it.
     fn commit_cut(&self, si: usize, accepted: usize) -> usize {
         let s = &self.slots[si];
         let pos = s.pos;
@@ -1808,14 +1807,5 @@ impl Engine {
             }
         }
         cut
-    }
-
-    /// What one request cost: prompt tokens, tokens produced, and the seconds spent prefilling and decoding it
-    /// (a decode step's time divided among the rows that shared it).
-    pub fn slot_cost(&self, id: SlotId) -> Option<(usize, usize, f64, f64)> {
-        self.slots
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| (s.prompt_tokens, s.produced, s.prefill_s, s.decode_s))
     }
 }

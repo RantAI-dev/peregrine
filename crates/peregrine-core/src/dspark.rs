@@ -659,12 +659,9 @@ impl Drafter {
     /// Draft up to `k` tokens after `anchor`, the token at position `ctx_len`. Returns
     /// the tokens and, when the head has one, each one's conditional survival
     /// probability from the confidence head.
-    pub fn draft(&mut self, anchor: u32, k: usize, pool: &Pool) -> (Vec<u32>, Vec<f32>) {
-        self.draft_with(anchor, k, pool, |_, row| crate::sample::argmax(row))
-    }
-
-    /// As `draft`, with `pick(i, logits)` choosing draft `i` from its (Markov-biased)
-    /// logits. The session passes the target's own sampler with the key of the
+    ///
+    /// `pick(i, logits)` chooses draft `i` from its (Markov-biased) logits. The
+    /// session passes the target's own sampler with the key of the
     /// position draft `i` would land at, so at a non-zero temperature the drafter
     /// draws with the same noise the target will (uzu couples its drafter to the
     /// target's per-position seeds the same way): when the two distributions agree
