@@ -72,6 +72,11 @@ pub struct EngineOptions {
     pub wide: bool,
     /// `PEREGRINE_TILES=0` turns off the repacked row tiles for ternary weights.
     pub tiles: bool,
+    /// `PEREGRINE_KREPACK=1` repacks the k-quant matrices into eight-row tiles at
+    /// load (S3.4). Off until the repacked kernels land: until then nothing reads
+    /// the store, so repacking would only cost memory and load time. PR 2 turns it
+    /// on by default and makes `PEREGRINE_KREPACK=0` the control.
+    pub kq_repack: bool,
     /// `PEREGRINE_DYNAMIC=0` uses the static row partition instead of dynamic work splitting.
     pub dynamic_rows: bool,
     /// `PEREGRINE_PF`: software prefetch distance in bytes (0 = off).
@@ -135,6 +140,7 @@ impl Default for EngineOptions {
             zmm: true,
             wide: true,
             tiles: true,
+            kq_repack: false,
             dynamic_rows: true,
             prefetch_bytes: PF_DEFAULT,
             tq_span: 16,
@@ -220,6 +226,7 @@ impl EngineOptions {
             zmm: unless("ZMM", "0"),
             wide: unless("NO_WIDE", "1"),
             tiles: unless("TILES", "0"),
+            kq_repack: only("KREPACK", "1"),
             dynamic_rows: unless("DYNAMIC", "0"),
             prefetch_bytes: num("PF").unwrap_or(d.prefetch_bytes),
             tq_span: num("TQ_SPAN")
@@ -298,6 +305,7 @@ impl EngineOptions {
             ("zmm", self.zmm.to_string()),
             ("wide", self.wide.to_string()),
             ("tiles", self.tiles.to_string()),
+            ("kq_repack", self.kq_repack.to_string()),
             ("dynamic_rows", self.dynamic_rows.to_string()),
             ("prefetch_bytes", self.prefetch_bytes.to_string()),
             ("tq_span", self.tq_span.to_string()),
@@ -351,6 +359,7 @@ pub const NAMES: &[&str] = &[
     "ZMM",
     "NO_WIDE",
     "TILES",
+    "KREPACK",
     "DYNAMIC",
     "PF",
     "TQ_SPAN",
@@ -438,6 +447,11 @@ mod tests {
         assert!(with(&[("ZMM", "no")]).zmm);
         assert!(!with(&[("MTP", "0")]).mtp);
         assert!(!with(&[("TILE_HUGEPAGES", "0")]).tile_hugepages);
+        // The k-quant repack is off unless it is asked for, until the repacked
+        // kernels land.
+        assert!(!with(&[("KREPACK", "0")]).kq_repack);
+        assert!(!with(&[("KREPACK", "yes")]).kq_repack);
+        assert!(with(&[("KREPACK", "1")]).kq_repack);
         // Off only with "1".
         assert!(with(&[("EXACT", "1")]).exact);
         assert!(!with(&[("EXACT", "yes")]).exact);
