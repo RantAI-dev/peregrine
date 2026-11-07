@@ -299,6 +299,59 @@ impl Slot {
             self.pen.prepare(pen.last_n, n_vocab);
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn account(
+        &mut self,
+        fed: u32,
+        id: u32,
+        logprob: f32,
+        secs: f64,
+        tk: &crate::tokenizer::Tokenizer,
+        max_ctx: usize,
+        em: &mut Emission,
+    ) {
+        if self.pos >= self.prompt.len() - 1 {
+            self.fed_back.push(fed);
+        }
+        self.pos += 1;
+        self.next = id;
+        if !self.cfg.penalties.is_off() {
+            self.pen.push(id);
+        }
+        self.produced += 1;
+        self.decode_s += secs;
+        let stop = self.cfg.stop.contains(&id);
+        if stop {
+            em.text.clear();
+        } else {
+            self.utf8.push_to(tk.token_bytes_ref(id), &mut em.text);
+        }
+        let finish = if stop {
+            Some(Finish::Stop)
+        } else if self.produced >= self.cfg.max_tokens {
+            Some(Finish::Length)
+        } else if self.pos + 1 >= max_ctx {
+            Some(Finish::Context)
+        } else {
+            None
+        };
+        if finish.is_some() && !stop {
+            self.utf8.finish_to(&mut em.text);
+        }
+        let cost = finish.is_some().then_some(SlotCost {
+            prompt_tokens: self.prompt_tokens,
+            prefilled: self.prefilled,
+            produced: self.produced,
+            prefill_s: self.prefill_s,
+            decode_s: self.decode_s,
+        });
+        em.slot = self.id;
+        em.token = id;
+        em.logprob = logprob;
+        em.finish = finish;
+        em.cost = cost;
+    }
 }
 
 /// The prompt text of one chat turn: the system block, the earlier exchanges, this turn's message, and the
@@ -409,6 +462,15 @@ pub struct Engine {
     draft_rate: Option<f64>,
     /// The drafting rounds measured.
     drafted_rounds: u64,
+    emissions: Vec<Emission>,
+    step_picks: Vec<(u32, f32)>,
+    step_dec: Vec<usize>,
+    step_pre: Vec<(usize, usize)>,
+    step_tokens: Vec<u32>,
+    step_positions: Vec<usize>,
+    step_map: Vec<usize>,
+    step_order: Vec<usize>,
+    step_want: Vec<usize>,
 }
 
 impl Engine {
@@ -475,7 +537,43 @@ impl Engine {
             park: 0,
             draft_rate: None,
             drafted_rounds: 0,
+            emissions: (0..max_logit_rows.max(max_slots).max(2))
+                .map(|_| Emission {
+                    slot: 0,
+                    token: 0,
+                    text: String::with_capacity(64),
+                    logprob: 0.0,
+                    finish: None,
+                    cost: None,
+                })
+                .collect(),
+            step_picks: Vec::with_capacity(max_slots),
+            step_dec: Vec::with_capacity(max_slots),
+            step_pre: Vec::with_capacity(max_slots),
+            step_tokens: Vec::with_capacity(max_batch),
+            step_positions: Vec::with_capacity(max_batch),
+            step_map: Vec::with_capacity(max_batch),
+            step_order: Vec::with_capacity(max_slots),
+            step_want: Vec::with_capacity(max_slots),
         }
+    }
+
+    fn ensure_emissions_len(&mut self, n: usize) {
+        if self.emissions.len() < n {
+            self.emissions.resize_with(n, || Emission {
+                slot: 0,
+                token: 0,
+                text: String::with_capacity(64),
+                logprob: 0.0,
+                finish: None,
+                cost: None,
+            });
+        }
+    }
+
+    /// The emissions produced by the last `step()`.
+    pub fn emissions(&self) -> &[Emission] {
+        &self.emissions[..self.last_step.tokens]
     }
 
     /// Whether a lone user's decode speculates with the model's MTP block.
@@ -695,6 +793,7 @@ impl Engine {
         if penalized {
             pen.start(&prompt, cfg.max_tokens.min(self.max_ctx));
         }
+        let fed_back_cap = cfg.max_tokens.min(self.max_ctx);
         self.slots.push(Slot {
             drafter: drafter.map(std::sync::Mutex::new),
             drafter_depth: depth,
@@ -710,7 +809,7 @@ impl Engine {
             pos: fed,
             next,
             produced: 0,
-            fed_back: vec![],
+            fed_back: Vec::with_capacity(fed_back_cap),
             utf8: Utf8Stream::default(),
             prefill_s: 0.0,
             decode_s: 0.0,
@@ -1007,9 +1106,10 @@ impl Engine {
     /// nobody's decode waits behind a prompt, and the pass reads the weights once for both). `PEREGRINE_MIX=0`
     /// keeps the alternating schedule (a prompt chunk, or a decode step, never both). Returns what to send to each
     /// caller; an empty result with no active slots means there is nothing to do.
-    pub fn step(&mut self) -> Vec<Emission> {
+    pub fn step(&mut self) -> &[Emission] {
         if self.slots.is_empty() {
-            return vec![];
+            self.last_step.tokens = 0;
+            return &[];
         }
         if mixed() {
             return self.mixed_step();
@@ -1020,16 +1120,20 @@ impl Engine {
             if let Err(e) = self.prefill_chunk(i) {
                 let id = self.slots[i].id;
                 self.slots.remove(i);
-                return vec![Emission {
+                self.ensure_emissions_len(1);
+                self.emissions[0] = Emission {
                     slot: id,
                     token: 0,
                     text: String::new(),
                     logprob: 0.0,
                     finish: Some(Finish::Error(e)),
                     cost: None,
-                }];
+                };
+                self.last_step.tokens = 1;
+                return &self.emissions[..1];
             }
-            return vec![];
+            self.last_step.tokens = 0;
+            return &[];
         }
         self.decode()
     }
@@ -1037,7 +1141,7 @@ impl Engine {
     /// The mixed step: decode rows for the ready slots first (they want logits), then prompt runs for the others,
     /// oldest first, within the chunk budget. Each prompt run is consecutive positions of one cache
     /// (`Caches::Mapped`), so its attention is one grouped call, as in a plain prefill chunk.
-    fn mixed_step(&mut self) -> Vec<Emission> {
+    fn mixed_step(&mut self) -> &[Emission] {
         // A lone slot with a drafter verifies that drafter's proposals: one
         // weight pass for the anchor and the drafted tokens (ADR 0007,
         // decision 3: speculation stays single-slot).
@@ -1056,11 +1160,65 @@ impl Engine {
         }
         let t0 = std::time::Instant::now();
         let before = self.stats;
-        let dec: Vec<usize> = (0..self.slots.len())
-            .filter(|&i| self.slots[i].ready())
-            .collect();
+
+        // Fast path for lone ready slot decode: zero heap allocations.
+        if self.slots.len() == 1 && self.slots[0].ready() {
+            let anchor = self.slots[0].next;
+            let pos = self.slots[0].pos;
+            let tokens = [anchor];
+            let positions = [pos];
+            let want = [0usize];
+            let p = self.pool1.as_ref().unwrap_or(&self.pool);
+            self.state.want_hidden = self.wants_hidden();
+            let r = {
+                let mut refs = [&mut self.slots[0].kv];
+                self.model.forward_rows(
+                    &mut self.state,
+                    &mut Caches::PerRow(&mut refs),
+                    p,
+                    &tokens,
+                    &positions,
+                    &want,
+                    &mut self.stats,
+                )
+            };
+            self.state.want_hidden = false;
+            let elapsed = t0.elapsed().as_secs_f64();
+            if let Err(e) = r {
+                let id = self.slots[0].id;
+                self.slots.clear();
+                self.ensure_emissions_len(1);
+                self.emissions[0] = Emission {
+                    slot: id,
+                    token: 0,
+                    text: String::new(),
+                    logprob: 0.0,
+                    finish: Some(Finish::Error(e)),
+                    cost: None,
+                };
+                return &self.emissions[..1];
+            }
+            self.vcost.observe(1, elapsed);
+            self.finish_decode(&[0], &tokens, elapsed);
+            self.last_step = StepReport {
+                stats: self.stats.since(&before),
+                secs: t0.elapsed().as_secs_f64(),
+                rows: 1,
+                tokens: 1,
+                drafted: 0,
+                accepted: 0,
+            };
+            return &self.emissions[..1];
+        }
+
+        self.step_dec.clear();
+        for (i, s) in self.slots.iter().enumerate() {
+            if s.ready() {
+                self.step_dec.push(i);
+            }
+        }
         let mut budget = PREFILL_CHUNK;
-        let mut pre: Vec<(usize, usize)> = Vec::new(); // (slot index, tokens taken)
+        self.step_pre.clear();
         for (i, s) in self.slots.iter().enumerate() {
             if budget == 0 {
                 break;
@@ -1069,94 +1227,102 @@ impl Engine {
                 let last = s.prompt.len() - 1;
                 let take = budget.min(last - s.fed);
                 if take > 0 {
-                    pre.push((i, take));
+                    self.step_pre.push((i, take));
                     budget -= take;
                 }
             }
         }
-        let n_dec = dec.len();
-        let mut tokens: Vec<u32> = Vec::new();
-        let mut positions: Vec<usize> = Vec::new();
-        let mut map: Vec<usize> = Vec::new();
-        // Cache order: the decode slots, then the prefilled ones.
-        let order: Vec<usize> = dec.iter().copied().chain(pre.iter().map(|p| p.0)).collect();
-        for (ci, &i) in dec.iter().enumerate() {
-            tokens.push(self.slots[i].next);
-            positions.push(self.slots[i].pos);
-            map.push(ci);
+        let n_dec = self.step_dec.len();
+        self.step_tokens.clear();
+        self.step_positions.clear();
+        self.step_map.clear();
+        self.step_order.clear();
+        self.step_order.extend(self.step_dec.iter().copied());
+        for &(i, _) in &self.step_pre {
+            self.step_order.push(i);
         }
-        for (k, &(i, take)) in pre.iter().enumerate() {
+        for (ci, &i) in self.step_dec.iter().enumerate() {
+            self.step_tokens.push(self.slots[i].next);
+            self.step_positions.push(self.slots[i].pos);
+            self.step_map.push(ci);
+        }
+        for (k, &(i, take)) in self.step_pre.iter().enumerate() {
             let s = &self.slots[i];
             for t in 0..take {
-                tokens.push(s.prompt[s.fed + t]);
-                positions.push(s.fed + t);
-                map.push(n_dec + k);
+                self.step_tokens.push(s.prompt[s.fed + t]);
+                self.step_positions.push(s.fed + t);
+                self.step_map.push(n_dec + k);
             }
         }
-        let want: Vec<usize> = (0..n_dec).collect();
+        self.step_want.clear();
+        self.step_want.extend(0..n_dec);
         // A drafter that needs the target's hidden states gets them: the MTP
         // block's rows read the hidden state of the position before them.
         self.state.want_hidden = self.wants_hidden();
         let r = {
             let mut refs: Vec<Option<&mut KvCache>> =
                 self.slots.iter_mut().map(|s| Some(&mut s.kv)).collect();
-            let mut caches: Vec<&mut KvCache> = order
+            let mut caches: Vec<&mut KvCache> = self
+                .step_order
                 .iter()
                 .map(|&i| refs[i].take().expect("a slot appears once"))
                 .collect();
-            let p = if tokens.len() == 1 {
+            let p = if self.step_tokens.len() == 1 {
                 self.pool1.as_ref().unwrap_or(&self.pool)
             } else {
                 &self.pool
             };
             self.model.forward_rows(
                 &mut self.state,
-                &mut Caches::Mapped(&mut caches, &map),
+                &mut Caches::Mapped(&mut caches, &self.step_map),
                 p,
-                &tokens,
-                &positions,
-                &want,
+                &self.step_tokens,
+                &self.step_positions,
+                &self.step_want,
                 &mut self.stats,
             )
         };
         if let Err(e) = r {
-            let out = self
-                .slots
-                .iter()
-                .map(|s| Emission {
+            self.ensure_emissions_len(self.slots.len());
+            for (i, s) in self.slots.iter().enumerate() {
+                self.emissions[i] = Emission {
                     slot: s.id,
                     token: 0,
                     text: String::new(),
                     logprob: 0.0,
                     finish: Some(Finish::Error(e.clone())),
                     cost: None,
-                })
-                .collect();
+                };
+            }
+            let n = self.slots.len();
             self.slots.clear();
-            return out;
+            return &self.emissions[..n];
         }
         self.state.want_hidden = false;
         let elapsed = t0.elapsed().as_secs_f64();
-        let rows = tokens.len().max(1) as f64;
+        let rows = self.step_tokens.len().max(1) as f64;
         // The plain step is a verification pass of width one: the cost model
         // prices the drafts against it, and without it the prices are a prior
         // in the wrong units (a second against a millisecond).
-        if n_dec == 1 && pre.is_empty() {
+        if n_dec == 1 && self.step_pre.is_empty() {
             self.vcost.observe(1, elapsed);
         }
         // The prefilled rows are committed positions too: a drafter is told about them, with the
         // target's taps and hidden state for the row.
-        for (k, &(i, take)) in pre.iter().enumerate() {
+        for k in 0..self.step_pre.len() {
+            let (i, take) = self.step_pre[k];
             if self.slots[i].drafter.is_none() {
                 continue;
             }
             let fed = self.slots[i].fed;
             for t in 0..take {
                 let row = n_dec + k + t;
-                self.commit_row(i, row, fed + t, tokens[row]);
+                let tok = self.step_tokens[row];
+                self.commit_row(i, row, fed + t, tok);
             }
         }
-        for &(i, take) in &pre {
+        for k in 0..self.step_pre.len() {
+            let (i, take) = self.step_pre[k];
             let s = &mut self.slots[i];
             let last = s.prompt.len() - 1;
             s.fed += take;
@@ -1172,23 +1338,24 @@ impl Engine {
             self.last_step = StepReport {
                 stats: self.stats.since(&before),
                 secs: t0.elapsed().as_secs_f64(),
-                rows: tokens.len(),
+                rows: self.step_tokens.len(),
                 tokens: 0,
                 drafted: 0,
                 accepted: 0,
             };
-            return vec![];
+            return &[];
         }
-        let out = self.finish_decode(&dec, &tokens[..n_dec], elapsed * n_dec as f64 / rows);
+        let (dec, fed) = (self.step_dec.clone(), self.step_tokens[..n_dec].to_vec());
+        self.finish_decode(&dec, &fed, elapsed * n_dec as f64 / rows);
         self.last_step = StepReport {
             stats: self.stats.since(&before),
             secs: t0.elapsed().as_secs_f64(),
-            rows: tokens.len(),
-            tokens: out.len(),
+            rows: self.step_tokens.len(),
+            tokens: n_dec,
             drafted: 0,
             accepted: 0,
         };
-        out
+        &self.emissions[..n_dec]
     }
     /// Feed the next chunk of slot `i`'s prompt. Its last token is left for the first decode step, which is
     /// what produces the logits the first token is sampled from.
@@ -1240,20 +1407,65 @@ impl Engine {
     }
 
     /// One token for every ready slot, in one pass over the weights.
-    fn decode(&mut self) -> Vec<Emission> {
+    fn decode(&mut self) -> &[Emission] {
         let t0 = std::time::Instant::now();
         let before = self.stats;
         let n = self.slots.len();
+        if n == 1 {
+            let anchor = self.slots[0].next;
+            let pos = self.slots[0].pos;
+            let tokens = [anchor];
+            let positions = [pos];
+            let want = [0usize];
+            let hidden = self.wants_hidden();
+            let p = self.pool1.as_ref().unwrap_or(&self.pool);
+            self.state.want_hidden = hidden;
+            let r = {
+                let mut refs = [&mut self.slots[0].kv];
+                self.model.forward_rows(
+                    &mut self.state,
+                    &mut Caches::PerRow(&mut refs),
+                    p,
+                    &tokens,
+                    &positions,
+                    &want,
+                    &mut self.stats,
+                )
+            };
+            self.state.want_hidden = false;
+            if let Err(e) = r {
+                let id = self.slots[0].id;
+                self.slots.clear();
+                self.ensure_emissions_len(1);
+                self.emissions[0] = Emission {
+                    slot: id,
+                    token: 0,
+                    text: String::new(),
+                    logprob: 0.0,
+                    finish: Some(Finish::Error(e)),
+                    cost: None,
+                };
+                return &self.emissions[..1];
+            }
+            let secs = t0.elapsed().as_secs_f64();
+            self.vcost.observe(1, secs);
+            self.finish_decode(&[0], &tokens, secs);
+            self.last_step = StepReport {
+                stats: self.stats.since(&before),
+                secs: t0.elapsed().as_secs_f64(),
+                rows: 1,
+                tokens: 1,
+                drafted: 0,
+                accepted: 0,
+            };
+            return &self.emissions[..1];
+        }
         let tokens: Vec<u32> = self.slots.iter().map(|s| s.next).collect();
         let positions: Vec<usize> = self.slots.iter().map(|s| s.pos).collect();
         let want: Vec<usize> = (0..n).collect();
         let hidden = self.wants_hidden();
         let mut caches: Vec<&mut KvCache> = self.slots.iter_mut().map(|s| &mut s.kv).collect();
-        let p = if n == 1 {
-            self.pool1.as_ref().unwrap_or(&self.pool)
-        } else {
-            &self.pool
-        };
+        let p = &self.pool;
         self.state.want_hidden = hidden;
         let r = self.model.forward_rows(
             &mut self.state,
@@ -1267,43 +1479,38 @@ impl Engine {
         self.state.want_hidden = false;
         if let Err(e) = r {
             // A failed step is the whole batch's failure: every caller is told, and the slots go.
-            let out = self
-                .slots
-                .iter()
-                .map(|s| Emission {
+            self.ensure_emissions_len(self.slots.len());
+            for (i, s) in self.slots.iter().enumerate() {
+                self.emissions[i] = Emission {
                     slot: s.id,
                     token: 0,
                     text: String::new(),
                     logprob: 0.0,
                     finish: Some(Finish::Error(e.clone())),
                     cost: None,
-                })
-                .collect();
+                };
+            }
+            let n = self.slots.len();
             self.slots.clear();
-            return out;
+            return &self.emissions[..n];
         }
         let all: Vec<usize> = (0..n).collect();
         let secs = t0.elapsed().as_secs_f64();
-        // A lone slot's plain step is a verification pass of width one: the cost
-        // model prices the drafts against it.
-        if n == 1 {
-            self.vcost.observe(1, secs);
-        }
-        let out = self.finish_decode(&all, &tokens, secs);
+        self.finish_decode(&all, &tokens, secs);
         self.last_step = StepReport {
             stats: self.stats.since(&before),
             secs: t0.elapsed().as_secs_f64(),
             rows: tokens.len(),
-            tokens: out.len(),
+            tokens: n,
             drafted: 0,
             accepted: 0,
         };
-        out
+        &self.emissions[..n]
     }
 
     /// Sample and account for the decode rows just computed: row `b` of the logits belongs to slot `dec[b]`, which
     /// was fed `fed[b]`; `secs` is the decode rows' share of the step.
-    fn finish_decode(&mut self, dec: &[usize], fed: &[u32], secs: f64) -> Vec<Emission> {
+    fn finish_decode(&mut self, dec: &[usize], fed: &[u32], secs: f64) {
         let n = dec.len();
         self.decode_steps += 1;
         self.decode_rows += n as u64;
@@ -1313,10 +1520,6 @@ impl Engine {
         }
         let share = secs / n as f64;
         let n_vocab = self.model.cfg.n_vocab;
-        // Sampling, one row per worker: each is a pass over the whole vocabulary (~2 ms at 248 320 entries), and
-        // serially they cost a 2B model's step 40% at ten users. The sampler is keyed by (seed, position), so which
-        // worker samples a row does not change what it draws.
-        let mut picks = vec![(0u32, 0.0f32); n];
         // Penalty windows are rebuilt serially (each is O(window)) so the parallel
         // sampling below only reads them; the default request skips this entirely.
         if dec.iter().any(|&si| !self.slots[si].cfg.penalties.is_off()) {
@@ -1324,9 +1527,31 @@ impl Engine {
                 self.slots[si].prepare_penalties(n_vocab);
             }
         }
-        {
+        self.step_picks.resize(n, (0u32, 0.0f32));
+        if n == 1 {
+            let s = &self.slots[dec[0]];
+            let logits = self.state.logits_row(0, n_vocab);
+            let mut sc = self.samps[0].lock().expect("sampler scratch");
+            let id = crate::sample::sample_penalized(
+                logits,
+                s.cfg.temperature,
+                s.cfg.top_p,
+                s.cfg.top_k,
+                s.cfg.min_p,
+                &s.cfg.penalties,
+                s.pen.window(),
+                crate::sample::position_key(s.seed, s.cfg.turn as u64, s.pos + 1),
+                &mut sc,
+            );
+            let lp = if s.cfg.logprobs {
+                crate::session::logprob_of(logits, id)
+            } else {
+                0.0
+            };
+            self.step_picks[0] = (id, lp);
+        } else {
             let next = std::sync::atomic::AtomicUsize::new(0);
-            let pk = std::sync::Mutex::new(&mut picks);
+            let pk = std::sync::Mutex::new(&mut self.step_picks[..]);
             let (slots, state, samps) = (&self.slots, &self.state, &self.samps);
             let body = |wk: usize, _nw: usize| {
                 let mut sc = None;
@@ -1363,85 +1588,34 @@ impl Engine {
                 body(0, 1);
             }
         }
-        let mut out = Vec::with_capacity(n);
+        self.ensure_emissions_len(n);
+        let max_ctx = self.max_ctx;
         for (b, &si) in dec.iter().enumerate() {
-            let (id, logprob) = picks[b];
-            out.push(self.account(si, b, fed[b], id, logprob, share));
+            let (id, logprob) = self.step_picks[b];
+            let pos = self.slots[si].pos;
+            self.commit_row(si, b, pos, fed[b]);
+            self.slots[si].account(
+                fed[b],
+                id,
+                logprob,
+                share,
+                &self.model.tk,
+                max_ctx,
+                &mut self.emissions[b],
+            );
         }
-        self.reap(&out);
+        self.reap(n);
         // The step is done: the next one is the next step of the count the
         // suffix index's probe rule uses.
         self.steps += 1;
-        out
     }
 
-    /// Slot `si` was fed `fed` at its position and sampled `id` for the next: move it on one position, and
-    /// say what to send.
-    ///
-    /// `row` is the batch row the slot's token was computed in: its taps and its hidden state are that
-    /// row's, and a drafter that asked for them is told what was committed.
-    fn account(
-        &mut self,
-        si: usize,
-        row: usize,
-        fed: u32,
-        id: u32,
-        logprob: f32,
-        secs: f64,
-    ) -> Emission {
-        let pos = self.slots[si].pos;
-        // The drafter is told what was committed, with the target's row for it.
-        self.commit_row(si, row, pos, fed);
-        let s = &mut self.slots[si];
-        // The token just fed sat at `pos`; after the prompt's own positions it is part of what the cache
-        // now describes.
-        if s.pos >= s.prompt.len() - 1 {
-            s.fed_back.push(fed);
+    /// Remove the slots whose last emission is in `self.emissions[..n]`, keeping their caches as prefixes.
+    fn reap(&mut self, n: usize) {
+        if !self.emissions[..n].iter().any(|e| e.finish.is_some()) {
+            return;
         }
-        s.pos += 1;
-        s.next = id;
-        // The sampled token joins the sequence for the next penalty window.
-        if !s.cfg.penalties.is_off() {
-            s.pen.push(id);
-        }
-        s.produced += 1;
-        s.decode_s += secs;
-        let stop = s.cfg.stop.contains(&id);
-        // The stop token itself is not part of the answer.
-        let text = if stop {
-            String::new()
-        } else {
-            s.utf8.push(&self.model.tk.token_bytes(id))
-        };
-        let finish = if stop {
-            Some(Finish::Stop)
-        } else if s.produced >= s.cfg.max_tokens {
-            Some(Finish::Length)
-        } else if s.pos + 1 >= self.max_ctx {
-            Some(Finish::Context)
-        } else {
-            None
-        };
-        let cost = finish.is_some().then_some(SlotCost {
-            prompt_tokens: s.prompt_tokens,
-            prefilled: s.prefilled,
-            produced: s.produced,
-            prefill_s: s.prefill_s,
-            decode_s: s.decode_s,
-        });
-        Emission {
-            slot: s.id,
-            token: id,
-            text,
-            logprob,
-            finish,
-            cost,
-        }
-    }
-
-    /// Remove the slots whose last emission is in `out`, keeping their caches as prefixes.
-    fn reap(&mut self, out: &[Emission]) {
-        let finished: Vec<SlotId> = out
+        let finished: Vec<SlotId> = self.emissions[..n]
             .iter()
             .filter(|e| e.finish.is_some())
             .map(|e| e.slot)
@@ -1588,7 +1762,7 @@ impl Engine {
     ///
     /// The accepted run ends where the turn ends: the token that stops the
     /// turn is emitted but never fed, exactly as `Session::commit` cuts it.
-    fn verify_step(&mut self, si: usize) -> Vec<Emission> {
+    fn verify_step(&mut self, si: usize) -> &[Emission] {
         let t0 = std::time::Instant::now();
         let before = self.stats;
         let pos = self.slots[si].pos;
@@ -1670,14 +1844,16 @@ impl Engine {
         if let Err(e) = r {
             let id = self.slots[si].id;
             self.slots.clear();
-            return vec![Emission {
+            self.ensure_emissions_len(1);
+            self.emissions[0] = Emission {
                 slot: id,
                 token: 0,
                 text: String::new(),
                 logprob: 0.0,
                 finish: Some(Finish::Error(e)),
                 cost: None,
-            }];
+            };
+            return &self.emissions[..1];
         }
         // What the pass cost is what the model measures.
         self.vcost.observe(n, verify_s);
@@ -1717,11 +1893,13 @@ impl Engine {
         }
         let secs = t0.elapsed().as_secs_f64();
         let share = secs / (accepted + 1) as f64;
-        let mut out = Vec::with_capacity(accepted + 1);
+        self.ensure_emissions_len(accepted + 1);
+        let max_ctx = self.max_ctx;
+        let mut count = 0;
         for i in 0..=accepted {
             // The turn may have ended with the previous token: nothing more is
             // committed then.
-            if out.last().is_some_and(|e: &Emission| e.finish.is_some()) {
+            if count > 0 && self.emissions[count - 1].finish.is_some() {
                 break;
             }
             let fed = if i == 0 {
@@ -1729,7 +1907,20 @@ impl Engine {
             } else {
                 self.proposal.toks[i - 1]
             };
-            out.push(self.account(si, i, fed, self.v_samples[i], self.v_logprobs[i], share));
+            let id = self.v_samples[i];
+            let lp = self.v_logprobs[i];
+            let pos = self.slots[si].pos;
+            self.commit_row(si, i, pos, fed);
+            self.slots[si].account(
+                fed,
+                id,
+                lp,
+                share,
+                &self.model.tk,
+                max_ctx,
+                &mut self.emissions[count],
+            );
+            count += 1;
         }
         // The drafts that were not committed are forgotten.
         if cut < k {
@@ -1758,8 +1949,8 @@ impl Engine {
                 }
             }
         }
-        self.decode_rows += out.len() as u64;
-        self.reap(&out);
+        self.decode_rows += count as u64;
+        self.reap(count);
         // The step is done: the next one is the next step of the count the
         // suffix index's probe rule uses.
         self.steps += 1;
@@ -1768,11 +1959,11 @@ impl Engine {
             stats: self.stats.since(&before),
             secs: t0.elapsed().as_secs_f64(),
             rows: n,
-            tokens: out.len(),
+            tokens: count,
             drafted: k as u16,
             accepted: accepted as u16,
         };
-        out
+        &self.emissions[..count]
     }
 
     /// How many of the `accepted` drafted tokens are committed: the accepted

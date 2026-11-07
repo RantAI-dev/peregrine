@@ -310,8 +310,8 @@ fn hybrid_mtp_variant_speculates_losslessly() {
             let mut toks = Vec::new();
             while e.active() > 0 {
                 for em in e.step() {
-                    if let Some(Finish::Error(e)) = em.finish {
-                        return Err(e);
+                    if let Some(Finish::Error(e)) = &em.finish {
+                        return Err(e.clone());
                     }
                     toks.push(em.token);
                 }
@@ -493,7 +493,7 @@ fn drive_one(e: &mut Engine, prompt: &[u32]) -> Vec<u32> {
     let mut out = Vec::new();
     while e.active() > 0 {
         for em in e.step() {
-            if let Some(Finish::Error(err)) = em.finish {
+            if let Some(Finish::Error(err)) = &em.finish {
                 panic!("engine: {err}");
             }
             assert_eq!(em.slot, id, "a single user's slot changed mid-request");
@@ -547,7 +547,7 @@ fn batching_failures(model: &Arc<Model>, label: &str, perrow: bool) -> Vec<Strin
         let empty = ems.is_empty();
         let mut emitted = 0usize;
         for em in ems {
-            if let Some(Finish::Error(err)) = em.finish {
+            if let Some(Finish::Error(err)) = &em.finish {
                 failures.push(format!("{label}: {err}"));
             }
             let i = ids
@@ -739,8 +739,8 @@ fn hybrid_mtp_accepting_variant_accepts_drafts_losslessly() {
             let mut toks = Vec::new();
             while e.active() > 0 {
                 for em in e.step() {
-                    if let Some(Finish::Error(err)) = em.finish {
-                        return Err(err);
+                    if let Some(Finish::Error(err)) = &em.finish {
+                        return Err(err.clone());
                     }
                     toks.push(em.token);
                 }

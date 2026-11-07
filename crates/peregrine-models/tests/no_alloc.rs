@@ -119,6 +119,26 @@ fn check_decode(model: &Model, threads: usize, prec: KvPrec) -> usize {
     })
 }
 
+fn check_engine_decode(model: &Arc<Model>, prec: KvPrec) -> usize {
+    use peregrine_core::serve::{Engine, SlotCfg};
+    let mut e = Engine::new(model.clone(), 1, 512, 1, prec, 0);
+    let cfg = SlotCfg {
+        temperature: 0.0,
+        max_tokens: 128,
+        ..Default::default()
+    };
+    let _id = e.admit(vec![TOKEN, TOKEN], cfg).unwrap();
+    // Warm up prefill and first decode steps
+    for _ in 0..6 {
+        e.step();
+    }
+    allocations_steady(|| {
+        for _ in 0..3 {
+            e.step();
+        }
+    })
+}
+
 fn check_mtp_draft(model: &Model, threads: usize) -> usize {
     let c = model.cfg;
     let pool = Pool::new(threads);
@@ -259,6 +279,15 @@ fn a_decode_step_allocates_nothing() {
                         prec.name()
                     ));
                 }
+            }
+        }
+        for prec in [KvPrec::F16, KvPrec::F32] {
+            let n = check_engine_decode(model, prec);
+            if n != 0 {
+                failures.push(format!(
+                    "{name}, 1-slot engine, {} cache: {n} allocations per decode step",
+                    prec.name()
+                ));
             }
         }
     }

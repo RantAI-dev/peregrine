@@ -47,7 +47,6 @@ use crate::model::Model;
 use crate::serve::{Engine, Finish, SlotCfg};
 use crate::telem::{Machine, TokenTelem, TurnTelem};
 use crate::template::{today_llama3, Template};
-use crate::tokenizer::Utf8Stream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -802,7 +801,6 @@ impl Session {
 
         // ---- decode ----
         let mut out = String::new();
-        let mut utf8 = Utf8Stream::default();
         let mut step = 0u32;
         let mut decoded = false;
         let mut roll_back = false;
@@ -817,9 +815,9 @@ impl Session {
                 self.engine.cancel(id);
                 break;
             }
-            let ems = self.engine.step();
+            self.engine.step();
             let rep = self.engine.last_step;
-            if ems.is_empty() {
+            if self.engine.emissions().is_empty() {
                 // A chunk of the prompt: its cost is the prompt's.
                 telem.prefill_phases.add_step(&rep.stats);
                 telem.prefill_s += rep.secs;
@@ -831,16 +829,14 @@ impl Session {
             decoded = true;
             telem.decode_phases.add_step(&rep.stats);
             telem.decode_steps_s += rep.secs;
-            let n_em = ems.len();
+            let n_em = self.engine.emissions().len();
             let mut emitted = 0usize;
-            for (i, em) in ems.iter().enumerate() {
+            let mut err = None;
+            for (i, em) in self.engine.emissions().iter().enumerate() {
                 match &em.finish {
                     Some(Finish::Error(e)) => {
-                        // The step failed: the turn ends, and the conversation
-                        // takes its cache and its drafter back.
-                        self.engine.cancel(id);
-                        let _ = self.take_back(is_dspark);
-                        return Err(e.clone());
+                        err = Some(e.clone());
+                        break;
                     }
                     // The token that ends the turn is the end of the answer, not
                     // part of it.
@@ -861,23 +857,28 @@ impl Session {
                     from_gemm: rep.rows > 1,
                     is_prefill: false,
                 };
-                let text = utf8.push(&self.model.tk.token_bytes(em.token));
-                out.push_str(&text);
+                let text = &em.text;
+                out.push_str(text);
                 telem.tokens.push(tt);
                 on_token(Emitted {
                     id: em.token,
-                    text: &text,
+                    text,
                     telem: telem.tokens.last().unwrap(),
                     logprob: em.logprob,
                 });
+            }
+            if let Some(e) = err {
+                // The step failed: the turn ends, and the conversation
+                // takes its cache and its drafter back.
+                self.engine.cancel(id);
+                let _ = self.take_back(is_dspark);
+                return Err(e);
             }
             // A pass counts toward tokens-per-pass only when it emitted a token.
             if emitted > 0 {
                 telem.passes += 1;
             }
         }
-        let tail = utf8.finish();
-        out.push_str(&tail);
 
         // ---- what the turn left behind ----
         self.take_back(is_dspark)?;
@@ -1004,17 +1005,17 @@ impl Session {
         let mut total_bytes_weights = 0u64;
         let mut total_bytes_kv = 0u64;
         let start_pos = self.ctx.len();
+        let model = &self.model;
+        let p = self.engine.narrow_pool().unwrap_or(self.engine.pool());
+        let kv = self
+            .kv
+            .as_mut()
+            .expect("the cache is the engine's during a turn");
 
         for step in 0..decode_tokens {
             let td = Instant::now();
             let mut ss = crate::model::StepStats::default();
             let pos = start_pos + step;
-            let model = &self.model;
-            let p = self.engine.narrow_pool().unwrap_or(self.engine.pool());
-            let kv = self
-                .kv
-                .as_mut()
-                .expect("the cache is the engine's during a turn");
             model.forward(&mut st, kv, p, &[next], pos, &[0], &mut ss)?;
             decode_s += td.elapsed().as_secs_f64();
             total_bytes_weights += ss.bytes_weights;

@@ -660,13 +660,14 @@ fn engine_thread(
             }
             continue;
         }
+        let mut to_cancel = Vec::new();
         for em in engine.step() {
             let done = em.finish.is_some();
             let slot = em.slot;
             if let Some(tx) = routes.get(&slot) {
-                if tx.send(em).is_err() && !done {
+                if tx.send(em.clone()).is_err() && !done {
                     // The caller has gone: stop generating for it.
-                    engine.cancel(slot);
+                    to_cancel.push(slot);
                     routes.remove(&slot);
                     continue;
                 }
@@ -674,6 +675,9 @@ fn engine_thread(
             if done {
                 routes.remove(&slot);
             }
+        }
+        for slot in to_cancel {
+            engine.cancel(slot);
         }
         shared.steps.store(engine.decode_steps, Ordering::SeqCst);
         shared.rows.store(engine.decode_rows, Ordering::SeqCst);

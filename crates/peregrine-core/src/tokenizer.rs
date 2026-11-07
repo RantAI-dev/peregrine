@@ -188,6 +188,8 @@ pub struct Tokenizer {
     pub pre: PreType,
     pub n_vocab: usize,
     algo: TokenizerAlgo,
+    token_bytes_flat: Vec<u8>,
+    token_bytes_offsets: Vec<usize>,
 }
 
 /// The GPT-2 byte alphabet: every byte maps to a printable code point so that BPE
@@ -271,7 +273,7 @@ impl Tokenizer {
 
             let (byte_enc, byte_dec) = byte_alphabet();
             let n_vocab = pieces.len();
-            Ok(Tokenizer {
+            let mut tk = Tokenizer {
                 pieces,
                 ids,
                 specials,
@@ -290,7 +292,11 @@ impl Tokenizer {
                     byte_enc,
                     byte_dec,
                 }),
-            })
+                token_bytes_flat: Vec::new(),
+                token_bytes_offsets: Vec::new(),
+            };
+            tk.precompute_token_bytes();
+            Ok(tk)
         } else {
             // llama (SentencePiece)
             let pre_name = g.str("tokenizer.ggml.pre").unwrap_or("default");
@@ -367,7 +373,7 @@ impl Tokenizer {
                 .collect();
 
             let n_vocab = pieces.len();
-            Ok(Tokenizer {
+            let mut tk = Tokenizer {
                 pieces,
                 ids,
                 specials,
@@ -385,7 +391,11 @@ impl Tokenizer {
                     add_space_prefix,
                     remove_extra_whitespaces,
                 }),
-            })
+                token_bytes_flat: Vec::new(),
+                token_bytes_offsets: Vec::new(),
+            };
+            tk.precompute_token_bytes();
+            Ok(tk)
         }
     }
 
@@ -442,7 +452,7 @@ impl Tokenizer {
             .collect();
 
         let n_vocab = pieces.len();
-        Tokenizer {
+        let mut tk = Tokenizer {
             pieces,
             ids,
             specials,
@@ -460,7 +470,11 @@ impl Tokenizer {
                 add_space_prefix,
                 remove_extra_whitespaces: false,
             }),
-        }
+            token_bytes_flat: Vec::new(),
+            token_bytes_offsets: Vec::new(),
+        };
+        tk.precompute_token_bytes();
+        tk
     }
 
     pub fn encode(&self, text: &str) -> Vec<u32> {
@@ -816,22 +830,50 @@ impl Tokenizer {
         }
     }
 
-    /// Raw bytes of one token, before UTF-8 validation.
-    pub fn token_bytes(&self, id: u32) -> Vec<u8> {
+    fn precompute_token_bytes(&mut self) {
+        let n = self.pieces.len();
+        let mut offsets = Vec::with_capacity(n + 1);
+        let mut flat = Vec::with_capacity(n * 8);
+        offsets.push(0);
         match &self.algo {
-            TokenizerAlgo::Bpe(bpe) => match self.pieces.get(id as usize) {
-                Some(p) => p
-                    .chars()
-                    .filter_map(|c| bpe.byte_dec.get(&c).copied())
-                    .collect(),
-                None => Vec::new(),
-            },
-            TokenizerAlgo::Spm(spm) => spm
-                .decoded_pieces
-                .get(id as usize)
-                .cloned()
-                .unwrap_or_default(),
+            TokenizerAlgo::Bpe(bpe) => {
+                for p in &self.pieces {
+                    for c in p.chars() {
+                        if let Some(&b) = bpe.byte_dec.get(&c) {
+                            flat.push(b);
+                        }
+                    }
+                    offsets.push(flat.len());
+                }
+            }
+            TokenizerAlgo::Spm(spm) => {
+                for piece in &spm.decoded_pieces {
+                    flat.extend_from_slice(piece);
+                    offsets.push(flat.len());
+                }
+            }
         }
+        self.token_bytes_flat = flat;
+        self.token_bytes_offsets = offsets;
+    }
+
+    /// Borrow the precomputed byte representation of token `id`.
+    #[inline]
+    pub fn token_bytes_ref(&self, id: u32) -> &[u8] {
+        let i = id as usize;
+        if i + 1 < self.token_bytes_offsets.len() {
+            let start = self.token_bytes_offsets[i];
+            let end = self.token_bytes_offsets[i + 1];
+            &self.token_bytes_flat[start..end]
+        } else {
+            &[]
+        }
+    }
+
+    /// Raw bytes of one token, before UTF-8 validation.
+    #[inline]
+    pub fn token_bytes(&self, id: u32) -> Vec<u8> {
+        self.token_bytes_ref(id).to_vec()
     }
 
     pub fn decode(&self, ids: &[u32]) -> String {
@@ -839,7 +881,7 @@ impl Tokenizer {
             TokenizerAlgo::Bpe(_) => {
                 let mut bytes = Vec::new();
                 for &id in ids {
-                    bytes.extend_from_slice(&self.token_bytes(id));
+                    bytes.extend_from_slice(self.token_bytes_ref(id));
                 }
                 String::from_utf8_lossy(&bytes).into_owned()
             }
@@ -847,11 +889,11 @@ impl Tokenizer {
                 let mut bytes = Vec::new();
                 let mut remove_space = spm.add_space_prefix;
                 for &id in ids {
-                    let piece_bytes = self.token_bytes(id);
+                    let piece_bytes = self.token_bytes_ref(id);
                     let slice = if remove_space && piece_bytes.first() == Some(&b' ') {
                         &piece_bytes[1..]
                     } else {
-                        &piece_bytes[..]
+                        piece_bytes
                     };
                     remove_space = false;
                     bytes.extend_from_slice(slice);
@@ -934,14 +976,14 @@ pub struct Utf8Stream {
 }
 
 impl Utf8Stream {
-    /// Feed one token's bytes; returns whatever is now a complete UTF-8 prefix.
-    pub fn push(&mut self, bytes: &[u8]) -> String {
+    /// Feed one token's bytes into `out`, clearing `out` first; appends whatever is now a complete UTF-8 prefix.
+    pub fn push_to(&mut self, bytes: &[u8], out: &mut String) {
+        out.clear();
         self.pending.extend_from_slice(bytes);
         match std::str::from_utf8(&self.pending) {
             Ok(s) => {
-                let out = s.to_string();
+                out.push_str(s);
                 self.pending.clear();
-                out
             }
             Err(e) => {
                 let good = e.valid_up_to();
@@ -952,17 +994,41 @@ impl Utf8Stream {
                     None => good,
                     Some(_) => self.pending.len(),
                 };
-                let out = String::from_utf8_lossy(&self.pending[..keep]).into_owned();
+                for chunk in self.pending[..keep].utf8_chunks() {
+                    out.push_str(chunk.valid());
+                    if !chunk.invalid().is_empty() {
+                        out.push('\u{FFFD}');
+                    }
+                }
                 self.pending.drain(..keep);
-                out
             }
         }
     }
 
+    /// Flush anything left at end of generation into `out`.
+    pub fn finish_to(&mut self, out: &mut String) {
+        if !self.pending.is_empty() {
+            for chunk in self.pending.utf8_chunks() {
+                out.push_str(chunk.valid());
+                if !chunk.invalid().is_empty() {
+                    out.push('\u{FFFD}');
+                }
+            }
+            self.pending.clear();
+        }
+    }
+
+    /// Feed one token's bytes; returns whatever is now a complete UTF-8 prefix.
+    pub fn push(&mut self, bytes: &[u8]) -> String {
+        let mut out = String::new();
+        self.push_to(bytes, &mut out);
+        out
+    }
+
     /// Flush anything left at end of generation, lossily.
     pub fn finish(&mut self) -> String {
-        let out = String::from_utf8_lossy(&self.pending).into_owned();
-        self.pending.clear();
+        let mut out = String::new();
+        self.finish_to(&mut out);
         out
     }
 }

@@ -108,7 +108,7 @@ fn engine_tokens_with(model: &Arc<Model>, prompt: &[u32], cfg: &SlotCfg, kv: KvP
     let mut out = Vec::new();
     while e.active() > 0 {
         for em in e.step() {
-            if let Some(Finish::Error(err)) = em.finish {
+            if let Some(Finish::Error(err)) = &em.finish {
                 panic!("engine: {err}");
             }
             assert_eq!(em.slot, id);
