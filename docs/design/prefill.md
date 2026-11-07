@@ -352,6 +352,8 @@ points): a linear + quadratic fit gives, at p = 512, **≈ 96 % linear**
 
 ### Gap 1 — the k-quant GEMM extracts half the MACs per instruction (≈ 76 % of the prefill)
 
+> **Correction (S3.4 design, docs/design/s3.4.md §2.5–2.6):** the 64-MACs-per-`vpmaddubsw` figure is llama.cpp's AVX-512 kernel. On AVX2 both kernels get 32. The gap there comes from amortising the scale and fold over eight output columns, and from activation traffic: the row-at-a-time path re-reads the activation codes for every output row.
+
 Peregrine's matmul is 2.92 s; llama.cpp's *entire* prompt is 1.98 s. Per core:
 Peregrine 24.6 G int8 MAC/s, llama.cpp ≈ 40 G MAC/s (its 1-thread prompt rate is
 44.7 tok/s = 44.3 G MAC/s in total, of which ~90 % is matmul).
