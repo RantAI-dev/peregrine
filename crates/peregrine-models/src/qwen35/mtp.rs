@@ -35,7 +35,8 @@ pub struct Mtp {
     head_norm: TensorInfo,
     tok_embd: TensorInfo,
     head: TensorInfo,
-    rot: Rotation,
+    /// The file's rotation, when it has one: a plain Qwen 3.5 file has none.
+    rot: Option<Rotation>,
     signs_d_model: Vec<f32>,
     hc: HybridCfg,
 }
@@ -59,8 +60,8 @@ impl Mtp {
         il: usize,
         tok_embd: &TensorInfo,
         head: &TensorInfo,
-        rot: &Rotation,
-        signs_d_model: &[f32],
+        rot: Option<&Rotation>,
+        signs_d_model: Option<&[f32]>,
         hc: &HybridCfg,
     ) -> Result<Mtp, String> {
         let get =
@@ -98,8 +99,8 @@ impl Mtp {
             head_norm,
             tok_embd: tok_embd.clone(),
             head: head.clone(),
-            rot: rot.clone(),
-            signs_d_model: signs_d_model.to_vec(),
+            rot: rot.cloned(),
+            signs_d_model: signs_d_model.map_or_else(Vec::new, <[f32]>::to_vec),
             hc: *hc,
         };
         for t in [&m.eh_proj, &m.q, &m.k, &m.v, &m.o, &m.gate, &m.up, &m.down] {
@@ -134,15 +135,8 @@ impl MtpHead for Mtp {
         let c = *cfg;
         let hc = self.hc;
         let draft_vocab = options::get().mtp_vocab.min(c.n_vocab) / 16 * 16;
-        let tacts = (0..MTP_MAX_ROWS)
-            .map(|_| {
-                let mut a = QuantAct::with_capacity(c.d_model);
-                a.ternary = true;
-                a.tb_span = hc.tb_span;
-                a.ptq1 = false;
-                a
-            })
-            .collect();
+        // The head's activations: the ternary layout for a Bonsai 2 head, the ordinary
+        // one for a plain Qwen 3.5 file's.
         let keep_f32 = [
             &self.eh_proj,
             &self.q,
@@ -152,9 +146,20 @@ impl MtpHead for Mtp {
             &self.gate,
             &self.up,
             &self.down,
+            &self.head,
         ]
         .iter()
         .any(|t| matches!(t.kind, Format::F32 | Format::F16 | Format::BF16));
+        let tacts = (0..MTP_MAX_ROWS)
+            .map(|_| {
+                let mut a = QuantAct::with_capacity(c.d_model);
+                a.ternary = hc.ternary;
+                a.tb_span = hc.tb_span;
+                a.ptq1 = false;
+                a.keep_f32 = keep_f32;
+                a
+            })
+            .collect();
         let act_layout = ActLayout {
             keep_f32,
             ..Default::default()
@@ -215,7 +220,10 @@ impl MtpHead for Mtp {
         // [enorm(e) | hnorm(h)] · eh_proj
         for b in 0..nb {
             blocks::embed::embed(&self.tok_embd, w, tokens[b], &mut inner.e, stats);
-            self.rot.rotate_embedding(&mut inner.e, &self.signs_d_model);
+            // A file with no rotation uses its embedding rows as they are.
+            if let Some(rot) = &self.rot {
+                rot.rotate_embedding(&mut inner.e, &self.signs_d_model);
+            }
             let (lo, hi) = inner.cat.split_at_mut(b * 2 * d + d);
             blocks::norm::rmsnorm_into(
                 w,
@@ -420,18 +428,30 @@ impl MtpHead for Mtp {
         blocks::norm::rmsnorm_into(w, &self.head_norm, c.eps, &inner.st.x[..d], &mut inner.y);
         let dv = inner.draft_vocab;
         let rows = dv.min(self.head.dims[1] as usize) / 16 * 16;
-        self.rot.rotate_rows(
-            &mut inner.hs.rot,
-            inner.hs.rot_w,
-            &mut inner.tacts,
-            &inner.y,
-            d,
-            1,
-            None,
-            1 >= ROW_PARALLEL && pool.width() > 1,
-            pool,
-            stats,
-        );
+        match &self.rot {
+            Some(rot) => rot.rotate_rows(
+                &mut inner.hs.rot,
+                inner.hs.rot_w,
+                &mut inner.tacts,
+                &inner.y,
+                d,
+                1,
+                None,
+                1 >= ROW_PARALLEL && pool.width() > 1,
+                pool,
+                stats,
+            ),
+            // No rotation: the row is quantised as it is.
+            None => blocks::rotate::fill_rows(
+                &mut inner.tacts,
+                &inner.y,
+                d,
+                1,
+                1 >= ROW_PARALLEL && pool.width() > 1,
+                pool,
+                stats,
+            ),
+        }
         blocks::linear::matmul_group(
             w,
             &[MatJob {

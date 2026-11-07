@@ -2309,4 +2309,74 @@ mod tests {
         let w = [0u8; 128];
         dot_scalar(Format::F32, &w, &a);
     }
+    #[test]
+    fn activation_quantiser_clamps_to_pm_127_so_sign_trick_pairs_stay_under_i16_max() {
+        // Decision 5: A Q8_0 weight of -128 makes `sign_epi8(w, w)` give 128 (unsigned byte).
+        // If an activation were allowed to quantise to -128, the sign trick would map it to 128 unsigned.
+        // Then a `vpmaddubsw` pair of two adjacent products would reach:
+        //   128 * 128 + 128 * 128 = 32768, which is one past i16::MAX (32767) and silently saturates.
+        // Because `QuantAct::fill` and `fill_scalar` clamp activations to ±127 rather than [-128, 127],
+        // the worst-case pair is:
+        //   128 * 127 + 128 * 127 = 32512 <= i16::MAX (headroom of 255).
+        let mut x = vec![0.0f32; 256];
+        for (i, v) in x.iter_mut().enumerate() {
+            *v = if i % 2 == 0 { -1e9 } else { 1e9 };
+        }
+        x[0] = -128.0;
+        x[1] = -127.0;
+        x[2] = 127.0;
+        x[3] = 128.0;
+
+        // Test scalar path
+        let mut a_scalar = QuantAct::with_capacity(256);
+        a_scalar.fill_scalar(&x);
+        for &q in &a_scalar.q {
+            assert!(
+                (-127..=127).contains(&q),
+                "scalar q contains {q}, must clamp to [-127, 127]"
+            );
+        }
+        for &q in &a_scalar.qk {
+            assert!(
+                (-127..=127).contains(&q),
+                "scalar qk contains {q}, must clamp to [-127, 127]"
+            );
+        }
+
+        // Test general fill path (which uses vector on x86 if available)
+        let mut a_vec = QuantAct::with_capacity(256);
+        a_vec.fill(&x);
+        for &q in &a_vec.q {
+            assert!(
+                (-127..=127).contains(&q),
+                "vector q contains {q}, must clamp to [-127, 127]"
+            );
+        }
+        for &q in &a_vec.qk {
+            assert!(
+                (-127..=127).contains(&q),
+                "vector qk contains {q}, must clamp to [-127, 127]"
+            );
+        }
+
+        // Verify the sign trick's arithmetic bounds:
+        let worst_w = -128i8;
+        // In the sign trick, w is multiplied by sign_epi8(a, a) or sign_epi8(w, w):
+        // (-128i8).wrapping_neg() is -128 as i8, which as unsigned u8 is 128.
+        let w_abs = (worst_w as i16).unsigned_abs() as u32; // 128
+        let max_act_abs = 127u32;
+        let worst_pair = 2 * (w_abs * max_act_abs);
+        assert_eq!(worst_pair, 32512);
+        assert!(
+            worst_pair <= i16::MAX as u32,
+            "worst-case pair {worst_pair} must stay under i16::MAX"
+        );
+
+        let saturated_pair = 2 * (w_abs * 128);
+        assert_eq!(saturated_pair, 32768);
+        assert!(
+            saturated_pair > i16::MAX as u32,
+            "if activation reached -128 (magnitude 128), pair would overflow i16::MAX"
+        );
+    }
 }

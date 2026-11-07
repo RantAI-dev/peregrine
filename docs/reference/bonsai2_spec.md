@@ -282,6 +282,32 @@ x0  = row * signs[n_embd]                # "h = s * (H z)"
 
 (The KV-cache "attn_rot" Hadamard in `llama-kv-cache.cpp` activates only for quantized KV cache types. It is off with the default f16 KV, so ignore it.)
 
+### 4.1 A plain Qwen 3.5 file has no rotation at all
+
+The rotation above is a PrismML/Bonsai 2 thing, not a Qwen 3.5 thing. Upstream's own `qwen35`
+files — what `conversion/qwen.py` writes for `Qwen/Qwen3.5-9B` — carry none of the
+`prism.hadamard.*` keys, and llama.cpp v0.9.0 reads them as "no rotation"
+(`llama_model_base::load_hparams_hadamard`: the whole block is behind `prism.hadamard.version`,
+which the plain files do not have). Their weights are used as they are, and so is their
+embedding table.
+
+Two more differences come with a plain file, and both are the converter's doing
+(`conversion/qwen.py`, `_LinearAttentionVReorderBase`):
+
+- The value heads are in the **tiled** order, not the grouped one: the converter folds the
+  permutation into `attn_qkv`, `attn_gate`, `ssm_beta`, `ssm_alpha`, `ssm_a`, `ssm_dt.bias`,
+  `ssm_conv1d` and `ssm_out`. A Bonsai 2 file keeps the grouped order and says so with
+  `prism.hadamard.gdn_v_grouped`, and the engine permutes the activation instead.
+- The matmuls are ordinary quantised matrices (Q8_0, Q4_K, ...), not ternary ones, so the
+  activation layout is the ordinary one (int8 codes with one scale per 32) rather than the
+  ternary one.
+
+The MRoPE sections (`qwen35.rope.dimension_sections`) are the one thing a plain file has and
+Bonsai 2 files also carry: llama.cpp's `qwen35` loader requires them, and the converter writes
+`[11, 11, 10, 0]` when a checkpoint omits them. For a text-only model they change nothing —
+all four position streams are the same, so the interleaved MRoPE is the NeoX rope — but the
+key has to be there.
+
 ---
 
 ## 5. PQ2_0 / PTQ1_0 formats and kernels

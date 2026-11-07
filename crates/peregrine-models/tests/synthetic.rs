@@ -16,8 +16,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{
-    write_dense, write_gemma3, write_gemma3_named, write_hybrid, write_hybrid_accepting, write_moe,
-    write_rope_dense, Dense, Gemma3Config, MoeShape, Rope,
+    write_dense, write_gemma3, write_gemma3_named, write_hybrid, write_hybrid_accepting,
+    write_hybrid_plain, write_hybrid_plain_mtp, write_moe, write_phi3, write_rope_dense, Dense,
+    Gemma3Config, MoeShape, Rope,
 };
 
 const PROMPT: [u32; 24] = [
@@ -143,11 +144,20 @@ fn check_model(model: Model, name: &str) -> Option<String> {
         }
     }
     let tier = peregrine_core::cpu::tier_name();
+    // AVX-VNNI-256 is mathematically bit-identical to AVX2 and aliases to its goldens (S2.6 Decision 1).
+    let golden_tier = if tier == "x86_64-avx2-vnni256" {
+        "x86_64-avx2"
+    } else {
+        tier.as_str()
+    };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden/synthetic")
-        .join(&tier);
+        .join(golden_tier);
     let gpath = dir.join(format!("{name}.golden"));
-    if std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record") && !gpath.exists() {
+    if std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record")
+        && tier != "x86_64-avx2-vnni256"
+        && !gpath.exists()
+    {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&gpath, &a).unwrap();
         eprintln!("synthetic: recorded {name} ({tier})");
@@ -1202,4 +1212,398 @@ fn a_qwen3moe_file_without_the_expert_width_is_refused() {
         "refused without naming the key: {err}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------------------------------------ phi3 (S2.4c) --
+
+/// Phi-3 / Phi-4: fused QKV projection, fused gate/up feed-forward, RMSNorm,
+/// NeoX rotary pairing, and no biases.
+#[test]
+fn phi3_models_in_f16_and_q8_0() {
+    let dir = tmpdir("phi3");
+    let mut failures = Vec::new();
+    let formats = [Format::F16, Format::Q8_0];
+    for (i, &fmt) in formats.iter().enumerate() {
+        let path = write_phi3(&dir, fmt, 1000 + i as u64, Dense::default());
+        failures.extend(check(&path, &format!("phi3-{}", fmt.label())));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic phi3 models failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn phi3_batching_is_invariant_across_slots() {
+    let perrow = !peregrine_core::options::get().mix;
+    let dir = tmpdir("phi3-batch");
+    let mut failures = Vec::new();
+    let path = write_phi3(&dir, Format::Q8_0, 1010, Dense::default());
+    let model = load_arc(&path);
+    failures.extend(batching_failures(&model, "phi3-Q8_0", perrow));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "phi3 batching invariance failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn phi3_synthetic_file_runs_in_llama_cpp() {
+    let compare_bin = PathBuf::from("/tmp/compare_gemma3");
+    if !compare_bin.exists() {
+        let llama_so = Path::new("/tmp/llama.cpp/build/bin/libllama.so");
+        if !llama_so.exists() {
+            eprintln!("llama.cpp not found at {}, skipping", llama_so.display());
+            return;
+        }
+    }
+    let dir = tmpdir("phi3-llama-cpp");
+    let path = write_phi3(&dir, Format::F16, 1020, Dense::default());
+    let logits_path = dir.join("llama_logits.bin");
+
+    let prompt = "In a quiet valley surrounded by mountains";
+    let n_predict = 16;
+
+    let output = std::process::Command::new(&compare_bin)
+        .args([
+            path.to_str().unwrap(),
+            &n_predict.to_string(),
+            prompt,
+            logits_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to execute compare_gemma3");
+
+    if !output.status.success() {
+        eprintln!(
+            "compare_gemma3 failed on synthetic phi3 model: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let llama_stdout = String::from_utf8_lossy(&output.stdout);
+
+    let llama_tokens: Vec<u32> = llama_stdout
+        .lines()
+        .find(|l| l.starts_with("TOKENS:"))
+        .expect("TOKENS: line")
+        .strip_prefix("TOKENS:")
+        .unwrap()
+        .split_whitespace()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(llama_tokens.len(), n_predict);
+
+    let llama_logits_bytes = std::fs::read(&logits_path).expect("read logits");
+    let llama_logits: Vec<f32> = llama_logits_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_ne_bytes(*b))
+        .collect();
+
+    let model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
+    let prompt_toks = model.tk.encode(prompt);
+
+    let pool = Pool::new(1);
+    let mut st = model.new_state(128, prompt_toks.len() + n_predict, 256, 1);
+    let mut kv = model.new_cache(KvPrec::F16, 256);
+    let mut ss = StepStats::default();
+    let want: Vec<usize> = vec![prompt_toks.len() - 1];
+    model
+        .forward(&mut st, &mut kv, &pool, &prompt_toks, 0, &want, &mut ss)
+        .unwrap();
+
+    let pere_logits = st.logits_row(0, model.cfg.n_vocab).to_vec();
+    assert_eq!(pere_logits.len(), llama_logits.len());
+
+    let mut max_abs_err = 0.0f32;
+    let mut max_rel_err = 0.0f32;
+    let mut sum_sq_diff = 0.0f64;
+    let mut sum_sq_ref = 0.0f64;
+    for (p, l) in pere_logits.iter().zip(&llama_logits) {
+        let abs = (p - l).abs();
+        max_abs_err = max_abs_err.max(abs);
+        let rel = abs / l.abs().max(1e-5);
+        max_rel_err = max_rel_err.max(rel);
+        sum_sq_diff += ((p - l) as f64).powi(2);
+        sum_sq_ref += (*l as f64).powi(2);
+    }
+    let rel_l2_err = (sum_sq_diff.sqrt() / sum_sq_ref.sqrt()) as f32;
+    eprintln!(
+        "Phi3 last-position logits: max_abs_err = {:e}, max_rel_err = {:e}, rel_l2_err = {:e}",
+        max_abs_err, max_rel_err, rel_l2_err
+    );
+    assert!(max_abs_err < 0.05, "logits error too high: {max_abs_err}");
+
+    let mut pere_tokens = Vec::new();
+    let mut next = argmax(&pere_logits);
+    pere_tokens.push(next);
+    for step in 1..n_predict {
+        let pos = prompt_toks.len() + step - 1;
+        model
+            .forward(&mut st, &mut kv, &pool, &[next], pos, &[0], &mut ss)
+            .unwrap();
+        next = argmax(st.logits_row(0, model.cfg.n_vocab));
+        pere_tokens.push(next);
+    }
+
+    assert_eq!(
+        pere_tokens, llama_tokens,
+        "greedy tokens diverged between Peregrine and llama.cpp"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_phi3_file_with_longrope_factors_is_refused() {
+    use support::vocab::add_tokenizer_metadata;
+    use support::writer::GgufWriter;
+
+    let dir = tmpdir("phi3-refuse");
+    let path = dir.join("phi3-longrope.gguf");
+    let mut w = GgufWriter::new();
+    w.str("general.architecture", "phi3");
+    w.str("general.name", "synthetic-phi3-longrope");
+    w.u32("phi3.block_count", 2);
+    w.u32("phi3.embedding_length", 256);
+    w.u32("phi3.attention.head_count", 8);
+    w.u32("phi3.attention.head_count_kv", 4);
+    w.u32("phi3.feed_forward_length", 512);
+    w.u32("phi3.vocab_size", 320);
+    w.add_tensor(
+        "rope_factors_long.weight",
+        &[16],
+        Format::F32,
+        vec![0u8; 16 * 4],
+    );
+    add_tokenizer_metadata(&mut w, "llama-bpe");
+    w.write_to_file(&path).expect("write the test model");
+
+    let g = Gguf::open(&path).expect("open the test model");
+    let err = match peregrine_models::load(g) {
+        Ok(_) => panic!("the engine loaded a phi3 file with LongRoPE factors"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("LongRoPE"),
+        "refused without naming LongRoPE: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------- plain Qwen 3.5 (S2.2c) --
+
+/// A plain Qwen 3.5 file: the hybrid model without the Hadamard rotation, with ordinary
+/// quantised matmuls (F16, Q8_0) instead of the ternary ones.
+///
+/// This is the file upstream's converter writes for `Qwen/Qwen3.5-9B` (llama.cpp v0.9.0,
+/// `conversion/qwen.py`, `Qwen3_5TextModel`): no `prism.hadamard.*` metadata at all. It
+/// loads, gives finite logits, is bit-identical across runs and across 1, 2 and 4 threads,
+/// decodes greedily the same way twice, and matches its golden for the current tier.
+#[test]
+fn plain_qwen35_models_load_and_match_their_goldens() {
+    let dir = tmpdir("qwen35-plain");
+    let mut failures = Vec::new();
+    let formats = [Format::F16, Format::Q8_0];
+    for (i, &fmt) in formats.iter().enumerate() {
+        let path = write_hybrid_plain(&dir, fmt, 1000 + i as u64);
+        failures.extend(check(&path, &format!("qwen35-plain-{}", fmt.label())));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic plain qwen35 models failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The plain Qwen 3.5 file against llama.cpp v0.9.0's own `qwen35` implementation — the
+/// upstream oracle for this architecture.
+///
+/// The file is the F16 one: with the weights in f16 and the activations unquantised, both
+/// engines compute the same thing, and the greedy tokens must be the same. (The Q8_0 file
+/// quantises the activations to int8, and the two engines' rounding then differ by about
+/// an ulp of a logit — enough for a near-tie to flip, as it does for any quantised model.)
+#[test]
+fn plain_qwen35_synthetic_file_runs_in_llama_cpp() {
+    let compare_bin = PathBuf::from("/tmp/compare_gemma3");
+    if !compare_bin.exists() {
+        let llama_so = Path::new("/tmp/llama.cpp/build/bin/libllama.so");
+        if !llama_so.exists() {
+            eprintln!("llama.cpp not found at {}, skipping", llama_so.display());
+            return;
+        }
+    }
+    let dir = tmpdir("qwen35-plain-llama-cpp");
+    let path = write_hybrid_plain(&dir, Format::F16, 1000);
+    let logits_path = dir.join("llama_logits.bin");
+
+    let prompt = "In a quiet valley surrounded by mountains";
+    let n_predict = 8;
+
+    let output = std::process::Command::new(&compare_bin)
+        .args([
+            path.to_str().unwrap(),
+            &n_predict.to_string(),
+            prompt,
+            logits_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to execute compare_gemma3");
+
+    assert!(
+        output.status.success(),
+        "compare_gemma3 failed on the synthetic plain qwen35 model: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let llama_stdout = String::from_utf8_lossy(&output.stdout);
+
+    let llama_tokens: Vec<u32> = llama_stdout
+        .lines()
+        .find(|l| l.starts_with("TOKENS:"))
+        .expect("TOKENS: line")
+        .strip_prefix("TOKENS:")
+        .unwrap()
+        .split_whitespace()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(llama_tokens.len(), n_predict);
+
+    let llama_logits_bytes = std::fs::read(&logits_path).expect("read logits");
+    let llama_logits: Vec<f32> = llama_logits_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_ne_bytes(*b))
+        .collect();
+
+    let model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
+    let prompt_toks = model.tk.encode(prompt);
+    assert_eq!(prompt_toks.len(), 40, "prompt should be 40 tokens");
+
+    let pool = Pool::new(1);
+    let mut st = model.new_state(128, prompt_toks.len() + n_predict, 256, 1);
+    let mut kv = model.new_cache(KvPrec::F16, 256);
+    let mut ss = StepStats::default();
+    let want: Vec<usize> = vec![prompt_toks.len() - 1];
+    model
+        .forward(&mut st, &mut kv, &pool, &prompt_toks, 0, &want, &mut ss)
+        .unwrap();
+
+    let pere_logits = st.logits_row(0, model.cfg.n_vocab).to_vec();
+    assert_eq!(pere_logits.len(), llama_logits.len());
+
+    let mut max_abs_err = 0.0f32;
+    let mut sum_sq_diff = 0.0f64;
+    let mut sum_sq_ref = 0.0f64;
+    for (p, l) in pere_logits.iter().zip(&llama_logits) {
+        max_abs_err = max_abs_err.max((p - l).abs());
+        sum_sq_diff += ((p - l) as f64).powi(2);
+        sum_sq_ref += (*l as f64).powi(2);
+    }
+    let rel_l2_err = (sum_sq_diff.sqrt() / sum_sq_ref.sqrt()) as f32;
+    eprintln!("Last-position logits: max_abs_err = {max_abs_err:e}, rel_l2_err = {rel_l2_err:e}");
+    assert!(max_abs_err < 0.05, "logits error too high: {max_abs_err}");
+
+    let mut pere_tokens = Vec::new();
+    let mut next = argmax(&pere_logits);
+    pere_tokens.push(next);
+    for step in 1..n_predict {
+        let pos = prompt_toks.len() + step - 1;
+        model
+            .forward(&mut st, &mut kv, &pool, &[next], pos, &[0], &mut ss)
+            .unwrap();
+        next = argmax(st.logits_row(0, model.cfg.n_vocab));
+        pere_tokens.push(next);
+    }
+    eprintln!("llama.cpp greedy tokens ({llama_tokens:?})");
+    eprintln!("Peregrine greedy tokens ({pere_tokens:?})");
+
+    assert_eq!(
+        pere_tokens, llama_tokens,
+        "greedy tokens diverged between Peregrine and llama.cpp"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The plain Qwen 3.5 file with an MTP (NextN) block: the block is optional, and when it
+/// is there its speculation must be lossless — the token stream with the MTP on is the one
+/// without it.
+#[test]
+fn plain_qwen35_mtp_variant_speculates_losslessly() {
+    use peregrine_core::serve::{Engine, Finish, SlotCfg};
+    use std::sync::Arc;
+
+    let dir = tmpdir("qwen35-plain-mtp");
+    let mut failures = Vec::new();
+    for (i, fmt) in [Format::F16, Format::Q8_0].into_iter().enumerate() {
+        // The MTP variants have their own seed base, as the Bonsai 2 ones do.
+        let path = write_hybrid_plain_mtp(&dir, fmt, 3000 + i as u64);
+        let name = format!("qwen35-plain-mtp-{}", fmt.label());
+        failures.extend(check(&path, &name));
+        let model = match Gguf::open(&path).and_then(peregrine_models::load) {
+            Ok(m) => Arc::new(m),
+            Err(e) => {
+                failures.push(format!("{name}: does not load: {e}"));
+                continue;
+            }
+        };
+        if !model.has_mtp() {
+            failures.push(format!("{name}: loaded without an MTP block"));
+            continue;
+        }
+        let decode = |spec: bool| -> Result<(Vec<u32>, u64), String> {
+            let mut e = Engine::new(model.clone(), 4, 512, 1, KvPrec::F16, 0);
+            if !spec {
+                e.disable_mtp();
+            }
+            if e.speculates() != spec {
+                return Err(format!("speculation {spec} was not configured"));
+            }
+            let cfg = SlotCfg {
+                temperature: 0.0,
+                max_tokens: 24,
+                ..Default::default()
+            };
+            e.admit(PROMPT.to_vec(), cfg).map_err(|(_, e)| e)?;
+            let mut toks = Vec::new();
+            while e.active() > 0 {
+                for em in e.step() {
+                    if let Some(Finish::Error(e)) = em.finish {
+                        return Err(e);
+                    }
+                    toks.push(em.token);
+                }
+            }
+            Ok((toks, e.spec_drafts))
+        };
+        match (decode(true), decode(false)) {
+            (Ok((with, drafts)), Ok((without, _))) => {
+                if drafts == 0 {
+                    failures.push(format!("{name}: the drafter never ran"));
+                }
+                if with.len() != 24 {
+                    failures.push(format!("{name}: {} tokens, want 24", with.len()));
+                }
+                if with != without {
+                    failures.push(format!("{name}: MTP speculation changed the tokens"));
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => failures.push(format!("{name}: {e}")),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic plain qwen35 MTP models failed:\n{}",
+        failures.join("\n")
+    );
 }

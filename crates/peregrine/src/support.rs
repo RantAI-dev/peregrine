@@ -49,7 +49,7 @@ pub fn support_text() -> String {
     }
 
     let _ = writeln!(out, "CPU tiers:");
-    let _ = writeln!(out, "  scalar, avx2, avx512");
+    let _ = writeln!(out, "  scalar, avx2, avx-vnni, avx512");
 
     let _ = writeln!(out, "tokenizers:");
     let _ = writeln!(
@@ -77,8 +77,9 @@ pub fn support_markdown() -> String {
                 "llama" => "Llama",
                 "qwen2" => "Qwen 2",
                 "qwen3" => "Qwen 3",
-                "qwen35" => "Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP)",
+                "qwen35" => "Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP; plain file: synthetic check, real file pending)",
                 "gemma3" => "Gemma 3",
+                "phi3" => "Phi-3 / Phi-4 (synthetic check; real file pending)",
                 "qwen3moe" => "Qwen 3 MoE (synthetic check; real file pending)",
                 other => other,
             };
@@ -92,7 +93,8 @@ pub fn support_markdown() -> String {
     let fmt_str = fmt_labels.join(", ");
 
     // 3. CPUs
-    let cpu_str = "x86-64 AVX2, AVX-512 (VNNI, GFNI, VBMI); others through scalar code";
+    let cpu_str =
+        "x86-64 AVX2, AVX-VNNI (256-bit), AVX-512 (VNNI, GFNI, VBMI); others through scalar code";
 
     // 4. Tokenizers
     let tok_str = "GPT-2 byte-level BPE, SentencePiece (llama)";
