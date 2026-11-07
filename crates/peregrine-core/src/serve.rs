@@ -17,7 +17,7 @@
 // read (`Caches::Mapped` gives a prompt chunk's rows one cache; before it, a step was one or the other,
 // because a chunk and a decode row needed two mutable borrows of the same cache list). Chunking is what keeps a
 // long prompt from stopping everyone else (Sarathi-Serve's argument, which matters more here than on a GPU:
-// a 2,000-token prompt is about 20 seconds of this machine, and `PREFILL_CHUNK` bounds the stall to about one
+// a 2,000-token prompt is about 20 seconds of this machine, and `PEREGRINE_PREFILL_CHUNK` bounds the stall to about one
 // second).
 //
 // # What it does not do
@@ -35,10 +35,6 @@ use crate::prefix::PrefixStore;
 use crate::tokenizer::Utf8Stream;
 use std::sync::Arc;
 
-/// Prompt tokens fed in one step. The stall this imposes on everyone else's decode is one chunk's prefill,
-/// about a second on the reference machine's 4B model.
-pub const PREFILL_CHUNK: usize = 64;
-
 /// The mixed schedule (prompt tokens and decode rows in one pass); `PEREGRINE_MIX=0` turns it off.
 fn mixed() -> bool {
     use std::sync::OnceLock;
@@ -46,9 +42,24 @@ fn mixed() -> bool {
     *M.get_or_init(|| crate::options::get().mix)
 }
 
+/// The prompt tokens one weight pass carries (`PEREGRINE_PREFILL_CHUNK`).
+///
+/// The engine prefills a prompt in pieces of this size, so a long prompt is read in several passes.
+/// Smaller pieces keep the activation scratch small (it stays in cache) and read the weights more
+/// often; the tokens do not depend on it — `crates/peregrine-models/tests/prefill_chunk.rs` pins
+/// that.
+fn prefill_chunk() -> usize {
+    crate::options::get().prefill_chunk
+}
+
 /// Users served at once by default. Above the machine's roofline ridge (about seven rows) another user adds no
 /// throughput, and every user's own tokens arrive more slowly, so this is deliberately below it.
 pub const DEFAULT_MAX_SLOTS: usize = 4;
+
+/// The scratch's width in prompt tokens: the width the engine's scratch had before the prefill chunk
+/// became an option. The scratch holds the speculation's rows as well as the prompt's, so a narrower
+/// chunk must not narrow the drafts.
+const SCRATCH_CHUNK: usize = 64;
 
 /// Why a slot stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,6 +344,9 @@ pub struct Engine {
     max_slots: usize,
     max_ctx: usize,
     kv_prec: KvPrec,
+    /// The prompt tokens one weight pass carries: the engine prefills a prompt in pieces of this
+    /// size (`PEREGRINE_PREFILL_CHUNK`).
+    prefill_chunk: usize,
     /// Caches of finished requests, so a prompt that shares a beginning with one of them (the system prompt
     /// every user of a deployment sends, the transcript a code agent extends) is not prefilled again. Shared
     /// across slots, which is where it pays most: one user's work serves the next.
@@ -410,6 +424,7 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// The engine with the process's prefill chunk (`PEREGRINE_PREFILL_CHUNK`).
     pub fn new(
         model: Arc<Model>,
         threads: usize,
@@ -418,16 +433,47 @@ impl Engine {
         kv_prec: KvPrec,
         prefix_cache_bytes: usize,
     ) -> Engine {
+        Self::new_with_chunk(
+            model,
+            threads,
+            max_ctx,
+            max_slots,
+            kv_prec,
+            prefix_cache_bytes,
+            prefill_chunk(),
+        )
+    }
+
+    /// The engine with a chosen prefill chunk: the prompt tokens one weight pass carries.
+    ///
+    /// The chunk is how the prompt is *read*, not what it produces: the tokens and the logits
+    /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that). It is
+    /// clamped to the matmul scratch's row limit, and a mixed step takes fewer rows when the
+    /// other users' decode rows need the room.
+    pub fn new_with_chunk(
+        model: Arc<Model>,
+        threads: usize,
+        max_ctx: usize,
+        max_slots: usize,
+        kv_prec: KvPrec,
+        prefix_cache_bytes: usize,
+        prefill_chunk: usize,
+    ) -> Engine {
         let c = model.cfg;
         let max_slots = max_slots.max(1);
+        // The prompt tokens one weight pass carries.
+        let prefill_chunk = prefill_chunk.clamp(1, crate::options::MAX_PREFILL_CHUNK);
         // One position more than the model's own context is allowed: the engine
         // stops a turn one position short of a full cache, so a caller that
         // wants the whole context asks for one more (ADR 0007: a conversation
         // runs on a one-slot engine).
         let max_ctx = max_ctx.clamp(32, c.ctx_train + 1);
         // The widest batch is a prefill chunk beside one row per slot (a mixed step); every decode row wants
-        // logits, a prefill chunk wants none.
-        let max_batch = PREFILL_CHUNK + max_slots;
+        // logits, a prefill chunk wants none. The scratch keeps the width it had before the chunk became an
+        // option, because it also holds the speculation's rows: a narrower chunk must not narrow the drafts.
+        // The matmul's row limit caps the whole thing, and a chunk beside the decode rows must fit in it.
+        let max_batch =
+            (prefill_chunk.max(SCRATCH_CHUNK) + max_slots).min(crate::blocks::linear::MAX_BATCH);
         // An MTP verification pass wants logits for two rows, whatever the slot count.
         let use_mtp = model.has_mtp() && mtp_enabled() && mixed();
         let max_logit_rows = if use_mtp { max_slots.max(2) } else { max_slots };
@@ -447,6 +493,7 @@ impl Engine {
             max_slots,
             max_ctx,
             kv_prec,
+            prefill_chunk,
             prefixes: PrefixStore::new(prefix_cache_bytes),
             next_id: 1,
             stats: StepStats::default(),
@@ -1001,7 +1048,7 @@ impl Engine {
     }
 
     /// One scheduler iteration. Mixed (the default): one token for every ready user and, in the same weight pass,
-    /// up to `PREFILL_CHUNK` prompt tokens of the users still being prefilled (Sarathi-Serve's stall-free batching:
+    /// up to `PEREGRINE_PREFILL_CHUNK` prompt tokens of the users still being prefilled (Sarathi-Serve's stall-free batching:
     /// nobody's decode waits behind a prompt, and the pass reads the weights once for both). `PEREGRINE_MIX=0`
     /// keeps the alternating schedule (a prompt chunk, or a decode step, never both). Returns what to send to each
     /// caller; an empty result with no active slots means there is nothing to do.
@@ -1057,7 +1104,11 @@ impl Engine {
         let dec: Vec<usize> = (0..self.slots.len())
             .filter(|&i| self.slots[i].ready())
             .collect();
-        let mut budget = PREFILL_CHUNK;
+        // The chunk, less the rows the decoders take: the whole step is one weight pass, and the
+        // matmul scratch holds at most `MAX_BATCH` rows.
+        let mut budget = self
+            .prefill_chunk
+            .min(self.state.max_batch.saturating_sub(dec.len()));
         let mut pre: Vec<(usize, usize)> = Vec::new(); // (slot index, tokens taken)
         for (i, s) in self.slots.iter().enumerate() {
             if budget == 0 {
@@ -1195,7 +1246,7 @@ impl Engine {
         let before = self.stats;
         let s = &mut self.slots[i];
         let last = s.prompt.len() - 1;
-        let take = PREFILL_CHUNK.min(last - s.fed);
+        let take = self.prefill_chunk.min(last - s.fed);
         let chunk: Vec<u32> = s.prompt[s.fed..s.fed + take].to_vec();
         let start = s.fed;
         self.state.want_hidden = self.wants_hidden();

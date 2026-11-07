@@ -25,8 +25,8 @@
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::{KvCache, KvPrec};
 use peregrine_core::model::{Model, State, StepStats};
+use peregrine_core::options::PREFILL_CHUNK_DEFAULT;
 use peregrine_core::pool::Pool;
-use peregrine_core::serve::PREFILL_CHUNK;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
@@ -230,7 +230,7 @@ fn parse_args() -> Result<Args, String> {
     let mut base = None;
     let mut model = None;
     let mut threads = std::thread::available_parallelism().map_or(8, |n| n.get());
-    let mut prefill = PREFILL_CHUNK;
+    let mut prefill = PREFILL_CHUNK_DEFAULT;
     let mut kv = KvPrec::F16;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -265,7 +265,7 @@ fn parse_args() -> Result<Args, String> {
                      llama.cpp, the way `llama-perplexity --kl-divergence` does.\n\
                      \n\
                      --prefill is how many tokens the prefill is fed in at a time. The\n\
-                     default is the engine's own {PREFILL_CHUNK}. The result does not\n\
+                     default is the engine's own chunk ({PREFILL_CHUNK_DEFAULT}). The result does not\n\
                      depend on it: every row of a matmul is computed the same way,\n\
                      whatever else shares the call.\n\
                      \n\
@@ -363,7 +363,7 @@ impl Loaded {
         // The chunk starts at position 0 with an empty cache, exactly as llama.cpp
         // clears its KV cache between chunks. The prefill is fed in the engine's
         // own chunks: one matmul call takes at most `MAX_BATCH` rows, and the
-        // engine prefills in `PREFILL_CHUNK` pieces.
+        // engine prefills in `PEREGRINE_PREFILL_CHUNK` pieces.
         self.kv.clear();
         let mut p = 0usize;
         while p < n {

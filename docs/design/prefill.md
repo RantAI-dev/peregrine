@@ -36,6 +36,10 @@ at 2.07× from 1 to 12 threads).
 
 The third gap is the prefill chunk size: `PREFILL_CHUNK = 64` costs **9-11 %**
 (a 16-token chunk measures 167.7-168.8 tok/s against 150.7-156.3 tok/s at 64).
+That gap is closed by S3.5 step 1: the chunk is an option now
+(`PEREGRINE_PREFILL_CHUNK`, default 16), and the A/B that chose the default
+reproduced the 9-11 % (165.9 tok/s against 154.3 at 64, Llama-3.2-1B, 512-token
+prompt, 12 threads).
 
 ---
 
@@ -352,6 +356,8 @@ points): a linear + quadratic fit gives, at p = 512, **≈ 96 % linear**
 
 ### Gap 1 — the k-quant GEMM extracts half the MACs per instruction (≈ 76 % of the prefill)
 
+> **Correction (S3.4 design, docs/design/s3.4.md §2.5–2.6):** the 64-MACs-per-`vpmaddubsw` figure is llama.cpp's AVX-512 kernel. On AVX2 both kernels get 32. The gap there comes from amortising the scale and fold over eight output columns, and from activation traffic: the row-at-a-time path re-reads the activation codes for every output row.
+
 Peregrine's matmul is 2.92 s; llama.cpp's *entire* prompt is 1.98 s. Per core:
 Peregrine 24.6 G int8 MAC/s, llama.cpp ≈ 40 G MAC/s (its 1-thread prompt rate is
 44.7 tok/s = 44.3 G MAC/s in total, of which ~90 % is matmul).
@@ -420,6 +426,11 @@ at 15 % of its roof — it is activation locality and prefetcher stream count.
 **Fix for S3.5:** make the prefill chunk size a function of the model's activation
 size (and of the number of concurrent slots, which is why it is currently a
 constant), or make the kernel's activation layout stream-friendly.
+
+**Closed for the constant (S3.5 step 1):** the chunk is `PEREGRINE_PREFILL_CHUNK`
+now (default 16, was the constant 64 this note measured). What the note asks for
+next — a chunk that follows the model's activation size and the number of slots —
+is still open: the option takes one number for the whole process.
 
 ### Gap 4 — thread scheduling: load imbalance, not barriers (up to 16 %)
 
