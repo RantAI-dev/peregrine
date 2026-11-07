@@ -237,6 +237,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
             .unwrap_or(1e-6),
         rope_base: g.f32(&k("rope.freq_base")).unwrap_or(1e7),
         ctx_train: g.u32(&k("context_length")).unwrap_or(4096) as usize,
+        rope_yarn: None,
     };
     // The value heads are permuted from the grouped order to the tiled one only when the
     // file says so (`prism.hadamard.gdn_v_grouped`): a plain Qwen 3.5 file's converter

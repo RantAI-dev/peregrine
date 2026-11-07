@@ -10,18 +10,22 @@
 //! blocks' (`blocks::norm`, `blocks::attn`, `blocks::linear`), and the order is the dense
 //! family's.
 
-use std::time::Instant;
-
 use peregrine_core::blocks::linear::LinJob;
 use peregrine_core::blocks::par::Disjoint;
 use peregrine_core::gguf::TensorInfo;
-use peregrine_core::model::{Caches, Config, Linear, State, StepStats, Weights};
+use peregrine_core::model::{Config, Linear, State, StepStats, Weights};
 use peregrine_core::pool::Pool;
 
 /// The attention weights of one layer.
 ///
 /// The biases are Qwen2's (`None` for Qwen3 and for the mixture of experts), the per-head
 /// q/k norms are Qwen3's (`None` for Llama and Qwen2).
+#[cfg(any(
+    feature = "arch-llama",
+    feature = "arch-qwen",
+    feature = "arch-qwen3moe",
+    feature = "arch-phi3"
+))]
 pub(crate) struct AttnWeights {
     pub(crate) attn_norm: TensorInfo,
     pub(crate) wq: Linear,
@@ -39,12 +43,18 @@ pub(crate) struct AttnWeights {
 /// write, the attention, the output projection, and the residual.
 ///
 /// The rows are `nb` wide: `d_model` for the residual, `q_dim` for the attention's output.
+#[cfg(any(
+    feature = "arch-llama",
+    feature = "arch-qwen",
+    feature = "arch-qwen3moe",
+    feature = "arch-phi3"
+))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn attention_rows(
     w: &Weights,
     cfg: &Config,
     st: &mut State,
-    caches: &mut Caches<'_>,
+    caches: &mut peregrine_core::model::Caches<'_>,
     pool: &Pool,
     l: &AttnWeights,
     li: usize,
@@ -128,7 +138,7 @@ pub(crate) fn attention_rows(
         cfg.head_dim,
     );
 
-    let t_attn = Instant::now();
+    let t_attn = std::time::Instant::now();
     for (r0, len, c) in caches.runs(nb) {
         peregrine_core::blocks::attn::attend(
             cfg,

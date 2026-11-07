@@ -249,12 +249,20 @@ fn a_decode_step_allocates_nothing() {
         7005,
         Dense::default(),
     ));
+    // gpt-oss in Q8_0: attention sinks, the sliding window, YaRN, the experts' biases.
+    let gpt_oss = load(&support::models::write_gpt_oss(
+        &dir,
+        Format::Q8_0,
+        7006,
+        support::models::GptOssShape::default(),
+    ));
     for (name, model) in [
         ("qwen3-Q8_0", &dense),
         ("qwen35-PQ2_0", &hybrid),
         ("qwen3moe-Q8_0", &moe),
         ("gemma3-Q8_0", &gemma3),
         ("phi3-Q8_0", &phi3),
+        ("gpt-oss-Q8_0", &gpt_oss),
     ] {
         for threads in [1, 4] {
             // The f16 cache and the f32 one (the opt-in full-precision cache) must

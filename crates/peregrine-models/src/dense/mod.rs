@@ -1,7 +1,5 @@
 //! The dense transformer families: Llama, Qwen2 and Qwen3 (ADR 0006).
 
-pub(crate) mod layer;
-
 use std::time::Instant;
 
 use peregrine_core::arch::{ActLayout, Architecture, Family, Loaded};
@@ -12,7 +10,8 @@ use peregrine_core::model::{Caches, Config, Linear, State, StepStats, TileStore,
 use peregrine_core::pool::Pool;
 use peregrine_core::tokenizer::Tokenizer;
 
-use layer::AttnWeights;
+use crate::layer;
+use crate::layer::AttnWeights;
 
 /// The dense transformer architectures implemented by Peregrine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +277,7 @@ impl Dense {
                 .unwrap_or(if arch.is_phi3() { 1e-6 } else { 1e-5 }),
             rope_base: g.f32(&k("rope.freq_base")).unwrap_or(10000.0),
             ctx_train: g.u32(&k("context_length")).unwrap_or(2048) as usize,
+            rope_yarn: None,
         };
         let mut rope_factors: Option<Vec<f32>> = rope_scale.map(|s| vec![1.0 / s; rope_dim / 2]);
         if let Ok(t) = g.tensor("rope_freqs.weight") {

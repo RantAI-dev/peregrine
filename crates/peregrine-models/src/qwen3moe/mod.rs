@@ -27,7 +27,7 @@ use peregrine_core::model::{Caches, Config, Linear, State, StepStats, Weights};
 use peregrine_core::pool::Pool;
 use peregrine_core::tokenizer::Tokenizer;
 
-use crate::dense::layer::AttnWeights;
+use crate::layer::AttnWeights;
 
 /// One layer: Qwen3's attention and a bank of experts.
 pub(crate) struct MoeLayer {

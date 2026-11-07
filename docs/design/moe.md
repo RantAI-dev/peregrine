@@ -179,3 +179,25 @@ renormalised). IQ1_S/IQ1_M, the smallest files, are not supported.
    `expert_feed_forward_length`: confirm we use only the latter and refuse a file without it.
 6. **gpt-oss in S2.5 or later?** MXFP4 is a new format and kernel; recommend a separate PR after
    qwen3moe.
+
+## 8. What gpt-oss turned out to need (S2.5 step 5)
+
+The design above is `qwen3moe`'s. gpt-oss is the second half of S2.5, and it shares the
+expert bank but almost nothing else, so it is its own family (`crates/peregrine-models/src/gptoss/`,
+behind `arch-gpt-oss`) over the same `blocks::moe`. What differs, and what each difference
+cost:
+
+| what | qwen3moe | gpt-oss | where |
+|---|---|---|---|
+| the router's weights | a softmax over **all** the experts, then the best `k`, then a renormalisation over the selection | the best `k` by score, then a softmax over **those** | `src/llama-graph.cpp:2285-2287, 2363-2367` |
+| the experts' activation | `silu(gate) ⊙ up` | `min(gate, 7) / (1 + e^(1.702·−min(gate, 7))) ⊙ (clamp(up) + 1)` | `src/llama-graph.cpp:2519-2526`, `ggml/src/ggml-cpu/ops.cpp:3388-3450` |
+| biases | none | on the router and on every expert projection | `src/models/openai-moe.cpp:49-54` |
+| the attention | Qwen3's | with **sinks** (a learned logit per head in the softmax), with an output bias, and with the sliding window on every other layer | `src/models/openai-moe.cpp:6-9, 42, 49` |
+| the rope | plain or linear | YaRN | `src/llama-context.cpp:276-317`, `ggml/src/ggml-cpu/ops.cpp:6164-6187` |
+
+The MXFP4 format the roadmap expected is already in the kernels (S2.1), so no new kernel
+was needed: the experts are read as the same 2D views as `qwen3moe`'s, in MXFP4.
+
+The gaps left for later: the real-file check (a `gpt-oss-20b` file, on a machine that has
+one), the harmony chat template (llama.cpp's built-in one is a small rendering, but the
+model file's own Jinja template is the one that matters), and the AVX-512 goldens.

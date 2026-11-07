@@ -904,6 +904,247 @@ pub fn write_moe(dir: &Path, fmt: Format, seed: u64, s: MoeShape) -> PathBuf {
     path
 }
 
+/// A `gpt-oss` model's shape: alternating sliding-window and full attention, attention
+/// sinks, YaRN rope scaling, and a bank of experts with biases.
+#[derive(Clone, Copy, Debug)]
+pub struct GptOssShape {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    /// How many experts the router chooses from.
+    pub n_expert: usize,
+    /// How many of them one token uses.
+    pub n_expert_used: usize,
+    /// `expert_feed_forward_length`: the width of one expert's feed-forward.
+    pub expert_ff: usize,
+    /// The sliding window (`attention.sliding_window`).
+    pub sliding_window: usize,
+    pub ctx: usize,
+}
+
+impl Default for GptOssShape {
+    fn default() -> Self {
+        // Every matrix row is a multiple of 32 (the activation block and MXFP4's
+        // block), the heads are 32 wide, and the experts are 64 wide.
+        GptOssShape {
+            d_model: 256,
+            n_layer: 4,
+            n_head: 8,
+            n_head_kv: 4,
+            n_expert: 4,
+            n_expert_used: 2,
+            expert_ff: 64,
+            sliding_window: 16,
+            ctx: 512,
+        }
+    }
+}
+
+/// Write a synthetic `gpt-oss` file, the way llama.cpp v0.9.0 expects it
+/// (`src/models/openai-moe.cpp`, `conversion/gpt_oss.py`).
+///
+/// The experts are in `fmt` (F16 or MXFP4, as the published files are) and the
+/// attention in the same format — except for MXFP4, where the published files keep
+/// the attention in f16 and quantise only the experts. The biases and the norms are
+/// F32, as in every file.
+///
+/// | tensor | GGUF dims | what |
+/// |---|---|---|
+/// | `blk.i.attn_norm.weight` | `[d_model]` | the attention's norm |
+/// | `blk.i.attn_q.weight` | `[d_model, n_head·head_dim]` | the queries |
+/// | `blk.i.attn_k.weight` | `[d_model, n_kv_head·head_dim]` | the keys |
+/// | `blk.i.attn_v.weight` | `[d_model, n_kv_head·head_dim]` | the values |
+/// | `blk.i.attn_output.weight` | `[n_head·head_dim, d_model]` | the attention's output |
+/// | `blk.i.attn_output.bias` | `[d_model]` | its bias |
+/// | `blk.i.attn_sinks.weight` | `[n_head]` | the attention sinks |
+/// | `blk.i.post_attention_norm.weight` | `[d_model]` | the norm the experts see |
+/// | `blk.i.ffn_gate_inp.weight` | `[d_model, n_expert]` | the router |
+/// | `blk.i.ffn_gate_inp.bias` | `[n_expert]` | the router's bias |
+/// | `blk.i.ffn_gate_exps.weight` | `[d_model, expert_ff, n_expert]` | the experts' gates |
+/// | `blk.i.ffn_gate_exps.bias` | `[expert_ff, n_expert]` | their biases |
+/// | `blk.i.ffn_up_exps.weight` | `[d_model, expert_ff, n_expert]` | the experts' ups |
+/// | `blk.i.ffn_up_exps.bias` | `[expert_ff, n_expert]` | their biases |
+/// | `blk.i.ffn_down_exps.weight` | `[expert_ff, d_model, n_expert]` | the experts' downs |
+/// | `blk.i.ffn_down_exps.bias` | `[d_model, n_expert]` | their biases |
+pub fn write_gpt_oss(dir: &Path, fmt: Format, seed: u64, s: GptOssShape) -> PathBuf {
+    assert!(
+        s.d_model.is_multiple_of(fmt.block()) && s.expert_ff.is_multiple_of(fmt.block()),
+        "gpt-oss rows must be a multiple of the {} block {}",
+        fmt.label(),
+        fmt.block()
+    );
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let head_dim = s.d_model / s.n_head;
+    w.str("general.architecture", "gpt-oss");
+    w.str(
+        "general.name",
+        &format!("synthetic-gpt-oss-{}", fmt.label()),
+    );
+    let k = |x: &str| format!("gpt-oss.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("attention.head_count_kv"), s.n_head_kv as u32);
+    w.u32(&k("attention.key_length"), head_dim as u32);
+    w.u32(&k("attention.value_length"), head_dim as u32);
+    w.u32(&k("attention.sliding_window"), s.sliding_window as u32);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-5);
+    w.u32(&k("rope.dimension_count"), head_dim as u32);
+    // The rotary base of gpt-oss's files: 150000.
+    w.f32(&k("rope.freq_base"), 150_000.0);
+    // YaRN: the factor and the context it was trained for.
+    w.str(&k("rope.scaling.type"), "yarn");
+    w.f32(&k("rope.scaling.factor"), 32.0);
+    w.u32(&k("rope.scaling.original_context_length"), 4096);
+    w.u32(&k("expert_count"), s.n_expert as u32);
+    w.u32(&k("expert_used_count"), s.n_expert_used as u32);
+    w.u32(&k("expert_feed_forward_length"), s.expert_ff as u32);
+    // llama.cpp never applies this scale for gpt-oss: 0 means "no scaling".
+    w.f32(&k("expert_weights_scale"), 0.0);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    // The `o200k_harmony` pre-tokenizer.
+    vocab::add_tokenizer_metadata(&mut w, "gpt-4o");
+
+    let kv = s.n_head_kv * head_dim;
+    let qd = s.n_head * head_dim;
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    // The attention's matrices are in the file's format, except for MXFP4: the
+    // published gpt-oss files keep the attention in f16 and quantise only the
+    // experts.
+    let attn_fmt = if fmt == Format::MXFP4 {
+        Format::F16
+    } else {
+        fmt
+    };
+    let mat16 = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            attn_fmt,
+            generate_weights(attn_fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    // A bias: F32, one value per unit, the rows running slowest.
+    let bias = |w: &mut GgufWriter, rng: &mut Rng, name: &str, dims: &[u64]| {
+        let n: u64 = dims.iter().product();
+        let data: Vec<u8> = (0..n)
+            .flat_map(|_| rng.f32_range(-0.05, 0.05).to_le_bytes())
+            .collect();
+        w.add_tensor(name, dims, Format::F32, data);
+    };
+    // One expert's weights: `cols` weights per row, `rows` rows, `n_expert` of them,
+    // the last dimension running slowest — llama.cpp's own order.
+    let exps = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64, s.n_expert as u64],
+            fmt,
+            generate_weights(fmt, cols * rows * s.n_expert, rng),
+        );
+    };
+
+    mat16(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    for i in 0..s.n_layer {
+        let p = |t: &str| format!("blk.{i}.{t}");
+        norm(&mut w, &mut rng, &p("attn_norm.weight"), s.d_model);
+        mat16(&mut w, &mut rng, &p("attn_q.weight"), s.d_model, qd);
+        mat16(&mut w, &mut rng, &p("attn_k.weight"), s.d_model, kv);
+        mat16(&mut w, &mut rng, &p("attn_v.weight"), s.d_model, kv);
+        mat16(&mut w, &mut rng, &p("attn_output.weight"), qd, s.d_model);
+        bias(
+            &mut w,
+            &mut rng,
+            &p("attn_output.bias"),
+            &[s.d_model as u64],
+        );
+        // The attention sinks: one learned logit per query head.
+        bias(
+            &mut w,
+            &mut rng,
+            &p("attn_sinks.weight"),
+            &[s.n_head as u64],
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &p("post_attention_norm.weight"),
+            s.d_model,
+        );
+        // The router.
+        mat(
+            &mut w,
+            &mut rng,
+            &p("ffn_gate_inp.weight"),
+            s.d_model,
+            s.n_expert,
+        );
+        bias(
+            &mut w,
+            &mut rng,
+            &p("ffn_gate_inp.bias"),
+            &[s.n_expert as u64],
+        );
+        // The experts.
+        exps(
+            &mut w,
+            &mut rng,
+            &p("ffn_gate_exps.weight"),
+            s.d_model,
+            s.expert_ff,
+        );
+        bias(
+            &mut w,
+            &mut rng,
+            &p("ffn_gate_exps.bias"),
+            &[s.expert_ff as u64, s.n_expert as u64],
+        );
+        exps(
+            &mut w,
+            &mut rng,
+            &p("ffn_up_exps.weight"),
+            s.d_model,
+            s.expert_ff,
+        );
+        bias(
+            &mut w,
+            &mut rng,
+            &p("ffn_up_exps.bias"),
+            &[s.expert_ff as u64, s.n_expert as u64],
+        );
+        exps(
+            &mut w,
+            &mut rng,
+            &p("ffn_down_exps.weight"),
+            s.expert_ff,
+            s.d_model,
+        );
+        bias(
+            &mut w,
+            &mut rng,
+            &p("ffn_down_exps.bias"),
+            &[s.d_model as u64, s.n_expert as u64],
+        );
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+    mat16(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
+    let path = dir.join(format!("gpt-oss-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// Write a synthetic `phi3` model (fused `attn_qkv`, fused `ffn_up` with SwiGLU, RMSNorm,
 /// NeoX rotary pairing, no biases) whose matrices are all `fmt`, seeded by `seed`.
 pub fn write_phi3(dir: &Path, fmt: Format, seed: u64, s: Dense) -> PathBuf {

@@ -14,7 +14,7 @@
 //! llama.cpp reads it, and so does this loader, but the experts' own width is
 //! `expert_feed_forward_length`. A file without that key is refused rather than guessed at.
 
-use crate::dense::layer::AttnWeights;
+use crate::layer::AttnWeights;
 use crate::qwen3moe::{MoeLayer, Qwen3Moe};
 use peregrine_core::arch::Loaded;
 use peregrine_core::blocks::moe::expert_view;
@@ -145,6 +145,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
             .unwrap_or(1e-6),
         rope_base: g.f32(&k("rope.freq_base")).unwrap_or(10000.0),
         ctx_train: g.u32(&k("context_length")).unwrap_or(2048) as usize,
+        rope_yarn: None,
     };
     let mut rope_factors: Option<Vec<f32>> = rope_scale.map(|s| vec![1.0 / s; rope_dim / 2]);
     if let Ok(t) = g.tensor("rope_freqs.weight") {

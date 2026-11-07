@@ -57,6 +57,10 @@ pub struct Config {
     pub eps: f32,
     pub rope_base: f32,
     pub ctx_train: usize,
+    /// YaRN's parameters, when the file asks for YaRN scaling
+    /// (`rope.scaling.type = "yarn"`, gpt-oss). `None` for every other model:
+    /// the table is then the plain one, with the file's per-frequency factors.
+    pub rope_yarn: Option<crate::blocks::rope::Yarn>,
 }
 
 impl Config {
@@ -598,6 +602,7 @@ mod tests {
             eps: 1e-5,
             rope_base: 1e5,
             ctx_train: 8192,
+            rope_yarn: None,
         };
         assert_eq!(c.gqa(), 3);
         assert_eq!(c.kv_dim(), 320);
