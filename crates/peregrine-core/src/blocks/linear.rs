@@ -10,7 +10,7 @@ use crate::table::{MatKernels, MatPath};
 use std::time::Instant;
 
 /// Largest batch one matmul call accepts. A stack array of this many scratch floats
-/// holds one row's results; `PREFILL_CHUNK` and `draft_len + 1` are both far below it.
+/// holds one row's results; `PEREGRINE_PREFILL_CHUNK` and `draft_len + 1` are both far below it.
 pub const MAX_BATCH: usize = 128;
 
 /// whether matmul rows are handed out in chunks from a counter (default) or in equal shares

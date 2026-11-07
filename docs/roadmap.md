@@ -59,7 +59,7 @@ Each model is checked against llama.cpp on the same file before it is listed.
 | S3.2 | Competitor baselines on H1, H2 and H3 — desktop (H1) baseline in (#82); H2 and H3 open | 1.0 |
 | S3.3 | Task-accuracy gate against the reference engine (GSM8K, HumanEval+, MMLU subset), batch and speculation invariance on 500+ prompts — KL against llama.cpp per model done (docs/targets.md); the task-accuracy gate and invariance runs open | 1.0 |
 | S3.4 | Faster k-quant kernels (repacked row tiles, int8 dot products) | 1.5 |
-| S3.5 | Batched ternary GEMM toward the int8 compute roof; prompt path (large tiles, chunked Gated DeltaNet scan) | 1.5 |
+| S3.5 | Batched ternary GEMM toward the int8 compute roof; prompt path (large tiles, chunked Gated DeltaNet scan) — the prefill chunk is an option now (`PEREGRINE_PREFILL_CHUNK`, default 16, #87); the ternary GEMM open | 1.5 |
 | S3.6 | Faster PTQ1_0 for the 27B | 0.5 |
 | S3.7 | Long context: split-K attention per length; q8 KV as an opt-in with its own accuracy report | 1.0 |
 | S3.8 | Serving: first token at 10 users, MTP at 2-3 users, server overhead | 1.0 |
