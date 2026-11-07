@@ -81,6 +81,15 @@ Run a clean single-user throughput and bytes/token measurement:
 - `--json` formats results as a single JSON object for automation.
 - Automatically checks for and applies the default tuning profile for the model and host CPU (or `--profile <path>`, `--no-profile`).
 
+## Startup calibration
+
+When no tuning profile exists (`peregrine tune`) and parameters are unpinned, Peregrine dynamically calibrates `decode_threads` and `spin_us` at startup (< 200 ms budget):
+- Sweeps candidate decode threads up to physical cores for memory bandwidth saturation, stopping early when bandwidth gains drop below 5%.
+- Measures condvar wake-up latency over 50 barrier cycles with 0 µs spin, setting `spin_us = 2 * L_wake` clamped to [50, 2000] µs.
+- Aborts to safe defaults (`physical_cores()`, 1000 µs spin) if variance (CV) across repetitions exceeds 15% (noisy host).
+- Can be disabled via `PEREGRINE_CALIBRATE=0`.
+- Reported in startup logs, `/metrics` Prometheus gauges, and `--json` benchmark outputs under `"config"`.
+
 ## Model and machine tuning: `peregrine tune`
 
 Model- and machine-specific tuning is data written by `peregrine tune`, never code (ADR 0005):

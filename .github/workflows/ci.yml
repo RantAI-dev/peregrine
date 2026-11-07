@@ -141,6 +141,7 @@ jobs:
       - name: Synthetic models under SDE
         env:
           PEREGRINE_GOLDEN: require
+          PEREGRINE_CALIBRATE: "0"
         run: |
           set -o pipefail
           while read -r t; do "$HOME/.cache/intel-sde/sde64" -spr -- "$t" --nocapture; done \
@@ -184,6 +185,7 @@ jobs:
       - name: Synthetic models under SDE (-adl)
         env:
           PEREGRINE_GOLDEN: require
+          PEREGRINE_CALIBRATE: "0"
         run: |
           set -o pipefail
           while read -r t; do "$HOME/.cache/intel-sde/sde64" -adl -- "$t" --nocapture; done \
