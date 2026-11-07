@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -116,6 +117,8 @@ def send_chat_completion(
         "stream": stream,
         "ignore_eos": ignore_eos,
     }
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
@@ -175,8 +178,8 @@ def send_chat_completion(
     ttft_s = (t_first - t0) if t_first is not None else total_s
     decode_s = max(0.0, t_end - (t_first if t_first is not None else t0))
 
-    prompt_tokens = usage.get("prompt_tokens", 0)
-    completion_tokens = usage.get("completion_tokens", tokens_emitted)
+    prompt_tokens = usage.get("prompt_tokens", 0) or final_timings.get("prompt_n", 0)
+    completion_tokens = usage.get("completion_tokens", 0) or final_timings.get("predicted_n", 0) or tokens_emitted
 
     # Server-reported timings take precedence if present
     prefill_tok_s = 0.0
