@@ -120,6 +120,8 @@ pub fn check_compatible_with(
             "qwen2" | "qwen3" => Some("arch-qwen"),
             "qwen25" | "qwen35" => Some("arch-qwen35"),
             "gemma3" => Some("arch-gemma3"),
+            "qwen3moe" => Some("arch-qwen3moe"),
+            "gpt-oss" => Some("arch-gpt-oss"),
             "phi3" => Some("arch-phi3"),
             _ => None,
         };
@@ -163,7 +165,8 @@ pub fn check_compatible_with(
         }
     }
     if let Ok(t) = g.str(&format!("{arch}.rope.scaling.type")) {
-        if t != "none" && t != "linear" {
+        // YaRN is gpt-oss's scaling; the families that read it check the rest.
+        if t != "none" && t != "linear" && !(t == "yarn" && arch == "gpt-oss") {
             return Err(format!("rope scaling {t:?} is not implemented"));
         }
     }

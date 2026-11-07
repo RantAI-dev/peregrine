@@ -81,6 +81,7 @@ pub fn support_markdown() -> String {
                 "gemma3" => "Gemma 3",
                 "phi3" => "Phi-3 / Phi-4 (synthetic check; real file pending)",
                 "qwen3moe" => "Qwen 3 MoE",
+                "gpt-oss" => "gpt-oss (synthetic check; real file pending)",
                 other => other,
             };
             arch_items.push(label);

@@ -23,7 +23,10 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    current tier (`tests/golden/synthetic/<tier>/`). A `qwen3moe` file (8 experts, 2 used, F16 and Q8_0
    experts) is written there too: the mixture-of-experts family runs it — it loads, gives finite logits,
    is bit-identical across runs and across 1, 2 and 4 threads, matches its golden, and gives the same
-   tokens alone and batched through `Engine` — and llama.cpp v0.9.0 loads and runs the same file. The
+   tokens alone and batched through `Engine` — and llama.cpp v0.9.0 loads and runs the same file. A
+   `gpt-oss` file (4 experts, 2 used, F16 and MXFP4 experts, attention sinks, alternating
+   sliding-window and full attention, YaRN rope scaling) is written there too, and llama.cpp v0.9.0
+   gives the same greedy tokens for both. The
    same tests drive small models through `Engine`:
    prompts served alone must produce the same tokens when admitted together (a mixed prefill/decode step,
    both `Caches::Mapped` and, with `PEREGRINE_MIX=0`, `Caches::PerRow`), a shared opening must restore from

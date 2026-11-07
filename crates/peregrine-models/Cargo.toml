@@ -21,6 +21,7 @@ default = [
     "arch-qwen35",
     "arch-gemma3",
     "arch-qwen3moe",
+    "arch-gpt-oss",
     "arch-phi3",
     "fmt-mxfp4",
     "fmt-kquant",
@@ -38,6 +39,7 @@ arch-qwen = []
 arch-qwen35 = []
 arch-gemma3 = []
 arch-qwen3moe = []
+arch-gpt-oss = []
 arch-phi3 = []
 
 # Formats passed through to core and kernels
@@ -98,7 +100,7 @@ required-features = ["arch-qwen", "fmt-kquant"]
 
 [[test]]
 name = "synthetic"
-required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-gemma3", "arch-phi3", "mtp", "fmt-mxfp4", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
+required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-gemma3", "arch-gpt-oss", "arch-phi3", "mtp", "fmt-mxfp4", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
 
 [lints]
 workspace = true

@@ -77,6 +77,83 @@ pub fn swiglu_rows(
     }
 }
 
+/// OpenAI's `swiglu_oai` — the gated activation gpt-oss's experts use:
+/// `hb = x / (1 + e^(α·(−x))) ⊙ (y + 1)` with `x = min(gate, limit)` and
+/// `y = clamp(up, −limit, limit)` — and its quantisation, row-parallel like
+/// `swiglu_rows`.
+///
+/// llama.cpp v0.9.0's `LLM_FFN_SWIGLU_OAI_MOE` (`src/llama-graph.cpp:2519-2526`,
+/// `ggml/src/ggml-cpu/ops.cpp:3388-3450`); the alpha and the limit are its
+/// constants (`1.702` and `7.0`).
+#[allow(clippy::too_many_arguments)]
+pub fn swiglu_oai_rows(
+    n_ff: usize,
+    hb: &mut [f32],
+    up: &[f32],
+    acts: &mut [QuantAct],
+    nb: usize,
+    alpha: f32,
+    limit: f32,
+    pool: &Pool,
+    stats: &mut StepStats,
+) {
+    let f = n_ff;
+    if nb >= ROW_PARALLEL && pool.width() > 1 {
+        for_row_chunks_2(
+            pool,
+            true,
+            hb,
+            f,
+            acts,
+            1,
+            nb,
+            Sched::Static,
+            |_wk, rows, hb_chunk, acts_chunk| {
+                for (i, b) in rows.enumerate() {
+                    let g = &mut hb_chunk[i * f..(i + 1) * f];
+                    crate::vmath::swiglu_oai(g, &up[b * f..(b + 1) * f], alpha, limit);
+                    acts_chunk[i].fill(g);
+                }
+            },
+        );
+        stats.barriers += 1;
+    } else if nb == 1 && pool.width() > 1 && f >= 1024 {
+        // Decode: one row, but thousands of exponentials on the calling thread
+        // while the workers spin.
+        for_row_chunks(
+            pool,
+            true,
+            &mut hb[..f],
+            1,
+            f,
+            Sched::Static,
+            |_wk, range, gs| {
+                crate::vmath::swiglu_oai(gs, &up[range], alpha, limit);
+            },
+        );
+        stats.barriers += 1;
+        acts[0].fill(&hb[..f]);
+    } else {
+        for_row_chunks_2(
+            pool,
+            false,
+            hb,
+            f,
+            acts,
+            1,
+            nb,
+            Sched::Static,
+            |_wk, rows, hb_chunk, acts_chunk| {
+                for (i, b) in rows.enumerate() {
+                    let g = &mut hb_chunk[i * f..(i + 1) * f];
+                    crate::vmath::swiglu_oai(g, &up[b * f..(b + 1) * f], alpha, limit);
+                    acts_chunk[i].fill(g);
+                }
+            },
+        );
+    }
+}
+
 /// GeGLU — `hb = gelu_tanh(gate) ⊙ up` — and its quantisation, row-parallel like
 /// `norm_rows`.
 pub fn geglu_rows(

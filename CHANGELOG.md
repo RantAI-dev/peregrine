@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The `gpt-oss` model family (S2.5 step 5): OpenAI's mixture of experts — attention sinks (a learned
+  per-head logit in the softmax), alternating sliding-window and full attention, biases on the attention
+  output, the router and every expert projection, YaRN rope scaling, the router's softmax over the
+  *selected* experts, and OpenAI's `swiglu_oai` activation. The `gpt-4o` (o200k) pre-tokenizer is
+  transcribed from llama.cpp v0.9.0's regex. The synthetic F16 and MXFP4 files give the same greedy
+  tokens as llama.cpp; the check against a real gpt-oss file is pending.
 - Support for plain Qwen 3.5 files (S2.2c): a `qwen35` file with no `prism.hadamard.*` metadata is loaded
   without a rotation, and its ordinary quantised matmuls (Q8_0, F16, ...) run through the dense kernels
   instead of the ternary ones. The synthetic plain file gives the same greedy tokens as llama.cpp v0.9.0;

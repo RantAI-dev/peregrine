@@ -9,10 +9,10 @@
 
 use std::time::Instant;
 
-use crate::dense::layer;
+use crate::layer;
 use crate::qwen3moe::{load::MoeCfg, Qwen3Moe};
 use peregrine_core::arch::Architecture;
-use peregrine_core::blocks::moe::{moe_ffn, MoeScratch, MoeWeights};
+use peregrine_core::blocks::moe::{moe_ffn, MoeAct, MoeGating, MoeScratch, MoeWeights};
 use peregrine_core::model::{Caches, Config, State, StepStats, Weights};
 use peregrine_core::pool::Pool;
 
@@ -125,6 +125,12 @@ impl Qwen3Moe {
                     n_used: self.cfg.n_expert_used,
                     renorm: self.cfg.renorm,
                     w_scale: self.cfg.w_scale,
+                    // qwen3moe: a softmax over every expert, then the best few,
+                    // renormalised over the selection (`src/models/qwen3moe.cpp`).
+                    gating: MoeGating::Softmax,
+                    act: MoeAct::SwiGLU,
+                    router_bias: None,
+                    expert_bias: None,
                 };
                 moe_ffn(
                     w,

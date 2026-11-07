@@ -51,7 +51,7 @@ pub const MAX_PARTIAL_ROWS: usize = 64;
 
 /// The geometry of one attention call.
 #[derive(Clone, Copy, Debug)]
-pub struct Shape {
+pub struct Shape<'a> {
     pub n_head: usize,
     pub n_kv_head: usize,
     pub head_dim: usize,
@@ -63,9 +63,12 @@ pub struct Shape {
     /// Sliding window attention: row `b` sees at most the last `window` positions
     /// (`(pos + 1 - window)..=pos`). `None` for full attention.
     pub window: Option<usize>,
+    /// The attention sinks: one learned logit per query head, added to the
+    /// softmax's denominator (`src/models/openai-moe.cpp:42`, gpt-oss).
+    pub sinks: Option<&'a [f32]>,
 }
 
-impl Shape {
+impl<'a> Shape<'a> {
     pub fn gqa(&self) -> usize {
         self.n_head / self.n_kv_head
     }
@@ -94,7 +97,7 @@ impl Plan {
 /// kept attention on one core, with three spinning, until ~270 positions), so only
 /// tiny calls stay serial, and mid-sized ones fork one task per KV head — the very
 /// computation the serial loop does per head, so the result is bit-identical.
-pub fn plan(sh: &Shape, workers: usize) -> Plan {
+pub fn plan(sh: &Shape<'_>, workers: usize) -> Plan {
     let avg_ctx = sh.start_pos + sh.nb.div_ceil(2);
     let work = sh.nb * sh.n_head * avg_ctx * sh.head_dim * 2;
     if workers <= 1 || work < 1 << 13 {
@@ -139,7 +142,7 @@ pub struct Task {
 }
 
 /// Task `i` of a plan, in KV-head-major order.
-pub fn task(sh: &Shape, p: &Plan, i: usize) -> Task {
+pub fn task(sh: &Shape<'_>, p: &Plan, i: usize) -> Task {
     let pi = i % p.pos_chunks;
     let ri = (i / p.pos_chunks) % p.row_blocks;
     let kh = i / (p.pos_chunks * p.row_blocks);
@@ -178,7 +181,7 @@ impl Scratch {
 /// head `kh·gqa + g` of batch row `b` — over its positions. `q` is the call's query
 /// buffer, `[nb][n_head][head_dim]`, after RoPE. When the cache is rotated, the
 /// queries are rotated here into scratch; the cache's values stay rotated in `o`.
-pub fn run(kv: &KvCache, layer: usize, sh: &Shape, q: &[f32], t: &Task, sc: &mut Scratch) {
+pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: &mut Scratch) {
     let hd = sh.head_dim;
     let gqa = sh.gqa();
     let qd = sh.q_dim();
@@ -257,12 +260,29 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape, q: &[f32], t: &Task, sc: &mut
 /// `out = o / l`, un-rotated when the cache is rotated. A row that saw no position
 /// (impossible for a full-range task; possible for a position chunk past it) yields
 /// zeros, which a combine weighs at zero anyway.
-pub fn finish_row(o: &[f32], l: f64, rotated: bool, out: &mut [f32]) {
+///
+/// With an attention sink, the denominator also carries the sink's weight:
+/// `out = o / (l + exp(sink − m))`. That is exactly what ggml computes: the sink
+/// is a logit that joins the softmax without a value of its own
+/// (`ggml/src/ggml-cpu/ops.cpp:5883-5894`, `ggml_soft_max_add_sinks`), so the
+/// denominator gains `exp(sink − max)` while the numerator keeps the values'
+/// weights. The maximum used here is the one over the positions, not the one over
+/// the positions *and* the sink: dividing the numerator and the denominator by
+/// `exp(m − max)` leaves the ratio unchanged, so the two agree whichever is larger.
+pub fn finish_row(o: &[f32], l: f64, m: f32, sink: Option<f32>, rotated: bool, out: &mut [f32]) {
     if l <= 0.0 {
         out.fill(0.0);
         return;
     }
-    let inv = (1.0 / l) as f32;
+    let denom = match sink {
+        Some(s) => l + (s - m).exp() as f64,
+        None => l,
+    };
+    if denom <= 0.0 {
+        out.fill(0.0);
+        return;
+    }
+    let inv = (1.0 / denom) as f32;
     for (d, &x) in out.iter_mut().zip(o) {
         *d = x * inv;
     }
@@ -273,7 +293,15 @@ pub fn finish_row(o: &[f32], l: f64, rotated: bool, out: &mut [f32]) {
 
 /// Merge partial `(o_i, m_i, l_i)` results of one row (one per position chunk) into
 /// its output — uzu's `combine.metal`: weights `exp(m_i − m*)`.
-pub fn combine_row(parts: &[(&[f32], f32, f64)], rotated: bool, out: &mut [f32]) {
+///
+/// The attention sink, if the layer has one, is added to the merged denominator
+/// once — after the merge, as ggml adds it to the whole row's softmax at once.
+pub fn combine_row(
+    parts: &[(&[f32], f32, f64)],
+    sink: Option<f32>,
+    rotated: bool,
+    out: &mut [f32],
+) {
     let m_star = parts
         .iter()
         .filter(|p| p.2 > 0.0)
@@ -291,11 +319,15 @@ pub fn combine_row(parts: &[(&[f32], f32, f64)], rotated: bool, out: &mut [f32])
             *d += x * w;
         }
     }
-    if l <= 0.0 {
+    let denom = match sink {
+        Some(s) => l + (s - m_star).exp() as f64,
+        None => l,
+    };
+    if denom <= 0.0 {
         out.fill(0.0);
         return;
     }
-    let inv = (1.0 / l) as f32;
+    let inv = (1.0 / denom) as f32;
     out.iter_mut().for_each(|d| *d *= inv);
     if rotated {
         crate::vmath::hadamard_inv(out);
@@ -521,7 +553,14 @@ mod tests {
         for (row, ps) in parts.iter().enumerate() {
             let refs: Vec<(&[f32], f32, f64)> =
                 ps.iter().map(|(o, m, l)| (&o[..], *m, *l)).collect();
-            combine_row(&refs, kv.rotated(), &mut out[row * hd..(row + 1) * hd]);
+            // The sink of the row's query head.
+            let sink = sh.sinks.map(|s| s[row % sh.n_head]);
+            combine_row(
+                &refs,
+                sink,
+                kv.rotated(),
+                &mut out[row * hd..(row + 1) * hd],
+            );
         }
         out
     }
@@ -558,6 +597,7 @@ mod tests {
                 start_pos,
                 scale: 1.0 / (head_dim as f32).sqrt(),
                 window: None,
+                sinks: None,
             };
             let (kv, q, ks, vs) = setup(KvPrec::F16, &sh, 2);
             // The cache holds f16; feed the reference what it actually stores.
@@ -624,6 +664,7 @@ mod tests {
                 start_pos,
                 scale: 1.0 / (head_dim as f32).sqrt(),
                 window: None,
+                sinks: None,
             };
             let (kv, q, ks, vs) = setup(KvPrec::F32, &sh, 1);
             assert!(!kv.rotated());
@@ -667,6 +708,7 @@ mod tests {
             start_pos: 300,
             scale: 1.0 / 128f32.sqrt(),
             window: None,
+            sinks: None,
         };
         let (_, q, ks, vs) = setup(KvPrec::F32, &sh, 1);
         let want = reference(&sh, &q, &ks, &vs);
@@ -701,6 +743,7 @@ mod tests {
             start_pos: 300,
             scale: 1.0 / 128f32.sqrt(),
             window: None,
+            sinks: None,
         };
         let (kv, q, ks, vs) = setup(KvPrec::I8, &sh, 1);
         assert!(kv.rotated());
@@ -728,12 +771,103 @@ mod tests {
             start_pos: 20,
             scale: 1.0 / 8.0,
             window: Some(6),
+            sinks: None,
         };
         let (kv, q, ks, vs) = setup(KvPrec::F16, &sh, 1);
         let want = reference(&sh, &q, &ks, &vs);
         let p = plan(&sh, 4);
         let got = grouped(&kv, 0, &sh, &q, p);
         assert!(max_rel(&got, &want) < 0.005);
+    }
+
+    /// The attention sinks: a learned logit per query head that joins the softmax
+    /// without a value of its own (`ggml/src/ggml-cpu/ops.cpp:5883-5894`).
+    ///
+    /// The sink's weight goes to the denominator only, so a sink of −∞ leaves the
+    /// attention unchanged and a large sink shrinks it towards zero.
+    #[test]
+    fn the_attention_sinks_join_the_softmax() {
+        let sh = Shape {
+            n_head: 4,
+            n_kv_head: 2,
+            head_dim: 32,
+            nb: 2,
+            start_pos: 5,
+            scale: 0.25,
+            window: None,
+            sinks: None,
+        };
+        let (kv, q, ks, vs) = setup(KvPrec::F32, &sh, 1);
+        let hd = sh.head_dim;
+        let gqa = sh.gqa();
+
+        // The reference: the sink's weight is added to the denominator, and the
+        // numerator keeps the values' own weights.
+        let reference = |sinks: &[f32]| -> Vec<f32> {
+            let mut out = vec![0.0f32; sh.nb * sh.n_head * hd];
+            for b in 0..sh.nb {
+                let n_ctx = sh.start_pos + b + 1;
+                for h in 0..sh.n_head {
+                    let kh = h / gqa;
+                    let qv = &q[(b * sh.n_head + h) * hd..][..hd];
+                    let sc: Vec<f64> = (0..n_ctx)
+                        .map(|p| {
+                            let k = &ks[p * sh.n_kv_head + kh];
+                            qv.iter()
+                                .zip(k)
+                                .map(|(a, b)| *a as f64 * *b as f64)
+                                .sum::<f64>()
+                                * sh.scale as f64
+                        })
+                        .collect();
+                    let sink = sinks[h] as f64;
+                    let m = sc.iter().cloned().fold(sink, f64::max);
+                    let e: Vec<f64> = sc.iter().map(|s| (s - m).exp()).collect();
+                    let z: f64 = e.iter().sum::<f64>() + (sink - m).exp();
+                    for d in 0..hd {
+                        let acc: f64 = (0..n_ctx)
+                            .enumerate()
+                            .map(|(j, p)| e[j] * vs[p * sh.n_kv_head + kh][d] as f64)
+                            .sum();
+                        out[(b * sh.n_head + h) * hd + d] = (acc / z) as f32;
+                    }
+                }
+            }
+            out
+        };
+
+        // No sink: the ordinary attention.
+        let plain = grouped(&kv, 0, &sh, &q, plan(&sh, 4));
+        let want = reference(&[f32::NEG_INFINITY; 4]);
+        assert!(
+            max_rel(&plain, &want) < 2e-5,
+            "the sinkless attention changed"
+        );
+
+        // With sinks: the same scores, a larger denominator.
+        let sinks = [-2.0f32, 0.5, 1.5, 3.0];
+        let sh = Shape {
+            sinks: Some(&sinks),
+            ..sh
+        };
+        let got = grouped(&kv, 0, &sh, &q, plan(&sh, 4));
+        let want = reference(&sinks);
+        assert!(
+            max_rel(&got, &want) < 2e-5,
+            "the sinks changed the attention"
+        );
+
+        // A sink that is very large leaves almost nothing for the values.
+        let big = [50.0f32, 50.0, 50.0, 50.0];
+        let sh = Shape {
+            sinks: Some(&big),
+            ..sh
+        };
+        let got = grouped(&kv, 0, &sh, &q, plan(&sh, 4));
+        assert!(
+            got.iter().all(|v| v.abs() < 1e-3),
+            "a large sink did not shrink the output: {got:?}"
+        );
     }
 
     #[test]
@@ -754,6 +888,7 @@ mod tests {
                 start_pos,
                 scale: 0.1,
                 window: None,
+                sinks: None,
             };
             let p = plan(&sh, workers);
             let ctx = start_pos + nb;
