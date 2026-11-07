@@ -131,7 +131,27 @@ pub async fn run(a: Args) {
         peregrine_core::profile::resolve(&a.model, a.profile.as_deref(), a.no_profile);
     println!("{prof_msg}");
     let opts = match engine_options(&a.opts, profile.as_ref()) {
-        Ok(o) => o,
+        Ok(o) => {
+            if profile.is_some() {
+                let p_path = a
+                    .profile
+                    .as_deref()
+                    .map(|p| p.to_path_buf())
+                    .or_else(|| peregrine_core::profile::default_path(&a.model).ok());
+                if let Some(p) = p_path {
+                    let dt = o
+                        .decode_threads
+                        .unwrap_or_else(|| peregrine_core::pool::physical_cores().unwrap_or(1));
+                    eprintln!(
+                        "peregrine: using tuning profile {} (decode_threads={}, spin_us={})",
+                        p.display(),
+                        dt,
+                        o.spin_us
+                    );
+                }
+            }
+            o
+        }
         Err(e) => {
             eprintln!("peregrine-server: {e}");
             std::process::exit(2);
@@ -151,11 +171,17 @@ pub async fn run(a: Args) {
         }
     );
     tracing::debug!("engine options in full:\n{}", opts.describe());
-    let option_metrics: String = opts
-        .pairs()
-        .iter()
-        .map(|(k, v)| format!("peregrine_option{{name=\"{k}\",value=\"{v}\"}} 1\n"))
-        .collect();
+    let option_metrics: String = format!(
+        "# HELP peregrine_calibrated_decode_threads Thread pool width for single-row decode\n# TYPE peregrine_calibrated_decode_threads gauge\nperegrine_calibrated_decode_threads {}\n\n# HELP peregrine_calibrated_spin_us Worker spin window in microseconds\n# TYPE peregrine_calibrated_spin_us gauge\nperegrine_calibrated_spin_us {}\n\n# HELP peregrine_calibration_duration_seconds Time spent during startup calibration\n# TYPE peregrine_calibration_duration_seconds gauge\nperegrine_calibration_duration_seconds {:.3}\n\n# HELP peregrine_calibration_source Source of active tuning parameters (0=default, 1=startup, 2=profile, 3=env)\n# TYPE peregrine_calibration_source gauge\nperegrine_calibration_source {}\n\n{}",
+        opts.decode_threads.unwrap_or_else(|| peregrine_core::pool::physical_cores().unwrap_or(1)),
+        opts.spin_us,
+        opts.calibration_ms() / 1000.0,
+        opts.tuning_source.code(),
+        opts.pairs()
+            .iter()
+            .map(|(k, v)| format!("peregrine_option{{name=\"{k}\",value=\"{v}\"}} 1\n"))
+            .collect::<String>()
+    );
     peregrine_core::options::init(opts)
         .expect("engine options are set once, before the model loads");
     let threads = a
@@ -1199,5 +1225,12 @@ mod tests {
             continuation_prefix(false, "Okay", closing),
             "<think>\nOkay\n</think>\n\n"
         );
+    }
+    #[test]
+    fn engine_options_and_metrics_include_calibration() {
+        let opts =
+            super::engine_options(&["CALIBRATE=0".into(), "SPIN_US=200".into()], None).unwrap();
+        assert_eq!(opts.spin_us, 200);
+        assert!(!opts.calibrate);
     }
 }

@@ -1612,6 +1612,48 @@ fn plain_qwen35_mtp_variant_speculates_losslessly() {
     );
 }
 
+#[test]
+fn calibrated_settings_match_defaults_and_goldens() {
+    let dir = tmpdir("calib-golden");
+    let path = write_dense(&dir, "llama", Format::Q8_0, 1000, Dense::default());
+    let model = match Gguf::open(&path).and_then(peregrine_models::load) {
+        Ok(m) => m,
+        Err(e) => panic!("failed to load synthetic model: {e}"),
+    };
+
+    let cal = peregrine_core::calib::calibrate();
+    let run_cal = run(&model, cal.decode_threads);
+    let run_def = run(&model, 4);
+
+    assert_eq!(
+        run_cal, run_def,
+        "calibrated thread count ({}) output differs from default (4 threads)",
+        cal.decode_threads
+    );
+
+    // Verify against the committed golden
+    let name = "llama-q8_0";
+    let tier = peregrine_core::cpu::tier_name();
+    let golden_tier = if tier == "x86_64-avx2-vnni256" {
+        "x86_64-avx2"
+    } else {
+        tier.as_str()
+    };
+    let gpath = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/synthetic")
+        .join(golden_tier)
+        .join(format!("{name}.golden"));
+    if gpath.exists() {
+        let expected = std::fs::read_to_string(&gpath).expect("read golden");
+        assert_eq!(
+            run_cal, expected,
+            "calibrated output must match golden file"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // -------------------------------------------------------------------- gpt-oss (S2.5) --
 
 /// A `gpt-oss` file — OpenAI's mixture of experts — written the way llama.cpp v0.9.0
