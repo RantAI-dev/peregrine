@@ -208,6 +208,7 @@ impl Model {
                     "qwen2" | "qwen3" => Some("arch-qwen"),
                     "qwen25" | "qwen35" => Some("arch-qwen35"),
                     "gemma3" => Some("arch-gemma3"),
+            "phi3" => Some("arch-phi3"),
                     _ => None,
                 };
                 if let Some(feat) = feat {
