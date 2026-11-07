@@ -1,6 +1,6 @@
 # 0007: One runtime and one drafter interface
 
-- Status: Accepted
+- Status: Implemented
 - Date: 2026-11-07
 
 ## Context
@@ -47,3 +47,26 @@ They also differ in two places that change output:
 - Each step keeps every golden and every speculation-on/off equality test identical, and steps that touch the
   decode loop carry a decode A/B.
 - Revisit when batched speculation is wanted (it needs per-slot drafts in one verification pass).
+
+## Implementation
+
+Roadmap S1.4, in pull requests:
+
+| PR | Step | What it did |
+|---|---|---|
+| [#53](https://github.com/RantAI-dev/peregrine/pull/53) | — | this decision |
+| [#55](https://github.com/RantAI-dev/peregrine/pull/55) | 0 | the behaviour that must not move, pinned; the verify-cost model moved to `draft.rs`, where it belongs |
+| [#56](https://github.com/RantAI-dev/peregrine/pull/56) | 1 | the `Drafter` interface, and the two per-slot settings: the sampling `turn` and the KV rotation |
+| [#58](https://github.com/RantAI-dev/peregrine/pull/58) | 3 | one verification step in the engine (`Engine::spec_step` became `verify_step`); the MTP block is a drafter |
+| [#60](https://github.com/RantAI-dev/peregrine/pull/60) | 4-5 | the suffix index and the DSpark head propose through that same step |
+| [#61](https://github.com/RantAI-dev/peregrine/pull/61) | 6 | the session rebuilt as a layer over a one-slot engine |
+
+Step 2 — the session's own decode loop using the drafter wrappers — was overtaken: the engine's
+verification step took the wrappers over, and the session's own loop went away with step 6.
+
+Two things were implemented differently from the decision above, and neither changed an output:
+
+* `needs()` declares the hidden states and the taps, and not the token history. The engine never read
+  the history, and the suffix drafter keeps the corpus it searches itself.
+* the benchmark (`peregrine bench`) measures the engine now, instead of a prefill and a decode loop of
+  its own beside it. The bytes a token moves are the same; the numbers are the engine's.
