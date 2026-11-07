@@ -14,9 +14,10 @@
 //! * **Nothing is allocated per token.** [`MoeScratch`] is sized once and reused; every buffer the
 //!   block needs lives in it.
 //!
-//! Roadmap S2.5: the `qwen3moe` family (step 3) is the first caller. Nothing calls this yet.
+//! Roadmap S2.5: the `qwen3moe` family (step 3) and the `gpt-oss` family (step 5) are its
+//! callers.
 
-use crate::blocks::ffn::swiglu_rows;
+use crate::blocks::ffn::{swiglu_oai_rows, swiglu_rows};
 use crate::blocks::linear::{matmul_group, MatJob};
 use crate::blocks::par::OutPtr;
 use crate::gguf::TensorInfo;
@@ -28,6 +29,53 @@ use crate::quant::QuantAct;
 /// it, so a row whose experts all score near zero cannot divide by zero
 /// (`src/llama-graph.cpp:2381`).
 const MIN_F16_NORMAL: f32 = 6.103_515_6e-5;
+
+/// How the router turns its scores into the experts' weights.
+///
+/// llama.cpp v0.9.0's gating functions (`src/llama-graph.cpp:2280-2296`):
+///
+/// * [`MoeGating::Softmax`] — a softmax over **every** expert, then the best few
+///   (qwen3moe: `src/models/qwen3moe.cpp`);
+/// * [`MoeGating::SoftmaxWeight`] — the best few by *score*, and only then a
+///   softmax over the selected scores (gpt-oss: `src/models/openai-moe.cpp:141`).
+///
+/// The two differ in where the softmax sits, and therefore in which experts are
+/// chosen: a softmax over all the experts is monotone in the score, so the
+/// *selection* is the same, but the weights are not — under `SoftmaxWeight` the
+/// selected experts' scores are normalised among themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoeGating {
+    /// A softmax over every expert, then the best `k` (`SOFTMAX`).
+    Softmax,
+    /// The best `k` by score, then a softmax over those `k` (`SOFTMAX_WEIGHT`).
+    SoftmaxWeight,
+}
+
+/// The feed-forward's nonlinearity, between the gate and the up projection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MoeAct {
+    /// `silu(gate) ⊙ up` — the usual SwiGLU.
+    SwiGLU,
+    /// OpenAI's `swiglu_oai`: `min(gate, limit) / (1 + e^(α·(−min(gate, limit))) ⊙
+    /// (clamp(up, −limit, limit) + 1)` — gpt-oss's experts
+    /// (`src/models/openai-moe.cpp:139`, `ggml/src/ggml-cpu/ops.cpp:3388-3450`).
+    SwiGLUOai { alpha: f32, limit: f32 },
+}
+
+/// The biases of one expert: its gate projection's, its up projection's and its
+/// down projection's.
+///
+/// gpt-oss's experts carry all three (`src/models/openai-moe.cpp:52-54`); the
+/// router carries one more, of its own (`ffn_gate_inp.bias`).
+#[derive(Debug, Clone)]
+pub struct ExpertBias {
+    /// The gate projection's bias: one value per unit of the expert's width.
+    pub gate: Vec<f32>,
+    /// The up projection's bias.
+    pub up: Vec<f32>,
+    /// The down projection's bias: one value per unit of the model's width.
+    pub down: Vec<f32>,
+}
 
 /// The router's choice for one row: which experts, and how much each one counts.
 ///
@@ -140,6 +188,77 @@ fn better(p_a: f32, id_a: u32, p_b: f32, id_b: u32) -> bool {
     p_a > p_b || (p_a == p_b && id_a < id_b)
 }
 
+/// The router's choice for one row, llama.cpp v0.9.0's `SOFTMAX_WEIGHT` gating.
+///
+/// This is gpt-oss's routing (`src/models/openai-moe.cpp:141`,
+/// `src/llama-graph.cpp:2285-2287, 2345, 2363-2367`):
+///
+/// 1. the best `k` experts by **score** — the softmax comes *after* the selection,
+///    not before it, so the scores are compared as they are;
+/// 2. a softmax over those `k` scores alone, which is the row's weight vector.
+///
+/// The tie rule is [`route`]'s: score descending, then expert index ascending. The
+/// rule is per row and never looks at the batch, which is what invariant 1 needs
+/// (`docs/design/moe.md` §1).
+///
+/// `out_ids` and `out_w` are the caller's buffers and must hold at least `k` entries.
+pub fn route_softmax_weight(logits: &[f32], k: usize, out_ids: &mut [u32], out_w: &mut [f32]) {
+    let n = logits.len();
+    assert!(
+        k > 0 && k <= n,
+        "a router must choose between 1 and {n} experts, not {k}"
+    );
+    assert!(
+        out_ids.len() >= k && out_w.len() >= k,
+        "the route buffers hold fewer than {k} entries"
+    );
+
+    // 1. the best k by score, descending, and the lower expert index first on a tie.
+    let mut n_sel = 0usize;
+    for (i, &l) in logits.iter().enumerate() {
+        let id = i as u32;
+        let mut pos = 0usize;
+        while pos < n_sel && !better(l, id, out_w[pos], out_ids[pos]) {
+            pos += 1;
+        }
+        if pos >= k {
+            continue;
+        }
+        let mut j = n_sel.min(k - 1);
+        while j > pos {
+            out_w[j] = out_w[j - 1];
+            out_ids[j] = out_ids[j - 1];
+            j -= 1;
+        }
+        out_w[pos] = l;
+        out_ids[pos] = id;
+        if n_sel < k {
+            n_sel += 1;
+        }
+    }
+
+    // 2. the softmax over the selected scores, in ggml's order: the maximum, then the
+    //    exponentials, then the sum in double, then the division.
+    softmax(&mut out_w[..n_sel]);
+}
+
+/// A softmax over a row of scores, in ggml's order (`ggml_compute_forward_soft_max_f32`,
+/// `ggml/src/ggml-cpu/ops.cpp:5797`): the maximum is subtracted, the exponentials are
+/// summed in double and the f32 exponentials are scaled by the reciprocal of that sum.
+fn softmax(x: &mut [f32]) {
+    let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f64;
+    for v in x.iter_mut() {
+        // In-crate exp, not the C library's: the result must not move with the host's libc (#64).
+        *v = peregrine_kernels::vmath::exp_scalar(*v - max);
+        sum += f64::from(*v);
+    }
+    let inv = (1.0 / sum) as f32;
+    for v in x.iter_mut() {
+        *v *= inv;
+    }
+}
+
 /// The 2D matrix of one expert of a 3D expert tensor.
 ///
 /// GGUF stores `dims[0]` contiguous, so llama.cpp's expert tensors (`[d_in, d_out, n_expert]`,
@@ -207,6 +326,16 @@ pub struct MoeWeights<'a> {
     /// value multiplies the weights. Every qwen3moe file carries 0, which means "no scaling" —
     /// not "scale everything by zero".
     pub w_scale: f32,
+    /// How the router turns its scores into the experts' weights.
+    pub gating: MoeGating,
+    /// The feed-forward's nonlinearity.
+    pub act: MoeAct,
+    /// The router's bias, one value per expert (`ffn_gate_inp.bias`). `None` when the
+    /// layer has none (qwen3moe).
+    pub router_bias: Option<&'a [f32]>,
+    /// The experts' biases, one set per expert. `None` when the layer has none
+    /// (qwen3moe).
+    pub expert_bias: Option<&'a [ExpertBias]>,
 }
 
 /// The buffers a mixture-of-experts layer needs, sized once.
@@ -340,15 +469,27 @@ pub fn moe_ffn(
         matmul_group(w, &jobs, &scratch.acts[..nb], nb, pool, st);
     }
 
+    // 1b. the router's bias, one value per expert (`src/llama-graph.cpp:2271`).
+    if let Some(bias) = mw.router_bias {
+        for b in 0..nb {
+            for (e, &v) in bias.iter().enumerate() {
+                scratch.router[b * n_expert + e] += v;
+            }
+        }
+    }
+
     // 2. the routing, one row at a time: the router never sees the batch.
     for b in 0..nb {
-        route(
-            &scratch.router[b * n_expert..(b + 1) * n_expert],
-            k,
-            mw.renorm,
-            &mut scratch.ids[b * k..(b + 1) * k],
-            &mut scratch.weights[b * k..(b + 1) * k],
-        );
+        let logits = &scratch.router[b * n_expert..(b + 1) * n_expert];
+        let ids = &mut scratch.ids[b * k..(b + 1) * k];
+        let ws = &mut scratch.weights[b * k..(b + 1) * k];
+        match mw.gating {
+            // A softmax over every expert, then the best few (`src/llama-graph.cpp:2279`).
+            MoeGating::Softmax => route(logits, k, mw.renorm, ids, ws),
+            // The best few by score, then a softmax over them
+            // (`src/llama-graph.cpp:2287, 2345, 2365`).
+            MoeGating::SoftmaxWeight => route_softmax_weight(logits, k, ids, ws),
+        }
     }
 
     // 2b. the scale on the weights, with llama.cpp's rule: a scale of 0 or 1 is not applied
@@ -417,17 +558,46 @@ pub fn moe_ffn(
             ];
             matmul_group(w, &jobs, &scratch.acts[..g], g, pool, st);
         }
-        // SwiGLU: silu(gate) ⊙ up, quantised for the down projection. The gate is taken in
+        // The experts' biases on the gate and the up projections
+        // (`src/llama-graph.cpp:2441-2444, 2457-2460`): the bias of the expert the
+        // rows chose, added to every one of them.
+        if let Some(bias) = mw.expert_bias {
+            let e = &bias[e];
+            for j in 0..g {
+                let (gate, up) = (
+                    &mut scratch.gate[j * n_ff..(j + 1) * n_ff],
+                    &mut scratch.up[j * n_ff..(j + 1) * n_ff],
+                );
+                for i in 0..n_ff {
+                    gate[i] += e.gate[i];
+                    up[i] += e.up[i];
+                }
+            }
+        }
+        // The activation: SwiGLU, or OpenAI's `swiglu_oai`. The gate is taken in
         // place, as the dense block does it.
-        swiglu_rows(
-            n_ff,
-            &mut scratch.gate[..g * n_ff],
-            &scratch.up[..g * n_ff],
-            &mut scratch.acts_ffn[..g],
-            g,
-            pool,
-            st,
-        );
+        match mw.act {
+            MoeAct::SwiGLU => swiglu_rows(
+                n_ff,
+                &mut scratch.gate[..g * n_ff],
+                &scratch.up[..g * n_ff],
+                &mut scratch.acts_ffn[..g],
+                g,
+                pool,
+                st,
+            ),
+            MoeAct::SwiGLUOai { alpha, limit } => swiglu_oai_rows(
+                n_ff,
+                &mut scratch.gate[..g * n_ff],
+                &scratch.up[..g * n_ff],
+                &mut scratch.acts_ffn[..g],
+                g,
+                alpha,
+                limit,
+                pool,
+                st,
+            ),
+        }
         // The down projection.
         {
             let jobs = [MatJob {
@@ -436,6 +606,16 @@ pub fn moe_ffn(
                 rows: None,
             }];
             matmul_group(w, &jobs, &scratch.acts_ffn[..g], g, pool, st);
+        }
+        // The down projection's bias (`src/llama-graph.cpp:2573-2576`).
+        if let Some(bias) = mw.expert_bias {
+            let d = &bias[e].down;
+            for j in 0..g {
+                let row = &mut scratch.down[j * d_model..(j + 1) * d_model];
+                for i in 0..d_model {
+                    row[i] += d[i];
+                }
+            }
         }
         // Scatter the group's outputs into the slot each row's selection occupies.
         for j in 0..g {
@@ -595,6 +775,40 @@ mod tests {
         let mut w3 = [0.0f32; 3];
         route(&logits, 3, true, &mut ids3, &mut w3);
         assert_eq!(ids3, [0, 1, 2]);
+    }
+
+    /// The `SOFTMAX_WEIGHT` routing: the best few by score, and a softmax over those
+    /// few alone. The scores are compared as they are — the softmax comes after the
+    /// selection, not before it.
+    #[test]
+    fn route_softmax_weight_picks_the_best_and_normalises_them() {
+        let logits = [0.0f32, 3.0, 1.0, 2.0];
+        let mut ids = [0u32; 2];
+        let mut w = [0.0f32; 2];
+        route_softmax_weight(&logits, 2, &mut ids, &mut w);
+        assert_eq!(ids, [1, 3], "the two best scores, best first");
+        // The weights are a softmax over the two selected scores: e^(3-3) and e^(2-3).
+        let e = std::f64::consts::E;
+        let sum = 1.0 + 1.0 / e;
+        let want0 = 1.0 / sum;
+        let want1 = 1.0 / e / sum;
+        assert!((w[0] as f64 - want0).abs() < 1e-6, "{} vs {want0}", w[0]);
+        assert!((w[1] as f64 - want1).abs() < 1e-6, "{} vs {want1}", w[1]);
+        // The weights sum to one: the softmax is the normalisation.
+        assert!((w[0] + w[1] - 1.0).abs() < 1e-6);
+    }
+
+    /// The tie rule is the same as the softmax routing's: the lower expert index wins.
+    #[test]
+    fn route_softmax_weight_breaks_a_tie_by_the_lower_expert_index() {
+        let logits = [1.0f32, 1.0, 0.5];
+        let mut ids = [0u32; 2];
+        let mut w = [0.0f32; 2];
+        route_softmax_weight(&logits, 2, &mut ids, &mut w);
+        assert_eq!(ids, [0, 1]);
+        // The two tied scores get the same weight: a half each.
+        assert!((w[0] - 0.5).abs() < 1e-6, "{}", w[0]);
+        assert!((w[1] - 0.5).abs() < 1e-6, "{}", w[1]);
     }
 
     // -------------------------------------------------------------- the expert views --
@@ -825,6 +1039,10 @@ mod tests {
                 n_used,
                 renorm: true,
                 w_scale: 0.0,
+                gating: MoeGating::Softmax,
+                act: MoeAct::SwiGLU,
+                router_bias: None,
+                expert_bias: None,
             }
         }
     }

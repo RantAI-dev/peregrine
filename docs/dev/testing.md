@@ -23,7 +23,10 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    current tier (`tests/golden/synthetic/<tier>/`). A `qwen3moe` file (8 experts, 2 used, F16 and Q8_0
    experts) is written there too: the mixture-of-experts family runs it — it loads, gives finite logits,
    is bit-identical across runs and across 1, 2 and 4 threads, matches its golden, and gives the same
-   tokens alone and batched through `Engine` — and llama.cpp v0.9.0 loads and runs the same file. The
+   tokens alone and batched through `Engine` — and llama.cpp v0.9.0 loads and runs the same file. A
+   `gpt-oss` file (4 experts, 2 used, F16 and MXFP4 experts, attention sinks, alternating
+   sliding-window and full attention, YaRN rope scaling) is written there too, and llama.cpp v0.9.0
+   gives the same greedy tokens for both. The
    same tests drive small models through `Engine`:
    prompts served alone must produce the same tokens when admitted together (a mixed prefill/decode step,
    both `Caches::Mapped` and, with `PEREGRINE_MIX=0`, `Caches::PerRow`), a shared opening must restore from
@@ -33,10 +36,11 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    CI's pinned tiers (scalar, AVX2 and the AVX-512 tier under SDE) run with `PEREGRINE_GOLDEN=require`,
    so a new model or format must commit its goldens for all three; `PEREGRINE_GOLDEN=record` writes the
    missing ones (the AVX-512 ones on an AVX-512 machine).
-   `tests/runtime_parity.rs` pins what the two runtimes do differently today, before ADR 0007 makes
-   the engine the only one: the same prompt through `Session` and through a one-slot `Engine` (greedy:
-   the same tokens; sampled: the session counts conversation turns into the sampling key and the engine
-   does not), the taps a DSpark drafter needs (which must not change a logit bit), a second user arriving
+   `tests/runtime_parity.rs` pins what the session and a one-slot engine must agree on, since ADR 0007
+   made the engine the only runtime: the same prompt through `Session` and through a one-slot `Engine`
+   (greedy: the same tokens; sampled: the session counts conversation turns into the sampling key and the
+   engine does not, and the two per-slot settings — the turn and the KV rotation — are what make them
+   agree), the taps a DSpark drafter needs (which must not change a logit bit), a second user arriving
    while the first one speculates, and the prefix store, which is off while a drafter is attached. The
    drafter it uses is written in the test (`tests/support/dspark.rs`: a `config.json` and a safetensors
    file), so it needs no model files either.

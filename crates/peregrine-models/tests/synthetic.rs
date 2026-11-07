@@ -1649,3 +1649,527 @@ fn calibrated_settings_match_defaults_and_goldens() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// -------------------------------------------------------------------- gpt-oss (S2.5) --
+
+/// A `gpt-oss` file — OpenAI's mixture of experts — written the way llama.cpp v0.9.0
+/// expects it (`src/models/openai-moe.cpp`, `conversion/gpt_oss.py`).
+///
+/// The engine runs the file now, so this test does two things. It checks that the file
+/// is written and read back exactly as intended: the metadata llama.cpp reads, the
+/// three-dimensional expert tensors in llama.cpp's dimension order (the expert index
+/// runs slowest, so one expert is a contiguous run of rows — a 2D matrix with no new
+/// kernel), the biases and the attention sinks. And it runs the ordinary `check` of
+/// every other synthetic model: the file loads, a prefill gives finite logits, two runs
+/// agree, the result is the same on 1, 2 and 4 threads, and it matches the stored golden
+/// for the current kernel tier.
+#[test]
+fn gpt_oss_models_load_and_match_their_goldens() {
+    use support::models::{write_gpt_oss, GptOssShape};
+
+    let dir = tmpdir("gpt-oss");
+    let s = GptOssShape::default();
+    let mut failures = Vec::new();
+    // The two formats, each with its own seed: F16 experts, and the MXFP4 experts the
+    // published gpt-oss files carry.
+    for (fmt, seed) in [(Format::F16, 9000u64), (Format::MXFP4, 9001)] {
+        let name = format!("gpt-oss-{}", fmt.label());
+        let path = write_gpt_oss(&dir, fmt, seed, s);
+        let g = match Gguf::open(&path) {
+            Ok(g) => g,
+            Err(e) => {
+                failures.push(format!("{name}: does not open: {e}"));
+                continue;
+            }
+        };
+        if g.str("general.architecture").unwrap_or("") != "gpt-oss" {
+            failures.push(format!("{name}: the architecture is not gpt-oss"));
+        }
+        for (key, want) in [
+            ("gpt-oss.block_count", s.n_layer as u32),
+            ("gpt-oss.embedding_length", s.d_model as u32),
+            ("gpt-oss.attention.head_count", s.n_head as u32),
+            ("gpt-oss.attention.head_count_kv", s.n_head_kv as u32),
+            ("gpt-oss.attention.sliding_window", s.sliding_window as u32),
+            ("gpt-oss.expert_count", s.n_expert as u32),
+            ("gpt-oss.expert_used_count", s.n_expert_used as u32),
+            ("gpt-oss.expert_feed_forward_length", s.expert_ff as u32),
+            ("gpt-oss.vocab_size", 320),
+        ] {
+            match g.u32(key) {
+                Ok(v) if v == want => {}
+                Ok(v) => failures.push(format!("{name}: {key} is {v}, want {want}")),
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        // YaRN: the scaling the real files carry.
+        match g.str("gpt-oss.rope.scaling.type") {
+            Ok("yarn") => {}
+            Ok(t) => failures.push(format!("{name}: the rope scaling is {t:?}, not yarn")),
+            Err(e) => failures.push(format!("{name}: {e}")),
+        }
+        let d = s.d_model as u64;
+        let ff = s.expert_ff as u64;
+        let ne = s.n_expert as u64;
+        let hd = d / s.n_head as u64;
+        for (tensor, dims) in [
+            ("blk.0.attn_q.weight", vec![d, s.n_head as u64 * hd]),
+            ("blk.0.attn_k.weight", vec![d, s.n_head_kv as u64 * hd]),
+            ("blk.0.attn_output.weight", vec![s.n_head as u64 * hd, d]),
+            ("blk.0.attn_output.bias", vec![d]),
+            ("blk.0.attn_sinks.weight", vec![s.n_head as u64]),
+            ("blk.0.ffn_gate_inp.weight", vec![d, ne]),
+            ("blk.0.ffn_gate_inp.bias", vec![ne]),
+            ("blk.0.ffn_gate_exps.weight", vec![d, ff, ne]),
+            ("blk.0.ffn_gate_exps.bias", vec![ff, ne]),
+            ("blk.0.ffn_up_exps.weight", vec![d, ff, ne]),
+            ("blk.0.ffn_up_exps.bias", vec![ff, ne]),
+            ("blk.0.ffn_down_exps.weight", vec![ff, d, ne]),
+            ("blk.0.ffn_down_exps.bias", vec![d, ne]),
+        ] {
+            match g.tensor(tensor) {
+                Ok(t) => {
+                    if t.dims != dims {
+                        failures.push(format!(
+                            "{name}: {tensor} has dims {:?}, want {dims:?}",
+                            t.dims
+                        ));
+                    }
+                }
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        // The experts are in the file's format; the attention is F16.
+        for tensor in ["blk.0.ffn_gate_exps.weight", "blk.0.ffn_up_exps.weight"] {
+            match g.tensor(tensor) {
+                Ok(t) if t.kind == fmt => {}
+                Ok(t) => failures.push(format!(
+                    "{name}: {tensor} is {}, want {}",
+                    t.kind.label(),
+                    fmt.label()
+                )),
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        // The biases and the sinks are F32, as in every file.
+        for tensor in ["blk.0.attn_output.bias", "blk.0.attn_sinks.weight"] {
+            match g.tensor(tensor) {
+                Ok(t) if t.kind == Format::F32 => {}
+                Ok(t) => failures.push(format!("{name}: {tensor} is {}, want F32", t.kind.label())),
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        // The engine accepts the file, and runs it.
+        if let Err(e) = peregrine_models::check_compatible(&g) {
+            failures.push(format!("{name}: refused: {e}"));
+        }
+        failures.extend(check(&path, &name));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "synthetic gpt-oss models failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The synthetic gpt-oss model's forward, computed from the file's own weights in
+/// f64: the specification the engine's forward must agree with.
+///
+/// Everything the architecture adds to a plain transformer is in here: the YaRN rope
+/// (`ggml/src/ggml-cpu/ops.cpp:6164-6187`), the attention sinks
+/// (`ggml/src/ggml-cpu/ops.cpp:5883-5894`), the sliding window on every other layer,
+/// the router's bias and its softmax over the *selected* experts
+/// (`src/llama-graph.cpp:2285-2287, 2363-2367`), the experts' biases, and OpenAI's
+/// `swiglu_oai` (`ggml/src/ggml-cpu/ops.cpp:3388-3450`).
+fn gpt_oss_reference(g: &Gguf, tokens: &[u32]) -> Vec<f64> {
+    let k = |s: &str| format!("gpt-oss.{s}");
+    let n_layer = g.u32(&k("block_count")).unwrap() as usize;
+    let d_model = g.u32(&k("embedding_length")).unwrap() as usize;
+    let n_head = g.u32(&k("attention.head_count")).unwrap() as usize;
+    let n_kv_head = g.u32(&k("attention.head_count_kv")).unwrap() as usize;
+    let head_dim = g.u32(&k("attention.key_length")).unwrap() as usize;
+    let window = g.u32(&k("attention.sliding_window")).unwrap() as usize;
+    let eps = g.f32(&k("attention.layer_norm_rms_epsilon")).unwrap() as f64;
+    let rope_dim = g.u32(&k("rope.dimension_count")).unwrap() as usize;
+    let rope_base = g.f32(&k("rope.freq_base")).unwrap() as f64;
+    let n_expert = g.u32(&k("expert_count")).unwrap() as usize;
+    let n_used = g.u32(&k("expert_used_count")).unwrap() as usize;
+    let n_ff = g.u32(&k("expert_feed_forward_length")).unwrap() as usize;
+    let n_vocab = g.u32(&k("vocab_size")).unwrap() as usize;
+    let factor = g.f32(&k("rope.scaling.factor")).unwrap() as f64;
+    let n_ctx_orig = g.u32(&k("rope.scaling.original_context_length")).unwrap() as usize;
+
+    // The rope angles, as llama.cpp computes them for YaRN.
+    let corr_dim = |n_rot: f64| -> f64 {
+        rope_dim as f64 * (n_ctx_orig as f64 / (n_rot * 2.0 * std::f64::consts::PI)).ln()
+            / (2.0 * rope_base.ln())
+    };
+    let corr = [
+        corr_dim(32.0).floor().max(0.0),
+        corr_dim(1.0).ceil().min(rope_dim as f64 - 1.0),
+    ];
+    let freq_scale = 1.0 / factor;
+    let mscale = 1.0 + 0.1 * factor.ln();
+    let angle = |pos: usize, i: usize| -> (f64, f64) {
+        let extrap = pos as f64 * rope_base.powf(-((2 * i) as f64) / rope_dim as f64);
+        let interp = freq_scale * extrap;
+        let y = (i as f64 - corr[0]) / (corr[1] - corr[0]).max(0.001);
+        let ramp = 1.0 - y.clamp(0.0, 1.0);
+        let theta = interp * (1.0 - ramp) + extrap * ramp;
+        (theta.cos() * mscale, theta.sin() * mscale)
+    };
+
+    // A tensor, dequantised into a flat array of rows of `dims[0]` values.
+    let deq = |name: &str| -> Vec<f64> {
+        let t = g.tensor(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let n = t.numel() as usize;
+        let mut buf = vec![0.0f32; n];
+        peregrine_core::quant::dequant_row(t.kind, g.bytes(t), &mut buf);
+        buf.iter().map(|&v| v as f64).collect()
+    };
+    // `y = W·x`, for a matrix of `rows` rows of `cols` weights, at `off`.
+    let matvec = |w: &[f64], cols: usize, rows: usize, x: &[f64], off: usize| -> Vec<f64> {
+        (0..rows)
+            .map(|r| {
+                w[off + r * cols..off + (r + 1) * cols]
+                    .iter()
+                    .zip(x)
+                    .map(|(a, b)| a * b)
+                    .sum()
+            })
+            .collect()
+    };
+    let rmsnorm = |x: &[f64], w: &[f64]| -> Vec<f64> {
+        let ss: f64 = x.iter().map(|v| v * v).sum();
+        let inv = 1.0 / (ss / x.len() as f64 + eps).sqrt();
+        x.iter().zip(w).map(|(v, &wv)| v * inv * wv).collect()
+    };
+
+    let nb = tokens.len();
+    let qd = n_head * head_dim;
+    let kvd = n_kv_head * head_dim;
+    let gqa = n_head / n_kv_head;
+    let half = rope_dim / 2;
+
+    let embd = deq("token_embd.weight");
+    let mut x: Vec<Vec<f64>> = tokens
+        .iter()
+        .map(|&t| embd[t as usize * d_model..(t as usize + 1) * d_model].to_vec())
+        .collect();
+
+    for li in 0..n_layer {
+        let p = |t: &str| format!("blk.{li}.{t}");
+        let attn_norm = deq(&p("attn_norm.weight"));
+        let wq = deq(&p("attn_q.weight"));
+        let wk = deq(&p("attn_k.weight"));
+        let wv = deq(&p("attn_v.weight"));
+        let wo = deq(&p("attn_output.weight"));
+        let wo_b = deq(&p("attn_output.bias"));
+        let sinks = deq(&p("attn_sinks.weight"));
+        let post_norm = deq(&p("post_attention_norm.weight"));
+        let router = deq(&p("ffn_gate_inp.weight"));
+        let router_b = deq(&p("ffn_gate_inp.bias"));
+        let gate_w = deq(&p("ffn_gate_exps.weight"));
+        let gate_b = deq(&p("ffn_gate_exps.bias"));
+        let up_w = deq(&p("ffn_up_exps.weight"));
+        let up_b = deq(&p("ffn_up_exps.bias"));
+        let down_w = deq(&p("ffn_down_exps.weight"));
+        let down_b = deq(&p("ffn_down_exps.bias"));
+        // Every other layer is a sliding-window one (`load_swa_pattern(ml, 2)`).
+        let is_swa = li % 2 == 0;
+
+        // ---- the attention ----
+        let xn: Vec<Vec<f64>> = x.iter().map(|r| rmsnorm(r, &attn_norm)).collect();
+        let mut qs = Vec::new();
+        let mut ks = Vec::new();
+        let mut vs = Vec::new();
+        for (b, xnb) in xn.iter().enumerate() {
+            let mut q = matvec(&wq, d_model, qd, xnb, 0);
+            let mut k = matvec(&wk, d_model, kvd, xnb, 0);
+            let v = matvec(&wv, d_model, kvd, xnb, 0);
+            // The rotation: the NeoX pairing, the frequencies in order.
+            for h in 0..n_head {
+                let row = &mut q[h * head_dim..(h + 1) * head_dim];
+                for i in 0..half {
+                    let (c, s) = angle(b, i);
+                    let (x0, x1) = (row[i], row[i + half]);
+                    row[i] = x0 * c - x1 * s;
+                    row[i + half] = x0 * s + x1 * c;
+                }
+            }
+            for h in 0..n_kv_head {
+                let row = &mut k[h * head_dim..(h + 1) * head_dim];
+                for i in 0..half {
+                    let (c, s) = angle(b, i);
+                    let (x0, x1) = (row[i], row[i + half]);
+                    row[i] = x0 * c - x1 * s;
+                    row[i + half] = x0 * s + x1 * c;
+                }
+            }
+            qs.push(q);
+            ks.push(k);
+            vs.push(v);
+        }
+        let scale = 1.0 / (head_dim as f64).sqrt();
+        let mut attn_out = vec![vec![0.0f64; qd]; nb];
+        for b in 0..nb {
+            let lo = if is_swa {
+                (b + 1).saturating_sub(window)
+            } else {
+                0
+            };
+            for h in 0..n_head {
+                let kh = h / gqa;
+                let q = &qs[b][h * head_dim..(h + 1) * head_dim];
+                let scores: Vec<f64> = (lo..=b)
+                    .map(|p| {
+                        let k = &ks[p][kh * head_dim..(kh + 1) * head_dim];
+                        q.iter().zip(k).map(|(a, b)| a * b).sum::<f64>() * scale
+                    })
+                    .collect();
+                // The sink joins the softmax without a value of its own.
+                let sink = sinks[h];
+                let m = scores.iter().cloned().fold(sink, f64::max);
+                let denom: f64 =
+                    scores.iter().map(|s| (s - m).exp()).sum::<f64>() + (sink - m).exp();
+                for d in 0..head_dim {
+                    let acc: f64 = (lo..=b)
+                        .enumerate()
+                        .map(|(j, p)| (scores[j] - m).exp() * vs[p][kh * head_dim + d])
+                        .sum();
+                    attn_out[b][h * head_dim + d] = acc / denom;
+                }
+            }
+        }
+        for b in 0..nb {
+            let o = matvec(&wo, qd, d_model, &attn_out[b], 0);
+            for i in 0..d_model {
+                x[b][i] += o[i] + wo_b[i];
+            }
+        }
+
+        // ---- the experts ----
+        let xn2: Vec<Vec<f64>> = x.iter().map(|r| rmsnorm(r, &post_norm)).collect();
+        for b in 0..nb {
+            let mut logits = matvec(&router, d_model, n_expert, &xn2[b], 0);
+            for e in 0..n_expert {
+                logits[e] += router_b[e];
+            }
+            // The best few by score, descending; the lower expert index first on a tie.
+            let mut order: Vec<usize> = (0..n_expert).collect();
+            order.sort_by(|&a, &b| {
+                logits[b]
+                    .partial_cmp(&logits[a])
+                    .unwrap()
+                    .then_with(|| a.cmp(&b))
+            });
+            let sel = &order[..n_used];
+            // The softmax over the selected scores.
+            let max = sel
+                .iter()
+                .map(|&e| logits[e])
+                .fold(f64::NEG_INFINITY, f64::max);
+            let exps: Vec<f64> = sel.iter().map(|&e| (logits[e] - max).exp()).collect();
+            let sum: f64 = exps.iter().sum();
+            let mut out = vec![0.0f64; d_model];
+            for (s, &e) in sel.iter().enumerate() {
+                let gate = matvec(&gate_w, d_model, n_ff, &xn2[b], e * d_model * n_ff);
+                let up = matvec(&up_w, d_model, n_ff, &xn2[b], e * d_model * n_ff);
+                let mut h = vec![0.0f64; n_ff];
+                for i in 0..n_ff {
+                    let gx = (gate[i] + gate_b[e * n_ff + i]).min(7.0);
+                    let uy = (up[i] + up_b[e * n_ff + i]).clamp(-7.0, 7.0);
+                    h[i] = gx / (1.0 + (1.702 * -gx).exp()) * (uy + 1.0);
+                }
+                let y = matvec(&down_w, n_ff, d_model, &h, e * n_ff * d_model);
+                let w = exps[s] / sum;
+                for i in 0..d_model {
+                    out[i] += w * (y[i] + down_b[e * d_model + i]);
+                }
+            }
+            for i in 0..d_model {
+                x[b][i] += out[i];
+            }
+        }
+    }
+
+    // ---- the output head ----
+    let out_norm = deq("output_norm.weight");
+    let head_w = deq("output.weight");
+    let mut logits = Vec::with_capacity(nb * n_vocab);
+    for xb in x.iter() {
+        let xn = rmsnorm(xb, &out_norm);
+        logits.extend(matvec(&head_w, d_model, n_vocab, &xn, 0));
+    }
+    logits
+}
+
+/// The engine's forward and the exact reference must agree.
+///
+/// The file is the F16 one, and the KV cache is f32, so the only difference between
+/// the two is the order of the arithmetic: the engine sums in f32 (and its own `exp`),
+/// the reference in f64 (and the C library's).
+#[test]
+fn the_gpt_oss_forward_matches_the_exact_reference() {
+    use support::models::{write_gpt_oss, GptOssShape};
+
+    let dir = tmpdir("gpt-oss-reference");
+    let path = write_gpt_oss(&dir, Format::F16, 9000, GptOssShape::default());
+    let g = Gguf::open(&path).expect("open the synthetic model");
+    let want = gpt_oss_reference(&g, &PROMPT);
+
+    let model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
+    let pool = Pool::new(1);
+    let mut st = model.new_state(128, PROMPT.len(), 256, 1);
+    let mut kv = model.new_cache(KvPrec::F32, 256);
+    let mut ss = StepStats::default();
+    let rows: Vec<usize> = (0..PROMPT.len()).collect();
+    model
+        .forward(&mut st, &mut kv, &pool, &PROMPT, 0, &rows, &mut ss)
+        .unwrap();
+
+    let n_vocab = model.cfg.n_vocab;
+    let mut worst = 0.0f64;
+    for b in 0..PROMPT.len() {
+        let got = st.logits_row(b, n_vocab);
+        for i in 0..n_vocab {
+            let d = (got[i] as f64 - want[b * n_vocab + i]).abs();
+            worst = worst.max(d);
+        }
+    }
+    eprintln!("gpt-oss: the largest logit difference from the reference is {worst:e}");
+    assert!(
+        worst < 5e-3,
+        "the forward differs from the reference by {worst}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The synthetic gpt-oss file against llama.cpp v0.9.0's own `gpt-oss`
+/// implementation — the upstream oracle for this architecture.
+///
+/// The F16 file and the MXFP4 one: with the weights in f16 and the activations
+/// unquantised, both engines compute the same thing, and the greedy tokens must
+/// be the same.
+#[test]
+fn gpt_oss_synthetic_file_runs_in_llama_cpp() {
+    use support::models::{write_gpt_oss, GptOssShape};
+
+    // The same helper the other families use: it loads any model, prints the greedy
+    // tokens and saves the last position's logits.
+    let compare_bin = PathBuf::from("/tmp/compare_gemma3");
+    if !compare_bin.exists() {
+        let llama_so = Path::new("/tmp/llama.cpp/build/bin/libllama.so");
+        if !llama_so.exists() {
+            eprintln!("llama.cpp not found at {}, skipping", llama_so.display());
+            return;
+        }
+    }
+    let dir = tmpdir("gpt-oss-llama-cpp");
+    let prompt = "In a quiet valley surrounded by mountains";
+    let n_predict = 8;
+    let mut failures = Vec::new();
+    for (fmt, seed) in [(Format::F16, 9000u64), (Format::MXFP4, 9001)] {
+        let name = format!("gpt-oss-{}", fmt.label());
+        let path = write_gpt_oss(&dir, fmt, seed, GptOssShape::default());
+        let logits_path = dir.join(format!("llama_logits-{}.bin", fmt.label()));
+
+        let output = std::process::Command::new(&compare_bin)
+            .args([
+                path.to_str().unwrap(),
+                &n_predict.to_string(),
+                prompt,
+                logits_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to execute compare_gemma3");
+
+        if !output.status.success() {
+            eprintln!(
+                "compare_gemma3 failed on the synthetic {name} model: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            failures.push(format!("{name}: llama.cpp did not run the file"));
+            continue;
+        }
+        let llama_stdout = String::from_utf8_lossy(&output.stdout);
+
+        let llama_tokens: Vec<u32> = llama_stdout
+            .lines()
+            .find(|l| l.starts_with("TOKENS:"))
+            .expect("TOKENS: line")
+            .strip_prefix("TOKENS:")
+            .unwrap()
+            .split_whitespace()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        assert_eq!(llama_tokens.len(), n_predict);
+
+        let llama_logits_bytes = std::fs::read(&logits_path).expect("read logits");
+        let llama_logits: Vec<f32> = llama_logits_bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_ne_bytes(*b))
+            .collect();
+
+        let model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
+        let prompt_toks = model.tk.encode(prompt);
+
+        let pool = Pool::new(1);
+        let mut st = model.new_state(128, prompt_toks.len() + n_predict, 256, 1);
+        let mut kv = model.new_cache(KvPrec::F16, 256);
+        let mut ss = StepStats::default();
+        let want: Vec<usize> = vec![prompt_toks.len() - 1];
+        model
+            .forward(&mut st, &mut kv, &pool, &prompt_toks, 0, &want, &mut ss)
+            .unwrap();
+
+        let pere_logits = st.logits_row(0, model.cfg.n_vocab).to_vec();
+        assert_eq!(pere_logits.len(), llama_logits.len());
+
+        let mut max_abs_err = 0.0f32;
+        let mut sum_sq_diff = 0.0f64;
+        let mut sum_sq_ref = 0.0f64;
+        for (p, l) in pere_logits.iter().zip(&llama_logits) {
+            max_abs_err = max_abs_err.max((p - l).abs());
+            sum_sq_diff += ((p - l) as f64).powi(2);
+            sum_sq_ref += (*l as f64).powi(2);
+        }
+        let rel_l2_err = (sum_sq_diff.sqrt() / sum_sq_ref.sqrt()) as f32;
+        eprintln!(
+            "{name} last-position logits: max_abs_err = {max_abs_err:e}, rel_l2_err = {rel_l2_err:e}"
+        );
+        if max_abs_err >= 0.05 {
+            failures.push(format!("{name}: the logits differ by {max_abs_err}"));
+        }
+
+        let mut pere_tokens = Vec::new();
+        let mut next = argmax(&pere_logits);
+        pere_tokens.push(next);
+        for step in 1..n_predict {
+            let pos = prompt_toks.len() + step - 1;
+            model
+                .forward(&mut st, &mut kv, &pool, &[next], pos, &[0], &mut ss)
+                .unwrap();
+            next = argmax(st.logits_row(0, model.cfg.n_vocab));
+            pere_tokens.push(next);
+        }
+        eprintln!("llama.cpp greedy tokens ({llama_tokens:?})");
+        eprintln!("Peregrine greedy tokens ({pere_tokens:?})");
+
+        if pere_tokens != llama_tokens {
+            failures.push(format!(
+                "{name}: the greedy tokens diverged: {pere_tokens:?} vs {llama_tokens:?}"
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "the synthetic gpt-oss files did not match llama.cpp:\n{}",
+        failures.join("\n")
+    );
+}

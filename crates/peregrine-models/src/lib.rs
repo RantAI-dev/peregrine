@@ -22,6 +22,16 @@
 pub mod dense;
 #[cfg(feature = "arch-gemma3")]
 pub mod gemma3;
+#[cfg(feature = "arch-gpt-oss")]
+pub mod gptoss;
+#[cfg(any(
+    feature = "arch-llama",
+    feature = "arch-qwen",
+    feature = "arch-qwen3moe",
+    feature = "arch-phi3",
+    feature = "arch-gpt-oss"
+))]
+pub(crate) mod layer;
 #[cfg(feature = "arch-qwen35")]
 pub mod qwen35;
 #[cfg(feature = "arch-qwen3moe")]
@@ -37,6 +47,8 @@ pub use dense::Phi3Family;
 pub use dense::QwenFamily;
 #[cfg(feature = "arch-gemma3")]
 pub use gemma3::Gemma3Family;
+#[cfg(feature = "arch-gpt-oss")]
+pub use gptoss::GptOssFamily;
 #[cfg(feature = "arch-qwen35")]
 pub use qwen35::Qwen35Family;
 #[cfg(feature = "arch-qwen3moe")]
@@ -74,6 +86,8 @@ pub const ARCHS: &[&str] = &[
     "gemma3",
     #[cfg(feature = "arch-qwen3moe")]
     "qwen3moe",
+    #[cfg(feature = "arch-gpt-oss")]
+    "gpt-oss",
     #[cfg(feature = "arch-phi3")]
     "phi3",
 ];
@@ -90,6 +104,8 @@ pub static FAMILIES: &[&dyn Family] = &[
     &Gemma3Family,
     #[cfg(feature = "arch-qwen3moe")]
     &Qwen3MoeFamily,
+    #[cfg(feature = "arch-gpt-oss")]
+    &GptOssFamily,
     #[cfg(feature = "arch-phi3")]
     &Phi3Family,
 ];

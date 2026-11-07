@@ -19,9 +19,24 @@ use peregrine_core::model::{Model, StepStats};
 use peregrine_core::pool::Pool;
 use peregrine_core::sample::argmax;
 use peregrine_core::serve::{Engine, SlotCfg};
+use peregrine_core::suffix::{Draft, SuffixIndex};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{write_dense, write_hybrid, Dense};
+
+/// The index's own proposal, in the form the runtime uses: written into a
+/// buffer the caller owns.
+fn index_proposes(
+    index: &SuffixIndex,
+    ctx: &[u32],
+    anchor: u32,
+    max_len: usize,
+    min_order: usize,
+) -> Draft {
+    let mut d = Draft::default();
+    index.propose_into(ctx, anchor, max_len, min_order, &mut d);
+    d
+}
 
 /// A directory of its own for each test (tests run in parallel and each removes its directory).
 fn tmpdir(test: &str) -> PathBuf {
@@ -61,9 +76,9 @@ fn the_suffix_drafter_proposes_what_the_suffix_index_proposes() {
     let pool = Pool::new(4);
 
     // Today's path: the index proposes, and the confidences come from its cells.
-    let mut index = peregrine_core::suffix::SuffixIndex::new();
+    let mut index = SuffixIndex::new();
     index.sync(&ctx, min_order);
-    let d = index.propose(&ctx, anchor, max_len, min_order);
+    let d = index_proposes(&index, &ctx, anchor, max_len, min_order);
     assert!(!d.toks.is_empty(), "the corpus has no match to propose");
     let conf: Vec<f32> = d.cells.iter().map(|&c| index.conf(c)).collect();
 
@@ -94,9 +109,9 @@ fn the_suffix_drafter_proposal_prices_the_same_way() {
     let max_len = 6;
     let pool = Pool::new(4);
 
-    let mut index = peregrine_core::suffix::SuffixIndex::new();
+    let mut index = SuffixIndex::new();
     index.sync(&ctx, min_order);
-    let d = index.propose(&ctx, anchor, max_len, min_order);
+    let d = index_proposes(&index, &ctx, anchor, max_len, min_order);
     let conf: Vec<f32> = d.cells.iter().map(|&c| index.conf(c)).collect();
     let cost = |w: usize| 1.0 + 0.42 * (w as f64 - 1.0);
     let k = peregrine_core::draft::choose_k(&conf, cost);
@@ -125,9 +140,9 @@ fn the_suffix_drafter_books_what_the_target_committed() {
     let pool = Pool::new(4);
 
     // Today's path: the index proposes, and the outcome is booked on it.
-    let mut index = peregrine_core::suffix::SuffixIndex::new();
+    let mut index = SuffixIndex::new();
     index.sync(&ctx, min_order);
-    let d = index.propose(&ctx, anchor, max_len, min_order);
+    let d = index_proposes(&index, &ctx, anchor, max_len, min_order);
 
     // The wrapper: the same corpus, the same proposal, the same outcome.
     let mut drafter = SuffixDrafter::new(min_order, max_len);
@@ -176,7 +191,6 @@ impl Drafter for Recorder {
         Needs {
             taps: !self.layers.is_empty(),
             hidden: self.hidden,
-            history: false,
         }
     }
 

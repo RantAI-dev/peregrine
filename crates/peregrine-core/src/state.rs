@@ -156,12 +156,21 @@ impl State {
         fam: Option<Box<dyn Any + Send + Sync>>,
     ) -> State {
         let b = max_batch;
-        let rope = crate::blocks::rope::build_rope_table(
-            cfg.rope_dim,
-            cfg.rope_base,
-            max_ctx,
-            rope_factors,
-        );
+        let rope = match cfg.rope_yarn {
+            Some(y) => crate::blocks::rope::build_rope_table_yarn(
+                cfg.rope_dim,
+                cfg.rope_base,
+                max_ctx,
+                rope_factors,
+                &y,
+            ),
+            None => crate::blocks::rope::build_rope_table(
+                cfg.rope_dim,
+                cfg.rope_base,
+                max_ctx,
+                rope_factors,
+            ),
+        };
         State {
             x: vec![0.0; b * cfg.d_model],
             // Holds both a normed residual row (d_model wide) and an attention output

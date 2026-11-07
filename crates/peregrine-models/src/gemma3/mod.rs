@@ -209,6 +209,7 @@ impl Gemma3 {
             eps,
             rope_base,
             ctx_train,
+            rope_yarn: None,
         };
 
         let get = |n: &str| -> Result<TensorInfo, String> { g.tensor(n).cloned() };
@@ -546,6 +547,7 @@ impl Architecture for Gemma3 {
                     r0,
                     window,
                     Some(self.attn_scale),
+                    None,
                     stats,
                 );
             }

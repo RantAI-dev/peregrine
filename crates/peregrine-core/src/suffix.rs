@@ -180,15 +180,10 @@ impl SuffixIndex {
 
     /// Propose up to `k` tokens to follow `next`, the token just chosen but not yet
     /// in `ctx`. The longest suffix of `ctx + next` that occurred before wins.
-    pub fn propose(&self, ctx: &[u32], next: u32, k: usize, min_order: usize) -> Draft {
-        let mut d = Draft::default();
-        self.propose_into(ctx, next, k, min_order, &mut d);
-        d
-    }
-
-    /// As [`SuffixIndex::propose`], written into `out` (cleared first) instead of a
-    /// fresh [`Draft`]: a caller that proposes every step keeps one buffer, and the
-    /// proposal costs no allocation.
+    ///
+    /// The proposal is written into `out` (cleared first) rather than returned:
+    /// a caller that proposes every step keeps one buffer, and the proposal
+    /// costs no allocation.
     pub fn propose_into(
         &self,
         ctx: &[u32],
@@ -304,11 +299,19 @@ mod tests {
         s
     }
 
+    /// The proposal the index makes, in the form the runtime uses: written into
+    /// a buffer the caller owns.
+    fn propose(s: &SuffixIndex, ctx: &[u32], next: u32, k: usize, min_order: usize) -> Draft {
+        let mut d = Draft::default();
+        s.propose_into(ctx, next, k, min_order, &mut d);
+        d
+    }
+
     #[test]
     fn matches_the_suffix_ending_at_the_unfed_token() {
         // ... 1 2 3 4 5 6 ... then "1 2" with 3 about to be fed: propose 4 5 6.
         let ctx = [9, 1, 2, 3, 4, 5, 6, 7, 1, 2];
-        let d = built(&ctx).propose(&ctx, 3, 3, 2);
+        let d = propose(&built(&ctx), &ctx, 3, 3, 2);
         assert_eq!(d.toks, vec![4, 5, 6]);
     }
 
@@ -317,7 +320,7 @@ mod tests {
         // "7 1 2 3" occurred once, followed by 4; "1 2 3" occurred more recently
         // followed by 9. The query ends 7 1 2 3, so the longer match answers.
         let ctx = [7, 1, 2, 3, 4, 8, 1, 2, 3, 9, 5, 7, 1, 2];
-        let d = built(&ctx).propose(&ctx, 3, 1, 2);
+        let d = propose(&built(&ctx), &ctx, 3, 1, 2);
         assert_eq!(d.toks, vec![4]);
         assert_eq!(d.order, 4);
     }
@@ -326,29 +329,29 @@ mod tests {
     fn occurrences_vote_and_the_newest_breaks_a_tie() {
         // "1 2" was followed by 5 twice and by 6 once: 5 wins at depth 0.
         let ctx = [1, 2, 5, 0, 1, 2, 6, 0, 1, 2, 5, 0, 7, 1];
-        let d = built(&ctx).propose(&ctx, 2, 1, 2);
+        let d = propose(&built(&ctx), &ctx, 2, 1, 2);
         assert_eq!(d.toks, vec![5]);
         assert_eq!(d.cells[0].agree, 0, "the occurrences disagreed");
         // Tie: one vote each, the newest (…2 5) wins.
         let ctx = [1, 2, 6, 0, 1, 2, 5, 0, 7, 1];
-        let d = built(&ctx).propose(&ctx, 2, 1, 2);
+        let d = propose(&built(&ctx), &ctx, 2, 1, 2);
         assert_eq!(d.toks, vec![5]);
     }
 
     #[test]
     fn no_match_and_no_continuation_propose_nothing() {
         let ctx = [1, 2, 3, 4, 5];
-        assert!(built(&ctx).propose(&ctx, 9, 4, 2).toks.is_empty());
+        assert!(propose(&built(&ctx), &ctx, 9, 4, 2).toks.is_empty());
         // The only match is the context's own tail, which has nothing after it.
         let ctx = [5, 6, 1, 2];
-        assert!(built(&ctx).propose(&ctx, 7, 4, 2).toks.is_empty());
-        assert!(built(&ctx).propose(&ctx, 7, 0, 2).toks.is_empty());
+        assert!(propose(&built(&ctx), &ctx, 7, 4, 2).toks.is_empty());
+        assert!(propose(&built(&ctx), &ctx, 7, 0, 2).toks.is_empty());
     }
 
     #[test]
     fn a_draft_never_runs_past_the_context() {
         let ctx = [1, 2, 3, 4, 0, 1, 2];
-        let d = built(&ctx).propose(&ctx, 3, 8, 2);
+        let d = propose(&built(&ctx), &ctx, 3, 8, 2);
         assert_eq!(d.toks, vec![4, 0, 1, 2]);
     }
 
@@ -362,8 +365,8 @@ mod tests {
                 inc.sync(&ctx[..end], 2);
             }
             let (a, b) = (
-                inc.propose(&ctx[..cut], ctx[cut], 6, 2),
-                once.propose(&ctx[..cut], ctx[cut], 6, 2),
+                propose(&inc, &ctx[..cut], ctx[cut], 6, 2),
+                propose(&once, &ctx[..cut], ctx[cut], 6, 2),
             );
             assert!(
                 !b.toks.is_empty(),
@@ -381,9 +384,9 @@ mod tests {
         s.sync(&long, 2);
         let fresh = [7, 8, 9, 7, 8];
         s.sync(&fresh, 2);
-        assert_eq!(s.propose(&fresh, 9, 2, 2).toks, vec![7, 8]);
+        assert_eq!(propose(&s, &fresh, 9, 2, 2).toks, vec![7, 8]);
         assert!(
-            s.propose(&fresh, 3, 2, 2).toks.is_empty(),
+            propose(&s, &fresh, 3, 2, 2).toks.is_empty(),
             "the old corpus is gone"
         );
     }
@@ -392,7 +395,7 @@ mod tests {
     fn confidence_is_learned_from_outcomes() {
         let ctx = [1, 2, 3, 4, 5, 1, 2];
         let mut s = built(&ctx);
-        let d = s.propose(&ctx, 3, 3, 2);
+        let d = propose(&s, &ctx, 3, 3, 2);
         let before = s.conf(d.cells[0]);
         for _ in 0..40 {
             s.observe(&d.cells, 0); // always rejected at the first token

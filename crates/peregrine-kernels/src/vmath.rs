@@ -480,9 +480,82 @@ unsafe fn swiglu_avx2(gate: &mut [f32], up: &[f32]) {
     }
 }
 
+/// OpenAI's `swiglu_oai`, the gated activation gpt-oss's experts use.
+///
+/// `x = min(gate, limit)`, `y = clamp(up, −limit, limit)` and
+/// `out = x / (1 + e^(α·(−x))) · (y + 1)`.
+///
+/// llama.cpp v0.9.0 computes it in `ggml_compute_forward_swiglu_oai_f32`
+/// (`ggml/src/ggml-cpu/ops.cpp:3388-3450`): the gate is clamped *above* only
+/// (`std::min`), the up is clamped on both sides, and the exponential is the
+/// library's `expf`. This routine uses the engine's own `exp` — ggml's vector
+/// polynomial, whose scalar twin is bit for bit the same — so the result does
+/// not move when the host's C library does (issue #64), and the vector and the
+/// scalar paths agree bit for bit.
+pub fn swiglu_oai(gate: &mut [f32], up: &[f32], alpha: f32, limit: f32) {
+    debug_assert_eq!(gate.len(), up.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if vector_ok() {
+            // SAFETY: features checked; lengths equal.
+            return unsafe { swiglu_oai_avx2(gate, up, alpha, limit) };
+        }
+    }
+    for (g, &u) in gate.iter_mut().zip(up) {
+        *g = swiglu_oai_one(*g, u, alpha, limit);
+    }
+}
+
+/// One element of [`swiglu_oai`], in the order llama.cpp's kernel uses.
+#[inline(always)]
+fn swiglu_oai_one(g: f32, u: f32, alpha: f32, limit: f32) -> f32 {
+    // `std::min(gate, limit)`: the limit wins only when it is the smaller one.
+    let x = if limit < g { limit } else { g };
+    // `std::clamp(up, -limit, limit)`.
+    let y = if u < -limit {
+        -limit
+    } else if limit < u {
+        limit
+    } else {
+        u
+    };
+    let glu = x / (1.0 + exp_scalar(alpha * -x));
+    glu * (y + 1.0)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn swiglu_oai_avx2(gate: &mut [f32], up: &[f32], alpha: f32, limit: f32) {
+    let one = _mm256_set1_ps(1.0);
+    let av = _mm256_set1_ps(alpha);
+    let lv = _mm256_set1_ps(limit);
+    let nlv = _mm256_set1_ps(-limit);
+    let zero = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 8 <= gate.len() {
+        let g = _mm256_loadu_ps(gate.as_ptr().add(i));
+        let u = _mm256_loadu_ps(up.as_ptr().add(i));
+        // `min(gate, limit)` and `clamp(up, -limit, limit)`, with the operands in
+        // the order that keeps the NaN behaviour of the scalar path.
+        let x = _mm256_min_ps(lv, g);
+        let y = _mm256_max_ps(nlv, _mm256_min_ps(lv, u));
+        let e = exp8(_mm256_mul_ps(av, _mm256_sub_ps(zero, x)));
+        let glu = _mm256_div_ps(x, _mm256_add_ps(one, e));
+        _mm256_storeu_ps(
+            gate.as_mut_ptr().add(i),
+            _mm256_mul_ps(glu, _mm256_add_ps(y, one)),
+        );
+        i += 8;
+    }
+    while i < gate.len() {
+        let g = gate[i];
+        gate[i] = swiglu_oai_one(g, up[i], alpha, limit);
+        i += 1;
+    }
+}
+
 const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
 const GELU_COEF_A: f32 = 0.044715;
-
 /// GELU (tanh approximation):
 /// `gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
 /// Matching ggml's `ggml_gelu_f32`, with [`tanh`] instead of the C library's `tanhf`:
@@ -1087,6 +1160,44 @@ mod tests {
             let want = gelu_tanh(g0[i]) * up[i];
             assert_eq!(g[i], want, "{i}: {} vs {want}", g[i]);
         }
+    }
+
+    /// The `swiglu_oai` of llama.cpp v0.9.0 (`ggml/src/ggml-cpu/ops.cpp:3388-3450`):
+    /// the gate is clamped above only, the up on both sides, and the gate's
+    /// exponential carries the alpha.
+    #[test]
+    fn swiglu_oai_matches_llama_cpp_s_formula() {
+        let (alpha, limit) = (1.702f32, 7.0f32);
+        let g0 = prng(11, 1539, -12.0, 12.0);
+        let up = prng(13, 1539, -9.0, 9.0);
+        let mut g = g0.clone();
+        swiglu_oai(&mut g, &up, alpha, limit);
+        for i in 0..g0.len() {
+            let x = g0[i].min(limit);
+            let y = up[i].clamp(-limit, limit);
+            let want = (x / (1.0 + (alpha * -x).exp())) * (y + 1.0);
+            assert!(
+                (g[i] - want).abs() <= 1e-5 * want.abs().max(1e-3),
+                "{i}: {} vs {want}",
+                g[i]
+            );
+        }
+    }
+
+    /// The vector path and the portable one must agree bit for bit: they are the
+    /// same arithmetic, and the engine's output must not depend on the tier.
+    #[test]
+    fn swiglu_oai_vector_and_scalar_agree_bit_for_bit() {
+        let (alpha, limit) = (1.702f32, 7.0f32);
+        let g0 = prng(17, 1539, -12.0, 12.0);
+        let up = prng(19, 1539, -9.0, 9.0);
+        let mut vec = g0.clone();
+        swiglu_oai(&mut vec, &up, alpha, limit);
+        let mut scalar = g0.clone();
+        for (g, &u) in scalar.iter_mut().zip(&up) {
+            *g = swiglu_oai_one(*g, u, alpha, limit);
+        }
+        assert_eq!(vec, scalar);
     }
 
     /// The FMA path and the portable one must agree bit for bit, over a dense sweep of

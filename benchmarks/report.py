@@ -32,77 +32,22 @@ def format_ttft(stat_dict: Dict[str, Any]) -> str:
     return f"{med:.3f} s"
 
 
-def generate_report(runs: List[Dict[str, Any]]) -> str:
-    """Generate Markdown report from a list of run set dictionaries."""
+def _render_model_tables(model_runs: List[Dict[str, Any]], heading_level: int = 2) -> List[str]:
+    """Render Results and Head-to-Head tables for a specific model's runs."""
     lines: List[str] = []
+    h2 = "#" * heading_level
+    h3 = "#" * (heading_level + 1)
 
-    if not runs:
-        return "# Benchmark Report\n\nNo run data found."
-
-    # Use first run for system metadata
-    sample_run = runs[0]
-    mach = sample_run.get("machine", {})
-    model_info = sample_run.get("model", {})
-
-    is_synth = (
-        sample_run.get("sample_type") == "synthetic_smoke"
-        or "synthetic" in str(model_info.get("filename", "")).lower()
-        or "smoke" in str(model_info.get("path", "")).lower()
-    )
-    if is_synth:
-        lines.append("# Benchmark Report (Synthetic Smoke Sample)")
-        lines.append("")
-        lines.append("> **Note**: This is a synthetic smoke sample generated using a tiny synthetic GGUF model for CI/development verification, not real model weights.")
-    else:
-        lines.append("# Benchmark Report")
-    lines.append("")
-    lines.append(f"**Date**: {sample_run.get('timestamp', 'unknown')}")
-    lines.append(f"**Model**: `{model_info.get('filename', 'unknown')}` (SHA-256: `{model_info.get('sha256', '')[:16]}...`)")
-    lines.append("")
-
-    # Machine Record Table
-    lines.append("## Machine Record")
-    lines.append("")
-    lines.append("| Property | Value |")
-    lines.append("|---|---|")
-    lines.append(f"| Host / CPU | {mach.get('cpu_model', 'unknown')} |")
-    features_str = ", ".join(mach.get("cpu_features", [])) or "standard"
-    lines.append(f"| CPU Features | {features_str} |")
-    lines.append(f"| Memory Bandwidth Ceiling | **{mach.get('bandwidth_ceiling_gb_s', 0.0):.2f} GB/s** (Peregrine telemetry probe) |")
-    lines.append(f"| Compute Ceiling | {mach.get('gflops_ceiling', 0.0):.1f} GFLOP/s (Ridge: {mach.get('ridge_point', 0.0):.1f}) |")
-    lines.append(f"| Kernel / OS | {mach.get('kernel', 'unknown')} ({mach.get('os', 'unknown')}) |")
-    lines.append(f"| CPU Governor | {mach.get('governor', 'unknown')} |")
-    lines.append(f"| Benchmark Threads | {mach.get('threads_tested', 'unknown')} |")
-    lines.append("")
-
-    # Engine Builds Table
-    lines.append("## Engines Tested")
-    lines.append("")
-    lines.append("| Engine | Version / Commit | Build Details |")
-    lines.append("|---|---|---|")
-    for r in runs:
-        eng = r.get("engine", {})
-        lines.append(f"| {eng.get('name', 'unknown')} | `{eng.get('version', '')}` (`{eng.get('commit', '')[:8]}`) | {eng.get('build_command', eng.get('build_type', 'default'))} |")
-    lines.append("")
-
-    # Results Table: The Four Numbers
-    lines.append("## Benchmark Results: The Four Numbers")
-    lines.append("")
-    lines.append(
-        "Per `docs/targets.md`: single-user decode tok/s, prompt tok/s, total tok/s at 4 and 10 users, "
-        "and first-token time at 10 users; medians reported with spread (± half-range)."
-    )
-    lines.append("")
-    # Collect all contexts across runs
+    # Collect all contexts across runs for this model
     all_contexts: set = set()
-    for r in runs:
+    for r in model_runs:
         summary = r.get("summary", {})
         for c in summary.keys():
             all_contexts.add(int(c))
     sorted_contexts = sorted(list(all_contexts))
 
     # Verify actual prompt token counts across all runs and fail loudly if >5% off target
-    for r in runs:
+    for r in model_runs:
         eng_name = r.get("engine", {}).get("name", "unknown")
         for ctx in sorted_contexts:
             ctx_k = str(ctx)
@@ -133,12 +78,19 @@ def generate_report(runs: List[Dict[str, Any]]) -> str:
                             f"is {off * 100.0:.2f}% off target ({target_ctx}) > 5% allowed threshold!"
                         )
 
+    lines.append(f"{h2} Benchmark Results: The Four Numbers")
+    lines.append("")
+    lines.append(
+        "Per `docs/targets.md`: single-user decode tok/s, prompt tok/s, total tok/s at 4 and 10 users, "
+        "and first-token time at 10 users; medians reported with spread (± half-range)."
+    )
+    lines.append("")
     lines.append("| Context | Actual Tokens | Engine | Single decode tok/s | % of ceiling | Prompt tok/s | 4 users tok/s | 10 users tok/s | 10 users TTFT |")
     lines.append("|---|---|---|---|---|---|---|---|---|")
 
     for ctx in sorted_contexts:
         ctx_k = str(ctx)
-        for r in runs:
+        for r in model_runs:
             eng_name = r.get("engine", {}).get("name", "unknown")
             s = r.get("summary", {}).get(ctx_k)
             if not s:
@@ -163,15 +115,15 @@ def generate_report(runs: List[Dict[str, Any]]) -> str:
     lines.append("")
 
     # Head-to-Head Comparison Table if multiple engines exist
-    engines_in_runs = {r.get("engine", {}).get("name") for r in runs}
+    engines_in_runs = {r.get("engine", {}).get("name") for r in model_runs}
     if len(engines_in_runs) > 1 and "peregrine" in engines_in_runs:
-        lines.append("## Head-to-Head Comparison")
+        lines.append(f"{h2} Head-to-Head Comparison")
         lines.append("")
         lines.append("| Context | Metric | Peregrine | Competitor | Speedup | Peregrine % Ceiling |")
         lines.append("|---|---|---|---|---|---|")
 
-        p_run = next(r for r in runs if r.get("engine", {}).get("name") == "peregrine")
-        comp_runs = [r for r in runs if r.get("engine", {}).get("name") != "peregrine"]
+        p_run = next(r for r in model_runs if r.get("engine", {}).get("name") == "peregrine")
+        comp_runs = [r for r in model_runs if r.get("engine", {}).get("name") != "peregrine"]
 
         for comp_run in comp_runs:
             comp_name = comp_run.get("engine", {}).get("name", "competitor")
@@ -213,6 +165,88 @@ def generate_report(runs: List[Dict[str, Any]]) -> str:
                 ratio_ttft = f"{c_ttft / p_ttft:.2f}x faster" if p_ttft > 0 and c_ttft > 0 else "—"
                 lines.append(f"| {ctx} | 10 Users TTFT | {format_ttft(p_s['multi_user_10']['first_token_time_s'])} | {format_ttft(c_s['multi_user_10']['first_token_time_s'])} | {ratio_ttft} | — |")
         lines.append("")
+
+    return lines
+
+
+def generate_report(runs: List[Dict[str, Any]]) -> str:
+    """Generate Markdown report from a list of run set dictionaries."""
+    lines: List[str] = []
+
+    if not runs:
+        return "# Benchmark Report\n\nNo run data found."
+
+    # Group runs by model filename
+    models_dict: Dict[str, List[Dict[str, Any]]] = {}
+    for r in runs:
+        m_filename = r.get("model", {}).get("filename", "unknown")
+        models_dict.setdefault(m_filename, []).append(r)
+
+    # Use first run for system metadata
+    sample_run = runs[0]
+    mach = sample_run.get("machine", {})
+
+    is_synth = any(
+        r.get("sample_type") == "synthetic_smoke"
+        or "synthetic" in str(r.get("model", {}).get("filename", "")).lower()
+        or "smoke" in str(r.get("model", {}).get("path", "")).lower()
+        for r in runs
+    )
+    if is_synth:
+        lines.append("# Benchmark Report (Synthetic Smoke Sample)")
+        lines.append("")
+        lines.append("> **Note**: This is a synthetic smoke sample generated using a tiny synthetic GGUF model for CI/development verification, not real model weights.")
+    else:
+        lines.append("# Benchmark Report")
+    lines.append("")
+    lines.append(f"**Date**: {sample_run.get('timestamp', 'unknown')}")
+
+    if len(models_dict) == 1:
+        single_m = sample_run.get("model", {})
+        lines.append(f"**Model**: `{single_m.get('filename', 'unknown')}` (SHA-256: `{single_m.get('sha256', '')[:16]}...`)")
+    lines.append("")
+
+    # Machine Record Table
+    lines.append("## Machine Record")
+    lines.append("")
+    lines.append("| Property | Value |")
+    lines.append("|---|---|")
+    lines.append(f"| Host / CPU | {mach.get('cpu_model', 'unknown')} |")
+    features_str = ", ".join(mach.get("cpu_features", [])) or "standard"
+    lines.append(f"| CPU Features | {features_str} |")
+    lines.append(f"| Memory Bandwidth Ceiling | **{mach.get('bandwidth_ceiling_gb_s', 0.0):.2f} GB/s** (Peregrine telemetry probe) |")
+    lines.append(f"| Compute Ceiling | {mach.get('gflops_ceiling', 0.0):.1f} GFLOP/s (Ridge: {mach.get('ridge_point', 0.0):.1f}) |")
+    lines.append(f"| Kernel / OS | {mach.get('kernel', 'unknown')} ({mach.get('os', 'unknown')}) |")
+    lines.append(f"| CPU Governor | {mach.get('governor', 'unknown')} |")
+    lines.append(f"| Benchmark Threads | {mach.get('threads_tested', 'unknown')} |")
+    lines.append("")
+
+    # Engine Builds Table (deduplicated)
+    lines.append("## Engines Tested")
+    lines.append("")
+    lines.append("| Engine | Version / Commit | Build Details |")
+    lines.append("|---|---|---|")
+    seen_engines = set()
+    for r in runs:
+        eng = r.get("engine", {})
+        eng_key = (eng.get("name"), eng.get("version"), eng.get("commit"))
+        if eng_key in seen_engines:
+            continue
+        seen_engines.add(eng_key)
+        lines.append(f"| {eng.get('name', 'unknown')} | `{eng.get('version', '')}` (`{eng.get('commit', '')[:8]}`) | {eng.get('build_command', eng.get('build_type', 'default'))} |")
+    lines.append("")
+
+    if len(models_dict) == 1:
+        # Single model: render tables directly
+        lines.extend(_render_model_tables(runs, heading_level=2))
+    else:
+        # Multiple models: render a dedicated section per model
+        for m_filename, m_runs in models_dict.items():
+            m_info = m_runs[0].get("model", {})
+            sha = m_info.get("sha256", "")[:16]
+            lines.append(f"## Model: `{m_filename}` (SHA-256: `{sha}...`)")
+            lines.append("")
+            lines.extend(_render_model_tables(m_runs, heading_level=3))
 
     return "\n".join(lines)
 

@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The `gpt-oss` model family (S2.5 step 5): OpenAI's mixture of experts — attention sinks (a learned
+  per-head logit in the softmax), alternating sliding-window and full attention, biases on the attention
+  output, the router and every expert projection, YaRN rope scaling, the router's softmax over the
+  *selected* experts, and OpenAI's `swiglu_oai` activation. The `gpt-4o` (o200k) pre-tokenizer is
+  transcribed from llama.cpp v0.9.0's regex. The synthetic F16 and MXFP4 files give the same greedy
+  tokens as llama.cpp; the check against a real gpt-oss file is pending.
 - Support for plain Qwen 3.5 files (S2.2c): a `qwen35` file with no `prism.hadamard.*` metadata is loaded
   without a rotation, and its ordinary quantised matmuls (Q8_0, F16, ...) run through the dense kernels
   instead of the ternary ones. The synthetic plain file gives the same greedy tokens as llama.cpp v0.9.0;
@@ -44,9 +50,9 @@ All notable changes to this project are documented here. The format follows
   variant that runs lossless speculation with it on and off.
 - Synthetic coverage for Qwen2 attention biases, Llama 3.x and linear rope scaling, engine batching (shared
   prefixes, mixed prefill/decode, mapped and per-row caches), LittleBit sidecars and accepted MTP drafts.
-- Synthetic coverage of what the two runtimes do differently, pinned before ADR 0007 makes the engine the
-  only one: the same prompt through `Session` and a one-slot `Engine`, the taps a DSpark drafter needs, a
-  second user arriving mid-speculation, and the prefix store with a drafter attached.
+- Synthetic coverage of what the session and a one-slot engine must agree on (ADR 0007): the same prompt
+  through `Session` and a one-slot `Engine`, the taps a DSpark drafter needs, a second user arriving
+  mid-speculation, and the prefix store with a drafter attached.
 - `peregrine-core`: the `Drafter` interface (ADR 0007) — one way of proposing tokens, told what the target
   committed and what was rolled back — with wrappers over today's drafters (the suffix index, DeepSeek's
   DSpark head, the model's own MTP block). Unstable until 1.0.
@@ -70,10 +76,24 @@ All notable changes to this project are documented here. The format follows
 - The startup calibration is off by default: `PEREGRINE_CALIBRATE=1` turns it on (S2.6 decision 6).
   A wrong thread count costs far more than the tuned default it replaces, and the calibration is only
   switched on by default once it has passed A/Bs on two machines.
+- `Session` is a conversation layer over a one-slot `Engine` (ADR 0007, S1.4): the chat history, the template,
+  the prompt, the reuse of the positions the previous turn computed and the context shifting stay in the
+  session; the generation, the speculation and the verification of the drafts are the engine's. Its public API
+  is unchanged.
+- `peregrine bench` measures the engine. The benchmark used to walk a prefill and a decode loop of its own,
+  beside the runtime the server runs; it now admits a slot and lets the engine do the work, so the numbers it
+  reports are the numbers the engine charges a request. The bytes a token moves are the same, and the JSON
+  keys are unchanged.
 - The GeGLU kernel's `tanh` runs on the CPU's FMA instruction where there is one: the scalar arithmetic is
   compiled a second time inside a `#[target_feature(enable = "fma")]` function, so the `mul_add`s become
   `vfmadd` instead of a call to the C library's `fmaf` (8.3x on the kernel, bit for bit the same result).
 - F32/F16/BF16 matrices multiply f32 activations instead of int8-quantised ones (output change for those formats).
+
+### Removed
+- The last of the old runtime and the old speculation paths (ADR 0007, S1.4): `Session::probe_verify_curve`
+  (the engine's verify-cost model measures those widths now, on the engine's own forward passes),
+  `dspark::Drafter::draft`, `SuffixIndex::propose`, `Engine::slot_cost`, `DrafterChoice::Mtp` (an alias for
+  `DrafterChoice::None`) and `Needs::history` (the engine never read it). The interfaces are unstable until 1.0.
 
 ### Fixed
 - The startup calibration no longer stops its decode-thread sweep at the first candidate that fails to beat

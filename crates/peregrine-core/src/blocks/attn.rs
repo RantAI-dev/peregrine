@@ -194,7 +194,7 @@ pub fn attend_window(
     stats: &mut StepStats,
 ) {
     attend_scaled_window(
-        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, window, None, stats,
+        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, window, None, None, stats,
     )
 }
 
@@ -214,6 +214,8 @@ pub fn attend_scaled_window(
     row0: usize,
     window: Option<usize>,
     scale: Option<f32>,
+    // the attention sinks, one per query head (gpt-oss): `None` for every other model.
+    sinks: Option<&[f32]>,
     stats: &mut StepStats,
 ) {
     let c = cfg;
@@ -228,6 +230,7 @@ pub fn attend_scaled_window(
         start_pos,
         scale: scale.unwrap_or_else(|| 1.0 / (hd as f32).sqrt()),
         window,
+        sinks,
     };
     let plan = attn::plan(&sh, pool.width());
     let tasks = plan.tasks(&sh);
@@ -261,7 +264,8 @@ pub fn attend_scaled_window(
                     } else {
                         // SAFETY: head `kh·gqa + g` of row `b` belongs exclusively to this task.
                         let dst = unsafe { out.chunk(b * qd + (t.kh * gqa + g) * hd, hd) };
-                        attn::finish_row(o, sc.l[r], rotated, dst);
+                        let sink = sinks.map(|s| s[t.kh * gqa + g]);
+                        attn::finish_row(o, sc.l[r], sc.m[r], sink, rotated, dst);
                     }
                 }
             }
@@ -288,7 +292,8 @@ pub fn attend_scaled_window(
                     }
                     let h = kh * gqa + g;
                     let dst = &mut xb[(row0 + b) * qd + h * hd..(row0 + b) * qd + (h + 1) * hd];
-                    attn::combine_row(&parts[..plan.pos_chunks], rotated, dst);
+                    let sink = sinks.map(|s| s[h]);
+                    attn::combine_row(&parts[..plan.pos_chunks], sink, rotated, dst);
                 }
             }
         }

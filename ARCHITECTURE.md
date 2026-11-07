@@ -32,6 +32,9 @@ users' next tokens and chunks of new prompts, and runs **one forward pass** over
 single read of the weights. Decode for one user is bound by memory bandwidth; batches and prompts are
 bound by compute. That split drives most design choices.
 
+There is one runtime (ADR 0007). A conversation is the same engine with one slot: `Session` renders the
+prompt, keeps the chat history and lends the slot the cache the conversation has filled so far.
+
 ## Code map
 
 ### `crates/peregrine-kernels`: CPU kernels (no dependencies)
@@ -58,12 +61,13 @@ bound by compute. That split drives most design choices.
 | `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, LittleBit accounting, and parameterized loading via family table. |
 | `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
 | `model/mtp.rs` | Re-exports for the multi-token-prediction head traits. |
-| `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU, GeGLU), `moe` (the router and the expert feed-forward), `rope`, `attn` (attention scratch, row prep, KV write, attention), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
+| `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU, GeGLU, OpenAI's `swiglu_oai`), `moe` (the router, the expert feed-forward, the expert biases), `rope` (the plain and the YaRN tables), `attn` (attention scratch, row prep, KV write, attention, the attention sinks), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
 | `attn.rs` | Grouped online-softmax attention with optional sliding-window restriction. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state, snapshots for speculation, and the prefix store that reuses a shared prompt beginning. |
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
-| `serve.rs` | `Engine`: slots, scheduling, mixed prefill/decode steps, MTP verification. The server runs this. |
-| `session.rs`, `dspark.rs`, `suffix.rs` | `Session`, the older single-user runtime, with DSpark and suffix speculation. To be folded into `Engine` (roadmap S1.4). |
+| `serve.rs` | `Engine`: the one runtime — slots, scheduling, mixed prefill/decode steps, and the verification step every draft goes through. The server runs this. |
+| `session.rs` | `Session`: the conversation layer over a one-slot `Engine` (ADR 0007) — the chat history, the template, the prompt, the reuse of the positions the previous turn computed, the context shifting, the per-turn telemetry. |
+| `draft.rs`, `dspark.rs`, `suffix.rs` | The `Drafter` interface every speculation goes through, and the drafters behind it: the suffix index (`suffix.rs`), DeepSeek's DSpark head (`dspark.rs`), the model's own MTP block (`draft.rs`). |
 | `profile.rs` | Tuning profiles: read, write, mismatch detection and default paths (ADR 0005). |
 | `pool.rs` | The thread pool and barrier. Thread count and barrier count are measured quantities, which is why there is no rayon. |
 | `telem.rs` | Bytes moved, phases and machine ceilings: the numbers every benchmark reports. |
@@ -78,6 +82,7 @@ bound by compute. That split drives most design choices.
 | `gemma3/` | Gemma 3 architectures: interleaved sliding-window/global attention, 4 norms per layer, per-head q/k RMSNorm, GeGLU activation, tied output head. |
 | `qwen35/` | Hybrid architectures: Gated DeltaNet linear attention + softmax attention, Hadamard rotation, MTP head. |
 | `qwen3moe/` | Mixture of experts: Qwen3's attention and a bank of experts (the router and the expert feed-forward), over the shared `blocks::moe`. |
+| `gptoss/` | OpenAI's mixture of experts: attention sinks, alternating sliding-window and full attention, YaRN rope scaling, biases on every projection, and the `swiglu_oai` activation, over the shared `blocks::moe`. |
 | `lib.rs` | `FAMILIES` table, model loading (`load`, `open`, `open_with`), compatibility checks (`check_compatible`, `check_compatible_with`, `compatibility`), and session opening (`session::open`). |
 | `tests/` | Synthetic model generation, golden output regression tests, no-allocation tests, batching and speculative decoding integration tests. |
 
@@ -107,6 +112,8 @@ The engine provides fine-grained Cargo features across its layers so embedders c
 | **Architectures** | `arch-llama` | `peregrine-models` | Dense Llama models (`llama`) |
 | | `arch-qwen` | `peregrine-models` | Dense Qwen models (`qwen2`, `qwen3`) |
 | | `arch-qwen35` | `peregrine-models` | Hybrid Gated DeltaNet + softmax attention (`qwen35`, `qwen25`) |
+| | `arch-qwen3moe` | `peregrine-models` | Mixture of experts (`qwen3moe`) |
+| | `arch-gpt-oss` | `peregrine-models` | OpenAI's mixture of experts (`gpt-oss`) |
 | **Formats** | `fmt-kquant` | `peregrine-kernels` | K-quants: Q2_K through Q6_K |
 | | `fmt-ternary` | `peregrine-kernels` | Ternary formats: PQ2_0, PTQ1_0 |
 | | `fmt-iq` | `peregrine-kernels` | Importance-matrix quants: IQ4_NL, IQ4_XS |

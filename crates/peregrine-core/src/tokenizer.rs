@@ -85,6 +85,10 @@ pub enum PreType {
     Qwen2,
     /// `qwen35`: `qwen2` with combining marks counted as letters (Qwen3.5, Bonsai 2).
     Qwen35,
+    /// `gpt-4o`: the `o200k_harmony` pattern gpt-oss's files carry — the
+    /// case-sensitive word pattern, digits in groups of up to three, and
+    /// contractions.
+    Gpt4o,
     /// `default`: SentencePiece (SPM) or models without a custom BPE pre-tokenizer.
     Default,
 }
@@ -96,6 +100,7 @@ impl PreType {
             "llama-bpe" => PreType::Llama3,
             "qwen2" => PreType::Qwen2,
             "qwen35" => PreType::Qwen35,
+            "gpt-4o" => PreType::Gpt4o,
             "default" => PreType::Default,
             _ => return None,
         })
@@ -106,13 +111,21 @@ impl PreType {
             PreType::Llama3 => "llama-bpe",
             PreType::Qwen2 => "qwen2",
             PreType::Qwen35 => "qwen35",
+            PreType::Gpt4o => "gpt-4o",
             PreType::Default => "default",
         }
     }
 }
 
 /// Pre-tokenizer names this crate implements, for the compatibility probe's message.
-pub const PRE_TYPES: &[&str] = &["smollm", "llama-bpe", "qwen2", "qwen35", "default"];
+pub const PRE_TYPES: &[&str] = &[
+    "smollm",
+    "llama-bpe",
+    "qwen2",
+    "qwen35",
+    "gpt-4o",
+    "default",
+];
 
 struct BpeData {
     ranks: HashMap<(String, String), u32>,
@@ -754,6 +767,11 @@ impl Tokenizer {
                     self.bpe(piece, bpe, out);
                 }
             }
+            PreType::Gpt4o => {
+                for piece in split_gpt4o(text) {
+                    self.bpe(piece, bpe, out);
+                }
+            }
             PreType::Default => {}
         }
     }
@@ -1186,9 +1204,244 @@ pub fn split_with(s: &str, max_digits: usize, marks: bool) -> Vec<&str> {
     out
 }
 
+/// A letter or a combining mark: llama.cpp's `[\p{L}\p{M}]`.
+///
+/// `\p{L}` is the Unicode *category* `L`, and Rust's `char::is_alphabetic` is the
+/// `Alphabetic` property, which also covers the letter numbers (`Nl`) — the Roman
+/// numerals among them. llama.cpp's collapsed regex calls a Roman numeral a
+/// number, so this excludes it.
+fn is_word_char(c: char) -> bool {
+    (c.is_alphabetic() && !is_letter_number(c)) || is_mark(c)
+}
+
+/// The Unicode category `Nl`: the letters that are numbers.
+fn is_letter_number(c: char) -> bool {
+    matches!(c as u32,
+        0x2160..=0x2182 | 0x218F | 0x3007 | 0x3021..=0x3029 | 0x3038..=0x303A
+        | 0xA000..=0xA48C | 0xA490..=0xA4C6 | 0x12400..=0x1246E)
+}
+
+/// The GPT-4o pre-tokenizer's splitter, as llama.cpp v0.9.0's
+/// `LLAMA_VOCAB_PRE_TYPE_GPT4O` regex (`src/llama-vocab.cpp:454-465`).
+///
+/// The regex is
+///
+/// ```text
+/// [^\r\n\p{L}\p{N}]? A* B+ (?:'s|'t|'re|'ve|'m|'ll|'d)?
+/// [^\r\n\p{L}\p{N}]? A+ B* (?:'s|'t|'re|'ve|'m|'ll|'d)?
+/// \p{N}{1,3}
+///  ?[^\s\p{L}\p{N}]+[\r\n/]*
+/// \s*[\r\n]+
+/// \s+(?!\S)
+/// \s+
+/// ```
+///
+/// with `A` a letter or a mark that is not a lowercase ASCII letter (`[^a-z]`
+/// behind a `[\p{L}\p{M}]` lookahead) and `B` a letter or a mark that is not an
+/// uppercase ASCII letter. This is the vocabulary gpt-oss's files carry
+/// (`tokenizer.ggml.pre = "gpt-4o"`, the `o200k_harmony` one).
+///
+/// The scanner follows the regex branch for branch, backtracking where the regex
+/// backtracks: the optional prefix gives back its character when the rest of the
+/// word does not match, the `A*` gives back characters until a `B` follows, and
+/// the whitespace alternatives give back one character where the negative
+/// lookahead asks for it.
+///
+/// The Unicode classes are approximations, like the other splitters' here: `\p{L}`
+/// is Rust's `Alphabetic` property without the letter numbers, `\p{M}` is the
+/// general-purpose combining blocks, and `\s` is `char::is_whitespace`.
+pub fn split_gpt4o(s: &str) -> Vec<&str> {
+    let cps: Vec<(usize, char)> = s.char_indices().collect();
+    let n = cps.len();
+    let at = |i: usize| -> Option<char> { cps.get(i).map(|x| x.1) };
+    let byte = |i: usize| -> usize {
+        if i < n {
+            cps[i].0
+        } else {
+            s.len()
+        }
+    };
+    // `(?=[\p{L}\p{M}])([^a-z])`.
+    let not_lower = |i: usize| at(i).is_some_and(|c| is_word_char(c) && !c.is_ascii_lowercase());
+    // `(?=[\p{L}\p{M}])([^A-Z])`.
+    let not_upper = |i: usize| at(i).is_some_and(|c| is_word_char(c) && !c.is_ascii_uppercase());
+    // The number of consecutive `B` characters from `i`.
+    let mut blen = vec![0usize; n + 1];
+    for i in (0..n).rev() {
+        blen[i] = if not_upper(i) { blen[i + 1] + 1 } else { 0 };
+    }
+    // The contraction that may follow a word: `'s`, `'t`, `'re`, `'ve`, `'m`, `'ll`, `'d`.
+    // The `'ll` one is two letters from `{l, L}`, so `'LL` counts too.
+    let contraction = |i: usize| -> usize {
+        match at(i) {
+            Some('\'') => match at(i + 1) {
+                Some('s') | Some('S') | Some('t') | Some('T') | Some('m') | Some('M')
+                | Some('d') | Some('D') => 2,
+                Some('r') if matches!(at(i + 2), Some('e') | Some('E')) => 3,
+                Some('v') if matches!(at(i + 2), Some('e') | Some('E')) => 3,
+                Some('l' | 'L') if matches!(at(i + 2), Some('l') | Some('L')) => 3,
+                _ => 0,
+            },
+            _ => 0,
+        }
+    };
+    // The word pattern: the optional prefix, then `A* B+` or `A+ B*`, then the
+    // contraction. The end index (exclusive) of the match, or `None`.
+    let word = |start: usize| -> Option<usize> {
+        // The prefix is greedy: the regex tries it first and gives it back only
+        // when the rest of the word does not match.
+        for prefix in [1usize, 0] {
+            if prefix == 1 {
+                let c = at(start)?;
+                if c == '\r' || c == '\n' || c.is_alphabetic() || c.is_numeric() {
+                    continue;
+                }
+            }
+            let q = start + prefix;
+            // The maximal `A` run.
+            let mut a = 0usize;
+            while q + a < n && not_lower(q + a) {
+                a += 1;
+            }
+            // `A* B+`: the `A` run gives back characters until a `B` follows.
+            for a2 in (0..=a).rev() {
+                if blen[q + a2] > 0 {
+                    let end = q + a2 + blen[q + a2];
+                    return Some(end + contraction(end));
+                }
+            }
+            // `A+ B*`: the `A` run is greedy and the `B` run may be empty.
+            if a >= 1 {
+                let end = q + a + blen[q + a];
+                return Some(end + contraction(end));
+            }
+        }
+        None
+    };
+
+    let mut out = Vec::new();
+    let mut prev_end = 0usize;
+    let mut pos = 0usize;
+    macro_rules! add {
+        ($end:expr) => {{
+            let end: usize = $end;
+            if end > prev_end {
+                out.push(&s[byte(prev_end)..byte(end)]);
+            }
+            prev_end = end;
+        }};
+    }
+
+    while pos < n {
+        // The word pattern.
+        if let Some(end) = word(pos) {
+            pos = end;
+            add!(pos);
+            continue;
+        }
+        // \p{N}{1,3}
+        if at(pos).is_some_and(char::is_numeric) {
+            let mut k = 0usize;
+            while k < 3 && pos + k < n && at(pos + k).is_some_and(char::is_numeric) {
+                k += 1;
+            }
+            pos += k;
+            add!(pos);
+            continue;
+        }
+        // <space>?[^\s\p{L}\p{N}]+[\r\n/]*
+        {
+            let mut i = pos;
+            if at(i) == Some(' ') {
+                i += 1;
+            }
+            let mut k = i;
+            while k < n
+                && at(k)
+                    .is_some_and(|c| !c.is_whitespace() && !c.is_alphabetic() && !c.is_numeric())
+            {
+                k += 1;
+            }
+            if k > i {
+                while k < n && matches!(at(k), Some('\r') | Some('\n') | Some('/')) {
+                    k += 1;
+                }
+                pos = k;
+                add!(pos);
+                continue;
+            }
+        }
+        // The whitespace run, and what the alternatives do with it.
+        {
+            let mut num_ws = 0usize;
+            let mut last_end_nl = 0usize;
+            while pos + num_ws < n && at(pos + num_ws).is_some_and(char::is_whitespace) {
+                if matches!(at(pos + num_ws), Some('\r') | Some('\n')) {
+                    last_end_nl = pos + num_ws + 1;
+                }
+                num_ws += 1;
+            }
+            if num_ws > 0 {
+                // \s*[\r\n]+
+                if last_end_nl > 0 {
+                    pos = last_end_nl;
+                    add!(pos);
+                    continue;
+                }
+                // \s+(?!\S): the run gives back its last character when a
+                // non-space follows.
+                if num_ws > 1 && at(pos + num_ws).is_some() {
+                    pos += num_ws - 1;
+                    add!(pos);
+                    continue;
+                }
+                // \s+
+                pos += num_ws;
+                add!(pos);
+                continue;
+            }
+        }
+        // No alternative matched: one character.
+        pos += 1;
+        add!(pos);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The GPT-4o splitter, against llama.cpp v0.9.0's own
+    /// `unicode_regex_split` with the `LLAMA_VOCAB_PRE_TYPE_GPT4O` regex
+    /// (`src/llama-vocab.cpp:454-465`). The expectations are what llama.cpp
+    /// produces, checked with its `std::regex` over its collapsed text.
+    #[test]
+    fn the_gpt4o_splitter_matches_llama_cpp() {
+        // A word, and the space that belongs to the next one.
+        assert_eq!(split_gpt4o("hello world"), vec!["hello", " world"]);
+        // The case-sensitive pattern: a capitalised word, an all-caps one.
+        assert_eq!(split_gpt4o("Hello World"), vec!["Hello", " World"]);
+        assert_eq!(split_gpt4o("HELLO WORLD"), vec!["HELLO", " WORLD"]);
+        // The contraction: the apostrophe is the word's prefix, and `'LL` is a
+        // contraction of two letters from `{l, L}`.
+        assert_eq!(split_gpt4o("it's"), vec!["it's"]);
+        assert_eq!(split_gpt4o("I'LL don't"), vec!["I'LL", " don't"]);
+        assert_eq!(split_gpt4o("don't"), vec!["don't"]);
+        assert_eq!(split_gpt4o(" 'don't"), vec![" '", "don't"]);
+        // Digits in groups of up to three.
+        assert_eq!(split_gpt4o("12345"), vec!["123", "45"]);
+        // Punctuation takes one optional space and the newlines after it.
+        assert_eq!(split_gpt4o("x !?\n\ny"), vec!["x", " !?\n\n", "y"]);
+        // A slash is punctuation, and each piece stops at the next letter.
+        assert_eq!(split_gpt4o("x/y/z"), vec!["x", "/y", "/z"]);
+        // Whitespace: a run of two before a non-space gives back exactly one.
+        assert_eq!(split_gpt4o("a  b"), vec!["a", " ", " b"]);
+        // A letter outside ASCII is a letter, and a Roman numeral is a number.
+        assert_eq!(split_gpt4o("héllo"), vec!["héllo"]);
+        assert_eq!(split_gpt4o("中文"), vec!["中文"]);
+        assert_eq!(split_gpt4o("Ⅻfoo"), vec!["Ⅻ", "foo"]);
+    }
 
     #[test]
     fn llama3_splitter_follows_llama_cpp_branch_for_branch() {
