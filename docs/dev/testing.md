@@ -53,6 +53,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 | Qwen2.5-0.5B-Instruct Q4_K_M, Llama-3.2-1B-Instruct Q4_K_M | `~/models/` |
 | Llama-2-7b-chat-hf Q4_K_M, Mistral-7B-Instruct-v0.2 Q4_K_M | `~/models/` |
 | Gemma 3 1B Instruct Q4_K_M (`google_gemma-3-1b-it-Q4_K_M.gguf`) | `~/models/` |
+| Qwen3-30B-A3B Q2_K (`Qwen3-30B-A3B-Q2_K.gguf`) | `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
 | TheBloke's Mistral 7B Instruct v0.2 and Llama 2 7B Chat Q4_K_M | `~/models/` (see below) |
@@ -144,6 +145,19 @@ The tokenizer was checked across 22 test strings against `llama-tokenize --ids` 
 Greedy decoding (32 tokens, 6 threads) was checked against llama.cpp on three prompts, including a 713-token prompt that exercises the 512-token sliding window: all 32/32 tokens match llama.cpp bit for bit on all three prompts.
 The chat path (`/apply-template` and `/v1/chat/completions`) matches byte for byte with and without a system message (folded into the first user turn).
 The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512` and `-c 1024`).
+
+### Qwen 3 MoE (Qwen3-30B-A3B)
+
+Qwen3-30B-A3B is checked end to end against llama.cpp v0.9.0 on the unsloth Q2_K upload:
+
+| File | Download | Bytes | SHA-256 |
+|---|---|---|---|
+| `Qwen3-30B-A3B-Q2_K.gguf` | <https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q2_K.gguf> | 11258610240 | `db3ce897ccc9e7d9dbf17fe083cae7880a2092aa473b45eba8b77715aa9ca170` |
+
+The tokenizer was checked across 22 test strings against `llama-tokenize --ids --no-bos` (100% agreement, 22/22 matches).
+Greedy decoding (32 tokens, 8 threads) was checked against llama.cpp on three prompts: prompt 2 and prompt 3 match bit for bit across all 32 steps (32/32), while prompt 1 matches through the first 26 tokens with the first divergence at token 26 being a near-tie between " Portugal" (Peregrine top-1, logit 31.92) and " the" (llama.cpp top-1, logit 31.75), a margin of 0.169.
+The chat path (`/apply-template` and `/v1/chat/completions`) renders identical prompt templates (15 tokens without system, 26 tokens with system) and yields matching answers identifying Paris with reasoning tokens.
+The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512`, 20 chunks).
 
 ## Accuracy against llama.cpp
 
