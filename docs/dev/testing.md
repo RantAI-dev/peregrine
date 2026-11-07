@@ -55,6 +55,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 | Llama-2-7b-chat-hf Q4_K_M, Mistral-7B-Instruct-v0.2 Q4_K_M | `~/models/` |
 | Gemma 3 1B Instruct Q4_K_M (`google_gemma-3-1b-it-Q4_K_M.gguf`) | `~/models/` |
 | Qwen3-30B-A3B Q2_K (`Qwen3-30B-A3B-Q2_K.gguf`) | `~/models/` |
+| Qwen3.5-2B Q4_K_M (`Qwen3.5-2B-Q4_K_M.gguf`) | `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
 | TheBloke's Mistral 7B Instruct v0.2 and Llama 2 7B Chat Q4_K_M | `~/models/` (see below) |
@@ -158,6 +159,20 @@ Qwen3-30B-A3B is checked end to end against llama.cpp v0.9.0 on the unsloth Q2_K
 The tokenizer was checked across 22 test strings against `llama-tokenize --ids --no-bos` (100% agreement, 22/22 matches).
 Greedy decoding (32 tokens, 8 threads) was checked against llama.cpp on three prompts: prompt 2 and prompt 3 match bit for bit across all 32 steps (32/32), while prompt 1 matches through the first 26 tokens with the first divergence at token 26 being a near-tie between " Portugal" (Peregrine top-1, logit 31.92) and " the" (llama.cpp top-1, logit 31.75), a margin of 0.169.
 The chat path (`/apply-template` and `/v1/chat/completions`) renders identical prompt templates (15 tokens without system, 26 tokens with system) and yields matching answers identifying Paris with reasoning tokens.
+The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512`, 20 chunks).
+
+### Plain Qwen 3.5 (Qwen3.5-2B)
+
+Qwen3.5-2B is checked end to end against llama.cpp v0.9.0 on the Q4_K_M file:
+
+| File | Download | Bytes | SHA-256 |
+|---|---|---|---|
+| `Qwen3.5-2B-Q4_K_M.gguf` | `~/models/Qwen3.5-2B-Q4_K_M.gguf` | 1280835840 | `aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223` |
+
+The file carries no `prism.hadamard.*` metadata and is verified by `peregrine inspect`.
+The tokenizer was checked across 22 test strings against `llama-tokenize --ids --no-bos` (100% agreement, 22/22 matches).
+Greedy decoding (32 tokens, 8 threads) was checked against llama.cpp across four prompts, including a 602-token prompt from wikitext-2: prompts 1, 2, and 4 match bit for bit across all 32 steps (32/32), while prompt 3 matches through the first 27 tokens with the first divergence at token 27 being a near-tie between " book" (Peregrine top-1, logit 14.92) and " printing" (llama.cpp top-1, logit 14.97, logprob margin 0.045).
+The chat path (`/v1/chat/completions`) generates matching reasoning tokens with answers identifying Paris as the capital of France.
 The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512`, 20 chunks).
 
 ## Accuracy against llama.cpp
