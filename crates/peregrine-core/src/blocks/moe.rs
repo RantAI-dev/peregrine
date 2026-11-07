@@ -300,6 +300,7 @@ pub fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
         kind: t.kind,
         offset: t.offset + e as u64 * bytes,
         tile_off: None,
+        kq_off: None,
     })
 }
 
@@ -645,7 +646,7 @@ pub fn moe_ffn(
 mod tests {
     use super::*;
     use crate::gguf::{Format, Gguf};
-    use crate::model::TileStore;
+    use crate::model::{KqStore, TileStore};
     use crate::pool::Pool;
     use crate::quant::{dequant_row, row_bytes, QuantAct};
     use std::path::PathBuf;
@@ -822,6 +823,7 @@ mod tests {
             kind: Format::Q8_0,
             offset: 1024,
             tile_off: None,
+            kq_off: None,
         };
         let v = expert_view(&t, 2).unwrap();
         assert_eq!(v.dims, vec![64, 32], "a 2D matrix");
@@ -1015,6 +1017,7 @@ mod tests {
                 w: Weights {
                     g,
                     tiles: TileStore::default(),
+                    kq: KqStore::default(),
                     #[cfg(feature = "littlebit")]
                     lb: None,
                 },
