@@ -43,7 +43,7 @@ matches the code.
 | S2.1 | Formats: Q5_K, Q4_0, then IQ4_XS / IQ4_NL, then Q2_K / Q3_K; BF16 in matrix multiplies — done (also MXFP4) | 1.5 |
 | S2.2 | Plain Qwen 3.5 (rotation optional); check Llama 3.x and Mistral on real files — done | 1.0 |
 | S2.3 | SentencePiece tokenizer; chat templates rendered from the model file's own template — done | 1.0 |
-| S2.4 | Gemma 3 (sliding-window attention, its norms) and Phi-4 — Gemma 3 done; Phi-4 synthetic done, real-file check open | 1.0 |
+| S2.4 | Gemma 3 (sliding-window attention, its norms) and Phi-4 — done | 1.0 |
 | S2.5 | Mixture of experts: qwen3moe, then gpt-oss (MXFP4) — qwen3moe done; gpt-oss synthetic done, real-file check and harmony template open | 1.5 |
 | S2.6 | Every format on AVX2; AVX-VNNI-256 tier; startup calibration of thread count and spin window — every format has an AVX2 kernel; the VNNI-256 tier is in, its kernels on hold (#77); calibration open (#80) | 1.0 |
 | S2.7 | Support table generated from the kernel table and the architecture registry, checked in CI — done | 0.25 |
