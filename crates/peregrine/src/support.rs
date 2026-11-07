@@ -102,7 +102,7 @@ pub fn support_markdown() -> String {
 
     // 5. Chat templates
     let tmpl_str = "read from the model file and rendered exactly as llama.cpp renders them: \
-ChatML, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2 \
+ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2 \
 — or named with `--chat-template` for a file that declares none";
 
     let _ = writeln!(out, "| | Supported now |");
