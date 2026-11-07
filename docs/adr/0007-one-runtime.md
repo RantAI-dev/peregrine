@@ -60,6 +60,7 @@ Roadmap S1.4, in pull requests:
 | [#58](https://github.com/RantAI-dev/peregrine/pull/58) | 3 | one verification step in the engine (`Engine::spec_step` became `verify_step`); the MTP block is a drafter |
 | [#60](https://github.com/RantAI-dev/peregrine/pull/60) | 4-5 | the suffix index and the DSpark head propose through that same step |
 | [#61](https://github.com/RantAI-dev/peregrine/pull/61) | 6 | the session rebuilt as a layer over a one-slot engine |
+| [#78](https://github.com/RantAI-dev/peregrine/pull/78) | wrap-up | the last of the old runtime: the benchmark measures the engine, the paths nobody walked are gone, and the docs say one runtime |
 
 Step 2 — the session's own decode loop using the drafter wrappers — was overtaken: the engine's
 verification step took the wrappers over, and the session's own loop went away with step 6.
