@@ -36,6 +36,10 @@ at 2.07× from 1 to 12 threads).
 
 The third gap is the prefill chunk size: `PREFILL_CHUNK = 64` costs **9-11 %**
 (a 16-token chunk measures 167.7-168.8 tok/s against 150.7-156.3 tok/s at 64).
+That gap is closed by S3.5 step 1: the chunk is an option now
+(`PEREGRINE_PREFILL_CHUNK`, default 16), and the A/B that chose the default
+reproduced the 9-11 % (165.9 tok/s against 154.3 at 64, Llama-3.2-1B, 512-token
+prompt, 12 threads).
 
 ---
 
@@ -422,6 +426,11 @@ at 15 % of its roof — it is activation locality and prefetcher stream count.
 **Fix for S3.5:** make the prefill chunk size a function of the model's activation
 size (and of the number of concurrent slots, which is why it is currently a
 constant), or make the kernel's activation layout stream-friendly.
+
+**Closed for the constant (S3.5 step 1):** the chunk is `PEREGRINE_PREFILL_CHUNK`
+now (default 16, was the constant 64 this note measured). What the note asks for
+next — a chunk that follows the model's activation size and the number of slots —
+is still open: the option takes one number for the whole process.
 
 ### Gap 4 — thread scheduling: load imbalance, not barriers (up to 16 %)
 
