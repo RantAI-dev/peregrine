@@ -20,7 +20,9 @@ use peregrine_core::tokenizer::Tokenizer;
 pub struct Qwen35 {
     pub(crate) cfg: HybridCfg,
     pub(crate) layers: Vec<load::HLayer>,
-    pub(crate) rot: Rotation,
+    /// The block Hadamard rotation the file's weights were folded into; none for a plain
+    /// Qwen 3.5 file, whose weights are used as they are.
+    pub(crate) rot: Option<Rotation>,
     pub(crate) v_grouped: bool,
     pub(crate) tok_embd: TensorInfo,
     pub(crate) out_norm: TensorInfo,
@@ -52,10 +54,12 @@ impl Architecture for Qwen35 {
 
     fn act_layout(&self) -> ActLayout {
         ActLayout {
-            ternary: true,
+            // A Bonsai 2 file's matmuls are ternary; a plain Qwen 3.5 file's are ordinary
+            // quantised matrices, and the activation layout is the ordinary one.
+            ternary: self.cfg.ternary,
             ptq1: self.cfg.ptq1 && peregrine_kernels::table::MatKernels::get().ptq1_layout(),
             tb_span: self.cfg.tb_span,
-            keep_f32: false,
+            keep_f32: self.cfg.keep_f32,
         }
     }
 
@@ -64,7 +68,9 @@ impl Architecture for Qwen35 {
     }
 
     fn session_kv_rotation(&self) -> bool {
-        true
+        // Only a file whose weights were folded into a Hadamard basis rotates its KV
+        // cache: a plain Qwen 3.5 file's does not.
+        self.rot.is_some()
     }
 
     fn linears_mut(
