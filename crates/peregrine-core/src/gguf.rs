@@ -205,6 +205,10 @@ impl Gguf {
         } else {
             (map, Some(file))
         };
+        // The huge-page copy is Linux-only, so elsewhere the mapping is of the
+        // file and the file is kept for the repack's reads.
+        #[cfg(not(target_os = "linux"))]
+        let (map, file) = (map, Some(file));
 
         let mut c = Cur { b: &map, p: 0 };
         if c.take(4)? != b"GGUF" {

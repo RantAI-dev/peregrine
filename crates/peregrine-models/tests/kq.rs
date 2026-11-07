@@ -156,10 +156,12 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
                 );
             }
         }
-        if fmt == Format::Q4_K {
+        if fmt == Format::Q4_K && peregrine_kernels::table::MatKernels::get().kq_tiles() {
             // The repacked tile reads the activation once per eight output rows
             // instead of once per row: the activation traffic falls by the
-            // same factor. This is the design note's claim, measured.
+            // same factor. This is the design note's claim, measured. (Only
+            // where the repacked kernel runs: on a CPU without AVX2 the
+            // matrices are multiplied the ordinary way.)
             assert!(
                 plain_acts > acts * 4,
                 "{fmt:?}: the activation traffic did not fall: {acts} against {plain_acts}"
