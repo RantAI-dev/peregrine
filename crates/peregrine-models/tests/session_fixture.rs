@@ -237,11 +237,17 @@ fn the_session_s_token_streams_are_the_recorded_ones() {
     }
 
     let tier = peregrine_core::cpu::tier_name();
+    let golden_tier = if tier == "x86_64-avx2-vnni256" {
+        "x86_64-avx2"
+    } else {
+        tier.as_str()
+    };
     let text = render(&tier, &rows);
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/session")
-        .join(format!("{tier}.txt"));
-    let record = std::env::var("PEREGRINE_SESSION_FIXTURE").is_ok_and(|v| v == "record");
+        .join(format!("{golden_tier}.txt"));
+    let record = std::env::var("PEREGRINE_SESSION_FIXTURE").is_ok_and(|v| v == "record")
+        && tier != "x86_64-avx2-vnni256";
     if record {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &text).unwrap();

@@ -143,11 +143,20 @@ fn check_model(model: Model, name: &str) -> Option<String> {
         }
     }
     let tier = peregrine_core::cpu::tier_name();
+    // AVX-VNNI-256 is mathematically bit-identical to AVX2 and aliases to its goldens (S2.6 Decision 1).
+    let golden_tier = if tier == "x86_64-avx2-vnni256" {
+        "x86_64-avx2"
+    } else {
+        tier.as_str()
+    };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden/synthetic")
-        .join(&tier);
+        .join(golden_tier);
     let gpath = dir.join(format!("{name}.golden"));
-    if std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record") && !gpath.exists() {
+    if std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record")
+        && tier != "x86_64-avx2-vnni256"
+        && !gpath.exists()
+    {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&gpath, &a).unwrap();
         eprintln!("synthetic: recorded {name} ({tier})");

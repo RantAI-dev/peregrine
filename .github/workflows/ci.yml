@@ -149,6 +149,47 @@ jobs:
           # this assertion proves SDE really exposed the AVX-512/VNNI/GFNI/VBMI features.
           grep -q 'x86_64-avx2-avx512-vnni-gfni-vbmi' "$RUNNER_TEMP/synthetic.log"
 
+  # The AVX-VNNI-256 tier on Alder Lake (-adl: AVX-VNNI, no AVX-512) under Intel SDE (S2.6).
+  # Same structure as the Sapphire Rapids job: tests built natively, run under SDE with -adl.
+  sde-adl:
+    runs-on: ubuntu-24.04
+    env:
+      SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+      SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Cache Intel SDE
+        id: sde-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/intel-sde
+          key: intel-sde-10.13.1-2026-07-28-lin
+      - name: Download and verify Intel SDE
+        if: steps.sde-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --silent --show-error "$SDE_URL" -o "$RUNNER_TEMP/sde.tar.xz"
+          echo "$SDE_SHA256  $RUNNER_TEMP/sde.tar.xz" | sha256sum --check --strict
+          mkdir -p "$HOME/.cache/intel-sde"
+          tar -xJf "$RUNNER_TEMP/sde.tar.xz" --strip-components=1 -C "$HOME/.cache/intel-sde"
+      - name: Build test binaries
+        run: |
+          cargo test --release --locked -p peregrine-kernels --no-run --message-format=json \
+            | jq -r 'select(.executable != null) | .executable' > "$RUNNER_TEMP/kernel-tests"
+          cargo test --release --locked -p peregrine-models --test synthetic --no-run --message-format=json \
+            | jq -r 'select(.executable != null) | .executable' > "$RUNNER_TEMP/synthetic-tests"
+      - name: Kernel tests under SDE (-adl)
+        run: |
+          while read -r t; do "$HOME/.cache/intel-sde/sde64" -adl -- "$t"; done < "$RUNNER_TEMP/kernel-tests"
+      - name: Synthetic models under SDE (-adl)
+        env:
+          PEREGRINE_GOLDEN: require
+        run: |
+          set -o pipefail
+          while read -r t; do "$HOME/.cache/intel-sde/sde64" -adl -- "$t" --nocapture; done \
+            < "$RUNNER_TEMP/synthetic-tests" 2>&1 | tee "$RUNNER_TEMP/synthetic.log"
+          grep -q 'x86_64-avx2-vnni256' "$RUNNER_TEMP/synthetic.log"
+
   # The oldest compiler we promise to build with (workspace `rust-version`).
   msrv:
     runs-on: ubuntu-24.04
