@@ -54,6 +54,7 @@ pub mod dspark {
     }
 }
 pub mod gguf;
+pub mod kq;
 pub mod kv;
 #[cfg(feature = "littlebit")]
 pub mod lbq;

@@ -79,6 +79,10 @@ name = "engine"
 required-features = ["arch-qwen", "fmt-kquant"]
 
 [[test]]
+name = "kq"
+required-features = ["arch-llama", "fmt-kquant"]
+
+[[test]]
 name = "golden"
 required-features = ["arch-qwen", "fmt-kquant"]
 

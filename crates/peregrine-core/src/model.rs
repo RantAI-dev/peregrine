@@ -132,6 +132,10 @@ pub struct Weights {
     // PQ2_0 matrices repacked into 16-row tiles at load (`TensorInfo::tile_off` points here); empty if not.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
     pub(crate) tiles: TileStore,
+    // The k-quant matrices repacked into eight-row tiles at load (`TensorInfo::kq_off` points
+    // here); empty unless `PEREGRINE_KREPACK=1`, and read by nothing until the repacked
+    // kernels land (S3.4 PR 2).
+    pub(crate) kq: KqStore,
     #[cfg(feature = "littlebit")]
     pub(crate) lb: Option<Slb>,
 }
@@ -147,6 +151,11 @@ impl Weights {
     #[inline]
     pub fn tiles(&self) -> &[u8] {
         self.tiles.bytes()
+    }
+    /// The repacked k-quant store (see `TensorInfo::kq_off`).
+    #[inline]
+    pub fn kq(&self) -> &[u8] {
+        self.kq.bytes()
     }
     #[cfg(feature = "littlebit")]
     pub fn lb(&self) -> Option<&Slb> {
@@ -200,8 +209,72 @@ impl TileStore {
     }
 }
 
+/// The repacked k-quant weights: the Q4_K and Q6_K matrices, repacked into eight-row
+/// tiles at load (`TensorInfo::kq_off` points here). Built the way the [`TileStore`]
+/// is — an anonymous mapping that asks for transparent huge pages, since a decode
+/// step streams all of it every token — and `PEREGRINE_TILE_HUGEPAGES=0` uses a plain
+/// heap buffer, for the A/B.
+///
+/// The store is empty when the repack is off (`PEREGRINE_KREPACK`), and until the
+/// repacked kernels land (S3.4 PR 2) nothing reads it: the matrices are still
+/// multiplied from the file's own bytes, so the outputs do not move.
+#[derive(Default)]
+pub struct KqStore {
+    map: Option<memmap2::MmapMut>,
+    heap: Vec<u8>,
+}
+
+impl KqStore {
+    pub fn new(len: usize) -> KqStore {
+        let huge = crate::options::get().tile_hugepages;
+        if huge && len > 0 {
+            if let Ok(m) = memmap2::MmapMut::map_anon(len) {
+                #[cfg(target_os = "linux")]
+                let _ = m.advise(memmap2::Advice::HugePage);
+                return KqStore {
+                    map: Some(m),
+                    heap: Vec::new(),
+                };
+            }
+        }
+        KqStore {
+            map: None,
+            heap: vec![0u8; len],
+        }
+    }
+    #[inline]
+    pub fn bytes(&self) -> &[u8] {
+        self.map.as_deref().unwrap_or(&self.heap)
+    }
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        match &mut self.map {
+            Some(m) => m,
+            None => &mut self.heap,
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bytes().is_empty()
+    }
+}
+
 impl Model {
+    /// Load a model from a parsed GGUF file, with the k-quant repack as
+    /// `PEREGRINE_KREPACK` says.
     pub fn load_with(g: Gguf, families: &[&dyn crate::arch::Family]) -> Result<Model, String> {
+        Self::load_with_kq(g, families, crate::options::get().kq_repack)
+    }
+
+    /// Load a model from a parsed GGUF file, with the k-quant repack forced on or
+    /// off whatever `PEREGRINE_KREPACK` says.
+    ///
+    /// This is the switch an A/B of the repack needs: the same file, loaded both
+    /// ways, and the two compared. Until the repacked kernels land (S3.4 PR 2) the
+    /// two must give the same numbers — nothing reads the store.
+    pub fn load_with_kq(
+        g: Gguf,
+        families: &[&dyn crate::arch::Family],
+        kq: bool,
+    ) -> Result<Model, String> {
         let arch_name = g.str("general.architecture")?;
         let family = families
             .iter()
@@ -230,12 +303,24 @@ impl Model {
                     )
                 }
             })?;
+        // The k-quant repack (S3.4): the Q4_K and Q6_K matrices are rewritten into
+        // eight-row tiles before the family reads the file, so every matrix the
+        // family holds knows where its repacked bytes are. Off until the repacked
+        // kernels land (PR 2): until then nothing reads the store, and the outputs
+        // are the file's own bytes either way.
+        let mut g = g;
+        let kq = if kq {
+            crate::kq::repack(&mut g)
+        } else {
+            KqStore::default()
+        };
         let tk = Tokenizer::from_gguf(&g)?;
         let loaded = family.load(&g, &tk)?;
         Ok(Model {
             w: Weights {
                 g,
                 tiles: loaded.tiles,
+                kq,
                 #[cfg(feature = "littlebit")]
                 lb: None,
             },
@@ -398,6 +483,12 @@ impl Model {
     /// The file's metadata, for the template detector and the host's telemetry.
     pub fn gguf(&self) -> &Gguf {
         &self.w.g
+    }
+
+    /// The repacked k-quant store: the Q4_K and Q6_K matrices, rewritten into
+    /// eight-row tiles at load (S3.4). Empty unless `PEREGRINE_KREPACK=1`.
+    pub fn kq(&self) -> &[u8] {
+        self.w.kq.bytes()
     }
 
     /// `general.name`, or an empty string.
