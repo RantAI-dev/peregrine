@@ -15,21 +15,23 @@
 //! ```text
 //! 0    d      the eight rows' f16 super-block scales      16 bytes
 //! 16   dmin   the eight rows' f16 super-block min scales  16 bytes
-//! 32   sc     the eight rows' 6-bit scales, unpacked      64 bytes
-//! 96   m      the eight rows' 6-bit mins, unpacked        64 bytes
-//! 160  qs     the eight rows' nibbles                   1024 bytes
+//! 32   scm    the eight rows' 6-bit scales and mins       96 bytes
+//! 128  qs     the eight rows' nibbles                   1024 bytes
 //! ```
 //!
-//! The scales are *unpacked*: the file packs eight six-bit scales and eight six-bit
-//! mins into twelve bytes, and the kernel would have to undo that packing in its
-//! inner loop. Unpacking once, at load, costs 32 bytes per tile (2.8 % of the Q4_K
-//! weights) and leaves the kernel with a byte load and a broadcast per sub-block.
+//! The scales and mins are *packed*: `scm[sub_block * 12 ..][..6]` holds the eight
+//! rows' six-bit scales for that sub-block and `.. + 6` their mins. The tile is then
+//! exactly the 8 × 144 = 1152 bytes of the file's own blocks. An unpacked tile would
+//! be 32 bytes larger, and decode streams every byte of every tile once per token —
+//! the 2.8 % would come straight off the decode rate, which the design note's
+//! decision 9 does not allow. The kernel undoes the packing once per super-block,
+//! before its window loop (`kqsimd::unpack_scales`), so the inner loop still reads a
+//! ready scale and min vector per sub-block.
 //!
-//! `sc` and `m` are indexed `sc[sub_block * 8 + row]`: the sub-block's scale for all
-//! eight rows, then the next sub-block's. `qs` is sixteen windows of eight bytes per
-//! row, side by side: `qs[window * 64 + row * 8 + k]` is row `row`'s byte `k` of
-//! window `window`. A 32-byte load at `qs + window * 64` therefore holds rows 0 to 3's
-//! eight bytes, and one at `qs + window * 64 + 32` holds rows 4 to 7's.
+//! `qs` is sixteen windows of eight bytes per row, side by side:
+//! `qs[window * 64 + row * 8 + k]` is row `row`'s byte `k` of window `window`. A
+//! 32-byte load at `qs + window * 64` therefore holds rows 0 to 3's eight bytes, and
+//! one at `qs + window * 64 + 32` holds rows 4 to 7's.
 //!
 //! # The Q6_K tile
 //!
@@ -47,9 +49,10 @@
 //!
 //! # Sizes
 //!
-//! A Q4_K tile is 1184 bytes against 8 × 144 = 1152 bytes of the file's bytes: the
-//! 2.8 % the unpacked scales cost. A Q6_K tile is 1680 bytes against 8 × 210 = 1680
-//! bytes: exactly the same, because Q6_K's scales are already one byte each.
+//! A Q4_K tile is 1152 bytes against 8 × 144 = 1152 bytes of the file's bytes, and a
+//! Q6_K tile is 1680 against 8 × 210 = 1680: both are exactly the size of the blocks
+//! they hold, so the repacked store is size-neutral and a decode step streams the
+//! same bytes either way.
 
 use std::mem::{offset_of, size_of};
 
@@ -66,8 +69,8 @@ pub const ACT_GROUP: usize = 4;
 
 /// Eight Q4_K super-blocks — eight output rows — interleaved for the repacked GEMM.
 ///
-/// The byte offsets are the ones the file's own layout implies: the scales first
-/// (unpacked, one byte each), then the codes.
+/// The byte offsets are the ones the file's own layout implies: the scales first,
+/// then the codes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Q4K8 {
@@ -75,10 +78,10 @@ pub struct Q4K8 {
     pub d: [u16; 8],
     /// The eight rows' super-block min scales, as f16 bit patterns.
     pub dmin: [u16; 8],
-    /// The eight rows' six-bit sub-block scales, unpacked: `sc[sub_block * 8 + row]`.
-    pub sc: [u8; 64],
-    /// The eight rows' six-bit sub-block mins, unpacked: `m[sub_block * 8 + row]`.
-    pub m: [u8; 64],
+    /// The eight rows' six-bit scales and mins, packed as the file packs them:
+    /// `scm[sub_block * 12 ..][..6]` holds the eight rows' scales, `.. + 6` their
+    /// mins, eight six-bit fields each.
+    pub scm: [u8; 96],
     /// The eight rows' nibbles: `qs[window * 64 + row * 8 + k]`.
     pub qs: [u8; 1024],
 }
@@ -115,8 +118,7 @@ impl Q6K8 {
 // the struct's fields cannot drift apart.
 const Q4_D: usize = offset_of!(Q4K8, d);
 const Q4_DMIN: usize = offset_of!(Q4K8, dmin);
-const Q4_SC: usize = offset_of!(Q4K8, sc);
-const Q4_M: usize = offset_of!(Q4K8, m);
+const Q4_SCM: usize = offset_of!(Q4K8, scm);
 const Q4_QS: usize = offset_of!(Q4K8, qs);
 const Q6_D: usize = offset_of!(Q6K8, d);
 const Q6_SC: usize = offset_of!(Q6K8, sc);
@@ -131,17 +133,31 @@ pub const fn q4_d() -> usize {
 pub const fn q4_dmin() -> usize {
     Q4_DMIN
 }
-/// The byte offset of the eight rows' six-bit sub-block scales in a Q4_K tile.
-pub const fn q4_sc() -> usize {
-    Q4_SC
+/// The byte offset of the eight rows' six-bit sub-block scales and mins in a
+/// Q4_K tile.
+pub const fn q4_scm() -> usize {
+    Q4_SCM
 }
-/// The byte offset of the eight rows' six-bit sub-block mins in a Q4_K tile.
-pub const fn q4_m() -> usize {
-    Q4_M
-}
+/// The bytes one sub-block's packed scales and mins take: six for the eight
+/// rows' scales, six for their mins.
+pub const Q4_SCM_STRIDE: usize = 12;
 /// The byte offset of the eight rows' nibbles in a Q4_K tile.
 pub const fn q4_qs() -> usize {
     Q4_QS
+}
+
+/// The six-bit scale of row `row` for sub-block `sub` of a repacked Q4_K tile.
+pub fn tile_q4k_scale(t: &[u8], sub: usize, row: usize) -> u8 {
+    let at = Q4_SCM + sub * Q4_SCM_STRIDE;
+    let v = u64::from_le_bytes(t[at..at + 8].try_into().unwrap());
+    ((v >> (6 * row)) & 63) as u8
+}
+
+/// The six-bit min of row `row` for sub-block `sub` of a repacked Q4_K tile.
+pub fn tile_q4k_min(t: &[u8], sub: usize, row: usize) -> u8 {
+    let at = Q4_SCM + sub * Q4_SCM_STRIDE + 6;
+    let v = u64::from_le_bytes(t[at..at + 8].try_into().unwrap());
+    ((v >> (6 * row)) & 63) as u8
 }
 
 /// The eight rows' six-bit scales and mins, unpacked from a Q4_K super-block's twelve
@@ -196,19 +212,29 @@ fn q4k_pack_scales(sc: &[u8; 8], m: &[u8; 8]) -> [u8; 12] {
 pub fn repack_q4k8(src: &[&[u8]], dst: &mut [u8]) {
     assert_eq!(src.len(), 8, "a Q4_K tile holds eight rows");
     assert!(dst.len() >= Q4K8::SIZE);
+    // The scales and mins are packed one field per row per sub-block: the tile
+    // is then exactly the size of the eight blocks it holds, so a decode step
+    // streams the same bytes as the file's own layout does.
+    let mut sc = [0u64; 8];
+    let mut m = [0u64; 8];
     for (r, b) in src.iter().enumerate() {
         assert!(b.len() >= Q4K_BLOCK, "a Q4_K super-block is 144 bytes");
         dst[Q4_D + r * 2..Q4_D + r * 2 + 2].copy_from_slice(&b[0..2]);
         dst[Q4_DMIN + r * 2..Q4_DMIN + r * 2 + 2].copy_from_slice(&b[2..4]);
-        let (sc, m) = q4k_scales(&b[4..16]);
+        let (s, mn) = q4k_scales(&b[4..16]);
         for j in 0..8 {
-            dst[Q4_SC + j * 8 + r] = sc[j];
-            dst[Q4_M + j * 8 + r] = m[j];
+            sc[j] |= (s[j] as u64) << (6 * r);
+            m[j] |= (mn[j] as u64) << (6 * r);
         }
         for c in 0..16 {
             let at = Q4_QS + c * 64 + r * 8;
             dst[at..at + 8].copy_from_slice(&b[16 + c * 8..16 + c * 8 + 8]);
         }
+    }
+    for j in 0..8 {
+        let at = Q4_SCM + j * Q4_SCM_STRIDE;
+        dst[at..at + 6].copy_from_slice(&sc[j].to_le_bytes()[..6]);
+        dst[at + 6..at + 12].copy_from_slice(&m[j].to_le_bytes()[..6]);
     }
 }
 
@@ -230,8 +256,8 @@ pub fn unrepack_q4k8(src: &[u8], dst: &mut [u8]) {
         let mut sc = [0u8; 8];
         let mut m = [0u8; 8];
         for j in 0..8 {
-            sc[j] = src[Q4_SC + j * 8 + r];
-            m[j] = src[Q4_M + j * 8 + r];
+            sc[j] = tile_q4k_scale(src, j, r);
+            m[j] = tile_q4k_min(src, j, r);
         }
         b[4..16].copy_from_slice(&q4k_pack_scales(&sc, &m));
         for c in 0..16 {
@@ -337,12 +363,10 @@ pub struct KqActs {
     /// The per-32-weight sum of every row: `groups · super_blocks · 4 · 8`.
     ///
     /// The min term of the Q4_K format is the row's mins against the
-    /// activation's sums, one per sub-block — and the kernel folds it in
-    /// float, where the sums are exact (a sub-block's sum is at most 4064 and
-    /// the whole super-block's min term at most 2 048 256, both inside the
-    /// float's exact integer range). So the sums are kept per sub-block, as
-    /// floats, rather than as the per-16 run sums they are built from.
-    pub bs: Vec<f32>,
+    /// activation's sums, one per sub-block — and every product and partial sum
+    /// of it is an integer below 2^24 (63 · 4064 · 8 = 2 048 256), so it is
+    /// exact in either domain and the kernel folds it in int32 lanes.
+    pub bs: Vec<i32>,
     /// The rows filled.
     pub rows: usize,
     /// The activation width.
@@ -390,7 +414,7 @@ impl KqActs {
         self.d.clear();
         self.d.resize(groups * n_sb * ACT_GROUP, 0.0);
         self.bs.clear();
-        self.bs.resize(groups * n_sb * ACT_GROUP * 8, 0.0);
+        self.bs.resize(groups * n_sb * ACT_GROUP * 8, 0);
         for g in 0..groups {
             for sb in 0..n_sb {
                 let base = (g * n_sb + sb) * 1024;
@@ -416,8 +440,7 @@ impl KqActs {
                     // The per-32-weight sums, from the per-16 run sums.
                     let rs = &acts[b].bsums[sb * 16..sb * 16 + 16];
                     for j in 0..8 {
-                        self.bs[bbase + t * 8 + j] =
-                            (rs[2 * j] as i32 + rs[2 * j + 1] as i32) as f32;
+                        self.bs[bbase + t * 8 + j] = rs[2 * j] as i32 + rs[2 * j + 1] as i32;
                     }
                 }
             }
@@ -474,8 +497,8 @@ pub fn dot_q4k8_ref(tile: &[u8], n_sb: usize, row: usize, act: &QuantAct) -> f32
         let mut sumi = 0i64;
         let mut summ = 0i64;
         for j in 0..8 {
-            let sc = t[Q4_SC + j * 8 + row] as i64;
-            let mn = t[Q4_M + j * 8 + row] as i64;
+            let sc = tile_q4k_scale(t, j, row) as i64;
+            let mn = tile_q4k_min(t, j, row) as i64;
             // The sub-block's 32 weights: the low nibbles of the row's bytes
             // 32·(j/2) .. +32 when j is even, the high nibbles when it is odd.
             let qbase = (j / 2) * 32;
@@ -531,10 +554,14 @@ mod tests {
 
     #[test]
     fn the_tiles_have_the_sizes_the_layout_says() {
-        assert_eq!(Q4K8::SIZE, 1184);
+        assert_eq!(Q4K8::SIZE, 1152);
         assert_eq!(Q4K8::SOURCE, 1152);
         assert_eq!(Q6K8::SIZE, 1680);
         assert_eq!(Q6K8::SOURCE, 1680);
+        // Size-neutral: the store replaces the file's bytes, it does not add to
+        // them. Decode streams every byte of the store once per token.
+        assert_eq!(Q4K8::SIZE, Q4K8::SOURCE);
+        assert_eq!(Q6K8::SIZE, Q6K8::SOURCE);
     }
 
     #[test]
@@ -630,6 +657,13 @@ mod tests {
                 &tile[Q4_DMIN + r * 2..Q4_DMIN + r * 2 + 2],
                 &src[r * 144 + 2..r * 144 + 4]
             );
+            // The six-bit scales and mins, at the row's six bits of each
+            // sub-block's packed fields.
+            let (sc, m) = q4k_scales(&src[r * 144 + 4..r * 144 + 16]);
+            for j in 0..8 {
+                assert_eq!(tile_q4k_scale(&tile, j, r), sc[j], "scale {j} of row {r}");
+                assert_eq!(tile_q4k_min(&tile, j, r), m[j], "min {j} of row {r}");
+            }
             // The codes: window by window, the row's own bytes.
             for c in 0..16 {
                 let at = Q4_QS + c * 64 + r * 8;

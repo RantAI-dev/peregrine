@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn the_tile_sizes_are_the_layouts_own() {
-        assert_eq!(tile_size(Format::Q4_K), Some(1184));
+        assert_eq!(tile_size(Format::Q4_K), Some(1152));
         assert_eq!(tile_size(Format::Q6_K), Some(1680));
         assert_eq!(tile_size(Format::F16), None);
         assert_eq!(tile_size(Format::Q8_0), None);
