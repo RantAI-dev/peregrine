@@ -228,14 +228,20 @@ impl Template {
 
     /// The system message the model's own template inserts when the caller gives
     /// none. SmolLM2 and Qwen2.5 each name themselves; Llama 3.2 inserts only its
-    /// date header (rendered in `system_block`).
+    /// date header (rendered in `system_block`). A model that names neither gets
+    /// none: its own template writes no system message, and one invented for it
+    /// would be a stranger's sentence.
     pub fn default_system(self, model_name: &str) -> Option<&'static str> {
         match self {
-            Template::ChatMl if model_name.to_ascii_lowercase().contains("qwen") => {
-                Some("You are Qwen, created by Alibaba Cloud. You are a helpful assistant.")
-            }
             Template::ChatMl => {
-                Some("You are a helpful AI assistant named SmolLM, trained by Hugging Face")
+                let name = model_name.to_ascii_lowercase();
+                if name.contains("qwen") {
+                    Some("You are Qwen, created by Alibaba Cloud. You are a helpful assistant.")
+                } else if name.contains("smollm") {
+                    Some("You are a helpful AI assistant named SmolLM, trained by Hugging Face")
+                } else {
+                    None
+                }
             }
             Template::Llama3
             | Template::Qwen3
@@ -768,6 +774,12 @@ mod tests {
             .default_system("SmolLM2 360M Instruct")
             .unwrap()
             .contains("SmolLM"));
+        // A ChatML file that names neither family gets no system message of its own:
+        // the SmolLM one would be a stranger's sentence in someone else's conversation.
+        assert!(Template::ChatMl.default_system("Phi 4").is_none());
+        assert!(Template::ChatMl
+            .default_system("Llama 3.2 1B Instruct")
+            .is_none());
         assert!(Template::Llama3
             .default_system("Llama 3.2 1B Instruct")
             .is_none());
