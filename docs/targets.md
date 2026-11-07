@@ -41,6 +41,7 @@ plus the `kld` tool), llama.cpp v0.9.0 `cd959ba`; wikitext-2 test, `-c 512`, 40 
 | Mistral-7B-Instruct-v0.2 | 0.00121 ± 0.00003 | 0.0006 / 0.010 | 1.01 % | 98.2 % | 6.245 / 6.237 |
 | Gemma-3-1B-IT | 0.00726 ± 0.00032 | 0.0025 / 0.082 | 2.41 % | 96.1 % | 28.329 / 27.881 |
 | Gemma-3-1B-IT (-c 1024) | 0.00799 ± 0.00085 | 0.0022 / 0.084 | 2.58 % | 96.3 % | 27.096 / 26.632 |
+| Qwen3-30B-A3B | 0.00885 ± 0.00041 | 0.0040 / 0.077 | 2.98 % | 95.9 % | 10.450 / 10.425 |
 
 Qwen3-1.7B is the outlier, and the cause is on llama.cpp's side: a layer-by-layer comparison (S3.3b) finds every
 Qwen3-specific step (q/k head norms, NeoX RoPE at base 1e6, the tied head) equal to llama.cpp's within ~1e-7; the
@@ -146,8 +147,8 @@ Competitors: llama.cpp, ik_llama.cpp, OpenVINO GenAI, MNN; vLLM / SGLang CPU bac
 
 | Release | Architectures | Formats | CPUs | Tokenizers / templates |
 |---|---|---|---|---|
-| today | llama, qwen2, qwen3, qwen35, gemma3 | F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q6_K, PQ2_0, PTQ1_0 | AVX2, AVX-512 | GPT-2 BPE; 3 built-in templates |
-| v0.3 (Stage 2) | + plain Qwen 3.5, Gemma 3 (real-file gate), Phi-4, qwen3moe | + Q4_0, Q5_K, IQ4_XS, IQ4_NL | + AVX-VNNI-256; all formats on AVX2 | + SentencePiece; the model file's own template |
+| today | llama, qwen2, qwen3, qwen35, gemma3, qwen3moe | F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q6_K, PQ2_0, PTQ1_0 | AVX2, AVX-512 | GPT-2 BPE; 3 built-in templates |
+| v0.3 (Stage 2) | + plain Qwen 3.5, Gemma 3 (real-file gate), Phi-4 | + Q4_0, Q5_K, IQ4_XS, IQ4_NL | + AVX-VNNI-256; all formats on AVX2 | + SentencePiece; the model file's own template |
 | v0.4 | + gpt-oss | + Q2_K, Q3_K, MXFP4 | + ARM NEON/SDOT (if in scope) | |
 
 A model is "supported" when it loads, passes the accuracy gate in section 1 against llama.cpp on the same
