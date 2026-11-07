@@ -6,6 +6,8 @@
 *.slb
 # Benchmark scratch output; curated results go under benchmarks/results/.
 /benchmarks/out/
+__pycache__/
+*.pyc
 .DS_Store
 .idea/
 .vscode/
