@@ -61,6 +61,21 @@ impl StepStats {
         self.ns_attn += o.ns_attn;
         self.ns_total += o.ns_total;
     }
+    /// What this reading added since `prev`: one step's share of a counter the
+    /// engine keeps running (ADR 0007: the engine's counters are cumulative, a
+    /// conversation reports per token).
+    pub fn since(&self, prev: &StepStats) -> StepStats {
+        StepStats {
+            bytes_weights: self.bytes_weights.saturating_sub(prev.bytes_weights),
+            bytes_kv: self.bytes_kv.saturating_sub(prev.bytes_kv),
+            macs: self.macs.saturating_sub(prev.macs),
+            barriers: self.barriers.saturating_sub(prev.barriers),
+            ns_matmul: self.ns_matmul.saturating_sub(prev.ns_matmul),
+            ns_head: self.ns_head.saturating_sub(prev.ns_head),
+            ns_attn: self.ns_attn.saturating_sub(prev.ns_attn),
+            ns_total: self.ns_total.saturating_sub(prev.ns_total),
+        }
+    }
 }
 
 /// Reusable scratch. Allocated once per session so a decode step does no allocation.

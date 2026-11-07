@@ -96,7 +96,8 @@ pub struct EngineOptions {
     pub kv_prec: crate::kv::KvPrec,
 
     // Scheduling and speculation.
-    /// `PEREGRINE_MIX=0`: no mixed prefill/decode steps.
+    /// `PEREGRINE_MIX=0`: no mixed prefill/decode steps. Speculation (MTP, suffix, DSpark) is verified only in
+    /// the mixed step, so this also turns speculation off, for the server and for conversations (`Session`).
     pub mix: bool,
     /// `PEREGRINE_MTP=0`: no MTP speculation.
     pub mtp: bool,
