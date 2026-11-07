@@ -198,37 +198,29 @@ impl EngineOptions {
         get: impl Fn(&str) -> Option<String>,
         profile: Option<&crate::profile::Profile>,
     ) -> Self {
-        let mut opts = Self::from_lookup(&get);
+        // Only settings that cannot change a token are read from a profile (ADR 0003, ADR 0005):
+        // the ones `TUNABLE` lists. Anything else in the file is ignored, and `get` wins over it.
+        let mut opts = Self::from_lookup(|k| {
+            if let Some(v) = get(k) {
+                return Some(v);
+            }
+            let prof = profile?;
+            let key_name = TUNABLE
+                .iter()
+                .find(|(env, _)| *env == k)
+                .map(|(_, key)| *key)?;
+            prof.get(key_name).map(str::to_string)
+        });
 
         let env_spin = get("PEREGRINE_SPIN_US").is_some();
         let env_dec = get("PEREGRINE_DECODE_THREADS").is_some();
 
-        if let Some(prof) = profile {
+        if profile.is_some() {
             opts.tuning_source = if env_spin && env_dec {
                 crate::calib::TuningSource::Env
             } else {
                 crate::calib::TuningSource::Profile
             };
-            if !env_spin {
-                if let Some(val) = prof.get("spin_us").and_then(|v| v.parse().ok()) {
-                    opts.spin_us = val;
-                }
-            }
-            if !env_dec {
-                if let Some(val) = prof.get("decode_threads").and_then(|v| v.parse().ok()) {
-                    opts.decode_threads = Some(val);
-                }
-            }
-            if get("PEREGRINE_PF").is_none() {
-                if let Some(val) = prof.get("prefetch_bytes").and_then(|v| v.parse().ok()) {
-                    opts.prefetch_bytes = val;
-                }
-            }
-            if get("PEREGRINE_YIELD_US").is_none() {
-                if let Some(val) = prof.get("yield_us").and_then(|v| v.parse().ok()) {
-                    opts.yield_us = val;
-                }
-            }
         } else if env_spin && env_dec {
             opts.tuning_source = crate::calib::TuningSource::Env;
         } else if opts.calibrate {
