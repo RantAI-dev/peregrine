@@ -67,9 +67,11 @@ pub struct Args {
     /// Context length (clamped to the model's training context).
     #[arg(short = 'c', long, default_value_t = 8192)]
     pub ctx: usize,
-    /// KV cache precision: f16 or i8.
-    #[arg(long, default_value = "f16")]
-    pub kv: String,
+    /// KV cache precision: f16, f32 or i8. The default is f16 (or whatever `PEREGRINE_KV`
+    /// says); `f32` keeps the keys and values in full precision, which is what a
+    /// like-for-like comparison against another engine needs.
+    #[arg(long)]
+    pub kv: Option<String>,
     /// A DSpark drafter directory (config.json + model.safetensors) trained for this model; greedy requests only.
     #[arg(long)]
     pub dspark: Option<std::path::PathBuf>,
@@ -201,10 +203,16 @@ pub async fn run(a: Args) {
             std::process::exit(2);
         }
     };
-    let kv_prec = if a.kv == "i8" {
-        peregrine_core::kv::KvPrec::I8
-    } else {
-        peregrine_core::kv::KvPrec::F16
+    let kv_prec = match a.kv.as_deref() {
+        Some(s) => match peregrine_core::kv::KvPrec::parse(s) {
+            Some(p) => p,
+            None => {
+                eprintln!("unknown KV cache precision {s:?} — f16, f32 or i8");
+                std::process::exit(2);
+            }
+        },
+        // No `--kv`: the environment decides (`PEREGRINE_KV`), else f16.
+        None => peregrine_core::options::get().kv_prec,
     };
     let max_ctx = a.ctx.clamp(32, model.cfg.ctx_train);
     let engine = Engine::new(

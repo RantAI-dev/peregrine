@@ -29,6 +29,20 @@
 //! uzu (`prepare_int8.rs`), int8 vectors are rotated by a fixed sign flip and an
 //! orthonormal Walsh–Hadamard transform before quantising, which spreads an outlier
 //! across the whole vector. Attention runs in the rotated space; see `rotated`.
+//!
+//! # The f32 cache (opt-in)
+//!
+//! The default cache is f16, and that is a *choice*: the keys and values are rounded
+//! to half precision before attention sees them. A comparison against another engine
+//! is only like-for-like if both engines keep their operands in the same precision, so
+//! the f32 cache exists to make that comparison honest — llama.cpp's cache is f16 by
+//! default, and its attention reads f16 operands, while Peregrine's queries are f32.
+//! With `KvPrec::F32` both engines' attention runs on f32 keys and values, and the
+//! difference that remains is the difference of the *engines*, not of their caches.
+//!
+//! It is opt-in because it costs twice the memory of the f16 cache and buys nothing
+//! for a deployment: f16 keys are within a fraction of a percent of f32 ones. It is a
+//! measurement tool, and `docs/dev/accuracy.md` says how to use it.
 
 use crate::gguf::{f16, to_f16};
 
@@ -38,6 +52,9 @@ const MAX_ROTATED_DIM: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvPrec {
     F16,
+    /// Full float precision: the keys and values attention reads are the ones the
+    /// model produced, with no rounding. Opt-in; see the module docs.
+    F32,
     I8,
 }
 
@@ -45,13 +62,33 @@ impl KvPrec {
     pub fn label(self) -> &'static str {
         match self {
             KvPrec::F16 => "f16",
+            KvPrec::F32 => "f32",
             KvPrec::I8 => "int8",
+        }
+    }
+    /// The name a command line or an environment variable uses: `f16`, `f32`, `i8`.
+    pub fn name(self) -> &'static str {
+        match self {
+            KvPrec::F16 => "f16",
+            KvPrec::F32 => "f32",
+            KvPrec::I8 => "i8",
+        }
+    }
+    /// Parse the name a command line or an environment variable carries. `int8` is
+    /// accepted for the int8 cache, whose label says `int8`.
+    pub fn parse(s: &str) -> Option<KvPrec> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "f16" | "fp16" => Some(KvPrec::F16),
+            "f32" | "fp32" => Some(KvPrec::F32),
+            "i8" | "int8" => Some(KvPrec::I8),
+            _ => None,
         }
     }
     /// Bytes per stored element, excluding the per-vector scale that I8 adds.
     const fn elem(self) -> usize {
         match self {
             KvPrec::F16 => 2,
+            KvPrec::F32 => 4,
             KvPrec::I8 => 1,
         }
     }
@@ -67,6 +104,20 @@ unsafe fn encode_f16_avx(x: &[f32], out: &mut [u8]) {
     while i + 8 <= x.len() {
         let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(_mm256_loadu_ps(x.as_ptr().add(i)));
         _mm_storeu_si128(out.as_mut_ptr().add(i * 2) as *mut __m128i, h);
+        i += 8;
+    }
+}
+
+/// Full-precision encode with AVX2: the floats are stored as they are, so the only
+/// rounding the f32 cache ever applies is the one the model itself did.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn encode_f32_avx(x: &[f32], out: &mut [u8]) {
+    use std::arch::x86_64::*;
+    let mut i = 0;
+    while i + 8 <= x.len() {
+        let v = _mm256_loadu_ps(x.as_ptr().add(i));
+        _mm256_storeu_ps(out.as_mut_ptr().add(i * 4) as *mut f32, v);
         i += 8;
     }
 }
@@ -436,6 +487,24 @@ impl KvCache {
                     buf[(off + i) * 2 + 1] = h[1];
                 }
             }
+            KvPrec::F32 => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if hd.is_multiple_of(8) && crate::cpu_has!("avx2") {
+                        let buf = if is_k { &mut self.k } else { &mut self.v };
+                        // SAFETY: features checked; `off + hd` elements fit (vec_index).
+                        unsafe { encode_f32_avx(x, &mut buf[off * 4..(off + hd) * 4]) };
+                        return;
+                    }
+                }
+                let buf = if is_k { &mut self.k } else { &mut self.v };
+                for (d, &val) in buf[off * 4..(off + hd) * 4]
+                    .chunks_exact_mut(4)
+                    .zip(x.iter())
+                {
+                    d.copy_from_slice(&val.to_le_bytes());
+                }
+            }
             KvPrec::I8 => {
                 let mut rot = [0.0f32; MAX_ROTATED_DIM];
                 let x = if self.rotated {
@@ -521,10 +590,33 @@ impl KvCache {
         let idx0 = self.vec_index(layer, head, p0);
         #[cfg(target_arch = "x86_64")]
         {
-            if hd.is_multiple_of(8) && vector_path() {
-                // SAFETY: features checked; `vec_index` and `p0 + n <= max_ctx` keep
-                // every read inside this head's run of positions.
-                unsafe { return self.decode_block_avx2(is_k, idx0, n, out) };
+            if hd.is_multiple_of(8) {
+                // One path per precision, chosen once per block: the f16 path must
+                // not pay for the f32 one, and the f32 cache needs no F16C (it is a
+                // plain copy of the stored floats).
+                match self.prec {
+                    KvPrec::F32 => {
+                        if crate::cpu_has!("avx2") {
+                            // SAFETY: features checked; `vec_index` and `p0 + n <= max_ctx`
+                            // keep every read inside this head's run of positions.
+                            unsafe { return self.decode_block_f32_avx2(is_k, idx0, n, out) };
+                        }
+                    }
+                    KvPrec::F16 => {
+                        if vector_path() {
+                            // SAFETY: features checked; `vec_index` and `p0 + n <= max_ctx`
+                            // keep every read inside this head's run of positions.
+                            unsafe { return self.decode_block_f16_avx2(is_k, idx0, n, out) };
+                        }
+                    }
+                    KvPrec::I8 => {
+                        if vector_path() {
+                            // SAFETY: features checked; `vec_index` and `p0 + n <= max_ctx`
+                            // keep every read inside this head's run of positions.
+                            unsafe { return self.decode_block_i8_avx2(is_k, idx0, n, out) };
+                        }
+                    }
+                }
             }
         }
         self.decode_block_scalar(is_k, idx0, n, out);
@@ -534,16 +626,35 @@ impl KvCache {
     fn decode_block_scalar(&self, is_k: bool, idx0: usize, n: usize, out: &mut [f32]) {
         let hd = self.head_dim;
         let buf = if is_k { &self.k } else { &self.v };
-        for p in 0..n {
-            let row = &mut out[p * hd..(p + 1) * hd];
-            match self.prec {
-                KvPrec::F16 => {
+        // The precision is decided once, not per position: the f16 path must not pay
+        // for the f32 one.
+        match self.prec {
+            KvPrec::F16 => {
+                for p in 0..n {
+                    let row = &mut out[p * hd..(p + 1) * hd];
                     let b = &buf[(idx0 + p) * hd * 2..(idx0 + p + 1) * hd * 2];
                     for (i, o) in row.iter_mut().enumerate() {
                         *o = f16(u16::from_le_bytes([b[i * 2], b[i * 2 + 1]]));
                     }
                 }
-                KvPrec::I8 => {
+            }
+            KvPrec::F32 => {
+                for p in 0..n {
+                    let row = &mut out[p * hd..(p + 1) * hd];
+                    let b = &buf[(idx0 + p) * hd * 4..(idx0 + p + 1) * hd * 4];
+                    for (i, o) in row.iter_mut().enumerate() {
+                        *o = f32::from_le_bytes([
+                            b[i * 4],
+                            b[i * 4 + 1],
+                            b[i * 4 + 2],
+                            b[i * 4 + 3],
+                        ]);
+                    }
+                }
+            }
+            KvPrec::I8 => {
+                for p in 0..n {
+                    let row = &mut out[p * hd..(p + 1) * hd];
                     let b = &buf[(idx0 + p) * hd..(idx0 + p + 1) * hd];
                     let s = if is_k {
                         self.ks[idx0 + p]
@@ -558,41 +669,64 @@ impl KvCache {
         }
     }
 
+    /// The f32 cache's vector decode: the stored floats, copied out.
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2,fma,f16c")]
-    unsafe fn decode_block_avx2(&self, is_k: bool, idx0: usize, n: usize, out: &mut [f32]) {
+    #[target_feature(enable = "avx2")]
+    unsafe fn decode_block_f32_avx2(&self, is_k: bool, idx0: usize, n: usize, out: &mut [f32]) {
         use std::arch::x86_64::*;
         let hd = self.head_dim;
         let buf = if is_k { &self.k } else { &self.v };
         let op = out.as_mut_ptr();
-        match self.prec {
-            KvPrec::F16 => {
-                // Contiguous positions: one flat run of `n · hd` halves.
-                let src = buf.as_ptr().add(idx0 * hd * 2);
-                let total = n * hd;
-                let mut i = 0;
-                while i < total {
-                    _mm256_storeu_ps(
-                        op.add(i),
-                        _mm256_cvtph_ps(_mm_loadu_si128(src.add(i * 2) as *const __m128i)),
-                    );
-                    i += 8;
-                }
-            }
-            KvPrec::I8 => {
-                let scales = if is_k { &self.ks } else { &self.vs };
-                for p in 0..n {
-                    let src = buf.as_ptr().add((idx0 + p) * hd);
-                    let s = _mm256_set1_ps(scales[idx0 + p]);
-                    let mut i = 0;
-                    while i < hd {
-                        let x = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
-                            src.add(i) as *const __m128i,
-                        )));
-                        _mm256_storeu_ps(op.add(p * hd + i), _mm256_mul_ps(x, s));
-                        i += 8;
-                    }
-                }
+        // Contiguous positions: one flat run of `n · hd` floats.
+        let src = buf.as_ptr().add(idx0 * hd * 4) as *const f32;
+        let total = n * hd;
+        let mut i = 0;
+        while i < total {
+            _mm256_storeu_ps(op.add(i), _mm256_loadu_ps(src.add(i)));
+            i += 8;
+        }
+    }
+
+    /// The f16 cache's vector decode: the stored halves, widened.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    unsafe fn decode_block_f16_avx2(&self, is_k: bool, idx0: usize, n: usize, out: &mut [f32]) {
+        use std::arch::x86_64::*;
+        let hd = self.head_dim;
+        let buf = if is_k { &self.k } else { &self.v };
+        let op = out.as_mut_ptr();
+        // Contiguous positions: one flat run of `n · hd` halves.
+        let src = buf.as_ptr().add(idx0 * hd * 2);
+        let total = n * hd;
+        let mut i = 0;
+        while i < total {
+            _mm256_storeu_ps(
+                op.add(i),
+                _mm256_cvtph_ps(_mm_loadu_si128(src.add(i * 2) as *const __m128i)),
+            );
+            i += 8;
+        }
+    }
+
+    /// The int8 cache's vector decode: the stored bytes, scaled.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    unsafe fn decode_block_i8_avx2(&self, is_k: bool, idx0: usize, n: usize, out: &mut [f32]) {
+        use std::arch::x86_64::*;
+        let hd = self.head_dim;
+        let buf = if is_k { &self.k } else { &self.v };
+        let op = out.as_mut_ptr();
+        let scales = if is_k { &self.ks } else { &self.vs };
+        for p in 0..n {
+            let src = buf.as_ptr().add((idx0 + p) * hd);
+            let s = _mm256_set1_ps(scales[idx0 + p]);
+            let mut i = 0;
+            while i < hd {
+                let x = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                    src.add(i) as *const __m128i
+                )));
+                _mm256_storeu_ps(op.add(p * hd + i), _mm256_mul_ps(x, s));
+                i += 8;
             }
         }
     }
@@ -642,7 +776,7 @@ mod tests {
     // a snapshot restores exactly the positions it was taken at, into the same or a fresh cache.
     #[test]
     fn a_snapshot_restores_its_positions_into_a_fresh_cache() {
-        for prec in [KvPrec::F16, KvPrec::I8] {
+        for prec in [KvPrec::F16, KvPrec::F32, KvPrec::I8] {
             let hd = 32;
             let mut a = KvCache::new(prec, 3, 2, hd, 16);
             for pos in 0..6 {
@@ -704,6 +838,79 @@ mod tests {
         }
     }
 
+    /// The f32 cache is exact: the key attention reads is the key the model
+    /// produced, bit for bit. That is the whole point of it — a like-for-like
+    /// comparison against an engine whose attention reads f16 operands must not
+    /// differ because of *our* rounding.
+    #[test]
+    fn f32_cache_round_trips_keys_and_values_exactly() {
+        let hd = 64;
+        let mut c = KvCache::new(KvPrec::F32, 2, 2, hd, 8);
+        assert!(!c.rotated(), "only the int8 cache is rotated");
+        // Values a half-precision cache would round: a subnormal, a tiny and a huge
+        // one, and something f16 cannot represent at all.
+        let k: Vec<f32> = (0..hd)
+            .map(|i| match i % 4 {
+                0 => 1e-40,           // f16 rounds this to zero
+                1 => 1.0 / 3.0,       // not a half
+                2 => 65520.0,         // f16 overflows this to infinity
+                _ => -12.345_678_f32, // more digits than a half holds
+            })
+            .collect();
+        let v: Vec<f32> = (0..hd).map(|i| (i as f32) * 1e-3 - 0.5).collect();
+        c.put(1, 1, 3, &k, &v);
+        for (got, want) in decoded(&c, true, 1, 1, 3).iter().zip(&k) {
+            assert_eq!(got.to_bits(), want.to_bits(), "key {got} != {want}");
+        }
+        for (got, want) in decoded(&c, false, 1, 1, 3).iter().zip(&v) {
+            assert_eq!(got.to_bits(), want.to_bits(), "value {got} != {want}");
+        }
+        // The f16 cache of the same vector is not exact — that is the difference the
+        // option exists to remove.
+        let mut h = KvCache::new(KvPrec::F16, 2, 2, hd, 8);
+        h.put(1, 1, 3, &k, &v);
+        let inexact = decoded(&h, true, 1, 1, 3)
+            .iter()
+            .zip(&k)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert!(
+            inexact > 0,
+            "the f16 cache was exact; the test proves nothing"
+        );
+    }
+
+    /// The f32 cache costs twice the bytes of the f16 one and no scale at all.
+    #[test]
+    fn the_f32_cache_holds_twice_the_bytes_of_the_f16_one() {
+        let f16 = KvCache::new(KvPrec::F16, 32, 5, 64, 2048);
+        let f32 = KvCache::new(KvPrec::F32, 32, 5, 64, 2048);
+        assert_eq!(f16.bytes_per_position(), 32 * 5 * 64 * 2 * 2);
+        assert_eq!(f32.bytes_per_position(), 32 * 5 * 64 * 4 * 2);
+        assert_eq!(f32.bytes_per_position(), 2 * f16.bytes_per_position());
+        assert_eq!(
+            f32.bytes_per_position_per_layer() * 32,
+            f32.bytes_per_position()
+        );
+        // The int8 scale is the only per-vector extra; f32 has none.
+        assert_eq!(f32.resident_bytes(), f32.bytes_per_position() * 2048);
+    }
+
+    /// The names a command line carries: `f16`, `f32`, `i8`.
+    #[test]
+    fn a_cache_precision_is_named_and_parsed() {
+        assert_eq!(KvPrec::parse("f16"), Some(KvPrec::F16));
+        assert_eq!(KvPrec::parse("f32"), Some(KvPrec::F32));
+        assert_eq!(KvPrec::parse("F32"), Some(KvPrec::F32));
+        assert_eq!(KvPrec::parse("i8"), Some(KvPrec::I8));
+        assert_eq!(KvPrec::parse("int8"), Some(KvPrec::I8));
+        assert_eq!(KvPrec::parse("f64"), None);
+        assert_eq!(KvPrec::parse(""), None);
+        for p in [KvPrec::F16, KvPrec::F32, KvPrec::I8] {
+            assert_eq!(KvPrec::parse(p.name()), Some(p));
+        }
+    }
+
     #[test]
     fn int8_cache_is_accurate_to_its_quantisation_step() {
         let hd = 64;
@@ -762,7 +969,7 @@ mod tests {
     /// width it accepts, and a block that starts mid-run.
     #[test]
     fn vector_decode_matches_the_scalar_decode() {
-        for prec in [KvPrec::F16, KvPrec::I8] {
+        for prec in [KvPrec::F16, KvPrec::F32, KvPrec::I8] {
             for hd in [64usize, 24, 128] {
                 let n = 37;
                 let mut c = KvCache::new(prec, 2, 2, hd, 64);
