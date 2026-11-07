@@ -67,6 +67,9 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- The GeGLU kernel's `tanh` runs on the CPU's FMA instruction where there is one: the scalar arithmetic is
+  compiled a second time inside a `#[target_feature(enable = "fma")]` function, so the `mul_add`s become
+  `vfmadd` instead of a call to the C library's `fmaf` (8.3x on the kernel, bit for bit the same result).
 - F32/F16/BF16 matrices multiply f32 activations instead of int8-quantised ones (output change for those formats).
 
 ### Fixed

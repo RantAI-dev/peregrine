@@ -144,7 +144,11 @@ struct ExpParts {
 
 /// [`exp8`]'s range reduction and polynomial, in scalar: the same constants, the same
 /// operation order, the same fused multiply-adds.
-#[inline]
+///
+/// `#[inline(always)]`, so that the FMA-targeted wrappers below (`tanh_fma`, `geglu_fma`)
+/// compile their `mul_add`s to the hardware instruction instead of a call to `fmaf`: the
+/// inlined body inherits the caller's target features.
+#[inline(always)]
 fn exp_parts(x: f32) -> ExpParts {
     // `z = x·log2(e) + 0x1.8p23`; the sum's low mantissa bits hold `x·log2(e)`'s integer
     // part, and `n = z − 0x1.8p23` recovers it exactly (the subtraction is exact).
@@ -186,6 +190,10 @@ fn greater(x: f32, limit: f32) -> bool {
 /// The fused multiply-adds are the IEEE-754 fused operation: the hardware instruction where
 /// the target has one, a correctly rounded `fmaf` where it does not. Either way the result
 /// is the one the standard prescribes, so it does not vary with the C library either.
+///
+/// `#[inline(always)]`, so that the FMA-targeted wrapper (`tanh_fma`) compiles these
+/// `mul_add`s to the hardware instruction.
+#[inline(always)]
 pub fn exp_scalar(x: f32) -> f32 {
     let p = exp_parts(x);
     // `2ⁿ`, from `n` in the exponent field.
@@ -231,7 +239,10 @@ const TANH_POLY: [f32; 6] = [
 ];
 
 /// `tanh(x)` for `|x| ≤ 0.55`: the polynomial above, times `x`.
-#[inline]
+///
+/// `#[inline(always)]`, so that the FMA-targeted wrapper (`tanh_fma`) compiles these
+/// `mul_add`s to the hardware instruction.
+#[inline(always)]
 fn tanh_poly(x: f32) -> f32 {
     let u = x * x;
     let p = TANH_POLY[5].mul_add(u, TANH_POLY[4]);
@@ -262,7 +273,32 @@ fn tanh_poly(x: f32) -> f32 {
 /// (−12…12 in steps of 1.3e-4, plus every 997th `f32` in [0, 1)): **max 1.72 ulp**, at
 /// `|x| ≈ 0.61`, where `exp`'s own error is the largest. The two branches differ by
 /// 1.3 ulp where they meet, and `tanh` is odd to the bit.
+///
+/// # The FMA path
+///
+/// On a CPU with the FMA instruction the same arithmetic runs inside a
+/// `#[target_feature(enable = "fma")]` function (`tanh_fma`), where the `mul_add`s
+/// become `vfmadd` instead of a call to the C library's `fmaf`. Both are the IEEE fused
+/// multiply-add, so the result is the same bit for bit — the instruction only removes
+/// the call. The tier cap (`PEREGRINE_ISA`) decides: `scalar` keeps the portable path.
 pub fn tanh(x: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::cpu::have_fma() {
+            // SAFETY: FMA checked.
+            return unsafe { tanh_fma(x) };
+        }
+    }
+    tanh_scalar(x)
+}
+
+/// The portable scalar `tanh`: the arithmetic [`tanh`] describes.
+///
+/// `#[inline(always)]`, so that the FMA-targeted wrappers (`tanh_fma`, `geglu_fma`)
+/// compile the `mul_add`s to the hardware instruction: an inlined body inherits the
+/// caller's target features.
+#[inline(always)]
+fn tanh_scalar(x: f32) -> f32 {
     if x.is_nan() {
         return x;
     }
@@ -281,6 +317,17 @@ pub fn tanh(x: f32) -> f32 {
     } else {
         t
     }
+}
+
+/// [`tanh_scalar`] compiled for a CPU with the FMA instruction.
+///
+/// # Safety
+///
+/// FMA must be available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn tanh_fma(x: f32) -> f32 {
+    tanh_scalar(x)
 }
 
 /// `x[i] = exp(x[i] − shift)` in place; returns `Σ x[i]` after the update.
@@ -441,9 +488,39 @@ const GELU_COEF_A: f32 = 0.044715;
 /// Matching ggml's `ggml_gelu_f32`, with [`tanh`] instead of the C library's `tanhf`:
 /// ggml's own `tanhf` moves with the host's libc (issue #64), and this engine's outputs
 /// must not.
-#[inline]
+///
+/// On a CPU with the FMA instruction the same arithmetic runs inside a
+/// `#[target_feature(enable = "fma")]` function (`gelu_tanh_fma`); the result is the
+/// same bit for bit (see [`tanh`]).
 pub fn gelu_tanh(x: f32) -> f32 {
-    0.5 * x * (1.0 + tanh(SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)))
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::cpu::have_fma() {
+            // SAFETY: FMA checked.
+            return unsafe { gelu_tanh_fma(x) };
+        }
+    }
+    gelu_tanh_scalar(x)
+}
+
+/// The portable scalar GELU: the arithmetic [`gelu_tanh`] describes.
+///
+/// `#[inline(always)]`, so that the FMA-targeted wrappers (`gelu_tanh_fma`,
+/// `geglu_fma`) compile the `mul_add`s of [`tanh_scalar`] to the hardware instruction.
+#[inline(always)]
+fn gelu_tanh_scalar(x: f32) -> f32 {
+    0.5 * x * (1.0 + tanh_scalar(SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)))
+}
+
+/// [`gelu_tanh_scalar`] compiled for a CPU with the FMA instruction.
+///
+/// # Safety
+///
+/// FMA must be available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn gelu_tanh_fma(x: f32) -> f32 {
+    gelu_tanh_scalar(x)
 }
 
 /// GeGLU in place: `gate[i] = gelu_tanh(gate[i]) · up[i]` — matching llama.cpp's `LLM_FFN_GELU`.
@@ -451,11 +528,50 @@ pub fn gelu_tanh(x: f32) -> f32 {
 /// Scalar, and deliberately so: it has no vector path, so there is no second arithmetic to
 /// keep in step with [`gelu_tanh`]'s. A vector GeGLU may only be added if it evaluates the
 /// same expressions lane-wise, so that it is bit for bit the scalar result.
+///
+/// # The FMA path
+///
+/// The scalar arithmetic is compiled twice: once for a plain x86-64 target, where every
+/// `mul_add` of [`tanh`] is a call to the C library's `fmaf`, and once inside a
+/// `#[target_feature(enable = "fma")]` function (`geglu_fma`), where they are the
+/// hardware's `vfmadd`. The choice is made once per call, from the CPU's features under
+/// the tier cap (`PEREGRINE_ISA`; `scalar` keeps the portable path).
+///
+/// The two are the same arithmetic: an IEEE fused multiply-add has one result, and both
+/// the instruction and the library's `fmaf` produce it. So the GeGLU output does not
+/// depend on which path ran — the test pins that over a dense sweep.
 pub fn geglu(gate: &mut [f32], up: &[f32]) {
     debug_assert_eq!(gate.len(), up.len());
-    for (g, &u) in gate.iter_mut().zip(up) {
-        *g = gelu_tanh(*g) * u;
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::cpu::have_fma() {
+            // SAFETY: FMA checked.
+            return unsafe { geglu_fma(gate, up) };
+        }
     }
+    geglu_scalar(gate, up);
+}
+
+/// The GeGLU loop, written once: the portable path, and the body of the FMA path.
+///
+/// `#[inline(always)]`, so that `geglu_fma` compiles the `mul_add`s of [`tanh_scalar`]
+/// to the hardware instruction: an inlined body inherits the caller's target features.
+#[inline(always)]
+fn geglu_scalar(gate: &mut [f32], up: &[f32]) {
+    for (g, &u) in gate.iter_mut().zip(up) {
+        *g = gelu_tanh_scalar(*g) * u;
+    }
+}
+
+/// The same loop, compiled for a CPU with the FMA instruction.
+///
+/// # Safety
+///
+/// FMA must be available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn geglu_fma(gate: &mut [f32], up: &[f32]) {
+    geglu_scalar(gate, up);
 }
 
 // `Σ x²` accumulated in f64, four lanes at a time (the norms' sums; was a serial f64 loop).
@@ -970,6 +1086,94 @@ mod tests {
         for i in 0..g0.len() {
             let want = gelu_tanh(g0[i]) * up[i];
             assert_eq!(g[i], want, "{i}: {} vs {want}", g[i]);
+        }
+    }
+
+    /// The FMA path and the portable one must agree bit for bit, over a dense sweep of
+    /// the argument.
+    ///
+    /// They are the same arithmetic: an IEEE fused multiply-add has one result, and the
+    /// hardware's `vfmadd` and the C library's `fmaf` both produce it. If they ever
+    /// differed, the engine's output would depend on the CPU it ran on — the one thing
+    /// the kernel tiers must not decide.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn the_fma_path_agrees_with_the_portable_one_bit_for_bit() {
+        if !crate::cpu::have_fma() {
+            eprintln!("skipped: no FMA");
+            return;
+        }
+        // A dense sweep across the whole range `tanh` handles, so that every branch is
+        // walked many times: the polynomial's, the exponential's, and the saturation's.
+        let mut xs: Vec<f32> = Vec::new();
+        let mut x = -24.0f32;
+        while x <= 24.0 {
+            xs.push(x);
+            x += 0.000_37;
+        }
+        // Every 997th `f32` in [0, 1): the polynomial branch, at the resolution of the
+        // format rather than of the sweep.
+        let mut bits = 0u32;
+        while bits < 0x3f80_0000 {
+            xs.push(f32::from_bits(bits));
+            bits += 997;
+        }
+        // The corners: the branch boundaries, the extremes, the denormals and the NaN.
+        for v in [
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            TANH_POLY_LIMIT,
+            -TANH_POLY_LIMIT,
+            0.54999995,
+            TANH_SATURATE,
+            -TANH_SATURATE,
+            8.999999,
+            9.000001,
+            1e-30,
+            -1e-30,
+            1e-45,
+            -1e-45,
+            1e10,
+            -1e10,
+            f32::MAX,
+            f32::MIN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            xs.push(v);
+        }
+        // `tanh` itself: the two paths must not differ.
+        for &x in &xs {
+            // SAFETY: FMA is available (checked above).
+            let got = unsafe { tanh_fma(x) };
+            assert_eq!(
+                got.to_bits(),
+                tanh_scalar(x).to_bits(),
+                "tanh({x}): FMA {got:?}, portable {:?}",
+                tanh_scalar(x)
+            );
+        }
+        // And the GeGLU that uses it, over the same sweep.
+        for u in [1.0f32, -2.5, 0.125, f32::MIN_POSITIVE] {
+            let up = vec![u; xs.len()];
+            let mut a = xs.clone();
+            let mut b = xs.clone();
+            geglu_scalar(&mut a, &up);
+            // SAFETY: FMA is available (checked above).
+            unsafe { geglu_fma(&mut b, &up) };
+            for i in 0..a.len() {
+                assert_eq!(
+                    a[i].to_bits(),
+                    b[i].to_bits(),
+                    "geglu({}, {u}): FMA {:?}, portable {:?}",
+                    xs[i],
+                    b[i],
+                    a[i]
+                );
+            }
         }
     }
 

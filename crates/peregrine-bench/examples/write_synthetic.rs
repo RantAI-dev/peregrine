@@ -4,16 +4,17 @@
 //! cargo run --release -p peregrine-bench --example write_synthetic -- <dir> [ctx] [arch] [fmt]
 //! ```
 //!
-//! `arch` is `llama` (the default), `gemma3` (the GeGLU model) or `qwen35-plain` (the
-//! hybrid model without the Hadamard rotation, with ordinary quantised matmuls). `fmt` is
-//! `f16` (the default) or `q8_0`.
+//! `arch` is `llama` (the default), `gemma3` (the GeGLU model the `peregrine bench` numbers
+//! for the GeGLU kernel are measured on) or `qwen35-plain` (the hybrid model without the
+//! Hadamard rotation, with ordinary quantised matmuls). `fmt` is `f16` (the default) or
+//! `q8_0`; it applies to `qwen35-plain`.
 
 #[path = "../../peregrine-models/tests/support/mod.rs"]
 mod support;
 
 use peregrine_core::gguf::Format;
 use std::path::PathBuf;
-use support::models::{write_dense, write_hybrid_plain, Dense};
+use support::models::{write_dense, write_gemma3, write_hybrid_plain, Dense, Gemma3Config};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -35,6 +36,21 @@ fn main() {
             let seed = if fmt == Format::Q8_0 { 1001 } else { 1000 };
             write_hybrid_plain(&out_dir, fmt, seed)
         }
+        "gemma3" => write_gemma3(
+            &out_dir,
+            Format::F16,
+            42,
+            Gemma3Config {
+                d_model: 1024,
+                n_layer: 8,
+                n_head: 8,
+                n_head_kv: 4,
+                n_ff: 2816,
+                ctx,
+                sliding_window: 64,
+                ..Gemma3Config::default()
+            },
+        ),
         _ => write_dense(
             &out_dir,
             "llama",
