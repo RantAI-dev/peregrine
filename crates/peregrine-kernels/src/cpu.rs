@@ -105,6 +105,23 @@ pub fn tier_name() -> String {
     }
 }
 
+/// Cached check for the FMA instruction under tier cap.
+///
+/// `fma` belongs to the AVX2 tier, so `PEREGRINE_ISA=scalar` turns this off and the
+/// portable code (a call to the C library's `fmaf`) runs instead.
+#[inline]
+pub fn have_fma() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| crate::cpu_has!("fma"))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// Cached check for AVX-512 VNNI + VL support under tier cap.
 #[inline]
 pub fn have_vnni() -> bool {
