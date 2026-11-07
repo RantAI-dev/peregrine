@@ -119,7 +119,7 @@ pub struct EngineOptions {
     pub trace: bool,
 
     // Calibration (S2.6 PR 3/4).
-    /// `PEREGRINE_CALIBRATE=0`: turn startup calibration off.
+    /// `PEREGRINE_CALIBRATE=1`: run the startup calibration. Off by default (S2.6 decision 6).
     pub calibrate: bool,
     /// Source of active tuning parameters (0=default, 1=startup, 2=profile, 3=env).
     pub tuning_source: crate::calib::TuningSource,
@@ -168,7 +168,7 @@ impl Default for EngineOptions {
             lb_i8: true,
             prof: false,
             trace: false,
-            calibrate: true,
+            calibrate: false,
             tuning_source: crate::calib::TuningSource::Default,
             calibration_us: 0,
         }
@@ -193,7 +193,9 @@ impl EngineOptions {
     }
 
     /// Build options from a custom key-lookup (e.g. environment) and a profile:
-    /// `get` wins over the profile, the profile wins over calibration, calibration wins over defaults.
+    /// `get` wins over the profile, the profile wins over calibration, calibration wins over
+    /// defaults. The calibration runs only when it is asked for (`PEREGRINE_CALIBRATE=1`) and
+    /// nothing pins the values it would set.
     pub fn from_chained(
         get: impl Fn(&str) -> Option<String>,
         profile: Option<&crate::profile::Profile>,
@@ -293,7 +295,7 @@ impl EngineOptions {
             lb_i8: unless("LB_I8", "0"),
             prof: only("PROF", "1"),
             trace: s("TRACE").is_some(),
-            calibrate: unless("CALIBRATE", "0"),
+            calibrate: only("CALIBRATE", "1"),
             tuning_source: crate::calib::TuningSource::Default,
             calibration_us: 0,
         }
@@ -521,10 +523,10 @@ mod tests {
             with(&[("LB", "/x.slb")]).lb_sidecar,
             LbSidecar::Path("/x.slb".into())
         );
-        // Startup calibration.
+        // Startup calibration: off unless it is asked for.
         assert!(!with(&[("CALIBRATE", "0")]).calibrate);
         assert!(with(&[("CALIBRATE", "1")]).calibrate);
-        assert!(with(&[]).calibrate);
+        assert!(!with(&[]).calibrate);
     }
 
     #[test]
@@ -651,14 +653,23 @@ mod tests {
     }
 
     #[test]
-    fn calibration_runs_when_unpinned_and_no_profile() {
+    fn calibration_is_off_unless_it_is_asked_for() {
         let o = EngineOptions::from_chained(|_| None, None);
+        assert!(!o.calibrate);
+        assert_eq!(o.decode_threads, None);
+        assert_eq!(o.spin_us, SPIN_DEFAULT_US);
+        assert_eq!(o.tuning_source, crate::calib::TuningSource::Default);
+    }
+
+    #[test]
+    fn calibration_runs_when_asked_for_and_nothing_is_pinned() {
+        let o = EngineOptions::from_chained(
+            |k| (k == "PEREGRINE_CALIBRATE").then(|| "1".to_string()),
+            None,
+        );
         assert!(o.calibrate);
         assert!(o.decode_threads.is_some());
         assert!(o.spin_us >= 50 && o.spin_us <= 2000);
-        assert!(
-            o.tuning_source == crate::calib::TuningSource::Startup
-                || o.tuning_source == crate::calib::TuningSource::Default
-        );
+        assert_eq!(o.tuning_source, crate::calib::TuningSource::Startup);
     }
 }

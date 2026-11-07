@@ -67,12 +67,20 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- The startup calibration is off by default: `PEREGRINE_CALIBRATE=1` turns it on (S2.6 decision 6).
+  A wrong thread count costs far more than the tuned default it replaces, and the calibration is only
+  switched on by default once it has passed A/Bs on two machines.
 - The GeGLU kernel's `tanh` runs on the CPU's FMA instruction where there is one: the scalar arithmetic is
   compiled a second time inside a `#[target_feature(enable = "fma")]` function, so the `mul_add`s become
   `vfmadd` instead of a call to the C library's `fmaf` (8.3x on the kernel, bit for bit the same result).
 - F32/F16/BF16 matrices multiply f32 activations instead of int8-quantised ones (output change for those formats).
 
 ### Fixed
+- The startup calibration no longer stops its decode-thread sweep at the first candidate that fails to beat
+  the previous best by 5%: one noisy high early sample froze it at one or two threads and the 9B decoded
+  at 5.6 tok/s instead of 23.6. Every candidate is measured now, the default (the physical cores) stands
+  unless a smaller count is at least as good (median bandwidth ≥ 98% of the default's, both measurements
+  quiet), and the count never goes below half the physical cores.
 - The A1 dequantisation oracle is re-cut from one pinned SmolLM2-360M-Instruct Q4_K_M file (size and
   FNV-1a checked at test time, SHA-256 in the failure message), so another upload fails loudly instead
   of looking like a kernel bug.
