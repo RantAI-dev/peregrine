@@ -473,10 +473,26 @@ unsafe fn swiglu_avx2(gate: &mut [f32], up: &[f32]) {
         );
         i += 8;
     }
-    while i < gate.len() {
-        let g = gate[i];
-        gate[i] = (g / (1.0 + (-g).exp())) * up[i];
-        i += 1;
+    // The tail goes through `exp8` too, in a padded vector, rather than through the
+    // scalar path: a caller that splits a row across workers must get the same bits
+    // for an element however the row was cut. `libm`'s `expf` and `exp8` differ, so
+    // the old scalar tail made a row's result depend on where the split fell (and
+    // the one-row path in `swiglu_rows` splits a row into unequal shares).
+    if i < gate.len() {
+        let rem = gate.len() - i;
+        let mut g = [0.0f32; 8];
+        let mut u = [0.0f32; 8];
+        g[..rem].copy_from_slice(&gate[i..]);
+        u[..rem].copy_from_slice(&up[i..]);
+        let x = _mm256_loadu_ps(g.as_ptr());
+        let e = exp8(_mm256_sub_ps(_mm256_setzero_ps(), x));
+        let silu = _mm256_div_ps(x, _mm256_add_ps(one, e));
+        let mut out = [0.0f32; 8];
+        _mm256_storeu_ps(
+            out.as_mut_ptr(),
+            _mm256_mul_ps(silu, _mm256_loadu_ps(u.as_ptr())),
+        );
+        gate[i..].copy_from_slice(&out[..rem]);
     }
 }
 
@@ -1147,6 +1163,57 @@ mod tests {
                 "{i}: {} vs {want}",
                 g[i]
             );
+        }
+    }
+
+    /// An element's `swiglu` bits must not depend on where the row was split.
+    ///
+    /// The one-row decode path splits a feed-forward row into unequal shares across
+    /// the pool (`swiglu_rows`, `Sched::Static`), while a batched step hands every
+    /// worker a whole row. Before the tail was moved onto `exp8`, the narrow path
+    /// evaluated each share's last 1..7 elements with `libm`'s `expf` and the batched
+    /// path evaluated them with `exp8`, so the same row came out different bits
+    /// depending on the batch it ran in — the batch-invariance break the repacked
+    /// Q4_K fold then surfaced. The scratch is dirtied by an eight-row call first, so
+    /// a split can never pass by reading a leftover lane.
+    #[test]
+    fn a_rows_swiglu_does_not_depend_on_the_split() {
+        if !vector_ok() {
+            eprintln!("skipped: no AVX2 and FMA");
+            return;
+        }
+        let n = 1024;
+        let g0 = prng(29, n, -12.0, 12.0);
+        let up = prng(31, n, -3.0, 3.0);
+        let mut want = g0.clone();
+        swiglu(&mut want, &up);
+
+        let mut scratch_g = vec![0.0f32; 8 * n];
+        let mut scratch_u = vec![0.0f32; 8 * n];
+        for r in 0..8 {
+            scratch_g[r * n..(r + 1) * n].copy_from_slice(&prng(100 + r as u64, n, -12.0, 12.0));
+            scratch_u[r * n..(r + 1) * n].copy_from_slice(&prng(200 + r as u64, n, -3.0, 3.0));
+        }
+        // The wider call dirties the whole buffer.
+        swiglu(&mut scratch_g, &scratch_u);
+
+        // Widths one to eight, as a row split across that many workers.
+        for w in 1..=8usize {
+            scratch_g[..n].copy_from_slice(&g0);
+            scratch_u[..n].copy_from_slice(&up);
+            for k in 0..w {
+                let (lo, hi) = (n * k / w, n * (k + 1) / w);
+                swiglu(&mut scratch_g[lo..hi], &scratch_u[lo..hi]);
+            }
+            for i in 0..n {
+                assert_eq!(
+                    scratch_g[i].to_bits(),
+                    want[i].to_bits(),
+                    "width {w}, element {i}: {} vs {}",
+                    scratch_g[i],
+                    want[i]
+                );
+            }
         }
     }
 
