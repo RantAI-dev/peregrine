@@ -59,6 +59,50 @@ impl TensorInfo {
         debug_assert_eq!(n % self.kind.block() as u64, 0);
         n / self.kind.block() as u64 * self.kind.block_bytes() as u64
     }
+
+    /// Return a view of output rows `[start, start + n)`.
+    pub fn rows(&self, start: usize, n: usize) -> Result<TensorInfo, String> {
+        if self.dims.len() != 2 {
+            return Err(format!(
+                "tensor {}: expected 2 dimensions for row slice, got {:?}",
+                self.name, self.dims
+            ));
+        }
+        let cols = self.dims[0] as usize;
+        let total_rows = self.dims[1] as usize;
+        let end = start
+            .checked_add(n)
+            .ok_or_else(|| format!("tensor {}: row range overflow", self.name))?;
+        if end > total_rows {
+            return Err(format!(
+                "tensor {}: row slice [{}..{}) exceeds total rows {}",
+                self.name, start, end, total_rows
+            ));
+        }
+        let blk = self.kind.block();
+        if cols % blk != 0 {
+            return Err(format!(
+                "tensor {}: column count {} is not a multiple of block size {}",
+                self.name, cols, blk
+            ));
+        }
+        let rb = peregrine_kernels::quant::row_bytes(self.kind, cols) as u64;
+        let row_offset = (start as u64)
+            .checked_mul(rb)
+            .ok_or_else(|| format!("tensor {}: row offset overflow", self.name))?;
+        let offset = self
+            .offset
+            .checked_add(row_offset)
+            .ok_or_else(|| format!("tensor {}: offset overflow", self.name))?;
+
+        Ok(TensorInfo {
+            name: format!("{}[{}..{}]", self.name, start, end),
+            dims: vec![self.dims[0], n as u64],
+            kind: self.kind,
+            offset,
+            tile_off: None,
+        })
+    }
 }
 
 pub struct Gguf {
@@ -557,5 +601,88 @@ mod tests {
             Ok(_) => panic!("accepted a file that is not GGUF"),
         }
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn tensor_info_rows_splits_valid_views_and_rejects_invalid() {
+        let t_f16 = TensorInfo {
+            name: "attn_qkv".to_string(),
+            dims: vec![128, 64],
+            kind: Format::F16,
+            offset: 1000,
+            tile_off: Some(42),
+        };
+        let q = t_f16.rows(0, 32).expect("q slice");
+        assert_eq!(q.name, "attn_qkv[0..32]");
+        assert_eq!(q.dims, vec![128, 32]);
+        assert_eq!(q.kind, Format::F16);
+        assert_eq!(q.offset, 1000);
+        assert_eq!(q.tile_off, None);
+        assert_eq!(q.bytes(), 32 * 128 * 2);
+
+        let k = t_f16.rows(32, 16).expect("k slice");
+        assert_eq!(k.name, "attn_qkv[32..48]");
+        assert_eq!(k.dims, vec![128, 16]);
+        assert_eq!(k.kind, Format::F16);
+        assert_eq!(k.offset, 1000 + 32 * 128 * 2);
+        assert_eq!(k.tile_off, None);
+
+        let v = t_f16.rows(48, 16).expect("v slice");
+        assert_eq!(v.name, "attn_qkv[48..64]");
+        assert_eq!(v.dims, vec![128, 16]);
+        assert_eq!(v.offset, 1000 + 48 * 128 * 2);
+        assert_eq!(v.tile_off, None);
+
+        // Quantized format (Q8_0: block=32, block_bytes=34)
+        let t_q8 = TensorInfo {
+            name: "ffn_up".to_string(),
+            dims: vec![64, 20],
+            kind: Format::Q8_0,
+            offset: 2048,
+            tile_off: None,
+        };
+        let gate = t_q8.rows(0, 10).expect("gate");
+        assert_eq!(gate.name, "ffn_up[0..10]");
+        assert_eq!(gate.dims, vec![64, 10]);
+        assert_eq!(gate.offset, 2048);
+        let up = t_q8.rows(10, 10).expect("up");
+        let rb = (64 / 32) * 34;
+        assert_eq!(up.offset, 2048 + 10 * rb as u64);
+        assert_eq!(up.dims, vec![64, 10]);
+
+        // Rejection cases
+        // 1. Non-2D
+        let t_1d = TensorInfo {
+            name: "norm".to_string(),
+            dims: vec![128],
+            kind: Format::F16,
+            offset: 0,
+            tile_off: None,
+        };
+        assert!(t_1d.rows(0, 10).is_err());
+
+        let t_3d = TensorInfo {
+            name: "moe".to_string(),
+            dims: vec![64, 64, 8],
+            kind: Format::F16,
+            offset: 0,
+            tile_off: None,
+        };
+        assert!(t_3d.rows(0, 10).is_err());
+
+        // 2. Out of bounds rows
+        assert!(t_f16.rows(50, 20).is_err());
+        assert!(t_f16.rows(65, 1).is_err());
+        assert!(t_f16.rows(usize::MAX, 1).is_err());
+
+        // 3. Row length not aligned to block
+        let t_unaligned = TensorInfo {
+            name: "bad_q8".to_string(),
+            dims: vec![31, 10],
+            kind: Format::Q8_0,
+            offset: 0,
+            tile_off: None,
+        };
+        assert!(t_unaligned.rows(0, 5).is_err());
     }
 }

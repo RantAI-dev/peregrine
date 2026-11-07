@@ -16,28 +16,27 @@
 #[cfg(any(
     feature = "arch-llama",
     feature = "arch-qwen",
-    feature = "arch-qwen3moe"
+    feature = "arch-qwen3moe",
+    feature = "arch-phi3"
 ))]
 pub mod dense;
 #[cfg(feature = "arch-gemma3")]
 pub mod gemma3;
-#[cfg(feature = "arch-phi3")]
-pub mod phi3;
 #[cfg(feature = "arch-qwen35")]
 pub mod qwen35;
 #[cfg(feature = "arch-qwen3moe")]
 pub mod qwen3moe;
 
-#[cfg(any(feature = "arch-llama", feature = "arch-qwen"))]
+#[cfg(any(feature = "arch-llama", feature = "arch-qwen", feature = "arch-phi3"))]
 pub use dense::DenseFamily;
 #[cfg(feature = "arch-llama")]
 pub use dense::LlamaFamily;
+#[cfg(feature = "arch-phi3")]
+pub use dense::Phi3Family;
 #[cfg(feature = "arch-qwen")]
 pub use dense::QwenFamily;
 #[cfg(feature = "arch-gemma3")]
 pub use gemma3::Gemma3Family;
-#[cfg(feature = "arch-phi3")]
-pub use phi3::Phi3Family;
 #[cfg(feature = "arch-qwen35")]
 pub use qwen35::Qwen35Family;
 #[cfg(feature = "arch-qwen3moe")]
