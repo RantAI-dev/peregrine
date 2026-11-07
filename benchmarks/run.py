@@ -238,8 +238,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tokens", "-n",
         type=int,
-        default=32,
-        help="Number of greedy decode tokens to generate per request.",
+        default=256,
+        help="Greedy decode tokens per request (enough that decode, not prefill, dominates).",
     )
     parser.add_argument(
         "--threads", "-t",
@@ -418,8 +418,8 @@ def main():
                 "results": {
                     str(ctx): {
                         "single_user": {"decode_tok_s": [], "prefill_tok_s": [], "ttft_s": [], "prompt_tokens": []},
-                        "multi_user_4": {"aggregate_tok_s": [], "ttft_s": [], "prompt_tokens": []},
-                        "multi_user_10": {"aggregate_tok_s": [], "ttft_s": [], "prompt_tokens": []},
+                        "multi_user_4": {"aggregate_tok_s": [], "decode_aggregate_tok_s": [], "ttft_s": [], "prompt_tokens": []},
+                        "multi_user_10": {"aggregate_tok_s": [], "decode_aggregate_tok_s": [], "ttft_s": [], "prompt_tokens": []},
                     }
                     for ctx in contexts
                 },
@@ -556,6 +556,7 @@ def main():
                                     med_pt = round(statistics.median(pts), 1)
                                     print(f"  4 users: aggregate {r4['aggregate_tok_s']:.1f} tok/s (prompt tokens: {med_pt})")
                                     engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["aggregate_tok_s"].append(r4["aggregate_tok_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["decode_aggregate_tok_s"].append(r4["decode_aggregate_tok_s"])
                                     engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["ttft_s"].append(r4["median_ttft_s"])
                                     engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["prompt_tokens"].append(med_pt)
 
@@ -588,6 +589,7 @@ def main():
                                     med_pt = round(statistics.median(pts), 1)
                                     print(f"  10 users: aggregate {r10['aggregate_tok_s']:.1f} tok/s, TTFT {r10['median_ttft_s']:.3f} s (prompt tokens: {med_pt})")
                                     engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["aggregate_tok_s"].append(r10["aggregate_tok_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["decode_aggregate_tok_s"].append(r10["decode_aggregate_tok_s"])
                                     engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["ttft_s"].append(r10["median_ttft_s"])
                                     engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["prompt_tokens"].append(med_pt)
 
@@ -640,12 +642,14 @@ def main():
                     },
                     "multi_user_4": {
                         "aggregate_tok_s": m4_agg,
+                        "decode_aggregate_tok_s": calculate_stats(data["multi_user_4"]["decode_aggregate_tok_s"]),
                         "ttft_s": m4_ttft,
                         "prompt_tokens": m4_pts,
                         "raw_samples": data["multi_user_4"],
                     },
                     "multi_user_10": {
                         "aggregate_tok_s": m10_agg,
+                        "decode_aggregate_tok_s": calculate_stats(data["multi_user_10"]["decode_aggregate_tok_s"]),
                         "first_token_time_s": m10_ttft,
                         "prompt_tokens": m10_pts,
                         "raw_samples": data["multi_user_10"],

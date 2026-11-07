@@ -16,6 +16,9 @@ Per `docs/targets.md` (Section 4), every benchmark report measures four distinct
    Sustained throughput when prefilling the input context before emitting the first token. Compute-bound, scaling with the CPU's vector multiply-accumulate peak.
 3. **Multi-user aggregate throughput** (`tok/s` at 4 and 10 concurrent users):
    Total tokens generated per second across all concurrent active slots when batching requests into shared weight passes.
+   The report shows tokens over the whole wall time, prefill included. The JSON also records `decode_aggregate_tok_s`:
+   tokens after each user's first, over the window from the last first token to the end, when every user is decoding.
+   Requests generate 256 tokens by default (`--tokens`), so decode rather than prefill dominates the totals.
 4. **Time to first token** (`TTFT` at 10 concurrent users):
    Latency from sending the request until the first token chunk arrives at the client under full concurrency load (10 users).
 

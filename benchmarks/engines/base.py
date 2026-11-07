@@ -92,7 +92,7 @@ def send_chat_completion(
     temperature: float = 0.0,
     stream: bool = True,
     model_alias: str = "peregrine",
-    timeout: float = 120.0,
+    timeout: float = 3600.0,
     ignore_eos: bool = True,
 ) -> Dict[str, Any]:
     """Send an OpenAI-compatible chat completion request and measure timings.
@@ -220,13 +220,16 @@ def run_concurrent_requests(
     max_tokens: int,
     temperature: float = 0.0,
     model_alias: str = "peregrine",
-    timeout: float = 120.0,
+    timeout: float = 3600.0,
     ignore_eos: bool = True,
 ) -> Dict[str, Any]:
     """Execute concurrent user completions synchronized by a thread barrier.
 
-    Calculates aggregate throughput (total tokens / overall elapsed wall time)
-    and collects per-user metrics (TTFT, decode tok/s).
+    Calculates aggregate throughput (total tokens / overall elapsed wall time, prefill
+    included) and decode aggregate throughput (tokens after each user's first one, over the
+    time from the last first token to the end: the window in which every user decodes), and
+    collects per-user metrics (TTFT, decode tok/s). The timeout is long because ten users'
+    16k-token prompts take minutes to prefill on a CPU.
     """
     n_users = len(prompts)
     results: List[Optional[Dict[str, Any]]] = [None] * n_users
@@ -282,6 +285,9 @@ def run_concurrent_requests(
     ttfts = [r["ttft_s"] for r in valid_results]
     ttfts.sort()
     median_ttft = ttfts[len(ttfts) // 2] if ttfts else 0.0
+    decode_window_s = max(1e-5, wall_s - max(ttfts))
+    decode_tokens = sum(max(0, r["completion_tokens"] - 1) for r in valid_results)
+    decode_aggregate_tok_s = decode_tokens / decode_window_s
 
     return {
         "users": n_users,
@@ -289,6 +295,7 @@ def run_concurrent_requests(
         "wall_s": wall_s,
         "total_tokens": total_tokens,
         "aggregate_tok_s": aggregate_tok_s,
+        "decode_aggregate_tok_s": decode_aggregate_tok_s,
         "median_ttft_s": median_ttft,
         "min_ttft_s": min(ttfts) if ttfts else 0.0,
         "max_ttft_s": max(ttfts) if ttfts else 0.0,
