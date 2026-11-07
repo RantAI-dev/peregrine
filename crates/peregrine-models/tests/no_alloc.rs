@@ -86,11 +86,11 @@ fn load(path: &Path) -> Arc<Model> {
 /// any id inside the vocabulary works for an allocation test.
 const TOKEN: u32 = 11;
 
-fn check_decode(model: &Model, threads: usize) -> usize {
+fn check_decode(model: &Model, threads: usize, prec: KvPrec) -> usize {
     let c = model.cfg;
     let pool = Pool::new(threads);
     let mut st = State::new(&c, 8, 1, 512, threads, model.rope_factors.as_deref());
-    let mut kv = model.new_cache(KvPrec::F16, 512);
+    let mut kv = model.new_cache(prec, 512);
     let mut stats = StepStats::default();
     let mut pos = 0usize;
     let mut decode = |pos: &mut usize| {
@@ -239,11 +239,16 @@ fn a_decode_step_allocates_nothing() {
         ("gemma3-Q8_0", &gemma3),
     ] {
         for threads in [1, 4] {
-            let n = check_decode(model, threads);
-            if n != 0 {
-                failures.push(format!(
-                    "{name}, {threads} threads: {n} allocations per decode step"
-                ));
+            // The f16 cache and the f32 one (the opt-in full-precision cache) must
+            // both decode without allocating.
+            for prec in [KvPrec::F16, KvPrec::F32] {
+                let n = check_decode(model, threads, prec);
+                if n != 0 {
+                    failures.push(format!(
+                        "{name}, {threads} threads, {} cache: {n} allocations per decode step",
+                        prec.name()
+                    ));
+                }
             }
         }
     }

@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
 - Support for GGML's Q2_K and Q3_K weight formats (AVX2 single-row and batched kernels, scalar reference).
 - Support for GGML's MXFP4 weight format (AVX2 single-row and batched kernels, scalar reference).
 - Support for the Gemma 3 model family (S2.4a): interleaved sliding-window (local) and global layers, four RMSNorms per layer (pre/post attention, pre/post FFN), per-head q/k RMSNorms, GeGLU activation, embedding scaled by sqrt(d_model), tied output head, sliding-window attention restriction, and distinct RoPE frequency bases for local vs global layers matching llama.cpp v0.9.0.
+- An opt-in f32 KV cache (`KvPrec::F32`, `PEREGRINE_KV=f32`, `peregrine serve --kv f32`, `kld --kv f32`), for a
+  like-for-like comparison against an engine whose attention reads f16 operands; the f16 cache stays the default.
 - `peregrine-bench` example `kld`: KL divergence and top-1 agreement against llama.cpp on real text (`docs/dev/accuracy.md`); first results in `docs/targets.md`.
 - `peregrine bench`, `peregrine tune` and tuning profiles (S1.7).
 - The `qwen3moe` mixture-of-experts family (S2.5 step 3): the synthetic models load, run, and give the

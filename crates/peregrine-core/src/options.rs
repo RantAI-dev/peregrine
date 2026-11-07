@@ -90,6 +90,10 @@ pub struct EngineOptions {
     pub tile_hugepages: bool,
     /// `PEREGRINE_KV_ROTATE=0`: plain int8 KV cache instead of the Hadamard-rotated one.
     pub kv_rotate: bool,
+    /// `PEREGRINE_KV` (`f16`, `f32`, `i8`): the precision of the KV cache. The
+    /// default is f16; `f32` keeps the keys and values in full precision, which is
+    /// what a like-for-like comparison against another engine needs.
+    pub kv_prec: crate::kv::KvPrec,
 
     // Scheduling and speculation.
     /// `PEREGRINE_MIX=0`: no mixed prefill/decode steps.
@@ -138,6 +142,7 @@ impl Default for EngineOptions {
             hugepages: false,
             tile_hugepages: true,
             kv_rotate: true,
+            kv_prec: crate::kv::KvPrec::F16,
             mix: true,
             mtp: true,
             mtp_vocab: 32768,
@@ -226,6 +231,9 @@ impl EngineOptions {
             hugepages: only("HUGEPAGES", "1"),
             tile_hugepages: unless("TILE_HUGEPAGES", "0"),
             kv_rotate: unless("KV_ROTATE", "0"),
+            kv_prec: s("KV")
+                .and_then(|v| crate::kv::KvPrec::parse(&v))
+                .unwrap_or(d.kv_prec),
             mix: unless("MIX", "0"),
             mtp: unless("MTP", "0"),
             mtp_vocab: num("MTP_VOCAB").unwrap_or(d.mtp_vocab),
@@ -296,6 +304,7 @@ impl EngineOptions {
             ("hugepages", self.hugepages.to_string()),
             ("tile_hugepages", self.tile_hugepages.to_string()),
             ("kv_rotate", self.kv_rotate.to_string()),
+            ("kv_prec", self.kv_prec.name().to_string()),
             ("mix", self.mix.to_string()),
             ("mtp", self.mtp.to_string()),
             ("mtp_vocab", self.mtp_vocab.to_string()),
@@ -348,6 +357,7 @@ pub const NAMES: &[&str] = &[
     "HUGEPAGES",
     "TILE_HUGEPAGES",
     "KV_ROTATE",
+    "KV",
     "MIX",
     "MTP",
     "MTP_VOCAB",
@@ -445,6 +455,11 @@ mod tests {
         // The tier cap.
         assert_eq!(with(&[("ISA", "avx2")]).isa, Some(crate::cpu::Tier::Avx2));
         assert_eq!(with(&[("ISA", "native")]).isa, None);
+        // The KV cache precision; an unknown name leaves the default (f16).
+        assert_eq!(with(&[("KV", "f32")]).kv_prec, crate::kv::KvPrec::F32);
+        assert_eq!(with(&[("KV", "i8")]).kv_prec, crate::kv::KvPrec::I8);
+        assert_eq!(with(&[("KV", "f16")]).kv_prec, crate::kv::KvPrec::F16);
+        assert_eq!(with(&[("KV", "f64")]).kv_prec, crate::kv::KvPrec::F16);
         // Zero decode threads means "default".
         assert_eq!(with(&[("DECODE_THREADS", "0")]).decode_threads, None);
         assert_eq!(with(&[("DECODE_THREADS", "6")]).decode_threads, Some(6));
