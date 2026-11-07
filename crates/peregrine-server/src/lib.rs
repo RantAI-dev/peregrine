@@ -14,6 +14,8 @@
 //!   a Peregrine addition), so the answer follows as llama-server's budget forcing does.
 //! - `logprobs` -> each content token's log-probability (`Emitted::logprob`), which a client's
 //!   fixed rule reads.
+//! - `ignore_eos` -> optional non-standard boolean (default false), matching llama.cpp's
+//!   meaning: end-of-generation tokens do not stop generation; it continues until `max_tokens`.
 //! - `n > 1` runs one generation per choice, in its own slot (so n choices share one weight pass);
 //!   with `stream` it is refused. `grammar` is refused (400): the engine has no constrained sampler.
 //!
@@ -372,6 +374,8 @@ struct Plan {
     /// Choices asked for (`n`). Each is its own generation in its own slot, so the engine serves them in one
     /// weight pass; choice `i` samples with seed `seed + i`.
     n: usize,
+    /// Non-standard option: whether to ignore end-of-generation tokens and decode until `max_tokens`.
+    ignore_eos: bool,
 }
 
 /// Most choices one request may ask for.
@@ -537,6 +541,7 @@ fn plan(b: &Value) -> Result<Plan, String> {
             .map(|v| v as usize),
         logprobs: b["logprobs"].as_bool().unwrap_or(false),
         stream: b["stream"].as_bool().unwrap_or(false),
+        ignore_eos: b["ignore_eos"].as_bool().unwrap_or(false),
     })
 }
 
@@ -747,7 +752,11 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
             penalties: p.penalties,
             seed: p.seed,
             max_tokens: budget_left.max(1),
-            stop: app.stop.clone(),
+            stop: if p.ignore_eos {
+                vec![]
+            } else {
+                app.stop.clone()
+            },
             logprobs: p.logprobs,
             // The server serves independent requests: every one of them draws with the
             // engine's own key (no conversation turn in it) and with the engine's own
@@ -1144,6 +1153,18 @@ mod tests {
                 "{field} at its no-op value"
             );
         }
+    }
+
+    #[test]
+    fn ignore_eos_defaults_to_false_and_can_be_enabled() {
+        let p_default = plan(&body(json!({}))).unwrap();
+        assert!(!p_default.ignore_eos);
+
+        let p_enabled = plan(&body(json!({"ignore_eos": true}))).unwrap();
+        assert!(p_enabled.ignore_eos);
+
+        let p_disabled = plan(&body(json!({"ignore_eos": false}))).unwrap();
+        assert!(!p_disabled.ignore_eos);
     }
 
     #[test]
