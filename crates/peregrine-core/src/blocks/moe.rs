@@ -641,6 +641,8 @@ mod tests {
             Format::Q4_0 => 2,
             Format::Q5_0 => 6,
             Format::Q8_0 => 8,
+            Format::Q2_K => 10,
+            Format::Q3_K => 11,
             Format::Q4_K => 12,
             Format::Q5_K => 13,
             Format::Q6_K => 14,

@@ -173,7 +173,9 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
         #[cfg(feature = "fmt-legacy")]
         Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => &[Tier::Scalar, Tier::Avx2],
         #[cfg(feature = "fmt-kquant")]
-        Format::Q4_K | Format::Q5_K | Format::Q6_K => &[Tier::Scalar, Tier::Avx2],
+        Format::Q2_K | Format::Q3_K | Format::Q4_K | Format::Q5_K | Format::Q6_K => {
+            &[Tier::Scalar, Tier::Avx2]
+        }
         #[cfg(feature = "fmt-iq")]
         Format::IQ4_NL | Format::IQ4_XS => &[Tier::Scalar, Tier::Avx2],
         #[cfg(feature = "fmt-mxfp4")]

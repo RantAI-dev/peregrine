@@ -175,7 +175,11 @@ fn dense_models_in_every_format() {
         Format::Q5_K,
         Format::IQ4_NL,
         Format::IQ4_XS,
+        // Append new formats at the end: the seed is `1000 + index`, so inserting one changes the
+        // weights (and the goldens) of every format after it.
         Format::MXFP4,
+        Format::Q2_K,
+        Format::Q3_K,
     ];
     for arch in ["llama", "qwen3"] {
         for (i, &fmt) in formats.iter().enumerate() {

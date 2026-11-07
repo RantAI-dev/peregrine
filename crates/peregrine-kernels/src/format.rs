@@ -15,10 +15,14 @@ pub enum Format {
     Q4_0,
     Q5_0,
     Q8_0,
+    /// GGML's 2-bit k-quant format, 256 weights in 84 bytes (`u8 scales[16], u8 qs[64], f16 d, f16 dmin`).
+    Q2_K,
+    /// GGML's 3-bit k-quant format, 256 weights in 110 bytes (`u8 hmask[32], u8 qs[64], u8 scales[12], f16 d`).
+    Q3_K,
     Q4_K,
     Q5_K,
     Q6_K,
-    /// GGML's non-linear 4-bit format with 16-entry lookup table, 32 weights in 18 bytes (f16 d, 16 bytes qs).
+    /// GGML's non-linear 4-bit format with 16-entry lookup table, 32 weights in 18 bytes (`f16 d, 16 bytes qs`).
     IQ4_NL,
     /// GGML's non-linear 4-bit format with 6-bit sub-block scales, 256 weights in 136 bytes (`f16 d, u16 scales_h, u8 scales_l[4], u8 qs[128]`).
     IQ4_XS,
@@ -41,6 +45,8 @@ impl Format {
             2 => Format::Q4_0,
             6 => Format::Q5_0,
             8 => Format::Q8_0,
+            10 => Format::Q2_K,
+            11 => Format::Q3_K,
             12 => Format::Q4_K,
             13 => Format::Q5_K,
             14 => Format::Q6_K,
@@ -59,7 +65,12 @@ impl Format {
         match self {
             Format::F32 | Format::F16 | Format::BF16 => 1,
             Format::Q4_0 | Format::Q5_0 | Format::Q8_0 | Format::IQ4_NL | Format::MXFP4 => 32,
-            Format::Q4_K | Format::Q5_K | Format::Q6_K | Format::IQ4_XS => 256,
+            Format::Q2_K
+            | Format::Q3_K
+            | Format::Q4_K
+            | Format::Q5_K
+            | Format::Q6_K
+            | Format::IQ4_XS => 256,
             Format::PQ2_0 | Format::PTQ1_0 => 128,
         }
     }
@@ -73,6 +84,8 @@ impl Format {
             Format::Q4_0 => 18,    // f16 d + u8 qs[16]
             Format::Q5_0 => 22,    // f16 d + u8 qh[4] + u8 qs[16]
             Format::Q8_0 => 34,    // f16 d + i8 qs[32]
+            Format::Q2_K => 84,    // u8 scales[16] + u8 qs[64] + f16 d + f16 dmin
+            Format::Q3_K => 110,   // u8 hmask[32] + u8 qs[64] + u8 scales[12] + f16 d
             Format::Q4_K => 144,   // f16 d + f16 dmin + u8 scales[12] + u8 qs[128]
             Format::Q5_K => 176,   // f16 d + f16 dmin + u8 scales[12] + u8 qh[32] + u8 qs[128]
             Format::Q6_K => 210,   // u8 ql[128] + u8 qh[64] + i8 scales[16] + f16 d
@@ -98,6 +111,8 @@ impl Format {
             Format::Q4_0 => "Q4_0",
             Format::Q5_0 => "Q5_0",
             Format::Q8_0 => "Q8_0",
+            Format::Q2_K => "Q2_K",
+            Format::Q3_K => "Q3_K",
             Format::Q4_K => "Q4_K",
             Format::Q5_K => "Q5_K",
             Format::Q6_K => "Q6_K",
@@ -116,7 +131,9 @@ impl Format {
         match self {
             Format::F32 | Format::F16 | Format::BF16 => None,
             Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => Some("fmt-legacy"),
-            Format::Q4_K | Format::Q5_K | Format::Q6_K => Some("fmt-kquant"),
+            Format::Q2_K | Format::Q3_K | Format::Q4_K | Format::Q5_K | Format::Q6_K => {
+                Some("fmt-kquant")
+            }
             Format::IQ4_NL | Format::IQ4_XS => Some("fmt-iq"),
             Format::MXFP4 => Some("fmt-mxfp4"),
             Format::PQ2_0 | Format::PTQ1_0 => Some("fmt-ternary"),
@@ -130,7 +147,7 @@ impl Format {
             #[cfg(feature = "fmt-legacy")]
             Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => true,
             #[cfg(feature = "fmt-kquant")]
-            Format::Q4_K | Format::Q5_K | Format::Q6_K => true,
+            Format::Q2_K | Format::Q3_K | Format::Q4_K | Format::Q5_K | Format::Q6_K => true,
             #[cfg(feature = "fmt-iq")]
             Format::IQ4_NL | Format::IQ4_XS => true,
             #[cfg(feature = "fmt-mxfp4")]
@@ -150,6 +167,8 @@ impl Format {
         Format::Q4_0,
         Format::Q5_0,
         Format::Q8_0,
+        Format::Q2_K,
+        Format::Q3_K,
         Format::Q4_K,
         Format::Q5_K,
         Format::Q6_K,
@@ -242,4 +261,24 @@ pub const fn e8m0_to_f32_half(x: u8) -> f32 {
         ((x - 1) as u32) << 23
     };
     f32::from_bits(bits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Format::ALL` drives `peregrine support` and the README table: every format the GGUF reader
+    /// knows must be in it, or a new format silently goes missing from the support list.
+    #[test]
+    fn all_lists_every_format_the_reader_knows() {
+        for id in 0..=u16::MAX as u32 {
+            if let Some(f) = Format::from_id(id) {
+                assert!(
+                    Format::ALL.contains(&f),
+                    "{} (id {id}) is missing from Format::ALL",
+                    f.label()
+                );
+            }
+        }
+    }
 }
