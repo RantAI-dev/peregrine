@@ -15,6 +15,17 @@
 //!
 //! Every function has a scalar path with identical semantics (tails and non-AVX2
 //! machines), and the tests pin the vector path against it.
+//!
+//! # The forward path does not call the C library
+//!
+//! The transcendentals the forward path needs are built here, from IEEE basic
+//! operations alone: [`exp_scalar`] is the scalar twin of [`exp8`] (bit for bit), and
+//! [`tanh`] is built on it. A libm call is not reproducible across C libraries — glibc
+//! 2.40 replaced `tanhf` with a correctly rounded version, and the same kernel then
+//! produced different activations, different logits and different golden files on
+//! glibc 2.39 and 2.43 (issue #64). A transcendental built here is fixed by its
+//! definition, not by the machine's libc, so the engine's output depends on the kernel
+//! tier alone.
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -96,6 +107,180 @@ pub unsafe fn exp8(x: __m256) -> __m256 {
             ),
         ),
     )
+}
+
+/// `exp8`'s magic constant: `0x1.8p23`. Adding it to `x·log2(e)` keeps the integer part of
+/// `x·log2(e)` in the low bits of the sum's mantissa, which is where `2ⁿ` is read from.
+const EXP_BIAS: f32 = f32::from_bits(0x4b40_0000);
+/// `log2(e)`.
+const EXP_LOG2E: f32 = f32::from_bits(0x3fb8_aa3b);
+/// `ln 2`, high part (`0x1.62e4p-1`).
+const EXP_LN2_HI: f32 = f32::from_bits(0x3f31_7200);
+/// `ln 2`, low part (`0x1.7f7d1cp-20`).
+const EXP_LN2_LO: f32 = f32::from_bits(0x35bf_be8e);
+/// `exp8`'s polynomial: the coefficient of `b⁵`.
+const EXP_P0: f32 = f32::from_bits(0x3c07_2010);
+/// The coefficient of `b⁴`.
+const EXP_P1: f32 = f32::from_bits(0x3d2b_9f17);
+/// The coefficient of `b³`.
+const EXP_P2: f32 = f32::from_bits(0x3e2a_af33);
+/// The coefficient of `b²`.
+const EXP_P3: f32 = f32::from_bits(0x3eff_fedb);
+/// The coefficient of `b`.
+const EXP_P4: f32 = f32::from_bits(0x3f7f_fff6);
+
+/// The pieces of [`exp8`]'s argument reduction: `n` (the exponent, `round(x·log2 e)`), `j`
+/// (the polynomial, `exp(b) − 1` for `b = x − n·ln 2`) and `e` (the bit pattern `2ⁿ` is
+/// built from).
+#[derive(Clone, Copy)]
+struct ExpParts {
+    /// `round(x·log2 e)`, exactly: the sum that carries it is exact.
+    n: f32,
+    /// `exp(b) − 1`, to the polynomial's accuracy.
+    j: f32,
+    /// `n` shifted into the exponent field; `2ⁿ` is this plus the exponent bias.
+    e: u32,
+}
+
+/// [`exp8`]'s range reduction and polynomial, in scalar: the same constants, the same
+/// operation order, the same fused multiply-adds.
+#[inline]
+fn exp_parts(x: f32) -> ExpParts {
+    // `z = x·log2(e) + 0x1.8p23`; the sum's low mantissa bits hold `x·log2(e)`'s integer
+    // part, and `n = z − 0x1.8p23` recovers it exactly (the subtraction is exact).
+    let z = x.mul_add(EXP_LOG2E, EXP_BIAS);
+    let n = z - EXP_BIAS;
+    // `b = x − n·ln 2`, with `ln 2` split in two so that the products stay exact enough.
+    let t = (-n).mul_add(EXP_LN2_HI, x);
+    let b = (-n).mul_add(EXP_LN2_LO, t);
+    // `e`: the low bits of `z`'s mantissa are `n` modulo 512, and the exponent field of a
+    // float is bits 23..30 — hence the shift by 23.
+    let e = z.to_bits() << 23;
+    // The polynomial `j ≈ exp(b) − 1`, in `u = b²`.
+    let u = b * b;
+    let a = EXP_P0.mul_add(b, EXP_P1);
+    let c = EXP_P2.mul_add(b, EXP_P3);
+    let d = a.mul_add(u, c);
+    let j = d.mul_add(u, EXP_P4 * b);
+    ExpParts { n, j, e }
+}
+
+/// `|x| > limit`, with `NaN` answering false — the comparison the vector masks make
+/// (`_CMP_GT_OQ` is false for a `NaN`).
+#[inline]
+fn greater(x: f32, limit: f32) -> bool {
+    matches!(
+        x.abs().partial_cmp(&limit),
+        Some(std::cmp::Ordering::Greater)
+    )
+}
+
+/// `exp` — the scalar twin of [`exp8`]: the same constants, the same operation order and the
+/// same overflow and underflow handling, so the two agree bit for bit on every input
+/// (the test sweeps them against each other).
+///
+/// It is built from IEEE basic operations alone, so unlike `f32::exp` its result does not
+/// depend on the C library — glibc 2.40 replaced `expf`'s neighbours with correctly rounded
+/// versions, and the engine's outputs must not move when the host's libc does (issue #64).
+///
+/// The fused multiply-adds are the IEEE-754 fused operation: the hardware instruction where
+/// the target has one, a correctly rounded `fmaf` where it does not. Either way the result
+/// is the one the standard prescribes, so it does not vary with the C library either.
+pub fn exp_scalar(x: f32) -> f32 {
+    let p = exp_parts(x);
+    // `2ⁿ`, from `n` in the exponent field.
+    let k = f32::from_bits(p.e.wrapping_add(0x3f80_0000));
+    if !greater(p.n, 126.0) {
+        // `2ⁿ·(1 + j)`, the ordinary path.
+        return k.mul_add(p.j, k);
+    }
+    // `|n| > 126`: `2ⁿ` itself is out of range, so the exponent is carried by the scaling
+    // factors instead. This is `exp8`'s masked path, one lane at a time.
+    let g: u32 = if p.n <= 0.0 { 0x8200_0000 } else { 0 };
+    let s1 = f32::from_bits(g.wrapping_add(0x7f00_0000));
+    let s2 = f32::from_bits(p.e.wrapping_sub(g));
+    if greater(p.n, 192.0) {
+        // Underflow to zero below, overflow to infinity above.
+        s1 * s1
+    } else {
+        s2.mul_add(p.j, s2) * s1
+    }
+}
+
+/// The largest `|x|` [`tanh`] handles with [`exp_scalar`]: from `|x| ≈ 8.96` the rounding of
+/// `1 − 2/(e^{2x} + 1)` is already `1.0`, so the branch saturates there and `exp` is never
+/// asked for an argument it would flush.
+const TANH_SATURATE: f32 = 9.0;
+
+/// Where [`tanh`]'s polynomial hands over to [`exp_scalar`]. Below it the polynomial is the
+/// more accurate of the two, above it `exp`'s own error is.
+const TANH_POLY_LIMIT: f32 = 0.55;
+
+/// `tanh(x)/x` as a polynomial in `x²`, for `|x| ≤ 0.55`.
+///
+/// A least-squares fit on 600 Chebyshev nodes with a relative-error criterion (the `f64`
+/// fit's own error is 9.6e-10, well under the `f32` evaluation's rounding), rounded to
+/// `f32`.
+const TANH_POLY: [f32; 6] = [
+    f32::from_bits(0x3f80_0000), // 1
+    f32::from_bits(0xbeaa_aaa3), // −1/3
+    f32::from_bits(0x3e08_8637), // 2/15
+    f32::from_bits(0xbd5c_8907), // −17/315
+    f32::from_bits(0x3cac_52cd), // 62/2835
+    f32::from_bits(0xbbcc_2668), // −1382/155925
+];
+
+/// `tanh(x)` for `|x| ≤ 0.55`: the polynomial above, times `x`.
+#[inline]
+fn tanh_poly(x: f32) -> f32 {
+    let u = x * x;
+    let p = TANH_POLY[5].mul_add(u, TANH_POLY[4]);
+    let p = p.mul_add(u, TANH_POLY[3]);
+    let p = p.mul_add(u, TANH_POLY[2]);
+    let p = p.mul_add(u, TANH_POLY[1]);
+    let p = p.mul_add(u, TANH_POLY[0]);
+    x * p
+}
+
+/// `tanh` — deterministic, and built only from IEEE basic operations.
+///
+/// `f32::tanh` is the C library's `tanhf`, and glibc 2.40 replaced it with a correctly
+/// rounded version: the same model then produced different activations and different logits
+/// on glibc 2.39 and 2.43, and the Gemma 3 goldens could not satisfy both (issue #64).
+/// This one is fixed by its definition instead of by the host's libc.
+///
+/// * `|x| ≤ 0.55`: an odd polynomial in `x²`, which keeps the relative accuracy where
+///   `tanh(x) ≈ x` and a cancellation would lose it.
+/// * `0.55 < |x| < 9`: `1 − 2/(e^{2|x|} + 1)`, on [`exp_scalar`]. The subtraction cancels
+///   only where the result is not small, and the sign is restored afterwards, so the
+///   function is exactly odd.
+/// * `|x| ≥ 9`: `±1`, where `f32` rounds `tanh` to one anyway.
+///
+/// # Accuracy
+///
+/// Measured against the `f64` reference `tanh` over a dense sweep of the `f32` range
+/// (−12…12 in steps of 1.3e-4, plus every 997th `f32` in [0, 1)): **max 1.72 ulp**, at
+/// `|x| ≈ 0.61`, where `exp`'s own error is the largest. The two branches differ by
+/// 1.3 ulp where they meet, and `tanh` is odd to the bit.
+pub fn tanh(x: f32) -> f32 {
+    if x.is_nan() {
+        return x;
+    }
+    let a = x.abs();
+    let t = if a >= TANH_SATURATE {
+        1.0
+    } else if a <= TANH_POLY_LIMIT {
+        tanh_poly(a)
+    } else {
+        // `tanh(x) = 1 − 2/(e^{2x} + 1)`.
+        let e = exp_scalar(2.0 * a);
+        1.0 - 2.0 / (e + 1.0)
+    };
+    if x.is_sign_negative() {
+        -t
+    } else {
+        t
+    }
 }
 
 /// `x[i] = exp(x[i] − shift)` in place; returns `Σ x[i]` after the update.
@@ -253,13 +438,19 @@ const GELU_COEF_A: f32 = 0.044715;
 
 /// GELU (tanh approximation):
 /// `gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
-/// Matching ggml's `ggml_gelu_f32`.
+/// Matching ggml's `ggml_gelu_f32`, with [`tanh`] instead of the C library's `tanhf`:
+/// ggml's own `tanhf` moves with the host's libc (issue #64), and this engine's outputs
+/// must not.
 #[inline]
 pub fn gelu_tanh(x: f32) -> f32 {
-    0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)).tanh())
+    0.5 * x * (1.0 + tanh(SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)))
 }
 
 /// GeGLU in place: `gate[i] = gelu_tanh(gate[i]) · up[i]` — matching llama.cpp's `LLM_FFN_GELU`.
+///
+/// Scalar, and deliberately so: it has no vector path, so there is no second arithmetic to
+/// keep in step with [`gelu_tanh`]'s. A vector GeGLU may only be added if it evaluates the
+/// same expressions lane-wise, so that it is bit for bit the scalar result.
 pub fn geglu(gate: &mut [f32], up: &[f32]) {
     debug_assert_eq!(gate.len(), up.len());
     for (g, &u) in gate.iter_mut().zip(up) {
@@ -497,6 +688,202 @@ mod tests {
                 lo + (hi - lo) * ((s >> 40) as f32 / (1u64 << 24) as f32)
             })
             .collect()
+    }
+
+    /// The gap between `x` and the next `f32` above it: the error's unit.
+    fn ulp(x: f32) -> f64 {
+        let a = x.abs();
+        if a == 0.0 {
+            // The smallest subnormal.
+            return f64::from(f32::from_bits(1));
+        }
+        f64::from(f32::from_bits(a.to_bits() + 1) - a)
+    }
+
+    /// The error of [`tanh`] against the `f64` reference, in ulp of the result.
+    fn tanh_err(x: f32) -> f64 {
+        let got = tanh(x);
+        let want = (x as f64).tanh();
+        (got as f64 - want).abs() / ulp(got)
+    }
+
+    /// Eight `exp`s through the AVX2 path.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn exp8_lanes(x: &[f32; 8]) -> [f32; 8] {
+        let v = exp8(_mm256_loadu_ps(x.as_ptr()));
+        let mut out = [0f32; 8];
+        _mm256_storeu_ps(out.as_mut_ptr(), v);
+        out
+    }
+
+    /// The scalar twin must be the vector routine, bit for bit: it is the same arithmetic
+    /// written once, and the two have to agree on every input, including the ones that
+    /// overflow, underflow and land on a NaN.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn exp_scalar_is_exp8_bit_for_bit() {
+        if !vector_ok() {
+            eprintln!("skipped: no AVX2 and FMA");
+            return;
+        }
+        let mut xs: Vec<f32> = Vec::new();
+        let mut x = -120.0f32;
+        while x <= 120.0 {
+            xs.push(x);
+            x += 0.001_7;
+        }
+        for v in [
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            87.0,
+            88.0,
+            88.5,
+            89.0,
+            100.0,
+            -87.0,
+            -88.0,
+            -103.0,
+            -104.0,
+            -104.5,
+            -200.0,
+            126.0,
+            -126.0,
+            -127.0,
+            -193.0,
+            193.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            xs.push(v);
+        }
+        let mut lane = [0f32; 8];
+        for chunk in xs.chunks(8) {
+            lane[..chunk.len()].copy_from_slice(chunk);
+            // SAFETY: AVX2 and FMA are available (checked above).
+            let got = unsafe { exp8_lanes(&lane) };
+            for (i, &x) in chunk.iter().enumerate() {
+                assert_eq!(
+                    got[i].to_bits(),
+                    exp_scalar(x).to_bits(),
+                    "exp({x}): vector {got:?}, scalar {}",
+                    exp_scalar(x)
+                );
+            }
+        }
+    }
+
+    /// The twin is also an `exp`: the vector routine's accuracy is ggml's, and the scalar
+    /// one inherits it.
+    #[test]
+    fn exp_scalar_is_within_two_ulp_of_libm() {
+        let xs = prng(13, 4099, -90.0, 20.0);
+        for x in xs {
+            let want = x.exp();
+            let got = exp_scalar(x);
+            let err = (got as f64 - want as f64).abs();
+            let u = err / ulp(got);
+            assert!(u <= 2.0, "exp({x}) = {got}, libm {want}, {u} ulp");
+        }
+    }
+
+    /// The accuracy the doc comment claims, measured: max 1.72 ulp over the sweep.
+    #[test]
+    fn tanh_is_within_a_few_ulp_of_the_f64_reference() {
+        let mut worst = 0.0f64;
+        let mut worst_x = 0.0f32;
+        let mut x = -12.0f32;
+        while x <= 12.0 {
+            let e = tanh_err(x);
+            if e > worst {
+                worst = e;
+                worst_x = x;
+            }
+            x += 0.000_13;
+        }
+        // Every 997th `f32` in [0, 1): the polynomial branch, where the relative error is
+        // what matters.
+        let mut bits = 0u32;
+        while bits < 0x3f80_0000 {
+            let x = f32::from_bits(bits);
+            let e = tanh_err(x);
+            if e > worst {
+                worst = e;
+                worst_x = x;
+            }
+            bits += 997;
+        }
+        assert!(
+            worst <= 3.0,
+            "tanh's max error is {worst:.2} ulp at x={worst_x}"
+        );
+        eprintln!("tanh: max error {worst:.2} ulp at x={worst_x:e}");
+    }
+
+    /// The sign is restored, not computed: `tanh` is odd to the bit.
+    #[test]
+    fn tanh_is_odd_to_the_bit() {
+        let mut x = -12.0f32;
+        while x <= 12.0 {
+            assert_eq!(
+                tanh(-x).to_bits(),
+                (-tanh(x)).to_bits(),
+                "tanh({x}) is not odd"
+            );
+            x += 0.000_7;
+        }
+        for x in [
+            1e-30f32,
+            1e-10,
+            0.5,
+            3.0,
+            9.0,
+            1e10,
+            f32::MAX,
+            f32::INFINITY,
+        ] {
+            assert_eq!(tanh(-x).to_bits(), (-tanh(x)).to_bits(), "tanh({x})");
+        }
+    }
+
+    /// `tanh` saturates, and never produces a NaN or an infinity, whatever it is given.
+    #[test]
+    fn tanh_saturates_and_stays_finite() {
+        for x in [9.0f32, 10.0, 20.0, 1e10, 1e30, f32::MAX, f32::INFINITY] {
+            assert_eq!(tanh(x), 1.0, "tanh({x})");
+            assert_eq!(tanh(-x), -1.0, "tanh(-{x})");
+        }
+        for x in [1e-30f32, 1e-20, 1e-10] {
+            assert_eq!(tanh(x), x, "tanh({x})");
+            assert_eq!(tanh(-x), -x, "tanh(-{x})");
+        }
+        assert!(tanh(f32::NAN).is_nan());
+        for x in [
+            -1e30f32, -1e10, -20.0, -9.0, -1.0, -0.5, 0.0, 0.5, 1.0, 9.0, 20.0, 1e10, 1e30,
+        ] {
+            assert!(tanh(x).is_finite(), "tanh({x}) is not finite");
+        }
+    }
+
+    /// GELU is the reason `tanh` exists here: it must stay finite for every input the
+    /// feed-forward can produce, and it must grow with the activation on the positive side.
+    #[test]
+    fn gelu_tanh_is_finite_and_monotone_above_zero() {
+        let mut x = -20.0f32;
+        let mut last = gelu_tanh(x);
+        while x <= 20.0 {
+            let g = gelu_tanh(x);
+            assert!(g.is_finite(), "gelu_tanh({x}) is {g}");
+            if x >= 0.0 {
+                assert!(g >= last, "gelu_tanh({x}) = {g} is below {last}");
+            }
+            last = g;
+            x += 0.001;
+        }
     }
 
     #[test]
