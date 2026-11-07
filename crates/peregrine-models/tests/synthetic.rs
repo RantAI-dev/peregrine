@@ -159,6 +159,13 @@ fn check_model(model: Model, name: &str) -> Option<String> {
             ));
         }
         eprintln!("synthetic: {name} identical ({tier})");
+    } else if std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "require") {
+        // CI sets this on the tiers it pins, so a model or format added without its goldens fails there
+        // instead of passing unchecked.
+        return Some(format!(
+            "{name}: no golden for tier {tier} ({}); record it with PEREGRINE_GOLDEN=record",
+            gpath.display()
+        ));
     } else {
         eprintln!("synthetic: {name} ok (no golden for tier {tier})");
     }
