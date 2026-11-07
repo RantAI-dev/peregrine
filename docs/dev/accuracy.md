@@ -19,6 +19,40 @@ orders. It is not the error against the exact computation. The accuracy budget i
 Sanity check: llama.cpp compared against its own base file gives a mean KLD of 0.000000, so the base file and
 the comparison are consistent.
 
+## Like-for-like: the same cache precision on both sides
+
+The measurement above compares two engines that do the same computation *differently*. Peregrine keeps its
+queries in f32 but rounds its cached keys and values to f16; llama.cpp's cache is f16 by default, so its
+attention reads f16 operands as well. A difference between the two is then a difference between two *different*
+computations, and it is not obvious which engine it comes from.
+
+For a comparison in which both engines' attention reads f32 keys and values, run llama.cpp with a full-precision
+cache and Peregrine with the f32 KV cache (`KvPrec::F32`):
+
+```sh
+llama-perplexity -m model.gguf -f wiki.test.raw -c 512 -b 512 -t 8 --chunks 40 \
+    --cache-type-k f32 --cache-type-v f32 --flash-attn off \
+    --kl-divergence-base model.f32.base.bin
+cargo run --release -p peregrine-bench --example kld -- \
+    --base model.f32.base.bin --model model.gguf --threads 8 --kv f32
+```
+
+The flags, and what each one is for:
+
+| Flag | Side | Why |
+|---|---|---|
+| `--cache-type-k f32 --cache-type-v f32` | llama.cpp | the keys and values in the cache keep full precision, so its attention reads what the model produced |
+| `--cache-type-k f16 --cache-type-v f16` | llama.cpp | the same run with llama.cpp's default cache: the pair of rows isolates the cache precision |
+| `--flash-attn off` | llama.cpp | llama.cpp's flash-attention kernels do not read a full-precision cache, and the two are different computations (on 2 chunks of SmolLM2, PPL 13.7227 with flash attention on and 13.7081 with it off). `auto` picks flash attention *on* for the CPU, so it has to be turned off explicitly |
+| `--kv f32` | Peregrine | the same precision on this side (`--kv f16`, `--kv i8`; the default is f16) |
+| `PEREGRINE_KV=f32` | Peregrine | the same choice for the engine as a whole (`peregrine serve --kv f32` says it per run) |
+
+The result is in `docs/targets.md`. It is worth stating what it says, because it is not the expected answer: the
+cache precision moves each engine's *own* output by about as much as the two engines differ (llama.cpp against
+itself, f16 against f32, gives a mean KLD of 0.0132 on Qwen3-1.7B — the same size as Peregrine against
+llama.cpp), but it does not create the distance between them: the two engines' keys and values are nearly the
+same, so they round to the same halves and both distributions move the same way.
+
 ## Reproducing
 
 llama.cpp v0.9.0 (commit `cd959ba`), CPU build. Corpus: wikitext-2-raw `wiki.test.raw`

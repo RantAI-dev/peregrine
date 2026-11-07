@@ -39,6 +39,8 @@ plus the `kld` tool), llama.cpp v0.9.0 `cd959ba`; wikitext-2 test, `-c 512`, 40 
 | Qwen3-1.7B | 0.01262 ± 0.00041 | 0.0054 / 0.105 | 3.16 % | 94.8 % | 15.819 / 15.590 |
 | Llama-2-7B-Chat | 0.00171 ± 0.00004 | 0.0007 / 0.015 | 1.24 % | 98.1 % | 7.283 / 7.281 |
 | Mistral-7B-Instruct-v0.2 | 0.00121 ± 0.00003 | 0.0006 / 0.010 | 1.01 % | 98.2 % | 6.245 / 6.237 |
+| Gemma-3-1B-IT | 0.00726 ± 0.00032 | 0.0025 / 0.082 | 2.41 % | 96.1 % | 28.329 / 27.881 |
+| Gemma-3-1B-IT (-c 1024) | 0.00799 ± 0.00085 | 0.0022 / 0.084 | 2.58 % | 96.3 % | 27.096 / 26.632 |
 
 Qwen3-1.7B is the outlier, and the cause is on llama.cpp's side: a layer-by-layer comparison (S3.3b) finds every
 Qwen3-specific step (q/k head norms, NeoX RoPE at base 1e6, the tied head) equal to llama.cpp's within ~1e-7; the
@@ -47,6 +49,63 @@ with f16 operands. Qwen3's head norms make the raw scores large (up to ~350), so
 error in every softmax weight. Against an exact f32 evaluation of the attention, Peregrine is 4.7e-6 away and
 llama.cpp 1.6e-4 (1.8e-7 with an F32 KV cache). A like-for-like comparison needs both engines' attention in f32
 (llama.cpp `--cache-type-k f32 --cache-type-v f32 --flash-attn off`). Bonsai (PQ2_0) is not listed: llama.cpp v0.9.0 refuses the file (`invalid ggml type 142`).
+
+### Like-for-like: the same cache precision on both sides
+
+The table above compares two engines that do the same computation *differently*: Peregrine keeps its queries in
+f32 and rounds its cached keys and values to f16, and llama.cpp's cache is f16 too, so its attention reads f16
+operands. The f32 KV cache (`KvPrec::F32`, `--kv f32`, `PEREGRINE_KV=f32`) removes that difference: both engines'
+attention then reads f32 keys and values.
+
+2026-11-07, bluefin (Ryzen 3 PRO 4350G, AVX2), branch `s3.3c-f32-kv` (main at `74656e4` plus the f32 cache),
+llama.cpp v0.9.0 `cd959ba`; wikitext-2 test, `-c 512`, 40 chunks, 8 threads. llama.cpp:
+`--cache-type-k <prec> --cache-type-v <prec> --flash-attn off`; Peregrine: `kld --kv <prec>`. Flash attention is
+off on the llama.cpp side in both rows (its CPU kernels do support it, and `auto` picks it on — a two-chunk
+SmolLM2 run gives PPL 13.7227 with it on and 13.7081 with it off, so the two are not the same computation; the
+row above was measured with llama.cpp's defaults, that is with flash attention on).
+
+| Model (Q4_K_M) | KV cache, both sides | Mean KLD | Median / 99% KLD | RMS Δp | Same top p | PPL Peregrine / llama.cpp |
+|---|---|---|---|---|---|---|
+| SmolLM2-360M-Instruct | f16 | 0.004078 ± 0.000066 | 0.0027 / 0.028 | 1.62 % | 96.03 % | 14.232 / 14.225 |
+| SmolLM2-360M-Instruct | **f32** | 0.003975 ± 0.000063 | 0.0027 / 0.025 | 1.58 % | 96.28 % | 14.231 / 14.230 |
+| Llama-3.2-1B-Instruct | f16 | 0.002514 ± 0.000032 | 0.0018 / 0.015 | 1.17 % | 97.20 % | 14.893 / 14.867 |
+| Llama-3.2-1B-Instruct | **f32** | 0.002552 ± 0.000036 | 0.0018 / 0.016 | 1.26 % | 97.12 % | 14.904 / 14.869 |
+| Qwen3-1.7B | f16 | 0.012714 ± 0.000306 | 0.0056 / 0.117 | 3.26 % | 94.96 % | 15.819 / 15.587 |
+| Qwen3-1.7B | **f32** | 0.012283 ± 0.000402 | 0.0053 / 0.103 | 3.13 % | 94.96 % | 15.925 / 15.603 |
+
+**The cache precision is not what separates the engines.** Putting both engines on f32 moves Qwen3-1.7B's mean
+KLD by 3 % (0.012714 → 0.012283) and its same-top-p not at all; the other two models do not move either. Yet the
+cache precision is not a small perturbation of one engine's output: llama.cpp compared against *itself* with the
+other cache precision gives
+
+| Model (Q4_K_M) | llama.cpp f16 vs f32, one engine | RMS Δp | Same top p |
+|---|---|---|---|
+| SmolLM2-360M-Instruct | 0.00399 ± 0.00006 | 1.59 % | 96.29 % |
+| Llama-3.2-1B-Instruct | 0.00257 ± 0.00003 | 1.21 % | 97.22 % |
+| Qwen3-1.7B | 0.01319 ± 0.00039 | 3.22 % | 94.70 % |
+
+— as large as the whole distance between the two engines. The reason it does not show up in the comparison is that
+it is a *common* perturbation: the two engines' keys and values are nearly the same, so they round to the same
+halves, and the rounding moves both distributions the same way. The four combinations for Qwen3-1.7B say it
+plainly:
+
+| Peregrine cache | llama.cpp cache | Mean KLD | Same top p |
+|---|---|---|---|
+| f16 | f16 | 0.012714 ± 0.000306 | 94.96 % |
+| f16 | f32 | 0.012823 ± 0.000332 | 94.74 % |
+| f32 | f16 | 0.012852 ± 0.000295 | 94.72 % |
+| f32 | f32 | 0.012283 ± 0.000402 | 94.96 % |
+
+All four are within 5 % of each other. So the f16 KV cache is *not* what separates the engines, and S3.3b's
+finding has to be read with that in mind: in the isolated attention the f16 cache is the only error there is
+(Peregrine 4.7e-6 from the exact f32 attention, llama.cpp 1.6e-4), and the measurement above confirms it — the
+cache precision moves llama.cpp's own end-to-end output by 0.0132 on Qwen3-1.7B. But the two engines' keys and
+values are nearly the same, so they round to the same halves and the rounding moves *both* distributions the
+same way: it is a common perturbation, not a divergence, and it cancels in the comparison. What is left is the
+rest of the attention — llama.cpp quantises the activations to Q8_K before the Q4_K projections, while Peregrine
+uses its own int8 layouts, and Qwen3's larger normed scores make that difference show up more than in the other
+two families. The 7 B models were not re-measured here (each run is about four times the 1.7 B one); their numbers
+above stand.
 
 ## 2. Speed
 
@@ -87,7 +146,7 @@ Competitors: llama.cpp, ik_llama.cpp, OpenVINO GenAI, MNN; vLLM / SGLang CPU bac
 
 | Release | Architectures | Formats | CPUs | Tokenizers / templates |
 |---|---|---|---|---|
-| today | llama, qwen2, qwen3, qwen35, gemma3 (synthetic only, real-file check pending) | F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q6_K, PQ2_0, PTQ1_0 | AVX2, AVX-512 | GPT-2 BPE; 3 built-in templates |
+| today | llama, qwen2, qwen3, qwen35, gemma3 | F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q6_K, PQ2_0, PTQ1_0 | AVX2, AVX-512 | GPT-2 BPE; 3 built-in templates |
 | v0.3 (Stage 2) | + plain Qwen 3.5, Gemma 3 (real-file gate), Phi-4, qwen3moe | + Q4_0, Q5_K, IQ4_XS, IQ4_NL | + AVX-VNNI-256; all formats on AVX2 | + SentencePiece; the model file's own template |
 | v0.4 | + gpt-oss | + Q2_K, Q3_K, MXFP4 | + ARM NEON/SDOT (if in scope) | |
 
