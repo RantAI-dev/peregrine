@@ -100,6 +100,8 @@ jobs:
       - run: cargo test --workspace --release --locked
         env:
           PEREGRINE_ISA: ${{ matrix.isa }}
+          # A pinned tier has a golden for every synthetic model: a missing one fails.
+          PEREGRINE_GOLDEN: require
 
   # The AVX-512 tier on GitHub's AVX2-only runners, under Intel SDE (#7, S0.3b). SDE is Intel's
   # emulator, not a re-host: the official mirror URL and its SHA-256 are pinned below. Sapphire
@@ -137,12 +139,14 @@ jobs:
         run: |
           while read -r t; do "$HOME/.cache/intel-sde/sde64" -spr -- "$t"; done < "$RUNNER_TEMP/kernel-tests"
       - name: Synthetic models under SDE
+        env:
+          PEREGRINE_GOLDEN: require
         run: |
           set -o pipefail
           while read -r t; do "$HOME/.cache/intel-sde/sde64" -spr -- "$t" --nocapture; done \
             < "$RUNNER_TEMP/synthetic-tests" 2>&1 | tee "$RUNNER_TEMP/synthetic.log"
-          # No AVX-512 goldens are committed yet, so the test tolerates "no golden for tier"; this
-          # assertion is what proves SDE really exposed the AVX-512/VNNI/GFNI/VBMI features.
+          # Every synthetic model has an AVX-512 golden, and a missing one fails (PEREGRINE_GOLDEN=require);
+          # this assertion proves SDE really exposed the AVX-512/VNNI/GFNI/VBMI features.
           grep -q 'x86_64-avx2-avx512-vnni-gfni-vbmi' "$RUNNER_TEMP/synthetic.log"
 
   # The oldest compiler we promise to build with (workspace `rust-version`).
