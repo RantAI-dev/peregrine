@@ -44,6 +44,10 @@ struct Args {
     threads: usize,
     /// How many tokens the prefill is fed in at a time.
     prefill: usize,
+    /// The precision of the KV cache. `f32` keeps the keys and values in full
+    /// precision, which is what a like-for-like comparison against another engine
+    /// (whose attention reads f16 operands) needs.
+    kv: KvPrec,
 }
 
 /// What llama.cpp's `kl_divergence_result` accumulates, one entry per scored position.
@@ -227,6 +231,7 @@ fn parse_args() -> Result<Args, String> {
     let mut model = None;
     let mut threads = std::thread::available_parallelism().map_or(8, |n| n.get());
     let mut prefill = PREFILL_CHUNK;
+    let mut kv = KvPrec::F16;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -246,9 +251,14 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--prefill needs a number")?;
             }
+            "--kv" => {
+                let v = it.next().ok_or("--kv needs a precision")?;
+                kv = KvPrec::parse(&v)
+                    .ok_or_else(|| format!("--kv: unknown precision {v:?} — f16, f32 or i8"))?;
+            }
             "-h" | "--help" => {
                 println!(
-                    "usage: kld --base <base.bin> [--model <model.gguf>] [--threads N] [--prefill N]\n\
+                    "usage: kld --base <base.bin> [--model <model.gguf>] [--threads N] [--prefill N] [--kv f16|f32|i8]\n\
                      \n\
                      Reads a llama.cpp `--kl-divergence-base` file. With --model it runs\n\
                      Peregrine over the same tokens and prints the KL divergence against\n\
@@ -257,7 +267,12 @@ fn parse_args() -> Result<Args, String> {
                      --prefill is how many tokens the prefill is fed in at a time. The\n\
                      default is the engine's own {PREFILL_CHUNK}. The result does not\n\
                      depend on it: every row of a matmul is computed the same way,\n\
-                     whatever else shares the call."
+                     whatever else shares the call.\n\
+                     \n\
+                     --kv is the precision of the KV cache (f16 by default). With f32\n\
+                     the keys and values attention reads are the ones the model produced,\n\
+                     with no rounding — the setting a like-for-like comparison against\n\
+                     another engine needs."
                 );
                 std::process::exit(0);
             }
@@ -269,6 +284,7 @@ fn parse_args() -> Result<Args, String> {
         model,
         threads: threads.max(1),
         prefill: prefill.clamp(1, MAX_BATCH),
+        kv,
     })
 }
 
@@ -405,7 +421,13 @@ impl Loaded {
     }
 }
 
-fn load_model(path: &Path, threads: usize, n_ctx: usize, prefill: usize) -> Result<Loaded, String> {
+fn load_model(
+    path: &Path,
+    threads: usize,
+    n_ctx: usize,
+    prefill: usize,
+    kv: KvPrec,
+) -> Result<Loaded, String> {
     let g = Gguf::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let add_bos = llama_add_bos(&g);
     let model = peregrine_models::load(g).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -421,7 +443,7 @@ fn load_model(path: &Path, threads: usize, n_ctx: usize, prefill: usize) -> Resu
         pool.width(),
         model.rope_factors.as_deref(),
     );
-    let kv = model.new_cache(KvPrec::F16, n_ctx);
+    let kv = model.new_cache(kv, n_ctx);
     Ok(Loaded {
         path: path.to_path_buf(),
         model,
@@ -469,12 +491,19 @@ fn run(args: &Args) -> Result<(), String> {
     );
 
     let mut engine = match &args.model {
-        Some(p) => Some(load_model(p, args.threads, n_ctx as usize, args.prefill)?),
+        Some(p) => Some(load_model(
+            p,
+            args.threads,
+            n_ctx as usize,
+            args.prefill,
+            args.kv,
+        )?),
         None => None,
     };
     if let Some(m) = &engine {
         println!("model        {}", m.path.display());
         println!("  n_vocab {}, add_bos {}", m.n_vocab, m.add_bos);
+        println!("  KV cache    {}", args.kv.name());
         if m.n_vocab != n_vocab {
             return Err(format!(
                 "the base file was made with a vocabulary of {n_vocab}, this model has {}",

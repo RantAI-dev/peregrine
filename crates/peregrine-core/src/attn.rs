@@ -599,6 +599,96 @@ mod tests {
         }
     }
 
+    /// The f32 cache: attention over full-precision keys and values must be the
+    /// exact computation, to the tolerance of the f32 arithmetic itself.
+    ///
+    /// The reference is computed in f64 from the same f32 inputs, so the only
+    /// difference is the summation order and the online softmax. The tolerance is
+    /// 2e-5 of the larger of the two values (the same scale the f16 test uses),
+    /// and the f32 cache must be far closer to the reference than the f16 one is.
+    #[test]
+    fn f32_cache_attention_matches_the_exact_f32_reference() {
+        let shapes = [
+            (8, 2, 64, 1, 0),
+            (12, 4, 64, 1, 300),
+            (15, 5, 64, 3, 129),
+            (16, 4, 128, 2, 300),
+            (6, 2, 24, 7, 40),
+        ];
+        for &(n_head, n_kv_head, head_dim, nb, start_pos) in &shapes {
+            let sh = Shape {
+                n_head,
+                n_kv_head,
+                head_dim,
+                nb,
+                start_pos,
+                scale: 1.0 / (head_dim as f32).sqrt(),
+                window: None,
+            };
+            let (kv, q, ks, vs) = setup(KvPrec::F32, &sh, 1);
+            assert!(!kv.rotated());
+            // The cache holds the f32 inputs exactly, so the reference is the
+            // specification of the same computation.
+            let want = reference(&sh, &q, &ks, &vs);
+            for plan in [
+                Plan {
+                    parallel: false,
+                    row_blocks: 1,
+                    pos_chunks: 1,
+                },
+                Plan {
+                    parallel: true,
+                    row_blocks: nb.clamp(1, 3),
+                    pos_chunks: 1,
+                },
+                Plan {
+                    parallel: true,
+                    row_blocks: 1,
+                    pos_chunks: 3,
+                },
+                plan(&sh, 4),
+            ] {
+                let got = grouped(&kv, 0, &sh, &q, plan);
+                let e = max_rel(&got, &want);
+                assert!(e < 2e-5, "{sh:?} {plan:?}: max relative error {e}");
+            }
+        }
+    }
+
+    /// The point of the f32 cache: the same attention over an f16 cache is
+    /// measurably further from the exact computation.
+    #[test]
+    fn the_f16_cache_is_further_from_the_exact_attention_than_the_f32_one() {
+        let sh = Shape {
+            n_head: 16,
+            n_kv_head: 4,
+            head_dim: 128,
+            nb: 2,
+            start_pos: 300,
+            scale: 1.0 / 128f32.sqrt(),
+            window: None,
+        };
+        let (_, q, ks, vs) = setup(KvPrec::F32, &sh, 1);
+        let want = reference(&sh, &q, &ks, &vs);
+        let rms = |a: &[f32], b: &[f32]| {
+            (a.iter()
+                .zip(b)
+                .map(|(x, y)| ((x - y) * (x - y)) as f64)
+                .sum::<f64>()
+                / a.len() as f64)
+                .sqrt()
+        };
+        let (kv32, q32, _, _) = setup(KvPrec::F32, &sh, 1);
+        let e32 = rms(&grouped(&kv32, 0, &sh, &q32, plan(&sh, 4)), &want);
+        let (kv16, q16, _, _) = setup(KvPrec::F16, &sh, 1);
+        let e16 = rms(&grouped(&kv16, 0, &sh, &q16, plan(&sh, 4)), &want);
+        assert!(e32 < 1e-6, "f32 cache rms error {e32}");
+        assert!(
+            e16 > 10.0 * e32,
+            "f16 cache rms error {e16} is not above the f32 one"
+        );
+    }
+
     /// Rotated int8: the same attention (within int8 noise), and closer to it than
     /// the unrotated int8 cache when the keys have an outlier channel.
     #[test]
