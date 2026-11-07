@@ -15,6 +15,17 @@
 //!
 //! Every function has a scalar path with identical semantics (tails and non-AVX2
 //! machines), and the tests pin the vector path against it.
+//!
+//! # The forward path does not call the C library
+//!
+//! The transcendentals the forward path needs are built here, from IEEE basic
+//! operations alone: [`exp_scalar`] is the scalar twin of [`exp8`] (bit for bit), and
+//! [`tanh`] is built on it. A libm call is not reproducible across C libraries — glibc
+//! 2.40 replaced `tanhf` with a correctly rounded version, and the same kernel then
+//! produced different activations, different logits and different golden files on
+//! glibc 2.39 and 2.43 (issue #64). A transcendental built here is fixed by its
+//! definition, not by the machine's libc, so the engine's output depends on the kernel
+//! tier alone.
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -96,6 +107,180 @@ pub unsafe fn exp8(x: __m256) -> __m256 {
             ),
         ),
     )
+}
+
+/// `exp8`'s magic constant: `0x1.8p23`. Adding it to `x·log2(e)` keeps the integer part of
+/// `x·log2(e)` in the low bits of the sum's mantissa, which is where `2ⁿ` is read from.
+const EXP_BIAS: f32 = f32::from_bits(0x4b40_0000);
+/// `log2(e)`.
+const EXP_LOG2E: f32 = f32::from_bits(0x3fb8_aa3b);
+/// `ln 2`, high part (`0x1.62e4p-1`).
+const EXP_LN2_HI: f32 = f32::from_bits(0x3f31_7200);
+/// `ln 2`, low part (`0x1.7f7d1cp-20`).
+const EXP_LN2_LO: f32 = f32::from_bits(0x35bf_be8e);
+/// `exp8`'s polynomial: the coefficient of `b⁵`.
+const EXP_P0: f32 = f32::from_bits(0x3c07_2010);
+/// The coefficient of `b⁴`.
+const EXP_P1: f32 = f32::from_bits(0x3d2b_9f17);
+/// The coefficient of `b³`.
+const EXP_P2: f32 = f32::from_bits(0x3e2a_af33);
+/// The coefficient of `b²`.
+const EXP_P3: f32 = f32::from_bits(0x3eff_fedb);
+/// The coefficient of `b`.
+const EXP_P4: f32 = f32::from_bits(0x3f7f_fff6);
+
+/// The pieces of [`exp8`]'s argument reduction: `n` (the exponent, `round(x·log2 e)`), `j`
+/// (the polynomial, `exp(b) − 1` for `b = x − n·ln 2`) and `e` (the bit pattern `2ⁿ` is
+/// built from).
+#[derive(Clone, Copy)]
+struct ExpParts {
+    /// `round(x·log2 e)`, exactly: the sum that carries it is exact.
+    n: f32,
+    /// `exp(b) − 1`, to the polynomial's accuracy.
+    j: f32,
+    /// `n` shifted into the exponent field; `2ⁿ` is this plus the exponent bias.
+    e: u32,
+}
+
+/// [`exp8`]'s range reduction and polynomial, in scalar: the same constants, the same
+/// operation order, the same fused multiply-adds.
+#[inline]
+fn exp_parts(x: f32) -> ExpParts {
+    // `z = x·log2(e) + 0x1.8p23`; the sum's low mantissa bits hold `x·log2(e)`'s integer
+    // part, and `n = z − 0x1.8p23` recovers it exactly (the subtraction is exact).
+    let z = x.mul_add(EXP_LOG2E, EXP_BIAS);
+    let n = z - EXP_BIAS;
+    // `b = x − n·ln 2`, with `ln 2` split in two so that the products stay exact enough.
+    let t = (-n).mul_add(EXP_LN2_HI, x);
+    let b = (-n).mul_add(EXP_LN2_LO, t);
+    // `e`: the low bits of `z`'s mantissa are `n` modulo 512, and the exponent field of a
+    // float is bits 23..30 — hence the shift by 23.
+    let e = z.to_bits() << 23;
+    // The polynomial `j ≈ exp(b) − 1`, in `u = b²`.
+    let u = b * b;
+    let a = EXP_P0.mul_add(b, EXP_P1);
+    let c = EXP_P2.mul_add(b, EXP_P3);
+    let d = a.mul_add(u, c);
+    let j = d.mul_add(u, EXP_P4 * b);
+    ExpParts { n, j, e }
+}
+
+/// `|x| > limit`, with `NaN` answering false — the comparison the vector masks make
+/// (`_CMP_GT_OQ` is false for a `NaN`).
+#[inline]
+fn greater(x: f32, limit: f32) -> bool {
+    matches!(
+        x.abs().partial_cmp(&limit),
+        Some(std::cmp::Ordering::Greater)
+    )
+}
+
+/// `exp` — the scalar twin of [`exp8`]: the same constants, the same operation order and the
+/// same overflow and underflow handling, so the two agree bit for bit on every input
+/// (the test sweeps them against each other).
+///
+/// It is built from IEEE basic operations alone, so unlike `f32::exp` its result does not
+/// depend on the C library — glibc 2.40 replaced `expf`'s neighbours with correctly rounded
+/// versions, and the engine's outputs must not move when the host's libc does (issue #64).
+///
+/// The fused multiply-adds are the IEEE-754 fused operation: the hardware instruction where
+/// the target has one, a correctly rounded `fmaf` where it does not. Either way the result
+/// is the one the standard prescribes, so it does not vary with the C library either.
+pub fn exp_scalar(x: f32) -> f32 {
+    let p = exp_parts(x);
+    // `2ⁿ`, from `n` in the exponent field.
+    let k = f32::from_bits(p.e.wrapping_add(0x3f80_0000));
+    if !greater(p.n, 126.0) {
+        // `2ⁿ·(1 + j)`, the ordinary path.
+        return k.mul_add(p.j, k);
+    }
+    // `|n| > 126`: `2ⁿ` itself is out of range, so the exponent is carried by the scaling
+    // factors instead. This is `exp8`'s masked path, one lane at a time.
+    let g: u32 = if p.n <= 0.0 { 0x8200_0000 } else { 0 };
+    let s1 = f32::from_bits(g.wrapping_add(0x7f00_0000));
+    let s2 = f32::from_bits(p.e.wrapping_sub(g));
+    if greater(p.n, 192.0) {
+        // Underflow to zero below, overflow to infinity above.
+        s1 * s1
+    } else {
+        s2.mul_add(p.j, s2) * s1
+    }
+}
+
+/// The largest `|x|` [`tanh`] handles with [`exp_scalar`]: from `|x| ≈ 8.96` the rounding of
+/// `1 − 2/(e^{2x} + 1)` is already `1.0`, so the branch saturates there and `exp` is never
+/// asked for an argument it would flush.
+const TANH_SATURATE: f32 = 9.0;
+
+/// Where [`tanh`]'s polynomial hands over to [`exp_scalar`]. Below it the polynomial is the
+/// more accurate of the two, above it `exp`'s own error is.
+const TANH_POLY_LIMIT: f32 = 0.55;
+
+/// `tanh(x)/x` as a polynomial in `x²`, for `|x| ≤ 0.55`.
+///
+/// A least-squares fit on 600 Chebyshev nodes with a relative-error criterion (the `f64`
+/// fit's own error is 9.6e-10, well under the `f32` evaluation's rounding), rounded to
+/// `f32`.
+const TANH_POLY: [f32; 6] = [
+    f32::from_bits(0x3f80_0000), // 1
+    f32::from_bits(0xbeaa_aaa3), // −1/3
+    f32::from_bits(0x3e08_8637), // 2/15
+    f32::from_bits(0xbd5c_8907), // −17/315
+    f32::from_bits(0x3cac_52cd), // 62/2835
+    f32::from_bits(0xbbcc_2668), // −1382/155925
+];
+
+/// `tanh(x)` for `|x| ≤ 0.55`: the polynomial above, times `x`.
+#[inline]
+fn tanh_poly(x: f32) -> f32 {
+    let u = x * x;
+    let p = TANH_POLY[5].mul_add(u, TANH_POLY[4]);
+    let p = p.mul_add(u, TANH_POLY[3]);
+    let p = p.mul_add(u, TANH_POLY[2]);
+    let p = p.mul_add(u, TANH_POLY[1]);
+    let p = p.mul_add(u, TANH_POLY[0]);
+    x * p
+}
+
+/// `tanh` — deterministic, and built only from IEEE basic operations.
+///
+/// `f32::tanh` is the C library's `tanhf`, and glibc 2.40 replaced it with a correctly
+/// rounded version: the same model then produced different activations and different logits
+/// on glibc 2.39 and 2.43, and the Gemma 3 goldens could not satisfy both (issue #64).
+/// This one is fixed by its definition instead of by the host's libc.
+///
+/// * `|x| ≤ 0.55`: an odd polynomial in `x²`, which keeps the relative accuracy where
+///   `tanh(x) ≈ x` and a cancellation would lose it.
+/// * `0.55 < |x| < 9`: `1 − 2/(e^{2|x|} + 1)`, on [`exp_scalar`]. The subtraction cancels
+///   only where the result is not small, and the sign is restored afterwards, so the
+///   function is exactly odd.
+/// * `|x| ≥ 9`: `±1`, where `f32` rounds `tanh` to one anyway.
+///
+/// # Accuracy
+///
+/// Measured against the `f64` reference `tanh` over a dense sweep of the `f32` range
+/// (−12…12 in steps of 1.3e-4, plus every 997th `f32` in [0, 1)): **max 1.72 ulp**, at
+/// `|x| ≈ 0.61`, where `exp`'s own error is the largest. The two branches differ by
+/// 1.3 ulp where they meet, and `tanh` is odd to the bit.
+pub fn tanh(x: f32) -> f32 {
+    if x.is_nan() {
+        return x;
+    }
+    let a = x.abs();
+    let t = if a >= TANH_SATURATE {
+        1.0
+    } else if a <= TANH_POLY_LIMIT {
+        tanh_poly(a)
+    } else {
+        // `tanh(x) = 1 − 2/(e^{2x} + 1)`.
+        let e = exp_scalar(2.0 * a);
+        1.0 - 2.0 / (e + 1.0)
+    };
+    if x.is_sign_negative() {
+        -t
+    } else {
+        t
+    }
 }
 
 /// `x[i] = exp(x[i] − shift)` in place; returns `Σ x[i]` after the update.
@@ -253,13 +438,19 @@ const GELU_COEF_A: f32 = 0.044715;
 
 /// GELU (tanh approximation):
 /// `gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`.
-/// Matching ggml's `ggml_gelu_f32`.
+/// Matching ggml's `ggml_gelu_f32`, with [`tanh`] instead of the C library's `tanhf`:
+/// ggml's own `tanhf` moves with the host's libc (issue #64), and this engine's outputs
+/// must not.
 #[inline]
 pub fn gelu_tanh(x: f32) -> f32 {
-    0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)).tanh())
+    0.5 * x * (1.0 + tanh(SQRT_2_OVER_PI * x * (1.0 + GELU_COEF_A * x * x)))
 }
 
 /// GeGLU in place: `gate[i] = gelu_tanh(gate[i]) · up[i]` — matching llama.cpp's `LLM_FFN_GELU`.
+///
+/// Scalar, and deliberately so: it has no vector path, so there is no second arithmetic to
+/// keep in step with [`gelu_tanh`]'s. A vector GeGLU may only be added if it evaluates the
+/// same expressions lane-wise, so that it is bit for bit the scalar result.
 pub fn geglu(gate: &mut [f32], up: &[f32]) {
     debug_assert_eq!(gate.len(), up.len());
     for (g, &u) in gate.iter_mut().zip(up) {
