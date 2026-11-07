@@ -120,9 +120,13 @@ impl HyScratch {
 const SHORT_RUN: usize = 4;
 
 impl Qwen35 {
+    /// The sign vector of an input width, when the file has a rotation.
     #[inline]
-    pub(crate) fn signs_for(&self, width: usize) -> Result<&[f32], String> {
-        self.rot.signs_for(width)
+    pub(crate) fn signs_for(&self, width: usize) -> Result<Option<&[f32]>, String> {
+        match &self.rot {
+            Some(r) => r.signs_for(width).map(Some),
+            None => Ok(None),
+        }
     }
 
     #[inline]
@@ -147,18 +151,23 @@ impl Qwen35 {
         stats: &mut StepStats,
     ) {
         let _t = Tick::new(2);
-        self.rot.rotate_rows(
-            &mut hs.rot,
-            hs.rot_w,
-            acts,
-            src,
-            w,
-            nb,
-            self.vperm(perm),
-            nb >= ROW_PARALLEL && pool.width() > 1,
-            pool,
-            stats,
-        );
+        let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+        match &self.rot {
+            Some(rot) => rot.rotate_rows(
+                &mut hs.rot,
+                hs.rot_w,
+                acts,
+                src,
+                w,
+                nb,
+                self.vperm(perm),
+                parallel,
+                pool,
+                stats,
+            ),
+            // No rotation: the row is quantised as it is.
+            None => blocks::rotate::fill_rows(acts, src, w, nb, parallel, pool, stats),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -175,19 +184,24 @@ impl Qwen35 {
         stats: &mut StepStats,
     ) {
         let _t = Tick::new(2);
-        self.rot.rotate_rows_pre(
-            &mut hs.rot,
-            hs.rot_w,
-            acts,
-            src,
-            w,
-            nb,
-            self.vperm(perm),
-            pre,
-            nb >= ROW_PARALLEL && pool.width() > 1,
-            pool,
-            stats,
-        );
+        let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+        match &self.rot {
+            Some(rot) => rot.rotate_rows_pre(
+                &mut hs.rot,
+                hs.rot_w,
+                acts,
+                src,
+                w,
+                nb,
+                self.vperm(perm),
+                pre,
+                parallel,
+                pool,
+                stats,
+            ),
+            // No rotation: the row is prepared and quantised as it is.
+            None => blocks::rotate::fill_rows_pre(acts, src, w, nb, pre, parallel, pool, stats),
+        }
     }
 
     pub(crate) fn mm(
@@ -277,7 +291,7 @@ impl Qwen35 {
             *fam = Some(Box::new(HyScratch::new(c, &self.cfg, st8.max_batch)));
         }
         for a in acts.iter_mut().take(nb) {
-            a.ternary = true;
+            a.ternary = self.cfg.ternary;
             a.ptq1 = self.cfg.ptq1 && table::MatKernels::get().ptq1_layout();
             a.tb_span = self.cfg.tb_span;
         }
@@ -316,7 +330,10 @@ impl Qwen35 {
         for (i, &t) in tokens.iter().enumerate() {
             let row = &mut x[i * d..(i + 1) * d];
             blocks::embed::embed(&self.tok_embd, w, t, row, stats);
-            self.rot.rotate_embedding(row, se);
+            // A file with no rotation uses its embedding rows as they are.
+            if let (Some(rot), Some(se)) = (&self.rot, se) {
+                rot.rotate_embedding(row, se);
+            }
         }
         drop(te);
 
