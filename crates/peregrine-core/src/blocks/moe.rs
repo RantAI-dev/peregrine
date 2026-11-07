@@ -249,7 +249,8 @@ fn softmax(x: &mut [f32]) {
     let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0f64;
     for v in x.iter_mut() {
-        *v = (*v - max).exp();
+        // In-crate exp, not the C library's: the result must not move with the host's libc (#64).
+        *v = peregrine_kernels::vmath::exp_scalar(*v - max);
         sum += f64::from(*v);
     }
     let inv = (1.0 / sum) as f32;

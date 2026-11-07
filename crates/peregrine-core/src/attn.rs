@@ -275,7 +275,7 @@ pub fn finish_row(o: &[f32], l: f64, m: f32, sink: Option<f32>, rotated: bool, o
         return;
     }
     let denom = match sink {
-        Some(s) => l + (s - m).exp() as f64,
+        Some(s) => l + f64::from(peregrine_kernels::vmath::exp_scalar(s - m)),
         None => l,
     };
     if denom <= 0.0 {
@@ -320,7 +320,7 @@ pub fn combine_row(
         }
     }
     let denom = match sink {
-        Some(s) => l + (s - m_star).exp() as f64,
+        Some(s) => l + f64::from(peregrine_kernels::vmath::exp_scalar(s - m_star)),
         None => l,
     };
     if denom <= 0.0 {
