@@ -145,6 +145,7 @@ impl GptOss {
                     lbt,
                     pool,
                     stats,
+                    &mut st.kq,
                 );
             }
             // ---- the rotation (no biases, no per-head norms) ----
@@ -213,6 +214,7 @@ impl GptOss {
                     lbt,
                     pool,
                     stats,
+                    &mut st.kq,
                 );
             }
             // The attention output's bias (`src/llama-graph.cpp:3217-3219`).

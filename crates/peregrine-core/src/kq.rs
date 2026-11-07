@@ -28,7 +28,7 @@
 //! super-block, so a matrix's repacked bytes are one contiguous run and a group of
 //! eight rows is one contiguous run inside it.
 
-use crate::gguf::{Format, Gguf};
+use crate::gguf::{Format, Gguf, TensorInfo};
 use crate::model::KqStore;
 
 /// The rows one tile holds.
@@ -77,7 +77,7 @@ impl KqEntry {
 /// The order is the file's own: the matrices are laid out by their offset in the
 /// data section, so a file always produces the same store.
 pub fn layout(g: &Gguf) -> Vec<KqEntry> {
-    let mut mats: Vec<(&String, &crate::gguf::TensorInfo)> =
+    let mut mats: Vec<(&String, &TensorInfo)> =
         g.tensors.iter().filter(|(_, t)| eligible(t)).collect();
     mats.sort_by_key(|(name, t)| (t.offset, name.as_str()));
     let mut entries = Vec::with_capacity(mats.len());
@@ -101,7 +101,7 @@ pub fn layout(g: &Gguf) -> Vec<KqEntry> {
 }
 
 /// Whether a tensor is one of the matrices the store takes.
-fn eligible(t: &crate::gguf::TensorInfo) -> bool {
+fn eligible(t: &TensorInfo) -> bool {
     tile_size(t.kind).is_some()
         && t.dims.len() == 2
         && t.name != EMBEDDING
@@ -124,8 +124,7 @@ pub fn repack(g: &mut Gguf) -> KqStore {
             let t = g
                 .tensor(&e.name)
                 .expect("the matrix is in the file's own directory");
-            let src = g.bytes(t);
-            repack_matrix(e, src, &mut dst[e.offset..e.offset + e.len]);
+            repack_matrix(g, e, t, &mut dst[e.offset..e.offset + e.len]);
         }
     }
     for e in &entries {
@@ -137,7 +136,12 @@ pub fn repack(g: &mut Gguf) -> KqStore {
 }
 
 /// Write one matrix's repacked tiles.
-fn repack_matrix(e: &KqEntry, src: &[u8], dst: &mut [u8]) {
+///
+/// The matrix's rows are read from the file, a group of eight at a time, rather
+/// than through the engine's mapping: the mapping's pages for them are then
+/// never faulted in, and the model does not cost twice what it should (S3.4,
+/// decision 2).
+fn repack_matrix(file: &Gguf, e: &KqEntry, t: &TensorInfo, dst: &mut [u8]) {
     let tile = match tile_size(e.kind) {
         Some(t) => t,
         None => return,
@@ -146,13 +150,17 @@ fn repack_matrix(e: &KqEntry, src: &[u8], dst: &mut [u8]) {
     let n_sb = e.super_blocks();
     let rb = n_sb * blk;
     let groups = e.rows / TILE_ROWS;
+    let mut rows = vec![0u8; TILE_ROWS * rb];
     for g in 0..groups {
+        // The group's eight rows are consecutive in the file.
+        let at = t.offset as usize + g * TILE_ROWS * rb;
+        file.read_data(at, &mut rows)
+            .expect("the matrix's bytes are in the file");
         for s in 0..n_sb {
             let at = (g * n_sb + s) * tile;
             let mut blocks: [&[u8]; TILE_ROWS] = [&[]; TILE_ROWS];
             for (r, b) in blocks.iter_mut().enumerate() {
-                let off = (g * TILE_ROWS + r) * rb + s * blk;
-                *b = &src[off..off + blk];
+                *b = &rows[r * rb + s * blk..r * rb + s * blk + blk];
             }
             let out = &mut dst[at..at + tile];
             match e.kind {

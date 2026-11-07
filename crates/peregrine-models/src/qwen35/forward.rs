@@ -204,6 +204,7 @@ impl Qwen35 {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn mm(
         &self,
         w: &Weights,
@@ -212,6 +213,7 @@ impl Qwen35 {
         nb: usize,
         pool: &Pool,
         stats: &mut StepStats,
+        kq: &mut peregrine_kernels::kq::KqActs,
     ) {
         assert!(!jobs.is_empty() && jobs.len() <= 4);
         let mj: [MatJob; 4] = std::array::from_fn(|i| {
@@ -223,9 +225,10 @@ impl Qwen35 {
             }
         });
         let mj = &mj[..jobs.len()];
-        self.mm_jobs(w, mj, acts, nb, pool, stats);
+        self.mm_jobs(w, mj, acts, nb, pool, stats, kq);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mm_jobs(
         &self,
         w: &Weights,
@@ -234,10 +237,11 @@ impl Qwen35 {
         nb: usize,
         pool: &Pool,
         stats: &mut StepStats,
+        kq: &mut peregrine_kernels::kq::KqActs,
     ) {
         let _t = Tick::new(3);
         let t0 = prof_on().then(Instant::now);
-        blocks::linear::matmul_group(w, mj, acts, nb, pool, stats);
+        blocks::linear::matmul_group(w, mj, acts, nb, pool, stats, kq);
         if let Some(t0) = t0 {
             let bytes: u64 = mj.iter().map(|j| j.w.bytes()).sum();
             let k = if bytes < 8 << 20 {
@@ -281,6 +285,7 @@ impl Qwen35 {
             attn,
             rope,
             acts,
+            kq,
             logits,
             fam,
             want_hidden,
@@ -369,6 +374,7 @@ impl Qwen35 {
                         nb,
                         pool,
                         stats,
+                        kq,
                     );
                     restride(&mut hs.big, hc.conv_dim(), hs.big_w, nb);
                     restride(&mut hs.z, hc.value_dim(), hs.z_w, nb);
@@ -412,6 +418,7 @@ impl Qwen35 {
                         nb,
                         pool,
                         stats,
+                        kq,
                     );
                 }
                 Mixer::Attn {
@@ -435,6 +442,7 @@ impl Qwen35 {
                         nb,
                         pool,
                         stats,
+                        kq,
                     );
                     let ta = Tick::new(8);
                     {
@@ -551,7 +559,15 @@ impl Qwen35 {
                         self.rotate_rows_pre(hs, acts, xb, qd, nb, false, Some(&pre), pool, stats);
                         hs.z = z;
                     }
-                    self.mm(w, &[(o, Disjoint::new(xb2))], &acts[..nb], nb, pool, stats);
+                    self.mm(
+                        w,
+                        &[(o, Disjoint::new(xb2))],
+                        &acts[..nb],
+                        nb,
+                        pool,
+                        stats,
+                        kq,
+                    );
                 }
             }
             for i in 0..nb * d {
@@ -574,6 +590,7 @@ impl Qwen35 {
                 nb,
                 pool,
                 stats,
+                kq,
             );
             let f = c.n_ff;
             if nb >= ROW_PARALLEL {
@@ -610,6 +627,7 @@ impl Qwen35 {
                 nb,
                 pool,
                 stats,
+                kq,
             );
             for i in 0..nb * d {
                 x[i] += xb2[i];
@@ -662,6 +680,7 @@ impl Qwen35 {
                 nl,
                 pool,
                 stats,
+                kq,
             );
             stats.ns_head += stats.ns_matmul - before;
             stats.ns_matmul = before;

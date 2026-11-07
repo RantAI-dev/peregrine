@@ -20,6 +20,9 @@ pub struct KernelOptions {
     pub tq_span: usize,
     /// `PEREGRINE_EXACT=1`: ternary matmuls in f32 against decoded weights (slow reference path).
     pub exact: bool,
+    /// `PEREGRINE_KREPACK=0` keeps the k-quant matrices in the file's own layout, so the
+    /// repacked kernels do not run. The switch is the A/B of the repack.
+    pub kq_repack: bool,
 }
 
 /// Default prefetch distance (bytes), the value the k-quant kernels were tuned with.
@@ -34,6 +37,7 @@ impl Default for KernelOptions {
             prefetch_bytes: PF_DEFAULT,
             tq_span: 16,
             exact: false,
+            kq_repack: true,
         }
     }
 }
@@ -55,6 +59,7 @@ pub fn get() -> &'static KernelOptions {
                 .filter(|v| [16, 32, 64, 128].contains(v))
                 .unwrap_or(d.tq_span),
             exact: s("EXACT").is_some_and(|v| v == "1"),
+            kq_repack: s("KREPACK").is_none_or(|v| v != "0"),
         }
     })
 }

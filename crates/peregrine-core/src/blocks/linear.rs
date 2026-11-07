@@ -9,6 +9,9 @@ use crate::quant::{row_bytes, QuantAct};
 use crate::table::{MatKernels, MatPath};
 use std::time::Instant;
 
+/// The rows one repacked k-quant tile holds.
+const KQ_TILE_ROWS: usize = 8;
+
 /// Largest batch one matmul call accepts. A stack array of this many scratch floats
 /// holds one row's results; `PREFILL_CHUNK` and `draft_len + 1` are both far below it.
 pub const MAX_BATCH: usize = 128;
@@ -40,6 +43,18 @@ impl<'a> MatJob<'a> {
     }
 }
 
+/// The bytes one activation row holds: its codes, its scales and its run sums.
+///
+/// The activation traffic is counted in bytes the same way the weight traffic
+/// is: what the matrix product reads of the activation, once per pass over it.
+fn act_bytes(a: &QuantAct) -> usize {
+    a.q.len()
+        + a.qk.len()
+        + a.tq.len()
+        + 4 * (a.d.len() + a.dk.len() + a.td.len())
+        + 2 * (a.sums.len() + a.bsums.len() + a.tls.len())
+}
+
 /// One matrix of a fused group, dense or LittleBit. `linear_group` dispatches.
 pub struct LinJob<'a> {
     pub lin: &'a Linear,
@@ -58,6 +73,7 @@ pub fn matmul_group(
     nb: usize,
     pool: &Pool,
     st: &mut StepStats,
+    kq: &mut peregrine_kernels::kq::KqActs,
 ) {
     assert!(
         nb <= MAX_BATCH,
@@ -75,10 +91,22 @@ pub fn matmul_group(
     assert!(jobs.len() <= 4, "a matmul group has at most 4 matrices");
     let mut paths = [MatPath::PerRow; 4];
     for (p, j) in paths.iter_mut().zip(jobs) {
-        *p = mk.path(j.w.kind, j.w.tile_off.is_some(), act_ptq1);
+        *p = mk.path(
+            j.w.kind,
+            j.w.tile_off.is_some(),
+            j.w.kq_off.is_some(),
+            act_ptq1,
+        );
     }
     let paths = &paths[..jobs.len()];
     let tiled = paths.contains(&MatPath::Tiles);
+    let kq_tiled = paths.contains(&MatPath::KqTiles);
+    // The interleaved activation is built once for the group, from the
+    // activation the group shares: every output row of the group reads it, so
+    // building it per matrix would multiply the work by the group's size.
+    if kq_tiled && nb >= 4 {
+        kq.fill(&acts[..nb]);
+    }
     // The rows `lo..hi` of the concatenated row space.
     let rows_range = |lo: usize, hi: usize, tmp: &mut [f32; MAX_BATCH]| {
         let mut off = 0usize;
@@ -135,6 +163,70 @@ pub fn matmul_group(
                         r += k;
                     }
                 }
+                MatPath::KqTiles => {
+                    // The repacked eight-row tiles (S3.4). The store holds the
+                    // rows in whole groups of eight; the rows past the last
+                    // whole group keep today's kernel, so a row's result
+                    // depends only on its index.
+                    let kq_off = j.w.kq_off.expect("the repacked path has a store offset");
+                    let n_sb = n / j.w.kind.block();
+                    let tile_bytes = peregrine_kernels::kq::Q4K8::SIZE;
+                    let store = w.kq();
+                    let rows = j.rows();
+                    let repacked = (rows / KQ_TILE_ROWS) * KQ_TILE_ROWS;
+                    // The tiles that cover the rows of this range. A tile is
+                    // computed whole, so a range that starts inside one costs
+                    // the whole tile and keeps the rows it does not want.
+                    let lo = r.min(repacked);
+                    let hi = rz.min(repacked);
+                    if lo < hi {
+                        let mut blk = [0.0f32; KQ_TILE_ROWS * MAX_BATCH];
+                        let first = lo / KQ_TILE_ROWS;
+                        let last = hi.div_ceil(KQ_TILE_ROWS);
+                        for t in first..last {
+                            let at = kq_off + t * n_sb * tile_bytes;
+                            let tile = &store[at..at + n_sb * tile_bytes];
+                            let out = &mut blk[..KQ_TILE_ROWS * nb];
+                            if nb >= 4 {
+                                mk.kq_tiles_q4k(tile, n_sb, kq, nb, out);
+                            } else {
+                                mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                            }
+                            for i in 0..KQ_TILE_ROWS {
+                                let row = t * KQ_TILE_ROWS + i;
+                                if row < r || row >= rz {
+                                    continue;
+                                }
+                                for b in 0..nb {
+                                    // SAFETY: the row belongs to this worker (a
+                                    // `share` range, or a chunk claimed from
+                                    // the counter), and the tile's rows are the
+                                    // job's rows.
+                                    unsafe { j.out.set(b * rows + row, out[b * KQ_TILE_ROWS + i]) };
+                                }
+                            }
+                        }
+                    }
+                    // The rows past the last whole group of eight: today's
+                    // kernel, on the file's own bytes.
+                    let tail = r.max(repacked);
+                    if tail < rz {
+                        let bytes = w.bytes(j.w);
+                        for rr in tail..rz {
+                            mk.row(
+                                j.w.kind,
+                                &bytes[rr * rb..(rr + 1) * rb],
+                                acts,
+                                &mut tmp[..nb],
+                            );
+                            for (b, &v) in tmp[..nb].iter().enumerate() {
+                                // SAFETY: the row of the concatenated row space
+                                // is taken by exactly one worker.
+                                unsafe { j.out.set(b * rows + rr, v) };
+                            }
+                        }
+                    }
+                }
                 MatPath::PerRow => {
                     let bytes = w.bytes(j.w);
                     for r in r..rz {
@@ -184,11 +276,22 @@ pub fn matmul_group(
     }
     // Counted once per matrix: the bytes crossed the memory interface once,
     // however many activations reused them.
-    for j in jobs {
+    for (j, &path) in jobs.iter().zip(paths) {
         let n = j.w.dims[0] as usize;
         let rows = j.rows();
         st.bytes_weights += (rows * row_bytes(j.w.kind, n)) as u64;
         st.macs += (rows * n * nb) as u64;
+        // The activation's traffic: how many times the activation crossed the
+        // memory interface, and how many bytes it was. The repacked tile reads
+        // it once per eight output rows, the ordinary path once per row, so
+        // this is where the design note's claim (a 32× cut) is measured.
+        let per_row = act_bytes(&acts[0]);
+        let reads = match path {
+            MatPath::KqTiles => rows.div_ceil(KQ_TILE_ROWS),
+            MatPath::Tiles => rows.div_ceil(16),
+            _ => rows,
+        };
+        st.bytes_acts += (reads * nb * per_row) as u64;
     }
     st.barriers += 1;
     st.ns_matmul += t0.elapsed().as_nanos() as u64;
@@ -201,8 +304,8 @@ pub fn matmul_group(
 /// output row — via `lb_group`. `xs` is the same activation `acts` was
 /// quantised from: the LittleBit path works on floats (its per-column scale
 /// `g` is applied before the signs), while the dense path keeps its int8 form.
-#[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "littlebit"), allow(unused_variables))]
+#[allow(clippy::too_many_arguments)]
 pub fn linear_group(
     w: &Weights,
     slb: Option<&Slb>,
@@ -215,6 +318,7 @@ pub fn linear_group(
     lbt: SharedBuf<'_>,
     pool: &Pool,
     st: &mut StepStats,
+    kq: &mut peregrine_kernels::kq::KqActs,
 ) {
     debug_assert!(jobs.len() <= 4);
     let mut dense: [Option<MatJob>; 4] = [None; 4];
@@ -241,7 +345,7 @@ pub fn linear_group(
     }
     if nd > 0 {
         let dj: [MatJob; 4] = std::array::from_fn(|i| dense[i.min(nd - 1)].unwrap());
-        matmul_group(w, &dj[..nd], acts, nb, pool, st);
+        matmul_group(w, &dj[..nd], acts, nb, pool, st, kq);
     }
     #[cfg(feature = "littlebit")]
     if nl > 0 {
