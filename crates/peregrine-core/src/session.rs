@@ -306,61 +306,6 @@ impl Session {
         Self::from_model(model, cfg)
     }
 
-    /// Seconds for one verification forward of each width in `widths` (median of
-    /// `reps`), at the end of the current context. The positions written are past
-    /// `ctx` and are cut again, exactly as a rejected draft's are. Used to measure
-    /// the batch→cost curve the draft length is priced against; call after a turn.
-    pub fn probe_verify_curve(
-        &mut self,
-        widths: &[usize],
-        reps: usize,
-    ) -> Result<Vec<(usize, f64)>, String> {
-        // it truncates to a position the recurrent state has no checkpoint for, which would empty a
-        // hybrid model's cache while the session still counted its context.
-        if self.model.is_hybrid() {
-            return Err(
-                "the verification-width probe is not available for a hybrid (recurrent) model"
-                    .into(),
-            );
-        }
-        let start = self.ctx.len();
-        let tok = self.ctx.last().copied().unwrap_or(0);
-        let mut out = Vec::new();
-        // The scratch the probe needs is its own: the engine's state is the
-        // engine's, and the probe runs between the turns.
-        let mut st = self.model.new_state(
-            crate::serve::PREFILL_CHUNK,
-            1,
-            self.cfg.max_ctx,
-            self.cfg.threads,
-        );
-        for &w in widths {
-            let batch = vec![tok; w];
-            let want: Vec<usize> = (0..w).collect();
-            let mut times = Vec::new();
-            for _ in 0..reps + 1 {
-                let mut ss = crate::model::StepStats::default();
-                let t = Instant::now();
-                let model = &self.model;
-                let pool = self.engine.pool();
-                let kv = self
-                    .kv
-                    .as_mut()
-                    .expect("the cache is the engine's during a turn");
-                model.forward(&mut st, kv, pool, &batch, start, &want, &mut ss)?;
-                times.push(t.elapsed().as_secs_f64());
-                self.kv
-                    .as_mut()
-                    .expect("the cache is the engine's during a turn")
-                    .truncate(start);
-            }
-            times.remove(0); // the first touches pages the rest find warm
-            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            out.push((w, times[times.len() / 2]));
-        }
-        Ok(out)
-    }
-
     /// Forget the conversation. The cache is *not* cleared: its positions stay valid
     /// for the tokens that were fed (`kept`), and the next prompt reuses whatever
     /// prefix it shares with them — the system block at least, when the system

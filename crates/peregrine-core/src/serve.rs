@@ -78,8 +78,6 @@ pub enum DrafterChoice {
     /// before.
     #[default]
     None,
-    /// The model's own MTP block: the engine's own speculation.
-    Mtp,
     /// Suffix-indexed drafting: the longest match of the conversation's tail,
     /// continued by what followed it last time.
     Suffix {
@@ -737,7 +735,7 @@ impl Engine {
     /// does not load.
     fn make_asked_drafter(&self, choice: &DrafterChoice) -> Result<AskedDrafter, String> {
         match choice {
-            DrafterChoice::None | DrafterChoice::Mtp => Ok(None),
+            DrafterChoice::None => Ok(None),
             DrafterChoice::Suffix { min_order, max_len } => {
                 // A hybrid model's recurrent state rolls back only to its
                 // turn-start checkpoint, so nothing may write positions it later
@@ -1808,14 +1806,5 @@ impl Engine {
             }
         }
         cut
-    }
-
-    /// What one request cost: prompt tokens, tokens produced, and the seconds spent prefilling and decoding it
-    /// (a decode step's time divided among the rows that shared it).
-    pub fn slot_cost(&self, id: SlotId) -> Option<(usize, usize, f64, f64)> {
-        self.slots
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| (s.prompt_tokens, s.produced, s.prefill_s, s.decode_s))
     }
 }
