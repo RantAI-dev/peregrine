@@ -44,7 +44,7 @@
 use crate::dspark::Drafter;
 use crate::kv::{KvCache, KvPrec};
 use crate::model::Model;
-use crate::serve::{Engine, Finish, SlotCfg};
+use crate::serve::{Engine, Finish, SlotCfg, SlotCost};
 use crate::telem::{Machine, TokenTelem, TurnTelem};
 use crate::template::{today_llama3, Template};
 use crate::tokenizer::Utf8Stream;
@@ -304,61 +304,6 @@ impl Session {
         let model =
             crate::model::keep::open_with_template(path, cfg.littlebit, cfg.template, families)?;
         Self::from_model(model, cfg)
-    }
-
-    /// Seconds for one verification forward of each width in `widths` (median of
-    /// `reps`), at the end of the current context. The positions written are past
-    /// `ctx` and are cut again, exactly as a rejected draft's are. Used to measure
-    /// the batch→cost curve the draft length is priced against; call after a turn.
-    pub fn probe_verify_curve(
-        &mut self,
-        widths: &[usize],
-        reps: usize,
-    ) -> Result<Vec<(usize, f64)>, String> {
-        // it truncates to a position the recurrent state has no checkpoint for, which would empty a
-        // hybrid model's cache while the session still counted its context.
-        if self.model.is_hybrid() {
-            return Err(
-                "the verification-width probe is not available for a hybrid (recurrent) model"
-                    .into(),
-            );
-        }
-        let start = self.ctx.len();
-        let tok = self.ctx.last().copied().unwrap_or(0);
-        let mut out = Vec::new();
-        // The scratch the probe needs is its own: the engine's state is the
-        // engine's, and the probe runs between the turns.
-        let mut st = self.model.new_state(
-            crate::serve::PREFILL_CHUNK,
-            1,
-            self.cfg.max_ctx,
-            self.cfg.threads,
-        );
-        for &w in widths {
-            let batch = vec![tok; w];
-            let want: Vec<usize> = (0..w).collect();
-            let mut times = Vec::new();
-            for _ in 0..reps + 1 {
-                let mut ss = crate::model::StepStats::default();
-                let t = Instant::now();
-                let model = &self.model;
-                let pool = self.engine.pool();
-                let kv = self
-                    .kv
-                    .as_mut()
-                    .expect("the cache is the engine's during a turn");
-                model.forward(&mut st, kv, pool, &batch, start, &want, &mut ss)?;
-                times.push(t.elapsed().as_secs_f64());
-                self.kv
-                    .as_mut()
-                    .expect("the cache is the engine's during a turn")
-                    .truncate(start);
-            }
-            times.remove(0); // the first touches pages the rest find warm
-            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            out.push((w, times[times.len() / 2]));
-        }
-        Ok(out)
     }
 
     /// Forget the conversation. The cache is *not* cleared: its positions stay valid
@@ -921,6 +866,11 @@ impl Session {
 
     /// Prefill a fixed synthetic prompt of `prompt_tokens` and decode `decode_tokens` greedy tokens.
     /// Returns prefill tok/s, decode tok/s, and bytes/token (from telemetry).
+    ///
+    /// The measurement runs on the engine — the one runtime (ADR 0007) — so it
+    /// measures the path the server runs, not a copy of it that only the
+    /// benchmark walks. The conversation is left as it was: the measurement runs
+    /// on a cache of its own.
     pub fn bench(
         &mut self,
         prompt_tokens: usize,
@@ -946,84 +896,96 @@ impl Session {
             ));
         }
 
-        self.reset();
-        self.ctx.clear();
-
-        // The scratch the benchmark needs is its own: the engine's state is the
-        // engine's, and the benchmark runs between the turns.
-        let mut st = self.model.new_state(
-            crate::serve::PREFILL_CHUNK,
-            1,
-            self.cfg.max_ctx,
-            self.cfg.threads,
-        );
-
-        // Prefill
-        let mut pre = crate::model::StepStats::default();
-        let t_pre = Instant::now();
-        let mut fed = 0;
-        while fed < ptoks.len() {
-            let take = crate::serve::PREFILL_CHUNK.min(ptoks.len() - fed);
-            let last = fed + take == ptoks.len();
-            let start = fed;
-            let want: &[usize] = if last { &[take - 1] } else { &[] };
-            let model = &self.model;
-            let pool = self.engine.pool();
-            let kv = self
-                .kv
-                .as_mut()
-                .expect("the cache is the engine's during a turn");
-            model.forward(
-                &mut st,
-                kv,
-                pool,
-                &ptoks[fed..fed + take],
-                start,
-                want,
-                &mut pre,
-            )?;
-            fed += take;
+        // The engine never prefills a prompt's last token — the first decode
+        // step feeds it — so the prompt gets one token more, and the engine
+        // prefills exactly the tokens the benchmark asked for.
+        let mut prompt = ptoks.clone();
+        if decode_tokens > 0 {
+            prompt.push(ptoks[0]);
         }
-        let prefill_s = t_pre.elapsed().as_secs_f64();
-        self.ctx.extend_from_slice(&ptoks);
+        let prompt_len = prompt.len();
 
-        // First greedy token from prefill logits
-        let argmax = |row: &[f32]| -> u32 {
-            let mut best = 0;
-            for (i, &x) in row.iter().enumerate() {
-                if x > row[best] {
-                    best = i;
-                }
-            }
-            best as u32
+        // The cache the measurement runs on is its own: the conversation's cache
+        // holds a conversation, and a benchmark measures an empty context.
+        let kv = self.model.new_cache(self.cfg.kv_prec, self.cfg.max_ctx);
+        let kv = if self.model.session_kv_rotation() {
+            kv
+        } else {
+            kv.without_rotation()
         };
-        let mut next = argmax(&st.logits[..n_vocab]);
 
-        // Decode
-        let mut decode_s = 0.0;
+        // Greedy, no stop token, no drafter: the benchmark measures the target.
+        let cfg = SlotCfg {
+            temperature: 0.0,
+            top_p: 1.0,
+            top_k: 0,
+            min_p: 0.0,
+            penalties: Default::default(),
+            seed: self.seed,
+            max_tokens: decode_tokens.max(1),
+            stop: Vec::new(),
+            logprobs: false,
+            turn: 0,
+            kv_rotation: self.model.session_kv_rotation(),
+            drafter: Default::default(),
+        };
+        let id = match self.engine.admit_with_cache(prompt, cfg, kv) {
+            Ok(id) => id,
+            Err((_prompt, e)) => return Err(e),
+        };
+
+        let mut decode_steps = 0usize;
+        let mut prefilled = 0usize;
+        let mut prefill_s = 0.0;
         let mut total_bytes_weights = 0u64;
         let mut total_bytes_kv = 0u64;
-        let start_pos = self.ctx.len();
-
-        for step in 0..decode_tokens {
-            let td = Instant::now();
-            let mut ss = crate::model::StepStats::default();
-            let pos = start_pos + step;
-            let model = &self.model;
-            let p = self.engine.narrow_pool().unwrap_or(self.engine.pool());
-            let kv = self
-                .kv
-                .as_mut()
-                .expect("the cache is the engine's during a turn");
-            model.forward(&mut st, kv, p, &[next], pos, &[0], &mut ss)?;
-            decode_s += td.elapsed().as_secs_f64();
-            total_bytes_weights += ss.bytes_weights;
-            total_bytes_kv += ss.bytes_kv;
-            next = argmax(&st.logits[..n_vocab]);
+        let mut cost: Option<SlotCost> = None;
+        while self.engine.active() > 0 {
+            let ems = self.engine.step();
+            let rep = self.engine.last_step;
+            if ems.is_empty() {
+                // A chunk of the prompt: it cost the prompt's time, not a token's.
+                prefilled += rep.rows;
+                prefill_s += rep.secs;
+                if decode_tokens == 0 && prefilled >= prompt_len - 1 {
+                    break;
+                }
+                continue;
+            }
+            for em in &ems {
+                if let Some(Finish::Error(e)) = &em.finish {
+                    self.engine.cancel(id);
+                    drop(self.engine.take_kept());
+                    return Err(e.clone());
+                }
+                if let Some(c) = &em.cost {
+                    cost = Some(c.clone());
+                }
+            }
+            // A decode step: the bytes it moved are the bytes one token moved.
+            decode_steps += 1;
+            total_bytes_weights += rep.stats.bytes_weights;
+            total_bytes_kv += rep.stats.bytes_kv;
+            if decode_steps >= decode_tokens {
+                break;
+            }
         }
+        // The slot goes: the engine reaped it when the turn ended, and this is
+        // the no-op for a turn that was cut short.
+        self.engine.cancel(id);
+        // The measurement's cache goes with it; the conversation keeps its own.
+        drop(self.engine.take_kept());
 
+        // The engine's own accounting of the turn: the forward passes of the
+        // prompt and of the decode steps, without the sampling that follows
+        // them. A turn that never ended has none, and the chunks timed here
+        // are what it had.
+        let (prefill_s, decode_s, prefilled) = match &cost {
+            Some(c) => (c.prefill_s, c.decode_s, c.prefilled),
+            None => (prefill_s, 0.0, prefilled),
+        };
         let prefill_tok_s = if prefill_s > 0.0 {
-            ptoks.len() as f64 / prefill_s
+            prefilled as f64 / prefill_s
         } else {
             0.0
         };

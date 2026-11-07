@@ -38,7 +38,7 @@
 use crate::pool::Pool;
 
 /// What one extra row costs a verification pass, as a fraction of a plain step.
-/// Measured with `examples/vcurve` (width 1..16, median of 9): SmolLM2-360M 0.47,
+/// Measured with a width sweep (width 1..16, median of 9): SmolLM2-360M 0.47,
 /// Llama-3.2-1B 0.40, Qwen2.5-0.5B 0.42. Verification on this CPU is compute-bound,
 /// not bandwidth-bound — a width-8 pass costs about 4 steps, not 1 — which is why
 /// the ceiling on any lossless speculation here is near 1/0.42 ≈ 2.4×. The engine
@@ -146,17 +146,14 @@ pub fn choose_k(conf: &[f32], cost: impl Fn(usize) -> f64) -> usize {
 /// What a drafter needs from the engine.
 ///
 /// The engine reads this before a step and pays for what is asked for: the
-/// hidden states and the taps are copies out of the forward pass, and the
-/// history is the committed token sequence. A drafter that needs none of them
-/// costs the engine nothing.
+/// hidden states and the taps are copies out of the forward pass. A drafter
+/// that needs none of them costs the engine nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Needs {
     /// The target's final hidden state per row (`State::want_hidden`).
     pub hidden: bool,
     /// The target's tapped hidden states per row (`State::set_taps`).
     pub taps: bool,
-    /// The committed token history, position by position.
-    pub history: bool,
 }
 
 /// A drafter's proposal, written into a buffer the engine owns and reuses (no
@@ -351,10 +348,9 @@ impl SuffixDrafter {
 
 impl Drafter for SuffixDrafter {
     fn needs(&self) -> Needs {
-        Needs {
-            history: true,
-            ..Needs::default()
-        }
+        // The index searches the corpus it was told about, so it needs nothing
+        // from the engine but its drafts.
+        Needs::default()
     }
 
     fn policy(&self) -> DraftPolicy {
