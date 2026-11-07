@@ -1585,7 +1585,8 @@ impl Engine {
     /// anchor's row.
     ///
     /// The accepted run ends where the turn ends: the token that stops the
-    /// turn is emitted but never fed, exactly as `Session::commit` cuts it.
+    /// turn is emitted but never fed, so the cache holds only what the turn
+    /// keeps.
     fn verify_step(&mut self, si: usize) -> Vec<Emission> {
         let t0 = std::time::Instant::now();
         let before = self.stats;
@@ -1781,8 +1782,8 @@ impl Engine {
     /// stay in the cache, and the draft that carried it is not committed. The
     /// same holds for the token that reaches the turn's budget.
     ///
-    /// This is the rule `Session::commit` applies, and the two runtimes must
-    /// cut the same run at the same place.
+    /// The rule the plain decode path applies too: the token that ends the
+    /// turn is not fed, so the cache does not hold it.
     fn commit_cut(&self, si: usize, accepted: usize) -> usize {
         let s = &self.slots[si];
         let pos = s.pos;

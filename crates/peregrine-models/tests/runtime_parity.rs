@@ -1,21 +1,25 @@
-//! Today’s behaviour of the two runtimes, pinned before ADR 0007 unifies them.
+//! What the session and a one-slot engine say for the same prompt, pinned
+//! before ADR 0007 unified them and kept since.
 //!
-//! There are two runtimes. `session::Session` is one conversation: chat history,
-//! template, prefix reuse inside the conversation, speculation with an adaptive
-//! draft length. `serve::Engine` is the server: slots, batching, mixed
-//! prefill/decode, MTP speculation, the cross-request prefix store.
+//! There is one runtime now: `serve::Engine`. `session::Session` is a thin layer
+//! over a one-slot engine — the chat history, the template, the prompt and the
+//! prefix reuse within a conversation are the layer's own; the generation, the
+//! speculation and the verification are the engine's.
 //!
-//! ADR 0007 makes the engine the one runtime and rebuilds the session as a thin
-//! layer over a one-slot engine. Before that move, the two differences that change
-//! output are pinned here, on the synthetic models (no model files needed):
+//! This file pins what the layer must not change, on the synthetic models (no
+//! model files needed):
 //!
-//! * the sampling key — the session counts conversation turns into it, the engine
-//!   does not;
+//! * the same prompt through the session and through a one-slot engine gives the
+//!   same greedy tokens, and the same sampled ones once the slot is told the
+//!   session’s two settings: the turn in the sampling key and the family’s KV
+//!   cache;
 //! * the taps a DSpark drafter needs, which must not change a single logit bit;
 //! * a second user arriving while the first one speculates;
 //! * the prefix store, which is off while a drafter is attached.
 //!
-//! Every test names the ADR 0007 consequence it pins.
+//! Every test names the ADR 0007 consequence it pins. The names are the ones the
+//! file was recorded under: they say "the two runtimes" for what are now the two
+//! ways of asking the one.
 
 mod support;
 
@@ -31,15 +35,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{write_dense, write_dense_accepting, write_hybrid, Dense};
 
-/// The prompt both runtimes are given. Short enough to be one prefill chunk.
+/// The prompt both paths are given. Short enough to be one prefill chunk.
 const USER: &str = "Name three colours.";
-/// The reply both runtimes are asked for.
+/// The reply both paths are asked for.
 const TOKENS: usize = 24;
-/// The seed both runtimes sample with.
+/// The seed both paths sample with.
 const SEED: u64 = 20240;
 /// The temperature at which the two sampling keys are compared.
 const TEMP: f32 = 0.7;
-/// The nucleus both runtimes sample from.
+/// The nucleus both paths sample from.
 const TOP_P: f32 = 0.95;
 
 /// A directory of its own for each test (tests run in parallel and each removes its directory).
@@ -70,7 +74,7 @@ fn system(model: &Model) -> Option<String> {
 ///
 /// The session renders the chat template and encodes it (`Session::plan_prompt`);
 /// the engine is given token ids. This is the same string through the same
-/// template, so the two runtimes see the same prompt.
+/// template, so the session and the engine see the same prompt.
 fn prompt_ids(model: &Model, user: &str) -> Vec<u32> {
     let text = chat_prompt(
         template(model),
@@ -94,9 +98,9 @@ fn session_tokens(session: &mut Session, user: &str) -> Vec<u32> {
 
 /// The token ids a one-slot engine produces for one prompt.
 ///
-/// The engine's stop list is the template's own, so both runtimes end the turn on
-/// the same token; the engine reports that token, the session does not (it is the
-/// turn's end, not part of the answer), so it is dropped here.
+/// The engine's stop list is the template's own, so both end the turn on the same
+/// token; the engine reports that token, the session does not (it is the turn's
+/// end, not part of the answer), so it is dropped here.
 fn engine_tokens(model: &Arc<Model>, prompt: &[u32], cfg: &SlotCfg) -> Vec<u32> {
     engine_tokens_with(model, prompt, cfg, KvPrec::F16)
 }
@@ -129,8 +133,7 @@ fn drop_stop(out: &mut Vec<u32>, stop: &[u32]) {
 
 /// The engine's request settings, matching the session's sampling controls.
 ///
-/// The stop list is the template's own, so both runtimes end the turn on the same
-/// token.
+/// The stop list is the template's own, so both end the turn on the same token.
 fn slot_cfg(model: &Model, temperature: f32) -> SlotCfg {
     SlotCfg {
         temperature,
@@ -163,7 +166,7 @@ fn session_cfg(temperature: f32) -> SessionCfg {
         max_tokens: TOKENS,
         threads: 4,
         // The drafter and the suffix drafter are not what this test compares: the
-        // two runtimes' *own* decoding is.
+        // the two paths' *own* decoding is.
         speculate: false,
         thinking: true,
         ..Default::default()
@@ -197,7 +200,8 @@ fn engine_run(model: &Arc<Model>, prompt: &[u32], cfg: &SlotCfg) -> (Vec<u32>, u
     (out, e.spec_drafts, e.spec_hits)
 }
 
-/// The two runtimes, given the same prompt and the same sampling controls.
+/// The session and the engine, given the same prompt and the same sampling
+/// controls.
 fn both(model: &Arc<Model>, temperature: f32) -> (Vec<u32>, Vec<u32>) {
     let mut session =
         Session::from_model(model.clone(), session_cfg(temperature)).expect("session");
@@ -264,13 +268,13 @@ fn reference_decode(model: &Model, prompt: &[u32], temperature: f32, turn: u64) 
 ///
 /// The same prompt through the session and through a one-slot engine, greedy: the
 /// token streams must be identical. Greedy decoding ignores the sampling key, so
-/// what this pins is everything else the two runtimes do differently — the prompt
+/// what this pins is everything else the two paths do differently — the prompt
 /// they build, the positions they number, the batch widths they run, and the
 /// kernel paths they take.
 ///
 /// The other difference ADR 0007 names — the session's int8 KV rotation, which it
 /// turns off for Qwen2 — is not exercised here: neither model is Qwen2, and both
-/// runtimes use the f16 cache.
+/// use the f16 cache.
 #[test]
 fn greedy_decoding_is_the_same_through_the_session_and_the_engine() {
     let dir = tmpdir("greedy");
@@ -291,12 +295,12 @@ fn greedy_decoding_is_the_same_through_the_session_and_the_engine() {
         eprintln!("{name}: greedy session {s:?}");
         if s != e {
             failures.push(format!(
-                "{name}: the two runtimes disagree\n  session: {s:?}\n  engine:  {e:?}"
+                "{name}: the session and the engine disagree\n  session: {s:?}\n  engine:  {e:?}"
             ));
         }
         // The turn may end before its budget, on the template's end-of-turn token
-        // — which token it samples depends on the kernel tier, and both runtimes
-        // must end on the same one.
+        // — which token it samples depends on the kernel tier, and both must end
+        // on the same one.
         if s.is_empty() {
             failures.push(format!("{name}: the turn produced no tokens"));
         }
@@ -310,14 +314,14 @@ fn greedy_decoding_is_the_same_through_the_session_and_the_engine() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         failures.is_empty(),
-        "the runtimes disagree:\n{}",
+        "the session and the engine disagree:\n{}",
         failures.join("\n")
     );
 }
 
 /// **ADR 0007, decision 5: the sampling key is a per-slot setting.**
 ///
-/// The two runtimes key their randomness differently today:
+/// The session and the engine key their randomness differently:
 ///
 /// * the engine samples with `position_key(seed, 0, pos)` — the position alone
 ///   (`serve.rs`, `finish_decode`), so the same prompt and seed give the same
@@ -435,8 +439,8 @@ fn the_two_runtimes_sample_with_different_keys() {
 
 /// **ADR 0007, decision 5: the session's turn and KV rotation are per-slot settings.**
 ///
-/// The two runtimes differ in two places that change the output, and both are
-/// settings of a slot now:
+/// The session and the engine differ in two places that change the output, and
+/// both are settings of a slot:
 ///
 /// * the sampling key — the session counts its conversation turns into it, so
 ///   its first turn draws with `turn = 1`; the engine keeps `turn = 0`;
@@ -765,7 +769,7 @@ fn the_engine_speculates_with_the_suffix_index_like_the_session() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         failures.is_empty(),
-        "the runtimes disagree:\n{}",
+        "the session and the engine disagree:\n{}",
         failures.join("\n")
     );
 }
@@ -774,7 +778,7 @@ fn the_engine_speculates_with_the_suffix_index_like_the_session() {
 ///
 /// The same, with the DSpark head: the engine asks the head for a block of
 /// drafts, verifies them in one pass, and cuts the accepted run where the
-/// turn ends — exactly as `Session::commit` does. The tokens are the
+/// turn ends — exactly as the plain decode path does. The tokens are the
 /// session's, and the engine's without a drafter.
 #[test]
 fn the_engine_speculates_with_a_dspark_head_like_the_session() {
@@ -836,7 +840,7 @@ fn the_engine_speculates_with_a_dspark_head_like_the_session() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         failures.is_empty(),
-        "the runtimes disagree:\n{}",
+        "the session and the engine disagree:\n{}",
         failures.join("\n")
     );
 }
