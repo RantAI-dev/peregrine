@@ -865,3 +865,112 @@ pub fn write_moe(dir: &Path, fmt: Format, seed: u64, s: MoeShape) -> PathBuf {
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
+
+/// Write a synthetic `phi3` model (fused `attn_qkv`, fused `ffn_up` with SwiGLU, RMSNorm,
+/// NeoX rotary pairing, no biases) whose matrices are all `fmt`, seeded by `seed`.
+pub fn write_phi3(dir: &Path, fmt: Format, seed: u64, s: Dense) -> PathBuf {
+    write_phi3_named(dir, fmt, seed, s, None)
+}
+
+/// Write a synthetic `phi3` model with optional custom file stem / general.name.
+pub fn write_phi3_named(
+    dir: &Path,
+    fmt: Format,
+    seed: u64,
+    s: Dense,
+    custom_name: Option<&str>,
+) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let head_dim = s.d_model / s.n_head;
+    w.str("general.architecture", "phi3");
+    let name = custom_name
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("synthetic-phi3-{}", fmt.label()));
+    w.str("general.name", &name);
+    let k = |x: &str| format!("phi3.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("attention.head_count_kv"), s.n_head_kv as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.u32(&k("attention.key_length"), head_dim as u32);
+    w.u32(&k("attention.value_length"), head_dim as u32);
+    w.u32(&k("rope.dimension_count"), head_dim as u32);
+    w.f32(&k("rope.freq_base"), 10000.0);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
+    w.u32(&k("attention.sliding_window"), 0);
+
+    vocab::add_tokenizer_metadata(&mut w, "llama-bpe");
+    w.str(
+        "tokenizer.chat_template",
+        vocab::chat_template(TemplateKind::ChatMl),
+    );
+
+    let kv = s.n_head_kv * head_dim;
+    let qkv = s.d_model + 2 * kv;
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    for i in 0..s.n_layer {
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_qkv.weight"),
+            s.d_model,
+            qkv,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_output.weight"),
+            s.d_model,
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_up.weight"),
+            s.d_model,
+            2 * s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_down.weight"),
+            s.n_ff,
+            s.d_model,
+        );
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+    mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
+
+    let file_name = format!("{name}.gguf");
+    let path = dir.join(file_name);
+    w.write_to_file(&path).expect("write synthetic phi3 model");
+    path
+}
