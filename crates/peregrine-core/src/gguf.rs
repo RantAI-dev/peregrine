@@ -121,6 +121,10 @@ impl TensorInfo {
 
 pub struct Gguf {
     map: Mmap,
+    /// The file, when the mapping is of the file itself. The huge-page copy is
+    /// anonymous memory, and a second mapping of the file would be of the
+    /// wrong thing.
+    file: Option<File>,
     data_start: usize,
     pub meta: HashMap<String, Value>,
     pub tensors: HashMap<String, TensorInfo>,
@@ -188,15 +192,18 @@ impl Gguf {
         // pages. A decode step streams every weight once; with 4 KB page-cache pages that is a TLB miss per 4 KB,
         // with 2 MB pages one per 2 MB. Costs one copy at load and the page cache's copy can then be dropped.
         #[cfg(target_os = "linux")]
-        let map = if crate::options::get().hugepages {
+        let (map, file) = if crate::options::get().hugepages {
             let mut anon = memmap2::MmapMut::map_anon(map.len())
                 .map_err(|e| format!("gguf: anon map: {e}"))?;
             let _ = anon.advise(memmap2::Advice::HugePage);
             anon.copy_from_slice(&map);
             drop(map);
-            anon.make_read_only().map_err(|e| format!("gguf: {e}"))?
+            (
+                anon.make_read_only().map_err(|e| format!("gguf: {e}"))?,
+                None,
+            )
         } else {
-            map
+            (map, Some(file))
         };
 
         let mut c = Cur { b: &map, p: 0 };
@@ -301,6 +308,7 @@ impl Gguf {
 
         let g = Gguf {
             map,
+            file,
             data_start,
             meta,
             tensors,
@@ -322,6 +330,41 @@ impl Gguf {
             }
         }
         Ok(g)
+    }
+
+    /// Read a range of the file's data section into `buf`.
+    ///
+    /// The repack reads the k-quant matrices this way, not through the
+    /// mapping: the mapping's pages for them are then never faulted in, so the
+    /// model does not cost twice what it should — once for the repacked store
+    /// and once for the file's bytes, which are never read again (S3.4,
+    /// decision 2). The pages stay in the page cache, which is the system's
+    /// memory, not the engine's.
+    pub fn read_data(&self, offset: usize, buf: &mut [u8]) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let f = self.file.as_ref().ok_or("gguf: the file is not mapped")?;
+            let mut done = 0;
+            while done < buf.len() {
+                let n = f
+                    .read_at(&mut buf[done..], (self.data_start + offset + done) as u64)
+                    .map_err(|e| format!("gguf: read: {e}"))?;
+                if n == 0 {
+                    return Err("gguf: the file ended inside a tensor".into());
+                }
+                done += n;
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            // Without the file handle, the mapping is the only way in: its
+            // pages become resident, and the model costs twice what it should.
+            let s = self.data_start + offset;
+            buf.copy_from_slice(&self.map[s..s + buf.len()]);
+            Ok(())
+        }
     }
 
     /// The raw block bytes of a tensor, straight out of the map. No copy.

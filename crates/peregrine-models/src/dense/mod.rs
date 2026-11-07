@@ -574,6 +574,7 @@ impl Architecture for Dense {
                     lbt,
                     pool,
                     stats,
+                    &mut st.kq,
                 );
             }
             peregrine_core::blocks::ffn::swiglu_rows(
@@ -605,6 +606,7 @@ impl Architecture for Dense {
                     lbt,
                     pool,
                     stats,
+                    &mut st.kq,
                 );
             }
             for i in 0..nb * cfg.d_model {

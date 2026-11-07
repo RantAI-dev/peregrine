@@ -799,6 +799,7 @@ impl Session {
                     dt_s: rep.secs / n_em as f64,
                     bytes_weights: rep.stats.bytes_weights / n_em as u64,
                     bytes_kv: rep.stats.bytes_kv / n_em as u64,
+                    bytes_acts: rep.stats.bytes_acts / n_em as u64,
                     macs: rep.stats.macs / n_em as u64,
                     barriers: rep.stats.barriers / n_em as u64,
                     drafted: if i == 0 { rep.drafted as u8 } else { 0 },
@@ -939,6 +940,8 @@ impl Session {
         let mut prefill_s = 0.0;
         let mut total_bytes_weights = 0u64;
         let mut total_bytes_kv = 0u64;
+        let mut prefill_bytes_acts = 0u64;
+        let mut decode_bytes_acts = 0u64;
         let mut cost: Option<SlotCost> = None;
         while self.engine.active() > 0 {
             let ems = self.engine.step();
@@ -947,6 +950,7 @@ impl Session {
                 // A chunk of the prompt: it cost the prompt's time, not a token's.
                 prefilled += rep.rows;
                 prefill_s += rep.secs;
+                prefill_bytes_acts += rep.stats.bytes_acts;
                 if decode_tokens == 0 && prefilled >= prompt_len - 1 {
                     break;
                 }
@@ -966,6 +970,7 @@ impl Session {
             decode_steps += 1;
             total_bytes_weights += rep.stats.bytes_weights;
             total_bytes_kv += rep.stats.bytes_kv;
+            decode_bytes_acts += rep.stats.bytes_acts;
             if decode_steps >= decode_tokens {
                 break;
             }
@@ -1008,6 +1013,8 @@ impl Session {
             prefill_tok_s,
             decode_tok_s,
             bytes_per_token,
+            prefill_bytes_acts,
+            decode_bytes_acts,
         })
     }
 }
@@ -1022,4 +1029,13 @@ pub struct BenchReport {
     pub prefill_tok_s: f64,
     pub decode_tok_s: f64,
     pub bytes_per_token: f64,
+    /// The bytes of the activations the prompt's matmuls read.
+    ///
+    /// The prefill's activation traffic is not in the weight accounting: the
+    /// matrix product reads the activation once per output row, or once per
+    /// eight rows with the repacked tiles. This is where the repack's claim —
+    /// that the tile cuts that traffic — is measured.
+    pub prefill_bytes_acts: u64,
+    /// The same, for the decode steps.
+    pub decode_bytes_acts: u64,
 }

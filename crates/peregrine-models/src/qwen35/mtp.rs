@@ -252,6 +252,7 @@ impl MtpHead for Mtp {
             nb,
             pool,
             stats,
+            &mut inner.st.kq,
         );
 
         // attention block
@@ -289,6 +290,7 @@ impl MtpHead for Mtp {
             nb,
             pool,
             stats,
+            &mut inner.st.kq,
         );
 
         for b in 0..nb {
@@ -372,6 +374,7 @@ impl MtpHead for Mtp {
             1,
             pool,
             stats,
+            &mut inner.st.kq,
         );
         for i in 0..d {
             inner.st.x[i] = inner.st.x[b * d + i] + inner.st.xb2[i];
@@ -402,6 +405,7 @@ impl MtpHead for Mtp {
             1,
             pool,
             stats,
+            &mut inner.st.kq,
         );
         {
             let (g, u) = (&mut inner.st.hb[..f], &inner.st.hb2[..f]);
@@ -419,6 +423,7 @@ impl MtpHead for Mtp {
             1,
             pool,
             stats,
+            &mut inner.st.kq,
         );
         for i in 0..d {
             inner.st.x[i] += inner.st.xb2[i];
@@ -463,6 +468,7 @@ impl MtpHead for Mtp {
             1,
             pool,
             stats,
+            &mut inner.st.kq,
         );
         let l = &inner.logits[..dv];
         let mut best = 0usize;
