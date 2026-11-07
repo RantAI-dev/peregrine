@@ -1,7 +1,40 @@
 # Benchmarking
 
-A speed claim is a measurement someone else can repeat. This page says how to make one. The full
-harness is roadmap item S3.1; until it exists, follow the same method by hand.
+A speed claim is a measurement someone else can repeat. This page says how to make one.
+The automated benchmark harness in `benchmarks/` (roadmap item **S3.1**) is the source for all
+`docs/targets.md` performance numbers from now on.
+
+## The benchmark harness: `benchmarks/run.py`
+
+The top-level harness orchestrates pinned engine builds, runs interleaved rounds, measures the four headline numbers across 512, 4k, and 16k contexts, records the host's hardware ceilings via Peregrine's telemetry probe, and generates Markdown comparison tables conforming to `docs/targets.md`.
+
+### Running benchmarks
+
+```sh
+# Full benchmark: interleaved Peregrine vs llama.cpp (3 repeat runs, 8 threads)
+python3 benchmarks/run.py \
+    --models /path/to/model.gguf \
+    --engines peregrine,llama_cpp \
+    --contexts 512,4096,16384 \
+    --runs 3 \
+    --threads 8 \
+    --output-dir benchmarks/results
+
+# Quick smoke test on an AVX2 host using a synthetic model (no external weights needed)
+python3 benchmarks/run.py --smoke --output-dir benchmarks/results
+
+# Dry-run: inspect build and execution commands without running
+python3 benchmarks/run.py --models /path/to/model.gguf --engines peregrine,llama_cpp --dry-run
+```
+
+### Generating reports
+
+Convert raw JSON manifests into Markdown tables:
+
+```sh
+python3 benchmarks/report.py benchmarks/results/*.json --output report.md
+cat report.md
+```
 
 ## Rules
 
