@@ -414,6 +414,26 @@ impl Template {
         }
     }
 
+    /// The final-channel text in a Harmony reply. gpt-oss writes an analysis channel
+    /// before the final one; its own Jinja keeps only the final channel when an earlier
+    /// assistant turn is replayed ("CoT is dropped during all previous turns", the
+    /// template's `else` branch), so a replayed transcript must do the same.
+    fn harmony_final_text(text: &str) -> &str {
+        const FINAL: &str = "<|channel|>final<|message|>";
+        let body = match text.rfind(FINAL) {
+            Some(i) => &text[i + FINAL.len()..],
+            // A reply with only an analysis channel has no final text to replay.
+            None if text.contains("<|channel|>analysis<|message|>") => "",
+            None => text,
+        };
+        let end = [body.find("<|return|>"), body.find("<|end|>")]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(body.len());
+        &body[..end]
+    }
+
     /// A completed assistant message, as it appears in a replayed transcript.
     pub fn assistant_turn(self, text: &str) -> String {
         match self {
@@ -427,7 +447,10 @@ impl Template {
             Template::MistralV0 | Template::Llama2Plain => format!("{text}</s>"),
             // The assistant header came from `user_turn`; a non-final answer closes
             // with `<|end|>`, as gpt-oss's template writes an earlier turn.
-            Template::Harmony => format!("<|channel|>final<|message|>{text}<|end|>"),
+            Template::Harmony => format!(
+                "<|channel|>final<|message|>{}<|end|>",
+                Self::harmony_final_text(text)
+            ),
         }
     }
 
@@ -436,9 +459,23 @@ impl Template {
     /// writes the same terminator as [`Template::assistant_turn`].
     pub fn assistant_final(self, text: &str) -> String {
         match self {
-            Template::Harmony => format!("<|channel|>final<|message|>{text}<|return|>"),
+            Template::Harmony => format!(
+                "<|channel|>final<|message|>{}<|return|>",
+                Self::harmony_final_text(text)
+            ),
             _ => self.assistant_turn(text),
         }
+    }
+
+    /// Whether a continuing conversation must be replayed from its transcript rather
+    /// than extended incrementally.
+    ///
+    /// gpt-oss's template drops every earlier assistant turn's analysis channel
+    /// (keeping only the final one), so a prompt built by appending to the cache of
+    /// the reply just generated would keep text the full render does not. Harmony
+    /// therefore rebuilds the transcript; the other templates extend the cache.
+    pub fn replays_transcript(self) -> bool {
+        self == Template::Harmony
     }
 
     /// What closes the previous assistant message when a conversation continues
@@ -824,6 +861,66 @@ mod tests {
             render_chat_prompt(t, None, &[("Hello", "Hi there")], FINAL_USER),
             "[INST] Hello [/INST]Hi there</s>[INST] Another question [/INST]"
         );
+    }
+
+    #[test]
+    fn harmony_drops_an_earlier_turns_analysis_channel_from_the_replay() {
+        let t = Template::Harmony;
+        // What the model generated in the earlier turn: analysis, then final.
+        let generated = "<|channel|>analysis<|message|>SECRET REASONING<|end|>\
+                         <|start|>assistant<|channel|>final<|message|>Hi there";
+        // An earlier assistant turn keeps only its final channel, as the Jinja
+        // template's "CoT is dropped during all previous turns" branch does.
+        assert_eq!(
+            t.assistant_turn(generated),
+            "<|channel|>final<|message|>Hi there<|end|>"
+        );
+        assert_eq!(
+            t.render(
+                None,
+                &[("Hello".into(), generated.into())],
+                "Next",
+                "14 Oct 2026",
+                false,
+                None
+            ),
+            format!(
+                "{HARMONY_SYSTEM}<|start|>user<|message|>Hello<|end|>\
+                 <|start|>assistant<|channel|>final<|message|>Hi there<|end|>\
+                 <|start|>user<|message|>Next<|end|><|start|>assistant"
+            )
+        );
+        assert!(!t
+            .render(
+                None,
+                &[("Hello".into(), generated.into())],
+                "Next",
+                "14 Oct 2026",
+                false,
+                None
+            )
+            .contains("SECRET"));
+        // The incremental path's closing token is the one a full render writes, so a
+        // final-only history produces the same string token for token.
+        let full = t.render(
+            None,
+            &[("Hello".into(), "Hi there".into())],
+            "Next",
+            "14 Oct 2026",
+            false,
+            None,
+        );
+        let incremental = format!(
+            "{}{}{}{}",
+            t.system_block(None, "14 Oct 2026"),
+            t.user_turn("Hello"),
+            t.assistant_turn("Hi there"),
+            t.user_turn("Next")
+        );
+        assert_eq!(full, incremental);
+        assert_eq!(t.close_previous(), "<|end|>");
+        assert!(t.replays_transcript());
+        assert!(!Template::Qwen3.replays_transcript());
     }
 
     /// gpt-oss's own chat template, from llama.cpp v0.9.0's

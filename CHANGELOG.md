@@ -42,8 +42,17 @@ All notable changes to this project are documented here. The format follows
   the fixed system block, the developer block for the caller's system message, user and assistant
   turns with the `<|channel|>final<|message|>` header, and the generation prompt. Rendered strings are
   pinned against llama.cpp v0.9.0; the synthetic gpt-oss file now carries the model's Jinja template
-  and is detected as `harmony`. The reasoning split between the analysis and final channels is a
-  follow-up.
+  and is detected as `harmony`.
+- The server splits gpt-oss's Harmony reply into `reasoning_content` (the `analysis` channel) and
+  `content` (the `final` channel), non-streamed and as SSE deltas, with the control tokens consumed.
+  A `commentary` preamble is content and a `<|constrain|>` header is accepted. `reasoning_format`
+  (`none`, `auto`, `deepseek`, `deepseek-legacy`) and `--reasoning-format`, and `reasoning_effort:
+  "none"`, map as llama-server maps them: `none` keeps the analysis text in `content`, `auto`/`deepseek`
+  split it, and `deepseek-legacy` also mirrors reasoning into streaming content. Qwen3's `<think>` span
+  obeys the same switch. Earlier assistant turns replay only their final channel, matching gpt-oss's
+  Jinja, and a Harmony `Session` re-renders its transcript so the incremental path cannot retain an
+  analysis the full render drops. The reasoning-budget forcing stays Qwen3-only: Harmony has no
+  `</think>` to close.
 - Support for plain Qwen 3.5 files (S2.2c): a `qwen35` file with no `prism.hadamard.*` metadata is loaded
   without a rotation, and its ordinary quantised matmuls (Q8_0, F16, ...) run through the dense kernels
   instead of the ternary ones. The synthetic plain file gives the same greedy tokens as llama.cpp v0.9.0;

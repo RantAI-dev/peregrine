@@ -527,7 +527,23 @@ impl Session {
         let reserve = answer_reserve(&self.cfg);
         let max = self.cfg.max_ctx;
         self.prefix_reused = 0;
-        let inc = if !self.started && !self.history.is_empty() {
+        let inc = if self.template.replays_transcript() && self.started {
+            // Harmony drops every earlier assistant turn's analysis channel, so the
+            // transcript is re-rendered and its shared beginning restored from the
+            // cache. The reply just generated may have opened an analysis channel
+            // that the replay does not contain, so appending `close_previous` to the
+            // cache would not be the prompt a full render writes.
+            let toks = self
+                .model
+                .tk
+                .encode_prompt(&self.full_prompt(&self.history.clone(), user));
+            if self.kept.is_empty() {
+                self.kept = std::mem::take(&mut self.ctx);
+            }
+            let l = self.reuse_prefix(&toks);
+            self.prefix_reused = l;
+            toks[l..].to_vec()
+        } else if !self.started && !self.history.is_empty() {
             // Seeded history: the whole transcript is the prompt, less what the cache
             // still holds of it.
             let toks = self
