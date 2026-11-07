@@ -1754,12 +1754,17 @@ fn gpt_oss_with_its_jinja_template_detects_harmony() {
 
     let tk = Tokenizer::from_gguf(&g).unwrap();
     let stops = Template::Harmony.stop_ids(&tk);
-    for name in ["<|return|>", "<|end|>"] {
-        let id = tk
-            .id_of(name)
-            .unwrap_or_else(|| panic!("the vocabulary has {name}"));
-        assert!(stops.contains(&id), "the stop set has {name}");
-    }
+    let id = |name: &str| {
+        tk.id_of(name)
+            .unwrap_or_else(|| panic!("the vocabulary has {name}"))
+    };
+    assert!(
+        stops.contains(&id("<|return|>")),
+        "the stop set has <|return|>"
+    );
+    // `<|end|>` closes the analysis message; the answer comes after it, so a
+    // stop there would cut every reply before its answer.
+    assert!(!stops.contains(&id("<|end|>")), "<|end|> is not a stop");
     assert!(stops.contains(&tk.eos), "the model's own EOS is a stop");
     let _ = std::fs::remove_dir_all(&dir);
 }

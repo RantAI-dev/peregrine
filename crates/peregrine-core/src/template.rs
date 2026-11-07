@@ -237,13 +237,16 @@ impl Template {
             | Template::MistralV7
             | Template::Llama2
             | Template::Llama2Plain => &["</s>"],
-            // A Harmony assistant message ends with `<|return|>` when it is the final
-            // message, and every message may end with `<|end|>` (the template writes
-            // both; `src/llama-chat.cpp:820-829`, v0.9.0).
-            Template::Harmony => &["<|return|>", "<|end|>"],
+            // A Harmony reply ends on `<|return|>` (the answer) or `<|call|>` (a tool
+            // call). `<|end|>` is not a stop: it closes the analysis message, and the
+            // final answer follows it in the same reply. llama.cpp v0.9.0 drops
+            // `<|end|>` from the end-of-generation set when the vocabulary has
+            // `<|return|>` and `<|call|>` (`src/llama-vocab.cpp:3345-3383`).
+            Template::Harmony => &["<|return|>", "<|call|>"],
         };
         let mut ids: Vec<u32> = names.iter().filter_map(|n| tk.id_of(n)).collect();
-        if !ids.contains(&tk.eos) {
+        let eos_is_end = self == Template::Harmony && tk.id_of("<|end|>") == Some(tk.eos);
+        if !ids.contains(&tk.eos) && !eos_is_end {
             ids.push(tk.eos);
         }
         ids

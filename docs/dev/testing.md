@@ -105,7 +105,7 @@ The synthetic gpt-oss file in `tests/synthetic.rs` is written with gpt-oss's own
 `tokenizer.chat_template` (the fixture `crates/peregrine-core/tests/fixtures/harmony.jinja`, from llama.cpp
 v0.9.0's `models/templates/openai-gpt-oss-120b.jinja`). `Template::detect` must choose `harmony` from it,
 the way llama.cpp detects the `<|start|>` + `<|channel|>` pair (`src/llama-chat.cpp:222-223`, v0.9.0), and
-the stop set must carry the template's `<|return|>` and `<|end|>` (`src/llama-chat.cpp:820-829`).
+the stop set must carry `<|return|>` (and `<|call|>`, when the vocabulary has it) but not `<|end|>`, which closes the analysis message before the answer (llama.cpp v0.9.0 drops it from the end-of-generation set, `src/llama-vocab.cpp:3345-3383`).
 `template.rs`'s tests pin the rendered strings — system block, developer block, user and assistant turns,
 and the generation prompt — for a system + user turn, a multi-turn conversation, and a final assistant
 message with no generation prompt. A real gpt-oss file is still the open check; the template's channel
@@ -115,7 +115,7 @@ The reasoning split is the follow-up: llama.cpp's gpt-oss handler treats
 `<|channel|>analysis<|message|>` … `<|end|>` as the reasoning span and
 `<|channel|>final<|message|>` … `<|return|>` as the answer (`common/parsers/gpt-oss.cpp`, v0.9.0), while
 Peregrine's server currently splits on the single `<think>` / `</think>` tokens. Serving gpt-oss needs a
-channel-aware split (and the `<|end|>` stop must not end a turn while the analysis channel is open);
+channel-aware split;
 until then the template is rendered exactly but a reasoning model's answer is not sorted into
 `reasoning_content` and `content`.
 
