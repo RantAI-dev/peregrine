@@ -130,17 +130,83 @@ def load_prompt_corpus(prompt_file: Optional[Path]) -> str:
     return "The quick brown fox jumps over the lazy dog. Benchmarking inference engines on CPUs."
 
 
-def make_prompt(corpus: str, target_tokens: int, run_nonce: str) -> str:
-    """Build a prompt targeting approx target_tokens with a randomized first line to avoid prefix cache reuse."""
-    # Target prompt tokens leaving headroom for generation within context
-    prompt_tokens = max(16, target_tokens - 48)
-    # Take prompt_tokens characters from corpus so it never exceeds context even on byte tokenizers
+def make_prompt(corpus: str, char_count: int, run_nonce: str) -> str:
+    """Build a prompt with approx char_count characters of corpus and a randomized first line to avoid prefix cache reuse."""
     text = corpus
-    while len(text) < prompt_tokens:
+    while len(text) < char_count:
         text += "\n" + corpus
-    base_text = text[:prompt_tokens].strip()
-    # Unique first line defeats position-0 prefix matching
+    base_text = text[:char_count].strip()
     return f"// Benchmark run nonce: {run_nonce}\n{base_text}"
+
+
+def calibrate_prompt_chars(
+    url: str,
+    corpus: str,
+    target_tokens: int,
+    model_alias: str = "peregrine",
+    max_iters: int = 10,
+    tolerance: float = 0.02,
+) -> int:
+    """Calibrate character count for a target prompt token length by probing the server.
+
+    Sends probe requests with ignore_eos: true, measures usage.prompt_tokens,
+    scales character count, and repeats until within ~2% of target_tokens.
+    """
+    print(f"  Calibrating prompt characters for target {target_tokens} tokens...")
+    # Start conservatively (e.g. target_tokens // 2) so we never exceed server_ctx
+    # on byte tokenizers (where 1 char ~= 1 token).
+    nonce = f"probe-{uuid.uuid4().hex[:8]}"
+    nonce_line = f"// Benchmark run nonce: {nonce}\n"
+    char_count = max(20, (target_tokens // 2) - len(nonce_line))
+
+    best_chars = char_count
+    best_diff = float("inf")
+    best_tokens = 0
+
+    for iteration in range(max_iters):
+        test_nonce = f"probe-{iteration}-{uuid.uuid4().hex[:8]}"
+        prompt = make_prompt(corpus, char_count, test_nonce)
+        try:
+            res = send_chat_completion(
+                url=url,
+                prompt=prompt,
+                max_tokens=1,
+                stream=False,
+                model_alias=model_alias,
+                ignore_eos=True,
+            )
+        except Exception as e:
+            if char_count > 40:
+                char_count = char_count // 2
+                continue
+            raise e
+
+        actual_tokens = res.get("prompt_tokens", 0)
+        if actual_tokens <= 0:
+            break
+
+        diff = abs(actual_tokens - target_tokens)
+        if diff < best_diff:
+            best_diff = diff
+            best_chars = char_count
+            best_tokens = actual_tokens
+
+        ratio = diff / float(target_tokens)
+        if ratio <= tolerance:
+            print(f"  [calibrated] {char_count} chars -> {actual_tokens} tokens ({ratio * 100:.1f}% error <= 2%)")
+            return char_count
+
+        scale = float(target_tokens) / float(actual_tokens)
+        new_char_count = max(10, int(char_count * scale))
+        if new_char_count == char_count:
+            if actual_tokens < target_tokens:
+                new_char_count += 4
+            else:
+                new_char_count = max(10, new_char_count - 4)
+        char_count = new_char_count
+
+    print(f"  [calibrated: best] {best_chars} chars -> {best_tokens} tokens (closest diff: {best_diff})")
+    return best_chars
 
 
 def parse_args() -> argparse.Namespace:
@@ -351,15 +417,17 @@ def main():
                 },
                 "results": {
                     str(ctx): {
-                        "single_user": {"decode_tok_s": [], "prefill_tok_s": [], "ttft_s": []},
-                        "multi_user_4": {"aggregate_tok_s": [], "ttft_s": []},
-                        "multi_user_10": {"aggregate_tok_s": [], "ttft_s": []},
+                        "single_user": {"decode_tok_s": [], "prefill_tok_s": [], "ttft_s": [], "prompt_tokens": []},
+                        "multi_user_4": {"aggregate_tok_s": [], "ttft_s": [], "prompt_tokens": []},
+                        "multi_user_10": {"aggregate_tok_s": [], "ttft_s": [], "prompt_tokens": []},
                     }
                     for ctx in contexts
                 },
             }
             for eng in selected_engines
         }
+
+        calibrated_chars_cache: Dict[Any, int] = {}
 
         # Interleaved repeat rounds: ABAB...
         for round_idx in range(runs):
@@ -384,77 +452,148 @@ def main():
                         engine_results[eng.name]["results"][ctx_k]["single_user"]["decode_tok_s"].append(res["decode_tok_s"])
                         engine_results[eng.name]["results"][ctx_k]["single_user"]["prefill_tok_s"].append(res["prefill_tok_s"])
                         engine_results[eng.name]["results"][ctx_k]["single_user"]["ttft_s"].append(res.get("prefill_s", 0.0))
+                        engine_results[eng.name]["results"][ctx_k]["single_user"]["prompt_tokens"].append(res.get("prompt_tokens", ctx))
                     continue
 
-                # Server mode: start HTTP server
-                max_ctx_needed = max(contexts) + decode_tokens + 64
-                server_proc = eng.start_server(
-                    model_path=str(model_path),
-                    port=args.port,
-                    threads=args.threads,
-                    ctx=max_ctx_needed,
-                    slots=16,
-                )
-                server_url = f"http://127.0.0.1:{args.port}"
+                # Server mode: start HTTP server per (context, user count) phase
+                for ctx in contexts:
+                    ctx_k = str(ctx)
+                    server_ctx = ctx + decode_tokens + 64
 
-                try:
-                    # Warm-up request
-                    print(f"[{eng.name}] Warming up...")
-                    send_chat_completion(
-                        url=server_url,
-                        prompt="Hello world",
-                        max_tokens=8,
-                        stream=True,
-                    )
+                    phases = [
+                        (1, "single_user", "1 user"),
+                        (4, "multi_user_4", "4 users"),
+                        (10, "multi_user_10", "10 users"),
+                    ]
 
-                    for ctx in contexts:
-                        print(f"[{eng.name}] Context {ctx} tokens:")
-                        ctx_k = str(ctx)
-
-                        # 1 User: single-user decode, prefill, TTFT
-                        prompt_1 = make_prompt(corpus, ctx, f"{round_idx}-1u-{uuid.uuid4().hex[:8]}")
-                        r1 = send_chat_completion(
-                            url=server_url,
-                            prompt=prompt_1,
-                            max_tokens=decode_tokens,
-                            stream=True,
+                    for users, phase_key, phase_label in phases:
+                        print(f"[{eng.name}] Context {ctx} tokens, {phase_label} (slots={users}, ctx={server_ctx}):")
+                        server_proc = eng.start_server(
+                            model_path=str(model_path),
+                            port=args.port,
+                            threads=args.threads,
+                            ctx=server_ctx,
+                            slots=users,
                         )
-                        print(f"  1 user:  decode {r1['decode_tok_s']:.1f} tok/s, prompt {r1['prefill_tok_s']:.1f} tok/s, TTFT {r1['ttft_s']:.3f} s")
-                        engine_results[eng.name]["results"][ctx_k]["single_user"]["decode_tok_s"].append(r1["decode_tok_s"])
-                        engine_results[eng.name]["results"][ctx_k]["single_user"]["prefill_tok_s"].append(r1["prefill_tok_s"])
-                        engine_results[eng.name]["results"][ctx_k]["single_user"]["ttft_s"].append(r1["ttft_s"])
+                        server_url = f"http://127.0.0.1:{args.port}"
 
-                        # 4 Users: multi-user aggregate throughput
-                        prompts_4 = [
-                            make_prompt(corpus, ctx, f"{round_idx}-4u-{u}-{uuid.uuid4().hex[:8]}")
-                            for u in range(4)
-                        ]
-                        r4 = run_concurrent_requests(
-                            url=server_url,
-                            prompts=prompts_4,
-                            max_tokens=decode_tokens,
-                        )
-                        print(f"  4 users: aggregate {r4['aggregate_tok_s']:.1f} tok/s")
-                        engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["aggregate_tok_s"].append(r4["aggregate_tok_s"])
-                        engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["ttft_s"].append(r4["median_ttft_s"])
+                        try:
+                            # Warm-up request after every server start
+                            print(f"[{eng.name}] Warming up...")
+                            send_chat_completion(
+                                url=server_url,
+                                prompt="Hello world",
+                                max_tokens=8,
+                                stream=True,
+                                ignore_eos=True,
+                            )
 
-                        # 10 Users: multi-user aggregate throughput and first-token time
-                        prompts_10 = [
-                            make_prompt(corpus, ctx, f"{round_idx}-10u-{u}-{uuid.uuid4().hex[:8]}")
-                            for u in range(10)
-                        ]
-                        r10 = run_concurrent_requests(
-                            url=server_url,
-                            prompts=prompts_10,
-                            max_tokens=decode_tokens,
-                        )
-                        print(f"  10 users: aggregate {r10['aggregate_tok_s']:.1f} tok/s, TTFT {r10['median_ttft_s']:.3f} s")
-                        engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["aggregate_tok_s"].append(r10["aggregate_tok_s"])
-                        engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["ttft_s"].append(r10["median_ttft_s"])
+                            # Calibrate prompt character count for this engine, model, and context
+                            cache_key = (eng.name, model_path.name, ctx)
+                            if cache_key not in calibrated_chars_cache:
+                                calibrated_chars_cache[cache_key] = calibrate_prompt_chars(
+                                    url=server_url,
+                                    corpus=corpus,
+                                    target_tokens=ctx,
+                                    model_alias=eng.name,
+                                )
+                            calibrated_chars = calibrated_chars_cache[cache_key]
 
-                finally:
-                    print(f"[{eng.name}] Stopping server...")
-                    eng.stop_server(server_proc)
+                            if users == 1:
+                                prompt_1 = make_prompt(corpus, calibrated_chars, f"{round_idx}-1u-{uuid.uuid4().hex[:8]}")
+                                r1 = send_chat_completion(
+                                    url=server_url,
+                                    prompt=prompt_1,
+                                    max_tokens=decode_tokens,
+                                    stream=True,
+                                    model_alias=eng.name,
+                                    ignore_eos=True,
+                                )
+                                actual_pt = r1.get("prompt_tokens", 0)
+                                off_ratio = abs(actual_pt - ctx) / float(ctx)
+                                if off_ratio > 0.05:
+                                    raise RuntimeError(
+                                        f"[{eng.name}] Actual prompt tokens ({actual_pt}) is {off_ratio * 100.0:.1f}% off target ({ctx}) > 5% allowed threshold!"
+                                    )
+                                if r1.get("completion_tokens") != decode_tokens:
+                                    print(
+                                        f"[warning] [{eng.name}] 1 user completion_tokens {r1.get('completion_tokens')} != max_tokens {decode_tokens}; dropping sample",
+                                        file=sys.stderr,
+                                    )
+                                else:
+                                    print(f"  1 user:  decode {r1['decode_tok_s']:.1f} tok/s, prompt {r1['prefill_tok_s']:.1f} tok/s, TTFT {r1['ttft_s']:.3f} s (prompt tokens: {actual_pt})")
+                                    engine_results[eng.name]["results"][ctx_k]["single_user"]["decode_tok_s"].append(r1["decode_tok_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["single_user"]["prefill_tok_s"].append(r1["prefill_tok_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["single_user"]["ttft_s"].append(r1["ttft_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["single_user"]["prompt_tokens"].append(actual_pt)
+
+                            elif users == 4:
+                                prompts_4 = [
+                                    make_prompt(corpus, calibrated_chars, f"{round_idx}-4u-{u}-{uuid.uuid4().hex[:8]}")
+                                    for u in range(4)
+                                ]
+                                r4 = run_concurrent_requests(
+                                    url=server_url,
+                                    prompts=prompts_4,
+                                    max_tokens=decode_tokens,
+                                    model_alias=eng.name,
+                                    ignore_eos=True,
+                                )
+                                user_results = r4.get("user_results", [])
+                                if len(user_results) != 4 or any(u.get("completion_tokens") != decode_tokens for u in user_results):
+                                    print(
+                                        f"[warning] [{eng.name}] 4 users: not all users produced max_tokens={decode_tokens}; dropping sample",
+                                        file=sys.stderr,
+                                    )
+                                else:
+                                    pts = [u.get("prompt_tokens", 0) for u in user_results]
+                                    for pt in pts:
+                                        off_ratio = abs(pt - ctx) / float(ctx)
+                                        if off_ratio > 0.05:
+                                            raise RuntimeError(
+                                                f"[{eng.name}] 4 users prompt tokens ({pt}) is {off_ratio * 100.0:.1f}% off target ({ctx}) > 5% allowed threshold!"
+                                            )
+                                    med_pt = round(statistics.median(pts), 1)
+                                    print(f"  4 users: aggregate {r4['aggregate_tok_s']:.1f} tok/s (prompt tokens: {med_pt})")
+                                    engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["aggregate_tok_s"].append(r4["aggregate_tok_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["ttft_s"].append(r4["median_ttft_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["multi_user_4"]["prompt_tokens"].append(med_pt)
+
+                            elif users == 10:
+                                prompts_10 = [
+                                    make_prompt(corpus, calibrated_chars, f"{round_idx}-10u-{u}-{uuid.uuid4().hex[:8]}")
+                                    for u in range(10)
+                                ]
+                                r10 = run_concurrent_requests(
+                                    url=server_url,
+                                    prompts=prompts_10,
+                                    max_tokens=decode_tokens,
+                                    model_alias=eng.name,
+                                    ignore_eos=True,
+                                )
+                                user_results = r10.get("user_results", [])
+                                if len(user_results) != 10 or any(u.get("completion_tokens") != decode_tokens for u in user_results):
+                                    print(
+                                        f"[warning] [{eng.name}] 10 users: not all users produced max_tokens={decode_tokens}; dropping sample",
+                                        file=sys.stderr,
+                                    )
+                                else:
+                                    pts = [u.get("prompt_tokens", 0) for u in user_results]
+                                    for pt in pts:
+                                        off_ratio = abs(pt - ctx) / float(ctx)
+                                        if off_ratio > 0.05:
+                                            raise RuntimeError(
+                                                f"[{eng.name}] 10 users prompt tokens ({pt}) is {off_ratio * 100.0:.1f}% off target ({ctx}) > 5% allowed threshold!"
+                                            )
+                                    med_pt = round(statistics.median(pts), 1)
+                                    print(f"  10 users: aggregate {r10['aggregate_tok_s']:.1f} tok/s, TTFT {r10['median_ttft_s']:.3f} s (prompt tokens: {med_pt})")
+                                    engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["aggregate_tok_s"].append(r10["aggregate_tok_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["ttft_s"].append(r10["median_ttft_s"])
+                                    engine_results[eng.name]["results"][ctx_k]["multi_user_10"]["prompt_tokens"].append(med_pt)
+
+                        finally:
+                            print(f"[{eng.name}] Stopping server...")
+                            eng.stop_server(server_proc)
 
         # 7. Aggregate statistics and write JSON per engine
         print("\n=== Aggregating Results and Writing JSON ===")
@@ -469,12 +608,17 @@ def main():
                 su_dec = calculate_stats(data["single_user"]["decode_tok_s"])
                 su_pref = calculate_stats(data["single_user"]["prefill_tok_s"])
                 su_ttft = calculate_stats(data["single_user"]["ttft_s"])
+                su_pts = calculate_stats(data["single_user"].get("prompt_tokens", []))
 
                 m4_agg = calculate_stats(data["multi_user_4"]["aggregate_tok_s"])
                 m4_ttft = calculate_stats(data["multi_user_4"]["ttft_s"])
+                m4_pts = calculate_stats(data["multi_user_4"].get("prompt_tokens", []))
 
                 m10_agg = calculate_stats(data["multi_user_10"]["aggregate_tok_s"])
                 m10_ttft = calculate_stats(data["multi_user_10"]["ttft_s"])
+                m10_pts = calculate_stats(data["multi_user_10"].get("prompt_tokens", []))
+
+                actual_prompt_tokens = su_pts["median"] if su_pts["median"] > 0 else int(ctx_str)
 
                 # Fraction of ceiling: (bytes_per_token * tok/s) / bandwidth_ceiling
                 frac_ceiling = 0.0
@@ -483,10 +627,12 @@ def main():
 
                 summary_results[ctx_str] = {
                     "context": int(ctx_str),
+                    "actual_prompt_tokens": actual_prompt_tokens,
                     "single_user": {
                         "decode_tok_s": su_dec,
                         "prefill_tok_s": su_pref,
                         "ttft_s": su_ttft,
+                        "prompt_tokens": su_pts,
                         "bytes_per_token": bytes_per_token,
                         "fraction_of_ceiling": round(frac_ceiling, 4),
                         "percent_of_ceiling": round(frac_ceiling * 100.0, 2),
@@ -495,16 +641,19 @@ def main():
                     "multi_user_4": {
                         "aggregate_tok_s": m4_agg,
                         "ttft_s": m4_ttft,
+                        "prompt_tokens": m4_pts,
                         "raw_samples": data["multi_user_4"],
                     },
                     "multi_user_10": {
                         "aggregate_tok_s": m10_agg,
                         "first_token_time_s": m10_ttft,
+                        "prompt_tokens": m10_pts,
                         "raw_samples": data["multi_user_10"],
                     },
                 }
 
             manifest["summary"] = summary_results
+
 
             ts_slug = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
             out_file = args.output_dir / f"{ts_slug}-{eng_name}-{model_path.stem}.json"

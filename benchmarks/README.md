@@ -34,6 +34,15 @@ Each number is measured at three standard context lengths defined in `docs/targe
 - **Interleaved execution (ABAB...)**: To control for thermal throttling, power profile fluctuations, and background OS noise, runs are interleaved (e.g. Engine A, Engine B, Engine A, Engine B) across at least 3 repetitions.
 - **Medians and Spread**: The median of each measurement is reported alongside its spread ($\frac{\max - \min}{2}$ or min/max range). Outliers and transient spikes are never averaged away.
 - **Prefix cache defeat**: To measure true prefill throughput and avoid artificial prefix-cache hits across repeat runs, every request prepends a unique first-line nonce (`// Benchmark run nonce: <uuid>\n`) while keeping the subsequent token sequence identical across engines.
+- **Prompt length calibration**: Prompts are calibrated per model and engine before measurement. The runner sends probe requests, reads `usage.prompt_tokens`, scales the corpus character count, and iteratively adjusts until the actual prompt token count is within ~2% of the target context length (including the nonce line). Every measured request records its actual prompt tokens in the JSON manifest; `report.py` displays it and fails loudly if any request deviates by >5% from the target.
+- **Fixed output length (`ignore_eos: true`)**: Without disabling end-of-sequence termination, generation can stop early, skewing decode token counts across engines. Both Peregrine (`crates/peregrine-server`) and llama.cpp accept `"ignore_eos": true` to decode to `max_tokens`. The harness asserts `completion_tokens == max_tokens` per request (warning and dropping samples if mismatched).
+- **Slots and context per phase**:
+  - In llama.cpp, `-c` specifies the total context divided among `-np` slots (unless `--kv-unified` is supported).
+  - In Peregrine, `-c` is per slot.
+  - To prevent slot starvation at 16k context and eliminate massive over-allocation of KV cache, servers are started per `(context, user count)` phase with `slots` set to the exact number of concurrent users (1, 4, 10).
+  - For llama.cpp, the harness passes `-c ctx*slots -np slots` (or `-c ctx -np slots --kv-unified` if `--kv-unified` is present in `llama-server --help`).
+  - For Peregrine, the harness passes `-c ctx --slots slots`.
+  - Servers are cleanly stopped and restarted between phases, maintaining ABAB interleaving per round and executing a warm-up request after every start.
 - **Fraction-of-Ceiling**: Achieved decode throughput is judged against the physical streaming bandwidth of the machine:
   $$\text{Fraction of Ceiling} = \frac{\text{Bytes moved per token} \times \text{Decode tok/s}}{\text{Machine streaming bandwidth ceiling}}$$
   Where bytes moved per token is measured directly via Peregrine's telemetry (`TokenTelem`), and the streaming bandwidth ceiling is measured via the hardware probe (`Machine::probe`).

@@ -117,6 +117,23 @@ class LlamaCppAdapter(EngineAdapter):
             "server_binary": str(self.server_bin) if self.server_bin else "pending",
         }
 
+    def supports_kv_unified(self) -> bool:
+        """Check if the llama-server binary supports the --kv-unified flag."""
+        if not self.server_bin or not self.server_bin.exists():
+            return False
+        try:
+            res = subprocess.run(
+                [str(self.server_bin), "--help"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5.0,
+            )
+            help_text = res.stdout + res.stderr
+            return "--kv-unified" in help_text
+        except Exception:
+            return False
+
     def start_server(
         self,
         model_path: str,
@@ -132,15 +149,19 @@ class LlamaCppAdapter(EngineAdapter):
                 f"llama-server binary not found at {self.server_bin}. Run build_or_locate first."
             )
 
+        # In llama.cpp, -c specifies total context divided among -np slots unless --kv-unified is supported
+        if self.supports_kv_unified():
+            kv_args = ["-c", str(ctx), "-np", str(slots), "--kv-unified"]
+        else:
+            kv_args = ["-c", str(ctx * slots), "-np", str(slots)]
+
         cmd = [
             str(self.server_bin),
             "-m", str(model_path),
             "--host", "127.0.0.1",
             "--port", str(port),
             "-t", str(threads),
-            "-c", str(ctx),
-            "-np", str(slots),
-        ]
+        ] + kv_args
         if extra_args:
             cmd.extend(extra_args)
 

@@ -44,7 +44,17 @@ def generate_report(runs: List[Dict[str, Any]]) -> str:
     mach = sample_run.get("machine", {})
     model_info = sample_run.get("model", {})
 
-    lines.append("# Benchmark Report")
+    is_synth = (
+        sample_run.get("sample_type") == "synthetic_smoke"
+        or "synthetic" in str(model_info.get("filename", "")).lower()
+        or "smoke" in str(model_info.get("path", "")).lower()
+    )
+    if is_synth:
+        lines.append("# Benchmark Report (Synthetic Smoke Sample)")
+        lines.append("")
+        lines.append("> **Note**: This is a synthetic smoke sample generated using a tiny synthetic GGUF model for CI/development verification, not real model weights.")
+    else:
+        lines.append("# Benchmark Report")
     lines.append("")
     lines.append(f"**Date**: {sample_run.get('timestamp', 'unknown')}")
     lines.append(f"**Model**: `{model_info.get('filename', 'unknown')}` (SHA-256: `{model_info.get('sha256', '')[:16]}...`)")
@@ -83,9 +93,6 @@ def generate_report(runs: List[Dict[str, Any]]) -> str:
         "and first-token time at 10 users; medians reported with spread (± half-range)."
     )
     lines.append("")
-    lines.append("| Context | Engine | Single decode tok/s | % of ceiling | Prompt tok/s | 4 users tok/s | 10 users tok/s | 10 users TTFT |")
-    lines.append("|---|---|---|---|---|---|---|---|")
-
     # Collect all contexts across runs
     all_contexts: set = set()
     for r in runs:
@@ -93,6 +100,41 @@ def generate_report(runs: List[Dict[str, Any]]) -> str:
         for c in summary.keys():
             all_contexts.add(int(c))
     sorted_contexts = sorted(list(all_contexts))
+
+    # Verify actual prompt token counts across all runs and fail loudly if >5% off target
+    for r in runs:
+        eng_name = r.get("engine", {}).get("name", "unknown")
+        for ctx in sorted_contexts:
+            ctx_k = str(ctx)
+            s = r.get("summary", {}).get(ctx_k)
+            if not s:
+                continue
+            target_ctx = int(ctx)
+            act_tokens = s.get("actual_prompt_tokens")
+            if act_tokens is None and "prompt_tokens" in s.get("single_user", {}):
+                act_tokens = s["single_user"]["prompt_tokens"].get("median")
+            if act_tokens is None:
+                raise ValueError(
+                    f"Engine '{eng_name}' context {ctx} is missing recorded actual prompt token count in summary!"
+                )
+            off_pct = abs(act_tokens - target_ctx) / float(target_ctx)
+            if off_pct > 0.05:
+                raise ValueError(
+                    f"Engine '{eng_name}' context {ctx} actual prompt tokens ({act_tokens:.1f}) "
+                    f"is {off_pct * 100.0:.2f}% off target ({target_ctx}) > 5% allowed threshold!"
+                )
+            for phase_name in ["single_user", "multi_user_4", "multi_user_10"]:
+                raw_pts = s.get(phase_name, {}).get("raw_samples", {}).get("prompt_tokens", [])
+                for pt in raw_pts:
+                    off = abs(pt - target_ctx) / float(target_ctx)
+                    if off > 0.05:
+                        raise ValueError(
+                            f"Engine '{eng_name}' context {ctx} {phase_name} request prompt tokens ({pt}) "
+                            f"is {off * 100.0:.2f}% off target ({target_ctx}) > 5% allowed threshold!"
+                        )
+
+    lines.append("| Context | Actual Tokens | Engine | Single decode tok/s | % of ceiling | Prompt tok/s | 4 users tok/s | 10 users tok/s | 10 users TTFT |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
 
     for ctx in sorted_contexts:
         ctx_k = str(ctx)
@@ -105,6 +147,9 @@ def generate_report(runs: List[Dict[str, Any]]) -> str:
             m4 = s.get("multi_user_4", {})
             m10 = s.get("multi_user_10", {})
 
+            act_tokens = s.get("actual_prompt_tokens", ctx)
+            act_str = f"{act_tokens:.0f}" if isinstance(act_tokens, (int, float)) else str(act_tokens)
+
             dec_str = format_stat(su.get("decode_tok_s", {}))
             pct_ceil = f"{su.get('percent_of_ceiling', 0.0):.1f}%" if su.get("percent_of_ceiling", 0.0) > 0 else "—"
             pref_str = format_stat(su.get("prefill_tok_s", {}))
@@ -113,7 +158,7 @@ def generate_report(runs: List[Dict[str, Any]]) -> str:
             ttft_str = format_ttft(m10.get("first_token_time_s", {}))
 
             lines.append(
-                f"| {ctx} | {eng_name} | {dec_str} | {pct_ceil} | {pref_str} | {m4_str} | {m10_str} | {ttft_str} |"
+                f"| {ctx} | {act_str} | {eng_name} | {dec_str} | {pct_ceil} | {pref_str} | {m4_str} | {m10_str} | {ttft_str} |"
             )
     lines.append("")
 

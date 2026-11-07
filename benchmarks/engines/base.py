@@ -93,6 +93,7 @@ def send_chat_completion(
     stream: bool = True,
     model_alias: str = "peregrine",
     timeout: float = 120.0,
+    ignore_eos: bool = True,
 ) -> Dict[str, Any]:
     """Send an OpenAI-compatible chat completion request and measure timings.
 
@@ -113,6 +114,7 @@ def send_chat_completion(
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": stream,
+        "ignore_eos": ignore_eos,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -219,6 +221,7 @@ def run_concurrent_requests(
     temperature: float = 0.0,
     model_alias: str = "peregrine",
     timeout: float = 120.0,
+    ignore_eos: bool = True,
 ) -> Dict[str, Any]:
     """Execute concurrent user completions synchronized by a thread barrier.
 
@@ -246,8 +249,15 @@ def run_concurrent_requests(
                 stream=True,
                 model_alias=model_alias,
                 timeout=timeout,
+                ignore_eos=ignore_eos,
             )
-            results[idx] = res
+            if res.get("completion_tokens") != max_tokens:
+                print(
+                    f"[warning] concurrent user {idx} completion_tokens ({res.get('completion_tokens')}) != max_tokens ({max_tokens}); dropping user sample",
+                    file=sys.stderr,
+                )
+            else:
+                results[idx] = res
         except Exception as e:
             errors[idx] = e
 
