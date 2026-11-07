@@ -26,6 +26,8 @@ pub enum Arch {
     /// heads of 128 over a 2560-wide residual).
     #[cfg(feature = "arch-qwen")]
     Qwen3,
+    #[cfg(feature = "arch-phi3")]
+    Phi3,
 }
 
 impl Arch {
@@ -37,6 +39,8 @@ impl Arch {
             "qwen2" => Some(Arch::Qwen2),
             #[cfg(feature = "arch-qwen")]
             "qwen3" => Some(Arch::Qwen3),
+            #[cfg(feature = "arch-phi3")]
+            "phi3" => Some(Arch::Phi3),
             _ => None,
         }
     }
@@ -49,6 +53,8 @@ impl Arch {
             Arch::Qwen2 => "qwen2",
             #[cfg(feature = "arch-qwen")]
             Arch::Qwen3 => "qwen3",
+            #[cfg(feature = "arch-phi3")]
+            Arch::Phi3 => "phi3",
         }
     }
 
@@ -78,6 +84,15 @@ impl Arch {
         match self {
             #[cfg(feature = "arch-qwen")]
             Arch::Qwen3 => true,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
+    pub fn is_phi3(self) -> bool {
+        match self {
+            #[cfg(feature = "arch-phi3")]
+            Arch::Phi3 => true,
             #[allow(unreachable_patterns)]
             _ => false,
         }
@@ -128,6 +143,20 @@ impl Family for QwenFamily {
     }
 }
 
+#[cfg(feature = "arch-phi3")]
+pub struct Phi3Family;
+
+#[cfg(feature = "arch-phi3")]
+impl Family for Phi3Family {
+    fn names(&self) -> &'static [&'static str] {
+        &["phi3"]
+    }
+
+    fn load(&self, g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
+        Dense::load(g, tk)
+    }
+}
+
 pub struct DenseFamily;
 
 impl Family for DenseFamily {
@@ -139,6 +168,8 @@ impl Family for DenseFamily {
             "qwen2",
             #[cfg(feature = "arch-qwen")]
             "qwen3",
+            #[cfg(feature = "arch-phi3")]
+            "phi3",
         ]
     }
 
@@ -154,12 +185,25 @@ impl Dense {
             match arch_name {
                 "llama" => "architecture \"llama\" is not enabled in this build (recompile with feature 'arch-llama')".to_string(),
                 "qwen2" | "qwen3" => format!("architecture {arch_name:?} is not enabled in this build (recompile with feature 'arch-qwen')"),
+                "phi3" => "architecture \"phi3\" is not enabled in this build (recompile with feature 'arch-phi3')".to_string(),
                 _ => format!(
                     "Peregrine implements {}; this model is {arch_name:?}",
                     crate::ARCHS.join(" and ")
                 ),
             }
         })?;
+        if arch.is_phi3() {
+            // LongRoPE 128k factors: refuse explicitly if present
+            if g.tensor("rope_factors_long.weight").is_ok()
+                || g.tensor("rope_factors_short.weight").is_ok()
+                || g.tensor("blk.0.rope_factors_long.weight").is_ok()
+                || g.tensor("blk.0.rope_factors_short.weight").is_ok()
+            {
+                return Err(
+                    "LongRoPE rope_factors_long/short is not supported (Phi-3 128k)".to_string(),
+                );
+            }
+        }
         let k = |suffix: &str| format!("{}.{suffix}", arch.key_prefix());
         let n_layer = g.u32(&k("block_count"))? as usize;
         let d_model = g.u32(&k("embedding_length"))? as usize;
@@ -183,7 +227,7 @@ impl Dense {
             .map(|v| v as usize)
             .unwrap_or(d_model / n_head);
         let is_qwen3 = arch.is_qwen3();
-        if !is_qwen3 && head_dim * n_head != d_model {
+        if !is_qwen3 && !arch.is_phi3() && head_dim * n_head != d_model {
             return Err(format!(
                 "head dim {head_dim} × {n_head} heads ≠ embedding length {d_model}"
             ));
@@ -206,6 +250,12 @@ impl Dense {
             }
         }
 
+        // Sliding window: Phi-3-mini 4k has one; Phi-4 has none.
+        // In llama.cpp (src/models/phi3.cpp), SWA is explicitly disabled:
+        // `if (found_swa && hparams.n_swa > 0) { hparams.swa_type = LLAMA_SWA_TYPE_NONE; hparams.n_swa = 0; }`
+        // We follow llama.cpp and do not apply sliding window mask.
+        let _ = g.u32(&k("attention.sliding_window")).unwrap_or(0);
+
         let rope_scale = g
             .f32(&k("rope.scaling.factor"))
             .ok()
@@ -225,7 +275,7 @@ impl Dense {
             rope_dim,
             eps: g
                 .f32(&k("attention.layer_norm_rms_epsilon"))
-                .unwrap_or(1e-5),
+                .unwrap_or(if arch.is_phi3() { 1e-6 } else { 1e-5 }),
             rope_base: g.f32(&k("rope.freq_base")).unwrap_or(10000.0),
             ctx_train: g.u32(&k("context_length")).unwrap_or(2048) as usize,
         };
@@ -276,12 +326,45 @@ impl Dense {
         };
         let mut layers = Vec::with_capacity(n_layer);
         for i in 0..n_layer {
+            let (wq, wk, wv) = if let Ok(wq_t) = get(&format!("blk.{i}.attn_q.weight")) {
+                let wk_t = get(&format!("blk.{i}.attn_k.weight"))?;
+                let wv_t = get(&format!("blk.{i}.attn_v.weight"))?;
+                (
+                    Linear::Dense(wq_t),
+                    Linear::Dense(wk_t),
+                    Linear::Dense(wv_t),
+                )
+            } else if let Ok(qkv) = get(&format!("blk.{i}.attn_qkv.weight")) {
+                let qd = cfg.q_dim();
+                let kd = cfg.kv_dim();
+                let wq_ti = qkv.rows(0, qd)?;
+                let wk_ti = qkv.rows(qd, kd)?;
+                let wv_ti = qkv.rows(qd + kd, kd)?;
+                (
+                    Linear::Dense(wq_ti),
+                    Linear::Dense(wk_ti),
+                    Linear::Dense(wv_ti),
+                )
+            } else {
+                return Err(format!(
+                    "blk.{i}.attn_q.weight or blk.{i}.attn_qkv.weight not found"
+                ));
+            };
+            let (gate, up) = if let Ok(gate_t) = get(&format!("blk.{i}.ffn_gate.weight")) {
+                let up_t = get(&format!("blk.{i}.ffn_up.weight"))?;
+                (Linear::Dense(gate_t), Linear::Dense(up_t))
+            } else {
+                let ffn_up = get(&format!("blk.{i}.ffn_up.weight"))?;
+                let gate_ti = ffn_up.rows(0, n_ff)?;
+                let up_ti = ffn_up.rows(n_ff, n_ff)?;
+                (Linear::Dense(gate_ti), Linear::Dense(up_ti))
+            };
             layers.push(DenseLayer {
                 attn: AttnWeights {
                     attn_norm: get(&format!("blk.{i}.attn_norm.weight"))?,
-                    wq: Linear::Dense(get(&format!("blk.{i}.attn_q.weight"))?),
-                    wk: Linear::Dense(get(&format!("blk.{i}.attn_k.weight"))?),
-                    wv: Linear::Dense(get(&format!("blk.{i}.attn_v.weight"))?),
+                    wq,
+                    wk,
+                    wv,
                     bq: bias(&format!("blk.{i}.attn_q.bias"))?,
                     bk: bias(&format!("blk.{i}.attn_k.bias"))?,
                     bv: bias(&format!("blk.{i}.attn_v.bias"))?,
@@ -290,8 +373,8 @@ impl Dense {
                     wo: Linear::Dense(get(&format!("blk.{i}.attn_output.weight"))?),
                 },
                 ffn_norm: get(&format!("blk.{i}.ffn_norm.weight"))?,
-                gate: Linear::Dense(get(&format!("blk.{i}.ffn_gate.weight"))?),
-                up: Linear::Dense(get(&format!("blk.{i}.ffn_up.weight"))?),
+                gate,
+                up,
                 down: Linear::Dense(get(&format!("blk.{i}.ffn_down.weight"))?),
             });
         }

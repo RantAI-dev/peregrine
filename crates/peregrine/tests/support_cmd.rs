@@ -29,6 +29,7 @@ fn support_plain_smoke_test() {
     assert!(s.contains("qwen2"), "missing qwen2 in support: {s}");
     assert!(s.contains("qwen3"), "missing qwen3 in support: {s}");
     assert!(s.contains("qwen35"), "missing qwen35 in support: {s}");
+    assert!(s.contains("phi3"), "missing phi3 in support: {s}");
 
     // Must list known formats
     assert!(s.contains("F32"), "missing F32 in support: {s}");
@@ -75,6 +76,10 @@ fn support_markdown_smoke_test() {
     assert!(s.contains("Llama"), "missing Llama in markdown: {s}");
     assert!(s.contains("Qwen 2"), "missing Qwen 2 in markdown: {s}");
     assert!(s.contains("Qwen 3.5"), "missing Qwen 3.5 in markdown: {s}");
+    assert!(
+        s.contains("Phi-3 / Phi-4"),
+        "missing Phi-3 / Phi-4 in markdown: {s}"
+    );
 
     assert!(
         s.contains("| Weight formats |"),

@@ -242,11 +242,19 @@ fn a_decode_step_allocates_nothing() {
         7004,
         support::models::Gemma3Config::default(),
     ));
+    // Phi-3 in Q8_0: fused qkv, fused ffn_up, RMSNorm, NeoX rotary pairing.
+    let phi3 = load(&support::models::write_phi3(
+        &dir,
+        Format::Q8_0,
+        7005,
+        Dense::default(),
+    ));
     for (name, model) in [
         ("qwen3-Q8_0", &dense),
         ("qwen35-PQ2_0", &hybrid),
         ("qwen3moe-Q8_0", &moe),
         ("gemma3-Q8_0", &gemma3),
+        ("phi3-Q8_0", &phi3),
     ] {
         for threads in [1, 4] {
             // The f16 cache and the f32 one (the opt-in full-precision cache) must

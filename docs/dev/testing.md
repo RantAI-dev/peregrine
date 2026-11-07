@@ -30,6 +30,9 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    the prefix store, and a LittleBit sidecar built in-test must give finite, deterministic logits. They
    need no model files, so they run in CI on every tier; the `x86_64-avx2` and scalar (`x86_64`) goldens
    were recorded on an Intel host and reproduced bit for bit on an AMD host.
+   CI's pinned tiers (scalar, AVX2 and the AVX-512 tier under SDE) run with `PEREGRINE_GOLDEN=require`,
+   so a new model or format must commit its goldens for all three; `PEREGRINE_GOLDEN=record` writes the
+   missing ones (the AVX-512 ones on an AVX-512 machine).
    `tests/runtime_parity.rs` pins what the two runtimes do differently today, before ADR 0007 makes
    the engine the only one: the same prompt through `Session` and through a one-slot `Engine` (greedy:
    the same tokens; sampled: the session counts conversation turns into the sampling key and the engine

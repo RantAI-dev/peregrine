@@ -74,7 +74,7 @@ bound by compute. That split drives most design choices.
 
 | Module | Role |
 |---|---|
-| `dense/` | Dense transformer architectures: Llama, Qwen2, Qwen3. `dense/layer.rs` holds the attention path and the output head the dense and the MoE families share. |
+| `dense/` | Dense transformer architectures: Llama, Qwen2, Qwen3, Phi-3, Phi-4 (fused tensors split at load). `dense/layer.rs` holds the attention path and the output head the dense and the MoE families share. |
 | `gemma3/` | Gemma 3 architectures: interleaved sliding-window/global attention, 4 norms per layer, per-head q/k RMSNorm, GeGLU activation, tied output head. |
 | `qwen35/` | Hybrid architectures: Gated DeltaNet linear attention + softmax attention, Hadamard rotation, MTP head. |
 | `qwen3moe/` | Mixture of experts: Qwen3's attention and a bank of experts (the router and the expert feed-forward), over the shared `blocks::moe`. |
