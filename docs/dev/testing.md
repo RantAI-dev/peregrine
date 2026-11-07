@@ -47,6 +47,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 | Qwen3-1.7B Q4_K_M | `models/` at the repository root |
 | Qwen2.5-0.5B-Instruct Q4_K_M, Llama-3.2-1B-Instruct Q4_K_M | `~/models/` |
 | Llama-2-7b-chat-hf Q4_K_M, Mistral-7B-Instruct-v0.2 Q4_K_M | `~/models/` |
+| Gemma 3 1B Instruct Q4_K_M (`google_gemma-3-1b-it-Q4_K_M.gguf`) | `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
 | TheBloke's Mistral 7B Instruct v0.2 and Llama 2 7B Chat Q4_K_M | `~/models/` (see below) |
@@ -125,6 +126,19 @@ enough to carry the models' own templates.
 and reference test vectors (`.inp` and `.out`) from pinned llama.cpp release files into `models/vocab/` (git-ignored),
 validating pinned SHA-256 checksums. `crates/peregrine-core/tests/tokenize_spm.rs` tests these reference vectors
 and skips with an informative message if the files are absent.
+
+### Gemma 3 1B Instruct
+
+Gemma 3 1B is checked end to end against llama.cpp v0.9.0 on the bartowski Q4_K_M upload:
+
+| File | Download | Bytes | SHA-256 |
+|---|---|---|---|
+| `google_gemma-3-1b-it-Q4_K_M.gguf` | <https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf> | 806058496 | `12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d` |
+
+The tokenizer was checked across 22 test strings against `llama-tokenize --ids` and `llama-tokenize --ids --no-bos` (100% agreement, with exactly one BOS on the prompt path).
+Greedy decoding (32 tokens, 6 threads) was checked against llama.cpp on three prompts, including a 713-token prompt that exercises the 512-token sliding window: all 32/32 tokens match llama.cpp bit for bit on all three prompts.
+The chat path (`/apply-template` and `/v1/chat/completions`) matches byte for byte with and without a system message (folded into the first user turn).
+The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512` and `-c 1024`).
 
 ## Accuracy against llama.cpp
 
