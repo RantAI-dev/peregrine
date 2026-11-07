@@ -7,8 +7,12 @@
 //!
 //! The rotation's data — the sign vector of every input width and the block size — is the [`Rotation`] struct
 //! the hybrid family owns; the functions below take it, slices and scratch, never the model.
+//!
+//! A plain Qwen 3.5 file has no rotation: it carries none of the `prism.hadamard.*` metadata. The engine then
+//! prepares the matmul input the same way, minus the rotation — [`fill_rows`] and [`fill_rows_pre`] are that
+//! path, and they quantise the row as it is.
 
-use crate::blocks::par::{for_row_chunks_2, for_row_chunks_3, Sched};
+use crate::blocks::par::{for_row_chunks, for_row_chunks_2, for_row_chunks_3, Sched};
 use crate::hadamard::fwht;
 use crate::model::StepStats;
 use crate::pool::Pool;
@@ -77,6 +81,12 @@ impl Rotation {
             .find(|(w, _)| *w == width)
             .map(|(_, s)| s.as_slice())
             .ok_or_else(|| format!("no Hadamard sign vector for input width {width}"))
+    }
+
+    /// The Hadamard block size: the transform's width.
+    #[inline]
+    pub fn block(&self) -> usize {
+        self.block
     }
 
     /// The embedding's inverse rotation: the block Hadamard transform, then the signs (`s ⊙ H·row`).
@@ -183,5 +193,76 @@ impl Rotation {
         if parallel {
             stats.barriers += 1;
         }
+    }
+}
+
+/// The matmul input of a model with no rotation: the rows are quantised as they are.
+///
+/// This is [`Rotation::rotate_rows`] without the rotation — the step a plain Qwen 3.5
+/// file needs, whose weights were not folded into a Hadamard basis. `src` holds `nb` rows
+/// of `w` floats; each is quantised into `acts[b]`.
+pub fn fill_rows(
+    acts: &mut [QuantAct],
+    src: &[f32],
+    w: usize,
+    nb: usize,
+    parallel: bool,
+    pool: &Pool,
+    stats: &mut StepStats,
+) {
+    for_row_chunks(
+        pool,
+        parallel,
+        acts,
+        1,
+        nb,
+        Sched::Dynamic(1),
+        |_wk, rows, a_chunk| {
+            for (i, b) in rows.enumerate() {
+                a_chunk[i].fill(&src[b * w..(b + 1) * w]);
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
+}
+
+/// The same, with a per-row preparation (a norm, a gate) before the quantisation.
+///
+/// This is [`Rotation::rotate_rows_pre`] without the rotation: `pre` writes into the row
+/// of `src` in place, and the row is then quantised into `acts[b]`.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_rows_pre(
+    acts: &mut [QuantAct],
+    src: &mut [f32],
+    w: usize,
+    nb: usize,
+    pre: Option<&RowPrep>,
+    parallel: bool,
+    pool: &Pool,
+    stats: &mut StepStats,
+) {
+    for_row_chunks_2(
+        pool,
+        parallel,
+        acts,
+        1,
+        src,
+        w,
+        nb,
+        Sched::Dynamic(1),
+        |_wk, rows, a_chunk, x_chunk| {
+            for (i, b) in rows.enumerate() {
+                let x_row = &mut x_chunk[i * w..(i + 1) * w];
+                if let Some(f) = pre {
+                    f(b, x_row);
+                }
+                a_chunk[i].fill(x_row);
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
     }
 }

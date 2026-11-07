@@ -1,5 +1,19 @@
 //! The session API: load a model, hold a conversation, report what it cost.
 //!
+//! # A conversation over one slot of the engine
+//!
+//! ADR 0007 (decision 4) makes the engine the one runtime and keeps the session
+//! as the public conversation type: a thin layer over a one-slot [`Engine`].
+//! What stays here is what belongs to a conversation — the chat history, the
+//! template, the prompt, the reuse of the positions the previous turn computed,
+//! the shifting of the context when it fills, the cancellation, and the
+//! per-token telemetry. What moved to the engine is the generation itself: the
+//! sampling, the speculation and the verification of the drafts.
+//!
+//! The slot is told what the session's own runtime told it: the conversation's
+//! turn in the sampling key (`SlotCfg::turn`), the family's own KV cache
+//! (`SlotCfg::kv_rotation`) and the drafter the conversation speculates with.
+//!
 //! # Suffix-indexed speculation
 //!
 //! The paper proposed speculative decode with a draft model. This implements the
@@ -27,23 +41,17 @@
 //! position (`sample.rs`, after uzu), so the same guarantee holds when sampling and
 //! speculation stays on — it used to be switched off for every non-greedy chat.
 
-use crate::draft::{choose_k, VerifyCost, PARK_STEPS, PROBE_EVERY};
 use crate::dspark::Drafter;
 use crate::kv::{KvCache, KvPrec};
-use crate::model::{Model, State, StepStats};
-use crate::pool::Pool;
-use crate::sample;
-use crate::suffix::{Cell, SuffixIndex};
+use crate::model::Model;
+use crate::serve::{Engine, Finish, SlotCfg};
 use crate::telem::{Machine, TokenTelem, TurnTelem};
 use crate::template::{today_llama3, Template};
 use crate::tokenizer::Utf8Stream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
-
-/// Prompt tokens per forward call. Bounds scratch memory while still reading the
-/// weights once per chunk instead of once per prompt token.
-const PREFILL_CHUNK: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct SessionCfg {
@@ -116,17 +124,16 @@ impl Default for SessionCfg {
 }
 
 pub struct Session {
-    pub model: std::sync::Arc<Model>,
-    kv: KvCache,
-    st: State,
-    /// Created once per session. Its workers park between matmuls rather than
-    /// being respawned 224 times per token.
-    pool: Pool,
-    // the narrower pool for one-row decode steps (`pool::narrow_pool`); None: use `pool`.
-    pool1: Option<Pool>,
+    pub model: Arc<Model>,
+    /// The one-slot engine the conversation runs on (ADR 0007, decision 4).
+    engine: Engine,
     pub cfg: SessionCfg,
     pub machine: Machine,
-    /// Every token fed to the model so far. Also the corpus prompt-lookup searches.
+    /// The conversation's cache. The engine borrows it for a turn and hands it
+    /// back when the turn ends; `None` while the engine holds it.
+    kv: Option<KvCache>,
+    /// Every token fed to the model so far. Also the corpus the suffix index
+    /// searches and the conversation the prefix reuse matches against.
     ctx: Vec<u32>,
     /// The sampling seed, and the turn counter mixed into every position's key, so a
     /// regenerated reply draws fresh randomness while each draw stays reproducible.
@@ -138,32 +145,15 @@ pub struct Session {
     template: Template,
     stops: Vec<u32>,
     default_system: Option<&'static str>,
-    /// The n-gram index over `ctx` and the confidence it has learned, and the cells
-    /// the last draft's tokens are booked to once verification has decided them.
-    suffix: SuffixIndex,
-    draft_cells: Vec<Cell>,
-    /// Consecutive speculative steps that accepted nothing (reported, not acted on).
-    spec_misses: u32,
-    steps: u64,
     /// The conversation as text, (user, assistant) per exchange. The cache holds the
     /// same thing as positions; this copy is what lets the oldest exchanges be dropped
     /// and the rest re-encoded when the context fills, instead of failing the turn.
     history: Vec<(String, String)>,
-    /// Scratch for nucleus sampling, reused so a sampled token allocates nothing.
-    samp: sample::Scratch,
+    /// The suffix drafter: the conversation's own speculation. It keeps its corpus
+    /// and what it learned between the turns.
+    suffix: Option<Box<dyn crate::draft::Drafter>>,
     /// The attached DSpark drafter, fed the target's tapped hidden states.
     pub dspark: Option<Drafter>,
-    /// Measured verify cost per batch width, for choosing how much to verify.
-    vcost: VerifyCost,
-    /// Plain steps left before drafting is probed again, and the measured token
-    /// rate of drafting rounds (draft + verify), against which a plain step is priced.
-    park: u32,
-    draft_rate: Option<f64>,
-    drafted_rounds: u64,
-    /// Committed positions not yet fed to the drafter (while parked): fed in one
-    /// batched update before the next draft, which costs far less than one per step.
-    pending_taps: Vec<f32>,
-    pending_start: usize,
     /// The tokens the cache still holds after a `reset` or `seed_history`: the next
     /// prompt is matched against them and only its divergent tail is prefilled
     /// (`reuse_prefix`). Empty while a conversation is live.
@@ -201,7 +191,7 @@ pub(crate) fn logprob_of(logits: &[f32], id: u32) -> f32 {
 
 impl Session {
     /// Initialize a single-user `Session` from an already loaded model.
-    pub fn from_model(model: std::sync::Arc<Model>, cfg: SessionCfg) -> Result<Session, String> {
+    pub fn from_model(model: Arc<Model>, cfg: SessionCfg) -> Result<Session, String> {
         let c = model.cfg;
         // a hybrid model's recurrent state rolls back only to its turn-start checkpoint, so nothing may
         // write positions it later takes back: no suffix speculation, no drafter.
@@ -239,8 +229,6 @@ impl Session {
             cfg.dspark_max
                 .clamp(1, d.cfg.block_size - d.cfg.logits_start)
         });
-        let logit_rows = cfg.draft_len.max(dspark_k) + 1;
-        let max_batch = PREFILL_CHUNK.max(logit_rows);
         // `new_cache` adds a hybrid model's recurrent state and sizes K/V for its attention layers only.
         let kv = model.new_cache(cfg.kv_prec, max_ctx);
         // The int8 rotation is measured per family: see `KvCache::without_rotation`.
@@ -249,16 +237,25 @@ impl Session {
         } else {
             kv
         };
-        let mut st = model.new_state(max_batch, logit_rows, max_ctx, threads);
-        // Probe with the same width the engine will actually run at: a bandwidth
-        // figure measured single-threaded is not the denominator a four-thread
-        // decode step should be judged against.
-        if let Some(d) = &dspark {
-            st.set_taps(&d.cfg.target_layer_ids, c.d_model);
-        }
+        // The engine the conversation runs on: one slot, and one position more
+        // than the conversation's context — the engine stops a turn one position
+        // short of a full cache, and the session fills it (ADR 0007).
+        let mut engine = Engine::new(model.clone(), threads, max_ctx + 1, 1, cfg.kv_prec, 0);
+        // The conversation does not speculate with the model's MTP block: it
+        // speculates with the suffix index or with a DSpark head, as it always did.
+        engine.disable_mtp();
+        // The suffix drafter: the conversation's own speculation. A hybrid model
+        // has none (its recurrent state cannot be rolled back), and the engine
+        // would refuse it — the session turns it off silently, as it always did.
+        let suffix = if cfg.speculate && cfg.ngram > 0 && cfg.draft_len > 0 {
+            Some(
+                Box::new(crate::draft::SuffixDrafter::new(cfg.ngram, cfg.draft_len))
+                    as Box<dyn crate::draft::Drafter>,
+            )
+        } else {
+            None
+        };
         let machine = Machine::cached(threads);
-        let pool = Pool::new(threads);
-        let pool1 = crate::pool::narrow_pool(threads);
         let template = match cfg.template {
             Some(t) => t,
             None => Template::detect(model.gguf())?,
@@ -273,10 +270,7 @@ impl Session {
 
         Ok(Session {
             model,
-            kv,
-            st,
-            pool,
-            pool1,
+            engine,
             cfg: SessionCfg {
                 max_ctx,
                 threads,
@@ -284,6 +278,7 @@ impl Session {
                 ..cfg
             },
             machine,
+            kv: Some(kv),
             ctx: Vec::new(),
             seed,
             turn: 0,
@@ -291,19 +286,9 @@ impl Session {
             template,
             stops,
             default_system,
-            suffix: SuffixIndex::new(),
-            draft_cells: Vec::new(),
-            spec_misses: 0,
-            steps: 0,
             history: Vec::new(),
-            samp: sample::Scratch::default(),
+            suffix,
             dspark,
-            vcost: VerifyCost::default(),
-            park: 0,
-            draft_rate: None,
-            drafted_rounds: 0,
-            pending_taps: Vec::new(),
-            pending_start: 0,
             kept: Vec::new(),
             prefix_reused: 0,
             prefixes: None,
@@ -341,37 +326,39 @@ impl Session {
         let start = self.ctx.len();
         let tok = self.ctx.last().copied().unwrap_or(0);
         let mut out = Vec::new();
+        // The scratch the probe needs is its own: the engine's state is the
+        // engine's, and the probe runs between the turns.
+        let mut st = self.model.new_state(
+            crate::serve::PREFILL_CHUNK,
+            1,
+            self.cfg.max_ctx,
+            self.cfg.threads,
+        );
         for &w in widths {
             let batch = vec![tok; w];
             let want: Vec<usize> = (0..w).collect();
             let mut times = Vec::new();
             for _ in 0..reps + 1 {
-                let mut ss = StepStats::default();
+                let mut ss = crate::model::StepStats::default();
                 let t = Instant::now();
-                let Session {
-                    model,
-                    st,
-                    kv,
-                    pool,
-                    ..
-                } = self;
-                model.forward(st, kv, pool, &batch, start, &want, &mut ss)?;
+                let model = &self.model;
+                let pool = self.engine.pool();
+                let kv = self
+                    .kv
+                    .as_mut()
+                    .expect("the cache is the engine's during a turn");
+                model.forward(&mut st, kv, pool, &batch, start, &want, &mut ss)?;
                 times.push(t.elapsed().as_secs_f64());
-                self.kv.truncate(start);
+                self.kv
+                    .as_mut()
+                    .expect("the cache is the engine's during a turn")
+                    .truncate(start);
             }
             times.remove(0); // the first touches pages the rest find warm
             times.sort_by(|a, b| a.partial_cmp(b).unwrap());
             out.push((w, times[times.len() / 2]));
         }
         Ok(out)
-    }
-
-    /// Feed the drafter every committed position it has not seen yet.
-    fn flush_pending(&mut self) {
-        if let (Some(d), false) = (&mut self.dspark, self.pending_taps.is_empty()) {
-            d.update_context(&self.pending_taps, self.pending_start, &self.pool);
-        }
-        self.pending_taps.clear();
     }
 
     /// Forget the conversation. The cache is *not* cleared: its positions stay valid
@@ -382,17 +369,18 @@ impl Session {
     /// (FreeToken's radix prefix cache and semantic anchors, in their one-sequence
     /// form).
     pub fn reset(&mut self) {
-        self.flush_pending();
         if !self.ctx.is_empty() {
             self.kept = std::mem::take(&mut self.ctx);
         } else {
             self.ctx.clear();
         }
-        self.pending_taps.clear();
-        self.suffix.clear();
+        // The suffix index forgets the corpus it holds: it is rebuilt from the
+        // conversation's tokens. What it learned about how reliable each kind of
+        // match is stays.
+        if let Some(d) = &mut self.suffix {
+            d.reset();
+        }
         self.started = false;
-        self.spec_misses = 0;
-        self.steps = 0;
         self.history.clear();
     }
 
@@ -415,32 +403,72 @@ impl Session {
         if self.dspark.is_none() {
             if let Some(store) = self.prefixes.as_mut() {
                 if kept.len() >= crate::prefix::MIN_PREFIX && !store.covers(&kept) {
-                    let snap = self.kv.snapshot(kept.len());
+                    let snap = self
+                        .kv
+                        .as_ref()
+                        .expect("the cache is the engine's during a turn")
+                        .snapshot(kept.len());
                     let n = snap.len();
                     store.insert(kept[..n].to_vec(), snap);
                 }
                 let cap = toks.len().saturating_sub(1);
                 if let Some((snap, lcp)) = store.best(toks, cap) {
-                    if lcp > l + 8 && self.kv.restore(snap, lcp) {
+                    let restored = self
+                        .kv
+                        .as_mut()
+                        .expect("the cache is the engine's during a turn")
+                        .restore(snap, lcp);
+                    if restored && lcp > l + 8 {
                         store.note_hit(lcp - l);
                         self.ctx.clear();
                         self.ctx.extend_from_slice(&toks[..lcp]);
-                        self.suffix.clear();
+                        // The corpus the suffix index searches is the conversation's
+                        // tokens: the restored ones, not the ones before them.
+                        self.reset_suffix_corpus();
                         return lcp;
                     }
                 }
             }
         }
-        self.kv.truncate(l);
+        self.kv
+            .as_mut()
+            .expect("the cache is the engine's during a turn")
+            .truncate(l);
         // a hybrid model's cache may keep less than asked (only its checkpoint can be returned to).
-        let l = l.min(self.kv.filled());
+        let l = l.min(
+            self.kv
+                .as_ref()
+                .expect("the cache is the engine's during a turn")
+                .filled(),
+        );
+        // The DSpark head's own context goes back with the cache: it drafts
+        // from the positions the target has, and no further.
         if let Some(d) = &mut self.dspark {
             d.truncate(l);
         }
         self.ctx.clear();
         self.ctx.extend_from_slice(&kept[..l]);
-        self.suffix.clear();
+        // The suffix index's corpus is the conversation's tokens: it is rebuilt
+        // from them, because a reset (or a shifted context) left it with the
+        // ones the cache no longer holds. What it learned about how reliable
+        // each kind of match is stays.
+        self.reset_suffix_corpus();
         l
+    }
+
+    /// The suffix index's corpus is the conversation's tokens: after a restore
+    /// from the store, or a reset, it is a different sequence, so the index is
+    /// rebuilt from it.
+    fn reset_suffix_corpus(&mut self) {
+        let Some(d) = &mut self.suffix else {
+            return;
+        };
+        let ctx = self.ctx.clone();
+        d.reset();
+        let pool = self.engine.pool();
+        for (i, &t) in ctx.iter().enumerate() {
+            d.commit(i, t, &[], &[], pool);
+        }
     }
 
     // keep up to `budget_bytes` of finished conversations' caches (0 = off). Ignored with a drafter attached.
@@ -481,7 +509,7 @@ impl Session {
     }
 
     pub fn kv_resident_bytes(&self) -> u64 {
-        self.kv.resident_bytes()
+        self.kv.as_ref().map_or(0, |kv| kv.resident_bytes())
     }
 
     /// The system message in force: the caller's, else the one the model's own
@@ -586,14 +614,12 @@ impl Session {
                 self.history.drain(..drop);
                 // The re-encoded transcript shares its system block (and, when few
                 // exchanges went, more) with the cache: keep that, prefill the rest.
-                self.pending_taps.clear();
                 if self.kept.is_empty() {
                     self.kept = std::mem::take(&mut self.ctx);
                 }
                 let l = self.reuse_prefix(&toks);
                 self.prefix_reused = l;
                 self.started = false;
-                self.spec_misses = 0;
                 return Ok((toks[l..].to_vec(), drop));
             }
         }
@@ -608,50 +634,65 @@ impl Session {
         ))
     }
 
-    /// Propose tokens to follow `next` from the context, and how many of them to
-    /// verify.
+    /// The drafter this turn speculates with, and how deep it may draft.
     ///
-    /// `next` is the crucial argument. It is the token just emitted but *not yet
-    /// fed*, so it is not in `self.ctx` — and the drafted block will be placed
-    /// immediately after it. Matching on `ctx`'s last n tokens alone searches for
-    /// an n-gram that ends one position too early, and the proposed continuation is
-    /// then offset by one from what the model is about to predict. That version
-    /// accepted 0 of 168 drafts on a verbatim copy task, which is the single case
-    /// prompt-lookup exists to win. (`SuffixIndex::propose` takes `next` for the
-    /// same reason.)
+    /// The DSpark head comes first: with one attached the suffix index is off, as
+    /// it always was. The head is wrapped in the interface the engine asks, and the
+    /// wrapper is handed back when the turn ends — the head's context (the tapped
+    /// hidden states it drafts from) belongs to the conversation, not to the turn.
+    fn take_drafter(&mut self) -> (Option<Box<dyn crate::draft::Drafter>>, usize, bool) {
+        #[cfg(feature = "dspark")]
+        {
+            if let Some(head) = self.dspark.take() {
+                return (
+                    Some(Box::new(crate::draft::DsparkDrafter::new(head))),
+                    self.cfg.dspark_max,
+                    true,
+                );
+            }
+        }
+        match self.suffix.take() {
+            Some(d) => (Some(d), self.cfg.draft_len, false),
+            None => (None, 0, false),
+        }
+    }
+
+    /// The drafter the turn ended with: the conversation keeps it.
     ///
-    /// The count is `choose_k` over the learned per-token confidences and the
-    /// measured verify cost. When that says "verify nothing" the step is a plain
-    /// one — except every `PROBE_EVERY`th step, which verifies a couple of tokens
-    /// anyway, because a confidence that is never tested never recovers.
-    fn suffix_draft(&mut self, next: u32) -> Vec<u32> {
-        self.draft_cells.clear();
-        let min = self.cfg.ngram;
-        if min == 0 || self.cfg.draft_len == 0 {
-            return Vec::new();
+    /// `is_dspark` says which drafter it is: the conversation attached it, so
+    /// it knows. The DSpark head comes back out of its wrapper, with the taps
+    /// the head had not read yet folded into it.
+    fn put_drafter(&mut self, d: Box<dyn crate::draft::Drafter>, is_dspark: bool) {
+        #[cfg(feature = "dspark")]
+        if is_dspark {
+            let any: Box<dyn std::any::Any> = d;
+            let mut w = *any
+                .downcast::<crate::draft::DsparkDrafter>()
+                .expect("the drafter is the head's wrapper");
+            // The taps of the positions the turn committed but the head never read
+            // go into the head now: the next turn drafts from them.
+            w.flush(self.engine.pool());
+            self.dspark = Some(w.into_inner());
+            return;
         }
-        self.suffix.sync(&self.ctx, min);
-        let d = self
-            .suffix
-            .propose(&self.ctx, next, self.cfg.draft_len, min);
-        if d.toks.is_empty() {
-            self.suffix.cool();
-            return Vec::new();
+        #[cfg(not(feature = "dspark"))]
+        let _ = is_dspark;
+        self.suffix = Some(d);
+    }
+
+    /// The engine hands the conversation back what the turn left: its cache,
+    /// the tokens the cache holds and the drafter that drafted for it.
+    fn take_back(&mut self, is_dspark: bool) -> Result<(), String> {
+        let keep = self
+            .engine
+            .take_kept()
+            .ok_or("the engine lost the turn's cache")?;
+        self.kv = Some(keep.kv);
+        self.ctx = keep.tokens;
+        if let Some(d) = keep.drafter {
+            self.put_drafter(d, is_dspark);
         }
-        let conf: Vec<f32> = d.cells.iter().map(|&c| self.suffix.conf(c)).collect();
-        let vcost = &self.vcost;
-        let mut k = choose_k(&conf, |w| vcost.cost(w));
-        if k == 0 && self.steps.is_multiple_of(PROBE_EVERY) {
-            k = d.toks.len().min(2);
-        }
-        if k == 0 {
-            self.suffix.cool();
-        }
-        let mut toks = d.toks;
-        toks.truncate(k);
-        self.draft_cells = d.cells;
-        self.draft_cells.truncate(k);
-        toks
+        Ok(())
     }
 
     /// Run one conversational turn. `on_token` sees text as it is produced.
@@ -675,7 +716,6 @@ impl Session {
         cancel: Option<&AtomicBool>,
         mut on_token: F,
     ) -> Result<(String, TurnTelem), String> {
-        let n_vocab = self.model.cfg.n_vocab;
         let turn_start = Instant::now();
         self.turn += 1;
         let mut telem = TurnTelem {
@@ -684,429 +724,195 @@ impl Session {
         };
         let stopped = |c: Option<&AtomicBool>| c.is_some_and(|f| f.load(Ordering::Relaxed));
 
-        // ---- prefill ----
-        self.flush_pending();
+        // ---- the prompt ----
         let (ptoks, dropped) = self.plan_prompt(user)?;
         telem.dropped_exchanges = dropped;
         telem.prefix_reused = self.prefix_reused;
         let started_before = self.started;
         self.started = true;
         telem.prompt_tokens = ptoks.len();
+        // Where the turn starts: a cancelled turn goes back to here.
+        let turn_start_pos = self.ctx.len();
 
-        let mut pre = StepStats::default();
-        let t0 = Instant::now();
-        let mut fed = 0usize;
-        // a cancelled prefill rolls back to here; a hybrid model's recurrent state needs a copy to do it.
+        // The whole prompt, for the engine: the positions the cache already holds
+        // and the ones this turn adds.
+        let mut prompt = std::mem::take(&mut self.ctx);
+        prompt.extend_from_slice(&ptoks);
+
+        // ---- the slot ----
+        let cfg = SlotCfg {
+            temperature: self.cfg.temperature,
+            top_p: self.cfg.top_p,
+            top_k: self.cfg.top_k,
+            min_p: self.cfg.min_p,
+            penalties: Default::default(),
+            seed: self.seed,
+            max_tokens: self.cfg.max_tokens,
+            stop: self.stops.clone(),
+            // The caller wants the log-probability of every token.
+            logprobs: true,
+            // The conversation's own turn in the sampling key, and the family's own
+            // KV cache (ADR 0007, decision 5).
+            turn: self.turn as u32,
+            kv_rotation: self.model.session_kv_rotation(),
+            // The drafter is attached below: the conversation's own, kept between
+            // its turns.
+            drafter: Default::default(),
+        };
+        // A hybrid model's recurrent state rolls back only to its checkpoint: the
+        // turn may be cancelled, and the cache must be able to go back.
         if self.model.is_hybrid() {
-            self.kv.checkpoint();
+            self.kv
+                .as_mut()
+                .expect("the cache is the engine's during a turn")
+                .checkpoint();
         }
-        while fed < ptoks.len() {
-            if stopped(cancel) {
-                // Nothing of this turn is in the conversation yet; roll the cache back
-                // to where the turn started so the next message sees a clean context.
-                // `started` must roll back too — otherwise the next turn's prompt skips
-                // the system block (it only runs once per `started == false`), starting
-                // mid-conversation with no BOS token even though `ctx` is still empty.
-                self.kv.truncate(self.ctx.len());
-                let keep = self.ctx.len();
-                if let Some(d) = &mut self.dspark {
-                    d.truncate(keep);
+        let kv = self
+            .kv
+            .take()
+            .expect("the cache is the engine's during a turn");
+        let id = match self.engine.admit_with_cache(prompt, cfg, kv) {
+            Ok(id) => id,
+            Err((_prompt, e)) => {
+                // The turn did not start: the conversation keeps its cache.
+                if let Some(keep) = self.engine.take_kept() {
+                    self.kv = Some(keep.kv);
                 }
-                self.started = started_before;
-                telem.cancelled = true;
-                telem.prefill_s = t0.elapsed().as_secs_f64();
-                telem.wall_s = turn_start.elapsed().as_secs_f64();
-                telem.ctx_used = self.ctx.len();
-                return Ok((String::new(), telem));
+                return Err(e);
             }
-            let take = PREFILL_CHUNK.min(ptoks.len() - fed);
-            let last = fed + take == ptoks.len();
-            let start = self.ctx.len() + fed;
-            // Only the final chunk's last row produces the logits we sample from.
-            let want: &[usize] = if last { &[take - 1] } else { &[] };
-            let Session {
-                model,
-                st,
-                kv,
-                pool,
-                dspark,
-                ..
-            } = self;
-            model.forward(st, kv, pool, &ptoks[fed..fed + take], start, want, &mut pre)?;
-            if let Some(d) = dspark {
-                // Every prompt position joins the drafter's context as it is computed.
-                let w = d.cfg.target_layer_ids.len() * model.cfg.d_model;
-                let tc = Instant::now();
-                d.update_context(&st.tap[..take * w], start, pool);
-                telem.dspark_ctx_s += tc.elapsed().as_secs_f64();
-                dump_prefill(&ptoks[fed..fed + take], &st.tap[..take * w], start);
+        };
+        // The conversation's drafter, for this turn.
+        let (drafter, depth, is_dspark) = self.take_drafter();
+        if let Some(d) = drafter {
+            if let Err(e) = self.engine.attach_drafter_with_depth(id, d, depth) {
+                // The turn cannot run: the conversation takes its cache and its
+                // drafter back.
+                self.engine.cancel(id);
+                let _ = self.take_back(is_dspark);
+                return Err(e);
             }
-            fed += take;
         }
-        self.ctx.extend_from_slice(&ptoks);
-        telem.prefill_bytes = pre.bytes_total();
-        telem.prefill_macs = pre.macs;
-        telem.prefill_phases.add_step(&pre);
+        // The engine's counters are cumulative: the turn's share is the difference.
+        let rounds_before = self.engine.spec_rounds;
+        let tokens_before = self.engine.spec_tokens;
+        #[cfg(feature = "dspark")]
+        let head_ns = self.dspark.as_ref().map_or(0, |d| d.stats.ns);
+        #[cfg(feature = "dspark")]
+        let head_ctx_ns = self.dspark.as_ref().map_or(0, |d| d.stats.ctx_ns);
 
         // ---- decode ----
-        //
-        // The token sampled from the prefill logits is the turn's *first output
-        // token*. An earlier version fed it and emitted only what came after, which
-        // silently dropped the first word of every reply — the model said "The
-        // capital of France is Paris" and the user saw "capital of France is Paris".
-        // It is emitted here, with prefill's cost, and fed at the top of the loop.
         let mut out = String::new();
         let mut utf8 = Utf8Stream::default();
-        let ts = Instant::now();
-        // The first output token lands at position `ctx.len()`.
-        let mut next = {
-            let key = sample::position_key(self.seed, self.turn, self.ctx.len());
-            let Session { st, cfg, samp, .. } = self;
-            sample::sample_filtered(
-                &st.logits[..n_vocab],
-                cfg.temperature,
-                cfg.top_p,
-                cfg.top_k,
-                cfg.min_p,
-                key,
-                samp,
-            )
-        };
-        telem.prefill_phases.sample_s += ts.elapsed().as_secs_f64();
-        telem.prefill_s = t0.elapsed().as_secs_f64();
-        let trace = crate::options::get().trace;
-        // Lossless at every temperature: see the module docs and `sample.rs`.
-        let speculating = self.cfg.speculate || self.dspark.is_some();
-        let fixed_k: Option<usize> = crate::options::get().dspark.k;
         let mut step = 0u32;
+        let mut decoded = false;
+        let mut roll_back = false;
 
-        let stops = self.stops.clone();
-        let ends = |id: u32| stops.contains(&id);
-        if !ends(next) {
-            step = 1;
-            let tt = TokenTelem {
-                step,
-                dt_s: telem.prefill_s,
-                bytes_weights: pre.bytes_weights,
-                bytes_kv: pre.bytes_kv,
-                macs: pre.macs,
-                barriers: pre.barriers,
-                from_gemm: ptoks.len() > 1,
-                is_prefill: true,
-                ..Default::default()
-            };
-            let text = utf8.push(&self.model.tk.token_bytes(next));
-            out.push_str(&text);
-            telem.tokens.push(tt);
-            let logprob = logprob_of(&self.st.logits[..n_vocab], next);
-            on_token(Emitted {
-                id: next,
-                text: &text,
-                telem: telem.tokens.last().unwrap(),
-                logprob,
-            });
-        }
-
-        while step < self.cfg.max_tokens as u32 && !ends(next) {
+        while self.engine.active() > 0 {
             if stopped(cancel) {
                 telem.cancelled = true;
+                // Nothing of this turn is in the conversation yet: the cache goes
+                // back to where the turn started, so the next message sees a clean
+                // context. A turn that produced something keeps it, as it always did.
+                roll_back = !decoded;
+                self.engine.cancel(id);
                 break;
             }
-            let t = Instant::now();
-            let mut ss = StepStats::default();
-
-            // `next` has been emitted but not yet fed. Feed it together with whatever
-            // the context suggests will follow it.
-            let td = Instant::now();
-            if self.park > 0 {
-                self.park -= 1;
+            let ems = self.engine.step();
+            let rep = self.engine.last_step;
+            if ems.is_empty() {
+                // A chunk of the prompt: its cost is the prompt's.
+                telem.prefill_phases.add_step(&rep.stats);
+                telem.prefill_s += rep.secs;
+                telem.prefill_bytes += rep.stats.bytes_total();
+                telem.prefill_macs += rep.stats.macs;
+                continue;
             }
-            let drafting = speculating && self.dspark.is_some() && self.park == 0;
-            if drafting {
-                self.flush_pending();
-            }
-            let mut drafted = if drafting {
-                let kmax = self.cfg.dspark_max;
-                // Draft `i` lands at position `ctx.len() + 1 + i`: draw it with that
-                // position's key, as the target will (see `Drafter::draft_with`).
-                let (temp, top_p, top_k, min_p, seed, turn, base) = (
-                    self.cfg.temperature,
-                    self.cfg.top_p,
-                    self.cfg.top_k,
-                    self.cfg.min_p,
-                    self.seed,
-                    self.turn,
-                    self.ctx.len(),
-                );
-                let Session {
-                    dspark,
-                    pool,
-                    vcost,
-                    samp,
-                    ..
-                } = self;
-                let d = dspark.as_mut().unwrap();
-                let (toks, conf) = d.draft_with(next, kmax, pool, |i, row| {
-                    sample::sample_filtered(
-                        row,
-                        temp,
-                        top_p,
-                        top_k,
-                        min_p,
-                        sample::position_key(seed, turn, base + 1 + i),
-                        samp,
-                    )
-                });
-                let k = match fixed_k {
-                    Some(k) => k.min(toks.len()),
-                    None if conf.len() == toks.len() && !conf.is_empty() => {
-                        choose_k(&conf, |w| vcost.cost(w))
+            // A decode step.
+            decoded = true;
+            telem.decode_phases.add_step(&rep.stats);
+            telem.decode_steps_s += rep.secs;
+            let n_em = ems.len();
+            let mut emitted = 0usize;
+            for (i, em) in ems.iter().enumerate() {
+                match &em.finish {
+                    Some(Finish::Error(e)) => {
+                        // The step failed: the turn ends, and the conversation
+                        // takes its cache and its drafter back.
+                        self.engine.cancel(id);
+                        let _ = self.take_back(is_dspark);
+                        return Err(e.clone());
                     }
-                    None => toks.len(),
-                };
-                dump_draft(next, &toks, &conf, k);
-                telem.dspark_rounds += 1;
-                telem.dspark_verified += k as u64;
-                telem.dspark_draft_s += td.elapsed().as_secs_f64();
-                toks[..k].to_vec()
-            } else if speculating && self.dspark.is_none() {
-                self.suffix_draft(next)
-            } else {
-                Vec::new()
-            };
-            telem.decode_phases.draft_s += td.elapsed().as_secs_f64();
-            self.steps += 1;
-            // `forward` accepts a batch that ends exactly at the context limit. Near
-            // it, the draft is shortened — never the turn: ending the turn because
-            // `1 + k` would not fit, when a shorter draft (or a plain step) would,
-            // made a speculative answer shorter than the plain one (A6).
-            let start = self.ctx.len();
-            let room = self.cfg.max_ctx.saturating_sub(start);
-            if room == 0 {
-                break;
-            }
-            if drafted.len() >= room {
-                drafted.truncate(room - 1);
-                self.draft_cells.truncate(drafted.len());
-            }
-            let mut batch = Vec::with_capacity(drafted.len() + 1);
-            batch.push(next);
-            batch.extend_from_slice(&drafted);
-            let want: Vec<usize> = (0..batch.len()).collect();
-            let tv = Instant::now();
-            {
-                let Session {
-                    model,
-                    st,
-                    kv,
-                    pool,
-                    pool1,
-                    ..
-                } = self;
-                let p = if batch.len() == 1 {
-                    pool1.as_ref().unwrap_or(pool)
-                } else {
-                    pool
-                };
-                model.forward(st, kv, p, &batch, start, &want, &mut ss)?;
-            }
-            let verify_s = tv.elapsed().as_secs_f64();
-            self.vcost.observe(batch.len(), verify_s);
-
-            // Accept a drafted token only when it equals what the model would have
-            // produced anyway, so the emitted sequence is bit-identical to greedy
-            // decoding without speculation (A6). `emitted` always holds at least one
-            // token: the argmax after `next`.
-            let ts = Instant::now();
-            let mut emitted = Vec::with_capacity(batch.len());
-            let mut accepted = 0usize;
-            for j in 0..batch.len() {
-                // Row `j` predicts the token at position `start + j + 1` — the same
-                // key sequential decoding would have used there.
-                let pick = {
-                    let key = sample::position_key(self.seed, self.turn, start + j + 1);
-                    let Session { st, cfg, samp, .. } = self;
-                    sample::sample_filtered(
-                        st.logits_row(j, n_vocab),
-                        cfg.temperature,
-                        cfg.top_p,
-                        cfg.top_k,
-                        cfg.min_p,
-                        key,
-                        samp,
-                    )
-                };
-                if trace {
-                    let r = self.st.logits_row(j, n_vocab);
-                    let (mut m1, mut m2) = (f32::MIN, f32::MIN);
-                    for &v in r {
-                        if v > m1 {
-                            m2 = m1;
-                            m1 = v
-                        } else if v > m2 {
-                            m2 = v
-                        }
-                    }
-                    if m1 - m2 < 0.25 {
-                        eprintln!(
-                            "near-tie  token {} of this turn: top-2 logit gap {:.4}",
-                            step as usize + j + 1,
-                            m1 - m2
-                        );
-                    }
+                    // The token that ends the turn is the end of the answer, not
+                    // part of it.
+                    Some(Finish::Stop) => break,
+                    _ => {}
                 }
-                emitted.push(pick);
-                if j < drafted.len() && pick == drafted[j] {
-                    accepted += 1;
-                } else {
-                    break;
-                }
-            }
-            telem.decode_phases.sample_s += ts.elapsed().as_secs_f64();
-            telem.decode_phases.add_step(&ss);
-            let step_before = step;
-            // Positions to keep: `next` at `start`, plus each accepted draft. The
-            // rejected tail was written to the cache before verification and must not
-            // remain visible to the next step.
-            //
-            // Nor may an accepted draft *past the end of the turn*. Sequential decoding
-            // feeds every emitted token except the turn's last — the end-of-turn token,
-            // or the one that reaches `max_tokens` — so a verification pass that accepted
-            // the end-of-turn token and kept going (the suffix drafter proposes it
-            // readily: ChatML's `<|im_end|>` closes the system turn too) used to commit
-            // tokens nobody saw, and the next turn answered a different conversation
-            // than decoding without speculation would have. `commit` stops there.
-            let commit = {
-                let mut cut = accepted;
-                let mut s = step;
-                for (i, &id) in emitted.iter().enumerate().take(accepted + 1) {
-                    if ends(id) {
-                        cut = cut.min(i);
-                        break;
-                    }
-                    s += 1;
-                    if s >= self.cfg.max_tokens as u32 {
-                        cut = cut.min(i);
-                        break;
-                    }
-                }
-                cut
-            };
-            self.ctx.push(next);
-            for &d in drafted.iter().take(commit) {
-                self.ctx.push(d);
-            }
-            self.kv.truncate(self.ctx.len());
-            if let Some(d) = &mut self.dspark {
-                // The committed positions — `next` and the accepted drafts — join the
-                // drafter's context; the rejected tail's hidden states are dropped.
-                // While parked they wait, and go in as one batch before the next draft.
-                let w = d.cfg.target_layer_ids.len() * self.model.cfg.d_model;
-                if self.pending_taps.is_empty() {
-                    self.pending_start = start;
-                }
-                self.pending_taps
-                    .extend_from_slice(&self.st.tap[..(1 + commit) * w]);
-                if drafting {
-                    let tc = Instant::now();
-                    self.flush_pending();
-                    telem.dspark_ctx_s += tc.elapsed().as_secs_f64();
-                    // Price the round against a plain step: a draft that does not pay
-                    // for itself parks drafting for a while (DeepInfer's varlen rule
-                    // prices the verify width; this prices the draft too).
-                    let round_s = td.elapsed().as_secs_f64();
-                    let rate = (1 + accepted) as f64 / round_s.max(1e-9);
-                    self.draft_rate = Some(match self.draft_rate {
-                        Some(r) => 0.7 * r + 0.3 * rate,
-                        None => rate,
-                    });
-                    self.drafted_rounds += 1;
-                    // Only against a plain step actually measured (an extrapolated one
-                    // under a fluctuating load parked chat that drafting was winning),
-                    // and only when drafting is clearly slower.
-                    let plain = self.vcost.ema[1].map(|t| 1.0 / t);
-                    if fixed_k.is_none() && self.drafted_rounds >= 8 {
-                        if let (Some(dr), Some(pr)) = (self.draft_rate, plain) {
-                            if dr < 0.8 * pr {
-                                self.park = PARK_STEPS;
-                                self.draft_rate = None;
-                            }
-                        }
-                    }
-                }
-            }
-            if !drafted.is_empty() {
-                if self.dspark.is_none() {
-                    self.suffix.observe(&self.draft_cells, accepted);
-                }
-                if accepted > 0 {
-                    self.spec_misses = 0;
-                } else {
-                    self.spec_misses = self.spec_misses.saturating_add(1);
-                }
-            }
-
-            let dt = t.elapsed().as_secs_f64();
-            telem.decode_steps_s += dt;
-            // One step produced `n_em` tokens for one pass over the weights. The cost
-            // is divided across them, because that is what actually happened: a
-            // speculative step that yields four tokens really did move the bytes once.
-            let n_em = emitted.len().max(1);
-            for (i, &id) in emitted.iter().enumerate() {
-                if ends(id) {
-                    next = id;
-                    break;
-                }
+                emitted += 1;
                 step += 1;
                 let tt = TokenTelem {
                     step,
-                    dt_s: dt / n_em as f64,
-                    bytes_weights: ss.bytes_weights / n_em as u64,
-                    bytes_kv: ss.bytes_kv / n_em as u64,
-                    macs: ss.macs / n_em as u64,
-                    barriers: ss.barriers / n_em as u64,
-                    drafted: if i == 0 { drafted.len() as u8 } else { 0 },
-                    accepted: if i == 0 { accepted as u8 } else { 0 },
-                    from_gemm: batch.len() > 1,
+                    dt_s: rep.secs / n_em as f64,
+                    bytes_weights: rep.stats.bytes_weights / n_em as u64,
+                    bytes_kv: rep.stats.bytes_kv / n_em as u64,
+                    macs: rep.stats.macs / n_em as u64,
+                    barriers: rep.stats.barriers / n_em as u64,
+                    drafted: if i == 0 { rep.drafted as u8 } else { 0 },
+                    accepted: if i == 0 { rep.accepted as u8 } else { 0 },
+                    from_gemm: rep.rows > 1,
                     is_prefill: false,
                 };
-                let text = utf8.push(&self.model.tk.token_bytes(id));
+                let text = utf8.push(&self.model.tk.token_bytes(em.token));
                 out.push_str(&text);
                 telem.tokens.push(tt);
-                let logprob = logprob_of(self.st.logits_row(i, n_vocab), id);
                 on_token(Emitted {
-                    id,
+                    id: em.token,
                     text: &text,
                     telem: telem.tokens.last().unwrap(),
-                    logprob,
+                    logprob: em.logprob,
                 });
-                next = id;
-                if step >= self.cfg.max_tokens as u32 {
-                    break;
-                }
             }
-            // A pass counts toward tokens-per-pass only when it emitted a token; the
-            // final pass that samples only the end-of-turn token emits nothing.
-            if step > step_before {
+            // A pass counts toward tokens-per-pass only when it emitted a token.
+            if emitted > 0 {
                 telem.passes += 1;
             }
         }
         let tail = utf8.finish();
         out.push_str(&tail);
-        if crate::options::get().trace {
-            let ms: Vec<String> = self
-                .vcost
-                .ema
-                .iter()
-                .enumerate()
-                .filter_map(|(w, t)| t.map(|t| format!("{w}:{:.1}", t * 1e3)))
-                .collect();
-            eprintln!("verify ms by width  {}", ms.join("  "));
-        }
 
-        self.history.push((user.to_string(), out.clone()));
+        // ---- what the turn left behind ----
+        self.take_back(is_dspark)?;
+        if roll_back {
+            // The turn left nothing in the conversation: the cache, the drafter's
+            // context and the conversation itself go back to where it started.
+            let pos = turn_start_pos.min(self.ctx.len());
+            self.kv
+                .as_mut()
+                .expect("the cache is the engine's during a turn")
+                .truncate(pos);
+            if let Some(d) = &mut self.suffix {
+                d.rollback(pos);
+            }
+            if let Some(d) = &mut self.dspark {
+                d.truncate(pos);
+            }
+            self.ctx.truncate(pos);
+            self.started = started_before;
+        }
+        if is_dspark {
+            telem.dspark_rounds = self.engine.spec_rounds - rounds_before;
+            telem.dspark_verified = self.engine.spec_tokens - tokens_before;
+        }
+        #[cfg(feature = "dspark")]
         if let Some(d) = &mut self.dspark {
             telem.dspark_bytes = std::mem::take(&mut d.stats.bytes);
+            telem.dspark_draft_s = d.stats.ns.saturating_sub(head_ns) as f64 / 1e9;
+            telem.dspark_ctx_s = d.stats.ctx_ns.saturating_sub(head_ctx_ns) as f64 / 1e9;
+        }
+
+        // A turn that produced nothing is not in the conversation: it is not an
+        // exchange, and the next message must not see it.
+        if !roll_back {
+            self.history.push((user.to_string(), out.clone()));
         }
         telem.ctx_used = self.ctx.len();
         telem.wall_s = turn_start.elapsed().as_secs_f64();
@@ -1143,23 +949,39 @@ impl Session {
         self.reset();
         self.ctx.clear();
 
+        // The scratch the benchmark needs is its own: the engine's state is the
+        // engine's, and the benchmark runs between the turns.
+        let mut st = self.model.new_state(
+            crate::serve::PREFILL_CHUNK,
+            1,
+            self.cfg.max_ctx,
+            self.cfg.threads,
+        );
+
         // Prefill
-        let mut pre = StepStats::default();
+        let mut pre = crate::model::StepStats::default();
         let t_pre = Instant::now();
         let mut fed = 0;
         while fed < ptoks.len() {
-            let take = PREFILL_CHUNK.min(ptoks.len() - fed);
+            let take = crate::serve::PREFILL_CHUNK.min(ptoks.len() - fed);
             let last = fed + take == ptoks.len();
             let start = fed;
             let want: &[usize] = if last { &[take - 1] } else { &[] };
-            let Session {
-                model,
-                st,
+            let model = &self.model;
+            let pool = self.engine.pool();
+            let kv = self
+                .kv
+                .as_mut()
+                .expect("the cache is the engine's during a turn");
+            model.forward(
+                &mut st,
                 kv,
                 pool,
-                ..
-            } = self;
-            model.forward(st, kv, pool, &ptoks[fed..fed + take], start, want, &mut pre)?;
+                &ptoks[fed..fed + take],
+                start,
+                want,
+                &mut pre,
+            )?;
             fed += take;
         }
         let prefill_s = t_pre.elapsed().as_secs_f64();
@@ -1175,7 +997,7 @@ impl Session {
             }
             best as u32
         };
-        let mut next = argmax(&self.st.logits[..n_vocab]);
+        let mut next = argmax(&st.logits[..n_vocab]);
 
         // Decode
         let mut decode_s = 0.0;
@@ -1185,22 +1007,19 @@ impl Session {
 
         for step in 0..decode_tokens {
             let td = Instant::now();
-            let mut ss = StepStats::default();
+            let mut ss = crate::model::StepStats::default();
             let pos = start_pos + step;
-            let Session {
-                model,
-                st,
-                kv,
-                pool,
-                pool1,
-                ..
-            } = self;
-            let p = pool1.as_ref().unwrap_or(pool);
-            model.forward(st, kv, p, &[next], pos, &[0], &mut ss)?;
+            let model = &self.model;
+            let p = self.engine.narrow_pool().unwrap_or(self.engine.pool());
+            let kv = self
+                .kv
+                .as_mut()
+                .expect("the cache is the engine's during a turn");
+            model.forward(&mut st, kv, p, &[next], pos, &[0], &mut ss)?;
             decode_s += td.elapsed().as_secs_f64();
             total_bytes_weights += ss.bytes_weights;
             total_bytes_kv += ss.bytes_kv;
-            next = argmax(&self.st.logits[..n_vocab]);
+            next = argmax(&st.logits[..n_vocab]);
         }
 
         let prefill_tok_s = if prefill_s > 0.0 {
@@ -1241,58 +1060,4 @@ pub struct BenchReport {
     pub prefill_tok_s: f64,
     pub decode_tok_s: f64,
     pub bytes_per_token: f64,
-}
-
-/// `PEREGRINE_DSPARK_DUMP=<dir>`: write the prompt's tapped hidden states and the first
-/// draft to `<dir>`, so the PyTorch reference (`tests/dspark_reference.py`) can replay
-/// the drafter on exactly the inputs this engine gave it.
-fn dump_dir() -> Option<std::path::PathBuf> {
-    crate::options::get().dspark.dump.clone()
-}
-
-fn dump_prefill(toks: &[u32], taps: &[f32], start: usize) {
-    let Some(dir) = dump_dir() else { return };
-    let _ = std::fs::create_dir_all(&dir);
-    use std::io::Write;
-    let open = |n: &str| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(start > 0)
-            .write(true)
-            .truncate(start == 0)
-            .open(dir.join(n))
-    };
-    if let Ok(mut f) = open("taps.f32") {
-        let _ = f.write_all(
-            &taps
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect::<Vec<u8>>(),
-        );
-    }
-    if let Ok(mut f) = open("tokens.txt") {
-        let _ = writeln!(
-            f,
-            "{}",
-            toks.iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-    }
-}
-
-fn dump_draft(anchor: u32, toks: &[u32], conf: &[f32], k: usize) {
-    let Some(dir) = dump_dir() else { return };
-    let p = dir.join("draft.json");
-    if p.exists() {
-        return; // the first draft only
-    }
-    let _ = std::fs::write(
-        p,
-        format!(
-            "{{\"anchor\": {anchor}, \"tokens\": {:?}, \"confidence\": {:?}, \"chosen\": {k}}}\n",
-            toks, conf
-        ),
-    );
 }

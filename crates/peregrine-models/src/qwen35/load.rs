@@ -25,14 +25,20 @@ pub struct HybridCfg {
     pub dv: usize,
     pub d_conv: usize,
     pub interval: usize,
+    /// The Hadamard block size; 0 when the file has no rotation.
     pub had_block: usize,
     pub n_gdn: usize,
     pub n_attn: usize,
+    /// Every matmul is a ternary format (else every one is an ordinary quantised matrix):
+    /// selects the activation layout.
+    pub ternary: bool,
     /// Every ternary matmul is PTQ1_0 (else every one is PQ2_0): selects the activation layout.
     pub ptq1: bool,
     /// PQ2_0 matrices run from 16-row tiles (`tern::dot_tiles_pq2`) with one activation scale per `tb_span`
     /// values; 0 = the per-row kernels with one scale per 16.
     pub tb_span: usize,
+    /// Some matmul is F32/F16/BF16: the activations stay unquantised beside the codes.
+    pub keep_f32: bool,
 }
 
 impl HybridCfg {
@@ -111,6 +117,71 @@ fn f32_vec(g: &Gguf, t: &TensorInfo) -> Vec<f32> {
     v
 }
 
+/// The `prism.hadamard.*` keys the rotation is made of. A file that carries none of them
+/// has no rotation: that is a plain Qwen 3.5 file, whose weights were not folded into a
+/// Hadamard basis, and none is applied to it.
+///
+/// llama.cpp v0.9.0 switches on `prism.hadamard.version` alone
+/// (`llama_model_base::load_hparams_hadamard`); the list here is wider, because a file
+/// that carries the rotation's other keys without the version still has one.
+const HADAMARD_KEYS: [&str; 6] = [
+    "prism.hadamard.version",
+    "prism.hadamard.block_size",
+    "prism.hadamard.transform",
+    "prism.hadamard.sign_mode",
+    "prism.hadamard.sign_widths",
+    "prism.hadamard.sign_values",
+];
+
+/// The file's rotation, if it has one.
+///
+/// A Bonsai 2 file carries the block Hadamard transform it folded its weights into, in
+/// `prism.hadamard.*`: the block size, the transform's name, the sign mode and the sign
+/// vector of every input width. A plain Qwen 3.5 file carries none of them, and the
+/// engine applies no rotation to it — the weights are used as they are.
+///
+/// The keys are read as llama.cpp v0.9.0 reads them (`llama_model_base::load_hparams_hadamard`):
+/// the transform's name and the sign mode must be the ones the engine implements, and the
+/// sign vectors must cover every width the file's folded weights take.
+fn load_rotation(g: &Gguf) -> Result<Option<Rotation>, String> {
+    if !HADAMARD_KEYS.iter().any(|k| g.meta.contains_key(*k)) {
+        return Ok(None);
+    }
+    let had_block = g.u32("prism.hadamard.block_size")? as usize;
+    if g.str("prism.hadamard.transform")? != "normalized-sylvester-walsh-hadamard"
+        || g.str("prism.hadamard.sign_mode")? != "explicit"
+    {
+        return Err("unsupported prism.hadamard transform or sign mode".into());
+    }
+    if !had_block.is_power_of_two() {
+        return Err(format!("invalid prism.hadamard.block_size: {had_block}"));
+    }
+    let widths = match g.meta.get("prism.hadamard.sign_widths") {
+        Some(Value::ArrI32(v)) => v.iter().map(|&x| x as usize).collect::<Vec<_>>(),
+        _ => return Err("prism.hadamard.sign_widths missing".into()),
+    };
+    let vals = g.arr_i32("prism.hadamard.sign_values")?;
+    if vals.len() != widths.iter().sum::<usize>() {
+        return Err("prism.hadamard.sign_values length does not match sign_widths".into());
+    }
+    let scale = 1.0 / (had_block as f32).sqrt();
+    let mut signs = Vec::new();
+    let mut at = 0;
+    for &w in &widths {
+        if w % had_block != 0 {
+            return Err(format!(
+                "sign width {w} is not a multiple of the Hadamard block"
+            ));
+        }
+        signs.push((
+            w,
+            vals[at..at + w].iter().map(|&s| s as f32 * scale).collect(),
+        ));
+        at += w;
+    }
+    Ok(Some(Rotation::new(signs, had_block)))
+}
+
 pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     let k = |s: &str| format!("qwen35.{s}");
     let n_nextn = g.u32(&k("nextn_predict_layers")).unwrap_or(0) as usize;
@@ -124,6 +195,10 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     let n_ff = g.u32(&k("feed_forward_length"))? as usize;
     let rope_dim = g.u32(&k("rope.dimension_count"))? as usize;
     let interval = g.u32(&k("full_attention_interval"))? as usize;
+    // The rotation, if the file has one: a Bonsai 2 file carries it, a plain Qwen 3.5
+    // file does not, and none is applied to it.
+    let rot = load_rotation(g)?;
+    let had_block = rot.as_ref().map_or(0, |r| r.block());
     let hc0 = HybridCfg {
         n_k_heads: g.u32(&k("ssm.group_count"))? as usize,
         n_v_heads: g.u32(&k("ssm.time_step_rank"))? as usize,
@@ -131,24 +206,18 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
         dv: g.u32(&k("ssm.state_size"))? as usize,
         d_conv: g.u32(&k("ssm.conv_kernel"))? as usize,
         interval,
-        had_block: g.u32("prism.hadamard.block_size")? as usize,
+        had_block,
         n_gdn: 0,
         n_attn: 0,
+        ternary: false,
         ptq1: false,
         tb_span: 0,
+        keep_f32: false,
     };
     if hc0.value_dim() != g.u32(&k("ssm.inner_size"))? as usize {
         return Err("ssm.inner_size ≠ time_step_rank × state_size".into());
     }
-    if g.str("prism.hadamard.transform")? != "normalized-sylvester-walsh-hadamard"
-        || g.str("prism.hadamard.sign_mode")? != "explicit"
-    {
-        return Err("unsupported prism.hadamard transform or sign mode".into());
-    }
-    if !hc0.had_block.is_power_of_two()
-        || n_head % n_kv_head != 0
-        || hc0.n_v_heads % hc0.n_k_heads != 0
-    {
+    if n_head % n_kv_head != 0 || hc0.n_v_heads % hc0.n_k_heads != 0 {
         return Err("implausible hybrid geometry".into());
     }
     let cfg0 = Config {
@@ -169,34 +238,13 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
         rope_base: g.f32(&k("rope.freq_base")).unwrap_or(1e7),
         ctx_train: g.u32(&k("context_length")).unwrap_or(4096) as usize,
     };
-    let widths = match g.meta.get("prism.hadamard.sign_widths") {
-        Some(Value::ArrI32(v)) => v.iter().map(|&x| x as usize).collect::<Vec<_>>(),
-        _ => return Err("prism.hadamard.sign_widths missing".into()),
-    };
-    let vals = g.arr_i32("prism.hadamard.sign_values")?;
-    if vals.len() != widths.iter().sum::<usize>() {
-        return Err("prism.hadamard.sign_values length does not match sign_widths".into());
-    }
-    let scale = 1.0 / (hc0.had_block as f32).sqrt();
-    let mut signs = Vec::new();
-    let mut at = 0;
-    for &w in &widths {
-        if w % hc0.had_block != 0 {
-            return Err(format!(
-                "sign width {w} is not a multiple of the Hadamard block"
-            ));
-        }
-        signs.push((
-            w,
-            vals[at..at + w].iter().map(|&s| s as f32 * scale).collect(),
-        ));
-        at += w;
-    }
+    // The value heads are permuted from the grouped order to the tiled one only when the
+    // file says so (`prism.hadamard.gdn_v_grouped`): a plain Qwen 3.5 file's converter
+    // folds the permutation into the weights, so it needs none.
     let v_grouped = g.bool("prism.hadamard.gdn_v_grouped").unwrap_or(false);
 
     let get = |n: &str| -> Result<TensorInfo, String> { g.tensor(n).cloned() };
     let vecf = |n: &str| -> Result<Vec<f32>, String> { Ok(f32_vec(g, g.tensor(n)?)) };
-    let ternary = |t: &TensorInfo| matches!(t.kind, Format::PQ2_0 | Format::PTQ1_0);
     let mut layers = Vec::with_capacity(n_layer);
     let (mut n_gdn, mut n_attn) = (0usize, 0usize);
     for i in 0..n_layer {
@@ -246,15 +294,6 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
             up: get(&p("ffn_up.weight"))?,
             down: get(&p("ffn_down.weight"))?,
         };
-        for t in [&l.gate, &l.up, &l.down] {
-            if !ternary(t) {
-                return Err(format!(
-                    "{} is {}; the hybrid path runs ternary matmuls",
-                    t.name,
-                    t.kind.label()
-                ));
-            }
-        }
         layers.push(l);
     }
 
@@ -272,28 +311,53 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
         }
     }
 
+    // The output head: `output.weight`, or the embedding table when the file ties them —
+    // `prism.hadamard.tied_output` for a Bonsai 2 file, the absence of `output.weight` for
+    // a plain one (llama.cpp v0.9.0 falls back to the embedding table the same way).
     let tied = g.bool("prism.hadamard.tied_output").unwrap_or(false);
-    let head_name = if tied {
+    if tied && g.tensor("output.weight").is_ok() {
+        return Err("prism.hadamard.tied_output with an output.weight present".into());
+    }
+    let head_name = if tied || g.tensor("output.weight").is_err() {
         "token_embd.weight"
     } else {
         "output.weight"
     };
-    if tied && g.tensor("output.weight").is_ok() {
-        return Err("prism.hadamard.tied_output with an output.weight present".into());
-    }
     let output_kind = g.tensor(head_name)?.kind;
     if !kinds.contains(&output_kind) {
         kinds.push(output_kind);
     }
-    let ptq1 = match kinds.as_slice() {
-        [Format::PQ2_0] => false,
-        [Format::PTQ1_0] => true,
-        other => {
-            return Err(format!(
+    // The formats: either every matmul is the same ternary format (a Bonsai 2 file, whose
+    // weights were folded into a Hadamard basis and quantised to three levels), or none is
+    // (a plain Qwen 3.5 file, whose matmuls are ordinary quantised matrices). A file that
+    // mixes the two is refused: the activation layout is one or the other.
+    let n_ternary = kinds
+        .iter()
+        .filter(|k| matches!(k, Format::PQ2_0 | Format::PTQ1_0))
+        .count();
+    let ternary = n_ternary == kinds.len();
+    if n_ternary != 0 && !ternary {
+        return Err(format!(
+            "the file mixes ternary and ordinary weight formats: {kinds:?}"
+        ));
+    }
+    let ptq1 = if ternary {
+        match kinds.as_slice() {
+            [Format::PQ2_0] => false,
+            [Format::PTQ1_0] => true,
+            other => {
+                return Err(format!(
             "the hybrid path needs one ternary format for every matmul; this file mixes {other:?}"
         ))
+            }
         }
+    } else {
+        false
     };
+    // An F32, F16 or BF16 matrix multiplies the activations unquantised.
+    let keep_f32 = kinds
+        .iter()
+        .any(|k| matches!(k, Format::F32 | Format::F16 | Format::BF16));
 
     #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
     let mut output = g.tensor(head_name)?.clone();
@@ -303,7 +367,7 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     let mut tb_span = 0usize;
     #[cfg(target_arch = "x86_64")]
     {
-        let want = !ptq1 && MatKernels::get().tiles() && options::get().tiles;
+        let want = ternary && !ptq1 && MatKernels::get().tiles() && options::get().tiles;
         let mut mats: Vec<&mut TensorInfo> = Vec::new();
         for l in layers.iter_mut() {
             mats.extend([&mut l.gate, &mut l.up, &mut l.down]);
@@ -344,8 +408,10 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     let hc = HybridCfg {
         n_gdn,
         n_attn,
+        ternary,
         ptq1,
         tb_span,
+        keep_f32,
         ..hc0
     };
     let tok_embd = get("token_embd.weight")?;
@@ -358,7 +424,18 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
     if tok_embd.dims.get(1).copied().unwrap_or(0) as usize != cfg.n_vocab {
         return Err("token_embd rows ≠ vocabulary".into());
     }
-    let unit = if ptq1 { 256 } else { 128 };
+    // The widths the matmul inputs take: the ternary layout needs a multiple of its group
+    // (128, or 256 for PTQ1_0's pairs of groups), the ordinary one a multiple of the
+    // activation quantiser's block (32).
+    let unit = if ternary {
+        if ptq1 {
+            256
+        } else {
+            128
+        }
+    } else {
+        32
+    };
     for (what, w) in [
         ("embedding", d_model),
         ("feed-forward", n_ff),
@@ -369,15 +446,23 @@ pub(crate) fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
             return Err(format!("{what} width {w} is not a multiple of {unit}"));
         }
     }
-    let rot = Rotation::new(signs, hc.had_block);
-    for w in [d_model, n_ff, hc.value_dim(), cfg.q_dim()] {
-        rot.signs_for(w)?;
+    // A file with a rotation must carry a sign vector for every width its matmuls take.
+    if let Some(r) = &rot {
+        for w in [d_model, n_ff, hc.value_dim(), cfg.q_dim()] {
+            r.signs_for(w)?;
+        }
     }
     #[cfg(feature = "mtp")]
     let mtp = if n_nextn == 1 {
-        let se = rot.signs_for(d_model)?;
+        let se = rot.as_ref().map(|r| r.signs_for(d_model)).transpose()?;
         Some(mtp::Mtp::load(
-            g, n_layer, &tok_embd, &output, &rot, se, &hc,
+            g,
+            n_layer,
+            &tok_embd,
+            &output,
+            rot.as_ref(),
+            se,
+            &hc,
         )?)
     } else {
         None

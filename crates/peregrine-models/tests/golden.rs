@@ -138,9 +138,14 @@ fn golden_outputs() {
         .map(|v| v.split(',').map(str::to_string).collect())
         .unwrap_or_default();
     let tier = tier();
+    let golden_tier = if tier == "x86_64-avx2-vnni256" {
+        "x86_64-avx2"
+    } else {
+        tier.as_str()
+    };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
-        .join(&tier);
+        .join(golden_tier);
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .clamp(2, 8);
@@ -160,7 +165,7 @@ fn golden_outputs() {
             .to_string_lossy()
             .to_string();
         let gpath = dir.join(format!("{name}.golden"));
-        if !record && !gpath.is_file() {
+        if (!record || tier == "x86_64-avx2-vnni256") && !gpath.is_file() {
             eprintln!("golden: skip {rel} (no golden for tier {tier}; record one)");
             continue;
         }

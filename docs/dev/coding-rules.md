@@ -15,6 +15,15 @@ the rest. When a rule has to be broken, say so in a comment that gives the reaso
    reductions whose result depends on thread count, batch size or timing.
 4. **Prove a speedup before keeping it.** A hot-path change comes with an interleaved A/B
    (`docs/dev/benchmarking.md`) showing the gain on at least one reference host and no loss on another.
+5. **The forward path does not call the C library.** No libm transcendental (`exp`, `ln`, `tanh`,
+   `pow`, `sin`, `cos`, ...) in code that runs during a forward pass: its result then depends on the
+   host's C library and not on the kernel tier, and the two do not agree. glibc 2.40 replaced
+   `tanhf` with a correctly rounded version, and Gemma 3's synthetic goldens stopped matching
+   between glibc 2.39 and 2.43 (issue #64). Use the functions `vmath` builds from IEEE basic
+   operations (`exp_scalar`, `tanh`, ...), and add one there when there is none. The uses that are
+   left are listed in issue #64; each is a bug until it is gone. Exactly rounded operations
+   (`sqrt`, the fused multiply-add) are fine: the standard prescribes their result, so every
+   library returns the same one.
 
 ## 2. `unsafe`
 
