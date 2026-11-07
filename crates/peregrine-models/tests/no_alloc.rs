@@ -71,6 +71,16 @@ fn allocations_during(f: impl FnOnce()) -> usize {
     ALLOCS.load(Ordering::SeqCst)
 }
 
+/// The fewest allocations in any of three windows of `f`, run back to back.
+///
+/// A per-token allocation shows in every window. A one-off does not: on macOS, std's
+/// `Mutex` and `Condvar` allocate their pthread object on first use, so a pool worker
+/// that first sleeps (past its spin) inside a window counts once there and never again.
+/// That made this test fail now and then on the macOS runner.
+fn allocations_steady(mut f: impl FnMut()) -> usize {
+    (0..3).map(|_| allocations_during(&mut f)).min().unwrap()
+}
+
 fn tmpdir(test: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("peregrine-noalloc-{}-{test}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
@@ -102,7 +112,7 @@ fn check_decode(model: &Model, threads: usize, prec: KvPrec) -> usize {
     for _ in 0..4 {
         decode(&mut pos);
     }
-    allocations_during(|| {
+    allocations_steady(|| {
         for _ in 0..3 {
             decode(&mut pos);
         }
@@ -125,7 +135,7 @@ fn check_mtp_draft(model: &Model, threads: usize) -> usize {
     for _ in 0..4 {
         draft(&mut ms, &mut stats);
     }
-    allocations_during(|| {
+    allocations_steady(|| {
         for _ in 0..3 {
             draft(&mut ms, &mut stats);
         }
