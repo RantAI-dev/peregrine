@@ -454,20 +454,48 @@ pub fn write_gemma3_named(
 /// `block_count`), in Q8_0 as the 4B Bonsai file stores it. The main layers are written first from the
 /// same RNG stream, so `mtp = false` files stay byte-identical.
 pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64, mtp: bool) -> PathBuf {
-    write_hybrid_impl(dir, fmt, seed, mtp, false)
+    write_hybrid_impl(dir, fmt, seed, mtp, false, true)
+}
+
+/// A plain Qwen 3.5 file: the same hybrid model, without the Hadamard rotation and with
+/// ordinary quantised matmuls (Q8_0, F16) instead of the ternary ones.
+///
+/// This is what upstream's converter writes for `Qwen/Qwen3.5-9B` (llama.cpp v0.9.0,
+/// `conversion/qwen.py`, `Qwen3_5TextModel`): no `prism.hadamard.*` metadata at all, the
+/// value heads already in the tiled order, and the MRoPE sections the loader requires.
+pub fn write_hybrid_plain(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
+    write_hybrid_impl(dir, fmt, seed, false, false, false)
+}
+
+/// A plain Qwen 3.5 file with one MTP (NextN) block, as upstream's converter writes it
+/// when the checkpoint carries one (`mtp_num_hidden_layers`).
+pub fn write_hybrid_plain_mtp(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
+    write_hybrid_impl(dir, fmt, seed, true, false, false)
 }
 
 /// The MTP variant whose drafts are accepted: every output-head row is identical, so all logits tie and
 /// both the main model and the MTP block's shared head argmax to token 0; a draft then always matches what
 /// the main model sampled. Random weights otherwise (the ordinary MTP model rejects every draft).
 pub fn write_hybrid_accepting(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
-    write_hybrid_impl(dir, fmt, seed, true, true)
+    write_hybrid_impl(dir, fmt, seed, true, true, true)
 }
 
-fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool) -> PathBuf {
-    assert!(matches!(fmt, Format::PQ2_0 | Format::PTQ1_0));
+fn write_hybrid_impl(
+    dir: &Path,
+    fmt: Format,
+    seed: u64,
+    mtp: bool,
+    accept: bool,
+    rotated: bool,
+) -> PathBuf {
+    if rotated {
+        assert!(matches!(fmt, Format::PQ2_0 | Format::PTQ1_0));
+    }
     let (d_model, n_ff, n_layer, interval) = (256usize, 512usize, 4usize, 4usize);
-    let (n_head, n_kv, head_dim, rope_dim) = (4usize, 2usize, 64usize, 32usize);
+    let (n_head, n_kv, head_dim) = (4usize, 2usize, 64usize);
+    // A rotated file rotates two thirds of its head (the Bonsai 2 shape); a plain one
+    // rotates all of it, so that the MRoPE sections below cover every rotary pair.
+    let rope_dim = if rotated { 32 } else { head_dim };
     let (n_k, n_v, ds, d_conv) = (2usize, 4usize, 64usize, 4usize);
     let (key_dim, value_dim) = (n_k * ds, n_v * ds);
     let conv_dim = 2 * key_dim + value_dim;
@@ -499,26 +527,34 @@ fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool
     w.u32(&k("context_length"), 512);
     w.f32(&k("rope.freq_base"), 1e7);
     w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
-    w.u32("prism.hadamard.block_size", had_block as u32);
-    w.str(
-        "prism.hadamard.transform",
-        "normalized-sylvester-walsh-hadamard",
-    );
-    w.str("prism.hadamard.sign_mode", "explicit");
-    // One sign vector per distinct matmul input width: d_model = value = query = 256, FFN = 512.
-    let widths = [256i32, 512];
-    let signs: Vec<i32> = (0..widths.iter().sum::<i32>())
-        .map(|_| if rng.next_u32() & 1 == 0 { 1 } else { -1 })
-        .collect();
-    w.arr_i32("prism.hadamard.sign_widths", &widths);
-    w.arr_i32("prism.hadamard.sign_values", &signs);
+    if rotated {
+        w.u32("prism.hadamard.block_size", had_block as u32);
+        w.str(
+            "prism.hadamard.transform",
+            "normalized-sylvester-walsh-hadamard",
+        );
+        w.str("prism.hadamard.sign_mode", "explicit");
+        // One sign vector per distinct matmul input width: d_model = value = query = 256, FFN = 512.
+        let widths = [256i32, 512];
+        let signs: Vec<i32> = (0..widths.iter().sum::<i32>())
+            .map(|_| if rng.next_u32() & 1 == 0 { 1 } else { -1 })
+            .collect();
+        w.arr_i32("prism.hadamard.sign_widths", &widths);
+        w.arr_i32("prism.hadamard.sign_values", &signs);
+    } else {
+        // The MRoPE sections a plain Qwen 3.5 file carries: llama.cpp's `qwen35` loader
+        // requires them, and its converter writes the default when a checkpoint omits them
+        // (conversion/qwen.py, `_Qwen35MRopeMixin`). The sum is `rope_dim / 2`, the number
+        // of rotary pairs.
+        w.arr_i32(&k("rope.dimension_sections"), &[11, 11, 10, 0]);
+    }
     vocab::add_tokenizer_metadata(&mut w, "qwen35");
     w.str(
         "tokenizer.chat_template",
         vocab::chat_template(TemplateKind::Qwen3),
     );
 
-    let tern = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
         w.add_tensor(
             name,
             &[cols as u64, rows as u64],
@@ -547,15 +583,15 @@ fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool
         norm(&mut w, &mut rng, &p("attn_norm.weight"), d_model);
         if (i + 1) % interval == 0 {
             // Gated attention: q and its gate interleaved per head, so attn_q has 2 × q_dim rows.
-            tern(&mut w, &mut rng, &p("attn_q.weight"), d_model, 2 * q_dim);
-            tern(
+            mat(&mut w, &mut rng, &p("attn_q.weight"), d_model, 2 * q_dim);
+            mat(
                 &mut w,
                 &mut rng,
                 &p("attn_k.weight"),
                 d_model,
                 n_kv * head_dim,
             );
-            tern(
+            mat(
                 &mut w,
                 &mut rng,
                 &p("attn_v.weight"),
@@ -564,10 +600,10 @@ fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool
             );
             norm(&mut w, &mut rng, &p("attn_q_norm.weight"), head_dim);
             norm(&mut w, &mut rng, &p("attn_k_norm.weight"), head_dim);
-            tern(&mut w, &mut rng, &p("attn_output.weight"), q_dim, d_model);
+            mat(&mut w, &mut rng, &p("attn_output.weight"), q_dim, d_model);
         } else {
-            tern(&mut w, &mut rng, &p("attn_qkv.weight"), d_model, conv_dim);
-            tern(&mut w, &mut rng, &p("attn_gate.weight"), d_model, value_dim);
+            mat(&mut w, &mut rng, &p("attn_qkv.weight"), d_model, conv_dim);
+            mat(&mut w, &mut rng, &p("attn_gate.weight"), d_model, value_dim);
             f32m(
                 &mut w,
                 &mut rng,
@@ -602,12 +638,12 @@ fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool
             );
             f32m(&mut w, &mut rng, &p("ssm_a"), &[n_v as u64], -1.0, -0.1);
             norm(&mut w, &mut rng, &p("ssm_norm.weight"), ds);
-            tern(&mut w, &mut rng, &p("ssm_out.weight"), value_dim, d_model);
+            mat(&mut w, &mut rng, &p("ssm_out.weight"), value_dim, d_model);
         }
         norm(&mut w, &mut rng, &p("post_attention_norm.weight"), d_model);
-        tern(&mut w, &mut rng, &p("ffn_gate.weight"), d_model, n_ff);
-        tern(&mut w, &mut rng, &p("ffn_up.weight"), d_model, n_ff);
-        tern(&mut w, &mut rng, &p("ffn_down.weight"), n_ff, d_model);
+        mat(&mut w, &mut rng, &p("ffn_gate.weight"), d_model, n_ff);
+        mat(&mut w, &mut rng, &p("ffn_up.weight"), d_model, n_ff);
+        mat(&mut w, &mut rng, &p("ffn_down.weight"), n_ff, d_model);
     }
     norm(&mut w, &mut rng, "output_norm.weight", d_model);
     if accept {
@@ -626,7 +662,7 @@ fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool
             data,
         );
     } else {
-        tern(&mut w, &mut rng, "output.weight", d_model, VOCAB_SIZE);
+        mat(&mut w, &mut rng, "output.weight", d_model, VOCAB_SIZE);
     }
     if mtp {
         // One Qwen3.5 full-attention NextN block behind the input projection `[enorm(e) | hnorm(h)]`.
@@ -682,8 +718,10 @@ fn write_hybrid_impl(dir: &Path, fmt: Format, seed: u64, mtp: bool, accept: bool
     }
     let name = if accept {
         format!("qwen35-{}-mtp-accept", fmt.label())
-    } else {
+    } else if rotated {
         format!("qwen35-{}", fmt.label())
+    } else {
+        format!("qwen35-plain-{}", fmt.label())
     };
     let path = dir.join(format!("{name}.gguf"));
     w.write_to_file(&path).expect("write synthetic model");

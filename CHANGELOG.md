@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Support for plain Qwen 3.5 files (S2.2c): a `qwen35` file with no `prism.hadamard.*` metadata is loaded
+  without a rotation, and its ordinary quantised matmuls (Q8_0, F16, ...) run through the dense kernels
+  instead of the ternary ones. The synthetic plain file gives the same greedy tokens as llama.cpp v0.9.0;
+  the check against a real Qwen 3.5 file is pending.
 - Support for GGML's Q2_K and Q3_K weight formats (AVX2 single-row and batched kernels, scalar reference).
 - Support for GGML's MXFP4 weight format (AVX2 single-row and batched kernels, scalar reference).
 - Support for the Gemma 3 model family (S2.4a): interleaved sliding-window (local) and global layers, four RMSNorms per layer (pre/post attention, pre/post FFN), per-head q/k RMSNorms, GeGLU activation, embedding scaled by sqrt(d_model), tied output head, sliding-window attention restriction, and distinct RoPE frequency bases for local vs global layers matching llama.cpp v0.9.0.

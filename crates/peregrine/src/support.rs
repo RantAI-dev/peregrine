@@ -77,7 +77,7 @@ pub fn support_markdown() -> String {
                 "llama" => "Llama",
                 "qwen2" => "Qwen 2",
                 "qwen3" => "Qwen 3",
-                "qwen35" => "Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP)",
+                "qwen35" => "Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP; plain file: synthetic check, real file pending)",
                 "gemma3" => "Gemma 3",
                 "qwen3moe" => "Qwen 3 MoE (synthetic check; real file pending)",
                 other => other,

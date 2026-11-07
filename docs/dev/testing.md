@@ -16,7 +16,9 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    NeoX rotary pairing) in F16 and Q8_0, llama with a Llama 3.x `rope_freqs.weight` table or linear rope
    scaling, and the qwen35 hybrid (Gated DeltaNet, gated attention, Hadamard rotation) in PQ2_0 and
    PTQ1_0, plus that hybrid with one Q8_0 MTP (NextN) block whose speculation must be lossless and a
-   variant whose drafts are actually accepted. Each must load, give finite logits, be bit-identical across
+   variant whose drafts are actually accepted. The same hybrid is written there without the rotation —
+   a plain Qwen 3.5 file, in F16 and Q8_0 — and llama.cpp v0.9.0 loads it and gives the same greedy
+   tokens. Each must load, give finite logits, be bit-identical across
    runs and across 1, 2 and 4 threads, decode greedily the same way twice, and match its golden for the
    current tier (`tests/golden/synthetic/<tier>/`). A `qwen3moe` file (8 experts, 2 used, F16 and Q8_0
    experts) is written there too: the mixture-of-experts family runs it — it loads, gives finite logits,
