@@ -1,7 +1,7 @@
 //! Fused linear transformation blocks (dense GEMM groups and LittleBit).
 
 use crate::blocks::par::{OutPtr, SharedBuf};
-use crate::gguf::TensorInfo;
+use crate::gguf::{Format, TensorInfo};
 use crate::lbq::Slb;
 use crate::model::{Linear, StepStats, Weights};
 use crate::pool::{share, Pool};
@@ -11,6 +11,16 @@ use std::time::Instant;
 
 /// The rows one repacked k-quant tile holds.
 const KQ_TILE_ROWS: usize = 8;
+
+/// The bytes one repacked tile of a k-quant format takes.
+///
+/// Q4_K and Q6_K have their own tile sizes (S3.4).
+fn kq_tile_bytes(kind: Format) -> usize {
+    match kind {
+        Format::Q6_K => peregrine_kernels::kq::Q6K8::SIZE,
+        _ => peregrine_kernels::kq::Q4K8::SIZE,
+    }
+}
 
 /// Largest batch one matmul call accepts. A stack array of this many scratch floats
 /// holds one row's results; `PEREGRINE_PREFILL_CHUNK` and `draft_len + 1` are both far below it.
@@ -170,7 +180,7 @@ pub fn matmul_group(
                     // depends only on its index.
                     let kq_off = j.w.kq_off.expect("the repacked path has a store offset");
                     let n_sb = n / j.w.kind.block();
-                    let tile_bytes = peregrine_kernels::kq::Q4K8::SIZE;
+                    let tile_bytes = kq_tile_bytes(j.w.kind);
                     let store = w.kq();
                     let rows = j.rows();
                     let repacked = (rows / KQ_TILE_ROWS) * KQ_TILE_ROWS;
@@ -188,9 +198,17 @@ pub fn matmul_group(
                             let tile = &store[at..at + n_sb * tile_bytes];
                             let out = &mut blk[..KQ_TILE_ROWS * nb];
                             if nb >= 4 {
-                                mk.kq_tiles_q4k(tile, n_sb, kq, nb, out);
+                                match j.w.kind {
+                                    Format::Q6_K => mk.kq_tiles_q6k(tile, n_sb, kq, nb, out),
+                                    _ => mk.kq_tiles_q4k(tile, n_sb, kq, nb, out),
+                                }
                             } else {
-                                mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                match j.w.kind {
+                                    Format::Q6_K => {
+                                        mk.kq_tiles_q6k_gemv(tile, n_sb, &acts[..nb], nb, out)
+                                    }
+                                    _ => mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out),
+                                }
                             }
                             for i in 0..KQ_TILE_ROWS {
                                 let row = t * KQ_TILE_ROWS + i;

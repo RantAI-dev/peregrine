@@ -45,7 +45,20 @@
 //! Q6_K's codes are six bits wide and stored as four bits in `ql` and two in `qh`, so
 //! the tile keeps them in the file's own encoding: expanding them to bytes would cost
 //! 30 % more memory than the format itself. `sc` is indexed `sc[sub * 8 + row]`, with
-//! one scale per sixteen weights, and `ql` and `qh` are windowed like `qs` above.
+//! one scale per sixteen weights.
+//!
+//! `ql` and `qh` are *chunked*: four weights of one group at a time, the eight rows
+//! side by side. `ql[chunk * 32 + row * 4 + i]` is row `row`'s low-nibble byte for the
+//! `i`-th weight of the chunk, and `qh[chunk * 32 + row * 4 + i]` the same weight's
+//! high bits. A 32-byte load is then the eight rows' four codes of one chunk, one row
+//! per 32-bit lane — the shape a `vpmaddubsw` wants, with no shuffle in between.
+//!
+//! The chunks follow the format's own grouping: a super-block is two halves of 128
+//! weights, each four groups of 32, each two runs of 16. The half's first 32 `ql`
+//! bytes are the groups 0 and 2's (the low nibbles and the high nibbles of the same
+//! bytes), the next 32 the groups 1 and 3's; the half's 32 `qh` bytes hold all four
+//! groups' high bits, two bits each. So the tile holds every byte of the file's own
+//! bytes exactly once: the chunked order is a permutation, not a copy.
 //!
 //! # Sizes
 //!
@@ -94,9 +107,9 @@ pub struct Q6K8 {
     pub d: [u16; 8],
     /// The eight rows' eight-bit scales, one per sixteen weights: `sc[sub * 8 + row]`.
     pub sc: [i8; 128],
-    /// The eight rows' low nibbles: `ql[window * 64 + row * 8 + k]`.
+    /// The eight rows' low nibbles, chunk by chunk: `ql[chunk * 32 + row * 4 + i]`.
     pub ql: [u8; 1024],
-    /// The eight rows' high bits: `qh[window * 64 + row * 8 + k]`.
+    /// The eight rows' high bits, chunk by chunk: `qh[chunk * 32 + row * 4 + i]`.
     pub qh: [u8; 512],
 }
 
@@ -145,6 +158,25 @@ pub const Q4_SCM_STRIDE: usize = 12;
 pub const fn q4_qs() -> usize {
     Q4_QS
 }
+/// The byte offset of the eight rows' super-block scales in a Q6_K tile.
+pub const fn q6_d() -> usize {
+    Q6_D
+}
+/// The byte offset of the eight rows' eight-bit scales in a Q6_K tile.
+pub const fn q6_sc() -> usize {
+    Q6_SC
+}
+/// The byte offset of the eight rows' low nibbles in a Q6_K tile.
+pub const fn q6_ql() -> usize {
+    Q6_QL
+}
+/// The byte offset of the eight rows' high bits in a Q6_K tile.
+pub const fn q6_qh() -> usize {
+    Q6_QH
+}
+
+/// The bytes one Q6_K chunk holds: four weights of one group, of eight rows.
+pub const Q6_CHUNK: usize = 32;
 
 /// The six-bit scale of row `row` for sub-block `sub` of a repacked Q4_K tile.
 pub fn tile_q4k_scale(t: &[u8], sub: usize, row: usize) -> u8 {
@@ -282,13 +314,20 @@ pub fn repack_q6k8(src: &[&[u8]], dst: &mut [u8]) {
         for s in 0..16 {
             dst[Q6_SC + s * 8 + r] = b[192 + s];
         }
-        for c in 0..16 {
-            let at = Q6_QL + c * 64 + r * 8;
-            dst[at..at + 8].copy_from_slice(&b[c * 8..c * 8 + 8]);
-        }
-        for c in 0..8 {
-            let at = Q6_QH + c * 64 + r * 8;
-            dst[at..at + 8].copy_from_slice(&b[128 + c * 8..128 + c * 8 + 8]);
+        // The codes, chunk by chunk: four weights of one group, the eight rows
+        // side by side. The half's first 32 low-nibble bytes are the groups 0
+        // and 2's, the next 32 the groups 1 and 3's; the half's 32 high-bit
+        // bytes hold all four groups' two bits.
+        for c in 0..2 {
+            for cc in 0..8 {
+                let lo = Q6_QL + (c * 16 + cc) * Q6_CHUNK + r * 4;
+                dst[lo..lo + 4].copy_from_slice(&b[c * 64 + cc * 4..c * 64 + cc * 4 + 4]);
+                let hi = Q6_QL + (c * 16 + 8 + cc) * Q6_CHUNK + r * 4;
+                dst[hi..hi + 4].copy_from_slice(&b[c * 64 + 32 + cc * 4..c * 64 + 32 + cc * 4 + 4]);
+                let qh = Q6_QH + (c * 8 + cc) * Q6_CHUNK + r * 4;
+                dst[qh..qh + 4]
+                    .copy_from_slice(&b[128 + c * 32 + cc * 4..128 + c * 32 + cc * 4 + 4]);
+            }
         }
     }
 }
@@ -312,13 +351,16 @@ pub fn unrepack_q6k8(src: &[u8], dst: &mut [u8]) {
             b[192 + s] = src[Q6_SC + s * 8 + r];
         }
         b[208..210].copy_from_slice(&src[Q6_D + r * 2..Q6_D + r * 2 + 2]);
-        for c in 0..16 {
-            let at = Q6_QL + c * 64 + r * 8;
-            b[c * 8..c * 8 + 8].copy_from_slice(&src[at..at + 8]);
-        }
-        for c in 0..8 {
-            let at = Q6_QH + c * 64 + r * 8;
-            b[128 + c * 8..128 + c * 8 + 8].copy_from_slice(&src[at..at + 8]);
+        for c in 0..2 {
+            for cc in 0..8 {
+                let lo = Q6_QL + (c * 16 + cc) * Q6_CHUNK + r * 4;
+                b[c * 64 + cc * 4..c * 64 + cc * 4 + 4].copy_from_slice(&src[lo..lo + 4]);
+                let hi = Q6_QL + (c * 16 + 8 + cc) * Q6_CHUNK + r * 4;
+                b[c * 64 + 32 + cc * 4..c * 64 + 32 + cc * 4 + 4].copy_from_slice(&src[hi..hi + 4]);
+                let qh = Q6_QH + (c * 8 + cc) * Q6_CHUNK + r * 4;
+                b[128 + c * 32 + cc * 4..128 + c * 32 + cc * 4 + 4]
+                    .copy_from_slice(&src[qh..qh + 4]);
+            }
         }
     }
 }
@@ -360,12 +402,14 @@ pub struct KqActs {
     pub q: Vec<i8>,
     /// The per-256 scale of every row: `groups · super_blocks · 4`.
     pub d: Vec<f32>,
-    /// The per-32-weight sum of every row: `groups · super_blocks · 4 · 8`.
+    /// The per-16-weight run sum of every row: `groups · super_blocks · 4 · 16`.
     ///
-    /// The min term of the Q4_K format is the row's mins against the
-    /// activation's sums, one per sub-block — and every product and partial sum
-    /// of it is an integer below 2^24 (63 · 4064 · 8 = 2 048 256), so it is
-    /// exact in either domain and the kernel folds it in int32 lanes.
+    /// Two formats need the activation's sums, at two granularities: the Q4_K
+    /// min term is the row's mins against the sum over a 32-weight sub-block
+    /// (two runs), and the Q6_K offset is the row's scales against the sum over
+    /// a 16-weight run. Both are exact integers — a run's sum is at most 2 032
+    /// and a sub-block's at most 4 064 — so the sums are kept per run and the
+    /// sub-block's sum is the sum of two of them.
     pub bs: Vec<i32>,
     /// The rows filled.
     pub rows: usize,
@@ -414,7 +458,7 @@ impl KqActs {
         self.d.clear();
         self.d.resize(groups * n_sb * ACT_GROUP, 0.0);
         self.bs.clear();
-        self.bs.resize(groups * n_sb * ACT_GROUP * 8, 0);
+        self.bs.resize(groups * n_sb * ACT_GROUP * 16, 0);
         for g in 0..groups {
             for sb in 0..n_sb {
                 let base = (g * n_sb + sb) * 1024;
@@ -430,17 +474,18 @@ impl KqActs {
                     }
                 }
                 let dbase = (g * n_sb + sb) * ACT_GROUP;
-                let bbase = (g * n_sb + sb) * ACT_GROUP * 8;
+                let bbase = (g * n_sb + sb) * ACT_GROUP * 16;
                 for t in 0..ACT_GROUP {
                     let b = g * ACT_GROUP + t;
                     if b >= acts.len() {
                         continue;
                     }
                     self.d[dbase + t] = acts[b].dk[sb];
-                    // The per-32-weight sums, from the per-16 run sums.
+                    // The per-16 run sums: the Q6_K offset is applied against
+                    // them, and the Q4_K min term against two of them.
                     let rs = &acts[b].bsums[sb * 16..sb * 16 + 16];
-                    for j in 0..8 {
-                        self.bs[bbase + t * 8 + j] = rs[2 * j] as i32 + rs[2 * j + 1] as i32;
+                    for j in 0..16 {
+                        self.bs[bbase + t * 16 + j] = rs[j] as i32;
                     }
                 }
             }
@@ -519,6 +564,83 @@ pub fn dot_q4k8_ref(tile: &[u8], n_sb: usize, row: usize, act: &QuantAct) -> f32
         // difference and the accumulation in one rounding each.
         let x = (-dmin).mul_add(summ as f32, d * sumi as f32);
         acc = x.mul_add(act.dk[sb], acc);
+    }
+    acc
+}
+
+/// The value of one row of a repacked Q6_K tile against one activation row.
+///
+/// This is the specification the AVX2 kernel is checked against, and it is the
+/// same real number the ordinary Q6_K kernel computes:
+///
+/// ```text
+/// value = Σ_sb dk[sb] · ( d[sb] · S − 32 · Σ_runs scale[run] · bsum[run] )
+/// ```
+///
+/// with `S` the integer sum of the scaled products of the super-block. The
+/// `−32` is the format's offset: the codes are `0..63` and the weights they
+/// stand for are `−32..31`, so the offset is taken off the activation's run
+/// sums, exactly as the ordinary kernel does it — in the integer domain, where
+/// it is exact.
+///
+/// # Panics
+///
+/// If the tile is shorter than `n_sb` tiles, or the activation does not carry
+/// the per-256 layout.
+pub fn dot_q6k8_ref(tile: &[u8], n_sb: usize, row: usize, act: &QuantAct) -> f32 {
+    assert!(row < 8, "a tile holds eight rows");
+    assert!(
+        tile.len() >= n_sb * Q6K8::SIZE,
+        "the tile is shorter than its super-blocks"
+    );
+    assert!(
+        !act.qk.is_empty(),
+        "a k-quant row needs the per-256 activation"
+    );
+    let mut acc = 0.0f32;
+    for sb in 0..n_sb {
+        let t = &tile[sb * Q6K8::SIZE..(sb + 1) * Q6K8::SIZE];
+        let d = f16(u16::from_le_bytes([
+            t[Q6_D + row * 2],
+            t[Q6_D + row * 2 + 1],
+        ]));
+        let aq = &act.qk[sb * 256..sb * 256 + 256];
+        let rs = &act.bsums[sb * 16..sb * 16 + 16];
+        let mut sumi = 0i64;
+        let mut off = 0i64;
+        // Two halves of 128 weights, four groups of 32, two runs of 16.
+        for c in 0..2 {
+            for g in 0..4 {
+                for run in 0..2 {
+                    let sub = c * 8 + g * 2 + run;
+                    let scale = t[Q6_SC + sub * 8 + row] as i8 as i64;
+                    // The run's sixteen weights.
+                    let mut s = 0i64;
+                    for l in 0..16 {
+                        let w = c * 128 + g * 32 + run * 16 + l;
+                        // The chunk of four weights the weight is in, and the
+                        // byte inside it.
+                        let cc = (run * 16 + l) / 4;
+                        let i = (run * 16 + l) % 4;
+                        let ql = t[Q6_QL + (c * 16 + (g & 1) * 8 + cc) * Q6_CHUNK + row * 4 + i];
+                        let qh = t[Q6_QH + (c * 8 + cc) * Q6_CHUNK + row * 4 + i];
+                        // The groups 0 and 1 take the low nibble of the byte,
+                        // the groups 2 and 3 the high one; the high two bits
+                        // are the group's own two of the byte's four fields.
+                        let low = if g < 2 { ql & 0x0F } else { ql >> 4 };
+                        let high = (qh >> (2 * g)) & 3;
+                        let code = (low | (high << 4)) as i64;
+                        s += code * aq[w] as i64;
+                    }
+                    sumi += scale * s;
+                    off += 32 * scale * rs[sub] as i64;
+                }
+            }
+        }
+        // The same expression the kernel folds: the integer sums first, the
+        // scale and the accumulation in one rounding each.
+        let v = (sumi - off) as f32;
+        acc = v.mul_add(d * act.dk[sb], acc);
     }
     acc
 }
@@ -671,6 +793,49 @@ mod tests {
                     &tile[at..at + 8],
                     &src[r * 144 + 16 + c * 8..r * 144 + 16 + c * 8 + 8]
                 );
+            }
+        }
+    }
+
+    /// The Q6_K tile holds the codes chunk by chunk: four weights of one group
+    /// at a time, the eight rows side by side.
+    #[test]
+    fn the_q6_k_tile_holds_its_chunks_where_the_layout_says() {
+        let mut rng = Rng(0x0BAD_C0DE_F00D_BEEF);
+        let src = rng.bytes(8 * Q6K_BLOCK);
+        let mut tile = vec![0u8; Q6K8::SIZE];
+        repack_q6k8(&group6(&src), &mut tile);
+        for r in 0..8 {
+            let b = &src[r * Q6K_BLOCK..(r + 1) * Q6K_BLOCK];
+            // The scale and the super-block scale.
+            assert_eq!(&tile[Q6_D + r * 2..Q6_D + r * 2 + 2], &b[208..210]);
+            for s in 0..16 {
+                assert_eq!(tile[Q6_SC + s * 8 + r], b[192 + s]);
+            }
+            // The codes: the half's first thirty-two low-nibble bytes are the
+            // groups 0 and 2's, the next thirty-two the groups 1 and 3's; the
+            // half's thirty-two high-bit bytes hold all four groups' two bits.
+            for c in 0..2 {
+                for cc in 0..8 {
+                    let lo = Q6_QL + (c * 16 + cc) * Q6_CHUNK + r * 4;
+                    assert_eq!(
+                        &tile[lo..lo + 4],
+                        &b[c * 64 + cc * 4..c * 64 + cc * 4 + 4],
+                        "half {c} chunk {cc}"
+                    );
+                    let hi = Q6_QL + (c * 16 + 8 + cc) * Q6_CHUNK + r * 4;
+                    assert_eq!(
+                        &tile[hi..hi + 4],
+                        &b[c * 64 + 32 + cc * 4..c * 64 + 32 + cc * 4 + 4],
+                        "half {c} chunk {cc}"
+                    );
+                    let qh = Q6_QH + (c * 8 + cc) * Q6_CHUNK + r * 4;
+                    assert_eq!(
+                        &tile[qh..qh + 4],
+                        &b[128 + c * 32 + cc * 4..128 + c * 32 + cc * 4 + 4],
+                        "half {c} chunk {cc}"
+                    );
+                }
             }
         }
     }
