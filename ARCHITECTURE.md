@@ -32,6 +32,9 @@ users' next tokens and chunks of new prompts, and runs **one forward pass** over
 single read of the weights. Decode for one user is bound by memory bandwidth; batches and prompts are
 bound by compute. That split drives most design choices.
 
+There is one runtime (ADR 0007). A conversation is the same engine with one slot: `Session` renders the
+prompt, keeps the chat history and lends the slot the cache the conversation has filled so far.
+
 ## Code map
 
 ### `crates/peregrine-kernels`: CPU kernels (no dependencies)
@@ -62,8 +65,9 @@ bound by compute. That split drives most design choices.
 | `attn.rs` | Grouped online-softmax attention with optional sliding-window restriction. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state, snapshots for speculation, and the prefix store that reuses a shared prompt beginning. |
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
-| `serve.rs` | `Engine`: slots, scheduling, mixed prefill/decode steps, MTP verification. The server runs this. |
-| `session.rs`, `dspark.rs`, `suffix.rs` | `Session`, the older single-user runtime, with DSpark and suffix speculation. To be folded into `Engine` (roadmap S1.4). |
+| `serve.rs` | `Engine`: the one runtime — slots, scheduling, mixed prefill/decode steps, and the verification step every draft goes through. The server runs this. |
+| `session.rs` | `Session`: the conversation layer over a one-slot `Engine` (ADR 0007) — the chat history, the template, the prompt, the reuse of the positions the previous turn computed, the context shifting, the per-turn telemetry. |
+| `draft.rs`, `dspark.rs`, `suffix.rs` | The `Drafter` interface every speculation goes through, and the drafters behind it: the suffix index (`suffix.rs`), DeepSeek's DSpark head (`dspark.rs`), the model's own MTP block (`draft.rs`). |
 | `profile.rs` | Tuning profiles: read, write, mismatch detection and default paths (ADR 0005). |
 | `pool.rs` | The thread pool and barrier. Thread count and barrier count are measured quantities, which is why there is no rayon. |
 | `telem.rs` | Bytes moved, phases and machine ceilings: the numbers every benchmark reports. |

@@ -17,15 +17,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{write_dense, Dense};
 
-/// The prompt both runtimes are given.
+/// The prompt both paths are given.
 const USER: &str = "Name three colours.";
-/// The reply both runtimes are asked for.
+/// The reply both paths are asked for.
 const TOKENS: usize = 24;
-/// The seed both runtimes sample with.
+/// The seed both paths sample with.
 const SEED: u64 = 20240;
-/// The temperature the two runtimes sample at.
+/// The temperature both paths sample at.
 const TEMP: f32 = 0.7;
-/// The nucleus both runtimes sample from.
+/// The nucleus both paths sample from.
 const TOP_P: f32 = 0.95;
 /// The number of draft tokens the pin holds the head to.
 const PINNED_K: usize = 2;

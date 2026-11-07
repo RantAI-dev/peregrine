@@ -50,9 +50,9 @@ All notable changes to this project are documented here. The format follows
   variant that runs lossless speculation with it on and off.
 - Synthetic coverage for Qwen2 attention biases, Llama 3.x and linear rope scaling, engine batching (shared
   prefixes, mixed prefill/decode, mapped and per-row caches), LittleBit sidecars and accepted MTP drafts.
-- Synthetic coverage of what the two runtimes do differently, pinned before ADR 0007 makes the engine the
-  only one: the same prompt through `Session` and a one-slot `Engine`, the taps a DSpark drafter needs, a
-  second user arriving mid-speculation, and the prefix store with a drafter attached.
+- Synthetic coverage of what the session and a one-slot engine must agree on (ADR 0007): the same prompt
+  through `Session` and a one-slot `Engine`, the taps a DSpark drafter needs, a second user arriving
+  mid-speculation, and the prefix store with a drafter attached.
 - `peregrine-core`: the `Drafter` interface (ADR 0007) — one way of proposing tokens, told what the target
   committed and what was rolled back — with wrappers over today's drafters (the suffix index, DeepSeek's
   DSpark head, the model's own MTP block). Unstable until 1.0.
@@ -73,10 +73,24 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- `Session` is a conversation layer over a one-slot `Engine` (ADR 0007, S1.4): the chat history, the template,
+  the prompt, the reuse of the positions the previous turn computed and the context shifting stay in the
+  session; the generation, the speculation and the verification of the drafts are the engine's. Its public API
+  is unchanged.
+- `peregrine bench` measures the engine. The benchmark used to walk a prefill and a decode loop of its own,
+  beside the runtime the server runs; it now admits a slot and lets the engine do the work, so the numbers it
+  reports are the numbers the engine charges a request. The bytes a token moves are the same, and the JSON
+  keys are unchanged.
 - The GeGLU kernel's `tanh` runs on the CPU's FMA instruction where there is one: the scalar arithmetic is
   compiled a second time inside a `#[target_feature(enable = "fma")]` function, so the `mul_add`s become
   `vfmadd` instead of a call to the C library's `fmaf` (8.3x on the kernel, bit for bit the same result).
 - F32/F16/BF16 matrices multiply f32 activations instead of int8-quantised ones (output change for those formats).
+
+### Removed
+- The last of the old runtime and the old speculation paths (ADR 0007, S1.4): `Session::probe_verify_curve`
+  (the engine's verify-cost model measures those widths now, on the engine's own forward passes),
+  `dspark::Drafter::draft`, `SuffixIndex::propose`, `Engine::slot_cost`, `DrafterChoice::Mtp` (an alias for
+  `DrafterChoice::None`) and `Needs::history` (the engine never read it). The interfaces are unstable until 1.0.
 
 ### Fixed
 - The A1 dequantisation oracle is re-cut from one pinned SmolLM2-360M-Instruct Q4_K_M file (size and
