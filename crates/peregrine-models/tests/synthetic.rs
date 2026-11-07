@@ -488,8 +488,12 @@ fn load_arc(path: &Path) -> Arc<Model> {
 
 /// The long third prompt keeps one slot in prefill while the other two decode, which is the
 /// mixed step (`Caches::Mapped` with decode rows beside a prompt chunk).
+///
+/// The long prompt is longer than the widest chunk the engine may be given
+/// (`options::MAX_PREFILL_CHUNK`), so it is read in pieces whatever the chunk is, and the mixed
+/// step happens whatever the chunk is.
 fn batch_prompts() -> Vec<Vec<u32>> {
-    let long: Vec<u32> = (0..80).map(|i| ((i * 7) % 317 + 2) as u32).collect();
+    let long: Vec<u32> = (0..160).map(|i| ((i * 7) % 317 + 2) as u32).collect();
     vec![
         PROMPT.to_vec(),
         vec![17, 44, 201, 6, 99, 130, 250, 21, 300, 77, 4, 180],

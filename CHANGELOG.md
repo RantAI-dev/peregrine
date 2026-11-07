@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16): the prompt tokens one weight pass
+  carries. The engine prefills a prompt in pieces of this size, and the piece is how the prompt is
+  *read*, not what it produces: the same prompt, read in pieces of 16, 32, 64 or 128 tokens, gives the
+  same KV cache, the same logits and the same tokens (`crates/peregrine-models/tests/prefill_chunk.rs`).
+  The default comes from an A/B on the reference machine (12 threads, four rotating rounds): Llama-3.2-1B
+  165.9 prompt tok/s against 154.3 at the old 64 (+7.5 %), Ternary-Bonsai-2-2B 239.2 against 227.0
+  (+5.4 %), Qwen2.5-0.5B 257.3 against 270.7 (-5.0 %). The tenth user's first token does not get later
+  (19.8 s against 21.8 s at 64). A smaller chunk reads the weights more often (18.9 GB against 4.9 GB for
+  a 512-token prompt on the 1B model) and keeps the activations in cache; the prefill is compute-bound at
+  that width, so the traffic is free.
 - The `gpt-oss` model family (S2.5 step 5): OpenAI's mixture of experts — attention sinks (a learned
   per-head logit in the softmax), alternating sliding-window and full attention, biases on the attention
   output, the router and every expert projection, YaRN rope scaling, the router's softmax over the

@@ -43,14 +43,31 @@ pub struct DsparkOptions {
 
 /// The switches a tuning profile may set: `(environment variable, profile key)`. All are output-neutral —
 /// the golden tests check that tokens do not depend on the thread count, and spinning and prefetch only move
-/// time. Activation-layout switches such as `PEREGRINE_TQ_SPAN` / `PEREGRINE_TB_SPAN` change the quantised
-/// activations, hence the tokens, and are deliberately absent.
+/// time. The prefill chunk only changes how a prompt is *read*: the same prompt, read in pieces of 16,
+/// 32, 64 or 128 tokens, gives the same KV cache, the same logits and the same tokens
+/// (`crates/peregrine-models/tests/prefill_chunk.rs`). Activation-layout switches such as
+/// `PEREGRINE_TQ_SPAN` / `PEREGRINE_TB_SPAN` change the quantised activations, hence the tokens, and are
+/// deliberately absent.
 pub const TUNABLE: &[(&str, &str)] = &[
     ("PEREGRINE_SPIN_US", "spin_us"),
     ("PEREGRINE_YIELD_US", "yield_us"),
     ("PEREGRINE_DECODE_THREADS", "decode_threads"),
     ("PEREGRINE_PF", "prefetch_bytes"),
+    ("PEREGRINE_PREFILL_CHUNK", "prefill_chunk"),
 ];
+
+/// The default prompt chunk: the prompt tokens one weight pass carries (`PEREGRINE_PREFILL_CHUNK`).
+///
+/// 16, from the A/B on the reference machine (12 threads, `peregrine bench --prompt-tokens 512
+/// --tokens 1`, four rotating rounds): Llama-3.2-1B 165.9 tok/s against 154.3 at 64 (+7.5 %),
+/// Bonsai-2B 239.2 against 227.0 (+5.4 %), Qwen2.5-0.5B 257.3 against 270.7 (-5.0 %). The tenth
+/// user's first token does not get later (19.8 s against 21.8 s at 64).
+pub const PREFILL_CHUNK_DEFAULT: usize = 16;
+
+/// The largest prompt chunk one weight pass may carry: the matmul scratch's row limit
+/// (`blocks::linear::MAX_BATCH`). The engine lowers it further when the decode rows of the
+/// other users need the room.
+pub const MAX_PREFILL_CHUNK: usize = crate::blocks::linear::MAX_BATCH;
 
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +116,12 @@ pub struct EngineOptions {
     /// `PEREGRINE_MIX=0`: no mixed prefill/decode steps. Speculation (MTP, suffix, DSpark) is verified only in
     /// the mixed step, so this also turns speculation off, for the server and for conversations (`Session`).
     pub mix: bool,
+    /// `PEREGRINE_PREFILL_CHUNK`: prompt tokens one weight pass carries (default 16).
+    ///
+    /// The engine prefills a prompt in pieces of this size, so a long prompt is read in several passes.
+    /// Smaller pieces keep the activation scratch in cache and read the weights more often; the tokens
+    /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that).
+    pub prefill_chunk: usize,
     /// `PEREGRINE_MTP=0`: no MTP speculation.
     pub mtp: bool,
     /// `PEREGRINE_MTP_VOCAB`: vocabulary rows the MTP drafter scores (default 32768).
@@ -153,6 +176,7 @@ impl Default for EngineOptions {
             kv_rotate: true,
             kv_prec: crate::kv::KvPrec::F16,
             mix: true,
+            prefill_chunk: PREFILL_CHUNK_DEFAULT,
             mtp: true,
             mtp_vocab: 32768,
             dspark: DsparkOptions {
@@ -276,6 +300,9 @@ impl EngineOptions {
                 .and_then(|v| crate::kv::KvPrec::parse(&v))
                 .unwrap_or(d.kv_prec),
             mix: unless("MIX", "0"),
+            prefill_chunk: num("PREFILL_CHUNK")
+                .filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v))
+                .unwrap_or(d.prefill_chunk),
             mtp: unless("MTP", "0"),
             mtp_vocab: num("MTP_VOCAB").unwrap_or(d.mtp_vocab),
             dspark: DsparkOptions {
@@ -351,6 +378,7 @@ impl EngineOptions {
             ("kv_rotate", self.kv_rotate.to_string()),
             ("kv_prec", self.kv_prec.name().to_string()),
             ("mix", self.mix.to_string()),
+            ("prefill_chunk", self.prefill_chunk.to_string()),
             ("mtp", self.mtp.to_string()),
             ("mtp_vocab", self.mtp_vocab.to_string()),
             ("dspark.logits_start", self.dspark.logits_start.to_string()),
@@ -407,6 +435,7 @@ pub const NAMES: &[&str] = &[
     "KV_ROTATE",
     "KV",
     "MIX",
+    "PREFILL_CHUNK",
     "MTP",
     "MTP_VOCAB",
     "DSPARK_LOGITS_START",
@@ -527,6 +556,21 @@ mod tests {
         assert!(!with(&[("CALIBRATE", "0")]).calibrate);
         assert!(with(&[("CALIBRATE", "1")]).calibrate);
         assert!(!with(&[]).calibrate);
+        // The prefill chunk: from one token to the matmul scratch's row limit. Anything
+        // else leaves the default.
+        assert_eq!(with(&[("PREFILL_CHUNK", "32")]).prefill_chunk, 32);
+        assert_eq!(
+            with(&[("PREFILL_CHUNK", "0")]).prefill_chunk,
+            PREFILL_CHUNK_DEFAULT
+        );
+        assert_eq!(
+            with(&[("PREFILL_CHUNK", "1000")]).prefill_chunk,
+            PREFILL_CHUNK_DEFAULT
+        );
+        assert_eq!(
+            with(&[("PREFILL_CHUNK", "x")]).prefill_chunk,
+            PREFILL_CHUNK_DEFAULT
+        );
     }
 
     #[test]
@@ -609,6 +653,7 @@ mod tests {
                 ("exact".into(), "true".into()),
                 ("mtp".into(), "false".into()),
                 ("spin_us".into(), "7".into()),
+                ("prefill_chunk".into(), "32".into()),
             ],
         };
         let o = EngineOptions::from_chained(|_| None, Some(&prof));
@@ -618,6 +663,8 @@ mod tests {
             (d.tb_span, d.tq_span, d.exact, d.mtp)
         );
         assert_eq!(o.spin_us, 7);
+        // The prefill chunk is output-neutral, so a profile may set it.
+        assert_eq!(o.prefill_chunk, 32);
     }
     #[test]
     fn calibration_disabled_gives_defaults() {
