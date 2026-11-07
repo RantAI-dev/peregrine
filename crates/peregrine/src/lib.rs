@@ -95,9 +95,10 @@ pub fn inspect(path: &std::path::Path) -> Result<String, String> {
 pub fn describe_runtime() -> String {
     let o = peregrine_core::options::get();
     format!(
-        "kernel tier   {}\nsimd          {}\noptions:\n{}",
+        "kernel tier   {}\nsimd          {}\nkq_repack     {}\noptions:\n{}",
         peregrine_kernels::cpu::tier_name(),
         peregrine_core::simd_name(),
+        o.kq_repack_note(),
         o.describe()
             .lines()
             .map(|l| format!("  {l}\n"))

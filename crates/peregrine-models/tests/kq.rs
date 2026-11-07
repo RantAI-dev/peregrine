@@ -97,9 +97,25 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
         let path = write_dense(&dir, "llama", fmt, 4242, Dense::default());
         let g = Gguf::open(&path).expect("the synthetic model opens");
 
-        // The model the ordinary way: the option decides, and the store is built.
-        let model = peregrine_models::load(Gguf::open(&path).expect("the model opens"))
+        // The ordinary load builds the store only where a kernel reads it: the repack is
+        // on in this process, so the store appears exactly when the table has the
+        // repacked kernel (not on a `PEREGRINE_ISA=scalar` run, and never off x86-64).
+        let ordinary = peregrine_models::load(Gguf::open(&path).expect("the model opens"))
             .expect("the synthetic model loads");
+        assert_eq!(
+            !ordinary.kq().is_empty(),
+            peregrine_kernels::table::MatKernels::get().kq_tiles(),
+            "{fmt:?}: the ordinary load and the kernel table disagree about the store"
+        );
+
+        // The store's own contents, forced on: this is the test of the layout, so it runs on
+        // every tier and every architecture, including the ones no kernel reads the store on.
+        let model = Model::load_with_kq(
+            Gguf::open(&path).expect("the model opens"),
+            peregrine_models::FAMILIES,
+            true,
+        )
+        .expect("the synthetic model loads");
         let store = model.kq();
         assert!(!store.is_empty(), "{fmt:?}: the store is empty");
 

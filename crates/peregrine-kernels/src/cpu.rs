@@ -47,6 +47,47 @@ pub fn cap() -> Tier {
     *CAP.get_or_init(|| crate::options::get().isa.unwrap_or(Tier::Avx512))
 }
 
+/// The highest tier this CPU reaches on its own, before `PEREGRINE_ISA` caps it.
+///
+/// Detection only: unlike [`cap`], this reads no options, so the options parser can call it
+/// while it is resolving them.
+pub fn detected() -> Tier {
+    static DETECTED: OnceLock<Tier> = OnceLock::new();
+    *DETECTED.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let avx2 = std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma");
+            if std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("avx512vl")
+            {
+                Tier::Avx512
+            } else if avx2 && std::arch::is_x86_feature_detected!("avxvnni") {
+                Tier::AvxVnni
+            } else if avx2 {
+                Tier::Avx2
+            } else {
+                Tier::Scalar
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            Tier::Scalar
+        }
+    })
+}
+
+/// The tier the kernels run at under a `PEREGRINE_ISA` cap (`None` = native): the lower of what the
+/// CPU detects and the cap. This is the tier a tier-dependent default is resolved against.
+pub fn resolved_under(isa: Option<Tier>) -> Tier {
+    detected().min(isa.unwrap_or(Tier::Avx512))
+}
+
+/// The tier the kernels run at: [`detected`] capped by `PEREGRINE_ISA`.
+pub fn resolved() -> Tier {
+    resolved_under(crate::options::get().isa)
+}
+
 /// `PEREGRINE_ISA`'s value as a tier: `scalar`, `avx2`, `avx-vnni`, `avx512`; anything else (or unset) is no cap.
 pub fn parse_isa(v: Option<&str>) -> Option<Tier> {
     match v {
@@ -183,6 +224,16 @@ mod tests {
         assert!(
             Tier::Scalar < Tier::Avx2 && Tier::Avx2 < Tier::AvxVnni && Tier::AvxVnni < Tier::Avx512
         );
+    }
+
+    #[test]
+    fn the_resolved_tier_is_the_lower_of_detection_and_the_cap() {
+        let d = detected();
+        assert_eq!(resolved_under(None), d);
+        assert_eq!(resolved_under(Some(d)), d);
+        assert_eq!(resolved_under(Some(Tier::Scalar)), Tier::Scalar);
+        assert_eq!(resolved_under(Some(Tier::Avx2)), d.min(Tier::Avx2));
+        assert_eq!(resolved_under(Some(Tier::Avx512)), d);
     }
 
     #[test]
