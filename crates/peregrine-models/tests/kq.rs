@@ -159,7 +159,10 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
             if fmt == Format::Q4_K {
                 // The repacked kernel's fold: the same real number, rounded
-                // once instead of twice.
+                // once instead of twice. This bound holds here only because a
+                // random-weight model doesn't amplify the few-ulp difference; a
+                // trained model moves its logits by percent (docs/design/s3.4.md
+                // §10). The kernel's own bound is the per-matmul check in kqsimd.rs.
                 assert!(
                     (x - y).abs() <= 1e-3 * x.abs().max(1.0),
                     "{fmt:?}: logit {i} moved: {x} against {y}"
