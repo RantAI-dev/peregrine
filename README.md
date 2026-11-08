@@ -16,6 +16,31 @@ own memory-bandwidth ceiling.
 
 > **Status: early.** The engine works and is measured, but the API, CLI and crate layout will change as the [roadmap](docs/roadmap.md) lands.
 
+## Progress
+
+As of November 2026; the plan with every item is in the [roadmap](docs/roadmap.md).
+
+| Stage | Where it stands |
+|---|---|
+| 0. Groundwork | done, except writing down the release step on the AVX2-only host |
+| 1. Structure | done: the kernel table, shared layer blocks, one runtime, feature flags, `peregrine tune` |
+| 2. Breadth | done for the architectures, formats and templates in the table below; open: a real gpt-oss file, startup calibration, ARM (not yet decided) |
+| 3. Speed and proof | under way: the benchmark harness, a first desktop baseline against llama.cpp and the KL check per model are in; the first kernel and scheduling speed-ups have landed |
+
+Speed-ups that landed in November 2026, each checked against llama.cpp's KL on real files and against
+the batch-invariance tests:
+
+- **Repacked Q4_K kernels** (AVX2): prompt processing on a Ryzen 3 PRO 4350G goes from 104 to 152 tok/s
+  on Llama 3.2 1B and from 72 to 96 tok/s on Qwen 3.5 2B; decode is unchanged. Off by default on
+  AVX-512 until that tier has its own repacked kernel (`PEREGRINE_KREPACK=1` turns it on).
+- **The prefill chunk follows the worker pool**: on the Ryzen AI 9 HX 370, prompt processing is 14-43%
+  faster (Bonsai 2 2B +43%, Bonsai 2 9B +14%, Llama 3.2 1B +19%).
+- **More attention tasks at short context**: decode is 0.6-2.9% faster, and a row's attention no longer
+  depends on the other rows in the batch.
+
+Next: the AVX-512 repacked Q4_K kernel, repacked Q6_K, a real gpt-oss file, baselines on the other two
+hosts, and the task-accuracy gate.
+
 ## Why
 
 - **Measured, not claimed.** Every result is reported as a fraction of the host's roofline, with the exact
