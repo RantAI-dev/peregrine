@@ -2,8 +2,8 @@
 //! describes.
 //!
 //! The engine does not run Jinja. It recognises templates supported by the engine —
-//! ChatML (SmolLM2, Qwen2.5), Llama 3, Qwen3, Gemma, Mistral (v0, v1 and v7), and
-//! Llama 2 (with and without a system block) — from the markers in
+//! ChatML (SmolLM2, Qwen2.5), Llama 3, Qwen3, Gemma, Mistral (v0, v1 and v7),
+//! Llama 2 (with and without a system block), and OpenAI's Harmony (gpt-oss) — from the markers in
 //! `tokenizer.chat_template`, and renders them so that the token stream is the one
 //! llama.cpp's `--jinja` path produces for the same messages. That equality is what
 //! makes a greedy answer from this engine comparable with llama.cpp's on the same
@@ -56,6 +56,11 @@ pub enum Template {
     /// `[INST] … [/INST]`, the plain Llama 2 format: no system block, the system
     /// message folded into the first user turn (llama.cpp's `llama2`).
     Llama2Plain,
+    /// OpenAI's Harmony format, the one gpt-oss's own Jinja template renders:
+    /// `<|start|>role<|message|>…<|end|>`, assistant channels
+    /// (`<|channel|>final<|message|>`), a fixed system block, and a developer
+    /// block for the caller's system message.
+    Harmony,
 }
 
 /// Template kinds this crate renders, for the compatibility probe's message and
@@ -71,6 +76,7 @@ pub const TEMPLATES: &[&str] = &[
     "mistral-v7",
     "llama2",
     "llama2-sys-bos",
+    "harmony",
 ];
 
 impl Template {
@@ -86,6 +92,7 @@ impl Template {
             Template::MistralV7 => "mistral-v7",
             Template::Llama2 => "llama2-sys-bos",
             Template::Llama2Plain => "llama2",
+            Template::Harmony => "harmony",
         }
     }
 
@@ -103,6 +110,7 @@ impl Template {
             "mistral-v7" => Template::MistralV7,
             "llama2" => Template::Llama2Plain,
             "llama2-sys-bos" => Template::Llama2,
+            "harmony" => Template::Harmony,
             _ => return None,
         })
     }
@@ -142,6 +150,10 @@ impl Template {
     pub fn detect_from_template(tpl: &str, has: impl Fn(&str) -> bool) -> Result<Template, String> {
         if tpl.contains("<|start_header_id|>") {
             Ok(Template::Llama3)
+        } else if tpl.contains("<|start|>") && tpl.contains("<|channel|>") {
+            // gpt-oss's own Jinja template. llama.cpp's heuristic detector reads the
+            // same pair of markers (`src/llama-chat.cpp:222-223`, v0.9.0).
+            Ok(Template::Harmony)
         } else if tpl.contains("<|im_start|>") && tpl.contains("<|im_sep|>") {
             // llama.cpp v0.9.0 src/llama-chat.cpp:99-101.
             Ok(Template::Phi4)
@@ -212,6 +224,13 @@ impl Template {
             | Template::MistralV7
             | Template::Llama2
             | Template::Llama2Plain => &["<s>", "</s>"],
+            Template::Harmony => &[
+                "<|start|>",
+                "<|message|>",
+                "<|end|>",
+                "<|channel|>",
+                "<|return|>",
+            ],
         }
     }
 
@@ -228,9 +247,16 @@ impl Template {
             | Template::MistralV7
             | Template::Llama2
             | Template::Llama2Plain => &["</s>"],
+            // A Harmony reply ends on `<|return|>` (the answer) or `<|call|>` (a tool
+            // call). `<|end|>` is not a stop: it closes the analysis message, and the
+            // final answer follows it in the same reply. llama.cpp v0.9.0 drops
+            // `<|end|>` from the end-of-generation set when the vocabulary has
+            // `<|return|>` and `<|call|>` (`src/llama-vocab.cpp:3345-3383`).
+            Template::Harmony => &["<|return|>", "<|call|>"],
         };
         let mut ids: Vec<u32> = names.iter().filter_map(|n| tk.id_of(n)).collect();
-        if !ids.contains(&tk.eos) {
+        let eos_is_end = self == Template::Harmony && tk.id_of("<|end|>") == Some(tk.eos);
+        if !ids.contains(&tk.eos) && !eos_is_end {
             ids.push(tk.eos);
         }
         ids
@@ -261,7 +287,8 @@ impl Template {
             | Template::MistralV1
             | Template::MistralV7
             | Template::Llama2
-            | Template::Llama2Plain => None,
+            | Template::Llama2Plain
+            | Template::Harmony => None,
         }
     }
 
@@ -313,6 +340,24 @@ impl Template {
                 Some(sys) => format!("[INST] <<SYS>>\n{sys}\n<</SYS>>\n\n"),
                 None => "[INST] ".to_string(),
             },
+            // The fixed system block the gpt-oss Jinja template always writes, then
+            // the caller's system text as a developer message. The template renders
+            // messages[0] with role system/developer through the developer block.
+            Template::Harmony => {
+                let date = harmony_date(today);
+                let mut s = format!(
+                    "<|start|>system<|message|>You are ChatGPT, a large language model trained \
+                     by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: {date}\n\n\
+                     Reasoning: medium\n\n# Valid channels: analysis, commentary, final. \
+                     Channel must be included for every message.<|end|>"
+                );
+                if let Some(sys) = system {
+                    s.push_str(&format!(
+                        "<|start|>developer<|message|># Instructions\n\n{sys}\n\n<|end|>"
+                    ));
+                }
+                s
+            }
             // No system branch: the message is folded into the first user turn.
             Template::MistralV0 | Template::Llama2Plain => String::new(),
         }
@@ -361,6 +406,11 @@ impl Template {
             Template::MistralV0 | Template::Llama2Plain => {
                 format!("[INST] {user} [/INST]")
             }
+            // The user message, then the generation prompt's role header. The model
+            // writes its own `<|channel|>…<|message|>` after it.
+            Template::Harmony => {
+                format!("<|start|>user<|message|>{user}<|end|><|start|>assistant")
+            }
         }
     }
 
@@ -375,6 +425,19 @@ impl Template {
             Template::MistralV7 => format!(" {text}</s>"),
             Template::Llama2 => format!("{text}</s><s>[INST] "),
             Template::MistralV0 | Template::Llama2Plain => format!("{text}</s>"),
+            // The assistant header came from `user_turn`; a non-final answer closes
+            // with `<|end|>`, as gpt-oss's template writes an earlier turn.
+            Template::Harmony => format!("<|channel|>final<|message|>{text}<|end|>"),
+        }
+    }
+
+    /// A final assistant message with no generation prompt after it: Harmony closes
+    /// it with `<|return|>`, the token that ends a generation. Every other template
+    /// writes the same terminator as [`Template::assistant_turn`].
+    pub fn assistant_final(self, text: &str) -> String {
+        match self {
+            Template::Harmony => format!("<|channel|>final<|message|>{text}<|return|>"),
+            _ => self.assistant_turn(text),
         }
     }
 
@@ -391,6 +454,9 @@ impl Template {
             Template::MistralV7 => "</s>",
             Template::Llama2 => "</s><s>[INST] ",
             Template::MistralV0 | Template::Llama2Plain => "</s>",
+            // The generation ended on `<|return|>`, which is never fed back; the
+            // replayed transcript closes the assistant message with `<|end|>`.
+            Template::Harmony => "<|end|>",
         }
     }
 
@@ -447,6 +513,26 @@ pub fn today_llama3() -> String {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     format!("{d:02} {} {y}", MON[(m - 1) as usize])
+}
+
+/// The same day in Harmony's format (`%Y-%m-%d`, e.g. `2026-10-14`). gpt-oss's
+/// Jinja template calls `strftime_now("%Y-%m-%d")`; the engine's callers pass
+/// [`today_llama3`]'s string, so the month name is mapped back to its number.
+fn harmony_date(today: &str) -> String {
+    let mut parts = today.split_whitespace();
+    let (Some(d), Some(m), Some(y)) = (parts.next(), parts.next(), parts.next()) else {
+        return today.to_string();
+    };
+    const MON: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let Some(month) = MON.iter().position(|x| x.eq_ignore_ascii_case(m)) else {
+        return today.to_string();
+    };
+    let (Ok(day), Ok(year)) = (d.parse::<u32>(), y.parse::<i32>()) else {
+        return today.to_string();
+    };
+    format!("{year:04}-{:02}-{day:02}", month + 1)
 }
 
 /// Howard Hinnant's `civil_from_days`: days since 1970-01-01 → (year, month, day).
@@ -738,6 +824,107 @@ mod tests {
             render_chat_prompt(t, None, &[("Hello", "Hi there")], FINAL_USER),
             "[INST] Hello [/INST]Hi there</s>[INST] Another question [/INST]"
         );
+    }
+
+    /// gpt-oss's own chat template, from llama.cpp v0.9.0's
+    /// `models/templates/openai-gpt-oss-120b.jinja`.
+    const HARMONY_TMPL: &str = include_str!("../tests/fixtures/harmony.jinja");
+
+    /// The fixed block Harmony writes before any conversation. The date is the one
+    /// the test passes (`14 Oct 2026`), rendered as `%Y-%m-%d`.
+    const HARMONY_SYSTEM: &str = "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-10-14\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>";
+
+    fn harmony_developer(sys: &str) -> String {
+        format!("<|start|>developer<|message|># Instructions\n\n{sys}\n\n<|end|>")
+    }
+
+    #[test]
+    fn harmony_renders_system_and_user_exactly_like_the_gpt_oss_template() {
+        let t = Template::Harmony;
+        let rendered = t.render(Some(SYSTEM_MSG), &[], "Hello", "14 Oct 2026", false, None);
+        assert_eq!(
+            rendered,
+            format!(
+                "{HARMONY_SYSTEM}{}<|start|>user<|message|>Hello<|end|><|start|>assistant",
+                harmony_developer(SYSTEM_MSG)
+            )
+        );
+
+        // No system message: Harmony still writes its fixed system block, and no
+        // developer block.
+        assert_eq!(
+            t.render(None, &[], "Hello", "14 Oct 2026", false, None),
+            format!("{HARMONY_SYSTEM}<|start|>user<|message|>Hello<|end|><|start|>assistant")
+        );
+
+        // The pieces the incremental session uses.
+        assert_eq!(t.default_system("gpt-oss-20b"), None);
+        assert_eq!(t.system_fold(Some(SYSTEM_MSG)), None);
+        assert_eq!(
+            t.user_turn("Hello"),
+            "<|start|>user<|message|>Hello<|end|><|start|>assistant"
+        );
+        assert_eq!(
+            t.assistant_turn("Hi there"),
+            "<|channel|>final<|message|>Hi there<|end|>"
+        );
+        assert_eq!(t.close_previous(), "<|end|>");
+        assert_eq!(t.assistant_open(false), "");
+    }
+
+    #[test]
+    fn harmony_renders_a_multi_turn_conversation_exactly_like_the_gpt_oss_template() {
+        let t = Template::Harmony;
+        let rendered = render_chat_prompt(t, Some(SYSTEM_MSG), &PAIRS, FINAL_USER);
+        let expected = format!(
+            "{HARMONY_SYSTEM}{}\
+             <|start|>user<|message|>Hello<|end|>\
+             <|start|>assistant<|channel|>final<|message|>Hi there<|end|>\
+             <|start|>user<|message|>Who are you<|end|>\
+             <|start|>assistant<|channel|>final<|message|>   I am an assistant   <|end|>\
+             <|start|>user<|message|>Another question<|end|><|start|>assistant",
+            harmony_developer(SYSTEM_MSG)
+        );
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn harmony_ends_a_final_assistant_message_with_return_without_a_generation_prompt() {
+        let t = Template::Harmony;
+        // The template's training form: a last assistant turn and
+        // add_generation_prompt=false ends in `<|return|>`.
+        let mut rendered = t.system_block(Some(SYSTEM_MSG), "14 Oct 2026");
+        rendered.push_str(&t.user_turn("Hello"));
+        rendered.push_str(&t.assistant_final("Hi there"));
+        assert_eq!(
+            rendered,
+            format!(
+                "{HARMONY_SYSTEM}{}\
+                 <|start|>user<|message|>Hello<|end|>\
+                 <|start|>assistant<|channel|>final<|message|>Hi there<|return|>",
+                harmony_developer(SYSTEM_MSG)
+            )
+        );
+        // With a generation prompt instead, the same transcript is replayed with
+        // `<|end|>` and the assistant header opens the next turn.
+        let with_prompt = render_chat_prompt(t, Some(SYSTEM_MSG), &[("Hello", "Hi there")], "Next");
+        assert!(with_prompt.contains("<|channel|>final<|message|>Hi there<|end|>"));
+        assert!(with_prompt.ends_with("<|start|>user<|message|>Next<|end|><|start|>assistant"));
+        assert!(!with_prompt.contains("<|return|>"));
+    }
+
+    #[test]
+    fn harmony_is_detected_from_the_gpt_oss_template() {
+        assert_eq!(
+            Template::detect_from_str(HARMONY_TMPL),
+            Ok(Template::Harmony)
+        );
+        // llama.cpp detects the same pair of markers (`src/llama-chat.cpp:222-223`).
+        assert_eq!(
+            Template::detect_from_str("<|start|>assistant<|channel|>final<|message|>"),
+            Ok(Template::Harmony)
+        );
+        assert_eq!(Template::from_name("harmony"), Some(Template::Harmony));
     }
 
     #[test]

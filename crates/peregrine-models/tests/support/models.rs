@@ -968,6 +968,19 @@ impl Default for GptOssShape {
 /// | `blk.i.ffn_down_exps.weight` | `[expert_ff, d_model, n_expert]` | the experts' downs |
 /// | `blk.i.ffn_down_exps.bias` | `[d_model, n_expert]` | their biases |
 pub fn write_gpt_oss(dir: &Path, fmt: Format, seed: u64, s: GptOssShape) -> PathBuf {
+    write_gpt_oss_with_template(dir, fmt, seed, s, None)
+}
+
+/// The same file, optionally declaring a `tokenizer.chat_template`. The template
+/// test writes gpt-oss's own Jinja template into it, so detection runs on a file
+/// the way a real gpt-oss file does.
+pub fn write_gpt_oss_with_template(
+    dir: &Path,
+    fmt: Format,
+    seed: u64,
+    s: GptOssShape,
+    chat_template: Option<&str>,
+) -> PathBuf {
     assert!(
         s.d_model.is_multiple_of(fmt.block()) && s.expert_ff.is_multiple_of(fmt.block()),
         "gpt-oss rows must be a multiple of the {} block {}",
@@ -1006,7 +1019,16 @@ pub fn write_gpt_oss(dir: &Path, fmt: Format, seed: u64, s: GptOssShape) -> Path
     w.u32(&k("context_length"), s.ctx as u32);
     w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
     // The `o200k_harmony` pre-tokenizer.
-    vocab::add_tokenizer_metadata(&mut w, "gpt-4o");
+    if chat_template.is_some() {
+        // The template brings the Harmony control tokens with it; a check of the
+        // declared template needs them in the vocabulary.
+        vocab::add_gpt_oss_tokenizer_metadata(&mut w);
+    } else {
+        vocab::add_tokenizer_metadata(&mut w, "gpt-4o");
+    }
+    if let Some(t) = chat_template {
+        w.str("tokenizer.chat_template", t);
+    }
 
     let kv = s.n_head_kv * head_dim;
     let qd = s.n_head * head_dim;
