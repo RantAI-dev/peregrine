@@ -68,14 +68,20 @@ impl TokenTelem {
 ///
 /// A planner decision or a utilisation figure that cannot be reproduced is not a
 /// measurement, so both numbers go into the run manifest alongside the results.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Machine {
     /// Sustained streaming-read bandwidth, bytes per second.
     pub bandwidth: f64,
     /// Sustained fused multiply-add throughput, FLOP per second.
     pub flops: f64,
     pub threads: usize,
+    /// The instruction sets the build's fast paths use (`avx2+fma`, `avx2`, `scalar`, `neon`).
     pub simd: &'static str,
+    /// The kernel tier the run takes, after `PEREGRINE_ISA`
+    /// ([`crate::simd_tier`]). This is the field the benchmark manifests report:
+    /// `simd` names the instruction sets, not the kernel tier, and an AVX-512
+    /// host would otherwise be labelled by its AVX2 baseline.
+    pub simd_tier: String,
 }
 
 impl Machine {
@@ -95,6 +101,7 @@ impl Machine {
             flops: probe_flops(threads),
             threads,
             simd: crate::simd_name(),
+            simd_tier: crate::simd_tier(),
         }
     }
 
@@ -115,7 +122,7 @@ impl Machine {
                 .iter()
                 .find(|(t, m)| m.threads == threads && t.elapsed() < TTL)
             {
-                return *m;
+                return m.clone();
             }
         }
         // Probed outside the lock: two first loads at once probe twice rather than one
@@ -123,7 +130,7 @@ impl Machine {
         let m = Machine::probe(threads);
         let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         c.retain(|(t, e)| e.threads != threads && t.elapsed() < TTL);
-        c.push((Instant::now(), m));
+        c.push((Instant::now(), m.clone()));
         m
     }
 }
@@ -556,6 +563,7 @@ mod tests {
             flops: 100e9,
             threads: 4,
             simd: "test",
+            simd_tier: "test".into(),
         };
         assert_eq!(m.ridge(), 5.0);
         let t = TurnTelem {
@@ -574,6 +582,7 @@ mod tests {
             flops: 0.0,
             threads: 1,
             simd: "none",
+            simd_tier: "scalar".into(),
         };
         assert_eq!(t.roof_utilisation(&dead), 0.0);
         assert_eq!(dead.ridge(), 0.0);
