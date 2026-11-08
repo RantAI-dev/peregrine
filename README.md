@@ -54,8 +54,8 @@ the batch-invariance tests:
 - **More attention tasks at short context**: decode is 0.6-2.9% faster, and a row's attention no longer
   depends on the other rows in the batch.
 
-Next: the AVX-512 repacked Q4_K kernel, repacked Q6_K, a real gpt-oss file, baselines on the other two
-hosts, and the task-accuracy gate.
+Next: the AVX-512 repacked Q4_K kernel, repacked Q6_K, a real gpt-oss file, a baseline on the third
+host, and the task-accuracy gate.
 
 ## Why
 
