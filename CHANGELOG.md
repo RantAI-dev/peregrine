@@ -154,6 +154,9 @@ All notable changes to this project are documented here. The format follows
   per-key reduction tree, so a row's bits are the same whether it is decoded alone,
   read in a prefill chunk, verified in a batch or run on a different pool width
   (`crates/peregrine-core/src/attn.rs`, `crates/peregrine-models/tests/attn_invariance.rs`).
+  The tail key of a score block reduces with the same tree as a key inside one, so a
+  position's score no longer depends on where its block ends; that is a one-time change
+  to logits for contexts whose last tile ends mid-group, and the goldens are re-recorded.
   On the 4-core Xeon (H0), attention-only at 4096 context fell from 8.17 to 6.88
   ms/token on Qwen2.5-0.5B Q4_K_M and from 14.28 to 11.68 on Llama-3.2-1B Q4_K_M
   (medians of five alternating runs; decode attention is 25-30 % of a token, so the
