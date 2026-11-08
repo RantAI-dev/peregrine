@@ -562,8 +562,9 @@ pub fn run_rows<O: RowSink>(
 }
 
 /// One sub-block `r0..r1` of [`run_rows`]' query rows.
+///
 #[allow(clippy::too_many_arguments)]
-fn run_range<O: RowSink>(
+pub(crate) fn run_range<O: RowSink>(
     kv: &KvCache,
     layer: usize,
     sh: &Shape<'_>,
@@ -692,6 +693,65 @@ fn run_range<O: RowSink>(
         }
         let sink = sh.sinks.map(|s| s[h]);
         combine_row(&parts[..count[lr]], sink, rotated, out.head(bi, h));
+    }
+}
+
+/// One row of one KV head at its own position, as one task: the row is cut into its
+/// own canonical position chunks, each chunk is computed by [`run`] (so a one-row chunk
+/// takes the F16-direct kernel when the cache allows it), and the chunks are merged by
+/// [`combine_row`] in chunk order.
+///
+/// This is exactly what [`attend_scaled_window`]'s split path does for a solo row — the
+/// same chunk boundaries, the same per-chunk kernel choice, the same merge order — so a
+/// row's bits in a shared call are its solo bits, while the tasks of all the decoding
+/// users still share one parallel region.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_row<O: RowSink>(
+    kv: &KvCache,
+    layer: usize,
+    sh: &Shape<'_>,
+    q_row: &[f32],
+    kh: usize,
+    pos: usize,
+    sc: &mut Scratch,
+    out: &mut O,
+) {
+    let hd = sh.head_dim;
+    let gqa = sh.gqa();
+    let n_ctx = pos + 1;
+    let count = row_chunks(sh, n_ctx);
+    // The row alone, at its own position: the shape a solo decode would see.
+    let one = Shape {
+        nb: 1,
+        start_pos: pos,
+        ..*sh
+    };
+    for ci in 0..count {
+        let t = Task {
+            kh,
+            b0: 0,
+            b1: 1,
+            p0: ci * n_ctx / count,
+            p1: (ci + 1) * n_ctx / count,
+        };
+        run(kv, layer, &one, q_row, &t, sc);
+        for g in 0..gqa {
+            save_part(sc, g, ci, hd);
+        }
+    }
+    for g in 0..gqa {
+        let h = kh * gqa + g;
+        let mut parts = [(&[][..], f32::NEG_INFINITY, 0.0f64); MAX_CHUNKS];
+        for (ci, p) in parts.iter_mut().enumerate().take(count) {
+            let slot = g * MAX_CHUNKS + ci;
+            *p = (
+                &sc.partial_o[slot * hd..(slot + 1) * hd],
+                sc.partial_m[slot],
+                sc.partial_l[slot],
+            );
+        }
+        let sink = sh.sinks.map(|s| s[h]);
+        combine_row(&parts[..count], sink, kv.rotated(), out.head(0, h));
     }
 }
 

@@ -210,6 +210,117 @@ fn verify_rows_match_their_solo_decodes() {
     );
 }
 
+/// Several users decoding side by side, each from its own cache, in one pass: every
+/// row must equal the solo decode of the same position, bit for bit. This is the
+/// cross-cache attention path ([`attend_mapped`]): one parallel region for all the
+/// decoding users instead of one per user.
+#[test]
+fn decoding_users_with_their_own_caches_match_their_solo_decodes() {
+    let dir = tmpdir("decode-users");
+    let path = write_dense(&dir, "llama", Format::F16, 9400, wide());
+    let model = Gguf::open(&path).and_then(peregrine_models::load).unwrap();
+    let c = model.cfg;
+    let threads = 4;
+    let pool = Pool::new(threads);
+    let positions = [320usize, 260, 300];
+
+    fn prefix(model: &Model, pool: &Pool, toks: &[u32], n: usize, threads: usize) -> KvCache {
+        let mut kv = model.new_cache(KvPrec::F16, 1024);
+        let mut st = model.new_state(128, 1, 1024, threads);
+        let mut ss = StepStats::default();
+        let mut fed = 0;
+        while fed < n {
+            let k = 16.min(n - fed);
+            model
+                .forward(
+                    &mut st,
+                    &mut kv,
+                    pool,
+                    &toks[fed..fed + k],
+                    fed,
+                    &[],
+                    &mut ss,
+                )
+                .unwrap();
+            fed += k;
+        }
+        kv
+    }
+
+    let toks: Vec<Vec<u32>> = positions
+        .iter()
+        .enumerate()
+        .map(|(u, &p)| {
+            prompt(p + 8)
+                .iter()
+                .map(|t| (t + u as u32 * 3) % 320)
+                .collect()
+        })
+        .collect();
+
+    // Alone: one row through `forward`.
+    let mut alone = Vec::new();
+    for (u, &p) in positions.iter().enumerate() {
+        let mut kv = prefix(&model, &pool, &toks[u], p, threads);
+        let mut st = model.new_state(128, 1, 1024, threads);
+        let mut ss = StepStats::default();
+        model
+            .forward(
+                &mut st,
+                &mut kv,
+                &pool,
+                &toks[u][p..p + 1],
+                p,
+                &[0],
+                &mut ss,
+            )
+            .unwrap();
+        alone.push(st.logits_row(0, c.n_vocab).to_vec());
+    }
+
+    // Together: one `forward_rows` over all three caches.
+    let mut kvs: Vec<KvCache> = positions
+        .iter()
+        .enumerate()
+        .map(|(u, &p)| prefix(&model, &pool, &toks[u], p, threads))
+        .collect();
+    let mut st = model.new_state(128, positions.len(), 1024, threads);
+    let mut ss = StepStats::default();
+    let tokens: Vec<u32> = positions
+        .iter()
+        .enumerate()
+        .map(|(u, &p)| toks[u][p])
+        .collect();
+    let want: Vec<usize> = (0..positions.len()).collect();
+    {
+        let mut refs: Vec<&mut KvCache> = kvs.iter_mut().collect();
+        model
+            .forward_rows(
+                &mut st,
+                &mut peregrine_core::model::Caches::PerRow(&mut refs),
+                &pool,
+                &tokens,
+                &positions,
+                &want,
+                &mut ss,
+            )
+            .unwrap();
+    }
+
+    let mut failures = Vec::new();
+    for (u, want) in alone.iter().enumerate() {
+        if st.logits_row(u, c.n_vocab) != &want[..] {
+            failures.push(format!("user {u} changed when batched"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "a decoding user changed in a shared step:\n{}",
+        failures.join("\n")
+    );
+}
+
 /// A mixed step: one user's prompt chunk beside another user's decode row, one
 /// weight pass. Neither row may notice the other. The engine reaches this with
 /// `Caches::Mapped`, which groups rows by cache and calls attention once per run.
