@@ -16,7 +16,9 @@ from pathlib import Path
 
 OUT = Path(__file__).resolve().parent.parent / "docs" / "img"
 
-# Desktop: Ryzen AI 9 HX 370, 12 threads (benchmarks/results/desktop-zen5-2026-11-08).
+# Desktop: Ryzen AI 9 HX 370, 12 threads (Peregrine and llama.cpp -fa off from
+# benchmarks/results/desktop-zen5-2026-11-08-fa-off; llama.cpp at its faster flash-attention
+# setting per row, which is the default for the 1B prompt and the multi-user rows).
 # Bonsai 2: the same desktop, against PrismML's fork (benchmarks/results/2026-11-08-bonsai2-prism);
 # upstream llama.cpp cannot load PQ2_0. The fork bar is its faster flash-attention setting per row.
 # Bluefin: Ryzen 3 PRO 4350G, 4 threads (benchmarks/results/bluefin-zen2-2026-11-08-fa-off).
@@ -24,28 +26,28 @@ OUT = Path(__file__).resolve().parent.parent / "docs" / "img"
 # single-user decode, llama.cpp's default for prefill and multi-user throughput).
 # Each case: (label, peregrine, llama.cpp), tok/s.
 DECODE = [
-    ("Desktop · Llama 3.2 1B · 512", 59.4, 51.0),
-    ("Desktop · Llama 3.2 1B · 4096", 44.2, 32.4),
-    ("Desktop · Qwen 2.5 0.5B · 512", 68.1, 75.8),
-    ("Desktop · Qwen 2.5 0.5B · 4096", 51.6, 48.8),
+    ("Desktop · Llama 3.2 1B · 512", 62.6, 51.8),
+    ("Desktop · Llama 3.2 1B · 4096", 47.0, 33.8),
+    ("Desktop · Qwen 2.5 0.5B · 512", 70.0, 75.8),
+    ("Desktop · Qwen 2.5 0.5B · 4096", 54.9, 49.1),
     ("Bluefin · Llama 3.2 1B · 512", 46.06, 42.01),
     ("Bluefin · Llama 3.2 1B · 4096", 36.85, 29.25),
     ("Bluefin · Qwen 2.5 0.5B · 512", 52.87, 77.41),
     ("Bluefin · Qwen 2.5 0.5B · 4096", 45.20, 51.97),
 ]
 PREFILL = [
-    ("Desktop · Llama 3.2 1B · 512", 173.5, 262.0),
-    ("Desktop · Llama 3.2 1B · 4096", 125.4, 189.0),
-    ("Desktop · Qwen 2.5 0.5B · 512", 270.6, 435.2),
-    ("Desktop · Qwen 2.5 0.5B · 4096", 184.9, 279.4),
+    ("Desktop · Llama 3.2 1B · 512", 183.8, 262.0),
+    ("Desktop · Llama 3.2 1B · 4096", 130.9, 189.0),
+    ("Desktop · Qwen 2.5 0.5B · 512", 321.9, 435.2),
+    ("Desktop · Qwen 2.5 0.5B · 4096", 215.1, 293.1),
     ("Bluefin · Llama 3.2 1B · 512", 197.34, 188.27),
     ("Bluefin · Llama 3.2 1B · 4096", 144.59, 141.23),
     ("Bluefin · Qwen 2.5 0.5B · 512", 263.19, 302.91),
     ("Bluefin · Qwen 2.5 0.5B · 4096", 198.23, 235.98),
 ]
 USERS10 = [
-    ("Desktop · Llama 3.2 1B · 512", 51.8, 61.7),
-    ("Desktop · Qwen 2.5 0.5B · 512", 78.0, 93.4),
+    ("Desktop · Llama 3.2 1B · 512", 53.4, 61.7),
+    ("Desktop · Qwen 2.5 0.5B · 512", 83.4, 93.4),
     ("Bluefin · Llama 3.2 1B · 512", 55.18, 37.36),
     ("Bluefin · Qwen 2.5 0.5B · 512", 71.72, 68.69),
 ]
@@ -67,12 +69,12 @@ WINS = [
     ("Prompt · Bonsai 9B · 512 · Desktop", 67.24 / 26.12),
     ("Decode · Bonsai 9B · 512 · Desktop", 22.97 / 9.85),
     ("10 users · Llama 1B · 512 · Bluefin", 55.18 / 37.36),
-    ("Decode · Llama 1B · 4096 · Desktop", 44.2 / 32.4),
+    ("Decode · Llama 1B · 4096 · Desktop", 47.0 / 33.8),
     ("4 users · Llama 1B · 512 · Bluefin", 53.82 / 39.55),
     ("Decode · Llama 1B · 4096 · Bluefin", 36.85 / 29.25),
-    ("Decode · Llama 1B · 512 · Desktop", 59.4 / 51.0),
+    ("Decode · Llama 1B · 512 · Desktop", 62.6 / 51.8),
+    ("Decode · Qwen 0.5B · 4096 · Desktop", 54.9 / 49.1),
     ("Decode · Llama 1B · 512 · Bluefin", 46.06 / 42.01),
-    ("Decode · Qwen 0.5B · 4096 · Desktop", 51.6 / 48.8),
     ("Prompt · Llama 1B · 512 · Bluefin", 197.34 / 188.27),
 ]
 # Prompt processing before and after the November changes, Peregrine against itself.
