@@ -85,7 +85,7 @@ pub use peregrine_kernels::cpu_has;
 pub use peregrine_kernels::simd;
 #[cfg(all(target_arch = "x86_64", feature = "fmt-ternary"))]
 pub use peregrine_kernels::tern;
-pub use peregrine_kernels::{cpu, delta, format, hadamard, quant, table, vmath};
+pub use peregrine_kernels::{cpu, delta, format, hadamard, prof, quant, table, vmath};
 pub use profile::Profile;
 pub use session::{BenchReport, Session, SessionCfg};
 

@@ -41,21 +41,61 @@ pub fn swiglu_rows(
     } else if nb == 1 && pool.width() > 1 && f >= 1024 {
         // Decode: one row, but thousands of `exp`s on the calling thread while
         // the workers spin — a tenth of a SmolLM2 step at four threads.
-        // The activation is split across the pool for the gate (same arithmetic,
-        // element by element), then quantised once, vectorised, on this thread.
-        for_row_chunks(
-            pool,
-            true,
-            &mut hb[..f],
-            1,
-            f,
-            Sched::Static,
-            |_wk, range, gs| {
-                crate::vmath::swiglu(gs, &up[range]);
-            },
-        );
-        stats.barriers += 1;
-        acts[0].fill(&hb[..f]);
+        let a = &mut acts[0];
+        // SwiGLU and the quantisation in one pass. The quantise is per 32-block, so a
+        // worker's contiguous block range produces exactly the bytes one call would;
+        // the down matmul then starts from a ready activation without the caller first
+        // spending the serial quantise on it. Fall back to the two-step form when the
+        // activation has a layout this split cannot write (ternary, or a width that is
+        // not whole 256-blocks).
+        let fused = !a.ternary && f.is_multiple_of(256) && f / 256 >= pool.width();
+        if fused {
+            a.prepare(f);
+            // Each worker writes only its own 256-aligned block range of `a`.
+            struct ActPtr(*mut QuantAct);
+            // SAFETY: the ranges partition [0, f/256) by construction (`share`), so no
+            // two workers write the same field element.
+            unsafe impl Sync for ActPtr {}
+            impl ActPtr {
+                /// The activation this worker's range belongs to.
+                ///
+                /// # Safety
+                /// The caller must write only its own block range.
+                unsafe fn get(&self) -> *mut QuantAct {
+                    self.0
+                }
+            }
+            let ptr = ActPtr(a as *mut QuantAct);
+            let out = crate::blocks::par::Disjoint::new(&mut hb[..f]);
+            crate::prof::time(crate::prof::Slot::Swiglu, || {
+                pool.run(move |wk, nw| {
+                    let (b0, b1) = crate::pool::share(f / 256, wk, nw);
+                    let (lo, hi) = (b0 * 256, b1 * 256);
+                    // SAFETY: `lo..hi` is this worker's exclusive share of the row.
+                    let g = unsafe { out.chunk(lo, hi - lo) };
+                    crate::vmath::swiglu(g, &up[lo..hi]);
+                    // SAFETY: the same exclusive range, 256-aligned, in `ActPtr`.
+                    unsafe { (*ptr.get()).fill_range(g, lo) };
+                });
+            });
+            stats.barriers += 1;
+        } else {
+            crate::prof::time(crate::prof::Slot::Swiglu, || {
+                for_row_chunks(
+                    pool,
+                    true,
+                    &mut hb[..f],
+                    1,
+                    f,
+                    Sched::Static,
+                    |_wk, range, gs| {
+                        crate::vmath::swiglu(gs, &up[range]);
+                    },
+                );
+            });
+            stats.barriers += 1;
+            crate::prof::time(crate::prof::Slot::Quant, || acts[0].fill(&hb[..f]));
+        }
     } else {
         for_row_chunks_2(
             pool,

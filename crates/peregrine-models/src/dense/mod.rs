@@ -562,20 +562,22 @@ impl Architecture for Dense {
                         out: Disjoint::new(&mut st.hb2),
                     },
                 ];
-                peregrine_core::blocks::linear::linear_group(
-                    w,
-                    w.lb(),
-                    &jobs,
-                    acts,
-                    &st.xb,
-                    cfg.d_model,
-                    nb,
-                    lbx,
-                    lbt,
-                    pool,
-                    stats,
-                    &mut st.kq,
-                );
+                peregrine_core::prof::time(peregrine_core::prof::Slot::GateUp, || {
+                    peregrine_core::blocks::linear::linear_group(
+                        w,
+                        w.lb(),
+                        &jobs,
+                        acts,
+                        &st.xb,
+                        cfg.d_model,
+                        nb,
+                        lbx,
+                        lbt,
+                        pool,
+                        stats,
+                        &mut st.kq,
+                    )
+                });
             }
             peregrine_core::blocks::ffn::swiglu_rows(
                 cfg.n_ff,
@@ -594,24 +596,28 @@ impl Architecture for Dense {
                     lin: &l.down,
                     out: Disjoint::new(&mut st.xb2),
                 }];
-                peregrine_core::blocks::linear::linear_group(
-                    w,
-                    w.lb(),
-                    &jobs,
-                    acts,
-                    &st.hb,
-                    cfg.n_ff,
-                    nb,
-                    lbx,
-                    lbt,
-                    pool,
-                    stats,
-                    &mut st.kq,
-                );
+                peregrine_core::prof::time(peregrine_core::prof::Slot::Down, || {
+                    peregrine_core::blocks::linear::linear_group(
+                        w,
+                        w.lb(),
+                        &jobs,
+                        acts,
+                        &st.hb,
+                        cfg.n_ff,
+                        nb,
+                        lbx,
+                        lbt,
+                        pool,
+                        stats,
+                        &mut st.kq,
+                    )
+                });
             }
-            for i in 0..nb * cfg.d_model {
-                st.x[i] += st.xb2[i];
-            }
+            peregrine_core::prof::time(peregrine_core::prof::Slot::Resid, || {
+                for i in 0..nb * cfg.d_model {
+                    st.x[i] += st.xb2[i];
+                }
+            });
             layer::copy_tap(st, cfg, li, nb);
         }
 
