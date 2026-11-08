@@ -556,6 +556,21 @@ fn prefetch_distance() -> usize {
 }
 // The default distance, 1024 bytes, is `options::PF_DEFAULT`.
 
+/// The lookahead the eight-row kernels use.
+///
+/// The row kernels read one stream, and `PEREGRINE_PF`'s default (1 KB) was tuned on
+/// that shape. Eight rows are eight streams a page apart, and at 1 KB each stream is
+/// only hinted within the current page: the hardware streamer stops at a page boundary,
+/// so every page still costs a DRAM round trip. 4 KB — one page — keeps all eight fed.
+/// Measured on the 4-core Xeon (Qwen2.5-0.5B Q4_K_M, 512 context): decode 36.4 → 38.5
+/// tok/s, prefill 124.0 → 126.9. `PEREGRINE_PF=0` still turns prefetching off.
+fn rows8_prefetch() -> usize {
+    match prefetch_distance() {
+        0 => 0,
+        pf => pf.max(4096),
+    }
+}
+
 /// Hint `lines` cache lines starting `pf` bytes past `p`. A prefetch never faults, so
 /// running past the end of the tensor is harmless; `wrapping_add` keeps the pointer
 /// arithmetic defined there.
@@ -652,6 +667,103 @@ unsafe fn tile_q5_0<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]
     }
     for t in 0..T {
         out[t] = hsum_ps(acc[t]);
+    }
+}
+
+/// Eight consecutive Q8_0 rows against one activation: the decode GEMV.
+///
+/// Q8_0 rows are 34 bytes per 32 weights and the activation block is 32, so the
+/// activation load is a third of the traffic; loading it once for eight rows leaves
+/// only the per-row sign moves and multiply-adds. Each row runs the same operations
+/// `tile_q8_0::<1>` runs, block by block, so its bits do not depend on the group.
+///
+/// `w` holds eight consecutive rows of `rb` bytes (34 per 32 weights); `out[r]` is row
+/// `r`'s result.
+///
+/// # Safety
+/// The caller must have checked AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+pub unsafe fn q8_0_rows8(w: &[u8], rb: usize, a: &QuantAct, out: &mut [f32]) {
+    const ROWS: usize = 8;
+    assert_eq!(rb % 34, 0, "a Q8_0 row is a whole number of 34-byte blocks");
+    assert!(w.len() >= ROWS * rb, "the weight bytes hold eight rows");
+    assert!(out.len() >= ROWS, "the output holds eight rows");
+    let nblk = rb / 34;
+    assert!(
+        a.d.len() >= nblk && a.q.len() >= nblk * 32,
+        "the activation is narrower than a row"
+    );
+    let pf = rows8_prefetch();
+    let ones = _mm256_set1_epi16(1);
+    let mut acc = [_mm256_setzero_ps(); ROWS];
+    for b in 0..nblk {
+        let act = _mm256_loadu_si256(a.q.as_ptr().add(b * 32) as *const __m256i);
+        let d = *a.d.get_unchecked(b);
+        for r in 0..ROWS {
+            let blk = w.as_ptr().add(r * rb + b * 34);
+            prefetch_ahead(blk, pf, 1);
+            let wq = _mm256_loadu_si256(blk.add(2) as *const __m256i);
+            let absw = _mm256_sign_epi8(wq, wq);
+            let sa = _mm256_sign_epi8(act, wq);
+            let dw = f16_at4(blk);
+            let q = _mm256_cvtepi32_ps(_mm256_madd_epi16(_mm256_maddubs_epi16(absw, sa), ones));
+            acc[r] = _mm256_fmadd_ps(q, _mm256_set1_ps(dw * d), acc[r]);
+        }
+    }
+    for r in 0..ROWS {
+        out[r] = hsum_ps(acc[r]);
+    }
+}
+
+/// Eight consecutive Q5_0 rows against one activation: the decode GEMV.
+///
+/// A Q5_0 row is only 22 bytes per 32 weights, so the activation block (32 bytes) and
+/// its lane sums (32 bytes) are more traffic than the weights themselves, and the
+/// per-row kernel reloads both once per row. Here they are loaded once per block for
+/// eight rows; every row still runs exactly the operations `tile_q5_0::<1>` runs, block
+/// by block, so a row's bits do not depend on how many rows shared the pass.
+///
+/// `w` holds eight consecutive rows of `rb` bytes (22 per 32 weights); `out[r]` is row
+/// `r`'s result.
+///
+/// # Safety
+/// The caller must have checked AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+pub unsafe fn q5_0_rows8(w: &[u8], rb: usize, a: &QuantAct, out: &mut [f32]) {
+    const ROWS: usize = 8;
+    assert_eq!(rb % 22, 0, "a Q5_0 row is a whole number of 22-byte blocks");
+    assert!(w.len() >= ROWS * rb, "the weight bytes hold eight rows");
+    assert!(out.len() >= ROWS, "the output holds eight rows");
+    let nblk = rb / 22;
+    assert!(
+        a.d.len() >= nblk && a.q.len() >= nblk * 32 && a.lane_sums.len() >= nblk * 8,
+        "the activation is narrower than a row"
+    );
+    let pf = rows8_prefetch();
+    let lownib = _mm256_set1_epi8(0x0F);
+    let nib_shift = _mm256_set_epi64x(4, 4, 0, 0);
+    let ones = _mm256_set1_epi16(1);
+    let mut acc = [_mm256_setzero_ps(); ROWS];
+    for b in 0..nblk {
+        let act = _mm256_loadu_si256(a.q.as_ptr().add(b * 32) as *const __m256i);
+        let lanes = _mm256_loadu_si256(a.lane_sums.as_ptr().add(b * 8) as *const __m256i);
+        let d = *a.d.get_unchecked(b);
+        for r in 0..ROWS {
+            let blk = w.as_ptr().add(r * rb + b * 22);
+            prefetch_ahead(blk, pf, 1);
+            let qh = (blk.add(2) as *const u32).read_unaligned();
+            let qs = _mm256_broadcastsi128_si256(_mm_loadu_si128(blk.add(6) as *const __m128i));
+            let nib = _mm256_and_si256(_mm256_srlv_epi64(qs, nib_shift), lownib);
+            let codes = _mm256_or_si256(nib, q5_high_bits(u32::from_le(qh)));
+            let dw = f16_at4(blk);
+            let s = _mm256_madd_epi16(_mm256_maddubs_epi16(codes, act), ones);
+            // The same `madd_offset_ps::<4>` the per-row kernel runs.
+            let v = _mm256_cvtepi32_ps(_mm256_sub_epi32(s, _mm256_slli_epi32(lanes, 4)));
+            acc[r] = _mm256_fmadd_ps(v, _mm256_set1_ps(dw * d), acc[r]);
+        }
+    }
+    for r in 0..ROWS {
+        out[r] = hsum_ps(acc[r]);
     }
 }
 
@@ -1729,6 +1841,116 @@ pub unsafe fn quantize32(x: *const f32, inv: f32, out: *mut i8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The eight-row Q5_0 decode kernel against the one-row kernel: every row must
+    /// come out bit for bit the same, or a row's result would depend on how many rows
+    /// the matmul happened to run beside it.
+    /// The eight-row Q8_0 decode kernel against the one-row kernel, bit for bit.
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn q8_0_rows8_matches_the_one_row_kernel_exactly() {
+        if !have_batched() {
+            return;
+        }
+        let mut s = 0x0bad_c0de_1234_5678u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let rb = 34 * 20;
+        let mut w = vec![0u8; 8 * rb];
+        for r in 0..8 {
+            for b in 0..20 {
+                let blk = &mut w[r * rb + b * 34..r * rb + (b + 1) * 34];
+                for x in blk.iter_mut() {
+                    *x = next() as u8;
+                }
+                blk[..2].copy_from_slice(&crate::quant::f32_to_f16(0.01).to_le_bytes());
+            }
+        }
+        let x: Vec<f32> = (0..rb / 34 * 32)
+            .map(|_| (next() as u32 as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32 * 3.0)
+            .collect();
+        let mut a = QuantAct::with_capacity(x.len());
+        a.fill(&x);
+        let mut got = [0.0f32; 8];
+        // SAFETY: AVX2, FMA and F16C checked above; lengths are the kernel's asserts.
+        unsafe { q8_0_rows8(&w, rb, &a, &mut got) };
+        for r in 0..8 {
+            let mut want = [0.0f32; 1];
+            // SAFETY: as above.
+            unsafe {
+                tile_q8_0::<1>(
+                    &w[r * rb..(r + 1) * rb],
+                    std::slice::from_ref(&a),
+                    &mut want,
+                )
+            };
+            assert_eq!(
+                got[r].to_bits(),
+                want[0].to_bits(),
+                "row {r}: {} vs {}",
+                got[r],
+                want[0]
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn q5_0_rows8_matches_the_one_row_kernel_exactly() {
+        if !have_batched() {
+            return;
+        }
+        let mut s = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let rb = 22 * 20;
+        let mut w = vec![0u8; 8 * rb];
+        for r in 0..8 {
+            for b in 0..20 {
+                let blk = &mut w[r * rb + b * 22..r * rb + (b + 1) * 22];
+                for x in blk.iter_mut() {
+                    *x = next() as u8;
+                }
+                // A real f16 scale (a small positive one), not random bits.
+                blk[..2].copy_from_slice(&crate::quant::f32_to_f16(0.01).to_le_bytes());
+            }
+        }
+        let x: Vec<f32> = (0..rb / 22 * 32)
+            .map(|_| (next() as u32 as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32 * 3.0)
+            .collect();
+        let mut a = QuantAct::with_capacity(x.len());
+        a.fill(&x);
+        let mut got = [0.0f32; 8];
+        // SAFETY: AVX2, FMA and F16C checked above; the lengths are the ones the
+        // kernel asserts.
+        unsafe { q5_0_rows8(&w, rb, &a, &mut got) };
+        for r in 0..8 {
+            let mut want = [0.0f32; 1];
+            // SAFETY: as above.
+            unsafe {
+                tile_q5_0::<1>(
+                    &w[r * rb..(r + 1) * rb],
+                    std::slice::from_ref(&a),
+                    &mut want,
+                )
+            };
+            assert_eq!(
+                got[r].to_bits(),
+                want[0].to_bits(),
+                "row {r}: {} vs {}",
+                got[r],
+                want[0]
+            );
+        }
+    }
 
     #[test]
     fn the_saturation_headroom_is_real() {
