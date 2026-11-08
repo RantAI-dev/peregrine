@@ -211,3 +211,53 @@ pub fn simd_name() -> &'static str {
     #[allow(unreachable_code)]
     "scalar"
 }
+
+/// The kernel tier this process actually runs, as [`peregrine_kernels::cpu::tier_name`]
+/// spells it: `x86_64-avx2-avx512-vnni-gfni-vbmi` and so on, after the
+/// `PEREGRINE_ISA` cap.
+///
+/// This is the string manifests and `peregrine tier` report as the tier. It is
+/// not the same question [`simd_name`] answers: that one names the instruction
+/// sets compiled into the build, and it stops at AVX2 even where the kernels run
+/// the AVX-512 tier.
+pub fn simd_tier() -> String {
+    cpu::tier_name()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(target_arch = "x86_64")]
+    use crate::cpu::Tier;
+
+    /// The manifest's tier is the kernel tier, not the instruction-set baseline:
+    /// an AVX-512 host must not be labelled `avx2+fma` just because the build's
+    /// `simd_name` stops there.
+    #[test]
+    fn the_reported_tier_is_the_kernel_tier() {
+        assert_eq!(simd_tier(), cpu::tier_name());
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Every x86-64 tier name starts with the architecture and names a tier.
+            assert!(simd_tier().starts_with("x86_64"), "{}", simd_tier());
+            let detected = cpu::detected();
+            let resolved = cpu::resolved();
+            assert!(
+                resolved <= detected,
+                "the cap raised the tier: {resolved:?} > {detected:?}"
+            );
+            if resolved == Tier::Avx512 {
+                assert!(simd_tier().contains("avx512"), "{}", simd_tier());
+            }
+        }
+    }
+
+    /// The two strings answer different questions, and the old field is kept for
+    /// the tooling that reads it.
+    #[test]
+    fn the_simd_field_is_kept_beside_the_tier() {
+        let m = telem::Machine::probe(1);
+        assert_eq!(m.simd, simd_name());
+        assert_eq!(m.simd_tier, simd_tier());
+    }
+}

@@ -92,6 +92,7 @@ def get_machine_record(peregrine: PeregrineAdapter, threads: int) -> Dict[str, A
             "flops": 0.0,
             "gflops": 0.0,
             "simd": "unknown",
+            "simd_tier": "unknown",
             "ridge": 0.0,
         }
 
@@ -108,7 +109,12 @@ def get_machine_record(peregrine: PeregrineAdapter, threads: int) -> Dict[str, A
         "bandwidth_ceiling_gb_s": probe_data.get("bandwidth_gb_s", 0.0),
         "flops_ceiling": probe_data.get("flops", 0.0),
         "gflops_ceiling": probe_data.get("gflops", 0.0),
-        "simd_tier": probe_data.get("simd", "unknown"),
+        # The kernel tier, not the instruction-set string: `simd` stops at AVX2
+        # even where the AVX-512 tier's kernels run. Older probes only print
+        # `simd`, so fall back to it.
+        "simd_tier": probe_data.get(
+            "simd_tier", probe_data.get("simd", "unknown")
+        ),
         "ridge_point": probe_data.get("ridge", 0.0),
     }
 
