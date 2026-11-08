@@ -62,7 +62,7 @@ fn main() {
                 &pool,
                 l,
                 1,
-                ctx,
+                ctx - 1,
                 0,
                 &mut stats,
             );
