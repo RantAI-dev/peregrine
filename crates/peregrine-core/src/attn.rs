@@ -35,11 +35,12 @@
 //!   each loaded K vector, and the value mix keeps its accumulators in registers while
 //!   two rows share each loaded V vector. A decode head group (seven query heads per
 //!   KV head on Qwen2.5-0.5B) therefore reads the cache once per two query heads.
-//! * **Prefill widens the block once** and every query row of the task reads that one
-//!   decoded f32 tile. With tens of rows sharing a block, one widening amortises over
-//!   them; re-converting per row pair would do more `vcvtph2ps` work than it saves.
-//!   Both paths use the same per-key reduction tree, so which one a row takes cannot
-//!   change its bits.
+//! * **Prefill widens the block once** below ~1k positions of context: the tile is
+//!   small enough to sit in cache, and one widening amortises over every query row
+//!   that reads it. Past that the cache no longer fits, so the rows read the stored
+//!   halves in registers instead (two rows share each loaded K and V vector), which
+//!   halves the bytes they pull. Both paths use the same per-key reduction tree, so
+//!   which one a row takes cannot change its bits.
 //! * **A row's partition is its own.** The position chunks a row is cut into are a
 //!   function of that row's context length and the model shape alone — never of the
 //!   other rows in the call, the call width, the prefill chunk or the pool. A
@@ -56,6 +57,16 @@ use crate::kv::KvCache;
 /// Positions decoded and scored per step. 64 × 128 floats is a 32 KB tile each for
 /// K and V — inside L2 with room to spare, and long enough to amortise the rescale.
 pub const BLOCK: usize = 64;
+
+/// The shortest visible context at which a prefill tile reads the F16 cache directly.
+///
+/// Below it a row's K/V fits in the core's private caches, so halving the bytes the
+/// tile reads buys less than the per-row `vcvtph2ps` costs — the direct path measured
+/// about 1% slower on 512-position prompts. The crossover is around a thousand
+/// positions (five alternating rounds on H0), so shorter contexts keep the widened
+/// tile while long ones read the halves in registers.
+#[cfg(target_arch = "x86_64")]
+const DIRECT_MIN_VIS: usize = 1024;
 
 /// Most position chunks per KV head, which bounds the partial-result buffer.
 pub const MAX_CHUNKS: usize = 8;
@@ -647,6 +658,24 @@ pub(crate) fn run_range<O: RowSink>(
         }
     };
     let p_end = t.p1.min(max_ctx);
+    // The cache's own f16 halves can be read in the kernels' registers, as the
+    // single-row path does: the widened f32 tile is then never built, and the rows
+    // read half the bytes. That only pays once a row's visible context is long
+    // enough that the extra `vcvtph2ps` work is cheaper than the bytes it saves
+    // (`DIRECT_MIN_VIS`); shorter prefill keeps the widened tile. The per-row
+    // arithmetic is unchanged either way — the f16 kernels are the same FMAs in the
+    // same order (their test pins them to the widened ones bit for bit), so a row
+    // keeps its bits whichever path it takes.
+    let direct = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            prefill_direct(kv, sh, max_ctx)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    };
     let mut blk = t.p0;
     while blk < p_end {
         let bn = BLOCK.min(p_end - blk);
@@ -655,7 +684,10 @@ pub(crate) fn run_range<O: RowSink>(
         // resident tile the size of `bn × hd` floats plus the task's banked scores is
         // what keeps the row loop in L1; widening both K and V at once does not fit,
         // and every row then reads both tiles from L2.
-        kv.decode_block(true, layer, kh, blk, bn, &mut sc.kf);
+        let k16 = direct.then(|| kv.block_bytes(true, layer, kh, blk, bn));
+        if k16.is_none() {
+            kv.decode_block(true, layer, kh, blk, bn, &mut sc.kf);
+        }
         let mut lr = 0;
         while lr < sub {
             let (start, len) = vis_range(sh, ctx_of[lr], blk, bn);
@@ -668,7 +700,18 @@ pub(crate) fn run_range<O: RowSink>(
                 0
             };
             if len + len1 > 0 {
-                score_tile(sc, pairs, lr, paired, start - blk, len, len1, hd, sh.scale);
+                score_tile(
+                    sc,
+                    pairs,
+                    lr,
+                    paired,
+                    start - blk,
+                    len,
+                    len1,
+                    hd,
+                    sh.scale,
+                    k16,
+                );
             }
             lr += if paired { 2 } else { 1 };
         }
@@ -676,7 +719,10 @@ pub(crate) fn run_range<O: RowSink>(
         // boundaries cut its banked scores into the same pieces as before. Within the
         // tile `pos` walks this row's chunks: usually once, twice when a chunk
         // boundary falls inside the tile.
-        kv.decode_block(false, layer, kh, blk, bn, &mut sc.kf);
+        let v16 = direct.then(|| kv.block_bytes(false, layer, kh, blk, bn));
+        if v16.is_none() {
+            kv.decode_block(false, layer, kh, blk, bn, &mut sc.kf);
+        }
         for lr in 0..sub {
             let n_ctx = ctx_of[lr];
             if n_ctx <= blk {
@@ -700,13 +746,29 @@ pub(crate) fn run_range<O: RowSink>(
                     let psum = crate::vmath::exp_shift_sum(s, m_new);
                     let alpha = (m_old - m_new).exp();
                     sc.l[lr] = sc.l[lr] * alpha as f64 + psum;
-                    mix(
-                        &mut sc.o[lr * hd..][..hd],
-                        alpha,
-                        s,
-                        &sc.kf[j_start * hd..],
-                        hd,
-                    );
+                    match v16 {
+                        #[cfg(target_arch = "x86_64")]
+                        Some(v) => {
+                            // SAFETY: F16 directness checked (`f16_direct`); `v` holds the
+                            // tile's halves and `s` the row's scores for the positions mixed.
+                            unsafe {
+                                mix_f16(
+                                    &mut sc.o[lr * hd..][..hd],
+                                    alpha,
+                                    s,
+                                    &v[j_start * hd * 2..],
+                                    hd,
+                                )
+                            }
+                        }
+                        _ => mix(
+                            &mut sc.o[lr * hd..][..hd],
+                            alpha,
+                            s,
+                            &sc.kf[j_start * hd..],
+                            hd,
+                        ),
+                    }
                     sc.m[lr] = m_new;
                 }
                 pos = end;
@@ -822,12 +884,51 @@ fn score_tile(
     len1: usize,
     hd: usize,
     scale: f32,
+    // The tile's f16 halves in the cache, when the f16 kernels may read them; `None`
+    // means the widened f32 tile in `sc.kf`.
+    k16: Option<&[u8]>,
 ) {
     let Scratch { kf, q, s_tile, .. } = sc;
-    let kf = &kf[j_start * hd..];
     let (lo, mid) = s_tile.split_at_mut((lr + 1) * BLOCK);
     let s0 = &mut lo[lr * BLOCK..lr * BLOCK + len];
     let s1 = &mut mid[..len1];
+    if let Some(k) = k16 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // The direct path never carries a window (`f16_direct` excludes it), so
+            // every row starts at the tile's first position.
+            debug_assert_eq!(j_start, 0, "a windowed tile is not read as f16");
+            let _ = j_start;
+            if paired && pairs {
+                // SAFETY: F16 directness checked; `k` holds `max(len, len1)` keys.
+                unsafe {
+                    scores_f16_pair(
+                        &q[lr * hd..],
+                        &q[(lr + 1) * hd..],
+                        k,
+                        len,
+                        len1,
+                        hd,
+                        scale,
+                        s0,
+                        s1,
+                    )
+                };
+                return;
+            }
+            // SAFETY: F16 directness checked; `k` holds the tile's keys.
+            unsafe {
+                scores_f16(&q[lr * hd..][..hd], k, len, hd, scale, s0);
+                if paired {
+                    scores_f16(&q[(lr + 1) * hd..][..hd], k, len1, hd, scale, s1);
+                }
+            }
+            return;
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = k;
+    }
+    let kf = &kf[j_start * hd..];
     #[cfg(target_arch = "x86_64")]
     if paired && pairs {
         // SAFETY: AVX2+FMA checked; `kf` holds the rest of the tile and each `s` row
@@ -952,6 +1053,13 @@ fn f16_direct(kv: &KvCache, sh: &Shape<'_>) -> bool {
         && crate::cpu_has!("avx2")
         && crate::cpu_has!("fma")
         && crate::cpu_has!("f16c")
+}
+
+/// Whether a prefill task whose longest row sees `vis` positions reads the F16 cache
+/// directly instead of widening a tile ([`DIRECT_MIN_VIS`]).
+#[cfg(target_arch = "x86_64")]
+fn prefill_direct(kv: &KvCache, sh: &Shape<'_>, vis: usize) -> bool {
+    vis >= DIRECT_MIN_VIS && f16_direct(kv, sh)
 }
 
 /// The per-key reduction tree of the four-key score block: `((d0+d1)+(d2+d3)) +
@@ -2107,6 +2215,47 @@ mod tests {
         a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
     }
 
+    /// One pass of an `n`-position prompt in pieces of `chunk` rows on a pool of
+    /// `threads`, the way the engine reads it.
+    fn read_prompt(
+        cfg: &crate::model::Config,
+        kv: &KvCache,
+        q: &[f32],
+        n: usize,
+        chunk: usize,
+        threads: usize,
+    ) -> Vec<f32> {
+        use crate::blocks::attn::{attend, AttnScratch};
+        use crate::pool::Pool;
+        use crate::state::StepStats;
+        let pool = Pool::new(threads);
+        let mut scratch = AttnScratch::new(cfg, chunk, threads);
+        let mut stats = StepStats::default();
+        let qd = cfg.q_dim();
+        let mut out = vec![0.0f32; n * qd];
+        let mut start = 0;
+        while start < n {
+            let nb = chunk.min(n - start);
+            let mut xb = vec![0.0f32; nb * qd];
+            attend(
+                cfg,
+                &mut scratch,
+                &q[start * qd..],
+                &mut xb,
+                kv,
+                &pool,
+                0,
+                nb,
+                start,
+                0,
+                &mut stats,
+            );
+            out[start * qd..(start + nb) * qd].copy_from_slice(&xb);
+            start += nb;
+        }
+        out
+    }
+
     /// The hard rule of the prefill tiling: a row's output bits are a function of its
     /// query, its own context and the model shape alone — never of the prompt chunk it
     /// was read in or of the pool width. Read every row of a 512-position context as a
@@ -2119,43 +2268,9 @@ mod tests {
     /// batch rows with different context lengths), and Qwen2.5-0.5B's 14×2/64 (seven).
     #[test]
     fn prefill_tiles_are_bit_identical_to_a_solo_decode() {
-        use crate::blocks::attn::{attend, AttnScratch};
         use crate::model::Config;
-        use crate::pool::Pool;
-        use crate::state::StepStats;
 
         let n = 512usize;
-        let qd_of = |n_head: usize, hd: usize| n_head * hd;
-
-        // One pass of the prompt in pieces of `chunk` rows on a pool of `threads`.
-        let read = |cfg: &Config, kv: &KvCache, q: &[f32], chunk: usize, threads: usize| {
-            let pool = Pool::new(threads);
-            let mut scratch = AttnScratch::new(cfg, chunk, threads);
-            let mut stats = StepStats::default();
-            let qd = qd_of(cfg.n_head, cfg.head_dim);
-            let mut out = vec![0.0f32; n * qd];
-            let mut start = 0;
-            while start < n {
-                let nb = chunk.min(n - start);
-                let mut xb = vec![0.0f32; nb * qd];
-                attend(
-                    cfg,
-                    &mut scratch,
-                    &q[start * qd..],
-                    &mut xb,
-                    kv,
-                    &pool,
-                    0,
-                    nb,
-                    start,
-                    0,
-                    &mut stats,
-                );
-                out[start * qd..(start + nb) * qd].copy_from_slice(&xb);
-                start += nb;
-            }
-            out
-        };
 
         let mut failures = Vec::new();
         for &(n_head, n_kv_head, hd) in &[(8usize, 2usize, 64usize), (9, 3, 64), (14, 2, 64)] {
@@ -2185,13 +2300,13 @@ mod tests {
                 }
             }
             kv.advance(n);
-            let qd = qd_of(n_head, hd);
+            let qd = cfg.q_dim();
             let q = prng(99, n * qd);
             // The reference is the decode path: one row, on the widest pool.
-            let want = read(&cfg, &kv, &q, 1, 4);
+            let want = read_prompt(&cfg, &kv, &q, n, 1, 4);
             for &chunk in &[3usize, 16, 64] {
                 for &threads in &[1usize, 2, 4, 8] {
-                    let got = read(&cfg, &kv, &q, chunk, threads);
+                    let got = read_prompt(&cfg, &kv, &q, n, chunk, threads);
                     if let Some(row) = (0..n).find(|&row| {
                         !same_bits(
                             &got[row * qd..(row + 1) * qd],
@@ -2214,6 +2329,86 @@ mod tests {
             failures.join("\n")
         );
     }
+
+    /// The prefill F16-direct switch has a context threshold ([`DIRECT_MIN_VIS`]):
+    /// below it a task widens the tile, at and above it the task reads the cache's
+    /// halves. Crossing the line must not move a row's bits.
+    ///
+    /// A `DIRECT_MIN_VIS + 1`-position context is read as prompt pieces of 16 rows —
+    /// the pieces that end below the line widen, the ones that end at or above it go
+    /// direct, so both sides and the boundary itself appear in one pass — and then
+    /// row by row, which is the decode path and always direct. Qwen2.5-0.5B's
+    /// 14×2/64 geometry is used, the one the direct kernels exist for.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_direct_prefill_threshold_does_not_move_a_bit() {
+        use crate::model::Config;
+
+        let n = DIRECT_MIN_VIS + 1;
+        let (n_head, n_kv_head, hd) = (14usize, 2usize, 64usize);
+        let cfg = Config {
+            arch_name: "test",
+            rope_neox: false,
+            n_layer: 1,
+            n_kv_layer: 1,
+            n_head,
+            n_kv_head,
+            head_dim: hd,
+            d_model: n_head * hd,
+            n_ff: 4 * n_head * hd,
+            n_vocab: 32,
+            rope_dim: hd,
+            eps: 1e-5,
+            rope_base: 10_000.0,
+            ctx_train: 2 * DIRECT_MIN_VIS,
+            rope_yarn: None,
+        };
+        let mut kv = KvCache::new(KvPrec::F16, 1, n_kv_head, hd, n + 1);
+        for p in 0..n {
+            for h in 0..n_kv_head {
+                let k = prng((p * 31 + h * 7 + 1) as u64, hd);
+                let v = prng((p * 17 + h * 5 + 2) as u64, hd);
+                kv.put(0, h, p, &k, &v);
+            }
+        }
+        kv.advance(n);
+        let qd = cfg.q_dim();
+        let q = prng(99, n * qd);
+
+        // Row by row is the always-direct decode path; pieces of 16 cross the line.
+        let want = read_prompt(&cfg, &kv, &q, n, 1, 4);
+        let got = read_prompt(&cfg, &kv, &q, n, 16, 4);
+        let row = (0..n).find(|&row| {
+            !same_bits(
+                &got[row * qd..(row + 1) * qd],
+                &want[row * qd..(row + 1) * qd],
+            )
+        });
+        assert!(row.is_none(), "the switch moved row {:?}", row);
+
+        // And the switch itself: off one position below the line, on at it.
+        if crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c") {
+            let sh = Shape {
+                n_head,
+                n_kv_head,
+                head_dim: hd,
+                nb: 1,
+                start_pos: 0,
+                scale: 1.0 / 8.0,
+                window: None,
+                sinks: None,
+            };
+            assert!(
+                !prefill_direct(&kv, &sh, DIRECT_MIN_VIS - 1),
+                "the direct path was taken below the threshold"
+            );
+            assert!(
+                prefill_direct(&kv, &sh, DIRECT_MIN_VIS),
+                "the direct path was not taken at the threshold"
+            );
+        }
+    }
+
     /// The hard rule of the F16-direct path: a row's output bits are a function of
     /// that row's query, context and the model shape alone — not of the other rows in
     /// the call, the prefill chunk width, the worker count or which worker runs it.
