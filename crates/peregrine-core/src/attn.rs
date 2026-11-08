@@ -360,6 +360,18 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
     }
 }
 
+/// Where a multi-row task's finished rows go.
+///
+/// A task owns the `gqa` query heads of one KV head in rows `b0..b1`, and each of
+/// those `head_dim`-wide slices is strided by the full query width in the output
+/// buffer. Handing out one slice per (row, head) lets the caller claim exactly the
+/// bytes the task writes: the disjoint checker in `blocks::par` then sees per-head
+/// ranges instead of whole rows, which the tasks of different KV heads share.
+pub trait RowSink {
+    /// The output slice for query head `head` of the task's `row` (0-based).
+    fn head(&mut self, row: usize, head: usize) -> &mut [f32];
+}
+
 /// [`run`] for a multi-row task: every row walks its own canonical position chunks
 /// (`row_chunks`) and the chunks are merged by [`combine_row`] in chunk order.
 ///
@@ -376,15 +388,15 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
 /// buffer stays bounded; a sub-block reads its K/V again, but the arithmetic of a row
 /// does not depend on which sub-block it landed in.
 ///
-/// `out` is the task's contiguous output rows, `(t.b1 − t.b0) · q_dim` floats.
-pub fn run_rows(
+/// `out` receives only this task's query heads (`kh·gqa..kh·gqa+gqa`) of its rows.
+pub fn run_rows<O: RowSink>(
     kv: &KvCache,
     layer: usize,
     sh: &Shape<'_>,
     q: &[f32],
     t: &Task,
     sc: &mut Scratch,
-    out: &mut [f32],
+    out: &mut O,
 ) {
     debug_assert_eq!(t.p0, 0, "run_rows expects a whole-context task");
     let gqa = sh.gqa();
@@ -399,7 +411,7 @@ pub fn run_rows(
 
 /// One sub-block `r0..r1` of [`run_rows`]' query rows.
 #[allow(clippy::too_many_arguments)]
-fn run_range(
+fn run_range<O: RowSink>(
     kv: &KvCache,
     layer: usize,
     sh: &Shape<'_>,
@@ -408,7 +420,7 @@ fn run_range(
     r0: usize,
     r1: usize,
     sc: &mut Scratch,
-    out: &mut [f32],
+    out: &mut O,
 ) {
     let hd = sh.head_dim;
     let gqa = sh.gqa();
@@ -527,12 +539,7 @@ fn run_range(
             );
         }
         let sink = sh.sinks.map(|s| s[h]);
-        combine_row(
-            &parts[..count[lr]],
-            sink,
-            rotated,
-            &mut out[bi * qd + h * hd..][..hd],
-        );
+        combine_row(&parts[..count[lr]], sink, rotated, out.head(bi, h));
     }
 }
 
@@ -817,6 +824,19 @@ mod tests {
         out
     }
 
+    /// [`RowSink`] over a plain row-major buffer, for the sequential plan simulation.
+    struct SliceOut<'a> {
+        out: &'a mut [f32],
+        qd: usize,
+        hd: usize,
+    }
+
+    impl RowSink for SliceOut<'_> {
+        fn head(&mut self, row: usize, head: usize) -> &mut [f32] {
+            &mut self.out[row * self.qd + head * self.hd..][..self.hd]
+        }
+    }
+
     /// Run a call the way the model does: every task of the plan, then finish or
     /// combine. Workers are simulated sequentially; the partition is what is tested.
     fn grouped(kv: &KvCache, layer: usize, sh: &Shape, q: &[f32], plan: Plan) -> Vec<f32> {
@@ -856,15 +876,12 @@ mod tests {
             // Rows split, each row's chunks walk inside its task.
             for i in 0..plan.tasks(sh) {
                 let t = task(sh, &plan, i);
-                run_rows(
-                    kv,
-                    layer,
-                    sh,
-                    q,
-                    &t,
-                    &mut sc,
-                    &mut out[t.b0 * qd..t.b1 * qd],
-                );
+                let mut sink = SliceOut {
+                    out: &mut out[t.b0 * qd..t.b1 * qd],
+                    qd,
+                    hd,
+                };
+                run_rows(kv, layer, sh, q, &t, &mut sc, &mut sink);
             }
         } else {
             for i in 0..plan.tasks(sh) {

@@ -198,6 +198,32 @@ pub fn attend_window(
     )
 }
 
+/// A multi-row task's output, one head-wide slice per (row, query head).
+///
+/// The task owns only its KV head's `gqa` query heads, so the disjoint claim is made
+/// per head. Several KV-head tasks share the same rows; a whole-row claim (what this
+/// used to make) overlapped them even though no element is written twice.
+struct TaskOut<'a, 'b> {
+    out: &'b Disjoint<'a, f32>,
+    /// The task's first batch row, which is the base of its output slice.
+    row0: usize,
+    qd: usize,
+    hd: usize,
+}
+
+impl attn::RowSink for TaskOut<'_, '_> {
+    #[inline(always)]
+    fn head(&mut self, row: usize, head: usize) -> &mut [f32] {
+        // SAFETY: query head `head` of task row `row` belongs to this task alone:
+        // `head` is `kh·gqa + g` for this task's KV head, and no other task has the
+        // same (row block, KV head) pair.
+        unsafe {
+            self.out
+                .chunk((self.row0 + row) * self.qd + head * self.hd, self.hd)
+        }
+    }
+}
+
 /// Attention over the KV cache with optional sliding window and optional scale override.
 #[allow(clippy::too_many_arguments)]
 pub fn attend_scaled_window(
@@ -252,9 +278,13 @@ pub fn attend_scaled_window(
             if !split && nb > 1 {
                 // Rows split, positions stay with each row: walk every row's own
                 // canonical chunks inside the task and merge them there.
-                // SAFETY: rows `b0..b1` of the output belong exclusively to this task.
-                let dst = unsafe { out.chunk(t.b0 * qd, (t.b1 - t.b0) * qd) };
-                attn::run_rows(kv, li, &sh, q, &t, sc, dst);
+                let mut dst = TaskOut {
+                    out: &out,
+                    row0: t.b0,
+                    qd,
+                    hd,
+                };
+                attn::run_rows(kv, li, &sh, q, &t, sc, &mut dst);
                 continue;
             }
             attn::run(kv, li, &sh, q, &t, sc);
@@ -330,5 +360,110 @@ pub fn attend_scaled_window(
     for b in 0..nb {
         let n_ctx = (start_pos + b + 1) as u64;
         stats.macs += (c.n_head * hd) as u64 * n_ctx * 2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv::KvPrec;
+
+    fn prng(seed: u64, n: usize) -> Vec<f32> {
+        let mut s = seed | 1;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn test_config(n_head: usize, n_kv_head: usize, head_dim: usize) -> Config {
+        Config {
+            arch_name: "test",
+            rope_neox: false,
+            n_layer: 1,
+            n_kv_layer: 1,
+            n_head,
+            n_kv_head,
+            head_dim,
+            d_model: n_head * head_dim,
+            n_ff: 4 * n_head * head_dim,
+            n_vocab: 32,
+            rope_dim: head_dim,
+            eps: 1e-5,
+            rope_base: 10_000.0,
+            ctx_train: 4096,
+            rope_yarn: None,
+        }
+    }
+
+    /// A multi-row call keeps one task per KV head over the same rows, and each task
+    /// writes only its own query heads. The disjoint checker must therefore see the
+    /// per-head writes: the whole-row claim this path used to make overlapped the
+    /// KV-head tasks and panicked every debug build of a parallel multi-row call
+    /// with more than one KV head.
+    #[test]
+    fn multi_row_attention_claims_only_its_own_heads() {
+        let (n_head, n_kv_head, head_dim, nb, start) = (8, 2, 64, 8, 300);
+        let cfg = test_config(n_head, n_kv_head, head_dim);
+        let sh = attn::Shape {
+            n_head,
+            n_kv_head,
+            head_dim,
+            nb,
+            start_pos: start,
+            scale: 1.0 / (head_dim as f32).sqrt(),
+            window: None,
+            sinks: None,
+        };
+        // The plan splits the rows across workers and keeps a task per KV head, so
+        // tasks with different KV heads cover the same rows.
+        let plan = attn::plan(&sh, 4);
+        assert!(
+            plan.parallel && plan.row_blocks > 1 && plan.pos_chunks == 1,
+            "{plan:?}"
+        );
+
+        let ctx = start + nb;
+        let mut kv = KvCache::new(KvPrec::F16, 1, n_kv_head, head_dim, ctx + 1);
+        for p in 0..ctx {
+            for h in 0..n_kv_head {
+                let k = prng((p * 31 + h * 7 + 1) as u64, head_dim);
+                let v = prng((p * 17 + h * 5 + 2) as u64, head_dim);
+                kv.put(0, h, p, &k, &v);
+            }
+        }
+        kv.advance(ctx);
+        let q = prng(99, nb * n_head * head_dim);
+
+        let run = |threads: usize| {
+            let pool = Pool::new(threads);
+            let mut scratch = AttnScratch::new(&cfg, nb, threads);
+            let mut xb = vec![0.0f32; nb * cfg.q_dim()];
+            let mut stats = StepStats::default();
+            attend(
+                &cfg,
+                &mut scratch,
+                &q,
+                &mut xb,
+                &kv,
+                &pool,
+                0,
+                nb,
+                start,
+                0,
+                &mut stats,
+            );
+            xb
+        };
+        let serial = run(1);
+        let parallel = run(4);
+        assert_eq!(
+            serial, parallel,
+            "a row's bits must not depend on how its call is partitioned"
+        );
     }
 }
