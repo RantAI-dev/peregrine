@@ -1,5 +1,12 @@
 # Benchmark Report
 
+> **Correction (2026-11-08).** The 4096 llama.cpp single-decode row below is `llama-server`'s
+> default `-fa auto`, which resolves to flash attention *on* on the CPU backend; at 4096 that path
+> decodes at 13.0 tok/s while `-fa 0` decodes at 29.1 tok/s with the same harness method. The
+> like-for-like speedup is 1.27x, not 2.82x. This table and the JSON next to it are left as
+> measured (they are what a default user sees); the recheck and its method are in
+> [`README.md`](README.md#recheck-is-130-toks-at-4096-real-2026-11-08).
+
 **Date**: 2026-11-08T03:25:14.060205+00:00
 
 ## Machine Record

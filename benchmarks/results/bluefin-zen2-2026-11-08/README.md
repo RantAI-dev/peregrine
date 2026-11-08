@@ -86,8 +86,11 @@ does in one invocation.
 
 ## What the numbers say
 
-Peregrine wins single-user decode on the 1B model at both contexts (1.15x at 512, 2.82x at 4096)
-and on the 0.5B at 4096 (1.10x), but loses the 0.5B at 512 (0.70x). Prompt throughput is at parity
+Peregrine wins single-user decode on the 1B model at both contexts against llama.cpp's *defaults*
+(1.15x at 512, 2.82x at 4096) and on the 0.5B at 4096 (1.10x), but loses the 0.5B at 512 (0.70x).
+The 4096 figure against defaults is not a like-for-like throughput gap: those defaults turn flash
+attention on, and on this CPU it collapses at depth. With `-fa 0` on the llama.cpp side the same
+comparison is 1.27x (see the recheck below). Prompt throughput is at parity
 on the 1B (1.04x, 1.02x) and below llama.cpp on the 0.5B (0.86x, 0.83x). Multi-user throughput is
 ahead on the 1B (1.35x and 1.49x at 512, 1.43x and 1.52x at 4096) and mixed on the 0.5B (1.08x and
 1.04x at 512, 0.91x and 0.96x at 4096). 10-user TTFT is worse on the 0.5B (0.92x and 0.75x), better
@@ -97,14 +100,84 @@ Two things are worth calling out:
 
 - llama.cpp's single-user decode on the 1B model falls from 39.5 tok/s at 512 to 13.0 tok/s at
   4096 (0.33x), while Peregrine falls only from 45.4 to 36.7 (0.81x). This is the default
-  `llama-server` configuration from the pinned build, with no `-fa` or other extra flags, so it is
-  what a default user of that build gets on this host; it is also the single largest gap in the
-  suite. The same effect shows up in multi-user: 39.5 -> 5.4 tok/s for llama.cpp at 4 users versus
-  53.5 -> 7.7 for Peregrine.
+  `llama-server` configuration from the pinned build, with no `-fa` or other extra flags: its
+  `-fa auto` default resolves to *on* for the CPU backend, and that path is what collapses. It is
+  what a default user of that build gets on this host, but it is a property of that one default,
+  not of llama.cpp's decode throughput on this machine — with `-fa 0` the same harness method
+  measures 29.1 tok/s at 4096. The same effect shows up in multi-user: 39.5 -> 5.4 tok/s for
+  llama.cpp at 4 users versus 53.5 -> 7.7 for Peregrine, both at llama.cpp's defaults.
 - At 4096 tokens the 10-user figures are small (5-10 tok/s) and the wall-clock phases are minutes
   long, so those medians carry more weight from cache/clock state than the 512-token ones. The
   spreads are still small (mostly under 1%), but read them as "this is what a 4-core Zen 2 does at
   10 x 4096", not as a fine-grained ranking.
+
+### Recheck: is 13.0 tok/s at 4096 real? (2026-11-08)
+
+Yes, it reproduces exactly — and it is flash attention, not memory pressure. Same host, same model
+file (SHA-256 verified above), 4 threads, the three conditions identical to the original runs
+(load average 3.5-4.2 during runs is the benchmark's own 4 threads; 4.1-4.3 GiB RAM used, 3.8 GiB
+swap already in use and unchanged). Nothing else was running or stopped.
+
+`llama-bench` (decode only, 128 tokens, 3 reps, `-o md`), all values tok/s:
+
+| Command | 512 | 4096 |
+|---|---|---|
+| default (no `-fa`; `auto` resolves to on) | 39.20 ± 0.16 | 13.05 ± 0.13 |
+| `-fa 1` | 39.44 ± 0.18 | 13.42 ± 0.02 |
+| `-fa 0` | 43.35 ± 0.13 | **29.42 ± 0.09** |
+
+The server path, measured with the harness's own method (1 user, 256 greedy tokens, prompt within
+1% of 4096, 3 rounds, pinned `LLAMA_SERVER_BIN`, the `-fa` flag the only addition):
+
+| llama-server | decode tok/s | prefill tok/s |
+|---|---|---|
+| default (`-fa auto` -> on), the #97 configuration | 13.02 (12.996 / 13.040 / 13.016) | 140.2 |
+| `-fa on` (explicit) | 13.01 (13.03 / 12.97 / 13.01) | 140.4 |
+| `-fa 0` | **29.11 (29.09 / 29.11 / 29.18)** | 121.8 |
+
+Peregrine on the same host and model, `origin/main` at `bf241fe`, `release`, `peregrine bench
+--prompt-tokens 4096 --tokens 256`, 3 rounds: 36.9 / 36.8 / 36.9 tok/s decode, 153-156 tok/s
+prefill (at 512 prompt: 46.6 / 46.2 / 46.0). So the 4096 ratio is 36.9 / 13.0 = **2.84x against
+llama.cpp's defaults**, and 36.9 / 29.1 = **1.27x like-for-like** with flash attention off on the
+llama.cpp side. Flash attention on this CPU build costs 9% at 512 (`-fa 1` vs `-fa 0`: 39.44 vs
+43.35) and about 2.2x at 4096 (13.42 vs 29.42).
+
+Swap was not involved: `vmstat 1 8` during a 4096 run shows `si`/`so` at 0 and `swpd` constant at
+3997164 kB after model load; the first sample's page-in is the model file being read. `kswapd0` was
+idle at ~2-3% CPU, as in the original run.
+
+No samples were dropped: no 2.8e-09-style values and no outliers appeared. Every sample in every
+run above is within 0.6% of its median, and the server-path numbers agree with `llama-bench` to
+0.1 tok/s at 4096.
+
+Commands:
+
+```sh
+# llama-bench, one per flash-attention setting
+/var/tmp/llama.cpp/build/bin/llama-bench \
+  -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -p 0 -n 128 -d 512,4096 -t 4 -r 3 -o md [-fa 0|-fa 1]
+
+# server path, the #97 invocation, 1 user only
+LLAMA_SERVER_BIN=/var/tmp/llama.cpp/build/bin/llama-server \
+python3 benchmarks/run.py -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  -e llama_cpp -c 4096 -r 3 -n 256 -t 4 --user-counts 1
+
+# the same with flash attention off: llama-server started by the adapter with `-fa off`
+# (ctx 4416, -np 1 --kv-unified), then the harness's own send_chat_completion loop
+
+# Peregrine reference
+cargo build --release -p peregrine
+./target/release/peregrine bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  --prompt-tokens 4096 --tokens 256
+```
+
+**What this changes.** The 13.0 tok/s figure is real and repeatable for llama.cpp v0.9.0's defaults
+on this host, and the tables in `report.md` are left as measured. What it is not is a like-for-like
+decode comparison: the default flash-attention path is a different computation (see
+[`docs/dev/accuracy.md`](../../../docs/dev/accuracy.md)) and, at 4096, a much slower one here. The
+honest statement of the 1B result at 4096 is "2.84x against llama.cpp's defaults, 1.27x with the
+same attention path (flash attention off)", and the 512 result moves from 1.15x to 1.05x under the
+same correction (45.4 vs 43.35 `llama-bench`).
 
 The "% of ceiling" column is Peregrine's `bytes_per_token` telemetry times the measured decode rate
 over the harness's streaming-bandwidth probe. The probe reported 39.27-39.77 GB/s across the four
