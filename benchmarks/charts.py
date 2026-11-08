@@ -21,7 +21,7 @@ OUT = Path(__file__).resolve().parent.parent / "docs" / "img"
 # setting per row, which is the default for the 1B prompt and the multi-user rows).
 # Bonsai 2: the same desktop, against PrismML's fork (benchmarks/results/2026-11-08-bonsai2-prism);
 # upstream llama.cpp cannot load PQ2_0. The fork bar is its faster flash-attention setting per row.
-# Bluefin: Ryzen 3 PRO 4350G, 4 threads (benchmarks/results/bluefin-zen2-2026-11-08-fa-off).
+# Bluefin: Ryzen 3 PRO 4350G, 4 threads (benchmarks/results/bluefin-zen2-2026-11-08-q5).
 # The bluefin llama.cpp bar is the faster flash-attention setting for that row (-fa off for
 # single-user decode, llama.cpp's default for prefill and multi-user throughput).
 # Each case: (label, peregrine, llama.cpp), tok/s.
@@ -30,26 +30,31 @@ DECODE = [
     ("Desktop · Llama 3.2 1B · 4096", 47.0, 33.8),
     ("Desktop · Qwen 2.5 0.5B · 512", 70.0, 75.8),
     ("Desktop · Qwen 2.5 0.5B · 4096", 54.9, 49.1),
-    ("Bluefin · Llama 3.2 1B · 512", 46.06, 42.01),
-    ("Bluefin · Llama 3.2 1B · 4096", 36.85, 29.25),
-    ("Bluefin · Qwen 2.5 0.5B · 512", 52.87, 77.41),
-    ("Bluefin · Qwen 2.5 0.5B · 4096", 45.20, 51.97),
+    ("Bluefin · Llama 3.2 1B · 512", 46.83, 42.50),
+    ("Bluefin · Llama 3.2 1B · 4096", 36.81, 29.25),
+    ("Bluefin · Qwen 2.5 0.5B · 512", 83.48, 77.69),
+    ("Bluefin · Qwen 2.5 0.5B · 4096", 65.89, 52.20),
+    ("Bluefin · SmolLM2 360M · 512", 108.92, 94.45),
+    ("Bluefin · SmolLM2 360M · 4096", 63.79, 47.51),
 ]
 PREFILL = [
     ("Desktop · Llama 3.2 1B · 512", 183.8, 262.0),
     ("Desktop · Llama 3.2 1B · 4096", 130.9, 189.0),
     ("Desktop · Qwen 2.5 0.5B · 512", 321.9, 435.2),
     ("Desktop · Qwen 2.5 0.5B · 4096", 215.1, 293.1),
-    ("Bluefin · Llama 3.2 1B · 512", 197.34, 188.27),
-    ("Bluefin · Llama 3.2 1B · 4096", 144.59, 141.23),
-    ("Bluefin · Qwen 2.5 0.5B · 512", 263.19, 302.91),
-    ("Bluefin · Qwen 2.5 0.5B · 4096", 198.23, 235.98),
+    ("Bluefin · Llama 3.2 1B · 512", 195.67, 188.09),
+    ("Bluefin · Llama 3.2 1B · 4096", 144.95, 141.37),
+    ("Bluefin · Qwen 2.5 0.5B · 512", 434.78, 303.73),
+    ("Bluefin · Qwen 2.5 0.5B · 4096", 277.58, 236.46),
+    ("Bluefin · SmolLM2 360M · 512", 443.19, 318.91),
+    ("Bluefin · SmolLM2 360M · 4096", 228.45, 217.05),
 ]
 USERS10 = [
     ("Desktop · Llama 3.2 1B · 512", 53.4, 61.7),
     ("Desktop · Qwen 2.5 0.5B · 512", 83.4, 93.4),
-    ("Bluefin · Llama 3.2 1B · 512", 55.18, 37.36),
-    ("Bluefin · Qwen 2.5 0.5B · 512", 71.72, 68.69),
+    ("Bluefin · Llama 3.2 1B · 512", 55.53, 37.74),
+    ("Bluefin · Qwen 2.5 0.5B · 512", 108.41, 68.36),
+    ("Bluefin · SmolLM2 360M · 512", 116.76, 67.63),
 ]
 BONSAI = [
     ("Bonsai 2 2B · 512 · decode", 70.64, 32.66),
@@ -67,19 +72,21 @@ WINS = [
     ("10 users · Bonsai 9B · 512 · Desktop", 21.62 / 7.83),
     ("10 users · Bonsai 2B · 512 · Desktop", 80.59 / 29.96),
     ("Prompt · Bonsai 9B · 512 · Desktop", 67.24 / 26.12),
+    ("Prompt · Bonsai 2B · 512 · Desktop", 259.25 / 108.24),
     ("Decode · Bonsai 9B · 512 · Desktop", 22.97 / 9.85),
-    ("10 users · Llama 1B · 512 · Bluefin", 55.18 / 37.36),
-    ("Decode · Llama 1B · 4096 · Desktop", 47.0 / 33.8),
-    ("4 users · Llama 1B · 512 · Bluefin", 53.82 / 39.55),
-    ("Decode · Llama 1B · 4096 · Bluefin", 36.85 / 29.25),
-    ("Decode · Llama 1B · 512 · Desktop", 62.6 / 51.8),
-    ("Decode · Qwen 0.5B · 4096 · Desktop", 54.9 / 49.1),
-    ("Decode · Llama 1B · 512 · Bluefin", 46.06 / 42.01),
-    ("Prompt · Llama 1B · 512 · Bluefin", 197.34 / 188.27),
+    ("Decode · Bonsai 2B · 512 · Desktop", 70.64 / 32.66),
+    ("10 users · SmolLM2 360M · 4096 · Bluefin", 12.11 / 6.74),
+    ("10 users · SmolLM2 360M · 512 · Bluefin", 116.76 / 67.63),
+    ("4 users · SmolLM2 360M · 512 · Bluefin", 114.18 / 66.15),
+    ("4 users · Qwen 0.5B · 512 · Bluefin", 104.33 / 65.73),
+    ("10 users · Qwen 0.5B · 512 · Bluefin", 108.41 / 68.36),
+    ("10 users · Llama 1B · 4096 · Bluefin", 7.71 / 5.07),
 ]
 # Prompt processing before and after the November changes, Peregrine against itself.
-# Bluefin: the repacked Q4_K kernels (#88). Desktop: the prefill chunk default (#92).
+# Bluefin: the Q5_0 kernels (#103-#105) and the repacked Q4_K kernels (#88). Desktop: the
+# prefill chunk default (#92).
 SPEEDUPS = [
+    ("Bluefin · Qwen 2.5 0.5B (Q5_0 kernels)", 434.78 / 263.19),
     ("Bluefin · Llama 3.2 1B (Q4_K kernels)", 152 / 104),
     ("Desktop · Bonsai 2 2B (prefill chunk)", 1.43),
     ("Bluefin · Qwen 3.5 2B (Q4_K kernels)", 96 / 72),
