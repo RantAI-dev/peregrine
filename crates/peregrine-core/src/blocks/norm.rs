@@ -99,8 +99,10 @@ pub fn norm_rows(
         |_wk, rows, xb_chunk, acts_chunk| {
             for (i, b) in rows.enumerate() {
                 let out = &mut xb_chunk[i * d..(i + 1) * d];
-                rmsnorm_into(w, weight, eps, &x[b * d..(b + 1) * d], out);
-                acts_chunk[i].fill(out);
+                crate::prof::time(crate::prof::Slot::Norm, || {
+                    rmsnorm_into(w, weight, eps, &x[b * d..(b + 1) * d], out)
+                });
+                crate::prof::time(crate::prof::Slot::Quant, || acts_chunk[i].fill(out));
             }
         },
     );

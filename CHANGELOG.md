@@ -7,6 +7,20 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- Small-model decode no longer runs a Q5_0 or Q8_0 row at a time. A Q5_0 row is 22 bytes
+  per 32 weights and a Q8_0 row 34, so the 32-byte activation block (and, for Q5_0, its
+  32-byte lane sums) is more traffic than the weights; the per-row kernel reloaded both
+  for every output row. The new eight-row kernel loads them once per block for eight
+  rows, and each row still runs the per-row kernel's operations block by block, so the
+  bits are unchanged (a row's result does not depend on the batch, tested bit for bit).
+  On the 4-core Xeon (Qwen2.5-0.5B Q4_K_M) decode went 32.1 → 37.8 tok/s at 512 context
+  and 27.1 → 29.0 at 4096 (medians of 5 and 3 alternating rounds). The eight-row kernels
+  also prefetch one page ahead per row stream (`PEREGRINE_PF=0` still turns it off).
+- The SwiGLU activation's quantisation now runs in the workers' SwiGLU pass instead of
+  serially on the calling thread afterwards. A block's scale comes from that block's 32
+  values alone, so a worker's contiguous block range writes exactly the bytes one call
+  would; `QuantAct::prepare`/`fill_range` are tested against `fill` for any split. The
+  decode quantise on the 0.5B fell from 0.73 ms to 0.17 ms per token.
 - The prefill chunk's default now follows the worker pool. 16 is right on a pool as wide as the physical
   cores, but the engine builds `available_parallelism()` workers, which on an SMT machine is twice the
   core count. A 16-row pass is only 16 rows deep: its row-deep blocks (the rotation) give one row to 16
@@ -21,6 +35,10 @@ All notable changes to this project are documented here. The format follows
   16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
 
 ### Added
+- `PEREGRINE_PROF2=1` makes `peregrine bench` print a per-token phase breakdown (matmuls
+  by projection, attention, norms, quantisation, RoPE, KV writes, residuals, SwiGLU,
+  barrier wait); `=full` adds the attention subtimers. Off by default, no timers in the
+  default path.
 - A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical
   cores and 64 when the pool is wider; see the fix below): the prompt tokens one weight pass
   carries. The engine prefills a prompt in pieces of this size, and the piece is how the prompt is

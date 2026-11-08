@@ -303,6 +303,9 @@ impl Pool {
         }
         // The caller takes share 0 rather than blocking immediately.
         let mine = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(0, self.n)));
+        // How long the caller then waits for the last worker. `PEREGRINE_PROF2` reports
+        // it as "barrier wait"; it overlaps the matmul wall and is never added to it.
+        let wait_t0 = crate::prof::enabled().then(Instant::now);
         // Spin for the stragglers: the remaining work is microseconds, and sleeping
         // here would hand the wake-up latency straight back.
         let (t0, mut spins) = (Instant::now(), 0u32);
@@ -325,6 +328,9 @@ impl Pool {
             self.inner.caller_sleeping.store(false, Ordering::SeqCst);
         }
         let _ = spins;
+        if let Some(t) = wait_t0 {
+            crate::prof::add(crate::prof::Slot::Wait, t.elapsed().as_nanos() as u64);
+        }
         crate::blocks::par::bump_epoch();
         let poisoned = self.inner.poisoned.swap(false, Ordering::AcqRel);
         if let Err(p) = mine {
