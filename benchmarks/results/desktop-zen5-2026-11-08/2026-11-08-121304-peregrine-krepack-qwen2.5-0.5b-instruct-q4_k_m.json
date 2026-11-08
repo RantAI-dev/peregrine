@@ -1,0 +1,275 @@
+{
+  "benchmark": "peregrine-s3.1",
+  "timestamp": "2026-11-08T04:53:42.829438+00:00",
+  "model": {
+    "path": "/home/uaa/models-ab/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "filename": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "size_bytes": 491400032,
+    "bytes_per_token_telemetry": 392357992.0
+  },
+  "machine": {
+    "hostname": "DESKTOP-4TS2NH4",
+    "os": "Linux",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "cpu_model": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+    "cpu_features": [
+      "fma",
+      "avx",
+      "avx2",
+      "avx512f",
+      "avx_vnni",
+      "avx512_bf16"
+    ],
+    "threads_tested": 12,
+    "governor": "unknown (VM or fixed frequency)",
+    "bandwidth_ceiling_bytes_per_s": 41546641759.859116,
+    "bandwidth_ceiling_gb_s": 41.547,
+    "flops_ceiling": 313305616302.3356,
+    "gflops_ceiling": 313.306,
+    "simd_tier": "avx2+fma",
+    "ridge_point": 7.541
+  },
+  "engine": {
+    "name": "peregrine",
+    "version": "0.1.0",
+    "commit": "5f76d48862ad9b8e3dc48862323d9cf8e8a1655c",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "build_command": "cargo build --release -p peregrine"
+  },
+  "settings": {
+    "contexts": [
+      4096
+    ],
+    "runs": 3,
+    "decode_tokens": 256,
+    "threads": 12,
+    "mode": "server",
+    "interleaved": true
+  },
+  "results": {
+    "4096": {
+      "single_user": {
+        "decode_tok_s": [
+          52.2188915125267,
+          50.48252483954426,
+          50.29350290282393
+        ],
+        "prefill_tok_s": [
+          181.16967083124268,
+          180.4596222967235,
+          177.6791317631503
+        ],
+        "ttft_s": [
+          20.232234477996826,
+          22.533746004104614,
+          20.69343590736389
+        ],
+        "prompt_tokens": [
+          4084,
+          4083,
+          4085
+        ]
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": [
+          10.157177730599239,
+          10.209382057601074,
+          10.185687072630692
+        ],
+        "decode_aggregate_tok_s": [
+          196.56118122232192,
+          204.42579283986274,
+          198.68911323526973
+        ],
+        "ttft_s": [
+          71.19999408721924,
+          71.21270871162415,
+          71.22613215446472
+        ],
+        "prompt_tokens": [
+          4086.5,
+          4086.5,
+          4087.0
+        ]
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": [
+          10.365408216950014,
+          10.409305793830567,
+          10.529209719609222
+        ],
+        "decode_aggregate_tok_s": [
+          471.44400342598277,
+          500.5308433104346,
+          886.5476046208173
+        ],
+        "ttft_s": [
+          143.3759605884552,
+          142.72368168830872,
+          142.39266300201416
+        ],
+        "prompt_tokens": [
+          4088.0,
+          4088.0,
+          4088.0
+        ]
+      }
+    }
+  },
+  "summary": {
+    "4096": {
+      "context": 4096,
+      "actual_prompt_tokens": 4084,
+      "single_user": {
+        "decode_tok_s": {
+          "median": 50.48,
+          "spread": 0.96,
+          "min": 50.29,
+          "max": 52.22
+        },
+        "prefill_tok_s": {
+          "median": 180.46,
+          "spread": 1.75,
+          "min": 177.68,
+          "max": 181.17
+        },
+        "ttft_s": {
+          "median": 20.69,
+          "spread": 1.15,
+          "min": 20.23,
+          "max": 22.53
+        },
+        "prompt_tokens": {
+          "median": 4084,
+          "spread": 1.0,
+          "min": 4083,
+          "max": 4085
+        },
+        "bytes_per_token": 392357992.0,
+        "fraction_of_ceiling": 0.4767,
+        "percent_of_ceiling": 47.67,
+        "raw_samples": {
+          "decode_tok_s": [
+            52.2188915125267,
+            50.48252483954426,
+            50.29350290282393
+          ],
+          "prefill_tok_s": [
+            181.16967083124268,
+            180.4596222967235,
+            177.6791317631503
+          ],
+          "ttft_s": [
+            20.232234477996826,
+            22.533746004104614,
+            20.69343590736389
+          ],
+          "prompt_tokens": [
+            4084,
+            4083,
+            4085
+          ]
+        }
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": {
+          "median": 10.19,
+          "spread": 0.03,
+          "min": 10.16,
+          "max": 10.21
+        },
+        "decode_aggregate_tok_s": {
+          "median": 198.69,
+          "spread": 3.93,
+          "min": 196.56,
+          "max": 204.43
+        },
+        "ttft_s": {
+          "median": 71.21,
+          "spread": 0.01,
+          "min": 71.2,
+          "max": 71.23
+        },
+        "prompt_tokens": {
+          "median": 4086.5,
+          "spread": 0.25,
+          "min": 4086.5,
+          "max": 4087.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [
+            10.157177730599239,
+            10.209382057601074,
+            10.185687072630692
+          ],
+          "decode_aggregate_tok_s": [
+            196.56118122232192,
+            204.42579283986274,
+            198.68911323526973
+          ],
+          "ttft_s": [
+            71.19999408721924,
+            71.21270871162415,
+            71.22613215446472
+          ],
+          "prompt_tokens": [
+            4086.5,
+            4086.5,
+            4087.0
+          ]
+        }
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": {
+          "median": 10.41,
+          "spread": 0.08,
+          "min": 10.37,
+          "max": 10.53
+        },
+        "decode_aggregate_tok_s": {
+          "median": 500.53,
+          "spread": 207.55,
+          "min": 471.44,
+          "max": 886.55
+        },
+        "first_token_time_s": {
+          "median": 142.72,
+          "spread": 0.49,
+          "min": 142.39,
+          "max": 143.38
+        },
+        "prompt_tokens": {
+          "median": 4088.0,
+          "spread": 0.0,
+          "min": 4088.0,
+          "max": 4088.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [
+            10.365408216950014,
+            10.409305793830567,
+            10.529209719609222
+          ],
+          "decode_aggregate_tok_s": [
+            471.44400342598277,
+            500.5308433104346,
+            886.5476046208173
+          ],
+          "ttft_s": [
+            143.3759605884552,
+            142.72368168830872,
+            142.39266300201416
+          ],
+          "prompt_tokens": [
+            4088.0,
+            4088.0,
+            4088.0
+          ]
+        }
+      }
+    }
+  }
+}
