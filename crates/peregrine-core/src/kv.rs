@@ -622,6 +622,22 @@ impl KvCache {
         self.decode_block_scalar(is_k, idx0, n, out);
     }
 
+    /// The stored bytes of positions `p0..p0+n` of one (layer, head), keys when `is_k`
+    /// and values otherwise, in the stored (possibly rotated) space.
+    ///
+    /// This is the raw form attention's f16 path reads: the cache already holds half
+    /// precision, so widening it into a scratch tile only to read it back is a pass
+    /// over the data that buys nothing. The precision says how many bytes an element
+    /// takes; callers must check it first (only `F16` has a direct consumer today).
+    pub fn block_bytes(&self, is_k: bool, layer: usize, head: usize, p0: usize, n: usize) -> &[u8] {
+        let hd = self.head_dim;
+        debug_assert!(p0 + n <= self.max_ctx);
+        let idx0 = self.vec_index(layer, head, p0);
+        let buf = if is_k { &self.k } else { &self.v };
+        let elem = self.prec.elem();
+        &buf[idx0 * hd * elem..(idx0 + n) * hd * elem]
+    }
+
     /// The scalar specification of `decode_block`; the vector path is tested against it.
     fn decode_block_scalar(&self, is_k: bool, idx0: usize, n: usize, out: &mut [f32]) {
         let hd = self.head_dim;
