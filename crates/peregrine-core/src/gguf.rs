@@ -44,6 +44,9 @@ pub struct TensorInfo {
     /// where this matrix sits in the model's repacked tile store (PQ2_0 in 16-row tiles), if it was
     /// repacked at load; the bytes are the same, reordered (`tern.rs`, row-interleaved tiles).
     pub tile_off: Option<usize>,
+    /// where this matrix sits in the model's repacked k-quant store (Q4_K and Q6_K in eight-row
+    /// tiles), if it was repacked at load; the bytes are the same, reordered (`kq.rs`).
+    pub kq_off: Option<usize>,
 }
 
 impl TensorInfo {
@@ -101,12 +104,27 @@ impl TensorInfo {
             kind: self.kind,
             offset,
             tile_off: None,
+            kq_off: self.kq_off.and_then(|off| {
+                // A slice of a repacked matrix is repacked too, when it starts and
+                // ends on a row the tiles hold whole; the rows in between are the
+                // parent's, eight at a time.
+                if start % 8 != 0 || n % 8 != 0 {
+                    return None;
+                }
+                let tile = crate::kq::tile_size(self.kind)?;
+                let n_sb = cols / self.kind.block();
+                Some(off + (start / 8) * n_sb * tile)
+            }),
         })
     }
 }
 
 pub struct Gguf {
     map: Mmap,
+    /// The file, when the mapping is of the file itself. The huge-page copy is
+    /// anonymous memory, and a second mapping of the file would be of the
+    /// wrong thing.
+    file: Option<File>,
     data_start: usize,
     pub meta: HashMap<String, Value>,
     pub tensors: HashMap<String, TensorInfo>,
@@ -174,16 +192,23 @@ impl Gguf {
         // pages. A decode step streams every weight once; with 4 KB page-cache pages that is a TLB miss per 4 KB,
         // with 2 MB pages one per 2 MB. Costs one copy at load and the page cache's copy can then be dropped.
         #[cfg(target_os = "linux")]
-        let map = if crate::options::get().hugepages {
+        let (map, file) = if crate::options::get().hugepages {
             let mut anon = memmap2::MmapMut::map_anon(map.len())
                 .map_err(|e| format!("gguf: anon map: {e}"))?;
             let _ = anon.advise(memmap2::Advice::HugePage);
             anon.copy_from_slice(&map);
             drop(map);
-            anon.make_read_only().map_err(|e| format!("gguf: {e}"))?
+            (
+                anon.make_read_only().map_err(|e| format!("gguf: {e}"))?,
+                None,
+            )
         } else {
-            map
+            (map, Some(file))
         };
+        // The huge-page copy is Linux-only, so elsewhere the mapping is of the
+        // file and the file is kept for the repack's reads.
+        #[cfg(not(target_os = "linux"))]
+        let (map, file) = (map, Some(file));
 
         let mut c = Cur { b: &map, p: 0 };
         if c.take(4)? != b"GGUF" {
@@ -248,6 +273,7 @@ impl Gguf {
                 kind,
                 offset,
                 tile_off: None,
+                kq_off: None,
             };
             if !kind.is_supported() {
                 let feat = kind.required_feature().unwrap_or("unknown");
@@ -286,6 +312,7 @@ impl Gguf {
 
         let g = Gguf {
             map,
+            file,
             data_start,
             meta,
             tensors,
@@ -307,6 +334,41 @@ impl Gguf {
             }
         }
         Ok(g)
+    }
+
+    /// Read a range of the file's data section into `buf`.
+    ///
+    /// The repack reads the k-quant matrices this way, not through the
+    /// mapping: the mapping's pages for them are then never faulted in, so the
+    /// model does not cost twice what it should — once for the repacked store
+    /// and once for the file's bytes, which are never read again (S3.4,
+    /// decision 2). The pages stay in the page cache, which is the system's
+    /// memory, not the engine's.
+    pub fn read_data(&self, offset: usize, buf: &mut [u8]) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let f = self.file.as_ref().ok_or("gguf: the file is not mapped")?;
+            let mut done = 0;
+            while done < buf.len() {
+                let n = f
+                    .read_at(&mut buf[done..], (self.data_start + offset + done) as u64)
+                    .map_err(|e| format!("gguf: read: {e}"))?;
+                if n == 0 {
+                    return Err("gguf: the file ended inside a tensor".into());
+                }
+                done += n;
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            // Without the file handle, the mapping is the only way in: its
+            // pages become resident, and the model costs twice what it should.
+            let s = self.data_start + offset;
+            buf.copy_from_slice(&self.map[s..s + buf.len()]);
+            Ok(())
+        }
     }
 
     /// The raw block bytes of a tensor, straight out of the map. No copy.
@@ -611,6 +673,7 @@ mod tests {
             kind: Format::F16,
             offset: 1000,
             tile_off: Some(42),
+            kq_off: None,
         };
         let q = t_f16.rows(0, 32).expect("q slice");
         assert_eq!(q.name, "attn_qkv[0..32]");
@@ -640,6 +703,7 @@ mod tests {
             kind: Format::Q8_0,
             offset: 2048,
             tile_off: None,
+            kq_off: None,
         };
         let gate = t_q8.rows(0, 10).expect("gate");
         assert_eq!(gate.name, "ffn_up[0..10]");
@@ -658,6 +722,7 @@ mod tests {
             kind: Format::F16,
             offset: 0,
             tile_off: None,
+            kq_off: None,
         };
         assert!(t_1d.rows(0, 10).is_err());
 
@@ -667,6 +732,7 @@ mod tests {
             kind: Format::F16,
             offset: 0,
             tile_off: None,
+            kq_off: None,
         };
         assert!(t_3d.rows(0, 10).is_err());
 
@@ -682,6 +748,7 @@ mod tests {
             kind: Format::Q8_0,
             offset: 0,
             tile_off: None,
+            kq_off: None,
         };
         assert!(t_unaligned.rows(0, 5).is_err());
     }

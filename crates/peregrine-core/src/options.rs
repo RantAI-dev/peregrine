@@ -56,7 +56,8 @@ pub const TUNABLE: &[(&str, &str)] = &[
     ("PEREGRINE_PREFILL_CHUNK", "prefill_chunk"),
 ];
 
-/// The default prompt chunk: the prompt tokens one weight pass carries (`PEREGRINE_PREFILL_CHUNK`).
+/// The default prompt chunk on a pool no wider than the machine's physical cores: the prompt tokens one
+/// weight pass carries (`PEREGRINE_PREFILL_CHUNK`).
 ///
 /// 16, from the A/B on the reference machine (12 threads, `peregrine bench --prompt-tokens 512
 /// --tokens 1`, four rotating rounds): Llama-3.2-1B 165.9 tok/s against 154.3 at 64 (+7.5 %),
@@ -64,12 +65,40 @@ pub const TUNABLE: &[(&str, &str)] = &[
 /// user's first token does not get later (19.8 s against 21.8 s at 64).
 pub const PREFILL_CHUNK_DEFAULT: usize = 16;
 
+/// The default prompt chunk when the worker pool is wider than the machine's physical cores (an SMT
+/// machine, where `available_parallelism` reports the logical CPUs).
+///
+/// A 16-row pass is only 16 rows deep: the rotation hands one row to 16 of the workers and leaves the rest
+/// spinning for the 1 ms window on the siblings of the cores doing the work, and every parallel region is
+/// short enough that its slowest worker is a large share of it. The fixed part of that cost is about 20 ms
+/// per pass on both Bonsai sizes — it does not grow with rows or with the model — and a 512-token prompt
+/// pays it 32 times instead of 8. 64 rows amortise it: at 24 workers, medians of four rounds give
+/// Bonsai-2B 304 prompt tok/s against 212 (+43 %), Bonsai-9B 90.7 against 79.4 (+14 %), Llama-3.2-1B 225
+/// against 189 (+19 %), with decode unchanged on all three. The same measurements on a 12-worker pool
+/// keep 16: 257 against 248, 69.0 against 64.9, and 180 against 168. See [`prefill_chunk_default_for`].
+pub const PREFILL_CHUNK_SMT: usize = 64;
+
+/// The default prompt chunk for a pool of `threads` workers.
+///
+/// [`PREFILL_CHUNK_DEFAULT`] was tuned on a pool as wide as the physical cores; when the pool is wider,
+/// the per-pass cost of rows spread thinly over SMT siblings dominates, and [`PREFILL_CHUNK_SMT`] wins.
+/// The chunk only changes how the prompt is read, not what it produces, so the choice is output-neutral
+/// (`crates/peregrine-models/tests/prefill_chunk.rs`).
+pub fn prefill_chunk_default_for(threads: usize) -> usize {
+    match crate::pool::physical_cores() {
+        Some(cores) if threads > cores => PREFILL_CHUNK_SMT,
+        _ => PREFILL_CHUNK_DEFAULT,
+    }
+}
+
 /// The largest prompt chunk one weight pass may carry: the matmul scratch's row limit
 /// (`blocks::linear::MAX_BATCH`). The engine lowers it further when the decode rows of the
 /// other users need the room.
 pub const MAX_PREFILL_CHUNK: usize = crate::blocks::linear::MAX_BATCH;
 
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
+/// One default depends on the machine: the k-quant repack is off on the AVX-512 tier
+/// ([`EngineOptions::kq_repack_note`] says which applied).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineOptions {
     // Thread pool.
@@ -89,6 +118,14 @@ pub struct EngineOptions {
     pub wide: bool,
     /// `PEREGRINE_TILES=0` turns off the repacked row tiles for ternary weights.
     pub tiles: bool,
+    /// `PEREGRINE_KREPACK`: repack the k-quant matrices into eight-row tiles and multiply them with
+    /// the repacked kernels. On by default below the AVX-512 tier; off by default on it, where only
+    /// the AVX2 repacked kernel exists and decode is slower with it (S3.4 decision 9). The switch
+    /// overrides the default in both directions.
+    pub kq_repack: bool,
+    /// Whether `PEREGRINE_KREPACK` was given, so [`EngineOptions::kq_repack_note`] can say why the
+    /// switch has its value.
+    pub kq_repack_switch: bool,
     /// `PEREGRINE_DYNAMIC=0` uses the static row partition instead of dynamic work splitting.
     pub dynamic_rows: bool,
     /// `PEREGRINE_PF`: software prefetch distance in bytes (0 = off).
@@ -116,12 +153,13 @@ pub struct EngineOptions {
     /// `PEREGRINE_MIX=0`: no mixed prefill/decode steps. Speculation (MTP, suffix, DSpark) is verified only in
     /// the mixed step, so this also turns speculation off, for the server and for conversations (`Session`).
     pub mix: bool,
-    /// `PEREGRINE_PREFILL_CHUNK`: prompt tokens one weight pass carries (default 16).
+    /// `PEREGRINE_PREFILL_CHUNK`: prompt tokens one weight pass carries (default: 16, or 64 when the
+    /// pool is wider than the physical cores — [`prefill_chunk_default_for`]).
     ///
     /// The engine prefills a prompt in pieces of this size, so a long prompt is read in several passes.
     /// Smaller pieces keep the activation scratch in cache and read the weights more often; the tokens
     /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that).
-    pub prefill_chunk: usize,
+    pub prefill_chunk: Option<usize>,
     /// `PEREGRINE_MTP=0`: no MTP speculation.
     pub mtp: bool,
     /// `PEREGRINE_MTP_VOCAB`: vocabulary rows the MTP drafter scores (default 32768).
@@ -166,6 +204,11 @@ impl Default for EngineOptions {
             zmm: true,
             wide: true,
             tiles: true,
+            // The tier's default, from detection alone (`resolved_under` reads these options).
+            kq_repack: peregrine_kernels::options::kq_repack_default(crate::cpu::resolved_under(
+                None,
+            )),
+            kq_repack_switch: false,
             dynamic_rows: true,
             prefetch_bytes: PF_DEFAULT,
             tq_span: 16,
@@ -176,7 +219,7 @@ impl Default for EngineOptions {
             kv_rotate: true,
             kv_prec: crate::kv::KvPrec::F16,
             mix: true,
-            prefill_chunk: PREFILL_CHUNK_DEFAULT,
+            prefill_chunk: None,
             mtp: true,
             mtp_vocab: 32768,
             dspark: DsparkOptions {
@@ -272,6 +315,8 @@ impl EngineOptions {
         let unless = |k: &str, off: &str| s(k).is_none_or(|v| v != off);
         let only = |k: &str, on: &str| s(k).is_some_and(|v| v == on);
         let num = |k: &str| s(k).and_then(|v| v.parse::<usize>().ok());
+        let isa = crate::cpu::parse_isa(s("ISA").as_deref());
+        let krepack = s("KREPACK");
         EngineOptions {
             spin_us: s("SPIN_US")
                 .and_then(|v| v.parse().ok())
@@ -280,10 +325,15 @@ impl EngineOptions {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.yield_us),
             decode_threads: num("DECODE_THREADS").filter(|&v| v > 0),
-            isa: crate::cpu::parse_isa(s("ISA").as_deref()),
+            isa,
             zmm: unless("ZMM", "0"),
             wide: unless("NO_WIDE", "1"),
             tiles: unless("TILES", "0"),
+            kq_repack: peregrine_kernels::options::kq_repack_from(
+                krepack.as_deref(),
+                crate::cpu::resolved_under(isa),
+            ),
+            kq_repack_switch: krepack.is_some(),
             dynamic_rows: unless("DYNAMIC", "0"),
             prefetch_bytes: num("PF").unwrap_or(d.prefetch_bytes),
             tq_span: num("TQ_SPAN")
@@ -300,9 +350,7 @@ impl EngineOptions {
                 .and_then(|v| crate::kv::KvPrec::parse(&v))
                 .unwrap_or(d.kv_prec),
             mix: unless("MIX", "0"),
-            prefill_chunk: num("PREFILL_CHUNK")
-                .filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v))
-                .unwrap_or(d.prefill_chunk),
+            prefill_chunk: num("PREFILL_CHUNK").filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v)),
             mtp: unless("MTP", "0"),
             mtp_vocab: num("MTP_VOCAB").unwrap_or(d.mtp_vocab),
             dspark: DsparkOptions {
@@ -337,6 +385,30 @@ impl EngineOptions {
             .collect()
     }
 
+    /// The repack setting and why, for `peregrine tier`: `off (AVX-512 tier default)`. The tier is
+    /// the one the kernels resolve to, so `PEREGRINE_ISA=avx2` on an AVX-512 host reports the AVX2
+    /// default.
+    pub fn kq_repack_note(&self) -> String {
+        Self::kq_repack_note_for(
+            self.kq_repack,
+            self.kq_repack_switch,
+            crate::cpu::resolved_under(self.isa),
+        )
+    }
+
+    /// [`Self::kq_repack_note`] for a tier given directly, without reading the machine.
+    pub fn kq_repack_note_for(on: bool, switch: bool, tier: crate::cpu::Tier) -> String {
+        let state = if on { "on" } else { "off" };
+        let why = if switch {
+            "PEREGRINE_KREPACK"
+        } else if tier == crate::cpu::Tier::Avx512 {
+            "AVX-512 tier default"
+        } else {
+            "tier default"
+        };
+        format!("{state} ({why})")
+    }
+
     /// The options that differ from the defaults, as `name=value` pairs.
     pub fn non_default(&self) -> Vec<(&'static str, String)> {
         let d = EngineOptions::default().pairs();
@@ -368,6 +440,7 @@ impl EngineOptions {
             ("zmm", self.zmm.to_string()),
             ("wide", self.wide.to_string()),
             ("tiles", self.tiles.to_string()),
+            ("kq_repack", self.kq_repack.to_string()),
             ("dynamic_rows", self.dynamic_rows.to_string()),
             ("prefetch_bytes", self.prefetch_bytes.to_string()),
             ("tq_span", self.tq_span.to_string()),
@@ -378,7 +451,7 @@ impl EngineOptions {
             ("kv_rotate", self.kv_rotate.to_string()),
             ("kv_prec", self.kv_prec.name().to_string()),
             ("mix", self.mix.to_string()),
-            ("prefill_chunk", self.prefill_chunk.to_string()),
+            ("prefill_chunk", opt(self.prefill_chunk)),
             ("mtp", self.mtp.to_string()),
             ("mtp_vocab", self.mtp_vocab.to_string()),
             ("dspark.logits_start", self.dspark.logits_start.to_string()),
@@ -425,6 +498,7 @@ pub const NAMES: &[&str] = &[
     "ZMM",
     "NO_WIDE",
     "TILES",
+    "KREPACK",
     "DYNAMIC",
     "PF",
     "TQ_SPAN",
@@ -462,6 +536,7 @@ impl EngineOptions {
             prefetch_bytes: self.prefetch_bytes,
             tq_span: self.tq_span,
             exact: self.exact,
+            kq_repack: self.kq_repack,
         }
     }
 }
@@ -508,12 +583,28 @@ mod tests {
     }
 
     #[test]
+    fn the_default_chunk_follows_the_pool() {
+        // A pool no wider than the physical cores keeps the tuned 16; a pool that adds SMT siblings
+        // reads the prompt in 64-row pieces, which amortise the per-pass cost (S3.5 step 2).
+        let Some(cores) = crate::pool::physical_cores() else {
+            return; // no physical-core count on this host: the plain default
+        };
+        assert_eq!(prefill_chunk_default_for(1), PREFILL_CHUNK_DEFAULT);
+        assert_eq!(prefill_chunk_default_for(cores), PREFILL_CHUNK_DEFAULT);
+        assert_eq!(prefill_chunk_default_for(cores + 1), PREFILL_CHUNK_SMT);
+    }
+
+    #[test]
     fn each_switch_keeps_its_historical_rule() {
         // On unless "0".
         assert!(!with(&[("ZMM", "0")]).zmm);
         assert!(with(&[("ZMM", "no")]).zmm);
         assert!(!with(&[("MTP", "0")]).mtp);
         assert!(!with(&[("TILE_HUGEPAGES", "0")]).tile_hugepages);
+        // The k-quant repack is on unless it is turned off.
+        assert!(!with(&[("KREPACK", "0")]).kq_repack);
+        assert!(with(&[("KREPACK", "yes")]).kq_repack);
+        assert!(with(&[("KREPACK", "1")]).kq_repack);
         // Off only with "1".
         assert!(with(&[("EXACT", "1")]).exact);
         assert!(!with(&[("EXACT", "yes")]).exact);
@@ -557,19 +648,55 @@ mod tests {
         assert!(with(&[("CALIBRATE", "1")]).calibrate);
         assert!(!with(&[]).calibrate);
         // The prefill chunk: from one token to the matmul scratch's row limit. Anything
-        // else leaves the default.
-        assert_eq!(with(&[("PREFILL_CHUNK", "32")]).prefill_chunk, 32);
+        // else leaves the choice to the pool (`prefill_chunk_default_for`).
+        assert_eq!(with(&[("PREFILL_CHUNK", "32")]).prefill_chunk, Some(32));
+        assert_eq!(with(&[("PREFILL_CHUNK", "0")]).prefill_chunk, None);
+        assert_eq!(with(&[("PREFILL_CHUNK", "1000")]).prefill_chunk, None);
+        assert_eq!(with(&[("PREFILL_CHUNK", "x")]).prefill_chunk, None);
+    }
+
+    #[test]
+    fn the_repack_setting_follows_the_resolved_tier() {
+        let d = crate::cpu::resolved_under(None);
+        // Unset: the tier's default, which is the pure resolver's answer for the resolved tier.
         assert_eq!(
-            with(&[("PREFILL_CHUNK", "0")]).prefill_chunk,
-            PREFILL_CHUNK_DEFAULT
+            with(&[]).kq_repack,
+            peregrine_kernels::options::kq_repack_default(d)
+        );
+        // A cap is part of the resolution: a lower tier moves the default with it.
+        for isa in ["scalar", "avx2", "avx-vnni", "avx512"] {
+            let cap = peregrine_kernels::cpu::parse_isa(Some(isa));
+            assert_eq!(
+                with(&[("ISA", isa)]).kq_repack,
+                peregrine_kernels::options::kq_repack_default(crate::cpu::resolved_under(cap)),
+                "PEREGRINE_ISA={isa}"
+            );
+        }
+        // The switch overrides the default in both directions on every tier.
+        for isa in ["scalar", "avx2", "avx512"] {
+            assert!(with(&[("ISA", isa), ("KREPACK", "1")]).kq_repack);
+            assert!(!with(&[("ISA", isa), ("KREPACK", "0")]).kq_repack);
+        }
+    }
+
+    #[test]
+    fn the_repack_note_names_the_switch_or_the_tier() {
+        use crate::cpu::Tier;
+        assert_eq!(
+            EngineOptions::kq_repack_note_for(false, false, Tier::Avx512),
+            "off (AVX-512 tier default)"
         );
         assert_eq!(
-            with(&[("PREFILL_CHUNK", "1000")]).prefill_chunk,
-            PREFILL_CHUNK_DEFAULT
+            EngineOptions::kq_repack_note_for(true, false, Tier::Avx2),
+            "on (tier default)"
         );
         assert_eq!(
-            with(&[("PREFILL_CHUNK", "x")]).prefill_chunk,
-            PREFILL_CHUNK_DEFAULT
+            EngineOptions::kq_repack_note_for(true, true, Tier::Avx512),
+            "on (PEREGRINE_KREPACK)"
+        );
+        assert_eq!(
+            EngineOptions::kq_repack_note_for(false, true, Tier::Avx2),
+            "off (PEREGRINE_KREPACK)"
         );
     }
 
@@ -664,7 +791,7 @@ mod tests {
         );
         assert_eq!(o.spin_us, 7);
         // The prefill chunk is output-neutral, so a profile may set it.
-        assert_eq!(o.prefill_chunk, 32);
+        assert_eq!(o.prefill_chunk, Some(32));
     }
     #[test]
     fn calibration_disabled_gives_defaults() {

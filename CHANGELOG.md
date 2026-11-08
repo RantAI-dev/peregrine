@@ -6,8 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The prefill chunk's default now follows the worker pool. 16 is right on a pool as wide as the physical
+  cores, but the engine builds `available_parallelism()` workers, which on an SMT machine is twice the
+  core count. A 16-row pass is only 16 rows deep: its row-deep blocks (the rotation) give one row to 16
+  workers and leave the other 8 spinning on the siblings of the cores doing the work, and every parallel
+  region is short enough that its slowest worker is a large share of it. Measured on the reference
+  machine at 24 workers, a forward pass carries about 20 ms that does not scale with rows, on both Bonsai
+  sizes (2B and 9B), so a 512-token prompt pays it 32 times instead of 8. The default is now 64 when the
+  pool is wider than the physical cores and stays 16 otherwise (`options::prefill_chunk_default_for`).
+  At 24 workers, medians of four rounds: Bonsai-2B 304 prompt tok/s against 212 (+43 %), Bonsai-9B 90.7
+  against 79.4 (+14 %), Llama-3.2-1B 225 against 189 (+19 %); decode is unchanged on all three. At 12
+  workers 16 keeps winning (257 against 248, 69.0 against 64.9, 180 against 168), and the default stays
+  16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
+
 ### Added
-- A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16): the prompt tokens one weight pass
+- A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical
+  cores and 64 when the pool is wider; see the fix below): the prompt tokens one weight pass
   carries. The engine prefills a prompt in pieces of this size, and the piece is how the prompt is
   *read*, not what it produces: the same prompt, read in pieces of 16, 32, 64 or 128 tokens, gives the
   same KV cache, the same logits and the same tokens (`crates/peregrine-models/tests/prefill_chunk.rs`).
@@ -23,6 +38,21 @@ All notable changes to this project are documented here. The format follows
   *selected* experts, and OpenAI's `swiglu_oai` activation. The `gpt-4o` (o200k) pre-tokenizer is
   transcribed from llama.cpp v0.9.0's regex. The synthetic F16 and MXFP4 files give the same greedy
   tokens as llama.cpp; the check against a real gpt-oss file is pending.
+- OpenAI's Harmony chat template, which gpt-oss's own Jinja template renders (`--chat-template harmony`):
+  the fixed system block, the developer block for the caller's system message, user and assistant
+  turns with the `<|channel|>final<|message|>` header, and the generation prompt. Rendered strings are
+  pinned against llama.cpp v0.9.0; the synthetic gpt-oss file now carries the model's Jinja template
+  and is detected as `harmony`.
+- The server splits gpt-oss's Harmony reply into `reasoning_content` (the `analysis` channel) and
+  `content` (the `final` channel), non-streamed and as SSE deltas, with the control tokens consumed.
+  A `commentary` preamble is content and a `<|constrain|>` header is accepted. `reasoning_format`
+  (`none`, `auto`, `deepseek`, `deepseek-legacy`) and `--reasoning-format`, and `reasoning_effort:
+  "none"`, map as llama-server maps them: `none` keeps the analysis text in `content`, `auto`/`deepseek`
+  split it, and `deepseek-legacy` also mirrors reasoning into streaming content. Qwen3's `<think>` span
+  obeys the same switch. Earlier assistant turns replay only their final channel, matching gpt-oss's
+  Jinja, and a Harmony `Session` re-renders its transcript so the incremental path cannot retain an
+  analysis the full render drops. The reasoning-budget forcing stays Qwen3-only: Harmony has no
+  `</think>` to close.
 - Support for plain Qwen 3.5 files (S2.2c): a `qwen35` file with no `prism.hadamard.*` metadata is loaded
   without a rotation, and its ordinary quantised matmuls (Q8_0, F16, ...) run through the dense kernels
   instead of the ternary ones. The synthetic plain file gives the same greedy tokens as llama.cpp v0.9.0;

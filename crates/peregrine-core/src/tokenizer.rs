@@ -89,6 +89,10 @@ pub enum PreType {
     /// case-sensitive word pattern, digits in groups of up to three, and
     /// contractions.
     Gpt4o,
+    /// `dbrx`: same pattern as Llama 3 (Phi-4, DBRX).
+    /// llama.cpp v0.9.0 src/llama-vocab.cpp lines 310-315 map LLM_PRE_TOKENIZER_TYPE_DBRX
+    /// to the Llama 3 regex split pattern.
+    Dbrx,
     /// `default`: SentencePiece (SPM) or models without a custom BPE pre-tokenizer.
     Default,
 }
@@ -101,6 +105,7 @@ impl PreType {
             "qwen2" => PreType::Qwen2,
             "qwen35" => PreType::Qwen35,
             "gpt-4o" => PreType::Gpt4o,
+            "dbrx" => PreType::Dbrx,
             "default" => PreType::Default,
             _ => return None,
         })
@@ -112,6 +117,7 @@ impl PreType {
             PreType::Qwen2 => "qwen2",
             PreType::Qwen35 => "qwen35",
             PreType::Gpt4o => "gpt-4o",
+            PreType::Dbrx => "dbrx",
             PreType::Default => "default",
         }
     }
@@ -124,6 +130,7 @@ pub const PRE_TYPES: &[&str] = &[
     "qwen2",
     "qwen35",
     "gpt-4o",
+    "dbrx",
     "default",
 ];
 
@@ -752,7 +759,7 @@ impl Tokenizer {
                     }
                 }
             }
-            PreType::Llama3 => {
+            PreType::Llama3 | PreType::Dbrx => {
                 for piece in split_llama3(text, 3) {
                     self.bpe(piece, bpe, out);
                 }
@@ -1599,5 +1606,73 @@ abc", 3
         // When add_bos is false, no BOS is prepended
         tk.add_bos = false;
         assert_eq!(tk.encode_prompt("a"), vec![3]);
+    }
+
+    #[test]
+    fn pretype_dbrx_matches_llama3_split() {
+        assert_eq!(PreType::from_name("dbrx"), Some(PreType::Dbrx));
+        assert_eq!(PreType::Dbrx.name(), "dbrx");
+        // llama.cpp v0.9.0 src/llama-vocab.cpp lines 310-315 map DBRX to Llama 3 regex
+        let text = "Hello 123 world!";
+        let pieces: Vec<&str> = split_llama3(text, 3);
+        assert_eq!(pieces, vec!["Hello", " ", "123", " world", "!"]);
+    }
+
+    /// A byte-level BPE over a toy vocabulary, with the given pre-tokenizer.
+    ///
+    /// The vocabulary holds every single byte and the merged pair `12`, so the
+    /// difference between the pre-tokenizers shows up in the ids: the Llama 3
+    /// pattern (and so `dbrx`) keeps "123" in one piece, which the merge can
+    /// reach, while the SmolLM pattern splits the digits apart.
+    fn toy_bpe(pre: PreType) -> Tokenizer {
+        let (byte_enc, byte_dec) = byte_alphabet();
+        let mut pieces: Vec<String> =
+            vec!["<unk>".to_string(), "<s>".to_string(), "12".to_string()];
+        for b in 0..=255u8 {
+            pieces.push(byte_enc[b as usize].to_string());
+        }
+        let mut ids = HashMap::with_capacity(pieces.len());
+        for (i, p) in pieces.iter().enumerate() {
+            ids.entry(p.clone()).or_insert(i as u32);
+        }
+        let mut ranks = HashMap::new();
+        ranks.insert(("1".to_string(), "2".to_string()), 0u32);
+        Tokenizer {
+            pieces,
+            ids,
+            specials: Vec::new(),
+            bos: 1,
+            eos: 1,
+            add_bos: false,
+            pre,
+            n_vocab: 258,
+            algo: TokenizerAlgo::Bpe(BpeData {
+                ranks,
+                byte_enc,
+                byte_dec,
+            }),
+        }
+    }
+
+    #[test]
+    fn dbrx_encodes_like_llama3() {
+        // The `dbrx` pre-tokenizer is the Llama 3 pattern (llama.cpp v0.9.0
+        // src/llama-vocab.cpp lines 310-315), so the two must agree id for id.
+        let dbrx = toy_bpe(PreType::Dbrx);
+        let llama3 = toy_bpe(PreType::Llama3);
+        for text in ["123", "Hello 123 world!", "it's 2026!", "a1b2c3", " 12 "] {
+            assert_eq!(
+                dbrx.encode(text),
+                llama3.encode(text),
+                "dbrx and llama-bpe disagree on {text:?}"
+            );
+        }
+        // And it is not the SmolLM pattern: the digits stay together under
+        // `dbrx`, so the merge fires and the pair "12" is one token.
+        let smollm = toy_bpe(PreType::SmolLm);
+        let twelve = dbrx.ids.get("12").copied().unwrap();
+        let three = dbrx.ids.get("3").copied().unwrap();
+        assert_eq!(dbrx.encode("123"), vec![twelve, three]);
+        assert_ne!(smollm.encode("123"), dbrx.encode("123"));
     }
 }

@@ -86,6 +86,8 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
             "prefill_tok_s": report.prefill_tok_s,
             "decode_tok_s": report.decode_tok_s,
             "bytes_per_token": report.bytes_per_token,
+            "prefill_bytes_acts": report.prefill_bytes_acts,
+            "decode_bytes_acts": report.decode_bytes_acts,
             "prompt_tokens": report.prompt_tokens,
             "tokens": report.decode_tokens,
             "prefill_s": report.prefill_s,
@@ -99,6 +101,11 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
         println!("prefill tok/s   {:.1}", report.prefill_tok_s);
         println!("decode tok/s    {:.1}", report.decode_tok_s);
         println!("bytes/token     {:.1}", report.bytes_per_token);
+        println!(
+            "activation bytes  prefill {} MiB   decode {} MiB",
+            report.prefill_bytes_acts / (1024 * 1024),
+            report.decode_bytes_acts / (1024 * 1024)
+        );
         println!(
             "options:\n{}",
             effective_opts

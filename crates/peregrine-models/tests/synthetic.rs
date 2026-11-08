@@ -1777,6 +1777,93 @@ fn gpt_oss_models_load_and_match_their_goldens() {
     );
 }
 
+/// A synthetic gpt-oss file that declares gpt-oss's own Jinja template: detection
+/// runs on the file's `tokenizer.chat_template`, as it does for a real gpt-oss file,
+/// and the template's two terminators are in the stop set.
+#[test]
+fn gpt_oss_with_its_jinja_template_detects_harmony() {
+    use peregrine_core::template::Template;
+    use peregrine_core::tokenizer::Tokenizer;
+    use support::models::{write_gpt_oss_with_template, GptOssShape};
+
+    let dir = tmpdir("gpt-oss-harmony");
+    let tmpl = include_str!("../../peregrine-core/tests/fixtures/harmony.jinja");
+    let path =
+        write_gpt_oss_with_template(&dir, Format::F16, 9101, GptOssShape::default(), Some(tmpl));
+    let g = Gguf::open(&path).unwrap();
+    assert_eq!(g.str("tokenizer.chat_template").unwrap(), tmpl);
+    assert_eq!(Template::detect(&g), Ok(Template::Harmony));
+
+    let tk = Tokenizer::from_gguf(&g).unwrap();
+    let stops = Template::Harmony.stop_ids(&tk);
+    let id = |name: &str| {
+        tk.id_of(name)
+            .unwrap_or_else(|| panic!("the vocabulary has {name}"))
+    };
+    assert!(
+        stops.contains(&id("<|return|>")),
+        "the stop set has <|return|>"
+    );
+    // `<|end|>` closes the analysis message; the answer comes after it, so a
+    // stop there would cut every reply before its answer.
+    assert!(!stops.contains(&id("<|end|>")), "<|end|> is not a stop");
+    assert!(stops.contains(&tk.eos), "the model's own EOS is a stop");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A conversation continues from the final channel only: gpt-oss's Jinja drops every
+/// earlier assistant turn's analysis, so a replayed prompt must not keep it. A
+/// history with an analysis channel and a history with just its final text must
+/// produce the same tokens, on the seeded turn and on the incremental turn after it.
+#[test]
+fn gpt_oss_session_replays_only_the_final_channel() {
+    use peregrine_core::session::{Session, SessionCfg};
+    use peregrine_core::template::Template;
+    use support::models::{write_gpt_oss_with_template, GptOssShape};
+
+    let dir = tmpdir("gpt-oss-session");
+    let tmpl = include_str!("../../peregrine-core/tests/fixtures/harmony.jinja");
+    let path =
+        write_gpt_oss_with_template(&dir, Format::F16, 9102, GptOssShape::default(), Some(tmpl));
+    let model = load_arc(&path);
+    assert_eq!(Template::detect(model.gguf()), Ok(Template::Harmony));
+    let cfg = SessionCfg {
+        max_ctx: 512,
+        max_tokens: 8,
+        temperature: 0.0,
+        threads: 4,
+        speculate: false,
+        ..Default::default()
+    };
+
+    let analysis = "<|channel|>analysis<|message|>SECRET REASONING<|end|>\
+         <|start|>assistant<|channel|>final<|message|>Hi there";
+    let mut with_analysis = Session::from_model(model.clone(), cfg.clone()).unwrap();
+    with_analysis.seed_history(vec![("Hello".to_string(), analysis.to_string())]);
+    let (_, first_analysis) = with_analysis.generate("Next", |_| {}).unwrap();
+    let (after_analysis, telem_analysis) = with_analysis.generate("Again", |_| {}).unwrap();
+
+    let mut final_only = Session::from_model(model, cfg).unwrap();
+    final_only.seed_history(vec![("Hello".to_string(), "Hi there".to_string())]);
+    let (_, first_final) = final_only.generate("Next", |_| {}).unwrap();
+    let (after_final, telem_final) = final_only.generate("Again", |_| {}).unwrap();
+
+    assert_eq!(
+        first_analysis.prompt_tokens, first_final.prompt_tokens,
+        "the replayed prompt kept an earlier turn's analysis"
+    );
+    assert_eq!(
+        telem_analysis.prompt_tokens, telem_final.prompt_tokens,
+        "the replayed prompt kept an earlier turn's analysis"
+    );
+    assert_eq!(telem_analysis.ctx_used, telem_final.ctx_used);
+    assert_eq!(
+        after_analysis, after_final,
+        "the replayed prompt kept an earlier turn's analysis"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The synthetic gpt-oss model's forward, computed from the file's own weights in
 /// f64: the specification the engine's forward must agree with.
 ///

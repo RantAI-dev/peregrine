@@ -72,6 +72,12 @@ fn oracle_models() -> Vec<(PathBuf, &'static str, usize, &'static str)> {
             128256,
             "llama-bpe",
         ),
+        (
+            m("phi-4-Q4_K_M.gguf"),
+            include_str!("fixtures/tokenize-golden-phi4.tsv"),
+            100352,
+            "dbrx",
+        ),
     ]
 }
 

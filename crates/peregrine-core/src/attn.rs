@@ -29,6 +29,13 @@
 //!   `exp(m_i − m*)` weights — uzu's `combine.metal`.
 //! * The scores use eight keys per pass with a transposed horizontal add instead of
 //!   one reduction per key, and the exponentials are `vmath`'s vector `exp`.
+//! * **A row's partition is its own.** The position chunks a row is cut into are a
+//!   function of that row's context length and the model shape alone — never of the
+//!   other rows in the call, the call width, the prefill chunk or the pool. A
+//!   single-row call spreads the chunks over tasks; a multi-row call spreads the
+//!   rows and walks each row's chunks inside its task, in the same order. The merge
+//!   is not order-exact against a different chunk count, so this is what makes
+//!   prefill, speculative verification and plain decode agree bit for bit.
 //!
 //! The arithmetic is the same attention: identical scores, a softmax that differs
 //! only in float summation order, and the tests pin it against a naive reference.
@@ -39,14 +46,30 @@ use crate::kv::KvCache;
 /// K and V — inside L2 with room to spare, and long enough to amortise the rescale.
 pub const BLOCK: usize = 64;
 
-/// The shortest chunk of positions worth a task of its own when positions are split.
-const MIN_CHUNK: usize = 256;
-
 /// Most position chunks per KV head, which bounds the partial-result buffer.
 pub const MAX_CHUNKS: usize = 8;
 
-/// Most query rows (batch rows × `gqa`) a split-position call may hold partials for.
-/// Splitting positions is a decode measure; a prefill batch splits rows instead.
+/// The number of tasks a call with split positions aims for.
+///
+/// A constant, not the pool width. [`combine_row`] is mathematically exact but not
+/// bit-exact against a different chunk count: the merge weighs each partial by
+/// `exp(m_i − m*)`, whereas the unsplit pass applies the online softmax's successive
+/// `α` rescales, so the two round differently. A chunk count that followed the pool
+/// would therefore make a prompt's bits depend on the number of threads the engine
+/// happened to start, and the thread-invariance golden compares exactly that. So the
+/// chunk count is a function of the context length and the model shape only.
+///
+/// Twenty-four is two tasks per worker on the twelve-core reference host, which is
+/// the target the old worker-derived plan aimed for; an eight-worker host (bluefin)
+/// runs three per worker, which costs a little tail imbalance but keeps the bits.
+const TARGET_TASKS: usize = 24;
+
+/// Most query rows (batch rows × `gqa`) whose chunk partials are held at once.
+///
+/// It bounds both buffers: a single-row position-split call's shared partials, and
+/// the per-worker partials [`run_rows`] keeps while a multi-row task walks its rows'
+/// chunks. A wider task processes sub-blocks of this many rows, so the arithmetic of
+/// a row never depends on which sub-block it landed in.
 pub const MAX_PARTIAL_ROWS: usize = 64;
 
 /// The geometry of one attention call.
@@ -91,20 +114,52 @@ impl Plan {
     }
 }
 
-/// Divide a call among `workers`. Aim for at least two tasks per worker: rows are
-/// split first (no combine needed), then positions, in chunks of at least
-/// `MIN_CHUNK`. A fork–join costs ~0.5 µs (measured; the 20 µs this used to assume
-/// kept attention on one core, with three spinning, until ~270 positions), so only
-/// tiny calls stay serial, and mid-sized ones fork one task per KV head — the very
-/// computation the serial loop does per head, so the result is bit-identical.
+/// Divide a call among `workers`. Rows are split first (no combine needed), then
+/// positions, into chunks of at least `BLOCK` positions and enough of them to reach
+/// `TARGET_TASKS` tasks for the call.
+///
+/// A row's arithmetic must depend only on that row's own context length and the model
+/// shape — never on the other rows in the call, the call width (`nb`), the prefill
+/// chunk or the pool. The position partition therefore is not a property of the call
+/// at all: `row_chunks` gives every row its own chunk count from its own context,
+/// and the cut is the even one. A single-row call splits those chunks across tasks
+/// (flash decoding); a multi-row call splits rows across tasks and each task walks
+/// every row's chunks serially with the same boundaries and the same merge order (see
+/// [`run_rows`]). Both paths compute the same partials and call [`combine_row`] over
+/// them in the same order, so a row's bits are the same either way.
+///
+/// `row_blocks` may follow the pool: each task computes whole rows, and a row's
+/// arithmetic does not depend on how many rows share its task. `pos_chunks` for a
+/// single-row call is `row_chunks`' count, also pool-independent.
+///
+/// A fork–join costs ~0.5 µs (measured; the 20 µs this used to assume kept attention
+/// on one core, with three spinning, until ~270 positions), so only tiny calls stay
+/// serial, and mid-sized ones fork one task per KV head — the very computation the
+/// serial loop does per head, so the result is bit-identical.
 pub fn plan(sh: &Shape<'_>, workers: usize) -> Plan {
     let avg_ctx = sh.start_pos + sh.nb.div_ceil(2);
     let work = sh.nb * sh.n_head * avg_ctx * sh.head_dim * 2;
-    if workers <= 1 || work < 1 << 13 {
+    let ctx = sh.start_pos + sh.nb;
+    if work < 1 << 13 {
         return Plan {
             parallel: false,
             row_blocks: 1,
             pos_chunks: 1,
+        };
+    }
+    // Only a call that is one row can split positions across tasks. A multi-row call
+    // splits rows and lets each row walk its own canonical chunks inside the task.
+    let chunks = if sh.nb > 1 || sh.nb * sh.gqa() > MAX_PARTIAL_ROWS {
+        1
+    } else {
+        row_chunks(sh, ctx)
+    };
+    if workers <= 1 {
+        // The same partition, run serially: the bits must not change with the pool.
+        return Plan {
+            parallel: false,
+            row_blocks: 1,
+            pos_chunks: chunks,
         };
     }
     if work < 1 << 19 {
@@ -115,20 +170,32 @@ pub fn plan(sh: &Shape<'_>, workers: usize) -> Plan {
         };
     }
     let per_head = (2 * workers).div_ceil(sh.n_kv_head);
-    let row_blocks = per_head.min(sh.nb).max(1);
-    let ctx = sh.start_pos + sh.nb;
-    let mut pos_chunks = per_head
-        .div_ceil(row_blocks)
-        .min((ctx / MIN_CHUNK).max(1))
-        .min(MAX_CHUNKS);
-    if sh.nb * sh.gqa() > MAX_PARTIAL_ROWS {
-        pos_chunks = 1;
-    }
+    // Rows carry the rest of the target; when positions already fill it, one block
+    // of rows is enough (and the old plan's row/position split is reproduced).
+    let row_blocks = per_head.div_ceil(chunks).min(sh.nb).max(1);
     Plan {
         parallel: true,
         row_blocks,
-        pos_chunks: pos_chunks.max(1),
+        pos_chunks: chunks,
     }
+}
+
+/// One row's position partition: the number of chunks *that row's* context is cut
+/// into, from its context length and the model shape alone.
+///
+/// The chunk count is the task target spread over the KV heads, capped so a chunk
+/// holds at least one decode tile (`BLOCK`) and by `MAX_CHUNKS` (the partial buffer).
+/// The boundaries are the even cut `i·n_ctx/k`, which is what the single-row decode
+/// path uses too; they need not land on the `BLOCK` grid (see [`run_rows`]). The work
+/// gate is per row, so a short row is never split just because a wide call is long.
+fn row_chunks(sh: &Shape<'_>, n_ctx: usize) -> usize {
+    let work = sh.n_head * n_ctx * sh.head_dim * 2;
+    if work < 1 << 19 {
+        return 1;
+    }
+    let by_ctx = (n_ctx / BLOCK).max(1);
+    let by_heads = TARGET_TASKS.div_ceil(sh.n_kv_head);
+    by_heads.min(by_ctx).clamp(1, MAX_CHUNKS)
 }
 
 /// One task: KV head `kh`, batch rows `b0..b1`, cache positions `p0..p1`.
@@ -161,6 +228,11 @@ pub struct Scratch {
     pub o: Vec<f32>,
     pub m: Vec<f32>,
     pub l: Vec<f64>,
+    /// One row's per-chunk partials while [`run_rows`] walks its chunks: `MAX_CHUNKS`
+    /// contiguous `(o, m, l)` triples per row, for at most `MAX_PARTIAL_ROWS` rows.
+    partial_o: Vec<f32>,
+    partial_m: Vec<f32>,
+    partial_l: Vec<f64>,
 }
 
 impl Scratch {
@@ -173,6 +245,9 @@ impl Scratch {
             o: vec![0.0; max_rows * head_dim],
             m: vec![0.0; max_rows],
             l: vec![0.0; max_rows],
+            partial_o: vec![0.0; MAX_PARTIAL_ROWS * MAX_CHUNKS * head_dim],
+            partial_m: vec![0.0; MAX_PARTIAL_ROWS * MAX_CHUNKS],
+            partial_l: vec![0.0; MAX_PARTIAL_ROWS * MAX_CHUNKS],
         }
     }
 }
@@ -203,9 +278,12 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
 
     // No row of this task sees past `start_pos + b1 − 1`.
     let p_end = t.p1.min(sh.start_pos + t.b1);
+    // Tiles stay on the global `BLOCK` grid: a chunk may start inside one, and the
+    // multi-row walker ([`run_rows`]) then scores the same tile for every row. Only
+    // the part from `t.p0` on is read, so a chunk is never decoded twice.
     let mut blk = t.p0;
     while blk < p_end {
-        let bn = BLOCK.min(p_end - blk);
+        let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
         kv.decode_block(true, layer, t.kh, blk, bn, &mut sc.kf);
         kv.decode_block(false, layer, t.kh, blk, bn, &mut sc.vf);
         for bi in 0..t.b1 - t.b0 {
@@ -255,6 +333,190 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
         }
         blk += bn;
     }
+}
+
+/// [`run`] for a multi-row task: every row walks its own canonical position chunks
+/// (`row_chunks`) and the chunks are merged by [`combine_row`] in chunk order.
+///
+/// This is how a prefill chunk, a speculative verify or a mixed step reaches the same
+/// bits as the same row decoded alone. A task covers whole rows (that split is free),
+/// so the chunks cannot be separate tasks — but walking them here, inside the task,
+/// and merging them in the same order is exactly what the single-row split path does
+/// across tasks: the same chunk boundaries, the same tiles inside each chunk, the same
+/// `parts[0..k]` passed to [`combine_row`]. A boundary may fall inside a `BLOCK` tile
+/// (the even cut moves by one position with the row's context); the tile is decoded
+/// once and scored in the two pieces each chunk would have read on its own.
+///
+/// Rows are processed in blocks of at most `MAX_PARTIAL_ROWS` so the per-row partial
+/// buffer stays bounded; a sub-block reads its K/V again, but the arithmetic of a row
+/// does not depend on which sub-block it landed in.
+///
+/// `out` is the task's contiguous output rows, `(t.b1 − t.b0) · q_dim` floats.
+pub fn run_rows(
+    kv: &KvCache,
+    layer: usize,
+    sh: &Shape<'_>,
+    q: &[f32],
+    t: &Task,
+    sc: &mut Scratch,
+    out: &mut [f32],
+) {
+    debug_assert_eq!(t.p0, 0, "run_rows expects a whole-context task");
+    let gqa = sh.gqa();
+    let rows = (t.b1 - t.b0) * gqa;
+    let mut r0 = 0;
+    while r0 < rows {
+        let r1 = (r0 + MAX_PARTIAL_ROWS).min(rows);
+        run_range(kv, layer, sh, q, t, r0, r1, sc, out);
+        r0 = r1;
+    }
+}
+
+/// One sub-block `r0..r1` of [`run_rows`]' query rows.
+#[allow(clippy::too_many_arguments)]
+fn run_range(
+    kv: &KvCache,
+    layer: usize,
+    sh: &Shape<'_>,
+    q: &[f32],
+    t: &Task,
+    r0: usize,
+    r1: usize,
+    sc: &mut Scratch,
+    out: &mut [f32],
+) {
+    let hd = sh.head_dim;
+    let gqa = sh.gqa();
+    let qd = sh.q_dim();
+    let kh = t.kh;
+    let sub = r1 - r0;
+
+    for lr in 0..sub {
+        let r = r0 + lr;
+        let (bi, g) = (r / gqa, r % gqa);
+        let h = kh * gqa + g;
+        let src = &q[(t.b0 + bi) * qd + h * hd..][..hd];
+        let dst = &mut sc.q[lr * hd..][..hd];
+        dst.copy_from_slice(src);
+        if kv.rotated() {
+            crate::vmath::hadamard(dst);
+        }
+    }
+    sc.o[..sub * hd].fill(0.0);
+    sc.m[..sub].fill(f32::NEG_INFINITY);
+    sc.l[..sub].fill(0.0);
+
+    let mut count = [1usize; MAX_PARTIAL_ROWS];
+    let mut cur = [0usize; MAX_PARTIAL_ROWS];
+    let mut ctx_of = [0usize; MAX_PARTIAL_ROWS];
+    let mut max_ctx = 0;
+    for lr in 0..sub {
+        let b = t.b0 + (r0 + lr) / gqa;
+        let n_ctx = sh.start_pos + b + 1;
+        ctx_of[lr] = n_ctx;
+        count[lr] = row_chunks(sh, n_ctx);
+        max_ctx = max_ctx.max(n_ctx);
+    }
+
+    let p_end = t.p1.min(max_ctx);
+    let mut blk = t.p0;
+    while blk < p_end {
+        let bn = BLOCK.min(p_end - blk);
+        kv.decode_block(true, layer, kh, blk, bn, &mut sc.kf);
+        kv.decode_block(false, layer, kh, blk, bn, &mut sc.vf);
+        for lr in 0..sub {
+            let n_ctx = ctx_of[lr];
+            if n_ctx <= blk {
+                continue;
+            }
+            let p_min = match sh.window {
+                Some(w) => n_ctx.saturating_sub(w),
+                None => 0,
+            };
+            let vis_end = (blk + bn).min(n_ctx);
+            // Within the tile, `pos` walks this row's chunks: usually once, twice
+            // when a chunk boundary falls inside the tile.
+            let mut pos = blk;
+            while pos < vis_end {
+                let ci = cur[lr];
+                // The row's chunks are `[i·n_ctx/k, (i+1)·n_ctx/k)`.
+                let chunk_end = (ci + 1) * n_ctx / count[lr];
+                let end = vis_end.min(chunk_end);
+                let start = pos.max(p_min);
+                if start < end {
+                    let j_start = start - blk;
+                    let len = end - start;
+                    let s = &mut sc.s[..len];
+                    scores(
+                        &sc.q[lr * hd..][..hd],
+                        &sc.kf[j_start * hd..],
+                        len,
+                        hd,
+                        sh.scale,
+                        s,
+                    );
+                    let m_old = sc.m[lr];
+                    let m_new = m_old.max(crate::vmath::max(s));
+                    let psum = crate::vmath::exp_shift_sum(s, m_new);
+                    let alpha = (m_old - m_new).exp();
+                    sc.l[lr] = sc.l[lr] * alpha as f64 + psum;
+                    mix(
+                        &mut sc.o[lr * hd..][..hd],
+                        alpha,
+                        s,
+                        &sc.vf[j_start * hd..],
+                        hd,
+                    );
+                    sc.m[lr] = m_new;
+                }
+                pos = end;
+                if end == chunk_end && ci + 1 < count[lr] {
+                    // The chunk is complete: bank it and start the next one fresh,
+                    // exactly as a task of its own would have.
+                    save_part(sc, lr, ci, hd);
+                    sc.o[lr * hd..(lr + 1) * hd].fill(0.0);
+                    sc.m[lr] = f32::NEG_INFINITY;
+                    sc.l[lr] = 0.0;
+                    cur[lr] = ci + 1;
+                }
+            }
+        }
+        blk += bn;
+    }
+    for lr in 0..sub {
+        save_part(sc, lr, cur[lr], hd);
+    }
+
+    let rotated = kv.rotated();
+    for lr in 0..sub {
+        let r = r0 + lr;
+        let (bi, g) = (r / gqa, r % gqa);
+        let h = kh * gqa + g;
+        let mut parts = [(&[][..], f32::NEG_INFINITY, 0.0f64); MAX_CHUNKS];
+        for (ci, p) in parts.iter_mut().enumerate().take(count[lr]) {
+            let slot = lr * MAX_CHUNKS + ci;
+            *p = (
+                &sc.partial_o[slot * hd..(slot + 1) * hd],
+                sc.partial_m[slot],
+                sc.partial_l[slot],
+            );
+        }
+        let sink = sh.sinks.map(|s| s[h]);
+        combine_row(
+            &parts[..count[lr]],
+            sink,
+            rotated,
+            &mut out[bi * qd + h * hd..][..hd],
+        );
+    }
+}
+
+/// Store row `lr`'s current `(o, m, l)` as its partial for chunk `ci`.
+fn save_part(sc: &mut Scratch, lr: usize, ci: usize, hd: usize) {
+    let slot = lr * MAX_CHUNKS + ci;
+    sc.partial_o[slot * hd..(slot + 1) * hd].copy_from_slice(&sc.o[lr * hd..(lr + 1) * hd]);
+    sc.partial_m[slot] = sc.m[lr];
+    sc.partial_l[slot] = sc.l[lr];
 }
 
 /// `out = o / l`, un-rotated when the cache is rotated. A row that saw no position
@@ -535,34 +797,101 @@ mod tests {
     fn grouped(kv: &KvCache, layer: usize, sh: &Shape, q: &[f32], plan: Plan) -> Vec<f32> {
         let hd = sh.head_dim;
         let gqa = sh.gqa();
+        let qd = sh.q_dim();
         let mut out = vec![0.0f32; sh.nb * sh.n_head * hd];
-        let mut parts: Vec<Vec<(Vec<f32>, f32, f64)>> = vec![Vec::new(); sh.nb * sh.n_head];
         let mut sc = Scratch::new(sh.nb * gqa, hd);
-        for i in 0..plan.tasks(sh) {
-            let t = task(sh, &plan, i);
-            run(kv, layer, sh, q, &t, &mut sc);
-            for bi in 0..t.b1 - t.b0 {
+        if plan.pos_chunks > 1 {
+            // Flash decoding: a task per position chunk, merged afterwards.
+            let mut parts: Vec<Vec<(Vec<f32>, f32, f64)>> = vec![Vec::new(); sh.nb * sh.n_head];
+            for i in 0..plan.tasks(sh) {
+                let t = task(sh, &plan, i);
+                run(kv, layer, sh, q, &t, &mut sc);
+                for bi in 0..t.b1 - t.b0 {
+                    for g in 0..gqa {
+                        let r = bi * gqa + g;
+                        let h = t.kh * gqa + g;
+                        let row = (t.b0 + bi) * sh.n_head + h;
+                        parts[row].push((sc.o[r * hd..(r + 1) * hd].to_vec(), sc.m[r], sc.l[r]));
+                    }
+                }
+            }
+            for (row, ps) in parts.iter().enumerate() {
+                let refs: Vec<(&[f32], f32, f64)> =
+                    ps.iter().map(|(o, m, l)| (&o[..], *m, *l)).collect();
+                // The sink of the row's query head.
+                let sink = sh.sinks.map(|s| s[row % sh.n_head]);
+                combine_row(
+                    &refs,
+                    sink,
+                    kv.rotated(),
+                    &mut out[row * hd..(row + 1) * hd],
+                );
+            }
+        } else if sh.nb > 1 {
+            // Rows split, each row's chunks walk inside its task.
+            for i in 0..plan.tasks(sh) {
+                let t = task(sh, &plan, i);
+                run_rows(
+                    kv,
+                    layer,
+                    sh,
+                    q,
+                    &t,
+                    &mut sc,
+                    &mut out[t.b0 * qd..t.b1 * qd],
+                );
+            }
+        } else {
+            for i in 0..plan.tasks(sh) {
+                let t = task(sh, &plan, i);
+                run(kv, layer, sh, q, &t, &mut sc);
                 for g in 0..gqa {
-                    let r = bi * gqa + g;
                     let h = t.kh * gqa + g;
-                    let row = (t.b0 + bi) * sh.n_head + h;
-                    parts[row].push((sc.o[r * hd..(r + 1) * hd].to_vec(), sc.m[r], sc.l[r]));
+                    let sink = sh.sinks.map(|s| s[h]);
+                    finish_row(
+                        &sc.o[g * hd..(g + 1) * hd],
+                        sc.l[g],
+                        sc.m[g],
+                        sink,
+                        kv.rotated(),
+                        &mut out[h * hd..(h + 1) * hd],
+                    );
                 }
             }
         }
-        for (row, ps) in parts.iter().enumerate() {
-            let refs: Vec<(&[f32], f32, f64)> =
-                ps.iter().map(|(o, m, l)| (&o[..], *m, *l)).collect();
-            // The sink of the row's query head.
-            let sink = sh.sinks.map(|s| s[row % sh.n_head]);
-            combine_row(
-                &refs,
-                sink,
-                kv.rotated(),
-                &mut out[row * hd..(row + 1) * hd],
-            );
-        }
         out
+    }
+
+    /// The plans a call can take: serial, the canonical plan at a few pool widths,
+    /// and one forced alternate split to exercise a different chunk count.
+    fn test_plans(sh: &Shape) -> Vec<Plan> {
+        let ctx = sh.start_pos + sh.nb;
+        let mut v = vec![Plan {
+            parallel: false,
+            row_blocks: 1,
+            pos_chunks: 1,
+        }];
+        for w in [1usize, 4, 8] {
+            v.push(plan(sh, w));
+        }
+        if sh.nb == 1 {
+            let k = row_chunks(sh, ctx);
+            if k > 2 {
+                // A different chunk count, to prove the merge is canonical.
+                v.push(Plan {
+                    parallel: true,
+                    row_blocks: 1,
+                    pos_chunks: k - 1,
+                });
+            }
+        } else {
+            v.push(Plan {
+                parallel: true,
+                row_blocks: sh.nb.clamp(1, 3),
+                pos_chunks: 1,
+            });
+        }
+        v
     }
 
     fn max_rel(a: &[f32], b: &[f32]) -> f32 {
@@ -609,29 +938,7 @@ mod tests {
             let ks16: Vec<Vec<f32>> = ks.iter().map(rnd).collect();
             let vs16: Vec<Vec<f32>> = vs.iter().map(rnd).collect();
             let want = reference(&sh, &q, &ks16, &vs16);
-            for plan in [
-                Plan {
-                    parallel: false,
-                    row_blocks: 1,
-                    pos_chunks: 1,
-                },
-                Plan {
-                    parallel: true,
-                    row_blocks: nb.min(3),
-                    pos_chunks: 1,
-                },
-                Plan {
-                    parallel: true,
-                    row_blocks: 1,
-                    pos_chunks: 3,
-                },
-                Plan {
-                    parallel: true,
-                    row_blocks: nb.min(2),
-                    pos_chunks: 2,
-                },
-                plan(&sh, 4),
-            ] {
+            for plan in test_plans(&sh) {
                 let got = grouped(&kv, 1, &sh, &q, plan);
                 let e = max_rel(&got, &want);
                 assert!(e < 2e-4, "{sh:?} {plan:?}: max relative error {e}");
@@ -671,24 +978,7 @@ mod tests {
             // The cache holds the f32 inputs exactly, so the reference is the
             // specification of the same computation.
             let want = reference(&sh, &q, &ks, &vs);
-            for plan in [
-                Plan {
-                    parallel: false,
-                    row_blocks: 1,
-                    pos_chunks: 1,
-                },
-                Plan {
-                    parallel: true,
-                    row_blocks: nb.clamp(1, 3),
-                    pos_chunks: 1,
-                },
-                Plan {
-                    parallel: true,
-                    row_blocks: 1,
-                    pos_chunks: 3,
-                },
-                plan(&sh, 4),
-            ] {
+            for plan in test_plans(&sh) {
                 let got = grouped(&kv, 0, &sh, &q, plan);
                 let e = max_rel(&got, &want);
                 assert!(e < 2e-5, "{sh:?} {plan:?}: max relative error {e}");
@@ -906,5 +1196,127 @@ mod tests {
                 assert!(p.tasks(&sh) >= workers, "{sh:?} {p:?} leaves workers idle");
             }
         }
+    }
+
+    /// The invariant this whole partition exists for: the same cache row, the same
+    /// query, the same bits — whether it is one row in the call or one of many.
+    ///
+    /// Each row of a 6-row "verify" is compared, bit for bit, with the same row
+    /// decoded alone: same cache, same query, same context length. Before the
+    /// per-row partition the two took different `pos_chunks` (1 vs 4 here) and
+    /// differed in almost every output element.
+    #[test]
+    fn a_rows_attention_does_not_depend_on_the_batch_width() {
+        // (n_head, n_kv_head, head_dim, start_pos, nb). The second is Qwen3-1.7B's
+        // head geometry at a 129-token prompt: the last prefill chunk is one row, and
+        // it clears the split gate while the same row in a 64-row chunk does not.
+        for &(n_head, n_kv_head, hd, start_pos, nb) in &[
+            (8usize, 2usize, 128usize, 300usize, 6usize),
+            (16, 8, 128, 124, 6),
+        ] {
+            let base = Shape {
+                n_head,
+                n_kv_head,
+                head_dim: hd,
+                nb,
+                start_pos,
+                scale: 1.0 / (hd as f32).sqrt(),
+                window: None,
+                sinks: None,
+            };
+            let (kv, q, _, _) = setup(KvPrec::F32, &base, 1);
+            let batch = grouped(&kv, 0, &base, &q, plan(&base, 4));
+            let qd = base.q_dim();
+            for b in 0..nb {
+                let solo = Shape {
+                    nb: 1,
+                    start_pos: base.start_pos + b,
+                    ..base
+                };
+                let got = grouped(&kv, 0, &solo, &q[b * qd..], plan(&solo, 4));
+                let want = &batch[b * n_head * hd..(b + 1) * n_head * hd];
+                assert_eq!(
+                    got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    want.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    "row {b} changed when batched ({n_head}/{n_kv_head}/{hd} at {start_pos})"
+                );
+            }
+        }
+    }
+
+    /// S3.6 step 1: the position chunks at short context, and the rule that they never
+    /// follow the pool.
+    #[test]
+    fn the_position_split_depends_on_the_context_and_shape_not_the_pool() {
+        // Qwen2.5-0.5B: fourteen query heads over two KV heads, 64-wide.
+        let short = |start_pos: usize| Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 1,
+            start_pos,
+            scale: 0.125,
+            window: None,
+            sinks: None,
+        };
+        // At 512 positions the old plan gave a 12-worker pool four tasks; the split
+        // now uses the whole pool without needing a thread count to decide it.
+        let p = plan(&short(511), 12);
+        assert_eq!(p.pos_chunks, 8, "{p:?}");
+        assert_eq!(p.tasks(&short(511)), 16, "{p:?}");
+        assert_eq!(plan(&short(4095), 12).pos_chunks, 8);
+        // Below the task-count gate there is nothing to split.
+        assert_eq!(plan(&short(255), 12).pos_chunks, 1);
+
+        // Every pool width sees the same chunk count at the same context.
+        for pos in [0, 63, 127, 255, 511, 1023, 4095] {
+            let want = plan(&short(pos), 7).pos_chunks;
+            for workers in 1..=64 {
+                assert_eq!(
+                    plan(&short(pos), workers).pos_chunks,
+                    want,
+                    "workers {workers} at position {pos}"
+                );
+            }
+        }
+
+        // A multi-row call splits rows, not positions: the prefill chunk must not
+        // change a row's partition.
+        for nb in [2, 3, 16, 64] {
+            let mut sh = short(511);
+            sh.nb = nb;
+            assert_eq!(plan(&sh, 12).pos_chunks, 1, "nb {nb}");
+        }
+
+        // The 1B's eight KV heads reach three chunks — the old plan's worker-derived
+        // target — now that the 64-position floor lets them.
+        let one_b = Shape {
+            n_head: 32,
+            n_kv_head: 8,
+            head_dim: 64,
+            nb: 1,
+            start_pos: 511,
+            scale: 0.125,
+            window: None,
+            sinks: None,
+        };
+        assert_eq!(plan(&one_b, 12).pos_chunks, 3);
+        assert_eq!(plan(&one_b, 12).tasks(&one_b), 24);
+        assert_eq!(plan(&one_b, 4).tasks(&one_b), 24);
+
+        // The cut is the even one. A block-aligned cut at 512 positions gives
+        // 192/192/128, whose longest chunk is a straggler on the critical path;
+        // the even cut keeps every task within one position of its siblings.
+        let p = plan(&one_b, 12);
+        let lens: Vec<usize> = (0..p.pos_chunks)
+            .map(|i| {
+                let t = task(&one_b, &p, i);
+                t.p1 - t.p0
+            })
+            .collect();
+        assert!(
+            lens.iter().max().unwrap() - lens.iter().min().unwrap() <= 1,
+            "{lens:?}"
+        );
     }
 }

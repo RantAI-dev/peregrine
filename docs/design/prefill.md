@@ -432,6 +432,28 @@ now (default 16, was the constant 64 this note measured). What the note asks for
 next — a chunk that follows the model's activation size and the number of slots —
 is still open: the option takes one number for the whole process.
 
+**S3.5 step 2 — the default follows the pool.** The A/B behind the 16 above ran on
+a pool as wide as the physical cores (12 here). The engine, though, builds
+`available_parallelism()` workers, and this machine reports 24 logical CPUs (12
+cores + SMT): the default chunk then runs on a pool twice the core count. On that
+pool a 16-row pass is the wrong shape. Fitting pass time against rows at 24
+workers on Bonsai-2B gives `~20 ms + 2.8 ms × rows` (16/32/64/128 rows:
+63.6/104.9/199.6/372.9 ms per pass); at 12 workers the same fit is
+`~4 ms + 3.5 ms × rows` (59.9/—/226.2 ms at 16/32/64). The 20 ms is per *pass*,
+not per row and not per model: Bonsai-9B at 24 workers fits `~26 ms + 12 ms ×
+rows`. It is spread across every row-parallel region of the pass — rotation,
+matmul, the three GDN blocks and attention all grow by the same relative amount —
+so it is not one copy or allocation to remove; a 16-row pass is simply too
+shallow to hide the slowest worker, and the rotation alone gives 16 of the 24
+workers a row while the other 8 spin. 64 rows
+amortise it: at 24 workers Bonsai-2B goes from 212 to 304 prompt tok/s,
+Bonsai-9B from 79.4 to 90.7, Llama-3.2-1B from 189 to 225; decode is unchanged.
+At 12 workers 16 still wins (257 against 248 on the 2B), so the default now
+follows the pool: 16 when the pool is no wider than the physical cores, 64 when
+it is (`options::prefill_chunk_default_for`). `PEREGRINE_PREFILL_CHUNK` still
+overrides either. The cost is the serving stall: one chunk is one weight pass,
+so 64 rows is about three times the stall of 16 for the other users.
+
 ### Gap 4 — thread scheduling: load imbalance, not barriers (up to 16 %)
 
 The fork-join itself costs 2.7 ms (0.08 %). But the static row split

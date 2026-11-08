@@ -144,6 +144,38 @@ pub fn chat_template(kind: TemplateKind) -> &'static str {
     }
 }
 
+/// Writes gpt-oss tokenizer metadata: the `o200k_harmony` pre-tokenizer, the
+/// Harmony control tokens in the vocabulary, and `<|return|>` as EOS — the shape
+/// the published gpt-oss files have.
+pub fn add_gpt_oss_tokenizer_metadata(w: &mut GgufWriter) {
+    let (mut tokens, mut types, merges) = build_vocab();
+    let specials = [
+        "<|start|>",
+        "<|channel|>",
+        "<|message|>",
+        "<|end|>",
+        "<|return|>",
+    ];
+    let first_extra = tokens
+        .iter()
+        .position(|t| t.starts_with("extra_token_"))
+        .expect("the synthetic vocabulary has filler tokens");
+    for (i, s) in specials.iter().enumerate() {
+        tokens[first_extra + i] = (*s).to_string();
+        types[first_extra + i] = TYPE_CONTROL;
+    }
+    let ret = (first_extra + specials.len() - 1) as u32;
+    w.str("tokenizer.ggml.model", "gpt2");
+    w.str("tokenizer.ggml.pre", "gpt-4o");
+    w.arr_str("tokenizer.ggml.tokens", &tokens);
+    w.arr_i32("tokenizer.ggml.token_type", &types);
+    w.arr_str("tokenizer.ggml.merges", &merges);
+    w.u32("tokenizer.ggml.bos_token_id", 258); // <|endoftext|>
+    w.u32("tokenizer.ggml.eos_token_id", ret); // <|return|>
+    w.u32("tokenizer.ggml.padding_token_id", 258);
+    w.bool("tokenizer.ggml.add_bos_token", false);
+}
+
 /// Writes Gemma tokenizer metadata to a `GgufWriter`.
 pub fn add_gemma_tokenizer_metadata(w: &mut GgufWriter) {
     let (mut tokens, types, merges) = build_vocab();

@@ -527,7 +527,23 @@ impl Session {
         let reserve = answer_reserve(&self.cfg);
         let max = self.cfg.max_ctx;
         self.prefix_reused = 0;
-        let inc = if !self.started && !self.history.is_empty() {
+        let inc = if self.template.replays_transcript() && self.started {
+            // Harmony drops every earlier assistant turn's analysis channel, so the
+            // transcript is re-rendered and its shared beginning restored from the
+            // cache. The reply just generated may have opened an analysis channel
+            // that the replay does not contain, so appending `close_previous` to the
+            // cache would not be the prompt a full render writes.
+            let toks = self
+                .model
+                .tk
+                .encode_prompt(&self.full_prompt(&self.history.clone(), user));
+            if self.kept.is_empty() {
+                self.kept = std::mem::take(&mut self.ctx);
+            }
+            let l = self.reuse_prefix(&toks);
+            self.prefix_reused = l;
+            toks[l..].to_vec()
+        } else if !self.started && !self.history.is_empty() {
             // Seeded history: the whole transcript is the prompt, less what the cache
             // still holds of it.
             let toks = self
@@ -799,6 +815,7 @@ impl Session {
                     dt_s: rep.secs / n_em as f64,
                     bytes_weights: rep.stats.bytes_weights / n_em as u64,
                     bytes_kv: rep.stats.bytes_kv / n_em as u64,
+                    bytes_acts: rep.stats.bytes_acts / n_em as u64,
                     macs: rep.stats.macs / n_em as u64,
                     barriers: rep.stats.barriers / n_em as u64,
                     drafted: if i == 0 { rep.drafted as u8 } else { 0 },
@@ -939,6 +956,8 @@ impl Session {
         let mut prefill_s = 0.0;
         let mut total_bytes_weights = 0u64;
         let mut total_bytes_kv = 0u64;
+        let mut prefill_bytes_acts = 0u64;
+        let mut decode_bytes_acts = 0u64;
         let mut cost: Option<SlotCost> = None;
         while self.engine.active() > 0 {
             let ems = self.engine.step();
@@ -947,6 +966,7 @@ impl Session {
                 // A chunk of the prompt: it cost the prompt's time, not a token's.
                 prefilled += rep.rows;
                 prefill_s += rep.secs;
+                prefill_bytes_acts += rep.stats.bytes_acts;
                 if decode_tokens == 0 && prefilled >= prompt_len - 1 {
                     break;
                 }
@@ -966,6 +986,7 @@ impl Session {
             decode_steps += 1;
             total_bytes_weights += rep.stats.bytes_weights;
             total_bytes_kv += rep.stats.bytes_kv;
+            decode_bytes_acts += rep.stats.bytes_acts;
             if decode_steps >= decode_tokens {
                 break;
             }
@@ -1008,6 +1029,8 @@ impl Session {
             prefill_tok_s,
             decode_tok_s,
             bytes_per_token,
+            prefill_bytes_acts,
+            decode_bytes_acts,
         })
     }
 }
@@ -1022,4 +1045,13 @@ pub struct BenchReport {
     pub prefill_tok_s: f64,
     pub decode_tok_s: f64,
     pub bytes_per_token: f64,
+    /// The bytes of the activations the prompt's matmuls read.
+    ///
+    /// The prefill's activation traffic is not in the weight accounting: the
+    /// matrix product reads the activation once per output row, or once per
+    /// eight rows with the repacked tiles. This is where the repack's claim —
+    /// that the tile cuts that traffic — is measured.
+    pub prefill_bytes_acts: u64,
+    /// The same, for the decode steps.
+    pub decode_bytes_acts: u64,
 }
