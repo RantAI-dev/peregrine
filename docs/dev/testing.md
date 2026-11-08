@@ -109,16 +109,27 @@ the way llama.cpp detects the `<|start|>` + `<|channel|>` pair (`src/llama-chat.
 the stop set must carry `<|return|>` (and `<|call|>`, when the vocabulary has it) but not `<|end|>`, which closes the analysis message before the answer (llama.cpp v0.9.0 drops it from the end-of-generation set, `src/llama-vocab.cpp:3345-3383`).
 `template.rs`'s tests pin the rendered strings — system block, developer block, user and assistant turns,
 and the generation prompt — for a system + user turn, a multi-turn conversation, and a final assistant
-message with no generation prompt. A real gpt-oss file is still the open check; the template's channel
-split into `reasoning_content` and `content` is not implemented yet (see below).
+message with no generation prompt. They also pin that a replayed earlier assistant turn keeps only its
+final channel: gpt-oss's Jinja drops every previous turn's analysis ("CoT is dropped during all previous
+turns"), so `Template::assistant_turn` strips it and a Harmony `Session` re-renders its transcript instead
+of appending to the cache of the reply just generated (whose analysis the replay does not contain). A real
+gpt-oss file is still the open check.
 
-The reasoning split is the follow-up: llama.cpp's gpt-oss handler treats
-`<|channel|>analysis<|message|>` … `<|end|>` as the reasoning span and
-`<|channel|>final<|message|>` … `<|return|>` as the answer (`common/parsers/gpt-oss.cpp`, v0.9.0), while
-Peregrine's server currently splits on the single `<think>` / `</think>` tokens. Serving gpt-oss needs a
-channel-aware split;
-until then the template is rendered exactly but a reasoning model's answer is not sorted into
-`reasoning_content` and `content`.
+The reasoning split lives in `crates/peregrine-server/src/harmony.rs`. It follows llama.cpp v0.9.0's
+gpt-oss handler (`common/parsers/gpt-oss.cpp:66,68-93`): `<|start|>assistant` opens a message,
+`<|channel|>analysis<|message|>` … `<|end|>` is the reasoning span, a `commentary` preamble is content, and
+`<|channel|>final[ constraint]<|message|>` … is the answer. `reasoning_format` maps as llama.cpp does:
+`none` leaves the analysis text in `content`, `auto`/`deepseek` split it into `reasoning_content`, and
+`deepseek-legacy` also mirrors it into streaming content deltas (`common/parsers/gpt-oss.cpp:66,80-83`;
+`common/common.h:428-436`; `tools/server/server-task.cpp:78`). Control tokens are consumed and never appear
+in either field, including when a control token is split across streaming chunks. The parser's unit tests
+cover analysis + final, final only, a reply cut off mid-analysis by `max_tokens`, and every control token
+split across a chunk boundary; the server's tests cover the `reasoning_format`/`reasoning_effort` mapping
+and that an earlier assistant turn's `reasoning_content` is not replayed, and `tests/synthetic.rs` runs a
+gpt-oss `Session` with an analysis channel in its history against one with only the final text, comparing
+the prompt and the tokens. There is no server integration test for gpt-oss: the synthetic model writers
+live in `peregrine-models`' test support, which the server crate cannot import, and the server's `App` is
+built inside `run`.
 
 ### The two SentencePiece oracle files
 

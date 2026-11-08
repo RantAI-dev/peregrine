@@ -8,10 +8,16 @@
 //!   cache prefix is reused when the new prompt shares it (the system prompt, the agent's prompt).
 //! - the chat template -> the one the model file declares, or the one `--chat-template` names for a file that
 //!   declares none (a model prompted in a template it was not trained on answers fluently and wrongly).
-//! - `chat_template_kwargs.enable_thinking` -> `SessionCfg::thinking` (Qwen3's empty reasoning block when off).
+//! - `chat_template_kwargs.enable_thinking` -> `SessionCfg::thinking` (Qwen3's empty reasoning block when off),
+//!   and `reasoning_effort: "none"` switches it off too, as llama-server does (`tools/server/server-common.cpp`).
+//! - `reasoning_format` (and `--reasoning-format`) -> how a reasoning reply is split: `none` leaves the
+//!   analysis text in `content`, `auto`/`deepseek` put it in `reasoning_content`, and `deepseek-legacy` also
+//!   mirrors it into streaming `content` deltas. gpt-oss's Harmony channels are parsed by `harmony.rs`; Qwen3's
+//!   `<think>` span uses the same switch. The control tokens never appear in either field.
 //! - `thinking_budget_tokens` -> the reasoning span is counted by token; at the budget the turn is cancelled and
 //!   replanned with the reasoning so far plus `</think>` as the assistant's prefix (`SessionCfg::assistant_prefix`,
-//!   a Peregrine addition), so the answer follows as llama-server's budget forcing does.
+//!   a Peregrine addition), so the answer follows as llama-server's budget forcing does. This is Qwen3's
+//!   `</think>` budget: Harmony has no such closing token, so the option is not applied to it.
 //! - `logprobs` -> each content token's log-probability (`Emitted::logprob`), which a client's
 //!   fixed rule reads.
 //! - `ignore_eos` -> optional non-standard boolean (default false), matching llama.cpp's
@@ -38,6 +44,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+mod harmony;
+
+use harmony::{Channel, Harmony, ReasoningFormat};
+
 /// The server's command line (also `peregrine serve`).
 #[derive(Parser, Debug)]
 #[command(about = "Serve a GGUF model with Peregrine behind the OpenAI chat API")]
@@ -58,6 +68,15 @@ pub struct Args {
     /// a template it was not trained on answers fluently and wrongly.
     #[arg(long = "chat-template", value_name = "NAME")]
     pub chat_template: Option<String>,
+    /// How reasoning is returned (llama-server's `--reasoning-format`): `none` leaves the analysis text in
+    /// `content`, `auto` and `deepseek` split it into `reasoning_content`, and `deepseek-legacy` also mirrors
+    /// it into streaming `content` deltas. Per request, the body's `reasoning_format` wins.
+    #[arg(
+        long = "reasoning-format",
+        value_name = "FORMAT",
+        default_value = "auto"
+    )]
+    pub reasoning_format: String,
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
     #[arg(long, default_value_t = 8201)]
@@ -115,6 +134,8 @@ struct App {
     alias: String,
     think_open: Option<u32>,
     think_close: Option<u32>,
+    /// The server's default reasoning format, overridden by a request's `reasoning_format`.
+    reasoning_format: ReasoningFormat,
     /// Requests being served or waiting (llama-server's `requests_processing`).
     busy: AtomicUsize,
     requests: AtomicU64,
@@ -215,6 +236,16 @@ pub async fn run(a: Args) {
         None => peregrine_core::options::get().kv_prec,
     };
     let max_ctx = a.ctx.clamp(32, model.cfg.ctx_train);
+    let reasoning_format = match ReasoningFormat::parse(&a.reasoning_format) {
+        Some(f) => f,
+        None => {
+            eprintln!(
+                "unknown reasoning format {:?} — none, auto, deepseek or deepseek-legacy",
+                a.reasoning_format
+            );
+            std::process::exit(2);
+        }
+    };
     let engine = Engine::new(
         model.clone(),
         threads,
@@ -237,6 +268,7 @@ pub async fn run(a: Args) {
         option_metrics,
         think_open: model.tk.id_of("<think>"),
         think_close: model.tk.id_of("</think>"),
+        reasoning_format,
         stop: template.stop_ids(&model.tk),
         default_system: template.default_system(model.name()),
         template,
@@ -368,6 +400,8 @@ struct Plan {
     penalties: Penalties,
     seed: u64,
     thinking: bool,
+    /// How this reply's reasoning is presented; the request's field, else the server's default.
+    reasoning_format: ReasoningFormat,
     budget: Option<usize>,
     logprobs: bool,
     stream: bool,
@@ -521,6 +555,15 @@ fn plan(b: &Value) -> Result<Plan, String> {
         return Err("the last message must be from the user".into());
     };
     let kw = &b["chat_template_kwargs"];
+    // llama.cpp v0.9.0 maps `reasoning_effort: "none"` to thinking off and drops the
+    // effort from the template kwargs (`tools/server/server-common.cpp:1497-1505`).
+    let effort_none = b["reasoning_effort"].as_str() == Some("none");
+    let reasoning_format = match b["reasoning_format"].as_str() {
+        Some(name) => ReasoningFormat::parse(name).ok_or_else(|| {
+            format!("unknown reasoning_format {name:?} — none, auto, deepseek or deepseek-legacy")
+        })?,
+        None => ReasoningFormat::Auto,
+    };
     Ok(Plan {
         system: (!system.is_empty()).then(|| system.join("\n\n")),
         pairs,
@@ -534,7 +577,12 @@ fn plan(b: &Value) -> Result<Plan, String> {
         penalties: sampling_penalties(b)?,
         seed: b["seed"].as_u64().unwrap_or(42),
         n: n as usize,
-        thinking: kw["enable_thinking"].as_bool().unwrap_or(true),
+        thinking: if effort_none {
+            false
+        } else {
+            kw["enable_thinking"].as_bool().unwrap_or(true)
+        },
+        reasoning_format,
         budget: b["thinking_budget_tokens"]
             .as_u64()
             .or_else(|| b["reasoning_budget_tokens"].as_u64())
@@ -585,6 +633,36 @@ fn continuation_prefix(saw_open: bool, reasoning: &str, closing: &str) -> String
     } else {
         format!("<think>\n{reasoning}{closing}")
     }
+}
+
+/// A piece of a Harmony reply: count it under its channel and send it as the matching delta.
+/// Control tokens never reach here; `deepseek-legacy` mirrors a reasoning piece into a
+/// streaming `content` delta as llama.cpp does (`tools/server/server-task.cpp:78`).
+fn send_harmony_delta(
+    run: &mut Run,
+    p: &Plan,
+    tx: &tokio::sync::mpsc::UnboundedSender<Msg>,
+    logprob: f32,
+    channel: Channel,
+    text: String,
+) -> bool {
+    let reasoning = channel == Channel::Reasoning && p.reasoning_format.extracts();
+    if reasoning {
+        run.reasoning_tokens += 1;
+        run.reasoning.push_str(&text);
+        if tx.send(Msg::Delta(text.clone(), true, logprob)).is_err() {
+            return false;
+        }
+        if p.stream && p.reasoning_format.reasoning_in_content() {
+            let _ = tx.send(Msg::Delta(text, false, logprob));
+        }
+    } else {
+        run.content_tokens += 1;
+        if tx.send(Msg::Delta(text, false, logprob)).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 /// A request handed to the engine thread, and where its tokens go.
@@ -723,6 +801,9 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
     let mut budget_left = p.max_tokens;
     let mut prefix: Option<String> = None;
     let mut finish = "stop";
+    // gpt-oss's reply is split by control tokens; every other template's reasoning is Qwen3's
+    // `<think>` span, below.
+    let mut harmony = (app.template == Template::Harmony).then(Harmony::new);
     // At most two passes: the turn as asked, then the same turn continued with the reasoning closed.
     for pass in 0..2 {
         let thinking = p.thinking && pass == 0;
@@ -781,7 +862,7 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
         }
         let mut replan = false;
         let mut slot = 0;
-        while let Some(em) = erx.recv().await {
+        'emissions: while let Some(em) = erx.recv().await {
             slot = em.slot;
             if let Some(c) = &em.cost {
                 run.prompt_n += c.prefilled as u64;
@@ -802,6 +883,27 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
                     break;
                 }
             }
+            if let Some(h) = harmony.as_mut() {
+                if !em.text.is_empty() {
+                    let mut produced = false;
+                    for (channel, text) in h.feed(&em.text) {
+                        produced = true;
+                        if !send_harmony_delta(&mut run, p, &tx, em.logprob, channel, text) {
+                            break 'emissions;
+                        }
+                    }
+                    // A channel header, `<|end|>` or `<|start|>` is a generated token too; it
+                    // belongs to neither field but does belong in the token count.
+                    if !produced {
+                        run.content_tokens += 1;
+                    }
+                    budget_left = budget_left.saturating_sub(1);
+                }
+                if em.finish.is_some() {
+                    break;
+                }
+                continue;
+            }
             // The think tags mark the span; they are not part of either text.
             if Some(em.token) == app.think_open && pass == 0 {
                 run.in_think = true;
@@ -812,12 +914,18 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
                 run.in_think = false;
                 continue;
             }
-            if run.in_think {
+            if run.in_think && p.reasoning_format.extracts() {
                 run.reasoning_tokens += 1;
                 run.reasoning.push_str(&em.text);
                 budget_left = budget_left.saturating_sub(1);
-                if tx.send(Msg::Delta(em.text, true, em.logprob)).is_err() {
+                if tx
+                    .send(Msg::Delta(em.text.clone(), true, em.logprob))
+                    .is_err()
+                {
                     break;
+                }
+                if p.stream && p.reasoning_format.reasoning_in_content() {
+                    let _ = tx.send(Msg::Delta(em.text, false, em.logprob));
                 }
                 if p.budget.is_some_and(|b| run.reasoning_tokens as usize >= b) {
                     run.budget_hit = true;
@@ -825,6 +933,7 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
                     break;
                 }
             } else {
+                // With `reasoning_format: none`, the think span is ordinary content.
                 run.content_tokens += 1;
                 budget_left = budget_left.saturating_sub(1);
                 if tx.send(Msg::Delta(em.text, false, em.logprob)).is_err() {
@@ -833,6 +942,15 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
             }
             if em.finish.is_some() {
                 break;
+            }
+        }
+        // Flush a reply that ended inside a channel (a `max_tokens` stop, for instance);
+        // a half-written control token is dropped rather than leaked into the answer.
+        if let Some(h) = harmony.as_mut() {
+            for (channel, text) in h.finish() {
+                if !send_harmony_delta(&mut run, p, &tx, 0.0, channel, text) {
+                    break;
+                }
             }
         }
         if !replan {
@@ -907,10 +1025,13 @@ impl Drop for BusyGuard {
 }
 
 async fn chat(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
-    let p = match plan(&body) {
+    let mut p = match plan(&body) {
         Ok(p) => p,
         Err(e) => return bad(e),
     };
+    if body.get("reasoning_format").is_none() {
+        p.reasoning_format = app.reasoning_format;
+    }
     // One session decodes one request at a time; the others wait. A bounded wait queue keeps a burst of (possibly
     // abandoned) long prompts from piling up blocking threads and CPU-hours of prefill.
     // every choice is a generation of its own, so a request with `n` choices reserves `n` places (and
@@ -1052,7 +1173,7 @@ pub fn init_logging() {
 
 #[cfg(test)]
 mod tests {
-    use super::{continuation_prefix, plan, Penalties};
+    use super::{continuation_prefix, plan, Penalties, ReasoningFormat};
     use serde_json::{json, Value};
 
     fn body(extra: Value) -> Value {
@@ -1183,6 +1304,127 @@ mod tests {
             "min_p": 0.0
         })));
         assert!(p.is_ok(), "{:?}", p.err());
+    }
+
+    #[test]
+    fn reasoning_format_defaults_to_auto_and_accepts_llama_cpp_names() {
+        assert_eq!(
+            plan(&body(json!({}))).unwrap().reasoning_format,
+            ReasoningFormat::Auto
+        );
+        for (name, want) in [
+            ("none", ReasoningFormat::None),
+            ("auto", ReasoningFormat::Auto),
+            ("deepseek", ReasoningFormat::Deepseek),
+            ("deepseek-legacy", ReasoningFormat::DeepseekLegacy),
+        ] {
+            assert_eq!(
+                plan(&body(json!({"reasoning_format": name})))
+                    .unwrap()
+                    .reasoning_format,
+                want,
+                "{name}"
+            );
+        }
+        let err = plan(&body(json!({"reasoning_format": "thoughts"})))
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("reasoning_format"), "{err:?}");
+    }
+
+    #[test]
+    fn reasoning_effort_none_switches_thinking_off() {
+        assert!(plan(&body(json!({}))).unwrap().thinking);
+        assert!(
+            !plan(&body(json!({"reasoning_effort": "none"})))
+                .unwrap()
+                .thinking
+        );
+        assert!(
+            plan(&body(json!({"reasoning_effort": "high"})))
+                .unwrap()
+                .thinking
+        );
+        assert!(
+            !plan(&body(
+                json!({"chat_template_kwargs": {"enable_thinking": false}})
+            ))
+            .unwrap()
+            .thinking
+        );
+    }
+
+    #[test]
+    fn reasoning_format_decides_which_delta_field_a_channel_goes_to() {
+        use super::{send_harmony_delta, Channel, Msg, Run};
+        let b = body(json!({}));
+        let mut p = plan(&b).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut run = Run::default();
+        // `none`: the analysis channel is content.
+        p.reasoning_format = ReasoningFormat::None;
+        assert!(send_harmony_delta(
+            &mut run,
+            &p,
+            &tx,
+            0.0,
+            Channel::Reasoning,
+            "R".into()
+        ));
+        match rx.try_recv().unwrap() {
+            Msg::Delta(t, false, _) => assert_eq!(t, "R"),
+            _ => panic!("reasoning_format none did not send content"),
+        }
+        // `auto`: it is reasoning_content.
+        p.reasoning_format = ReasoningFormat::Auto;
+        assert!(send_harmony_delta(
+            &mut run,
+            &p,
+            &tx,
+            0.0,
+            Channel::Reasoning,
+            "R".into()
+        ));
+        match rx.try_recv().unwrap() {
+            Msg::Delta(t, true, _) => assert_eq!(t, "R"),
+            _ => panic!("reasoning_format auto did not send reasoning_content"),
+        }
+        // `deepseek-legacy` with streaming also mirrors it into content.
+        p.reasoning_format = ReasoningFormat::DeepseekLegacy;
+        p.stream = true;
+        assert!(send_harmony_delta(
+            &mut run,
+            &p,
+            &tx,
+            0.0,
+            Channel::Reasoning,
+            "R".into()
+        ));
+        assert!(matches!(rx.try_recv().unwrap(), Msg::Delta(t, true, _) if t == "R"));
+        assert!(matches!(rx.try_recv().unwrap(), Msg::Delta(t, false, _) if t == "R"));
+    }
+
+    #[test]
+    fn an_earlier_assistant_turn_replays_only_its_content() {
+        // gpt-oss's Jinja drops earlier turns' analysis; the request's
+        // `reasoning_content` is therefore not part of the replayed prompt.
+        let b = json!({"messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there", "reasoning_content": "SECRET"},
+            {"role": "user", "content": "Again"}
+        ]});
+        let p = plan(&b).unwrap();
+        assert_eq!(p.pairs, vec![("Hello".to_string(), "Hi there".to_string())]);
+        let prompt = peregrine_core::serve::chat_prompt(
+            peregrine_core::template::Template::Harmony,
+            None,
+            &p.pairs,
+            &p.user,
+            true,
+            None,
+        );
+        assert!(!prompt.contains("SECRET"));
+        assert!(prompt.contains("<|channel|>final<|message|>Hi there<|end|>"));
     }
 
     #[test]
