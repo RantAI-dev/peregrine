@@ -12,6 +12,14 @@ use crate::quant::QuantAct;
 pub struct StepStats {
     /// Exact bytes of weight tensors read.
     pub bytes_weights: u64,
+    /// Exact bytes of the activations read by the matmuls.
+    ///
+    /// The prefill's activation traffic is not in the weight accounting: the
+    /// matrix product reads the activation once per output row (or once per
+    /// eight rows, with the repacked tiles), so the two together are what the
+    /// matmul actually moves. The design note's claim that the repacked tile
+    /// cuts this traffic is measured here rather than derived.
+    pub bytes_acts: u64,
     /// Exact bytes read from the KV cache — `κ(T)`.
     pub bytes_kv: u64,
     /// Multiply-accumulates, counted rather than estimated. Two FLOPs each.
@@ -53,6 +61,7 @@ impl StepStats {
     }
     pub fn add(&mut self, o: &StepStats) {
         self.bytes_weights += o.bytes_weights;
+        self.bytes_acts += o.bytes_acts;
         self.bytes_kv += o.bytes_kv;
         self.macs += o.macs;
         self.barriers += o.barriers;
@@ -67,6 +76,7 @@ impl StepStats {
     pub fn since(&self, prev: &StepStats) -> StepStats {
         StepStats {
             bytes_weights: self.bytes_weights.saturating_sub(prev.bytes_weights),
+            bytes_acts: self.bytes_acts.saturating_sub(prev.bytes_acts),
             bytes_kv: self.bytes_kv.saturating_sub(prev.bytes_kv),
             macs: self.macs.saturating_sub(prev.macs),
             barriers: self.barriers.saturating_sub(prev.barriers),
@@ -95,6 +105,10 @@ pub struct State {
     /// layer of every token — 20 000 transcendental calls per decode step.
     pub rope: Vec<f32>,
     pub acts: Vec<QuantAct>,
+    /// The interleaved k-quant activation (S3.4): four rows side by side, for
+    /// the repacked k-quant kernel. Filled per matmul group; empty when the
+    /// model has no k-quant matrices.
+    pub kq: peregrine_kernels::kq::KqActs,
     pub logits: Vec<f32>,
     pub max_batch: usize,
     /// `start_pos..start_pos + n` for a `Model::forward` call, filled in place so the
@@ -198,6 +212,7 @@ impl State {
                     a
                 })
                 .collect(),
+            kq: peregrine_kernels::kq::KqActs::default(),
             // One row per batch element, not one row total. Speculative verification
             // needs every drafted position's logits at once; a single shared row
             // would leave each verification reading the last row's distribution and

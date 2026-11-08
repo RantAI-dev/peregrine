@@ -107,6 +107,7 @@ pub(crate) fn attention_rows(
             lbt,
             pool,
             stats,
+            &mut st.kq,
         );
     }
     // ---- the biases, the per-head q/k norms and RoPE ----
@@ -180,6 +181,7 @@ pub(crate) fn attention_rows(
             lbt,
             pool,
             stats,
+            &mut st.kq,
         );
     }
     for i in 0..nb * cfg.d_model {
@@ -247,6 +249,7 @@ pub(crate) fn head_rows(
             lbt,
             pool,
             stats,
+            &mut st.kq,
         );
     }
     stats.ns_head += stats.ns_matmul - before;

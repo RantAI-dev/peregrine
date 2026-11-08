@@ -6,10 +6,20 @@
 //! of a weight row, one dot product per row), so the result should be bit-identical, and that is what is
 //! asserted here — not "close enough".
 
+use peregrine_core::gguf::Format;
 use peregrine_core::kv::{KvCache, KvPrec};
 use peregrine_core::model::{Caches, State, StepStats};
 use peregrine_core::pool::Pool;
 use std::path::PathBuf;
+
+mod support;
+
+/// A directory of its own for each test (tests run in parallel and each removes its directory).
+fn tmpdir(test: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("peregrine-batch-{}-{test}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
 
 /// The model these tests run against: `PEREGRINE_MODEL`, else `models/Qwen3-1.7B-Q4_K_M.gguf`, else the
 /// engine's default fixture. Absent all three the test says so and passes, as the other model-backed tests do.
@@ -37,14 +47,7 @@ fn solo(
 ) -> (Vec<u32>, Vec<f32>) {
     let c = model.cfg;
     let mut kv = KvCache::new(KvPrec::F16, c.n_layer, c.n_kv_head, c.head_dim, max_ctx);
-    let mut st = State::new(
-        &c,
-        64,
-        2,
-        max_ctx,
-        pool.width(),
-        model.rope_factors.as_deref(),
-    );
+    let mut st = model.new_state(64, 2, max_ctx, pool.width());
     let mut stats = StepStats::default();
     let mut out = vec![];
     let mut pos = 0usize;
@@ -332,4 +335,124 @@ fn a_restored_cache_gives_the_same_logits_as_a_computed_one() {
         "{diff} of {} logits differ after a restore",
         la.len()
     );
+}
+
+/// The same property on synthetic models, so it runs in CI without a model file.
+///
+/// The shape matters: `n_ff` is at or above 1024, which is where the one-row
+/// decode path splits a feed-forward row into unequal element shares across the
+/// pool while a two-row step hands each worker a whole row. Every synthetic model
+/// in the suite used `n_ff = 512`, which never takes that path — which is how the
+/// break went unnoticed until a real model was decoded with the repack on.
+fn synthetic_two_users(fmt: Format, seed: u64, name: &str) {
+    let dir = tmpdir(name);
+    let shape = support::models::Dense {
+        n_ff: 1024,
+        ..support::models::Dense::default()
+    };
+    let path = support::models::write_dense(&dir, "llama", fmt, seed, shape);
+    let model = peregrine_models::open(&path).unwrap();
+    let c = model.cfg;
+    // Three workers is what makes the one-row split's boundaries unaligned to the
+    // vector width (1024 / 3 = 341, 341, 342), which is the failing case.
+    let pool = Pool::new(3);
+    let max_ctx = 128;
+    let a: Vec<u32> = vec![1, 2, 3, 4, 5];
+    let b: Vec<u32> = vec![1, 7, 8, 9, 10, 11, 12];
+    let steps = 6;
+
+    let (solo_a, last_a) = solo(&model, &pool, max_ctx, &a, steps);
+    let (solo_b, last_b) = solo(&model, &pool, max_ctx, &b, steps);
+
+    let mut kv_a = KvCache::new(KvPrec::F16, c.n_layer, c.n_kv_head, c.head_dim, max_ctx);
+    let mut kv_b = KvCache::new(KvPrec::F16, c.n_layer, c.n_kv_head, c.head_dim, max_ctx);
+    let mut st = model.new_state(16, 2, max_ctx, pool.width());
+    let mut stats = StepStats::default();
+    model
+        .forward(
+            &mut st,
+            &mut kv_a,
+            &pool,
+            &a[..a.len() - 1],
+            0,
+            &[],
+            &mut stats,
+        )
+        .unwrap();
+    model
+        .forward(
+            &mut st,
+            &mut kv_b,
+            &pool,
+            &b[..b.len() - 1],
+            0,
+            &[],
+            &mut stats,
+        )
+        .unwrap();
+    let (mut pos_a, mut pos_b) = (a.len() - 1, b.len() - 1);
+    let (mut tok_a, mut tok_b) = (a[a.len() - 1], b[b.len() - 1]);
+    let (mut got_a, mut got_b) = (vec![], vec![]);
+    let (mut final_a, mut final_b) = (vec![], vec![]);
+    for _ in 0..steps {
+        let mut both = [&mut kv_a, &mut kv_b];
+        model
+            .forward_rows(
+                &mut st,
+                &mut Caches::PerRow(&mut both),
+                &pool,
+                &[tok_a, tok_b],
+                &[pos_a, pos_b],
+                &[0, 1],
+                &mut stats,
+            )
+            .unwrap();
+        final_a = st.logits_row(0, c.n_vocab).to_vec();
+        final_b = st.logits_row(1, c.n_vocab).to_vec();
+        tok_a = argmax(&final_a);
+        tok_b = argmax(&final_b);
+        got_a.push(tok_a);
+        got_b.push(tok_b);
+        pos_a += 1;
+        pos_b += 1;
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        got_a, solo_a,
+        "user A's tokens changed when another user shared the pass"
+    );
+    assert_eq!(
+        got_b, solo_b,
+        "user B's tokens changed when another user shared the pass"
+    );
+    assert_eq!(
+        final_a, last_a,
+        "user A's final logits are not bit-identical"
+    );
+    assert_eq!(
+        final_b, last_b,
+        "user B's final logits are not bit-identical"
+    );
+}
+
+/// The repacked Q4_K model's two-user check.
+///
+/// This is the end-to-end path the real-file failure above runs on: the same
+/// shape, the same two prefills, the repacked kernel's fold. On these synthetic
+/// Q4_K weights the activation quantiser often absorbs the one-ulp swiglu delta
+/// before a matmul sees it, so the narrow regression is
+/// `vmath::tests::a_rows_swiglu_does_not_depend_on_the_split`; this test guards
+/// the rest of the path (caches, positions, the repack) around it.
+#[test]
+fn a_synthetic_q4k_model_is_batch_invariant() {
+    synthetic_two_users(Format::Q4_K, 8801, "q4k-two-users");
+}
+
+/// The same shape in f32 weights, where nothing quantises the feed-forward output
+/// away: this is the model-level regression for the split itself, and it fails on
+/// every seed tried before `swiglu_avx2`'s tail moved onto `exp8`.
+#[test]
+fn a_synthetic_float_model_is_batch_invariant() {
+    synthetic_two_users(Format::F16, 8802, "f16-two-users");
 }

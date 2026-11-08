@@ -133,8 +133,7 @@ pub struct Weights {
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
     pub(crate) tiles: TileStore,
     // The k-quant matrices repacked into eight-row tiles at load (`TensorInfo::kq_off` points
-    // here); empty unless `PEREGRINE_KREPACK=1`, and read by nothing until the repacked
-    // kernels land (S3.4 PR 2).
+    // here); empty when the repack is off, which is the AVX-512 tier's default.
     pub(crate) kq: KqStore,
     #[cfg(feature = "littlebit")]
     pub(crate) lb: Option<Slb>,
@@ -215,9 +214,9 @@ impl TileStore {
 /// step streams all of it every token — and `PEREGRINE_TILE_HUGEPAGES=0` uses a plain
 /// heap buffer, for the A/B.
 ///
-/// The store is empty when the repack is off (`PEREGRINE_KREPACK`), and until the
-/// repacked kernels land (S3.4 PR 2) nothing reads it: the matrices are still
-/// multiplied from the file's own bytes, so the outputs do not move.
+/// The store is empty when the repack is off — `PEREGRINE_KREPACK=0`, or the AVX-512 tier's
+/// default — and it is not built at all where the kernel table has no repacked kernel to read
+/// it, so it never costs resident memory that nothing uses.
 #[derive(Default)]
 pub struct KqStore {
     map: Option<memmap2::MmapMut>,
@@ -259,17 +258,25 @@ impl KqStore {
 
 impl Model {
     /// Load a model from a parsed GGUF file, with the k-quant repack as
-    /// `PEREGRINE_KREPACK` says.
+    /// `PEREGRINE_KREPACK` says — and only where the kernel table has a kernel
+    /// that will read the store.
     pub fn load_with(g: Gguf, families: &[&dyn crate::arch::Family]) -> Result<Model, String> {
-        Self::load_with_kq(g, families, crate::options::get().kq_repack)
+        // The repack costs the resident memory of every Q4_K and Q6_K matrix, so it is
+        // built only where a kernel multiplies from it. With the switch on but the
+        // repacked kernel unavailable (a `PEREGRINE_ISA` cap below AVX2, a build with
+        // the k-quant kernels off) the store would be RSS nothing reads.
+        let kq = crate::options::get().kq_repack
+            && peregrine_kernels::table::MatKernels::get().kq_tiles();
+        Self::load_with_kq(g, families, kq)
     }
 
     /// Load a model from a parsed GGUF file, with the k-quant repack forced on or
-    /// off whatever `PEREGRINE_KREPACK` says.
+    /// off whatever `PEREGRINE_KREPACK` says, and regardless of whether a kernel
+    /// will read the store.
     ///
     /// This is the switch an A/B of the repack needs: the same file, loaded both
-    /// ways, and the two compared. Until the repacked kernels land (S3.4 PR 2) the
-    /// two must give the same numbers — nothing reads the store.
+    /// ways, and the two compared. `true` builds the store even on a tier that
+    /// would not use it, which is what the store's own test does.
     pub fn load_with_kq(
         g: Gguf,
         families: &[&dyn crate::arch::Family],
@@ -305,9 +312,7 @@ impl Model {
             })?;
         // The k-quant repack (S3.4): the Q4_K and Q6_K matrices are rewritten into
         // eight-row tiles before the family reads the file, so every matrix the
-        // family holds knows where its repacked bytes are. Off until the repacked
-        // kernels land (PR 2): until then nothing reads the store, and the outputs
-        // are the file's own bytes either way.
+        // family holds knows where its repacked bytes are.
         let mut g = g;
         let kq = if kq {
             crate::kq::repack(&mut g)
@@ -486,7 +491,8 @@ impl Model {
     }
 
     /// The repacked k-quant store: the Q4_K and Q6_K matrices, rewritten into
-    /// eight-row tiles at load (S3.4). Empty unless `PEREGRINE_KREPACK=1`.
+    /// eight-row tiles at load (S3.4). Empty when the repack is off, and empty
+    /// where the kernel table has no kernel to read it.
     pub fn kq(&self) -> &[u8] {
         self.w.kq.bytes()
     }

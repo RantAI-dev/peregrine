@@ -498,6 +498,7 @@ impl Architecture for Gemma3 {
                     lbt,
                     pool,
                     stats,
+                    &mut st.kq,
                 );
             }
 
@@ -577,6 +578,7 @@ impl Architecture for Gemma3 {
                     lbt,
                     pool,
                     stats,
+                    &mut st.kq,
                 );
             }
 
@@ -638,6 +640,7 @@ impl Architecture for Gemma3 {
                     lbt,
                     pool,
                     stats,
+                    &mut st.kq,
                 );
             }
 
@@ -673,6 +676,7 @@ impl Architecture for Gemma3 {
                     lbt,
                     pool,
                     stats,
+                    &mut st.kq,
                 );
             }
 
@@ -753,6 +757,7 @@ impl Architecture for Gemma3 {
                 lbt,
                 pool,
                 stats,
+                &mut st.kq,
             );
         }
         stats.ns_head += stats.ns_matmul - before;

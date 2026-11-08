@@ -373,6 +373,10 @@ pub struct MoeScratch {
     /// (width `n_ff`).
     acts: Vec<QuantAct>,
     acts_ffn: Vec<QuantAct>,
+    /// The interleaved k-quant activation (S3.4). The experts' matrices are
+    /// three-dimensional and are not repacked, so this stays empty: it is here
+    /// so that the matmul group can take one.
+    pub kq: peregrine_kernels::kq::KqActs,
 }
 
 impl MoeScratch {
@@ -399,6 +403,7 @@ impl MoeScratch {
             slots: vec![0.0; nb * n_used * d_model],
             acts: (0..nb).map(|_| QuantAct::with_capacity(d_model)).collect(),
             acts_ffn: (0..nb).map(|_| QuantAct::with_capacity(n_ff)).collect(),
+            kq: peregrine_kernels::kq::KqActs::default(),
         }
     }
 }
@@ -467,7 +472,7 @@ pub fn moe_ffn(
             out: OutPtr::new(&mut scratch.router),
             rows: None,
         }];
-        matmul_group(w, &jobs, &scratch.acts[..nb], nb, pool, st);
+        matmul_group(w, &jobs, &scratch.acts[..nb], nb, pool, st, &mut scratch.kq);
     }
 
     // 1b. the router's bias, one value per expert (`src/llama-graph.cpp:2271`).
@@ -557,7 +562,7 @@ pub fn moe_ffn(
                     rows: None,
                 },
             ];
-            matmul_group(w, &jobs, &scratch.acts[..g], g, pool, st);
+            matmul_group(w, &jobs, &scratch.acts[..g], g, pool, st, &mut scratch.kq);
         }
         // The experts' biases on the gate and the up projections
         // (`src/llama-graph.cpp:2441-2444, 2457-2460`): the bias of the expert the
@@ -606,7 +611,15 @@ pub fn moe_ffn(
                 out: OutPtr::new(&mut scratch.down),
                 rows: None,
             }];
-            matmul_group(w, &jobs, &scratch.acts_ffn[..g], g, pool, st);
+            matmul_group(
+                w,
+                &jobs,
+                &scratch.acts_ffn[..g],
+                g,
+                pool,
+                st,
+                &mut scratch.kq,
+            );
         }
         // The down projection's bias (`src/llama-graph.cpp:2573-2576`).
         if let Some(bias) = mw.expert_bias {
