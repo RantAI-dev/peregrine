@@ -22,7 +22,7 @@ Against llama.cpp v0.9.0 on the same machine, model file and thread count:
 
 ![Where Peregrine is fastest against llama.cpp](docs/img/bench-wins.svg)
 
-- **Single-user decode up to 1.43× faster** (Llama 3.2 1B at a 4096-token context, 12-core desktop),
+- **Single-user decode up to 1.36× faster** (Llama 3.2 1B at a 4096-token context, 12-core desktop),
   and ahead in 5 of 7 confirmed cases. The lead grows with context: attention reads each cached
   key and value once per group of heads.
 - **1.48× the throughput with 10 users at once** on a 4-core Ryzen 3 (Llama 3.2 1B).

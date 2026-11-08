@@ -36,15 +36,15 @@
 <line class="grid" x1="690.0" y1="66" x2="690.0" y2="226" stroke-width="1"/>
 <text class="t2" x="690.0" y="242" font-size="11" text-anchor="middle">100</text>
 <text class="t1" x="238" y="89.0" font-size="12" text-anchor="end">Desktop · Llama 3.2 1B · 512</text>
-<path class="s1" d="M250.0,72.0 H474.8 A4.0,4.0 0 0 1 478.8,76.0 V80.0 A4.0,4.0 0 0 1 474.8,84.0 H250.0 Z"/>
-<text class="t2" x="484.8" y="82" font-size="11">52.0</text>
-<path class="s2" d="M250.0,86.0 H521.0 A4.0,4.0 0 0 1 525.0,90.0 V94.0 A4.0,4.0 0 0 1 521.0,98.0 H250.0 Z"/>
-<text class="t2" x="531.0" y="96" font-size="11">62.5</text>
+<path class="s1" d="M250.0,72.0 H473.9 A4.0,4.0 0 0 1 477.9,76.0 V80.0 A4.0,4.0 0 0 1 473.9,84.0 H250.0 Z"/>
+<text class="t2" x="483.9" y="82" font-size="11">51.8</text>
+<path class="s2" d="M250.0,86.0 H517.5 A4.0,4.0 0 0 1 521.5,90.0 V94.0 A4.0,4.0 0 0 1 517.5,98.0 H250.0 Z"/>
+<text class="t2" x="527.5" y="96" font-size="11">61.7</text>
 <text class="t1" x="238" y="129.0" font-size="12" text-anchor="end">Desktop · Qwen 2.5 0.5B · 512</text>
-<path class="s1" d="M250.0,112.0 H598.0 A4.0,4.0 0 0 1 602.0,116.0 V120.0 A4.0,4.0 0 0 1 598.0,124.0 H250.0 Z"/>
-<text class="t2" x="608.0" y="122" font-size="11">80.0</text>
-<path class="s2" d="M250.0,126.0 H658.7 A4.0,4.0 0 0 1 662.7,130.0 V134.0 A4.0,4.0 0 0 1 658.7,138.0 H250.0 Z"/>
-<text class="t2" x="668.7" y="136" font-size="11">93.8</text>
+<path class="s1" d="M250.0,112.0 H589.2 A4.0,4.0 0 0 1 593.2,116.0 V120.0 A4.0,4.0 0 0 1 589.2,124.0 H250.0 Z"/>
+<text class="t2" x="599.2" y="122" font-size="11">78.0</text>
+<path class="s2" d="M250.0,126.0 H657.0 A4.0,4.0 0 0 1 661.0,130.0 V134.0 A4.0,4.0 0 0 1 657.0,138.0 H250.0 Z"/>
+<text class="t2" x="667.0" y="136" font-size="11">93.4</text>
 <text class="t1" x="238" y="169.0" font-size="12" text-anchor="end">Bluefin · Llama 3.2 1B · 512</text>
 <path class="s1" d="M250.0,152.0 H490.2 A4.0,4.0 0 0 1 494.2,156.0 V160.0 A4.0,4.0 0 0 1 490.2,164.0 H250.0 Z"/>
 <text class="t2" x="500.2" y="162" font-size="11">55.5</text>

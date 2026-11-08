@@ -10,16 +10,16 @@ count. Wins and losses are both here. The raw data, method and machine records a
 ## The short version
 
 - **Single-user decode is Peregrine's strongest result.** It beats llama.cpp in 5 of the 7 confirmed cases,
-  by up to 1.43× (Llama 3.2 1B at a 4096-token context on the desktop). The gap grows with context:
+  by up to 1.36× (Llama 3.2 1B at a 4096-token context on the desktop). The gap grows with context:
   Peregrine's attention reads each cached key and value once per group of heads, and spends about
   2.3× less time per context position than llama.cpp.
 - **Many users on a small machine.** On the 4-core bluefin, Peregrine serves 10 users at once 1.48×
   faster than llama.cpp on Llama 3.2 1B.
 - **Prompt processing has caught up on AVX2.** On bluefin, with the repacked Q4_K kernels, Peregrine
-  matches llama.cpp on Llama 3.2 1B (1.02-1.04×). On the desktop it was still at 0.58-0.74× when
-  measured, before the November changes landed; a new desktop run is under way.
-- **Where it loses:** the 0.5B model at a short context (decode 0.70× on bluefin, 0.94× on the
-  desktop), prompt processing on the desktop, and multi-user throughput on the desktop.
+  matches llama.cpp on Llama 3.2 1B (1.02-1.04×). On the desktop it is at 0.62-0.66×; the same
+  kernels lift the desktop's Llama 3.2 1B from 0.66× to 0.81×, but they are not on by default there yet.
+- **Where it loses:** the 0.5B model at a short context (decode 0.70× on bluefin, 0.90× on the
+  desktop), prompt processing on the desktop, and multi-user throughput on the desktop (0.84×).
 
 ## The machines
 
@@ -29,8 +29,12 @@ count. Wins and losses are both here. The raw data, method and machine records a
 | SIMD | AVX2, AVX-512 (VNNI, GFNI, VBMI) | AVX2 |
 | Threads used | 12 (one per core) | 4 (one per core) |
 | OS | Linux under WSL2 | Fedora, bare metal |
-| Peregrine | `ce67e762` (2026-11-07) | `5f76d48` (2026-11-08), repacked Q4_K kernels on |
-| Results | [desktop-zen5-2026-11-07](../benchmarks/results/desktop-zen5-2026-11-07/README.md) | [bluefin-zen2-2026-11-08](../benchmarks/results/bluefin-zen2-2026-11-08/README.md) |
+| Peregrine | `5f76d48` (2026-11-08), defaults: repacked Q4_K kernels off | `5f76d48` (2026-11-08), defaults: repacked Q4_K kernels on |
+| Results | [desktop-zen5-2026-11-08](../benchmarks/results/desktop-zen5-2026-11-08/README.md) | [bluefin-zen2-2026-11-08](../benchmarks/results/bluefin-zen2-2026-11-08/README.md) |
+
+The desktop's same-day llama.cpp ran 0-7% faster than on 2026-11-07
+([first desktop baseline](../benchmarks/results/desktop-zen5-2026-11-07/README.md)), so compare
+ratios measured on the same day, not numbers across days.
 
 Both run llama.cpp v0.9.0 (`cd959ba`) as a server against Peregrine's server, with 256 greedy tokens
 per request, prompts calibrated to the target context, three interleaved rounds and the median
@@ -43,18 +47,18 @@ the same file (by SHA-256) for both engines.
 
 | Machine | Model | Context | Peregrine | llama.cpp | Peregrine ÷ llama.cpp |
 |---|---|---|---|---|---|
-| Desktop | Llama 3.2 1B | 512 | 61.4 | 49.4 | **1.24×** |
-| Desktop | Llama 3.2 1B | 4096 | 45.5 | 31.9 | **1.43×** |
-| Desktop | Qwen 2.5 0.5B | 512 | 66.5 | 70.8 | 0.94× |
-| Desktop | Qwen 2.5 0.5B | 4096 | 53.0 | 46.1 | **1.15×** |
+| Desktop | Llama 3.2 1B | 512 | 59.4 | 51.0 | **1.16×** |
+| Desktop | Llama 3.2 1B | 4096 | 44.2 | 32.4 | **1.36×** |
+| Desktop | Qwen 2.5 0.5B | 512 | 68.1 | 75.8 | 0.90× |
+| Desktop | Qwen 2.5 0.5B | 4096 | 51.6 | 48.8 | **1.06×** |
 | Bluefin | Llama 3.2 1B | 512 | 45.4 | 39.5 | **1.15×** |
 | Bluefin | Llama 3.2 1B | 4096 | 36.7 | 13.0 | 2.82×, being checked |
 | Bluefin | Qwen 2.5 0.5B | 512 | 52.8 | 74.9 | 0.70× |
 | Bluefin | Qwen 2.5 0.5B | 4096 | 45.1 | 41.0 | **1.10×** |
 
 Tokens per second. The bluefin Llama 3.2 1B row at 4096 is left out of the charts until it is
-re-measured: llama.cpp fell from 39.5 to 13.0 tok/s between the two contexts there, against 49.4 to
-31.9 on the desktop, and the host was using some swap during the run.
+re-measured: llama.cpp fell from 39.5 to 13.0 tok/s between the two contexts there, against 51.0 to
+32.4 on the desktop, and the host was using some swap during the run.
 
 Why the 0.5B loses at a short context: with only two KV heads its attention splits into fewer tasks
 than there are cores, and a few steps in each layer still run on one thread. Both matter more on a
@@ -66,17 +70,19 @@ small model, where each token's weight pass is short.
 
 | Machine | Model | Context | Peregrine | llama.cpp | Peregrine ÷ llama.cpp |
 |---|---|---|---|---|---|
-| Desktop | Llama 3.2 1B | 512 | 147.0 | 252.6 | 0.58× |
-| Desktop | Llama 3.2 1B | 4096 | 116.8 | 187.9 | 0.62× |
-| Desktop | Qwen 2.5 0.5B | 512 | 271.1 | 419.4 | 0.65× |
-| Desktop | Qwen 2.5 0.5B | 4096 | 200.7 | 269.9 | 0.74× |
+| Desktop | Llama 3.2 1B | 512 | 173.5 | 262.0 | 0.66× |
+| Desktop | Llama 3.2 1B | 4096 | 125.4 | 189.0 | 0.66× |
+| Desktop | Qwen 2.5 0.5B | 512 | 270.6 | 435.2 | 0.62× |
+| Desktop | Qwen 2.5 0.5B | 4096 | 184.9 | 279.4 | 0.66× |
 | Bluefin | Llama 3.2 1B | 512 | 196.3 | 188.3 | **1.04×** |
 | Bluefin | Llama 3.2 1B | 4096 | 143.7 | 141.2 | **1.02×** |
 | Bluefin | Qwen 2.5 0.5B | 512 | 260.0 | 302.9 | 0.86× |
 | Bluefin | Qwen 2.5 0.5B | 4096 | 195.2 | 236.0 | 0.83× |
 
-The desktop numbers predate the two November prompt changes below; the repacked Q4_K kernels are
-also still off by default on AVX-512 until that tier has a kernel of its own.
+On the desktop the repacked Q4_K kernels are off by default (AVX-512 has no kernel of its own yet).
+Turned on with `PEREGRINE_KREPACK=1`, Llama 3.2 1B goes to 211.5 tok/s at 512 (0.81×) and 144.6 at
+4096 (0.77×), and its 10-user throughput to 62.7 tok/s (1.02×), with decode within 1%. The 0.5B
+does not gain from them.
 
 ## Many users at once
 
@@ -84,8 +90,8 @@ also still off by default on AVX-512 until that tier has a kernel of its own.
 
 | Machine | Model | 4 users | 10 users | 10 users, Peregrine ÷ llama.cpp |
 |---|---|---|---|---|
-| Desktop | Llama 3.2 1B | 51.3 vs 53.5 | 52.0 vs 62.5 | 0.83× |
-| Desktop | Qwen 2.5 0.5B | 71.1 vs 79.6 | 80.0 vs 93.8 | 0.85× |
+| Desktop | Llama 3.2 1B | 52.9 vs 54.5 | 51.8 vs 61.7 | 0.84× |
+| Desktop | Qwen 2.5 0.5B | 70.6 vs 81.8 | 78.0 vs 93.4 | 0.84× |
 | Bluefin | Llama 3.2 1B | 53.5 vs 39.5 | 55.5 vs 37.4 | **1.48×** |
 | Bluefin | Qwen 2.5 0.5B | 70.1 vs 65.2 | 71.3 vs 68.7 | **1.04×** |
 

@@ -34,25 +34,25 @@
 <line class="grid" x1="690.0" y1="66" x2="690.0" y2="346" stroke-width="1"/>
 <text class="t2" x="690.0" y="362" font-size="11" text-anchor="middle">80</text>
 <text class="t1" x="238" y="89.0" font-size="12" text-anchor="end">Desktop · Llama 3.2 1B · 512</text>
-<path class="s1" d="M250.0,72.0 H583.7 A4.0,4.0 0 0 1 587.7,76.0 V80.0 A4.0,4.0 0 0 1 583.7,84.0 H250.0 Z"/>
-<text class="t2" x="593.7" y="82" font-size="11">61.4</text>
-<path class="s2" d="M250.0,86.0 H517.7 A4.0,4.0 0 0 1 521.7,90.0 V94.0 A4.0,4.0 0 0 1 517.7,98.0 H250.0 Z"/>
-<text class="t2" x="527.7" y="96" font-size="11">49.4</text>
+<path class="s1" d="M250.0,72.0 H572.7 A4.0,4.0 0 0 1 576.7,76.0 V80.0 A4.0,4.0 0 0 1 572.7,84.0 H250.0 Z"/>
+<text class="t2" x="582.7" y="82" font-size="11">59.4</text>
+<path class="s2" d="M250.0,86.0 H526.5 A4.0,4.0 0 0 1 530.5,90.0 V94.0 A4.0,4.0 0 0 1 526.5,98.0 H250.0 Z"/>
+<text class="t2" x="536.5" y="96" font-size="11">51.0</text>
 <text class="t1" x="238" y="129.0" font-size="12" text-anchor="end">Desktop · Llama 3.2 1B · 4096</text>
-<path class="s1" d="M250.0,112.0 H496.2 A4.0,4.0 0 0 1 500.2,116.0 V120.0 A4.0,4.0 0 0 1 496.2,124.0 H250.0 Z"/>
-<text class="t2" x="506.2" y="122" font-size="11">45.5</text>
-<path class="s2" d="M250.0,126.0 H421.4 A4.0,4.0 0 0 1 425.4,130.0 V134.0 A4.0,4.0 0 0 1 421.4,138.0 H250.0 Z"/>
-<text class="t2" x="431.4" y="136" font-size="11">31.9</text>
+<path class="s1" d="M250.0,112.0 H489.1 A4.0,4.0 0 0 1 493.1,116.0 V120.0 A4.0,4.0 0 0 1 489.1,124.0 H250.0 Z"/>
+<text class="t2" x="499.1" y="122" font-size="11">44.2</text>
+<path class="s2" d="M250.0,126.0 H424.2 A4.0,4.0 0 0 1 428.2,130.0 V134.0 A4.0,4.0 0 0 1 424.2,138.0 H250.0 Z"/>
+<text class="t2" x="434.2" y="136" font-size="11">32.4</text>
 <text class="t1" x="238" y="169.0" font-size="12" text-anchor="end">Desktop · Qwen 2.5 0.5B · 512</text>
-<path class="s1" d="M250.0,152.0 H611.8 A4.0,4.0 0 0 1 615.8,156.0 V160.0 A4.0,4.0 0 0 1 611.8,164.0 H250.0 Z"/>
-<text class="t2" x="621.8" y="162" font-size="11">66.5</text>
-<path class="s2" d="M250.0,166.0 H635.4 A4.0,4.0 0 0 1 639.4,170.0 V174.0 A4.0,4.0 0 0 1 635.4,178.0 H250.0 Z"/>
-<text class="t2" x="645.4" y="176" font-size="11">70.8</text>
+<path class="s1" d="M250.0,152.0 H620.5 A4.0,4.0 0 0 1 624.5,156.0 V160.0 A4.0,4.0 0 0 1 620.5,164.0 H250.0 Z"/>
+<text class="t2" x="630.5" y="162" font-size="11">68.1</text>
+<path class="s2" d="M250.0,166.0 H662.9 A4.0,4.0 0 0 1 666.9,170.0 V174.0 A4.0,4.0 0 0 1 662.9,178.0 H250.0 Z"/>
+<text class="t2" x="672.9" y="176" font-size="11">75.8</text>
 <text class="t1" x="238" y="209.0" font-size="12" text-anchor="end">Desktop · Qwen 2.5 0.5B · 4096</text>
-<path class="s1" d="M250.0,192.0 H537.5 A4.0,4.0 0 0 1 541.5,196.0 V200.0 A4.0,4.0 0 0 1 537.5,204.0 H250.0 Z"/>
-<text class="t2" x="547.5" y="202" font-size="11">53.0</text>
-<path class="s2" d="M250.0,206.0 H499.6 A4.0,4.0 0 0 1 503.6,210.0 V214.0 A4.0,4.0 0 0 1 499.6,218.0 H250.0 Z"/>
-<text class="t2" x="509.6" y="216" font-size="11">46.1</text>
+<path class="s1" d="M250.0,192.0 H529.8 A4.0,4.0 0 0 1 533.8,196.0 V200.0 A4.0,4.0 0 0 1 529.8,204.0 H250.0 Z"/>
+<text class="t2" x="539.8" y="202" font-size="11">51.6</text>
+<path class="s2" d="M250.0,206.0 H514.4 A4.0,4.0 0 0 1 518.4,210.0 V214.0 A4.0,4.0 0 0 1 514.4,218.0 H250.0 Z"/>
+<text class="t2" x="524.4" y="216" font-size="11">48.8</text>
 <text class="t1" x="238" y="249.0" font-size="12" text-anchor="end">Bluefin · Llama 3.2 1B · 512</text>
 <path class="s1" d="M250.0,232.0 H495.7 A4.0,4.0 0 0 1 499.7,236.0 V240.0 A4.0,4.0 0 0 1 495.7,244.0 H250.0 Z"/>
 <text class="t2" x="505.7" y="242" font-size="11">45.4</text>
