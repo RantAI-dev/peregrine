@@ -5,7 +5,7 @@ count. Wins and losses are both here. The raw data, method and machine records a
 [`benchmarks/results/`](../benchmarks/results/); the targets these numbers are held to are in
 [targets.md](targets.md).
 
-![Where Peregrine is fastest against llama.cpp](img/bench-wins.svg)
+![Where Peregrine is fastest](img/bench-wins.svg)
 
 ## The short version
 
@@ -166,6 +166,8 @@ greedy tokens, prompt lengths calibrated per engine. Peregrine at `bf241fe`; for
 `62c418ccd7aefee37997e94c2d9fac1eed7fc89b` (branch `prism`). Full method, raw manifests and
 the greedy-text check: [`benchmarks/results/2026-11-08-bonsai2-prism/`](../benchmarks/results/2026-11-08-bonsai2-prism/).
 
+![Bonsai 2: Peregrine against PrismML's fork](img/bench-bonsai.svg)
+
 Medians. "Fork best" is the faster of the fork's explicit `-fa on` and `-fa off` server
 settings for that row (lower for TTFT); "ratio" is Peregrine ÷ fork best, so above 1 means
 Peregrine is faster and, for TTFT, below 1 means Peregrine's first token arrives sooner. The
@@ -200,5 +202,15 @@ setting. `llama-bench` agrees after medians (its averages are contaminated by a 
 ~35% faster decode mode that hits one sample in five). The full on/off tables are in the
 results folder.
 
-Peregrine's binary reports the `avx2+fma` SIMD tier on this host, while the fork was built
-with native dispatch (AVX-512). That difference, if it matters, favours the fork.
+The manifests record `machine.simd_tier: avx2+fma` on this host, but that is a stale label,
+not the tier the kernels ran at. `peregrine tier` on this machine prints
+`kernel tier x86_64-avx2-avx512-vnni-gfni-vbmi` beside `simd avx2+fma`: two functions feed
+those lines, and only the first resolves the kernel tier (AVX-512 here, `isa=native`).
+`peregrine_core::simd_name()` knows `scalar`, `avx2`, `avx2+fma` and `neon` only and returns
+the first that matches, and the hardware probe writes that coarse name into
+`machine.simd_tier`. Bonsai 2 does run the AVX-512 tier: PQ2_0's fastest kernel is the
+16-row repacked-tile path built on AVX-512 VNNI and GFNI (`MatPath::Tiles` in
+`peregrine-kernels/src/table.rs`), selected with `zmm=true`, `tiles=true` and `isa=native`.
+So both engines use AVX-512 here; the fork was also built with `-march=native`. The label is
+a probe bug, not an AVX-512 tier that was skipped, and it does not change any number on this
+page.

@@ -30,8 +30,9 @@ engines on the same bytes, the same host, the same thread count and the same req
 - Flash attention: measured on the fork in both explicit settings, `-fa on` and `-fa off`,
   for every row, and cross-checked with `llama-bench`. The fork's default is `-fa auto`,
   which resolves to on (its default and explicit-on server numbers agree on every plain-model
-  row). The adapter accepts the setting, passes it to both `llama-server` and `llama-bench`,
-  and records it in the manifest as `engine.flash_attn`.
+  row). The setting comes from `run.py --llama-fa`, the same option #102 added for upstream
+  llama.cpp; it is passed to both `llama-server` and `llama-bench` and recorded as
+  `settings.llama_flash_attn` and `engine.flash_attn`.
 
 The 4B file is not on this host; the only MTP-capable file available here is the 9B
 `-MTP-Q8_0` file, so the MTP comparison uses that one.
@@ -49,11 +50,33 @@ The 4B file is not on this host; the only MTP-capable file available here is the
 | CPU governor | unknown (VM or fixed frequency) — WSL2 does not expose it |
 | Benchmark threads | 12 |
 
-A note on SIMD tiers, because it is the one place the two engines are not configured
-identically: Peregrine's telemetry reports `avx2+fma` for every run here (the same tier the
-2026-11-07 baseline reported), while the fork was built with `-march=native` and therefore
-has AVX-512 kernels available. If that matters at all, it favours the fork, so it does not
-explain Peregrine's margin.
+## Why the manifests say `avx2+fma` on an AVX-512 host
+
+This is a labelling bug in the probe, not a tier that was skipped. Every Peregrine manifest
+here records `machine.simd_tier: avx2+fma`, the same string the 2026-11-07 baseline recorded,
+while the CPU is Zen 5 with AVX-512 (see the machine table above). `peregrine tier` on this
+host prints both values side by side:
+
+```
+kernel tier   x86_64-avx2-avx512-vnni-gfni-vbmi
+simd          avx2+fma
+```
+
+Two different functions feed those two lines. `peregrine_kernels::cpu::tier_name()` resolves
+the kernel tier actually in effect: detected features capped by `PEREGRINE_ISA` (unset here,
+so `isa=native`), which is `x86_64-avx2-avx512-vnni-gfni-vbmi` — the AVX-512 tier.
+`peregrine_core::simd_name()` is an older, coarser detector that only knows `scalar`,
+`avx2`, `avx2+fma` and `neon`; it has no AVX-512 branch and returns `avx2+fma` as soon as
+AVX2 and FMA are present. `benchmarks/run.py` fills `machine.simd_tier` from the hardware
+probe (`examples/probe`, which prints `"simd": "avx2+fma"` on this host), so the coarse name
+is what reached the manifests even though the kernels ran at the AVX-512 tier.
+
+PQ2_0 uses that tier. Its fastest path is the 16-row repacked-tile kernel built on AVX-512
+VNNI and GFNI (`MatPath::Tiles`, `peregrine-kernels/src/table.rs`; the kernel itself is
+`tern::pq2_zmm`), and `peregrine tier` reports `zmm=true`, `tiles=true` with `isa=native` on
+this host. The AVX2 `MatPath::RowsPq2` path is the fallback on hosts without AVX-512, not
+what ran here. The fork was built with `-march=native` and also dispatches AVX-512, so the
+comparison is AVX-512 against AVX-512, not AVX2 against AVX-512.
 
 The measured streaming-bandwidth ceiling moved between invocations (32.8 to 44.7 GB/s, the
 probe's usual spread on this WSL2 host), so the `% of ceiling` column is not comparable
@@ -91,8 +114,9 @@ Three harness additions were needed for this model family and are in the same PR
   control token that carries no text. The sample is kept, and its throughput is still
   `reported_tokens / reported_decode_time`; the fork reported 256 on every request. This is
   at most a 0.4% difference in the token count, and it is applied to both engines.
-- `--flash-attn {default,auto,on,off}` and `--engine-args`, so the fork can be run in each
-  flash-attention setting and the setting lands in the manifest.
+- `--engine-args` (and, from #102, `--llama-fa {auto,on,off}`, shared by every
+  llama.cpp-family adapter), so the fork can be run in each flash-attention setting and the
+  setting lands in the manifest as `settings.llama_flash_attn` and `engine.flash_attn`.
 
 ## Results
 

@@ -132,6 +132,10 @@ def merge(group):
     fa = base["engine"].get("flash_attn", "default")
     if fa != "default":
         suffix += f"-fa-{fa}"
+        # #102 records the same choice under settings.llama_flash_attn; the raw
+        # invocations predate that option, so write it here from the adapter's
+        # own record. Peregrine has no such switch, so its run sets do not get it.
+        base["settings"]["llama_flash_attn"] = fa
     stamp = datetime.datetime.fromisoformat(runs[0]["timestamp"]).strftime("%Y-%m-%d-%H%M%S")
     out = OUT / f"{stamp}-{engine_name}-{stem}{suffix}.json"
     with open(out, "w", encoding="utf-8") as f:

@@ -58,7 +58,8 @@
       "enable_thinking": false
     },
     "token_tolerance": 1,
-    "interleaved": true
+    "interleaved": true,
+    "llama_flash_attn": "off"
   },
   "results": {
     "512": {

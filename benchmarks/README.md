@@ -50,7 +50,7 @@ Each number is measured at three standard context lengths defined in `docs/targe
   $$\text{Fraction of Ceiling} = \frac{\text{Bytes moved per token} \times \text{Decode tok/s}}{\text{Machine streaming bandwidth ceiling}}$$
   Where bytes moved per token is measured directly via Peregrine's telemetry (`TokenTelem`), and the streaming bandwidth ceiling is measured via the hardware probe (`Machine::probe`).
 
-### Flash attention (llama.cpp): compare against the faster setting
+### Flash attention (llama.cpp and its forks): compare against the faster setting
 
 llama.cpp v0.9.0 defaults to `-fa auto`, which resolves to flash attention **on** on the CPU
 backend. On some hosts that path is slower than `-fa off`, and at long contexts it can be much
@@ -67,9 +67,11 @@ The policy for every published ratio is therefore:
 - **Show the default-setting number only as a secondary note**, clearly labelled as
   "llama.cpp defaults (`-fa auto`)", alongside the like-for-like ratio.
 
-`run.py` takes `--llama-fa {auto,on,off}` (default `auto`). The setting is passed as `-fa` to both
-`llama-server` and `llama-bench`, and recorded in every JSON manifest under
-`settings.llama_flash_attn` and `engine.flash_attn`, so a run can never be misread. The default is
+`run.py` takes `--llama-fa {auto,on,off}` (default `auto`) for every llama.cpp-family
+adapter — upstream `llama_cpp` and the PrismML fork — so one option sets the whole comparison.
+The value is passed as `-fa` to both `llama-server` and `llama-bench` and recorded in every JSON
+manifest under `settings.llama_flash_attn` and `engine.flash_attn`, so a run can never be
+misread. The default is
 `auto` so that older invocations reproduce their original configuration; benchmarks intended for
 publication should measure both settings on the same day (or reuse a same-day default run) and use
 the faster of the two in each ratio.
@@ -186,7 +188,7 @@ python3 benchmarks/run.py \
     --contexts 512 --user-counts 1,10 --runs 3 --threads 12 \
     --engine-args 'peregrine=--opt MTP=0' \
     --engine-args 'prism_llama_cpp=--spec-type draft-mtp' \
-    --flash-attn off \
+    --llama-fa off \
     --chat-template-kwargs '{"enable_thinking": false}' \
     --token-tolerance 1 \
     --output-dir benchmarks/results
@@ -194,9 +196,10 @@ python3 benchmarks/run.py \
 
 `--token-tolerance N` keeps a sample whose reply is up to `N` tokens short of `--tokens`,
 for servers that do not count an empty control token at the end of a reasoning-template
-reply. `--flash-attn {default,auto,on,off}` sets the PrismML fork's `-fa` value on both
-`llama-server` and `llama-bench`; it is recorded as `engine.flash_attn` in every manifest so
-a reader can tell which setting produced the numbers.
+reply. `--llama-fa {auto,on,off}` sets the same `-fa` value for the llama.cpp-family engines
+(upstream and the fork) on both `llama-server` and `llama-bench`; it is recorded as
+`engine.flash_attn` in every manifest and as `settings.llama_flash_attn` in the run set, so a
+reader can tell which setting produced the numbers.
 
 ### Generate Markdown Comparison Report
 
