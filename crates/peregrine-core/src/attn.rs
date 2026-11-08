@@ -284,8 +284,12 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
     let mut blk = t.p0;
     while blk < p_end {
         let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
+        let tdec = crate::prof::detail().then(std::time::Instant::now);
         kv.decode_block(true, layer, t.kh, blk, bn, &mut sc.kf);
         kv.decode_block(false, layer, t.kh, blk, bn, &mut sc.vf);
+        if let Some(t) = tdec {
+            crate::prof::add_shared(crate::prof::Slot::AttnDecode, t.elapsed().as_nanos() as u64);
+        }
         for bi in 0..t.b1 - t.b0 {
             let n_ctx = sh.start_pos + t.b0 + bi + 1;
             if n_ctx <= blk {
@@ -307,6 +311,7 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
             for g in 0..gqa {
                 let r = bi * gqa + g;
                 let s = &mut sc.s[..count];
+                let ts = crate::prof::detail().then(std::time::Instant::now);
                 scores(
                     &sc.q[r * hd..][..hd],
                     &sc.kf[j_start * hd..],
@@ -315,12 +320,26 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
                     sh.scale,
                     s,
                 );
+                if let Some(t) = ts {
+                    crate::prof::add_shared(
+                        crate::prof::Slot::AttnScores,
+                        t.elapsed().as_nanos() as u64,
+                    );
+                }
                 let m_old = sc.m[r];
+                let tsm = crate::prof::detail().then(std::time::Instant::now);
                 let m_new = m_old.max(crate::vmath::max(s));
                 let psum = crate::vmath::exp_shift_sum(s, m_new);
                 // exp(−∞) = 0 on the first block: nothing to rescale.
                 let alpha = (m_old - m_new).exp();
                 sc.l[r] = sc.l[r] * alpha as f64 + psum;
+                if let Some(t) = tsm {
+                    crate::prof::add_shared(
+                        crate::prof::Slot::AttnSoftmax,
+                        t.elapsed().as_nanos() as u64,
+                    );
+                }
+                let tm = crate::prof::detail().then(std::time::Instant::now);
                 mix(
                     &mut sc.o[r * hd..][..hd],
                     alpha,
@@ -328,6 +347,12 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
                     &sc.vf[j_start * hd..],
                     hd,
                 );
+                if let Some(t) = tm {
+                    crate::prof::add_shared(
+                        crate::prof::Slot::AttnMix,
+                        t.elapsed().as_nanos() as u64,
+                    );
+                }
                 sc.m[r] = m_new;
             }
         }

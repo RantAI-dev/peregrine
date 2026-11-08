@@ -255,6 +255,45 @@ impl MatKernels {
         crate::quant::dot_batch(fmt, w, acts, out)
     }
 
+    /// Whether a decode step (one activation) can compute `fmt` eight rows at a time.
+    ///
+    /// The eight-row kernel shares one activation's block and lane sums across eight
+    /// output rows. Each row's block order is the per-row kernel's, so the result is
+    /// the same bits; only the loop that holds them differs.
+    #[inline]
+    pub fn rows8(&self, fmt: Format) -> bool {
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
+        if matches!(fmt, Format::Q5_0 | Format::Q8_0) {
+            return crate::simd::have_batched();
+        }
+        let _ = fmt;
+        false
+    }
+
+    /// Eight consecutive rows of `fmt` (a legacy 32-weight block) of row size `rb`
+    /// against one activation, into `out[r]`.
+    ///
+    /// # Panics
+    /// If [`MatKernels::rows8`] is false for the format, or `w`/`out` are short.
+    pub fn row8(&self, fmt: Format, w: &[u8], rb: usize, a: &QuantAct, out: &mut [f32]) {
+        assert!(self.rows8(fmt), "the eight-row kernel cannot run");
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
+        // SAFETY: `have_batched()` is AVX2+FMA+F16C, checked by `rows8`; the lengths
+        // are asserted by the kernel.
+        unsafe {
+            match fmt {
+                Format::Q5_0 => crate::simd::q5_0_rows8(w, rb, a, out),
+                Format::Q8_0 => crate::simd::q8_0_rows8(w, rb, a, out),
+                _ => unreachable!("rows8 advertised a format without a kernel"),
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        {
+            let _ = (fmt, w, rb, a, out);
+            unreachable!("no eight-row kernel on this architecture")
+        }
+    }
+
     /// The kernel tiers that provide a dedicated kernel for `fmt`.
     pub fn kernels_for(fmt: Format) -> &'static [Tier] {
         kernels_for(fmt)

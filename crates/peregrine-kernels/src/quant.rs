@@ -444,6 +444,158 @@ impl QuantAct {
         }
     }
 
+    /// Size and clear the buffers for a parallel fill of `n` activations.
+    ///
+    /// [`QuantAct::fill_range`] writes a worker's contiguous block range into these buffers; the
+    /// per-32 scales are independent, so any split on a block boundary produces the
+    /// same bytes as one call to [`QuantAct::fill`]. The 256-block layout is written only when
+    /// `n` is a multiple of 256 and every range starts on a 256 boundary.
+    pub fn prepare(&mut self, n: usize) {
+        assert_eq!(n % 32, 0, "an activation is a whole number of 32-blocks");
+        self.n = n;
+        self.q.clear();
+        self.q.resize(n, 0);
+        self.d.clear();
+        self.d.resize(n / 32, 0.0);
+        self.sums.clear();
+        self.sums.resize(n / 32, 0);
+        self.sums16.clear();
+        self.sums16.resize(n / 16, 0);
+        self.lane_sums.clear();
+        self.lane_sums.resize(n / 4, 0);
+        self.qk.clear();
+        self.dk.clear();
+        self.bsums.clear();
+        if n.is_multiple_of(256) {
+            self.qk.resize(n, 0);
+            self.dk.resize(n / 256, 0.0);
+            self.bsums.resize(n / 16, 0);
+        }
+        self.xf.clear();
+        if self.keep_f32 {
+            self.xf.resize(n, 0.0);
+        }
+    }
+
+    /// Fill blocks starting at `lo` from `x`, after [`QuantAct::prepare`].
+    ///
+    /// `x` holds the activation values from block `lo/32` to the end of the worker's
+    /// range; its length is a multiple of 32. When `n` is a multiple of 256, `lo` and
+    /// the range length are multiples of 256, so the per-256 layout is filled too.
+    ///
+    /// The arithmetic is [`QuantAct::fill`]'s, block for block: a block's scale and codes depend
+    /// only on that block, so who computed it cannot change the bytes.
+    pub fn fill_range(&mut self, x: &[f32], lo: usize) {
+        assert_eq!(x.len() % 32, 0, "a range is a whole number of 32-blocks");
+        assert_eq!(lo % 32, 0, "a range starts on a 32-block");
+        assert!(lo + x.len() <= self.n, "the range fits the activation");
+        if self.keep_f32 {
+            self.xf[lo..lo + x.len()].copy_from_slice(x);
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::simd::have_avx2() {
+                // SAFETY: AVX2 checked; the buffers were sized by `prepare` and the
+                // range assertions keep every write inside them.
+                unsafe { self.fill_range_avx2(x, lo) };
+                return;
+            }
+        }
+        self.fill_range_scalar(x, lo);
+    }
+
+    /// The vector form of [`QuantAct::fill_range`], the arithmetic of `fill_avx2`.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn fill_range_avx2(&mut self, x: &[f32], lo: usize) {
+        let mut codes = [0i8; 32];
+        if self.n.is_multiple_of(256) {
+            assert_eq!(lo % 256, 0, "the per-256 layout needs 256-aligned ranges");
+            for (s, blk) in x.chunks_exact(256).enumerate() {
+                let sb = lo / 256 + s;
+                let amax = crate::simd::absmax(blk);
+                let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
+                let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+                for (h, half) in blk.chunks_exact(32).enumerate() {
+                    crate::simd::quantize32(half.as_ptr(), inv, codes.as_mut_ptr());
+                    let at = sb * 256 + h * 32;
+                    self.qk[at..at + 32].copy_from_slice(&codes);
+                    for (i, run) in codes.chunks_exact(16).enumerate() {
+                        self.bsums[sb * 16 + h * 2 + i] = run.iter().map(|&q| q as i16).sum();
+                    }
+                }
+                self.dk[sb] = d;
+            }
+        }
+        for (s, blk) in x.chunks_exact(32).enumerate() {
+            let b = lo / 32 + s;
+            let amax = crate::simd::absmax(blk);
+            let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
+            let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+            crate::simd::quantize32(blk.as_ptr(), inv, codes.as_mut_ptr());
+            self.q[b * 32..b * 32 + 32].copy_from_slice(&codes);
+            for j in 0..8 {
+                self.lane_sums[b * 8 + j] = codes[4 * j..4 * j + 4].iter().map(|&v| v as i32).sum();
+            }
+            let s_lo: i32 = codes[..16].iter().map(|&v| v as i32).sum();
+            let s_hi: i32 = codes[16..].iter().map(|&v| v as i32).sum();
+            self.d[b] = d;
+            self.sums16[b * 2] = s_lo;
+            self.sums16[b * 2 + 1] = s_hi;
+            self.sums[b] = s_lo + s_hi;
+        }
+    }
+
+    /// The scalar specification of [`QuantAct::fill_range`].
+    fn fill_range_scalar(&mut self, x: &[f32], lo: usize) {
+        if self.n.is_multiple_of(256) {
+            assert_eq!(lo % 256, 0, "the per-256 layout needs 256-aligned ranges");
+            for (s, blk) in x.chunks_exact(256).enumerate() {
+                let sb = lo / 256 + s;
+                let amax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
+                let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+                for (h, run) in blk.chunks_exact(16).enumerate() {
+                    let mut sum = 0i16;
+                    for (i, &v) in run.iter().enumerate() {
+                        let q = (v * inv).round().clamp(-127.0, 127.0) as i8;
+                        self.qk[sb * 256 + h * 16 + i] = q;
+                        sum += q as i16;
+                    }
+                    self.bsums[sb * 16 + h] = sum;
+                }
+                self.dk[sb] = d;
+            }
+        }
+        for (s, blk) in x.chunks_exact(32).enumerate() {
+            let b = lo / 32 + s;
+            let amax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
+            let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+            let mut s_lo = 0i32;
+            let mut s_hi = 0i32;
+            for (i, &v) in blk.iter().enumerate() {
+                let q = (v * inv).round().clamp(-127.0, 127.0) as i8;
+                self.q[b * 32 + i] = q;
+                if i < 16 {
+                    s_lo += q as i32;
+                } else {
+                    s_hi += q as i32;
+                }
+            }
+            for j in 0..8 {
+                self.lane_sums[b * 8 + j] = self.q[b * 32 + 4 * j..b * 32 + 4 * j + 4]
+                    .iter()
+                    .map(|&v| v as i32)
+                    .sum();
+            }
+            self.d[b] = d;
+            self.sums16[b * 2] = s_lo;
+            self.sums16[b * 2 + 1] = s_hi;
+            self.sums[b] = s_lo + s_hi;
+        }
+    }
+
     /// The scalar specification of `fill`, which the vector form is tested against.
     pub fn fill_scalar(&mut self, x: &[f32]) {
         assert_eq!(
@@ -2378,5 +2530,58 @@ mod tests {
             saturated_pair > i16::MAX as u32,
             "if activation reached -128 (magnitude 128), pair would overflow i16::MAX"
         );
+    }
+
+    /// `prepare` + `fill_range` over one range, and over several disjoint ranges, must
+    /// equal `fill` byte for byte: the parallel quantise must not change the activation
+    /// a row's matmul reads, whatever the worker split.
+    #[test]
+    fn fill_range_matches_fill_for_any_split() {
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for &n in &[32usize, 96, 896, 4864] {
+            let x: Vec<f32> = (0..n)
+                .map(|_| (next() as u32 as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32 * 3.0)
+                .collect();
+            let mut want = QuantAct::with_capacity(n);
+            want.fill(&x);
+            // One range covering everything.
+            let mut got = QuantAct::with_capacity(n);
+            got.prepare(n);
+            got.fill_range(&x, 0);
+            assert_eq!(got.q, want.q, "n {n}: codes");
+            assert_eq!(got.d, want.d, "n {n}: scales");
+            assert_eq!(got.sums, want.sums, "n {n}: sums");
+            assert_eq!(got.sums16, want.sums16, "n {n}: half sums");
+            assert_eq!(got.lane_sums, want.lane_sums, "n {n}: lane sums");
+            assert_eq!(got.qk, want.qk, "n {n}: per-256 codes");
+            assert_eq!(got.dk, want.dk, "n {n}: per-256 scales");
+            assert_eq!(got.bsums, want.bsums, "n {n}: per-256 sums");
+            // Four ranges, 256-aligned (all of these n are multiples of 256 except 96).
+            let mut split = QuantAct::with_capacity(n);
+            split.prepare(n);
+            let step = if n.is_multiple_of(256) {
+                (n / 4).div_ceil(256) * 256
+            } else {
+                32
+            };
+            let mut lo = 0;
+            while lo < n {
+                let hi = (lo + step).min(n);
+                split.fill_range(&x[lo..hi], lo);
+                lo = hi;
+            }
+            assert_eq!(split.q, want.q, "n {n}: split codes");
+            assert_eq!(split.d, want.d, "n {n}: split scales");
+            assert_eq!(split.sums, want.sums, "n {n}: split sums");
+            assert_eq!(split.lane_sums, want.lane_sums, "n {n}: split lane sums");
+            assert_eq!(split.qk, want.qk, "n {n}: split per-256 codes");
+            assert_eq!(split.bsums, want.bsums, "n {n}: split per-256 sums");
+        }
     }
 }

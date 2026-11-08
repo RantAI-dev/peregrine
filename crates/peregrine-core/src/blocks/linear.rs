@@ -120,6 +120,7 @@ pub fn matmul_group(
             }
             let rb = row_bytes(j.w.kind, n);
             let (mut r, rz) = (a - off, z - off);
+            let tf = crate::prof::detail().then(Instant::now);
             match path {
                 MatPath::Tiles => {
                     let toff = j.w.tile_off.expect("a tiled path has a tile offset");
@@ -229,6 +230,30 @@ pub fn matmul_group(
                 }
                 MatPath::PerRow => {
                     let bytes = w.bytes(j.w);
+                    let mut r = r;
+                    // A decode step (one activation) runs a Q5_0/Q8_0 row eight at a
+                    // time: the activation block (and, for Q5_0, its lane sums) is then
+                    // loaded once for eight rows instead of once per row. Each row is
+                    // still accumulated block by block exactly as the one-row kernel
+                    // does, so the bits do not depend on the batch (a prefill uses
+                    // `dot_batch` unchanged).
+                    let mut eight = [0.0f32; 8];
+                    if nb == 1 && mk.rows8(j.w.kind) {
+                        while r + 8 <= rz {
+                            mk.row8(
+                                j.w.kind,
+                                &bytes[r * rb..(r + 8) * rb],
+                                rb,
+                                &acts[0],
+                                &mut eight,
+                            );
+                            for (i, &v) in eight.iter().enumerate() {
+                                // SAFETY: row `r + i` is in this worker's range.
+                                unsafe { j.out.set(r + i, v) };
+                            }
+                            r += 8;
+                        }
+                    }
                     for r in r..rz {
                         mk.row(j.w.kind, &bytes[r * rb..(r + 1) * rb], acts, &mut tmp[..nb]);
                         for (b, &v) in tmp[..nb].iter().enumerate() {
@@ -239,6 +264,12 @@ pub fn matmul_group(
                         }
                     }
                 }
+            }
+            if let Some(t) = tf {
+                crate::prof::add_shared(
+                    crate::prof::format_slot(j.w.kind),
+                    t.elapsed().as_nanos() as u64,
+                );
             }
             off += rows;
         }

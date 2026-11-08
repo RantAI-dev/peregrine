@@ -72,6 +72,40 @@ fn main() {
         "{:<6} {:>6} {:>12} {:>10} {:>12} {:>10} {:>12} {:>12}",
         "format", "acts", "ns/row", "GB/s", "ns/row×4", "GB/s×4", "ns/row×32", "ns/act×32"
     );
+    // The decode-only eight-row kernels, against the one-row columns below.
+    let mk = peregrine_core::table::MatKernels::get();
+    for fmt in [Format::Q5_0, Format::Q8_0] {
+        if !mk.rows8(fmt) {
+            continue;
+        }
+        let rb = row_bytes(fmt, k);
+        let n8 = rows / 8 * 8;
+        let mut w = prng_bytes(7, rb * n8);
+        sane(fmt, &mut w);
+        let a = act(k, 11);
+        let mut out8 = [0.0f32; 8];
+        let mut sink = 0.0f32;
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t = Instant::now();
+            let mut r = 0;
+            while r + 8 <= n8 {
+                mk.row8(fmt, &w[r * rb..(r + 8) * rb], rb, &a, &mut out8);
+                sink += out8[0];
+                r += 8;
+            }
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        println!(
+            "{fmt:?} rows8 (1 act) {:>8.0} ns/row {:>8.2} GB/s",
+            best / n8 as f64 * 1e9,
+            (rb * n8) as f64 / best / 1e9
+        );
+        if sink.is_nan() {
+            println!("nan");
+        }
+    }
+
     for fmt in [
         Format::Q8_0,
         Format::Q5_0,
