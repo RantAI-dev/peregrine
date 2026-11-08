@@ -47,12 +47,37 @@
 //! 30 % more memory than the format itself. `sc` is indexed `sc[sub * 8 + row]`, with
 //! one scale per sixteen weights, and `ql` and `qh` are windowed like `qs` above.
 //!
+//! # The Q5_0 tile
+//!
+//! ```text
+//! 0    d      the eight rows' f16 block scales       16 bytes
+//! 16   qh     the eight rows' fifth bits             32 bytes
+//! 48   qs     the eight rows' nibbles               128 bytes
+//! ```
+//!
+//! A Q5_0 block is only 32 weights, so the tile is built per block rather than per
+//! super-block. The block's 32 weights are four logical eight-weight groups:
+//! `h = 0` and `1` are the low nibbles of the row's `qs` bytes `0..8` and `8..16`
+//! (weights `0..16`), and `h = 2` and `3` are the high nibbles of the same bytes
+//! (weights `16..32`). The tile stores each of the sixteen `qs` bytes once —
+//! `qs[(h % 2) * 64 + row * 8 + k]` — so two logical groups share a physical
+//! window, and the kernel loads it once and reads it as low and then high
+//! nibbles. `qh[h * 8 + row]` holds row `row`'s eight fifth bits for the logical
+//! group `h` (bit `k` is weight `8h + k`).
+//!
+//! The fifth bits are stored *by weight group* — one byte per row per group —
+//! rather than in the file's per-row 32-bit word. That is what lets the kernel
+//! spread eight rows' bits with two `vpshufb`s per group instead of one full
+//! 32-bit expansion per row: the byte a row needs is already the byte the shuffle
+//! selects.
+//!
 //! # Sizes
 //!
-//! A Q4_K tile is 1152 bytes against 8 × 144 = 1152 bytes of the file's bytes, and a
-//! Q6_K tile is 1680 against 8 × 210 = 1680: both are exactly the size of the blocks
-//! they hold, so the repacked store is size-neutral and a decode step streams the
-//! same bytes either way.
+//! A Q4_K tile is 1152 bytes against 8 × 144 = 1152 bytes of the file's bytes, a
+//! Q6_K tile is 1680 against 8 × 210 = 1680, and a Q5_0 tile is 176 against
+//! 8 × 22 = 176: all three are exactly the size of the blocks they hold, so the
+//! repacked store is size-neutral and a decode step streams the same bytes either
+//! way.
 
 use std::mem::{offset_of, size_of};
 
@@ -63,6 +88,12 @@ use crate::quant::QuantAct;
 pub const Q4K_BLOCK: usize = 144;
 /// The bytes one Q6_K super-block takes (ggml's `block_q6_K`).
 pub const Q6K_BLOCK: usize = 210;
+/// The bytes one Q5_0 block takes (ggml's `block_q5_0`).
+pub const Q5_0_BLOCK: usize = 22;
+/// The weights one Q5_0 block holds.
+pub const Q5_0_WEIGHTS: usize = 32;
+/// The eight-weight groups one Q5_0 block splits into.
+pub const Q5_0_WINDOWS: usize = 4;
 
 /// The rows one interleaved activation group holds.
 pub const ACT_GROUP: usize = 4;
@@ -100,6 +131,25 @@ pub struct Q6K8 {
     pub qh: [u8; 512],
 }
 
+/// Eight Q5_0 blocks — eight output rows — interleaved for the repacked GEMM.
+///
+/// Q5_0's block is 32 weights, so the tile holds one block per row rather than a
+/// whole 256-weight super-block. The fifth bits are grouped by eight-weight
+/// window (`qh[h * 8 + row]`), which is what makes the kernel's spread cheap.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Q5_08 {
+    /// The eight rows' block scales, as the f16 bit patterns the file holds.
+    pub d: [u16; 8],
+    /// The eight rows' fifth bits, by eight-weight group:
+    /// `qh[group * 8 + row]`, bit `k` is weight `8·group + k`.
+    pub qh: [u8; 32],
+    /// The eight rows' nibbles, two physical windows of eight bytes per row:
+    /// `qs[window * 64 + row * 8 + k]`. Logical groups `window` and `window + 2`
+    /// are the low and high nibbles of the same bytes.
+    pub qs: [u8; 128],
+}
+
 impl Q4K8 {
     /// The tile's size in bytes.
     pub const SIZE: usize = size_of::<Q4K8>();
@@ -114,6 +164,13 @@ impl Q6K8 {
     pub const SOURCE: usize = 8 * Q6K_BLOCK;
 }
 
+impl Q5_08 {
+    /// The tile's size in bytes.
+    pub const SIZE: usize = size_of::<Q5_08>();
+    /// The bytes the eight blocks it holds take in the file.
+    pub const SOURCE: usize = 8 * Q5_0_BLOCK;
+}
+
 // The byte offsets of the fields, taken from the layout itself: the tile's bytes and
 // the struct's fields cannot drift apart.
 const Q4_D: usize = offset_of!(Q4K8, d);
@@ -124,6 +181,9 @@ const Q6_D: usize = offset_of!(Q6K8, d);
 const Q6_SC: usize = offset_of!(Q6K8, sc);
 const Q6_QL: usize = offset_of!(Q6K8, ql);
 const Q6_QH: usize = offset_of!(Q6K8, qh);
+const Q5_D: usize = offset_of!(Q5_08, d);
+const Q5_QH: usize = offset_of!(Q5_08, qh);
+const Q5_QS: usize = offset_of!(Q5_08, qs);
 
 /// The byte offset of the eight rows' super-block scales in a Q4_K tile.
 pub const fn q4_d() -> usize {
@@ -145,6 +205,23 @@ pub const Q4_SCM_STRIDE: usize = 12;
 pub const fn q4_qs() -> usize {
     Q4_QS
 }
+
+/// The byte offset of the eight rows' block scales in a Q5_0 tile.
+pub const fn q5_d() -> usize {
+    Q5_D
+}
+/// The byte offset of the eight rows' fifth bits in a Q5_0 tile.
+pub const fn q5_qh() -> usize {
+    Q5_QH
+}
+/// The byte offset of the eight rows' nibbles in a Q5_0 tile.
+pub const fn q5_qs() -> usize {
+    Q5_QS
+}
+/// The bytes one row's nibbles take in one window of a Q5_0 tile.
+pub const Q5_QS_ROW: usize = 8;
+/// The bytes one window of a Q5_0 tile takes.
+pub const Q5_WINDOW: usize = 64;
 
 /// The six-bit scale of row `row` for sub-block `sub` of a repacked Q4_K tile.
 pub fn tile_q4k_scale(t: &[u8], sub: usize, row: usize) -> u8 {
@@ -319,6 +396,60 @@ pub fn unrepack_q6k8(src: &[u8], dst: &mut [u8]) {
         for c in 0..8 {
             let at = Q6_QH + c * 64 + r * 8;
             b[128 + c * 8..128 + c * 8 + 8].copy_from_slice(&src[at..at + 8]);
+        }
+    }
+}
+
+/// Repack eight Q5_0 blocks — one per row — into one tile.
+///
+/// # Panics
+///
+/// If `src` does not hold eight blocks of [`Q5_0_BLOCK`] bytes, or `dst` is
+/// shorter than a tile.
+pub fn repack_q5_08(src: &[&[u8]], dst: &mut [u8]) {
+    assert_eq!(src.len(), 8, "a Q5_0 tile holds eight rows");
+    assert!(dst.len() >= Q5_08::SIZE);
+    for (r, b) in src.iter().enumerate() {
+        assert!(b.len() >= Q5_0_BLOCK, "a Q5_0 block is 22 bytes");
+        dst[Q5_D + r * 2..Q5_D + r * 2 + 2].copy_from_slice(&b[0..2]);
+        let qh = u32::from_le_bytes([b[2], b[3], b[4], b[5]]);
+        for h in 0..Q5_0_WINDOWS {
+            // The group's eight bits, one byte for this row.
+            dst[Q5_QH + h * 8 + r] = (qh >> (8 * h)) as u8;
+        }
+        // The sixteen nibble bytes, once each: the two physical windows are the
+        // file's `qs[0..8]` and `qs[8..16]`.
+        for w in 0..2 {
+            for k in 0..8 {
+                dst[Q5_QS + w * Q5_WINDOW + r * Q5_QS_ROW + k] = b[6 + w * 8 + k];
+            }
+        }
+    }
+}
+
+/// The inverse of [`repack_q5_08`]: one tile back into eight Q5_0 blocks.
+///
+/// The blocks are written in order: row `r`'s block at `r * 22`.
+///
+/// # Panics
+///
+/// If `src` is shorter than a tile, or `dst` is shorter than
+/// [`Q5_08::SOURCE`] bytes.
+pub fn unrepack_q5_08(src: &[u8], dst: &mut [u8]) {
+    assert!(src.len() >= Q5_08::SIZE);
+    assert!(dst.len() >= Q5_08::SOURCE);
+    for r in 0..8 {
+        let b = &mut dst[r * Q5_0_BLOCK..r * Q5_0_BLOCK + Q5_0_BLOCK];
+        b[0..2].copy_from_slice(&src[Q5_D + r * 2..Q5_D + r * 2 + 2]);
+        let mut qh = 0u32;
+        for h in 0..Q5_0_WINDOWS {
+            qh |= (src[Q5_QH + h * 8 + r] as u32) << (8 * h);
+        }
+        b[2..6].copy_from_slice(&qh.to_le_bytes());
+        for w in 0..2 {
+            for k in 0..8 {
+                b[6 + w * 8 + k] = src[Q5_QS + w * Q5_WINDOW + r * Q5_QS_ROW + k];
+            }
         }
     }
 }
@@ -523,6 +654,61 @@ pub fn dot_q4k8_ref(tile: &[u8], n_sb: usize, row: usize, act: &QuantAct) -> f32
     acc
 }
 
+/// The value of one row of a repacked Q5_0 tile against one activation row.
+///
+/// This is the specification the AVX2 kernel is checked against. Q5_0 has one
+/// scale per 32-weight block, so the fold is per block:
+///
+/// ```text
+/// value = Σ_b (d[b] · dk[b]) · ( Σ_j code_j·q_j − 16·Σ_j q_j )
+/// ```
+///
+/// with the integer sums exact. The expression is the kernel's, so the two agree
+/// bit for bit; the existing scalar kernel uses the same real number with a
+/// non-fused multiply-add, which differs by at most one rounding per block.
+///
+/// # Panics
+///
+/// If the tile is shorter than `n_blk` tiles, or the activation does not carry
+/// the per-32 layout.
+pub fn dot_q5_08_ref(tile: &[u8], n_blk: usize, row: usize, act: &QuantAct) -> f32 {
+    assert!(row < 8, "a tile holds eight rows");
+    assert!(
+        tile.len() >= n_blk * Q5_08::SIZE,
+        "the tile is shorter than its blocks"
+    );
+    assert!(
+        !act.q.is_empty() && act.q.len() >= n_blk * Q5_0_WEIGHTS,
+        "a Q5_0 row needs the per-32 activation"
+    );
+    let mut acc = 0.0f32;
+    for t in 0..n_blk {
+        let b = &tile[t * Q5_08::SIZE..(t + 1) * Q5_08::SIZE];
+        let d = f16(u16::from_le_bytes([
+            b[Q5_D + row * 2],
+            b[Q5_D + row * 2 + 1],
+        ]));
+        let mut s = 0i64;
+        for h in 0..Q5_0_WINDOWS {
+            let qh = b[Q5_QH + h * 8 + row];
+            let qs = Q5_QS + (h % 2) * Q5_WINDOW + row * Q5_QS_ROW;
+            for k in 0..8 {
+                let nib = if h < 2 {
+                    b[qs + k] & 0x0F
+                } else {
+                    b[qs + k] >> 4
+                };
+                let bit = (qh >> k) & 1;
+                let code = (nib + 16 * bit) as i64;
+                s += code * act.q[t * Q5_0_WEIGHTS + h * 8 + k] as i64;
+            }
+        }
+        let x = (s - 16 * act.sums[t] as i64) as f32;
+        acc = (d * act.d[t]).mul_add(x, acc);
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,10 +744,13 @@ mod tests {
         assert_eq!(Q4K8::SOURCE, 1152);
         assert_eq!(Q6K8::SIZE, 1680);
         assert_eq!(Q6K8::SOURCE, 1680);
+        assert_eq!(Q5_08::SIZE, 176);
+        assert_eq!(Q5_08::SOURCE, 176);
         // Size-neutral: the store replaces the file's bytes, it does not add to
         // them. Decode streams every byte of the store once per token.
         assert_eq!(Q4K8::SIZE, Q4K8::SOURCE);
         assert_eq!(Q6K8::SIZE, Q6K8::SOURCE);
+        assert_eq!(Q5_08::SIZE, Q5_08::SOURCE);
     }
 
     #[test]
@@ -619,6 +808,79 @@ mod tests {
             let mut back = vec![0u8; Q6K8::SOURCE];
             unrepack_q6k8(&tile, &mut back);
             assert_eq!(&back[..], &src[..], "case {case}");
+        }
+    }
+
+    fn group5(src: &[u8]) -> Vec<&[u8]> {
+        src.chunks_exact(Q5_0_BLOCK).take(8).collect()
+    }
+
+    #[test]
+    fn a_q5_0_tile_gives_the_blocks_back() {
+        let mut rng = Rng(0x0bad_f00d_5a5a_1234);
+        for case in 0..8 {
+            // All zeros, all ones, both fifth-bit extremes, and random bytes.
+            let src: Vec<u8> = match case {
+                0 => vec![0u8; 8 * Q5_0_BLOCK],
+                1 => vec![0xffu8; 8 * Q5_0_BLOCK],
+                2 => {
+                    let mut v = vec![0u8; 8 * Q5_0_BLOCK];
+                    for r in 0..8 {
+                        v[r * Q5_0_BLOCK + 2..r * Q5_0_BLOCK + 6].copy_from_slice(&[0, 0, 0, 0]);
+                    }
+                    v
+                }
+                3 => {
+                    let mut v = vec![0u8; 8 * Q5_0_BLOCK];
+                    for r in 0..8 {
+                        v[r * Q5_0_BLOCK + 2..r * Q5_0_BLOCK + 6]
+                            .copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+                    }
+                    v
+                }
+                _ => rng.bytes(8 * Q5_0_BLOCK),
+            };
+            let mut tile = vec![0u8; Q5_08::SIZE];
+            repack_q5_08(&group5(&src), &mut tile);
+            let mut back = vec![0u8; Q5_08::SOURCE];
+            unrepack_q5_08(&tile, &mut back);
+            assert_eq!(&back[..], &src[..], "case {case}");
+        }
+    }
+
+    #[test]
+    fn the_q5_0_tile_holds_each_row_where_the_layout_says() {
+        let mut rng = Rng(0xfeed_5a5a_dead_0001);
+        let src = rng.bytes(8 * Q5_0_BLOCK);
+        let mut tile = vec![0u8; Q5_08::SIZE];
+        repack_q5_08(&group5(&src), &mut tile);
+        for r in 0..8 {
+            assert_eq!(
+                &tile[Q5_D + r * 2..Q5_D + r * 2 + 2],
+                &src[r * Q5_0_BLOCK..r * Q5_0_BLOCK + 2]
+            );
+            let qh = u32::from_le_bytes([
+                src[r * Q5_0_BLOCK + 2],
+                src[r * Q5_0_BLOCK + 3],
+                src[r * Q5_0_BLOCK + 4],
+                src[r * Q5_0_BLOCK + 5],
+            ]);
+            for h in 0..Q5_0_WINDOWS {
+                assert_eq!(
+                    tile[Q5_QH + h * 8 + r],
+                    (qh >> (8 * h)) as u8,
+                    "row {r} group {h}'s fifth bits"
+                );
+            }
+            for w in 0..2 {
+                for k in 0..8 {
+                    assert_eq!(
+                        tile[Q5_QS + w * Q5_WINDOW + r * Q5_QS_ROW + k],
+                        src[r * Q5_0_BLOCK + 6 + w * 8 + k],
+                        "row {r} window {w} byte {k}"
+                    );
+                }
+            }
         }
     }
 

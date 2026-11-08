@@ -1,5 +1,6 @@
 //! The load-time k-quant repack (S3.4, step 1): the Q4_K and Q6_K matrices of a
-//! model file, rewritten into eight-row tiles.
+//! model file, rewritten into eight-row tiles, and the Q5_0 matrices of a model
+//! whose shape forces the legacy format (the small-model prefill fix).
 //!
 //! The repacked GEMM of S3.4 multiplies eight output rows at once, so the weights of
 //! eight rows have to sit side by side; the layout is [`peregrine_kernels::kq`]'s.
@@ -8,7 +9,7 @@
 //!
 //! # Which matrices
 //!
-//! Every Q4_K and Q6_K matrix of the file, except:
+//! Every Q4_K, Q6_K and Q5_0 matrix of the file, except:
 //!
 //! * the token embedding, which is gathered row by row and never multiplied, so the
 //!   repacked layout would mean nothing to it;
@@ -43,6 +44,7 @@ pub fn tile_size(kind: Format) -> Option<usize> {
     match kind {
         Format::Q4_K => Some(peregrine_kernels::kq::Q4K8::SIZE),
         Format::Q6_K => Some(peregrine_kernels::kq::Q6K8::SIZE),
+        Format::Q5_0 => Some(peregrine_kernels::kq::Q5_08::SIZE),
         _ => None,
     }
 }
@@ -165,6 +167,7 @@ fn repack_matrix(file: &Gguf, e: &KqEntry, t: &TensorInfo, dst: &mut [u8]) {
             let out = &mut dst[at..at + tile];
             match e.kind {
                 Format::Q4_K => peregrine_kernels::kq::repack_q4k8(&blocks, out),
+                Format::Q5_0 => peregrine_kernels::kq::repack_q5_08(&blocks, out),
                 _ => peregrine_kernels::kq::repack_q6k8(&blocks, out),
             }
         }
@@ -179,6 +182,7 @@ mod tests {
     fn the_tile_sizes_are_the_layouts_own() {
         assert_eq!(tile_size(Format::Q4_K), Some(1152));
         assert_eq!(tile_size(Format::Q6_K), Some(1680));
+        assert_eq!(tile_size(Format::Q5_0), Some(176));
         assert_eq!(tile_size(Format::F16), None);
         assert_eq!(tile_size(Format::Q8_0), None);
     }

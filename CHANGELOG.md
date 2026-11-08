@@ -35,6 +35,19 @@ All notable changes to this project are documented here. The format follows
   16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
 
 ### Added
+- A repacked eight-row store for **Q5_0** (`Q5_08`, 176 bytes = 8 × 22, size-neutral) and an AVX2
+  GEMM/GEMV on it, for the small "Q4_K_M" files whose `d_model` is not a multiple of 256 and whose
+  matrices llama.cpp therefore left at Q5_0. The tile groups the fifth bits by eight-weight window
+  (one byte per row per window), so the activation keeps its ordinary per-32 layout: no interleave
+  to build, no 256-alignment requirement, and the GEMV and GEMM are one code path, bit-identical per
+  row. Gated by the existing `PEREGRINE_KREPACK` (on below the AVX-512 tier, off on it); rows past
+  the last whole group of eight keep the per-row kernel. With the repack off, decode uses the
+  eight-row Q5_0/Q8_0 GEMV above and Q8_0 does regardless (it has no repacked layout). On bluefin,
+  5 alternating rounds against the tree #104 lands on: Qwen2.5-0.5B prefill 271.7 → 458.2 tok/s at
+  512 and 206.5 → 299.8 at 4096, decode 71.6 → 83.6 and 58.8 → 65.5; SmolLM2-360M 299.1 → 436.5 /
+  199.9 → 261.1 and 88.4 → 109.8 / 57.3 → 64.5; Llama-3.2-1B flat. Against llama.cpp v0.9.0 at its
+  faster flash-attention setting per row, the small models are 1.43×/1.20× (0.5B prefill at 512
+  and 4096) and 1.09×/1.27× (decode); the 360M is 1.27×/1.12× and 1.17×/1.42×.
 - `PEREGRINE_PROF2=1` makes `peregrine bench` print a per-token phase breakdown (matmuls
   by projection, attention, norms, quantisation, RoPE, KV writes, residuals, SwiGLU,
   barrier wait); `=full` adds the attention subtimers. Off by default, no timers in the

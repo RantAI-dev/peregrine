@@ -39,7 +39,7 @@
 #![cfg(target_arch = "x86_64")]
 #![cfg_attr(not(feature = "fmt-kquant"), allow(dead_code))]
 
-use crate::kq::{KqActs, ACT_GROUP, Q4K8};
+use crate::kq::{KqActs, ACT_GROUP, Q4K8, Q5_08};
 use crate::quant::QuantAct;
 use std::arch::x86_64::*;
 
@@ -486,6 +486,236 @@ pub unsafe fn q4k8_gemv(tile: &[u8], n_sb: usize, acts: &[QuantAct], nb: usize, 
     }
 }
 
+// ---------------------------------------------------------------------------
+// The repacked Q5_0 kernels
+// ---------------------------------------------------------------------------
+
+/// The lane order `vphaddd` leaves the eight row sums in.
+///
+/// `vphaddd(s_lo, s_hi)` sums the two int32 lanes of each row: lanes 0..3 are
+/// rows 0, 1 of the low half and 0, 1 of the high half, lanes 4..7 the other
+/// four. `Q5_LANES[k]` is the natural row of sum lane `k`.
+#[cfg(feature = "fmt-legacy")]
+static Q5_LANES: [i32; 8] = [0, 1, 4, 5, 2, 3, 6, 7];
+
+/// The bit each of a window's eight fifth-bits is tested against.
+#[cfg(feature = "fmt-legacy")]
+static Q5_BITS: [u8; 32] = {
+    let mut t = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        t[i] = 1u8 << (i % 8);
+        i += 1;
+    }
+    t
+};
+
+/// The shuffle that spreads the low four rows' fifth-bit bytes across a vector.
+///
+/// Output byte `r * 8 + k` takes source byte `r`, so the row's eight-bit mask is
+/// repeated eight times and the `Q5_BITS` test below reads one bit per byte.
+#[cfg(feature = "fmt-legacy")]
+static Q5_SPREAD_LO: [u8; 32] = {
+    let mut t = [0u8; 32];
+    let mut r = 0;
+    while r < 4 {
+        let mut k = 0;
+        while k < 8 {
+            t[r * 8 + k] = r as u8;
+            k += 1;
+        }
+        r += 1;
+    }
+    t
+};
+
+/// The same for the high four rows.
+#[cfg(feature = "fmt-legacy")]
+static Q5_SPREAD_HI: [u8; 32] = {
+    let mut t = [0u8; 32];
+    let mut r = 0;
+    while r < 4 {
+        let mut k = 0;
+        while k < 8 {
+            t[r * 8 + k] = (r + 4) as u8;
+            k += 1;
+        }
+        r += 1;
+    }
+    t
+};
+
+/// Eight output rows of a repacked Q5_0 tile against `N` activation rows.
+///
+/// One Q5_0 block is 32 weights, so the eight-row tile is one block per row: the
+/// weight side is four eight-weight windows, each a 32-byte vector holding four
+/// rows' eight nibbles. The fifth bits are spread with two `vpshufb`s per window
+/// (`Q5_SPREAD_LO`/`_HI`) and OR'd into the nibbles to make the 5-bit codes.
+///
+/// The eight `vpmaddubsw` of a block accumulate in int16 and the block's row
+/// sums come out in int32 with one `vphaddd`; the scale is per block, so the
+/// float fold happens once per block per activation, with the same expression
+/// the scalar reference uses. That is what keeps a row's bits independent of the
+/// batch: there is only one path, and `N` only says how many independent rows
+/// ride along.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C. The tile
+/// must hold `n_blk` tiles, and the activation must carry the per-32 layout.
+#[target_feature(enable = "avx2,fma,f16c")]
+#[cfg(feature = "fmt-legacy")]
+unsafe fn q5_08_group<const N: usize>(
+    tile: &[u8],
+    n_blk: usize,
+    acts: &[QuantAct],
+    out: &mut [f32],
+) {
+    assert!((1..=4).contains(&N), "one to four activation rows");
+    assert!(out.len() >= N * ROWS, "the output holds eight rows per row");
+    let lownib = _mm256_set1_epi8(0x0F);
+    let bits = _mm256_loadu_si256(Q5_BITS.as_ptr() as *const __m256i);
+    let ten = _mm256_set1_epi8(0x10);
+    let ctl_lo = _mm256_loadu_si256(Q5_SPREAD_LO.as_ptr() as *const __m256i);
+    let ctl_hi = _mm256_loadu_si256(Q5_SPREAD_HI.as_ptr() as *const __m256i);
+    let lanes = _mm256_loadu_si256(Q5_LANES.as_ptr() as *const __m256i);
+    let ones = _mm256_set1_epi16(1);
+    let mut facc = [_mm256_setzero_ps(); N];
+    for t in 0..n_blk {
+        let b = tile.as_ptr().add(t * Q5_08::SIZE);
+        // The eight scales, in the lane order the `vphaddd` leaves the sums in.
+        let dv = _mm256_castsi256_ps(_mm256_permutevar8x32_epi32(
+            _mm256_castps_si256(_mm256_cvtph_ps(_mm_loadu_si128(
+                b.add(crate::kq::q5_d()) as *const __m128i
+            ))),
+            lanes,
+        ));
+        let mut acc_lo = [_mm256_setzero_si256(); N];
+        let mut acc_hi = [_mm256_setzero_si256(); N];
+        // The tile stores each of the sixteen nibble bytes once, so two
+        // logical eight-weight groups share a physical window: the kernel loads
+        // the window's two 32-byte halves once and reads them as low and then
+        // high nibbles. Logical group `h = w + 2·half`.
+        for w in 0..2 {
+            let a = _mm256_loadu_si256(
+                b.add(crate::kq::q5_qs() + w * crate::kq::Q5_WINDOW) as *const __m256i
+            );
+            let c = _mm256_loadu_si256(
+                b.add(crate::kq::q5_qs() + w * crate::kq::Q5_WINDOW + 32) as *const __m256i
+            );
+            for half in 0..2 {
+                let h = w + 2 * half;
+                // The eight rows' fifth bits for this group, one byte each,
+                // spread to one byte per weight per row and turned into 0x10/0.
+                let mask = _mm256_set1_epi64x(
+                    (b.add(crate::kq::q5_qh() + h * 8) as *const u64).read_unaligned() as i64,
+                );
+                let hi_lo = _mm256_and_si256(
+                    _mm256_cmpeq_epi8(
+                        _mm256_and_si256(_mm256_shuffle_epi8(mask, ctl_lo), bits),
+                        bits,
+                    ),
+                    ten,
+                );
+                let hi_hi = _mm256_and_si256(
+                    _mm256_cmpeq_epi8(
+                        _mm256_and_si256(_mm256_shuffle_epi8(mask, ctl_hi), bits),
+                        bits,
+                    ),
+                    ten,
+                );
+                let (nlo, nhi) = if half == 0 {
+                    (_mm256_and_si256(a, lownib), _mm256_and_si256(c, lownib))
+                } else {
+                    (
+                        _mm256_and_si256(_mm256_srli_epi16(a, 4), lownib),
+                        _mm256_and_si256(_mm256_srli_epi16(c, 4), lownib),
+                    )
+                };
+                let clo = _mm256_or_si256(nlo, hi_lo);
+                let chi = _mm256_or_si256(nhi, hi_hi);
+                for u in 0..N {
+                    let av = _mm256_set1_epi64x(
+                        (acts[u].q.as_ptr().add(t * crate::kq::Q5_0_WEIGHTS + h * 8) as *const u64)
+                            .read_unaligned() as i64,
+                    );
+                    // Four groups of two products per int16 lane: 8 · 31 · 127 =
+                    // 31 496, inside int16 (`the_q5_0_int16_stage_has_headroom`).
+                    acc_lo[u] = _mm256_add_epi16(acc_lo[u], _mm256_maddubs_epi16(clo, av));
+                    acc_hi[u] = _mm256_add_epi16(acc_hi[u], _mm256_maddubs_epi16(chi, av));
+                }
+            }
+        }
+        for u in 0..N {
+            let s = _mm256_hadd_epi32(
+                _mm256_madd_epi16(acc_lo[u], ones),
+                _mm256_madd_epi16(acc_hi[u], ones),
+            );
+            // The bias identity: codes are 0..31 with offset 16, so subtract
+            // 16·Σq once per block, exactly, in int32.
+            let sum = _mm256_set1_epi32(*acts[u].sums.get_unchecked(t));
+            let x = _mm256_sub_epi32(s, _mm256_slli_epi32(sum, 4));
+            let dv_dk = _mm256_mul_ps(dv, _mm256_set1_ps(*acts[u].d.get_unchecked(t)));
+            facc[u] = _mm256_fmadd_ps(dv_dk, _mm256_cvtepi32_ps(x), facc[u]);
+        }
+    }
+    let mut lane = [0f32; ROWS];
+    for u in 0..N {
+        _mm256_storeu_ps(lane.as_mut_ptr(), facc[u]);
+        for k in 0..ROWS {
+            out[u * ROWS + Q5_LANES[k] as usize] = lane[k];
+        }
+    }
+}
+
+/// Eight output rows of a repacked Q5_0 tile against `nb` activation rows.
+///
+/// The activation is the ordinary per-32 `QuantAct` layout, so there is no
+/// interleave to build and the GEMV and the GEMM read the same bytes. Both use
+/// `q5_08_group`, so a row's result is bit-identical at every batch width.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+#[cfg(feature = "fmt-legacy")]
+pub unsafe fn q5_08_gemm(tile: &[u8], n_blk: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
+    assert!(
+        !acts.is_empty() && nb <= acts.len(),
+        "more activations than rows"
+    );
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let mut b = 0;
+    while b + 4 <= nb {
+        q5_08_group::<4>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]);
+        b += 4;
+    }
+    match nb - b {
+        3 => q5_08_group::<3>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        2 => q5_08_group::<2>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        1 => q5_08_group::<1>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        _ => {}
+    }
+}
+
+/// Eight output rows of a repacked Q5_0 tile against one to three activations.
+///
+/// The decode path. It is the batched kernel with a narrow batch — the same
+/// arithmetic, so the GEMV and the GEMM agree bit for bit.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+#[cfg(feature = "fmt-legacy")]
+pub unsafe fn q5_08_gemv(tile: &[u8], n_blk: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
+    assert!((1..=3).contains(&nb), "the GEMV takes one to three rows");
+    q5_08_gemm(tile, n_blk, acts, nb, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,6 +758,27 @@ mod tests {
             let rows: Vec<Vec<u8>> = (0..8).map(|_| q4k_block(rng)).collect();
             let refs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
             crate::kq::repack_q4k8(&refs, &mut tile[sb * Q4K8::SIZE..(sb + 1) * Q4K8::SIZE]);
+        }
+        tile
+    }
+
+    /// One Q5_0 block with a sane scale and random codes.
+    #[cfg(feature = "fmt-legacy")]
+    pub fn q5_0_block(rng: &mut Rng) -> Vec<u8> {
+        let mut b = rng.bytes(crate::kq::Q5_0_BLOCK);
+        // A small positive scale, so the products stay in a sane float range.
+        b[0..2].copy_from_slice(&crate::quant::f32_to_f16(0.01).to_le_bytes());
+        b
+    }
+
+    /// A tile of eight rows and `n_blk` Q5_0 blocks.
+    #[cfg(feature = "fmt-legacy")]
+    pub fn q5_08_tile(rng: &mut Rng, n_blk: usize) -> Vec<u8> {
+        let mut tile = vec![0u8; n_blk * Q5_08::SIZE];
+        for t in 0..n_blk {
+            let rows: Vec<Vec<u8>> = (0..8).map(|_| q5_0_block(rng)).collect();
+            let refs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+            crate::kq::repack_q5_08(&refs, &mut tile[t * Q5_08::SIZE..(t + 1) * Q5_08::SIZE]);
         }
         tile
     }
@@ -838,6 +1089,163 @@ mod tests {
                         "min of lane {k} of sub-block {j}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The Q5_0 int16 stage's bound: four `vpmaddubsw` reach an int16 lane
+    /// before the widening, i.e. eight products of a 31 code and a 127
+    /// activation.
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn the_q5_0_int16_stage_has_headroom() {
+        let bound = 8 * 31 * 127;
+        assert!(bound <= i16::MAX as i32, "the int16 lanes would wrap");
+        assert!(-bound >= i16::MIN as i32);
+        if !crate::simd::have_batched() {
+            return;
+        }
+        unsafe {
+            // The weights at their largest code (31) against the activation at
+            // the largest magnitude in both directions, four madds deep.
+            let codes = _mm256_set1_epi8(31);
+            for a in [127i8, -127] {
+                let av = _mm256_set1_epi8(a);
+                let one = _mm256_maddubs_epi16(codes, av);
+                let mut acc = _mm256_setzero_si256();
+                for _ in 0..4 {
+                    acc = _mm256_add_epi16(acc, one);
+                }
+                let mut lanes = [0i16; 16];
+                _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, acc);
+                let want = 8 * 31 * a as i32;
+                assert!(
+                    lanes.iter().all(|&l| l as i32 == want),
+                    "the int16 lane is {lanes:?}, not {want}"
+                );
+            }
+        }
+    }
+
+    /// Every batch width, against the scalar reference — and every width of
+    /// activation, so the block count the store can hold is covered too.
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn every_q5_0_batch_width_agrees_with_the_reference() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        for n_blk in [1usize, 3, 4, 10, 28, 32] {
+            let n = n_blk * 32;
+            let mut rng = Rng(0x5EED_5A5A_1234_9876 ^ n_blk as u64);
+            let tile = q5_08_tile(&mut rng, n_blk);
+            let batch = acts(&mut rng, 20, n);
+            for nb in 1..=20usize {
+                let mut got = vec![0.0f32; nb * 8];
+                unsafe {
+                    if nb < 4 {
+                        q5_08_gemv(&tile, n_blk, &batch[..nb], nb, &mut got)
+                    } else {
+                        q5_08_gemm(&tile, n_blk, &batch[..nb], nb, &mut got)
+                    }
+                }
+                for b in 0..nb {
+                    for r in 0..8 {
+                        let want = crate::kq::dot_q5_08_ref(&tile, n_blk, r, &batch[b]);
+                        assert!(
+                            ulps(got[b * 8 + r], want) <= 1,
+                            "n_blk {n_blk} nb {nb}: row {r} of batch {b} is {} not {want}",
+                            got[b * 8 + r]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The GEMV and the GEMM agree bit for bit, including a row that starts in
+    /// the middle of a group (the linear layer computes whole tiles, so a
+    /// worker's range can begin inside one).
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn the_q5_0_gemv_and_gemm_agree_bit_for_bit() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        let n_blk = 28;
+        let n = n_blk * 32;
+        let mut rng = Rng(0x5EED_5A5A_ABCD_0001);
+        let tile = q5_08_tile(&mut rng, n_blk);
+        let batch = acts(&mut rng, 12, n);
+
+        let mut gemm = vec![0.0f32; 12 * 8];
+        unsafe { q5_08_gemm(&tile, n_blk, &batch, 12, &mut gemm) };
+        for nb in 1..=3 {
+            let mut gemv = vec![0.0f32; 3 * 8];
+            unsafe { q5_08_gemv(&tile, n_blk, &batch[..nb], nb, &mut gemv) };
+            for b in 0..nb {
+                for r in 0..8 {
+                    assert_eq!(
+                        gemv[b * 8 + r].to_bits(),
+                        gemm[b * 8 + r].to_bits(),
+                        "the GEMV and the GEMM disagree on row {r} of batch {b}"
+                    );
+                }
+            }
+        }
+        // A mid-batch start: rows 5..9 as their own batch agree with the wide
+        // run. The kernel has no cross-row state, so this is the property the
+        // dynamic row claiming relies on.
+        let mut part = vec![0.0f32; 4 * 8];
+        unsafe { q5_08_gemm(&tile, n_blk, &batch[5..], 4, &mut part) };
+        for b in 0..4 {
+            for r in 0..8 {
+                assert_eq!(
+                    part[b * 8 + r].to_bits(),
+                    gemm[(b + 5) * 8 + r].to_bits(),
+                    "the mid-batch start disagrees on row {r} of batch {b}"
+                );
+            }
+        }
+    }
+
+    /// The repacked tile, unrepacked, is the same weights as the file: the
+    /// ordinary scalar kernel and the repacked one compute the same real
+    /// number, to the last bit or two.
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn the_q5_0_tile_matches_the_ordinary_scalar_kernel() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        let n_blk = 4;
+        let n = n_blk * 32;
+        let mut rng = Rng(0x5EED_5A5A_0DDF_0001);
+        let tile = q5_08_tile(&mut rng, n_blk);
+        let batch = acts(&mut rng, 2, n);
+        // The file's bytes, eight rows, for the scalar kernel.
+        let mut blocks = vec![0u8; 8 * n_blk * crate::kq::Q5_0_BLOCK];
+        for t in 0..n_blk {
+            let mut back = vec![0u8; Q5_08::SOURCE];
+            crate::kq::unrepack_q5_08(&tile[t * Q5_08::SIZE..(t + 1) * Q5_08::SIZE], &mut back);
+            for r in 0..8 {
+                let at = (r * n_blk + t) * crate::kq::Q5_0_BLOCK;
+                blocks[at..at + crate::kq::Q5_0_BLOCK]
+                    .copy_from_slice(&back[r * crate::kq::Q5_0_BLOCK..][..crate::kq::Q5_0_BLOCK]);
+            }
+        }
+        let mut got = vec![0.0f32; 2 * 8];
+        unsafe { q5_08_gemm(&tile, n_blk, &batch, 2, &mut got) };
+        for b in 0..2 {
+            for r in 0..8 {
+                let row =
+                    &blocks[r * n_blk * crate::kq::Q5_0_BLOCK..][..n_blk * crate::kq::Q5_0_BLOCK];
+                let want = crate::quant::dot_scalar(crate::format::Format::Q5_0, row, &batch[b]);
+                assert!(
+                    ulps(got[b * 8 + r], want) <= 4,
+                    "row {r} of batch {b}: {} against the scalar kernel's {want}",
+                    got[b * 8 + r]
+                );
             }
         }
     }

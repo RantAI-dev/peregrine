@@ -118,8 +118,8 @@ pub struct EngineOptions {
     pub wide: bool,
     /// `PEREGRINE_TILES=0` turns off the repacked row tiles for ternary weights.
     pub tiles: bool,
-    /// `PEREGRINE_KREPACK`: repack the k-quant matrices into eight-row tiles and multiply them with
-    /// the repacked kernels. On by default below the AVX-512 tier; off by default on it, where only
+    /// `PEREGRINE_KREPACK`: repack the k-quant matrices (and Q5_0) into eight-row tiles and
+    /// multiply them with the repacked kernels. On by default below the AVX-512 tier; off by default on it, where only
     /// the AVX2 repacked kernel exists and decode is slower with it (S3.4 decision 9). The switch
     /// overrides the default in both directions.
     pub kq_repack: bool,

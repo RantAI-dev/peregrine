@@ -1,9 +1,9 @@
-//! The k-quant store (S3.4): the Q4_K and Q6_K matrices, repacked into eight-row
-//! tiles at load, and the repacked kernel that multiplies them.
+//! The k-quant store (S3.4): the Q4_K, Q6_K and Q5_0 matrices, repacked into
+//! eight-row tiles at load, and the repacked kernel that multiplies them.
 //!
 //! With the repack on, the loader rewrites every eligible matrix into the repacked
-//! layout and keeps the result in the model's k-quant store, and the Q4_K matrices
-//! are multiplied from it. The repacked kernel reduces a super-block's eight
+//! layout and keeps the result in the model's k-quant store, and the Q4_K and
+//! Q5_0 matrices are multiplied from it. The repacked kernel reduces a super-block's eight
 //! position classes in int32, where the ordinary kernel reduces them in float at
 //! the very end, so the two compute the same real number with a different
 //! rounding: the logits move in the last bits (the design note's §4.2).
@@ -43,13 +43,14 @@ fn tile_size(kind: Format) -> usize {
     match kind {
         Format::Q4_K => Q4K8::SIZE,
         Format::Q6_K => Q6K8::SIZE,
+        Format::Q5_0 => peregrine_kernels::kq::Q5_08::SIZE,
         other => panic!("{other:?} has no repacked layout"),
     }
 }
 
 /// Whether the store takes this tensor: the rule the loader uses.
 fn eligible(t: &TensorInfo) -> bool {
-    matches!(t.kind, Format::Q4_K | Format::Q6_K)
+    matches!(t.kind, Format::Q4_K | Format::Q6_K | Format::Q5_0)
         && t.dims.len() == 2
         && t.name != EMBEDDING
         && t.dims[1] as usize >= TILE_ROWS
@@ -93,7 +94,7 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
     );
 
     let dir = tmpdir("store");
-    for fmt in [Format::Q4_K, Format::Q6_K] {
+    for fmt in [Format::Q4_K, Format::Q6_K, Format::Q5_0] {
         let path = write_dense(&dir, "llama", fmt, 4242, Dense::default());
         let g = Gguf::open(&path).expect("the synthetic model opens");
 
@@ -157,7 +158,7 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
         let (b, acts) = prefill(&model);
         assert_eq!(a.len(), b.len());
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            if fmt == Format::Q4_K {
+            if matches!(fmt, Format::Q4_K | Format::Q5_0) {
                 // The repacked kernel's fold: the same real number, rounded
                 // once instead of twice. This bound holds here only because a
                 // random-weight model doesn't amplify the few-ulp difference; a
@@ -175,7 +176,9 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
                 );
             }
         }
-        if fmt == Format::Q4_K && peregrine_kernels::table::MatKernels::get().kq_tiles() {
+        if matches!(fmt, Format::Q4_K | Format::Q5_0)
+            && peregrine_kernels::table::MatKernels::get().kq_tiles()
+        {
             // The repacked tile reads the activation once per eight output rows
             // instead of once per row: the activation traffic falls by the
             // same factor. This is the design note's claim, measured. (Only
@@ -203,6 +206,7 @@ fn check_matrix(kind: Format, src: &[u8], stored: &[u8], rows: usize, cols: usiz
             let t = &stored[at..at + tile];
             match kind {
                 Format::Q4_K => unrepack_q4k8(t, &mut back),
+                Format::Q5_0 => peregrine_kernels::kq::unrepack_q5_08(t, &mut back),
                 _ => unrepack_q6k8(t, &mut back),
             }
             for r in 0..8 {
