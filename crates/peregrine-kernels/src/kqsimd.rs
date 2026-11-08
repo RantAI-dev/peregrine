@@ -1,5 +1,5 @@
-//! The repacked Q4_K kernels (S3.4, step 2): the AVX2 GEMM and GEMV over the
-//! eight-row tiles of [`crate::kq::Q4K8`].
+//! The repacked k-quant kernels (S3.4): the AVX2 and AVX-512 GEMM and GEMV over
+//! the eight-row tiles of [`crate::kq::Q4K8`] and [`crate::kq::Q5_08`].
 //!
 //! # What the repack buys
 //!
@@ -29,12 +29,20 @@
 //! computed in a batch (the GEMM, prefill) therefore agree bit for bit — the
 //! batch-invariance requirement of the design note's decisions 8 and 9.
 //!
-//! # The int16 stage
+//! # The int16 stage, and the AVX-512 kernel
 //!
-//! The int16 accumulator holds sixteen products per lane: eight `vpmaddubsw`
-//! results, two products each. The bound is `16 · 15 · 127 = 30 480`, inside
-//! int16's 32 767 — the same bound the design note works out, and the test
-//! `the_int16_stage_has_headroom` in this file asserts it.
+//! The AVX2 kernel's int16 accumulator holds sixteen products per lane: eight
+//! `vpmaddubsw` results, two products each. The bound is `16 · 15 · 127 =
+//! 30 480`, inside int16's 32 767 — the same bound the design note works out,
+//! and the test `the_int16_stage_has_headroom` in this file asserts it.
+//!
+//! The AVX-512 kernel (`q4k8_gemm_zmm`, `q5_08_gemm_zmm`, ...) has no int16
+//! stage at all: `vpdpbusd` accumulates four products per int32 lane, and the
+//! scale is applied with an exact int32 multiply on a different execution unit
+//! from the byte dot product. It computes the same integers and folds them the
+//! same way, so a row has the same bits as on the AVX2 tier — the test
+//! `the_avx512_kernel_agrees_with_the_avx2_one_bit_for_bit` asserts it at every
+//! batch width.
 
 #![cfg(target_arch = "x86_64")]
 #![cfg_attr(not(feature = "fmt-kquant"), allow(dead_code))]
@@ -445,7 +453,9 @@ pub unsafe fn q4k8_gemm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out:
         "the output holds fewer than eight rows per activation"
     );
     let src = Interleaved { acts };
-    let groups = acts.groups();
+    // The batch's groups, not the buffer's: a caller may pass a narrower `nb`
+    // than the interleaved buffer holds.
+    let groups = nb.div_ceil(ACT_GROUP);
     for g in 0..groups {
         let b0 = g * ACT_GROUP;
         let n = (nb - b0).min(ACT_GROUP);
@@ -483,6 +493,247 @@ pub unsafe fn q4k8_gemv(tile: &[u8], n_sb: usize, acts: &[QuantAct], nb: usize, 
         1 => q4k8_group::<_, 1>(tile, n_sb, &src, 0, out),
         2 => q4k8_group::<_, 2>(tile, n_sb, &src, 0, out),
         _ => q4k8_group::<_, 3>(tile, n_sb, &src, 0, out),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The AVX-512 kernel (S3.4 follow-up): the same eight-row tiles, 64 bytes at a time
+// ---------------------------------------------------------------------------
+//
+// A ZMM holds a whole window — eight rows' eight bytes — so the AVX2 kernel's
+// transpose and lane permutation disappear: the tile's window is already eight
+// rows side by side. `vpdpbusd` then accumulates four byte products per int32
+// lane, and the eight rows fall out in natural order (two int32 lanes per row),
+// with no int16 stage at all: there is no saturation question, because every
+// partial sum is an int32 (`the_avx512_int32_stage_has_headroom` asserts the
+// bound).
+//
+// The arithmetic is kept identical to the AVX2 kernel, not merely close. The
+// scale multiply is exact int32 either way, the min term is exact int32 either
+// way, and the float fold is the same expression with the same operands in the
+// same order, so a row has the same bits on the AVX-512 tier as on the AVX2 one
+// and the AVX-512 goldens do not move.
+
+/// Whether the AVX-512 repacked kernel can run: 512-bit integer byte/dword
+/// arithmetic, VNNI's byte dot product, and the AVX2 baseline the fold needs.
+#[inline]
+pub fn have_zmm512() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        crate::cpu_has!("avx512f")
+            && crate::cpu_has!("avx512bw")
+            && crate::cpu_has!("avx512vl")
+            && crate::cpu_has!("avx512vnni")
+            && crate::cpu_has!("fma")
+            && crate::cpu_has!("f16c")
+    })
+}
+
+/// The eight bytes at `p`, broadcast to the whole register.
+///
+/// The activation operand of a ZMM `vpdpbusd`: one window's eight codes of an
+/// activation row, repeated eight times so that it lines up with the eight rows
+/// of the weight operand.
+#[inline(always)]
+unsafe fn bcast8(p: *const u8) -> __m512i {
+    _mm512_set1_epi64(std::ptr::read_unaligned(p as *const i64))
+}
+
+/// The index that duplicates each of eight int32 values, one per 32-bit lane
+/// pair: the scale operand of the int32 multiply, two lanes per row.
+static DUP2: [i32; 16] = {
+    let mut t = [0i32; 16];
+    let mut i = 0;
+    while i < 16 {
+        t[i] = (i / 2) as i32;
+        i += 1;
+    }
+    t
+};
+
+/// The eight rows' six-bit scale of sub-block `j`, twice per row, as int32.
+///
+/// `vpdpbusd` leaves two int32 partials per row; multiplying each by the same
+/// scale and adding the pair is exact, so the scale never needs the int16 stage
+/// the AVX2 kernel's `vpmaddwd` uses.
+#[inline(always)]
+unsafe fn scale32(t: *const u8, j: usize) -> __m512i {
+    let sc = unpack6(t.add(crate::kq::q4_scm() + j * crate::kq::Q4_SCM_STRIDE));
+    _mm512_permutexvar_epi32(
+        _mm512_loadu_si512(DUP2.as_ptr() as *const __m512i),
+        _mm512_zextsi256_si512(sc),
+    )
+}
+
+/// The even int32 lanes of `v + swap_adjacent(v)`, in the low eight lanes.
+///
+/// `sumi` carries two int32 partials per row (the two halves of a sub-block);
+/// the fold wants their exact sum, one lane per row.
+static EVEN: [i32; 16] = {
+    let mut t = [0i32; 16];
+    let mut i = 0;
+    while i < 8 {
+        t[i] = (2 * i) as i32;
+        i += 1;
+    }
+    t
+};
+
+/// The exact sum of the two int32 partials of each row, in the low eight lanes.
+#[inline(always)]
+unsafe fn compact8(v: __m512i) -> __m256i {
+    let s = _mm512_add_epi32(v, _mm512_shuffle_epi32(v, 0xB1));
+    _mm512_castsi512_si256(_mm512_permutexvar_epi32(
+        _mm512_loadu_si512(EVEN.as_ptr() as *const __m512i),
+        s,
+    ))
+}
+
+/// Eight output rows of a repacked Q4_K tile against `N` activation rows, on the
+/// AVX-512 tier.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`]. The tile must hold `n_sb`
+/// tiles, and the activation must carry the per-256 layout.
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+unsafe fn q4k8_group_zmm<S: ActSrc, const N: usize>(
+    tile: &[u8],
+    n_sb: usize,
+    src: &S,
+    row0: usize,
+    out: &mut [f32],
+) {
+    assert!((1..=ACT_GROUP).contains(&N), "one to four activation rows");
+    assert!(out.len() >= N * ROWS, "the output holds eight rows per row");
+    let lownib = _mm512_set1_epi8(0x0F);
+    let mut facc = [_mm256_setzero_ps(); N];
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q4K8::SIZE);
+        // The tile's rows are in natural order, so no lane permutation is needed.
+        let dv = _mm256_cvtph_ps(_mm_loadu_si128(t.add(crate::kq::q4_d()) as *const __m128i));
+        let dminv = _mm256_cvtph_ps(_mm_loadu_si128(
+            t.add(crate::kq::q4_dmin()) as *const __m128i
+        ));
+        let mut sumi = [_mm512_setzero_si512(); N];
+        let mut mt = [_mm256_setzero_si256(); N];
+        // One window feeds two sub-blocks: its low nibbles are the weights of
+        // sub-block 2g and its high nibbles sub-block 2g+1.
+        for g in 0..WINDOWS / 4 {
+            let mut lo32 = [_mm512_setzero_si512(); N];
+            let mut hi32 = [_mm512_setzero_si512(); N];
+            for k in 0..4 {
+                let w = g * 4 + k;
+                let v = _mm512_loadu_si512(t.add(crate::kq::q4_qs() + w * 64) as *const __m512i);
+                let vlo = _mm512_and_si512(v, lownib);
+                let vhi = _mm512_and_si512(_mm512_srli_epi16(v, 4), lownib);
+                for u in 0..N {
+                    let q = src.quads(row0 + u, sb, w);
+                    // The low nibbles pair with the activation's first eight
+                    // codes of the window, the high nibbles with the second
+                    // eight (32 weights further along the row). VNNI's byte dot
+                    // product accumulates straight into int32: no int16 stage,
+                    // no saturation, and four products per lane per window.
+                    lo32[u] = _mm512_dpbusd_epi32(lo32[u], vlo, bcast8(q[0]));
+                    hi32[u] = _mm512_dpbusd_epi32(hi32[u], vhi, bcast8(q[2]));
+                }
+            }
+            // The scale multiply, on the int32 partials: each of a row's two
+            // partials is multiplied by the same six-bit scale and added, which
+            // is exact. The int32 multiply runs on a different port from the
+            // byte dot product, so it does not compete with it.
+            let svlo = scale32(t, 2 * g);
+            let svhi = scale32(t, 2 * g + 1);
+            for u in 0..N {
+                sumi[u] = _mm512_add_epi32(sumi[u], _mm512_mullo_epi32(lo32[u], svlo));
+                sumi[u] = _mm512_add_epi32(sumi[u], _mm512_mullo_epi32(hi32[u], svhi));
+            }
+        }
+        // The min term: the rows' six-bit mins against the activation's
+        // per-sub-block sums. Every product is at most 63 · 4064 and every
+        // partial sum at most 2 048 256, so the int32 chain and the float chain
+        // the fold runs round to the same bits.
+        for j in 0..SUBS {
+            let mv = unpack6(t.add(crate::kq::q4_scm() + j * crate::kq::Q4_SCM_STRIDE + 6));
+            for u in 0..N {
+                mt[u] = _mm256_add_epi32(
+                    mt[u],
+                    _mm256_mullo_epi32(mv, _mm256_set1_epi32(src.min_sum(row0 + u, sb, j))),
+                );
+            }
+        }
+        for u in 0..N {
+            facc[u] = fold(
+                facc[u],
+                compact8(sumi[u]),
+                _mm256_cvtepi32_ps(mt[u]),
+                dv,
+                dminv,
+                src.scale(row0 + u, sb),
+            );
+        }
+    }
+    // The eight lanes are the eight output rows, in the tile's own order.
+    let mut lane = [0f32; ROWS];
+    for u in 0..N {
+        _mm256_storeu_ps(lane.as_mut_ptr(), facc[u]);
+        out[(row0 + u) * ROWS..(row0 + u) * ROWS + ROWS].copy_from_slice(&lane);
+    }
+}
+
+/// Eight output rows of a repacked Q4_K tile against a batch of activations, on
+/// the AVX-512 tier. Same groups and tail handling as [`q4k8_gemm`].
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`].
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+pub unsafe fn q4k8_gemm_zmm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let src = Interleaved { acts };
+    let groups = nb.div_ceil(ACT_GROUP);
+    for g in 0..groups {
+        let b0 = g * ACT_GROUP;
+        let n = (nb - b0).min(ACT_GROUP);
+        match n {
+            4 => q4k8_group_zmm::<_, 4>(tile, n_sb, &src, b0, out),
+            3 => q4k8_group_zmm::<_, 3>(tile, n_sb, &src, b0, out),
+            2 => q4k8_group_zmm::<_, 2>(tile, n_sb, &src, b0, out),
+            1 => q4k8_group_zmm::<_, 1>(tile, n_sb, &src, b0, out),
+            0 => break,
+            _ => unreachable!("a group holds four activation rows"),
+        }
+    }
+}
+
+/// Eight output rows of a repacked Q4_K tile against one to three activations,
+/// on the AVX-512 tier. Same plain activation and the same fold as the GEMM.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`].
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+pub unsafe fn q4k8_gemv_zmm(
+    tile: &[u8],
+    n_sb: usize,
+    acts: &[QuantAct],
+    nb: usize,
+    out: &mut [f32],
+) {
+    assert!((1..=3).contains(&nb), "the GEMV takes one to three rows");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let src = Plain { acts };
+    match nb {
+        1 => q4k8_group_zmm::<_, 1>(tile, n_sb, &src, 0, out),
+        2 => q4k8_group_zmm::<_, 2>(tile, n_sb, &src, 0, out),
+        _ => q4k8_group_zmm::<_, 3>(tile, n_sb, &src, 0, out),
     }
 }
 
@@ -714,6 +965,167 @@ pub unsafe fn q5_08_gemm(tile: &[u8], n_blk: usize, acts: &[QuantAct], nb: usize
 pub unsafe fn q5_08_gemv(tile: &[u8], n_blk: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
     assert!((1..=3).contains(&nb), "the GEMV takes one to three rows");
     q5_08_gemm(tile, n_blk, acts, nb, out)
+}
+
+/// The shuffle that spreads the eight rows' fifth-bit bytes across a ZMM.
+///
+/// Output byte `r * 8 + k` takes source byte `r` of the 128-bit lane, and every
+/// lane of the broadcast holds the same eight bytes, so one control serves all
+/// eight rows.
+#[cfg(feature = "fmt-legacy")]
+static Q5_SPREAD_ZMM: [u8; 64] = {
+    let mut t = [0u8; 64];
+    let mut lane = 0;
+    while lane < 4 {
+        let mut k = 0;
+        while k < 8 {
+            t[lane * 16 + k] = (2 * lane) as u8;
+            t[lane * 16 + 8 + k] = (2 * lane + 1) as u8;
+            k += 1;
+        }
+        lane += 1;
+    }
+    t
+};
+
+/// Eight output rows of a repacked Q5_0 tile against `N` activation rows, on the
+/// AVX-512 tier.
+///
+/// One Q5_0 block is 32 weights, so the eight-row tile is one block per row: the
+/// weight side is two 64-byte windows, each holding eight rows' eight nibbles.
+/// The fifth bits are spread with one `vpshufb` per group and OR'd into the
+/// nibbles to make the 5-bit codes, and `vpdpbusd` accumulates the four groups
+/// of a block straight into int32: no int16 stage, no saturation.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`]. The tile must hold `n_blk`
+/// tiles, and the activation must carry the per-32 layout.
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+#[cfg(feature = "fmt-legacy")]
+unsafe fn q5_08_group_zmm<const N: usize>(
+    tile: &[u8],
+    n_blk: usize,
+    acts: &[QuantAct],
+    out: &mut [f32],
+) {
+    assert!((1..=4).contains(&N), "one to four activation rows");
+    assert!(out.len() >= N * ROWS, "the output holds eight rows per row");
+    let lownib = _mm512_set1_epi8(0x0F);
+    let ten = _mm512_set1_epi8(0x10);
+    let ctl = _mm512_loadu_si512(Q5_SPREAD_ZMM.as_ptr() as *const __m512i);
+    // The bit each of a group's eight weights is tested against: byte `k` of a
+    // row carries weight `8·group + k`, so it is tested against `1 << k`.
+    let bitmask = _mm512_set1_epi64(0x8040_2010_0804_0201u64 as i64);
+    let mut facc = [_mm256_setzero_ps(); N];
+    for t in 0..n_blk {
+        let b = tile.as_ptr().add(t * Q5_08::SIZE);
+        // The tile's rows are in natural order: no lane permutation is needed.
+        let dv = _mm256_cvtph_ps(_mm_loadu_si128(b.add(crate::kq::q5_d()) as *const __m128i));
+        let mut acc = [_mm512_setzero_si512(); N];
+        for w in 0..2 {
+            let v = _mm512_loadu_si512(
+                b.add(crate::kq::q5_qs() + w * crate::kq::Q5_WINDOW) as *const __m512i
+            );
+            let vlo = _mm512_and_si512(v, lownib);
+            let vhi = _mm512_and_si512(_mm512_srli_epi16(v, 4), lownib);
+            for half in 0..2 {
+                let h = w + 2 * half;
+                // The group's eight fifth bits, one byte per row, spread to one
+                // byte per weight per row and turned into 0x10 or 0.
+                let mask = _mm512_set1_epi64(
+                    (b.add(crate::kq::q5_qh() + h * 8) as *const u64).read_unaligned() as i64,
+                );
+                let hi = _mm512_maskz_mov_epi8(
+                    _mm512_cmpeq_epi8_mask(
+                        _mm512_and_si512(_mm512_shuffle_epi8(mask, ctl), bitmask),
+                        bitmask,
+                    ),
+                    ten,
+                );
+                let codes = if half == 0 {
+                    _mm512_or_si512(vlo, hi)
+                } else {
+                    _mm512_or_si512(vhi, hi)
+                };
+                for u in 0..N {
+                    let av =
+                        bcast8(acts[u].q.as_ptr().add(t * crate::kq::Q5_0_WEIGHTS + h * 8)
+                            as *const u8);
+                    acc[u] = _mm512_dpbusd_epi32(acc[u], codes, av);
+                }
+            }
+        }
+        for u in 0..N {
+            // The bias identity: codes are 0..31 with offset 16, so subtract
+            // 16·Σq once per block, exactly, in int32.
+            let s = compact8(acc[u]);
+            let sum = _mm256_set1_epi32(*acts[u].sums.get_unchecked(t));
+            let x = _mm256_sub_epi32(s, _mm256_slli_epi32(sum, 4));
+            let dv_dk = _mm256_mul_ps(dv, _mm256_set1_ps(*acts[u].d.get_unchecked(t)));
+            facc[u] = _mm256_fmadd_ps(dv_dk, _mm256_cvtepi32_ps(x), facc[u]);
+        }
+    }
+    let mut lane = [0f32; ROWS];
+    for u in 0..N {
+        _mm256_storeu_ps(lane.as_mut_ptr(), facc[u]);
+        out[u * ROWS..u * ROWS + ROWS].copy_from_slice(&lane);
+    }
+}
+
+/// Eight output rows of a repacked Q5_0 tile against `nb` activation rows, on
+/// the AVX-512 tier.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`].
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+#[cfg(feature = "fmt-legacy")]
+pub unsafe fn q5_08_gemm_zmm(
+    tile: &[u8],
+    n_blk: usize,
+    acts: &[QuantAct],
+    nb: usize,
+    out: &mut [f32],
+) {
+    assert!(
+        !acts.is_empty() && nb <= acts.len(),
+        "more activations than rows"
+    );
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let mut b = 0;
+    while b + 4 <= nb {
+        q5_08_group_zmm::<4>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]);
+        b += 4;
+    }
+    match nb - b {
+        3 => q5_08_group_zmm::<3>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        2 => q5_08_group_zmm::<2>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        1 => q5_08_group_zmm::<1>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        _ => {}
+    }
+}
+
+/// Eight output rows of a repacked Q5_0 tile against one to three activations,
+/// on the AVX-512 tier.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`].
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+#[cfg(feature = "fmt-legacy")]
+pub unsafe fn q5_08_gemv_zmm(
+    tile: &[u8],
+    n_blk: usize,
+    acts: &[QuantAct],
+    nb: usize,
+    out: &mut [f32],
+) {
+    assert!((1..=3).contains(&nb), "the GEMV takes one to three rows");
+    q5_08_gemm_zmm(tile, n_blk, acts, nb, out)
 }
 
 #[cfg(test)]
@@ -997,6 +1409,244 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// The AVX-512 kernel against the AVX2 one and the scalar reference: the
+    /// same bits, at every batch width, because the fold is the same expression.
+    #[test]
+    fn the_avx512_kernel_agrees_with_the_avx2_one_bit_for_bit() {
+        if !crate::simd::have_batched() || !have_zmm512() {
+            return;
+        }
+        for n_sb in [1usize, 3, 8, 32] {
+            let n = n_sb * 256;
+            let mut rng = Rng(0x5EED_512A_1234_0001 ^ n_sb as u64);
+            let tile = q4k8_tile(&mut rng, n_sb);
+            let batch = acts(&mut rng, 20, n);
+            let mut kq = KqActs::default();
+            kq.fill(&batch);
+            for nb in 1..=20usize {
+                let mut avx2 = vec![0.0f32; nb * 8];
+                let mut zmm = vec![0.0f32; nb * 8];
+                unsafe {
+                    if nb < 4 {
+                        q4k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut avx2);
+                        q4k8_gemv_zmm(&tile, n_sb, &batch[..nb], nb, &mut zmm);
+                    } else {
+                        q4k8_gemm(&tile, n_sb, &kq, nb, &mut avx2);
+                        q4k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut zmm);
+                    }
+                }
+                for i in 0..nb * 8 {
+                    assert_eq!(
+                        avx2[i].to_bits(),
+                        zmm[i].to_bits(),
+                        "n_sb {n_sb} nb {nb} element {i}: {} against {}",
+                        zmm[i],
+                        avx2[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// A mid-batch start: rows 5..9 as their own batch agree with the wide run,
+    /// which is what the dynamic row claiming relies on.
+    #[test]
+    fn the_avx512_kernel_has_no_cross_row_state() {
+        if !crate::simd::have_batched() || !have_zmm512() {
+            return;
+        }
+        let n_sb = 4;
+        let n = n_sb * 256;
+        let mut rng = Rng(0x5EED_512A_ABCD_0002);
+        let tile = q4k8_tile(&mut rng, n_sb);
+        let batch = acts(&mut rng, 12, n);
+        let mut kq = KqActs::default();
+        kq.fill(&batch);
+        let mut wide = vec![0.0f32; 12 * 8];
+        unsafe { q4k8_gemm_zmm(&tile, n_sb, &kq, 12, &mut wide) };
+        for (start, nb) in [(0usize, 4usize), (5, 4), (7, 5), (9, 3)] {
+            // A worker's range can begin inside a batch: the caller rebuilds the
+            // interleaved buffer from its slice (the GEMV reads the plain rows
+            // directly).
+            let mut sub = KqActs::default();
+            sub.fill(&batch[start..]);
+            let mut part = vec![0.0f32; nb * 8];
+            unsafe {
+                if nb < 4 {
+                    q4k8_gemv_zmm(&tile, n_sb, &batch[start..], nb, &mut part)
+                } else {
+                    q4k8_gemm_zmm(&tile, n_sb, &sub, nb, &mut part)
+                }
+            }
+            for b in 0..nb {
+                for r in 0..8 {
+                    assert_eq!(
+                        part[b * 8 + r].to_bits(),
+                        wide[(b + start) * 8 + r].to_bits(),
+                        "start {start} nb {nb}: row {r} of batch {b}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The AVX-512 int32 stage's bound: with `vpdpbusd` the partial sums are
+    /// int32, so the only question is whether a lane can overflow.
+    ///
+    /// A sub-block's int32 lane holds sixteen products of a 15 code and a 127
+    /// activation (four windows, four products each): 16 · 15 · 127 = 30 480,
+    /// times the six-bit scale 63 gives 1 920 240, and the eight sub-blocks of a
+    /// super-block sum to 15 361 920 — 0.7 % of int32's range. No saturation is
+    /// possible, unlike the int16 stage the AVX2 kernel needs.
+    #[test]
+    fn the_avx512_int32_stage_has_headroom() {
+        let lane = 16 * 15 * 127;
+        let scaled = lane * 63;
+        let super_block = 8 * scaled;
+        assert!(super_block < i32::MAX as i64, "the int32 lane would wrap");
+        // The min term: 8 sub-blocks of 63 · 4064.
+        assert!(8 * 63 * 4064 < i32::MAX as i64);
+        // And the float conversion the fold does is exact for the int32 sums.
+        assert!(super_block < 1 << 24, "the fold would round an integer");
+        if !crate::simd::have_batched() || !have_zmm512() {
+            return;
+        }
+        unsafe {
+            // The largest code against the largest activation, sixteen products
+            // deep, in both directions.
+            let codes = _mm512_set1_epi8(0x0F);
+            for a in [127i8, -127] {
+                let av = _mm512_set1_epi8(a);
+                let one = _mm512_dpbusd_epi32(_mm512_setzero_si512(), codes, av);
+                let mut acc = _mm512_setzero_si512();
+                for _ in 0..4 {
+                    acc = _mm512_add_epi32(acc, one);
+                }
+                let mut lanes = [0i32; 16];
+                _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, acc);
+                let want = 16 * 15 * a as i32;
+                assert!(
+                    lanes.iter().all(|&l| l == want),
+                    "the int32 lane is {lanes:?}, not {want}"
+                );
+            }
+        }
+    }
+
+    /// The AVX-512 Q5_0 kernel against the AVX2 one and the reference: the same
+    /// bits, at every batch width.
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn the_avx512_q5_0_kernel_agrees_with_the_avx2_one_bit_for_bit() {
+        if !crate::simd::have_batched() || !have_zmm512() {
+            return;
+        }
+        for n_blk in [1usize, 3, 4, 10, 28] {
+            let n = n_blk * 32;
+            let mut rng = Rng(0x5EED_512A_5A5A_0003 ^ n_blk as u64);
+            let tile = q5_08_tile(&mut rng, n_blk);
+            let batch = acts(&mut rng, 20, n);
+            for nb in 1..=20usize {
+                let mut avx2 = vec![0.0f32; nb * 8];
+                let mut zmm = vec![0.0f32; nb * 8];
+                unsafe {
+                    if nb < 4 {
+                        q5_08_gemv(&tile, n_blk, &batch[..nb], nb, &mut avx2);
+                        q5_08_gemv_zmm(&tile, n_blk, &batch[..nb], nb, &mut zmm);
+                    } else {
+                        q5_08_gemm(&tile, n_blk, &batch[..nb], nb, &mut avx2);
+                        q5_08_gemm_zmm(&tile, n_blk, &batch[..nb], nb, &mut zmm);
+                    }
+                }
+                for b in 0..nb {
+                    for r in 0..8 {
+                        assert_eq!(
+                            avx2[b * 8 + r].to_bits(),
+                            zmm[b * 8 + r].to_bits(),
+                            "n_blk {n_blk} nb {nb}: row {r} of batch {b} is {} not {}",
+                            zmm[b * 8 + r],
+                            avx2[b * 8 + r]
+                        );
+                        let want = crate::kq::dot_q5_08_ref(&tile, n_blk, r, &batch[b]);
+                        assert!(
+                            ulps(zmm[b * 8 + r], want) <= 1,
+                            "the reference disagrees: {} against {want}",
+                            zmm[b * 8 + r]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The AVX-512 Q5_0 kernel has no cross-row state: a batch that starts in
+    /// the middle of a group agrees with the wide run.
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn the_avx512_q5_0_kernel_has_no_cross_row_state() {
+        if !crate::simd::have_batched() || !have_zmm512() {
+            return;
+        }
+        let n_blk = 28;
+        let n = n_blk * 32;
+        let mut rng = Rng(0x5EED_512A_5A5A_0004);
+        let tile = q5_08_tile(&mut rng, n_blk);
+        let batch = acts(&mut rng, 12, n);
+        let mut wide = vec![0.0f32; 12 * 8];
+        unsafe { q5_08_gemm_zmm(&tile, n_blk, &batch, 12, &mut wide) };
+        for (start, nb) in [(0usize, 4usize), (5, 4), (7, 5), (9, 3)] {
+            let mut part = vec![0.0f32; nb * 8];
+            unsafe {
+                if nb < 4 {
+                    q5_08_gemv_zmm(&tile, n_blk, &batch[start..], nb, &mut part)
+                } else {
+                    q5_08_gemm_zmm(&tile, n_blk, &batch[start..], nb, &mut part)
+                }
+            }
+            for b in 0..nb {
+                for r in 0..8 {
+                    assert_eq!(
+                        part[b * 8 + r].to_bits(),
+                        wide[(b + start) * 8 + r].to_bits(),
+                        "start {start} nb {nb}: row {r} of batch {b}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The AVX-512 Q5_0 int32 stage's bound: four byte products per lane per
+    /// block, and a block is 32 weights — at most 32 · 31 · 127 = 125 984, and
+    /// the code is at most 31, so nothing can overflow.
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn the_avx512_q5_0_int32_stage_has_headroom() {
+        let bound = 32 * 31 * 127;
+        assert!(bound < i32::MAX as i64);
+        assert!(bound < 1 << 24, "the fold would round an integer");
+        if !crate::simd::have_batched() || !have_zmm512() {
+            return;
+        }
+        unsafe {
+            let codes = _mm512_set1_epi8(31);
+            for a in [127i8, -127] {
+                let av = _mm512_set1_epi8(a);
+                let one = _mm512_dpbusd_epi32(_mm512_setzero_si512(), codes, av);
+                let mut acc = _mm512_setzero_si512();
+                for _ in 0..4 {
+                    acc = _mm512_add_epi32(acc, one);
+                }
+                let mut lanes = [0i32; 16];
+                _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, acc);
+                let want = 16 * 31 * a as i32;
+                assert!(
+                    lanes.iter().all(|&l| l == want),
+                    "the int32 lane is {lanes:?}, not {want}"
+                );
             }
         }
     }
