@@ -16,6 +16,22 @@ own memory-bandwidth ceiling.
 
 > **Status: early.** The engine works and is measured, but the API, CLI and crate layout will change as the [roadmap](docs/roadmap.md) lands.
 
+## Biggest wins
+
+Against llama.cpp v0.9.0 on the same machine, model file and thread count:
+
+![Where Peregrine is fastest against llama.cpp](docs/img/bench-wins.svg)
+
+- **Single-user decode up to 1.43× faster** (Llama 3.2 1B at a 4096-token context, 12-core desktop),
+  and ahead in 5 of 7 confirmed cases. The lead grows with context: attention reads each cached
+  key and value once per group of heads.
+- **1.48× the throughput with 10 users at once** on a 4-core Ryzen 3 (Llama 3.2 1B).
+- **Prompt processing level with llama.cpp on AVX2** after the repacked Q4_K kernels (+46% on Llama
+  3.2 1B).
+
+Losses are in the same report: the 0.5B model at a short context, and prompt processing on the
+desktop. Every number, chart and machine record is in [docs/benchmark.md](docs/benchmark.md).
+
 ## Progress
 
 As of November 2026; the plan with every item is in the [roadmap](docs/roadmap.md).
@@ -142,6 +158,7 @@ cargo build --release -p peregrine --no-default-features --features cli,arch-qwe
 |---|---|
 | [Product](docs/product.md) | what Peregrine is, who it is for, what it will not do |
 | [Targets](docs/targets.md) | the speed, accuracy and support numbers we hold ourselves to |
+| [Benchmarks](docs/benchmark.md) | Peregrine against llama.cpp, wins and losses, with charts |
 | [Roadmap](docs/roadmap.md) | the plan, stage by stage |
 | [Architecture](ARCHITECTURE.md) | a map of the code |
 | [Contributing](CONTRIBUTING.md) | how to build, test, benchmark and send changes |
