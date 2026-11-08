@@ -282,6 +282,7 @@ fn batched_kernels_agree_on_rows_of_the_real_model() {
 
 /// Total-order key of a finite float, so `ulps` counts representable values between
 /// two numbers regardless of sign.
+#[cfg(target_arch = "x86_64")]
 fn f32_ord(x: f32) -> u32 {
     let u = x.to_bits();
     if u & 0x8000_0000 != 0 {
@@ -291,6 +292,7 @@ fn f32_ord(x: f32) -> u32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn ulps(a: f32, b: f32) -> u32 {
     f32_ord(a).abs_diff(f32_ord(b))
 }
@@ -307,6 +309,7 @@ fn ulps(a: f32, b: f32) -> u32 {
 /// checked against the scalar twin of the kernel's fold within one ULP: the
 /// kernels reorder the float sum, but not by more than the last bit of the result.
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn q5_0_wide_windows_are_invariant_and_match_the_scalar_fold() {
     use peregrine_core::quant::dot_batch;
     if !peregrine_core::simd::have_batched() {
@@ -382,6 +385,7 @@ fn q5_0_wide_windows_are_invariant_and_match_the_scalar_fold() {
 
 /// The row's codes as `dot_scalar` reads them: 32 per block, `[0,31]` for Q5_0 and
 /// signed for Q8_0.
+#[cfg(target_arch = "x86_64")]
 fn block_codes(fmt: Format, blk: &[u8], out: &mut [i32; 32]) {
     match fmt {
         Format::Q5_0 => {
@@ -406,6 +410,7 @@ fn block_codes(fmt: Format, blk: &[u8], out: &mut [i32; 32]) {
 /// The scalar twin of `wide_q5_0` / `wide_q8_0`: four contiguous products per
 /// integer lane, each lane converted to `f32` and fused into its own accumulator
 /// once per block, then the eight lanes reduced in `hsum_ps`'s order.
+#[cfg(target_arch = "x86_64")]
 fn fold_reference(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
     let bb = fmt.block_bytes();
     let mut acc = [0.0f32; 8];
