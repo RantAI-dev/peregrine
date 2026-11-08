@@ -46,9 +46,10 @@
         feature = "fmt-mxfp4",
         feature = "fmt-legacy"
     )),
-    allow(dead_code)
+    allow(dead_code, unused_imports)
 )]
 
+use crate::cpu::have_avx_vnni;
 use crate::format::{f16, Format};
 use crate::quant::QuantAct;
 use std::arch::x86_64::*;
@@ -82,6 +83,13 @@ unsafe fn dot32_u8_i8(codes: __m256i, acts: __m256i) -> i32 {
     hsum_i32(_mm256_madd_epi16(prod, _mm256_set1_epi16(1)))
 }
 
+/// `Σ codes·acts` for 32 unsigned codes against 32 signed activations via `VPDPBUSD`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn dot32_u8_i8_vnni(codes: __m256i, acts: __m256i) -> i32 {
+    let prod = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), codes, acts);
+    hsum_i32(prod)
+}
+
 #[inline(always)]
 unsafe fn acts32(a: &QuantAct, block: usize) -> __m256i {
     _mm256_loadu_si256(a.q.as_ptr().add(block * 32) as *const __m256i)
@@ -99,6 +107,23 @@ unsafe fn dot_q8_0(w: &[u8], a: &QuantAct) -> f32 {
         let absw = _mm256_sign_epi8(wq, wq);
         let sa = _mm256_sign_epi8(aq, wq);
         let s = dot32_u8_i8(absw, sa);
+        acc += f16(u16::from_le_bytes([blk[0], blk[1]])) * a.d[b] * s as f32;
+    }
+    acc
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available.
+/// `w` must have at least 34 bytes per block and `a` must hold activations.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn dot_q8_0_vnni(w: &[u8], a: &QuantAct) -> f32 {
+    let mut acc = 0.0f32;
+    for (b, blk) in w.chunks_exact(34).enumerate() {
+        let wq = _mm256_loadu_si256(blk.as_ptr().add(2) as *const __m256i);
+        let aq = acts32(a, b);
+        let absw = _mm256_sign_epi8(wq, wq);
+        let sa = _mm256_sign_epi8(aq, wq);
+        let s = dot32_u8_i8_vnni(absw, sa);
         acc += f16(u16::from_le_bytes([blk[0], blk[1]])) * a.d[b] * s as f32;
     }
     acc
@@ -145,6 +170,24 @@ unsafe fn dot_q4_0(w: &[u8], a: &QuantAct) -> f32 {
     acc
 }
 
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available.
+/// `w` must have at least 18 bytes per block and `a` must hold activations.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn dot_q4_0_vnni(w: &[u8], a: &QuantAct) -> f32 {
+    let lownib = _mm256_set1_epi8(0x0F);
+    let mut acc = 0.0f32;
+    for (b, blk) in w.chunks_exact(18).enumerate() {
+        let qs = _mm_loadu_si128(blk.as_ptr().add(2) as *const __m128i);
+        let lo = _mm_and_si128(qs, _mm256_castsi256_si128(lownib));
+        let hi = _mm_and_si128(_mm_srli_epi16(qs, 4), _mm256_castsi256_si128(lownib));
+        let codes = _mm256_set_m128i(hi, lo);
+        let s = dot32_u8_i8_vnni(codes, acts32(a, b));
+        acc += f16(u16::from_le_bytes([blk[0], blk[1]])) * a.d[b] * (s - 8 * a.sums[b]) as f32;
+    }
+    acc
+}
+
 #[target_feature(enable = "avx2")]
 unsafe fn dot_q5_0(w: &[u8], a: &QuantAct) -> f32 {
     let lownib = _mm256_set1_epi8(0x0F);
@@ -160,6 +203,26 @@ unsafe fn dot_q5_0(w: &[u8], a: &QuantAct) -> f32 {
         let codes = _mm256_or_si256(nib, q5_high_bits(qh));
         let s = dot32_u8_i8(codes, acts32(a, b));
         // Codes are [0,31] with offset 16: one correction for the whole block.
+        acc += f16(u16::from_le_bytes([blk[0], blk[1]])) * a.d[b] * (s - 16 * a.sums[b]) as f32;
+    }
+    acc
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available.
+/// `w` must have at least 22 bytes per block and `a` must hold activations.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn dot_q5_0_vnni(w: &[u8], a: &QuantAct) -> f32 {
+    let lownib = _mm256_set1_epi8(0x0F);
+    let mut acc = 0.0f32;
+    for (b, blk) in w.chunks_exact(22).enumerate() {
+        let qh = u32::from_le_bytes([blk[2], blk[3], blk[4], blk[5]]);
+        let qs = _mm_loadu_si128(blk.as_ptr().add(6) as *const __m128i);
+        let lo = _mm_and_si128(qs, _mm256_castsi256_si128(lownib));
+        let hi = _mm_and_si128(_mm_srli_epi16(qs, 4), _mm256_castsi256_si128(lownib));
+        let nib = _mm256_set_m128i(hi, lo);
+        let codes = _mm256_or_si256(nib, q5_high_bits(qh));
+        let s = dot32_u8_i8_vnni(codes, acts32(a, b));
         acc += f16(u16::from_le_bytes([blk[0], blk[1]])) * a.d[b] * (s - 16 * a.sums[b]) as f32;
     }
     acc
@@ -383,11 +446,29 @@ unsafe fn q4k_fold(
 pub unsafe fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
     match fmt {
         #[cfg(feature = "fmt-legacy")]
-        Format::Q8_0 => dot_q8_0(w, a),
+        Format::Q8_0 => {
+            if have_avx_vnni() {
+                dot_q8_0_vnni(w, a)
+            } else {
+                dot_q8_0(w, a)
+            }
+        }
         #[cfg(feature = "fmt-legacy")]
-        Format::Q4_0 => dot_q4_0(w, a),
+        Format::Q4_0 => {
+            if have_avx_vnni() {
+                dot_q4_0_vnni(w, a)
+            } else {
+                dot_q4_0(w, a)
+            }
+        }
         #[cfg(feature = "fmt-legacy")]
-        Format::Q5_0 => dot_q5_0(w, a),
+        Format::Q5_0 => {
+            if have_avx_vnni() {
+                dot_q5_0_vnni(w, a)
+            } else {
+                dot_q5_0(w, a)
+            }
+        }
         // The k-quants run on the per-256 tiles at width one: integer
         // accumulation across the super-block, one float scale per 256.
         #[cfg(feature = "fmt-kquant")]
@@ -405,19 +486,31 @@ pub unsafe fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
         #[cfg(feature = "fmt-kquant")]
         Format::Q4_K => {
             let mut o = [0.0f32];
-            tile_q4_k::<1>(w, std::slice::from_ref(a), &mut o);
+            if have_avx_vnni() {
+                tile_q4_k_vnni::<1>(w, std::slice::from_ref(a), &mut o);
+            } else {
+                tile_q4_k::<1>(w, std::slice::from_ref(a), &mut o);
+            }
             o[0]
         }
         #[cfg(feature = "fmt-kquant")]
         Format::Q5_K => {
             let mut o = [0.0f32];
-            tile_q5_k::<1>(w, std::slice::from_ref(a), &mut o);
+            if have_avx_vnni() {
+                tile_q5_k_vnni::<1>(w, std::slice::from_ref(a), &mut o);
+            } else {
+                tile_q5_k::<1>(w, std::slice::from_ref(a), &mut o);
+            }
             o[0]
         }
         #[cfg(feature = "fmt-kquant")]
         Format::Q6_K => {
             let mut o = [0.0f32];
-            tile_q6_k::<1>(w, std::slice::from_ref(a), &mut o);
+            if have_avx_vnni() {
+                tile_q6_k_vnni::<1>(w, std::slice::from_ref(a), &mut o);
+            } else {
+                tile_q6_k::<1>(w, std::slice::from_ref(a), &mut o);
+            }
             o[0]
         }
         #[cfg(feature = "fmt-iq")]
@@ -514,6 +607,24 @@ unsafe fn madd_offset_ps<const SHIFT: i32>(
 unsafe fn madd_ps(codes: __m256i, acts: __m256i) -> __m256 {
     let prod = _mm256_maddubs_epi16(codes, acts);
     _mm256_cvtepi32_ps(_mm256_madd_epi16(prod, _mm256_set1_epi16(1)))
+}
+
+/// `Σ codes·acts − offset·Σacts` as eight exact i32 lane sums, converted to f32 via `VPDPBUSD`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn dpbusd_offset_ps<const SHIFT: i32>(
+    codes: __m256i,
+    acts: __m256i,
+    lane_sums: *const i32,
+) -> __m256 {
+    let s = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), codes, acts);
+    let ls = _mm256_loadu_si256(lane_sums as *const __m256i);
+    _mm256_cvtepi32_ps(_mm256_sub_epi32(s, _mm256_slli_epi32(ls, SHIFT)))
+}
+
+/// `Σ codes·acts` as eight f32 partial sums via `VPDPBUSD`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn dpbusd_ps(codes: __m256i, acts: __m256i) -> __m256 {
+    _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), codes, acts))
 }
 
 #[cfg(test)]
@@ -845,6 +956,300 @@ unsafe fn tile_q6_k<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]
         for t in 0..T {
             let a = &acts[t];
             // Offset 32 on every code: subtract 32·Σ(scale_run · Σqk_run), exact in integers.
+            let bs = _mm256_loadu_si256(a.bsums.as_ptr().add(sb * 16) as *const __m256i);
+            let off = _mm256_slli_epi32(_mm256_madd_epi16(sc16, bs), 5);
+            let v = _mm256_sub_epi32(sumi[t], off);
+            acc[t] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(v), _mm256_set1_ps(d * a.dk[sb]), acc[t]);
+        }
+    }
+    for t in 0..T {
+        out[t] = hsum_ps(acc[t]);
+    }
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `tile_q8_0`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn tile_q8_0_vnni<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let mut acc = [_mm256_setzero_ps(); T];
+    for (b, blk) in w.chunks_exact(34).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 1);
+        let wq = _mm256_loadu_si256(blk.as_ptr().add(2) as *const __m256i);
+        let absw = _mm256_sign_epi8(wq, wq);
+        let dw = f16_at(blk, 0);
+        for t in 0..T {
+            let a = &acts[t];
+            let sa = _mm256_sign_epi8(acts32(a, b), wq);
+            acc[t] = _mm256_fmadd_ps(dpbusd_ps(absw, sa), _mm256_set1_ps(dw * a.d[b]), acc[t]);
+        }
+    }
+    for t in 0..T {
+        out[t] = hsum_ps(acc[t]);
+    }
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `tile_q4_0`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn tile_q4_0_vnni<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let lownib = _mm256_set1_epi8(0x0F);
+    let nib_shift = _mm256_set_epi64x(4, 4, 0, 0);
+    let nblk = w.len() / 18;
+    for a in &acts[..T] {
+        assert!(a.d.len() >= nblk && a.q.len() >= nblk * 32 && a.lane_sums.len() >= nblk * 8);
+    }
+    let mut acc = [_mm256_setzero_ps(); T];
+    for (b, blk) in w.chunks_exact(18).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 1);
+        let qs =
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(blk.as_ptr().add(2) as *const __m128i));
+        let codes = _mm256_and_si256(_mm256_srlv_epi64(qs, nib_shift), lownib);
+        let dw = f16_at4(blk.as_ptr());
+        for t in 0..T {
+            let a = &acts[t];
+            let v = dpbusd_offset_ps::<3>(codes, acts32(a, b), a.lane_sums.as_ptr().add(b * 8));
+            acc[t] = _mm256_fmadd_ps(v, _mm256_set1_ps(dw * *a.d.get_unchecked(b)), acc[t]);
+        }
+    }
+    for t in 0..T {
+        out[t] = hsum_ps(acc[t]);
+    }
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `tile_q5_0`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn tile_q5_0_vnni<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let lownib = _mm256_set1_epi8(0x0F);
+    let nib_shift = _mm256_set_epi64x(4, 4, 0, 0);
+    let nblk = w.len() / 22;
+    for a in &acts[..T] {
+        assert!(a.d.len() >= nblk && a.q.len() >= nblk * 32 && a.lane_sums.len() >= nblk * 8);
+    }
+    let mut acc = [_mm256_setzero_ps(); T];
+    for (b, blk) in w.chunks_exact(22).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 1);
+        let qh = (blk.as_ptr().add(2) as *const u32).read_unaligned();
+        let qs =
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(blk.as_ptr().add(6) as *const __m128i));
+        let nib = _mm256_and_si256(_mm256_srlv_epi64(qs, nib_shift), lownib);
+        let codes = _mm256_or_si256(nib, q5_high_bits(u32::from_le(qh)));
+        let dw = f16_at4(blk.as_ptr());
+        for t in 0..T {
+            let a = &acts[t];
+            let v = dpbusd_offset_ps::<4>(codes, acts32(a, b), a.lane_sums.as_ptr().add(b * 8));
+            acc[t] = _mm256_fmadd_ps(v, _mm256_set1_ps(dw * *a.d.get_unchecked(b)), acc[t]);
+        }
+    }
+    for t in 0..T {
+        out[t] = hsum_ps(acc[t]);
+    }
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `tile_q4_k`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn tile_q4_k_vnni<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    debug_assert!(
+        acts.iter().all(|a| !a.qk.is_empty()),
+        "k-quant rows need the per-256 activation"
+    );
+    let lownib = _mm256_set1_epi8(0x0F);
+    let mut acc = [_mm256_setzero_ps(); T];
+    for (sb, blk) in w.chunks_exact(144).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 3);
+        let dv = _mm256_set1_ps(f16_at(blk, 0));
+        let dminv = _mm256_set1_ps(f16_at(blk, 2));
+        let qs = blk.as_ptr().add(16);
+        let sm = unpack_q4k_scales(&blk[4..16]);
+        let scv = [
+            _mm256_set1_epi32(sm[0] as i32),
+            _mm256_set1_epi32(sm[1] as i32),
+            _mm256_set1_epi32(sm[2] as i32),
+            _mm256_set1_epi32(sm[3] as i32),
+            _mm256_set1_epi32(sm[4] as i32),
+            _mm256_set1_epi32(sm[5] as i32),
+            _mm256_set1_epi32(sm[6] as i32),
+            _mm256_set1_epi32(sm[7] as i32),
+        ];
+        let mins16 = q4k_mins16(&sm[8..16]);
+        let mut sumi = [_mm256_setzero_si256(); T];
+        for j in 0..4 {
+            let raw = _mm256_loadu_si256(qs.add(j * 32) as *const __m256i);
+            let q4l = _mm256_and_si256(raw, lownib);
+            let q4h = _mm256_and_si256(_mm256_srli_epi16(raw, 4), lownib);
+            let (scl, sch) = (scv[2 * j], scv[2 * j + 1]);
+            for t in 0..T {
+                let base = acts[t].qk.as_ptr().add(sb * 256 + j * 64);
+                let q8l = _mm256_loadu_si256(base as *const __m256i);
+                let q8h = _mm256_loadu_si256(base.add(32) as *const __m256i);
+                let dotl = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), q4l, q8l);
+                let doth = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), q4h, q8h);
+                let pl = _mm256_mullo_epi32(dotl, scl);
+                let ph = _mm256_mullo_epi32(doth, sch);
+                sumi[t] = _mm256_add_epi32(sumi[t], _mm256_add_epi32(pl, ph));
+            }
+        }
+        for t in 0..T {
+            let a = &acts[t];
+            acc[t] = q4k_fold(
+                acc[t],
+                sumi[t],
+                mins16,
+                a.bsums.as_ptr().add(sb * 16),
+                dv,
+                dminv,
+                a.dk[sb],
+            );
+        }
+    }
+    for t in 0..T {
+        out[t] = hsum_ps(acc[t]);
+    }
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `tile_q5_k`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn tile_q5_k_vnni<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    debug_assert!(
+        acts.iter().all(|a| !a.qk.is_empty()),
+        "k-quant rows need the per-256 activation"
+    );
+    let lownib = _mm256_set1_epi8(0x0F);
+    let bit16 = _mm256_set1_epi8(0x10);
+    let mut acc = [_mm256_setzero_ps(); T];
+    for (sb, blk) in w.chunks_exact(176).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 3);
+        let dv = _mm256_set1_ps(f16_at(blk, 0));
+        let dminv = _mm256_set1_ps(f16_at(blk, 2));
+        let sm = unpack_q4k_scales(&blk[4..16]);
+        let scv = [
+            _mm256_set1_epi32(sm[0] as i32),
+            _mm256_set1_epi32(sm[1] as i32),
+            _mm256_set1_epi32(sm[2] as i32),
+            _mm256_set1_epi32(sm[3] as i32),
+            _mm256_set1_epi32(sm[4] as i32),
+            _mm256_set1_epi32(sm[5] as i32),
+            _mm256_set1_epi32(sm[6] as i32),
+            _mm256_set1_epi32(sm[7] as i32),
+        ];
+        let mins16 = q4k_mins16(&sm[8..16]);
+        let qh = _mm256_loadu_si256(blk.as_ptr().add(16) as *const __m256i);
+        let qs = blk.as_ptr().add(48);
+        let mut sumi = [_mm256_setzero_si256(); T];
+        for j in 0..4 {
+            let raw = _mm256_loadu_si256(qs.add(j * 32) as *const __m256i);
+            let q4l = _mm256_and_si256(raw, lownib);
+            let q4h = _mm256_and_si256(_mm256_srli_epi16(raw, 4), lownib);
+
+            let mask_l = _mm256_set1_epi8((1u8 << (2 * j)) as i8);
+            let set_l = _mm256_cmpeq_epi8(_mm256_and_si256(qh, mask_l), mask_l);
+            let hi_l = _mm256_and_si256(set_l, bit16);
+            let q5l = _mm256_or_si256(q4l, hi_l);
+
+            let mask_h = _mm256_set1_epi8((1u8 << (2 * j + 1)) as i8);
+            let set_h = _mm256_cmpeq_epi8(_mm256_and_si256(qh, mask_h), mask_h);
+            let hi_h = _mm256_and_si256(set_h, bit16);
+            let q5h = _mm256_or_si256(q4h, hi_h);
+
+            let (scl, sch) = (scv[2 * j], scv[2 * j + 1]);
+            for t in 0..T {
+                let base = acts[t].qk.as_ptr().add(sb * 256 + j * 64);
+                let q8l = _mm256_loadu_si256(base as *const __m256i);
+                let q8h = _mm256_loadu_si256(base.add(32) as *const __m256i);
+                let dotl = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), q5l, q8l);
+                let doth = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), q5h, q8h);
+                let pl = _mm256_mullo_epi32(dotl, scl);
+                let ph = _mm256_mullo_epi32(doth, sch);
+                sumi[t] = _mm256_add_epi32(sumi[t], _mm256_add_epi32(pl, ph));
+            }
+        }
+        for t in 0..T {
+            let a = &acts[t];
+            acc[t] = q4k_fold(
+                acc[t],
+                sumi[t],
+                mins16,
+                a.bsums.as_ptr().add(sb * 16),
+                dv,
+                dminv,
+                a.dk[sb],
+            );
+        }
+    }
+    for t in 0..T {
+        out[t] = hsum_ps(acc[t]);
+    }
+}
+
+/// # Safety
+/// `sc_ptr` must point to at least 16 bytes of scales.
+#[inline(always)]
+unsafe fn q6k_scales_32(sc_ptr: *const u8) -> [__m256i; 8] {
+    let mut out = [_mm256_setzero_si256(); 8];
+    for i in 0..8 {
+        let slo = *sc_ptr.add(2 * i) as i8 as i32;
+        let shi = *sc_ptr.add(2 * i + 1) as i8 as i32;
+        out[i] = _mm256_set_m128i(_mm_set1_epi32(shi), _mm_set1_epi32(slo));
+    }
+    out
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `tile_q6_k`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn tile_q6_k_vnni<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    debug_assert!(
+        acts.iter().all(|a| !a.qk.is_empty()),
+        "k-quant rows need the per-256 activation"
+    );
+    let lownib = _mm256_set1_epi8(0x0F);
+    let two = _mm256_set1_epi8(0x03);
+    let mut acc = [_mm256_setzero_ps(); T];
+    for (sb, blk) in w.chunks_exact(210).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 4);
+        let d = f16_at(blk, 208);
+        let sc_ptr = blk.as_ptr().add(192);
+        let sc16 = _mm256_cvtepi8_epi16(_mm_loadu_si128(sc_ptr as *const __m128i));
+        let scales = q6k_scales_32(sc_ptr);
+        let mut sumi = [_mm256_setzero_si256(); T];
+        for c in 0..2 {
+            let ql = blk.as_ptr().add(c * 64);
+            let qh = _mm256_loadu_si256(blk.as_ptr().add(128 + c * 32) as *const __m256i);
+            let ql0 = _mm256_loadu_si256(ql as *const __m256i);
+            let ql1 = _mm256_loadu_si256(ql.add(32) as *const __m256i);
+            for g in 0..4 {
+                let (base, hbits) = match g {
+                    0 => (ql0, _mm256_and_si256(qh, two)),
+                    1 => (ql1, _mm256_and_si256(_mm256_srli_epi16(qh, 2), two)),
+                    2 => (ql0, _mm256_and_si256(_mm256_srli_epi16(qh, 4), two)),
+                    _ => (ql1, _mm256_and_si256(_mm256_srli_epi16(qh, 6), two)),
+                };
+                let low = if g < 2 {
+                    _mm256_and_si256(base, lownib)
+                } else {
+                    _mm256_and_si256(_mm256_srli_epi16(base, 4), lownib)
+                };
+                let codes = _mm256_or_si256(low, _mm256_slli_epi16(hbits, 4));
+                let scale = scales[c * 4 + g];
+                let o = sb * 256 + c * 128 + g * 32;
+                for t in 0..T {
+                    let q8 = _mm256_loadu_si256(acts[t].qk.as_ptr().add(o) as *const __m256i);
+                    let dot = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), codes, q8);
+                    let p = _mm256_mullo_epi32(dot, scale);
+                    sumi[t] = _mm256_add_epi32(sumi[t], p);
+                }
+            }
+        }
+        for t in 0..T {
+            let a = &acts[t];
             let bs = _mm256_loadu_si256(a.bsums.as_ptr().add(sb * 16) as *const __m256i);
             let off = _mm256_slli_epi32(_mm256_madd_epi16(sc16, bs), 5);
             let v = _mm256_sub_epi32(sumi[t], off);
@@ -1595,6 +2000,244 @@ unsafe fn wide_q6_k(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
     }
 }
 
+/// The per-activation half of a Q4_K super-block using `VPDPBUSD`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn q4k_acts_vnni<const T: usize>(
+    q4l: &[__m256i; 4],
+    q4h: &[__m256i; 4],
+    sc: &[u8; 8],
+    acts: &[QuantAct],
+    sb: usize,
+    sumi: &mut [__m256i; 4],
+) {
+    for j in 0..4 {
+        let scl = _mm256_set1_epi32(sc[2 * j] as i32);
+        let sch = _mm256_set1_epi32(sc[2 * j + 1] as i32);
+        for t in 0..T {
+            let base = acts[t].qk.as_ptr().add(sb * 256 + j * 64);
+            let q8l = _mm256_loadu_si256(base as *const __m256i);
+            let q8h = _mm256_loadu_si256(base.add(32) as *const __m256i);
+            let dotl = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), q4l[j], q8l);
+            let doth = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), q4h[j], q8h);
+            let pl = _mm256_mullo_epi32(dotl, scl);
+            let ph = _mm256_mullo_epi32(doth, sch);
+            sumi[t] = _mm256_add_epi32(sumi[t], _mm256_add_epi32(pl, ph));
+        }
+    }
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `wide_q4_k`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn wide_q4_k_vnni(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let n = acts.len();
+    debug_assert!(n <= MAX_WIDE && acts.iter().all(|a| !a.qk.is_empty()));
+    let lownib = _mm256_set1_epi8(0x0F);
+    let mut acc = [_mm256_setzero_ps(); MAX_WIDE];
+    for (sb, blk) in w.chunks_exact(144).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 3);
+        let dv = _mm256_set1_ps(f16_at(blk, 0));
+        let dminv = _mm256_set1_ps(f16_at(blk, 2));
+        let qs = blk.as_ptr().add(16);
+        let sm = unpack_q4k_scales(&blk[4..16]);
+        let mut sc = [0u8; 8];
+        sc.copy_from_slice(&sm[0..8]);
+        let mins16 = q4k_mins16(&sm[8..16]);
+        let mut q4l = [_mm256_setzero_si256(); 4];
+        let mut q4h = [_mm256_setzero_si256(); 4];
+        for j in 0..4 {
+            let raw = _mm256_loadu_si256(qs.add(j * 32) as *const __m256i);
+            q4l[j] = _mm256_and_si256(raw, lownib);
+            q4h[j] = _mm256_and_si256(_mm256_srli_epi16(raw, 4), lownib);
+        }
+        let mut t = 0;
+        while t < n {
+            let tw = (n - t).min(TILE);
+            let mut sumi = [_mm256_setzero_si256(); 4];
+            match tw {
+                4 => q4k_acts_vnni::<4>(&q4l, &q4h, &sc, &acts[t..], sb, &mut sumi),
+                3 => q4k_acts_vnni::<3>(&q4l, &q4h, &sc, &acts[t..], sb, &mut sumi),
+                2 => q4k_acts_vnni::<2>(&q4l, &q4h, &sc, &acts[t..], sb, &mut sumi),
+                _ => q4k_acts_vnni::<1>(&q4l, &q4h, &sc, &acts[t..], sb, &mut sumi),
+            }
+            for u in 0..tw {
+                let a = &acts[t + u];
+                acc[t + u] = q4k_fold(
+                    acc[t + u],
+                    sumi[u],
+                    mins16,
+                    a.bsums.as_ptr().add(sb * 16),
+                    dv,
+                    dminv,
+                    a.dk[sb],
+                );
+            }
+            t += tw;
+        }
+    }
+    for b in 0..n {
+        out[b] = hsum_ps(acc[b]);
+    }
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `wide_q5_k`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn wide_q5_k_vnni(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let n = acts.len();
+    debug_assert!(n <= MAX_WIDE && acts.iter().all(|a| !a.qk.is_empty()));
+    let lownib = _mm256_set1_epi8(0x0F);
+    let bit16 = _mm256_set1_epi8(0x10);
+    let mut acc = [_mm256_setzero_ps(); MAX_WIDE];
+    for (sb, blk) in w.chunks_exact(176).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 3);
+        let dv = _mm256_set1_ps(f16_at(blk, 0));
+        let dminv = _mm256_set1_ps(f16_at(blk, 2));
+        let sm = unpack_q4k_scales(&blk[4..16]);
+        let mut sc = [0u8; 8];
+        sc.copy_from_slice(&sm[0..8]);
+        let mins16 = q4k_mins16(&sm[8..16]);
+        let qh = _mm256_loadu_si256(blk.as_ptr().add(16) as *const __m256i);
+        let qs = blk.as_ptr().add(48);
+        let mut q5l = [_mm256_setzero_si256(); 4];
+        let mut q5h = [_mm256_setzero_si256(); 4];
+        for j in 0..4 {
+            let raw = _mm256_loadu_si256(qs.add(j * 32) as *const __m256i);
+            let q4l = _mm256_and_si256(raw, lownib);
+            let q4h = _mm256_and_si256(_mm256_srli_epi16(raw, 4), lownib);
+
+            let mask_l = _mm256_set1_epi8((1u8 << (2 * j)) as i8);
+            let set_l = _mm256_cmpeq_epi8(_mm256_and_si256(qh, mask_l), mask_l);
+            let hi_l = _mm256_and_si256(set_l, bit16);
+            q5l[j] = _mm256_or_si256(q4l, hi_l);
+
+            let mask_h = _mm256_set1_epi8((1u8 << (2 * j + 1)) as i8);
+            let set_h = _mm256_cmpeq_epi8(_mm256_and_si256(qh, mask_h), mask_h);
+            let hi_h = _mm256_and_si256(set_h, bit16);
+            q5h[j] = _mm256_or_si256(q4h, hi_h);
+        }
+        let mut t = 0;
+        while t < n {
+            let tw = (n - t).min(TILE);
+            let mut sumi = [_mm256_setzero_si256(); 4];
+            match tw {
+                4 => q4k_acts_vnni::<4>(&q5l, &q5h, &sc, &acts[t..], sb, &mut sumi),
+                3 => q4k_acts_vnni::<3>(&q5l, &q5h, &sc, &acts[t..], sb, &mut sumi),
+                2 => q4k_acts_vnni::<2>(&q5l, &q5h, &sc, &acts[t..], sb, &mut sumi),
+                _ => q4k_acts_vnni::<1>(&q5l, &q5h, &sc, &acts[t..], sb, &mut sumi),
+            }
+            for u in 0..tw {
+                let a = &acts[t + u];
+                acc[t + u] = q4k_fold(
+                    acc[t + u],
+                    sumi[u],
+                    mins16,
+                    a.bsums.as_ptr().add(sb * 16),
+                    dv,
+                    dminv,
+                    a.dk[sb],
+                );
+            }
+            t += tw;
+        }
+    }
+    for b in 0..n {
+        out[b] = hsum_ps(acc[b]);
+    }
+}
+
+/// The per-activation half of a Q6_K super-block against its eight unpacked code
+/// vectors (`c·4 + g`), each run-scaled via `VPDPBUSD`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn q6k_acts_vnni<const T: usize>(
+    codes: &[__m256i; 8],
+    scales: &[__m256i; 8],
+    acts: &[QuantAct],
+    sb: usize,
+    sumi: &mut [__m256i; 4],
+) {
+    for c in 0..2 {
+        for g in 0..4 {
+            let scale = scales[c * 4 + g];
+            let o = sb * 256 + c * 128 + g * 32;
+            for t in 0..T {
+                let q8 = _mm256_loadu_si256(acts[t].qk.as_ptr().add(o) as *const __m256i);
+                let dot = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), codes[c * 4 + g], q8);
+                let p = _mm256_mullo_epi32(dot, scale);
+                sumi[t] = _mm256_add_epi32(sumi[t], p);
+            }
+        }
+    }
+}
+
+/// # Safety
+/// Caller must ensure AVX2, FMA, F16C, and AVX-VNNI are available. Preconditions on `w`, `acts`, `out` match `wide_q6_k`.
+#[target_feature(enable = "avx2,fma,f16c,avxvnni")]
+unsafe fn wide_q6_k_vnni(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let n = acts.len();
+    debug_assert!(n <= MAX_WIDE && acts.iter().all(|a| !a.qk.is_empty()));
+    let lownib = _mm256_set1_epi8(0x0F);
+    let two = _mm256_set1_epi8(0x03);
+    let mut acc = [_mm256_setzero_ps(); MAX_WIDE];
+    for (sb, blk) in w.chunks_exact(210).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 4);
+        let d = f16_at(blk, 208);
+        let sc_ptr = blk.as_ptr().add(192);
+        let sc16 = _mm256_cvtepi8_epi16(_mm_loadu_si128(sc_ptr as *const __m128i));
+        let scales = q6k_scales_32(sc_ptr);
+        let mut codes = [_mm256_setzero_si256(); 8];
+        for c in 0..2 {
+            let ql = blk.as_ptr().add(c * 64);
+            let qh = _mm256_loadu_si256(blk.as_ptr().add(128 + c * 32) as *const __m256i);
+            let ql0 = _mm256_loadu_si256(ql as *const __m256i);
+            let ql1 = _mm256_loadu_si256(ql.add(32) as *const __m256i);
+            for g in 0..4 {
+                let (base, hbits) = match g {
+                    0 => (ql0, _mm256_and_si256(qh, two)),
+                    1 => (ql1, _mm256_and_si256(_mm256_srli_epi16(qh, 2), two)),
+                    2 => (ql0, _mm256_and_si256(_mm256_srli_epi16(qh, 4), two)),
+                    _ => (ql1, _mm256_and_si256(_mm256_srli_epi16(qh, 6), two)),
+                };
+                let low = if g < 2 {
+                    _mm256_and_si256(base, lownib)
+                } else {
+                    _mm256_and_si256(_mm256_srli_epi16(base, 4), lownib)
+                };
+                codes[c * 4 + g] = _mm256_or_si256(low, _mm256_slli_epi16(hbits, 4));
+            }
+        }
+        let mut t = 0;
+        while t < n {
+            let tw = (n - t).min(TILE);
+            let mut sumi = [_mm256_setzero_si256(); 4];
+            match tw {
+                4 => q6k_acts_vnni::<4>(&codes, &scales, &acts[t..], sb, &mut sumi),
+                3 => q6k_acts_vnni::<3>(&codes, &scales, &acts[t..], sb, &mut sumi),
+                2 => q6k_acts_vnni::<2>(&codes, &scales, &acts[t..], sb, &mut sumi),
+                _ => q6k_acts_vnni::<1>(&codes, &scales, &acts[t..], sb, &mut sumi),
+            }
+            for u in 0..tw {
+                let a = &acts[t + u];
+                let bs = _mm256_loadu_si256(a.bsums.as_ptr().add(sb * 16) as *const __m256i);
+                let off = _mm256_slli_epi32(_mm256_madd_epi16(sc16, bs), 5);
+                let v = _mm256_sub_epi32(sumi[u], off);
+                acc[t + u] = _mm256_fmadd_ps(
+                    _mm256_cvtepi32_ps(v),
+                    _mm256_set1_ps(d * a.dk[sb]),
+                    acc[t + u],
+                );
+            }
+            t += tw;
+        }
+    }
+    for b in 0..n {
+        out[b] = hsum_ps(acc[b]);
+    }
+}
+
 /// One weight row against `acts.len()` activations, writing `out[b]` for each.
 ///
 /// # Safety
@@ -1619,29 +2262,53 @@ pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32
     }
     match fmt {
         #[cfg(feature = "fmt-legacy")]
+        Format::Q8_0 if have_avx_vnni() => run!(tile_q8_0_vnni),
+        #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => run!(tile_q8_0),
         #[cfg(feature = "fmt-legacy")]
+        Format::Q4_0 if have_avx_vnni() => run!(tile_q4_0_vnni),
+        #[cfg(feature = "fmt-legacy")]
         Format::Q4_0 => run!(tile_q4_0),
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q5_0 if have_avx_vnni() => run!(tile_q5_0_vnni),
         #[cfg(feature = "fmt-legacy")]
         Format::Q5_0 => run!(tile_q5_0),
         // A prompt-sized batch decodes the row once for all of it; decode and the
         // speculative block (≤ 4) keep the tiled kernels, so their figures are unchanged.
         #[cfg(feature = "fmt-kquant")]
         Format::Q4_K if acts.len() > TILE && acts.len() <= MAX_WIDE && wide_enabled() => {
-            wide_q4_k(w, acts, out)
+            if have_avx_vnni() {
+                wide_q4_k_vnni(w, acts, out)
+            } else {
+                wide_q4_k(w, acts, out)
+            }
         }
         #[cfg(feature = "fmt-kquant")]
         Format::Q5_K if acts.len() > TILE && acts.len() <= MAX_WIDE && wide_enabled() => {
-            wide_q5_k(w, acts, out)
+            if have_avx_vnni() {
+                wide_q5_k_vnni(w, acts, out)
+            } else {
+                wide_q5_k(w, acts, out)
+            }
         }
         #[cfg(feature = "fmt-kquant")]
         Format::Q6_K if acts.len() > TILE && acts.len() <= MAX_WIDE && wide_enabled() => {
-            wide_q6_k(w, acts, out)
+            if have_avx_vnni() {
+                wide_q6_k_vnni(w, acts, out)
+            } else {
+                wide_q6_k(w, acts, out)
+            }
         }
+        #[cfg(feature = "fmt-kquant")]
+        Format::Q4_K if have_avx_vnni() => run!(tile_q4_k_vnni),
         #[cfg(feature = "fmt-kquant")]
         Format::Q4_K => run!(tile_q4_k),
         #[cfg(feature = "fmt-kquant")]
+        Format::Q5_K if have_avx_vnni() => run!(tile_q5_k_vnni),
+        #[cfg(feature = "fmt-kquant")]
         Format::Q5_K => run!(tile_q5_k),
+        #[cfg(feature = "fmt-kquant")]
+        Format::Q6_K if have_avx_vnni() => run!(tile_q6_k_vnni),
         #[cfg(feature = "fmt-kquant")]
         Format::Q6_K => run!(tile_q6_k),
         #[cfg(feature = "fmt-kquant")]
@@ -1918,6 +2585,7 @@ mod tests {
                     fix(blk, 0);
                     fix(blk, 2);
                 }
+                Format::Q6_K => fix(blk, 208),
                 Format::IQ4_XS => fix(blk, 0),
                 Format::MXFP4 => blk[0] = (blk[0] % 30) + 115,
                 _ => {}
@@ -2787,6 +3455,512 @@ mod tests {
                         fmt.label(),
                         bgot[0]
                     );
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn assert_vnni_matches_avx2_for_acts(fmt: Format, w: &[u8], acts: &[QuantAct]) {
+        assert!(!acts.is_empty());
+        // 1. Single-row: compare dot_*_vnni vs dot_*
+        for (i, a) in acts.iter().enumerate() {
+            let (got_vnni, got_avx2) = match fmt {
+                Format::Q8_0 => {
+                    // SAFETY: have_avx_vnni() checked by caller.
+                    let v = unsafe { dot_q8_0_vnni(w, a) };
+                    // SAFETY: have_avx2() checked by caller.
+                    let a2 = unsafe { dot_q8_0(w, a) };
+                    (v, a2)
+                }
+                Format::Q4_0 => {
+                    // SAFETY: have_avx_vnni() checked by caller.
+                    let v = unsafe { dot_q4_0_vnni(w, a) };
+                    // SAFETY: have_avx2() checked by caller.
+                    let a2 = unsafe { dot_q4_0(w, a) };
+                    (v, a2)
+                }
+                Format::Q5_0 => {
+                    // SAFETY: have_avx_vnni() checked by caller.
+                    let v = unsafe { dot_q5_0_vnni(w, a) };
+                    // SAFETY: have_avx2() checked by caller.
+                    let a2 = unsafe { dot_q5_0(w, a) };
+                    (v, a2)
+                }
+                #[cfg(feature = "fmt-kquant")]
+                Format::Q4_K => {
+                    let mut o_vnni = [0.0f32];
+                    let mut o_avx2 = [0.0f32];
+                    // SAFETY: have_avx_vnni() checked by caller.
+                    unsafe { tile_q4_k_vnni::<1>(w, std::slice::from_ref(a), &mut o_vnni) };
+                    // SAFETY: have_avx2() checked by caller.
+                    unsafe { tile_q4_k::<1>(w, std::slice::from_ref(a), &mut o_avx2) };
+                    (o_vnni[0], o_avx2[0])
+                }
+                #[cfg(feature = "fmt-kquant")]
+                Format::Q5_K => {
+                    let mut o_vnni = [0.0f32];
+                    let mut o_avx2 = [0.0f32];
+                    // SAFETY: have_avx_vnni() checked by caller.
+                    unsafe { tile_q5_k_vnni::<1>(w, std::slice::from_ref(a), &mut o_vnni) };
+                    // SAFETY: have_avx2() checked by caller.
+                    unsafe { tile_q5_k::<1>(w, std::slice::from_ref(a), &mut o_avx2) };
+                    (o_vnni[0], o_avx2[0])
+                }
+                #[cfg(feature = "fmt-kquant")]
+                Format::Q6_K => {
+                    let mut o_vnni = [0.0f32];
+                    let mut o_avx2 = [0.0f32];
+                    // SAFETY: have_avx_vnni() checked by caller.
+                    unsafe { tile_q6_k_vnni::<1>(w, std::slice::from_ref(a), &mut o_vnni) };
+                    // SAFETY: have_avx2() checked by caller.
+                    unsafe { tile_q6_k::<1>(w, std::slice::from_ref(a), &mut o_avx2) };
+                    (o_vnni[0], o_avx2[0])
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                got_vnni.to_bits(),
+                got_avx2.to_bits(),
+                "{:?} single-row act {i}: vnni {got_vnni} vs avx2 {got_avx2}",
+                fmt.label()
+            );
+        }
+
+        // 2. Tiled kernels for T in 1..=4
+        for t in 1..=4.min(acts.len()) {
+            let sub_acts = &acts[..t];
+            let mut got_vnni = vec![0.0f32; t];
+            let mut got_avx2 = vec![0.0f32; t];
+            match fmt {
+                Format::Q8_0 => match t {
+                    1 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q8_0_vnni::<1>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q8_0::<1>(w, sub_acts, &mut got_avx2);
+                    },
+                    2 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q8_0_vnni::<2>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q8_0::<2>(w, sub_acts, &mut got_avx2);
+                    },
+                    3 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q8_0_vnni::<3>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q8_0::<3>(w, sub_acts, &mut got_avx2);
+                    },
+                    4 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q8_0_vnni::<4>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q8_0::<4>(w, sub_acts, &mut got_avx2);
+                    },
+                    _ => unreachable!(),
+                },
+                Format::Q4_0 => match t {
+                    1 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q4_0_vnni::<1>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q4_0::<1>(w, sub_acts, &mut got_avx2);
+                    },
+                    2 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q4_0_vnni::<2>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q4_0::<2>(w, sub_acts, &mut got_avx2);
+                    },
+                    3 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q4_0_vnni::<3>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q4_0::<3>(w, sub_acts, &mut got_avx2);
+                    },
+                    4 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q4_0_vnni::<4>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q4_0::<4>(w, sub_acts, &mut got_avx2);
+                    },
+                    _ => unreachable!(),
+                },
+                Format::Q5_0 => match t {
+                    1 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q5_0_vnni::<1>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q5_0::<1>(w, sub_acts, &mut got_avx2);
+                    },
+                    2 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q5_0_vnni::<2>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q5_0::<2>(w, sub_acts, &mut got_avx2);
+                    },
+                    3 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q5_0_vnni::<3>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q5_0::<3>(w, sub_acts, &mut got_avx2);
+                    },
+                    4 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q5_0_vnni::<4>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q5_0::<4>(w, sub_acts, &mut got_avx2);
+                    },
+                    _ => unreachable!(),
+                },
+                #[cfg(feature = "fmt-kquant")]
+                Format::Q4_K => match t {
+                    1 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q4_k_vnni::<1>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q4_k::<1>(w, sub_acts, &mut got_avx2);
+                    },
+                    2 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q4_k_vnni::<2>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q4_k::<2>(w, sub_acts, &mut got_avx2);
+                    },
+                    3 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q4_k_vnni::<3>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q4_k::<3>(w, sub_acts, &mut got_avx2);
+                    },
+                    4 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q4_k_vnni::<4>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q4_k::<4>(w, sub_acts, &mut got_avx2);
+                    },
+                    _ => unreachable!(),
+                },
+                #[cfg(feature = "fmt-kquant")]
+                Format::Q5_K => match t {
+                    1 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q5_k_vnni::<1>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q5_k::<1>(w, sub_acts, &mut got_avx2);
+                    },
+                    2 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q5_k_vnni::<2>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q5_k::<2>(w, sub_acts, &mut got_avx2);
+                    },
+                    3 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q5_k_vnni::<3>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q5_k::<3>(w, sub_acts, &mut got_avx2);
+                    },
+                    4 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q5_k_vnni::<4>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q5_k::<4>(w, sub_acts, &mut got_avx2);
+                    },
+                    _ => unreachable!(),
+                },
+                #[cfg(feature = "fmt-kquant")]
+                Format::Q6_K => match t {
+                    1 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q6_k_vnni::<1>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q6_k::<1>(w, sub_acts, &mut got_avx2);
+                    },
+                    2 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q6_k_vnni::<2>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q6_k::<2>(w, sub_acts, &mut got_avx2);
+                    },
+                    3 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q6_k_vnni::<3>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q6_k::<3>(w, sub_acts, &mut got_avx2);
+                    },
+                    4 => unsafe {
+                        // SAFETY: have_avx_vnni() checked by caller; buffer lengths match t.
+                        tile_q6_k_vnni::<4>(w, sub_acts, &mut got_vnni);
+                        // SAFETY: have_avx2() checked by caller; buffer lengths match t.
+                        tile_q6_k::<4>(w, sub_acts, &mut got_avx2);
+                    },
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            }
+            for i in 0..t {
+                assert_eq!(
+                    got_vnni[i].to_bits(),
+                    got_avx2[i].to_bits(),
+                    "{:?} tile<{t}> item {i}: vnni {} vs avx2 {}",
+                    fmt.label(),
+                    got_vnni[i],
+                    got_avx2[i]
+                );
+            }
+        }
+
+        // 3. Wide kernels (for k-quants where acts.len() > 4 and <= MAX_WIDE)
+        #[cfg(feature = "fmt-kquant")]
+        if acts.len() > 4 && acts.len() <= MAX_WIDE {
+            let n = acts.len();
+            let mut got_vnni = vec![0.0f32; n];
+            let mut got_avx2 = vec![0.0f32; n];
+            match fmt {
+                Format::Q4_K => unsafe {
+                    // SAFETY: have_avx_vnni() checked by caller; acts.len() <= MAX_WIDE.
+                    wide_q4_k_vnni(w, acts, &mut got_vnni);
+                    // SAFETY: have_avx2() checked by caller; acts.len() <= MAX_WIDE.
+                    wide_q4_k(w, acts, &mut got_avx2);
+                },
+                Format::Q5_K => unsafe {
+                    // SAFETY: have_avx_vnni() checked by caller; acts.len() <= MAX_WIDE.
+                    wide_q5_k_vnni(w, acts, &mut got_vnni);
+                    // SAFETY: have_avx2() checked by caller; acts.len() <= MAX_WIDE.
+                    wide_q5_k(w, acts, &mut got_avx2);
+                },
+                Format::Q6_K => unsafe {
+                    // SAFETY: have_avx_vnni() checked by caller; acts.len() <= MAX_WIDE.
+                    wide_q6_k_vnni(w, acts, &mut got_vnni);
+                    // SAFETY: have_avx2() checked by caller; acts.len() <= MAX_WIDE.
+                    wide_q6_k(w, acts, &mut got_avx2);
+                },
+                _ => {}
+            }
+            if matches!(fmt, Format::Q4_K | Format::Q5_K | Format::Q6_K) {
+                for i in 0..n {
+                    assert_eq!(
+                        got_vnni[i].to_bits(),
+                        got_avx2[i].to_bits(),
+                        "{:?} wide ({n}) item {i}: vnni {} vs avx2 {}",
+                        fmt.label(),
+                        got_vnni[i],
+                        got_avx2[i]
+                    );
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn make_acts_pm127(n: usize) -> Vec<QuantAct> {
+        let mut out = Vec::new();
+        // Mode 0: all +127
+        {
+            let x = vec![1.0f32; n];
+            let mut a = QuantAct::with_capacity(n);
+            a.fill(&x);
+            assert!(a.q.iter().all(|&q| q == 127));
+            out.push(a);
+        }
+        // Mode 1: all -127
+        {
+            let x = vec![-1.0f32; n];
+            let mut a = QuantAct::with_capacity(n);
+            a.fill(&x);
+            assert!(a.q.iter().all(|&q| q == -127));
+            out.push(a);
+        }
+        // Mode 2: alternating ±127
+        {
+            let x: Vec<f32> = (0..n)
+                .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+                .collect();
+            let mut a = QuantAct::with_capacity(n);
+            a.fill(&x);
+            assert!(a.q.iter().all(|&q| q == 127 || q == -127));
+            out.push(a);
+        }
+        // Mode 3: blocks of 16 alternating ±127
+        {
+            let x: Vec<f32> = (0..n)
+                .map(|i| if (i / 16) % 2 == 0 { 1.0 } else { -1.0 })
+                .collect();
+            let mut a = QuantAct::with_capacity(n);
+            a.fill(&x);
+            assert!(a.q.iter().all(|&q| q == 127 || q == -127));
+            out.push(a);
+        }
+        out
+    }
+
+    #[test]
+    fn avxvnni_dot_matches_avx2_bit_for_bit_q8_0() {
+        if !have_avx_vnni() {
+            return;
+        }
+        let fmt = Format::Q8_0;
+        let mut s = 0x1234_5678_9ABC_DEF0u64;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+
+        for &n in &[32, 96, 160, 256, 512] {
+            let rb = crate::quant::row_bytes(fmt, n);
+
+            // 1. Random weights + random activations (widths 1..=8)
+            for _ in 0..5 {
+                let mut w: Vec<u8> = (0..rb).map(|_| (rnd() >> 32) as u8).collect();
+                sane_scales(fmt, &mut w);
+                for nb in [1, 2, 3, 4, 8] {
+                    let acts: Vec<QuantAct> = (0..nb)
+                        .map(|_| {
+                            let mut act = QuantAct::with_capacity(n);
+                            let x: Vec<f32> = (0..n)
+                                .map(|_| ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 6.0)
+                                .collect();
+                            act.fill(&x);
+                            act
+                        })
+                        .collect();
+                    assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
+                }
+            }
+
+            // 2. Random weights + extreme ±127 activations
+            for _ in 0..3 {
+                let mut w: Vec<u8> = (0..rb).map(|_| (rnd() >> 32) as u8).collect();
+                sane_scales(fmt, &mut w);
+                let acts = make_acts_pm127(n);
+                assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
+            }
+
+            // 3. Extreme codes: zeroes, max (0xFF), +127 (0x7F), -128 (0x80)
+            for &code_byte in &[0x00u8, 0xFF, 0x7F, 0x80] {
+                let mut w = vec![code_byte; rb];
+                sane_scales(fmt, &mut w);
+                let acts = make_acts_pm127(n);
+                assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn avxvnni_dot_matches_avx2_bit_for_bit_q4_0_and_q5_0() {
+        if !have_avx_vnni() {
+            return;
+        }
+        let mut s = 0xFEED_FACE_CAFE_BEEFu64;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+
+        for fmt in [Format::Q4_0, Format::Q5_0] {
+            for &n in &[32, 96, 160, 256, 512] {
+                let rb = crate::quant::row_bytes(fmt, n);
+
+                // 1. Random weights + random activations (widths 1..=8)
+                for _ in 0..5 {
+                    let mut w: Vec<u8> = (0..rb).map(|_| (rnd() >> 32) as u8).collect();
+                    sane_scales(fmt, &mut w);
+                    for nb in [1, 2, 3, 4, 8] {
+                        let acts: Vec<QuantAct> = (0..nb)
+                            .map(|_| {
+                                let mut act = QuantAct::with_capacity(n);
+                                let x: Vec<f32> = (0..n)
+                                    .map(|_| {
+                                        ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 6.0
+                                    })
+                                    .collect();
+                                act.fill(&x);
+                                act
+                            })
+                            .collect();
+                        assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
+                    }
+                }
+
+                // 2. Random weights + extreme ±127 activations
+                for _ in 0..3 {
+                    let mut w: Vec<u8> = (0..rb).map(|_| (rnd() >> 32) as u8).collect();
+                    sane_scales(fmt, &mut w);
+                    let acts = make_acts_pm127(n);
+                    assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
+                }
+
+                // 3. Extreme codes: zeroes, max (0xFF)
+                for &code_byte in &[0x00u8, 0xFF] {
+                    let mut w = vec![code_byte; rb];
+                    sane_scales(fmt, &mut w);
+                    let acts = make_acts_pm127(n);
+                    assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-kquant")]
+    fn avxvnni_dot_matches_avx2_bit_for_bit_kquants() {
+        if !have_avx_vnni() {
+            return;
+        }
+        let mut s = 0xCAFE_BABE_0123_4567u64;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+
+        for fmt in [Format::Q4_K, Format::Q5_K, Format::Q6_K] {
+            for &n in &[256, 512, 1024] {
+                let rb = crate::quant::row_bytes(fmt, n);
+
+                // 1. Random weights + random activations (widths 1..=4, plus wide 5, 8, 16)
+                for _ in 0..5 {
+                    let mut w: Vec<u8> = (0..rb).map(|_| (rnd() >> 32) as u8).collect();
+                    sane_scales(fmt, &mut w);
+                    for nb in [1, 2, 3, 4, 5, 8, 16] {
+                        let acts: Vec<QuantAct> = (0..nb)
+                            .map(|_| {
+                                let mut act = QuantAct::with_capacity(n);
+                                let x: Vec<f32> = (0..n)
+                                    .map(|_| {
+                                        ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 6.0
+                                    })
+                                    .collect();
+                                act.fill(&x);
+                                act
+                            })
+                            .collect();
+                        assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
+                    }
+                }
+
+                // 2. Random weights + extreme ±127 activations
+                for _ in 0..3 {
+                    let mut w: Vec<u8> = (0..rb).map(|_| (rnd() >> 32) as u8).collect();
+                    sane_scales(fmt, &mut w);
+                    let acts = make_acts_pm127(n);
+                    assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
+                }
+
+                // 3. Extreme codes: zeroes, max (0xFF)
+                for &code_byte in &[0x00u8, 0xFF] {
+                    let mut w = vec![code_byte; rb];
+                    sane_scales(fmt, &mut w);
+                    let acts = make_acts_pm127(n);
+                    assert_vnni_matches_avx2_for_acts(fmt, &w, &acts);
                 }
             }
         }
