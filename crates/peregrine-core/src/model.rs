@@ -133,7 +133,7 @@ pub struct Weights {
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))] // read only by the x86 tile kernels
     pub(crate) tiles: TileStore,
     // The k-quant matrices repacked into eight-row tiles at load (`TensorInfo::kq_off` points
-    // here); empty when the repack is off, which is the AVX-512 tier's default.
+    // here); empty when the repack is off (`PEREGRINE_KREPACK=0`).
     pub(crate) kq: KqStore,
     #[cfg(feature = "littlebit")]
     pub(crate) lb: Option<Slb>,
@@ -214,9 +214,9 @@ impl TileStore {
 /// step streams all of it every token — and `PEREGRINE_TILE_HUGEPAGES=0` uses a plain
 /// heap buffer, for the A/B.
 ///
-/// The store is empty when the repack is off — `PEREGRINE_KREPACK=0`, or the AVX-512 tier's
-/// default — and it is not built at all where the kernel table has no repacked kernel to read
-/// it, so it never costs resident memory that nothing uses.
+/// The store is empty when the repack is off — `PEREGRINE_KREPACK=0` — and it is not built at
+/// all where the kernel table has no repacked kernel to read it, so it never costs resident
+/// memory that nothing uses.
 #[derive(Default)]
 pub struct KqStore {
     map: Option<memmap2::MmapMut>,

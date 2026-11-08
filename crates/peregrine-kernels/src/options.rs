@@ -22,23 +22,26 @@ pub struct KernelOptions {
     /// `PEREGRINE_EXACT=1`: ternary matmuls in f32 against decoded weights (slow reference path).
     pub exact: bool,
     /// `PEREGRINE_KREPACK`: repack the k-quant matrices into eight-row tiles and multiply them with
-    /// the repacked kernels. On by default below the AVX-512 tier; off by default on it (only the
-    /// AVX2 repacked kernel exists, and it costs decode there). The switch is the A/B of the repack.
+    /// the repacked kernels. On by default on every tier, the AVX-512 tier included: it runs the
+    /// AVX2 repacked kernel there, and the A/B measured a large prompt win for a decode cost the
+    /// decision accepts (see `kq_repack_default`). The switch is the A/B of the repack.
     pub kq_repack: bool,
 }
 
 /// Default prefetch distance (bytes), the value the k-quant kernels were tuned with.
 pub const PF_DEFAULT: usize = 1024;
 
-/// The k-quant repack's default for a resolved kernel tier.
+/// The k-quant repack's default for a resolved kernel tier: on.
 ///
-/// The repacked Q4_K kernel is the AVX2 one: on the AVX-512 tier the kernel table picks the same
-/// AVX2 code, and the A/B measured decode −3.5 % there (prefill +24.9 %), against decision 9's
-/// "decode never slower". So the repack is off on the AVX-512 tier until its own 16-column kernel
-/// lands (S3.4 follow-up). Below it the repack stays on: decode there measured −1.4 %, which the
-/// prefill win pays for.
-pub const fn kq_repack_default(tier: Tier) -> bool {
-    !matches!(tier, Tier::Avx512)
+/// The repacked Q4_K kernel is the AVX2 one, and on the AVX-512 tier the kernel table picks the
+/// same AVX2 code. That tier used to keep the repack off because the first A/B measured decode
+/// −3.5 % (prefill +24.9 %). The 2026-11-08 re-measurement on the same host (three rounds,
+/// interleaved, Llama-3.2-1B Q4_K_M) found prefill +26 % at 512 tokens and decode −1.2 %, inside
+/// the desktop's ~1 % null-A/B band and inside the run spread; the user accepted that trade and
+/// turned the repack on for the tier. `PEREGRINE_KREPACK=0` remains the control, and the
+/// 16-column AVX-512 kernel (S3.4 follow-up) is measured against this default.
+pub const fn kq_repack_default(_tier: Tier) -> bool {
+    true
 }
 
 /// `PEREGRINE_KREPACK` resolved against a tier: `0` is off, any other value is on (the switch
@@ -97,11 +100,11 @@ pub fn init(opts: KernelOptions) -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
-    /// The repack's default is the tier's, not the machine's: the AVX-512 tier is the only one
-    /// that turns it off, and both switch values override it in either direction.
+    /// The repack is on by default on every tier — the AVX-512 tier included — and both switch
+    /// values override the default in either direction.
     #[test]
-    fn kq_repack_default_follows_the_tier() {
-        assert!(!kq_repack_default(Tier::Avx512));
+    fn kq_repack_default_is_on_everywhere() {
+        assert!(kq_repack_default(Tier::Avx512));
         assert!(kq_repack_default(Tier::AvxVnni));
         assert!(kq_repack_default(Tier::Avx2));
         assert!(kq_repack_default(Tier::Scalar));
