@@ -1176,12 +1176,10 @@ mod tests {
     /// depending on the batch it ran in — the batch-invariance break the repacked
     /// Q4_K fold then surfaced. The scratch is dirtied by an eight-row call first, so
     /// a split can never pass by reading a leftover lane.
+    ///
+    /// It runs on every target: the scalar path must hold the same property.
     #[test]
     fn a_rows_swiglu_does_not_depend_on_the_split() {
-        if !vector_ok() {
-            eprintln!("skipped: no AVX2 and FMA");
-            return;
-        }
         let n = 1024;
         let g0 = prng(29, n, -12.0, 12.0);
         let up = prng(31, n, -3.0, 3.0);
