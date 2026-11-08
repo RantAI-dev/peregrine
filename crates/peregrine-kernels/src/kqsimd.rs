@@ -611,7 +611,7 @@ unsafe fn q6_codes_v(qlv: __m256i, qhv: __m256i, g: usize) -> __m256i {
 /// This is the small-batch kernel: the GEMV's one to three rows and the
 /// four-row decode block. A four-row call decodes the tile once per
 /// super-block either way, and the four accumulators fit in registers. The
-/// wider prefill batches take [`q6k8_gemm_wide`], which decodes once per
+/// wider prefill batches take `q6k8_gemm_wide`, which decodes once per
 /// super-block across every row of the call.
 ///
 /// `N` is a const generic rather than a parameter so that the activation loop
@@ -990,7 +990,7 @@ unsafe fn q6k8_gemm_wide(
 /// Eight output rows of a repacked Q6_K tile against a batch of activations.
 ///
 /// The wide path decodes the tile once per super-block for every activation
-/// row of the call ([`q6k8_gemm_wide`]); a four-row call is the decode block's
+/// row of the call (`q6k8_gemm_wide`); a four-row call is the decode block's
 /// width and stays on the const-generic kernel, whose four accumulators fit in
 /// registers and which needs no decode buffer. Both paths have the same
 /// per-(row, super-block) arithmetic, so their bits agree.
