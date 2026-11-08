@@ -17,43 +17,46 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parent.parent / "docs" / "img"
 
 # Desktop: Ryzen AI 9 HX 370, 12 threads (benchmarks/results/desktop-zen5-2026-11-08).
-# Bluefin: Ryzen 3 PRO 4350G, 4 threads (benchmarks/results/bluefin-zen2-2026-11-08).
+# Bluefin: Ryzen 3 PRO 4350G, 4 threads (benchmarks/results/bluefin-zen2-2026-11-08-fa-off).
+# The bluefin llama.cpp bar is the faster flash-attention setting for that row (-fa off for
+# single-user decode, llama.cpp's default for prefill and multi-user throughput).
 # Each case: (label, peregrine, llama.cpp), tok/s.
 DECODE = [
     ("Desktop · Llama 3.2 1B · 512", 59.4, 51.0),
     ("Desktop · Llama 3.2 1B · 4096", 44.2, 32.4),
     ("Desktop · Qwen 2.5 0.5B · 512", 68.1, 75.8),
     ("Desktop · Qwen 2.5 0.5B · 4096", 51.6, 48.8),
-    ("Bluefin · Llama 3.2 1B · 512", 45.4, 39.5),
-    ("Bluefin · Qwen 2.5 0.5B · 512", 52.8, 74.9),
-    ("Bluefin · Qwen 2.5 0.5B · 4096", 45.1, 41.0),
+    ("Bluefin · Llama 3.2 1B · 512", 46.06, 42.01),
+    ("Bluefin · Llama 3.2 1B · 4096", 36.85, 29.25),
+    ("Bluefin · Qwen 2.5 0.5B · 512", 52.87, 77.41),
+    ("Bluefin · Qwen 2.5 0.5B · 4096", 45.20, 51.97),
 ]
 PREFILL = [
     ("Desktop · Llama 3.2 1B · 512", 173.5, 262.0),
     ("Desktop · Llama 3.2 1B · 4096", 125.4, 189.0),
     ("Desktop · Qwen 2.5 0.5B · 512", 270.6, 435.2),
     ("Desktop · Qwen 2.5 0.5B · 4096", 184.9, 279.4),
-    ("Bluefin · Llama 3.2 1B · 512", 196.3, 188.3),
-    ("Bluefin · Llama 3.2 1B · 4096", 143.7, 141.2),
-    ("Bluefin · Qwen 2.5 0.5B · 512", 260.0, 302.9),
-    ("Bluefin · Qwen 2.5 0.5B · 4096", 195.2, 236.0),
+    ("Bluefin · Llama 3.2 1B · 512", 197.34, 188.27),
+    ("Bluefin · Llama 3.2 1B · 4096", 144.59, 141.23),
+    ("Bluefin · Qwen 2.5 0.5B · 512", 263.19, 302.91),
+    ("Bluefin · Qwen 2.5 0.5B · 4096", 198.23, 235.98),
 ]
 USERS10 = [
     ("Desktop · Llama 3.2 1B · 512", 51.8, 61.7),
     ("Desktop · Qwen 2.5 0.5B · 512", 78.0, 93.4),
-    ("Bluefin · Llama 3.2 1B · 512", 55.5, 37.4),
-    ("Bluefin · Qwen 2.5 0.5B · 512", 71.3, 68.7),
+    ("Bluefin · Llama 3.2 1B · 512", 55.18, 37.36),
+    ("Bluefin · Qwen 2.5 0.5B · 512", 71.72, 68.69),
 ]
 # The biggest wins, Peregrine ÷ llama.cpp on the same machine and file.
 WINS = [
-    ("10 users · Llama 1B · 512 · Bluefin", 55.5 / 37.4),
+    ("10 users · Llama 1B · 512 · Bluefin", 55.18 / 37.36),
     ("Decode · Llama 1B · 4096 · Desktop", 44.2 / 32.4),
-    ("4 users · Llama 1B · 512 · Bluefin", 53.5 / 39.5),
+    ("4 users · Llama 1B · 512 · Bluefin", 53.82 / 39.55),
+    ("Decode · Llama 1B · 4096 · Bluefin", 36.85 / 29.25),
     ("Decode · Llama 1B · 512 · Desktop", 59.4 / 51.0),
-    ("Decode · Llama 1B · 512 · Bluefin", 45.4 / 39.5),
-    ("Decode · Qwen 0.5B · 4096 · Bluefin", 45.1 / 41.0),
+    ("Decode · Llama 1B · 512 · Bluefin", 46.06 / 42.01),
     ("Decode · Qwen 0.5B · 4096 · Desktop", 51.6 / 48.8),
-    ("Prompt · Llama 1B · 512 · Bluefin", 196.3 / 188.3),
+    ("Prompt · Llama 1B · 512 · Bluefin", 197.34 / 188.27),
 ]
 # Prompt processing before and after the November changes, Peregrine against itself.
 # Bluefin: the repacked Q4_K kernels (#88). Desktop: the prefill chunk default (#92).

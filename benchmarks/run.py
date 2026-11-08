@@ -254,6 +254,14 @@ def parse_args() -> argparse.Namespace:
         "context across several commands under a wall-clock cap.",
     )
     parser.add_argument(
+        "--llama-fa",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="llama.cpp flash attention setting, passed as -fa to both llama-server and "
+        "llama-bench. The default reproduces llama.cpp's own default and older runs; "
+        "benchmark reports compare against the faster setting per row (see benchmarks/README.md).",
+    )
+    parser.add_argument(
         "--port", "-p",
         type=int,
         default=8201,
@@ -320,7 +328,7 @@ def main():
     peregrine_adapter = PeregrineAdapter(workspace_root=workspace_root)
     engine_map: Dict[str, EngineAdapter] = {
         "peregrine": peregrine_adapter,
-        "llama_cpp": LlamaCppAdapter(),
+        "llama_cpp": LlamaCppAdapter(flash_attn=args.llama_fa),
         "ik_llama_cpp": IkLlamaCppAdapter(),
     }
 
@@ -425,6 +433,7 @@ def main():
                     "mode": args.mode,
                     "user_counts": selected_user_counts,
                     "interleaved": True,
+                    "llama_flash_attn": args.llama_fa,
                 },
                 "results": {
                     str(ctx): {

@@ -56,23 +56,23 @@
 <path class="s2" d="M250.0,206.0 H491.9 A4.0,4.0 0 0 1 495.9,210.0 V214.0 A4.0,4.0 0 0 1 491.9,218.0 H250.0 Z"/>
 <text class="t2" x="501.9" y="216" font-size="11">279</text>
 <text class="t1" x="238" y="249.0" font-size="12" text-anchor="end">Bluefin · Llama 3.2 1B · 512</text>
-<path class="s1" d="M250.0,232.0 H418.7 A4.0,4.0 0 0 1 422.7,236.0 V240.0 A4.0,4.0 0 0 1 418.7,244.0 H250.0 Z"/>
-<text class="t2" x="428.7" y="242" font-size="11">196</text>
+<path class="s1" d="M250.0,232.0 H419.7 A4.0,4.0 0 0 1 423.7,236.0 V240.0 A4.0,4.0 0 0 1 419.7,244.0 H250.0 Z"/>
+<text class="t2" x="429.7" y="242" font-size="11">197</text>
 <path class="s2" d="M250.0,246.0 H411.7 A4.0,4.0 0 0 1 415.7,250.0 V254.0 A4.0,4.0 0 0 1 411.7,258.0 H250.0 Z"/>
 <text class="t2" x="421.7" y="256" font-size="11">188</text>
 <text class="t1" x="238" y="289.0" font-size="12" text-anchor="end">Bluefin · Llama 3.2 1B · 4096</text>
-<path class="s1" d="M250.0,272.0 H372.5 A4.0,4.0 0 0 1 376.5,276.0 V280.0 A4.0,4.0 0 0 1 372.5,284.0 H250.0 Z"/>
-<text class="t2" x="382.5" y="282" font-size="11">144</text>
+<path class="s1" d="M250.0,272.0 H373.2 A4.0,4.0 0 0 1 377.2,276.0 V280.0 A4.0,4.0 0 0 1 373.2,284.0 H250.0 Z"/>
+<text class="t2" x="383.2" y="282" font-size="11">145</text>
 <path class="s2" d="M250.0,286.0 H370.3 A4.0,4.0 0 0 1 374.3,290.0 V294.0 A4.0,4.0 0 0 1 370.3,298.0 H250.0 Z"/>
 <text class="t2" x="380.3" y="296" font-size="11">141</text>
 <text class="t1" x="238" y="329.0" font-size="12" text-anchor="end">Bluefin · Qwen 2.5 0.5B · 512</text>
-<path class="s1" d="M250.0,312.0 H474.8 A4.0,4.0 0 0 1 478.8,316.0 V320.0 A4.0,4.0 0 0 1 474.8,324.0 H250.0 Z"/>
-<text class="t2" x="484.8" y="322" font-size="11">260</text>
+<path class="s1" d="M250.0,312.0 H477.6 A4.0,4.0 0 0 1 481.6,316.0 V320.0 A4.0,4.0 0 0 1 477.6,324.0 H250.0 Z"/>
+<text class="t2" x="487.6" y="322" font-size="11">263</text>
 <path class="s2" d="M250.0,326.0 H512.6 A4.0,4.0 0 0 1 516.6,330.0 V334.0 A4.0,4.0 0 0 1 512.6,338.0 H250.0 Z"/>
 <text class="t2" x="522.6" y="336" font-size="11">303</text>
 <text class="t1" x="238" y="369.0" font-size="12" text-anchor="end">Bluefin · Qwen 2.5 0.5B · 4096</text>
-<path class="s1" d="M250.0,352.0 H417.8 A4.0,4.0 0 0 1 421.8,356.0 V360.0 A4.0,4.0 0 0 1 417.8,364.0 H250.0 Z"/>
-<text class="t2" x="427.8" y="362" font-size="11">195</text>
+<path class="s1" d="M250.0,352.0 H420.4 A4.0,4.0 0 0 1 424.4,356.0 V360.0 A4.0,4.0 0 0 1 420.4,364.0 H250.0 Z"/>
+<text class="t2" x="430.4" y="362" font-size="11">198</text>
 <path class="s2" d="M250.0,366.0 H453.7 A4.0,4.0 0 0 1 457.7,370.0 V374.0 A4.0,4.0 0 0 1 453.7,378.0 H250.0 Z"/>
 <text class="t2" x="463.7" y="376" font-size="11">236</text>
 <text class="t2" x="470.0" y="420" font-size="11" text-anchor="middle">tokens per second</text>
