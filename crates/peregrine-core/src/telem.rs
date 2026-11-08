@@ -21,6 +21,11 @@ pub struct TokenTelem {
     pub dt_s: f64,
     pub bytes_weights: u64,
     pub bytes_kv: u64,
+    /// Bytes of the activations the matmuls read. The prefill reads the
+    /// activation once per output row — or once per eight rows, with the
+    /// repacked tiles — so this is what the matrix product moves besides the
+    /// weights.
+    pub bytes_acts: u64,
     pub macs: u64,
     pub barriers: u64,
     /// Tokens proposed by prompt-lookup for the step that produced this token.

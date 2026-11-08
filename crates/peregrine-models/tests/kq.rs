@@ -1,14 +1,16 @@
-//! The k-quant store (S3.4, step 1): the Q4_K and Q6_K matrices, repacked into
-//! eight-row tiles at load.
+//! The k-quant store (S3.4): the Q4_K and Q6_K matrices, repacked into eight-row
+//! tiles at load, and the repacked kernel that multiplies them.
 //!
 //! With the repack on, the loader rewrites every eligible matrix into the repacked
-//! layout and keeps the result in the model's k-quant store. Nothing reads the store
-//! yet — the repacked kernels land in PR 2 — so the model's numbers do not move: the
-//! same file, loaded both ways, gives the same logits, bit for bit.
+//! layout and keeps the result in the model's k-quant store, and the Q4_K matrices
+//! are multiplied from it. The repacked kernel reduces a super-block's eight
+//! position classes in int32, where the ordinary kernel reduces them in float at
+//! the very end, so the two compute the same real number with a different
+//! rounding: the logits move in the last bits (the design note's §4.2).
 //!
 //! The store has to hold exactly the repack of every eligible matrix all the same:
-//! PR 2 multiplies those bytes, and a store that is one tile out of place would
-//! multiply the wrong weights.
+//! the kernel multiplies those bytes, and a store that is one tile out of place
+//! would multiply the wrong weights.
 //!
 //! One test, because the engine's options are process-wide and read once: the repack
 //! is turned on here, before anything reads them.
@@ -59,8 +61,8 @@ fn repacked_rows(t: &TensorInfo) -> usize {
     (t.dims[1] as usize / TILE_ROWS) * TILE_ROWS
 }
 
-/// The logits of a short prefill: the bits a change in any weight would move.
-fn logits(model: &Model) -> Vec<f32> {
+/// The logits of a short prefill, and the activation bytes its matmuls read.
+fn prefill(model: &Model) -> (Vec<f32>, u64) {
     let threads = 2;
     let pool = Pool::new(threads);
     let tokens: Vec<u32> = (1..=16).collect();
@@ -71,7 +73,7 @@ fn logits(model: &Model) -> Vec<f32> {
     model
         .forward(&mut st, &mut kv, &pool, &tokens, 0, &want, &mut ss)
         .expect("the prefill runs");
-    st.logits_row(0, model.cfg.n_vocab).to_vec()
+    (st.logits_row(0, model.cfg.n_vocab).to_vec(), ss.bytes_acts)
 }
 
 /// The store holds the repack of every eligible matrix, and the repack moves no
@@ -95,9 +97,25 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
         let path = write_dense(&dir, "llama", fmt, 4242, Dense::default());
         let g = Gguf::open(&path).expect("the synthetic model opens");
 
-        // The model the ordinary way: the option decides, and the store is built.
-        let model = peregrine_models::load(Gguf::open(&path).expect("the model opens"))
+        // The ordinary load builds the store only where a kernel reads it: the repack is
+        // on in this process, so the store appears exactly when the table has the
+        // repacked kernel (not on a `PEREGRINE_ISA=scalar` run, and never off x86-64).
+        let ordinary = peregrine_models::load(Gguf::open(&path).expect("the model opens"))
             .expect("the synthetic model loads");
+        assert_eq!(
+            !ordinary.kq().is_empty(),
+            peregrine_kernels::table::MatKernels::get().kq_tiles(),
+            "{fmt:?}: the ordinary load and the kernel table disagree about the store"
+        );
+
+        // The store's own contents, forced on: this is the test of the layout, so it runs on
+        // every tier and every architecture, including the ones no kernel reads the store on.
+        let model = Model::load_with_kq(
+            Gguf::open(&path).expect("the model opens"),
+            peregrine_models::FAMILIES,
+            true,
+        )
+        .expect("the synthetic model loads");
         let store = model.kq();
         assert!(!store.is_empty(), "{fmt:?}: the store is empty");
 
@@ -121,8 +139,10 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
         // the rows past the last whole group of eight.
         assert_eq!(at, store.len(), "{fmt:?}: the store holds something else");
 
-        // The same file, loaded without the repack, gives the same numbers: nothing
-        // reads the store yet.
+        // The same file, loaded without the repack, is multiplied the ordinary
+        // way. The two compute the same real number with a different rounding,
+        // so the logits move in the last bits — not by more than the fold's
+        // last bit, and not at all for the formats the repack does not touch.
         let plain = Model::load_with_kq(
             Gguf::open(&path).expect("the model opens"),
             peregrine_models::FAMILIES,
@@ -133,14 +153,37 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
             plain.kq().is_empty(),
             "{fmt:?}: the plain model has a store"
         );
-        let a = logits(&plain);
-        let b = logits(&model);
+        let (a, plain_acts) = prefill(&plain);
+        let (b, acts) = prefill(&model);
         assert_eq!(a.len(), b.len());
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            assert_eq!(
-                x.to_bits(),
-                y.to_bits(),
-                "{fmt:?}: logit {i} moved: {x} against {y}"
+            if fmt == Format::Q4_K {
+                // The repacked kernel's fold: the same real number, rounded
+                // once instead of twice. This bound holds here only because a
+                // random-weight model doesn't amplify the few-ulp difference; a
+                // trained model moves its logits by percent (docs/design/s3.4.md
+                // §10). The kernel's own bound is the per-matmul check in kqsimd.rs.
+                assert!(
+                    (x - y).abs() <= 1e-3 * x.abs().max(1.0),
+                    "{fmt:?}: logit {i} moved: {x} against {y}"
+                );
+            } else {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "{fmt:?}: logit {i} moved: {x} against {y}"
+                );
+            }
+        }
+        if fmt == Format::Q4_K && peregrine_kernels::table::MatKernels::get().kq_tiles() {
+            // The repacked tile reads the activation once per eight output rows
+            // instead of once per row: the activation traffic falls by the
+            // same factor. This is the design note's claim, measured. (Only
+            // where the repacked kernel runs: on a CPU without AVX2 the
+            // matrices are multiplied the ordinary way.)
+            assert!(
+                plain_acts > acts * 4,
+                "{fmt:?}: the activation traffic did not fall: {acts} against {plain_acts}"
             );
         }
     }
