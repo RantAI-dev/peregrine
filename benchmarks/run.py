@@ -248,6 +248,12 @@ def parse_args() -> argparse.Namespace:
         help="Worker thread count for engines.",
     )
     parser.add_argument(
+        "--user-counts",
+        default="1,4,10",
+        help="Comma-separated user counts (phases) to run; lets a slow host split a "
+        "context across several commands under a wall-clock cap.",
+    )
+    parser.add_argument(
         "--port", "-p",
         type=int,
         default=8201,
@@ -349,6 +355,10 @@ def main():
         sys.exit(1)
 
     # 4. Contexts and settings
+    selected_user_counts = [int(c.strip()) for c in args.user_counts.split(",") if c.strip()]
+    if not selected_user_counts or any(c not in (1, 4, 10) for c in selected_user_counts):
+        print("Error: --user-counts must be a subset of 1,4,10.", file=sys.stderr)
+        sys.exit(1)
     if args.smoke:
         contexts = [512]
         runs = 1
@@ -413,6 +423,7 @@ def main():
                     "decode_tokens": decode_tokens,
                     "threads": args.threads,
                     "mode": args.mode,
+                    "user_counts": selected_user_counts,
                     "interleaved": True,
                 },
                 "results": {
@@ -461,9 +472,13 @@ def main():
                     server_ctx = ctx + decode_tokens + 64
 
                     phases = [
-                        (1, "single_user", "1 user"),
-                        (4, "multi_user_4", "4 users"),
-                        (10, "multi_user_10", "10 users"),
+                        (users, phase_key, phase_label)
+                        for users, phase_key, phase_label in [
+                            (1, "single_user", "1 user"),
+                            (4, "multi_user_4", "4 users"),
+                            (10, "multi_user_10", "10 users"),
+                        ]
+                        if users in selected_user_counts
                     ]
 
                     for users, phase_key, phase_label in phases:
