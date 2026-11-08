@@ -120,6 +120,7 @@ pub fn matmul_group(
             }
             let rb = row_bytes(j.w.kind, n);
             let (mut r, rz) = (a - off, z - off);
+            let tf = crate::prof::detail().then(Instant::now);
             match path {
                 MatPath::Tiles => {
                     let toff = j.w.tile_off.expect("a tiled path has a tile offset");
@@ -263,6 +264,12 @@ pub fn matmul_group(
                         }
                     }
                 }
+            }
+            if let Some(t) = tf {
+                crate::prof::add_shared(
+                    crate::prof::format_slot(j.w.kind),
+                    t.elapsed().as_nanos() as u64,
+                );
             }
             off += rows;
         }

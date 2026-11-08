@@ -1033,15 +1033,32 @@ impl Session {
             eprintln!(
                 "peregrine profile: {decode_steps} decode steps, mean µs/token (wall {wall_us:.1})"
             );
-            let n = if crate::prof::detail() {
+            // The detail timers are added up across the pool's workers, so a full-machine
+            // figure (comparable to the wall) is that sum over the decode pool's width.
+            let detail = crate::prof::detail();
+            let width = if detail {
+                self.engine
+                    .narrow_pool()
+                    .map(|p| p.width())
+                    .unwrap_or_else(|| self.engine.pool().width())
+                    .max(1)
+            } else {
+                1
+            };
+            let n = if detail {
                 crate::prof::N
             } else {
                 crate::prof::Slot::AttnScores as usize
             };
-            for (name, ns) in names[..n].iter().zip(prof_acc) {
+            for (i, (name, ns)) in names[..n].iter().zip(prof_acc).enumerate() {
+                let share = if i >= crate::prof::Slot::AttnScores as usize {
+                    width
+                } else {
+                    1
+                };
                 eprintln!(
                     "  {name:<16} {:>9.1}",
-                    ns as f64 / 1e3 / decode_steps as f64
+                    ns as f64 / 1e3 / decode_steps as f64 / share as f64
                 );
             }
         }

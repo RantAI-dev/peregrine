@@ -192,6 +192,52 @@ fn sane(fmt: Format, w: &mut [u8]) {
     }
 }
 
+/// A row's result must not depend on the batch width.
+///
+/// The eight-row decode kernel (`q5_0_rows8`, `q8_0_rows8`) runs the one-row
+/// kernel's operations, so it is bit-identical to width one; a wide prefill kernel
+/// for Q5_0 must be too, or the same row would produce different bits in a prefill
+/// and in a decode. This pins that contract at the dispatch layer (`dot_batch`), so
+/// a wide kernel added later is held to it without knowing about the eight-row one.
+#[test]
+#[cfg(feature = "fmt-legacy")]
+fn a_row_is_bit_identical_across_batch_widths() {
+    use peregrine_core::quant::dot_batch;
+    for (fmt, n) in [
+        (Format::Q5_0, 896),
+        (Format::Q8_0, 896),
+        (Format::Q5_0, 4864),
+        (Format::Q8_0, 4864),
+    ] {
+        let mut w = prng_bytes(0x5150_0000 + n as u64, row_bytes(fmt, n));
+        sane(fmt, &mut w);
+        let acts: Vec<QuantAct> = (0..32)
+            .map(|i| activations(n, 0x5200 + i as u64 * 7919))
+            .collect();
+        // Width one, one call per activation: the reference bits.
+        let mut base = vec![0.0f32; acts.len()];
+        for b in 0..acts.len() {
+            dot_batch(fmt, &w, &acts[b..b + 1], &mut base[b..b + 1]);
+        }
+        // Widths that hit every remainder of the four-wide tile, the eight-row
+        // decode group, and a prefill-sized batch.
+        for nb in [2usize, 3, 4, 5, 8, 16, 32] {
+            let mut got = vec![0.0f32; nb];
+            dot_batch(fmt, &w, &acts[..nb], &mut got);
+            for b in 0..nb {
+                assert_eq!(
+                    got[b].to_bits(),
+                    base[b].to_bits(),
+                    "{} n={n} nb={nb} act {b}: {} vs width-one {}",
+                    fmt.label(),
+                    got[b],
+                    base[b]
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn batched_kernels_match_the_scalar_specification_at_every_batch_width() {
     use peregrine_core::quant::dot_batch;

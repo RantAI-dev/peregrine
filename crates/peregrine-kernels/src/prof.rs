@@ -53,10 +53,16 @@ pub enum Slot {
     AttnSoftmax,
     AttnMix,
     AttnDecode,
+    /// Matmul time by weight format (worker-side, attributed at the job's rows).
+    MatQ5_0,
+    MatQ8_0,
+    MatQ6K,
+    MatQ4K,
+    MatOther,
 }
 
 /// The number of slots.
-pub const N: usize = 18;
+pub const N: usize = 23;
 
 thread_local! {
     static NS: [Cell<u64>; N] = const { [const { Cell::new(0) }; N] };
@@ -65,7 +71,12 @@ thread_local! {
 /// Counters that workers add to directly. Adding a shared counter is an atomic
 /// read-modify-write, so only the attention subtimers (which run per block inside the
 /// workers) use it, and only when the timers are on.
-static SHARED: [AtomicU64; 4] = [
+static SHARED: [AtomicU64; 9] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -108,7 +119,23 @@ pub fn time<R>(slot: Slot, f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// Add `ns` nanoseconds to a worker-side `slot` (one of the attention subtimers).
+/// The per-format matmul slot for a weight format.
+#[inline]
+pub fn format_slot(fmt: crate::format::Format) -> Slot {
+    match fmt {
+        #[cfg(feature = "fmt-legacy")]
+        crate::format::Format::Q5_0 => Slot::MatQ5_0,
+        #[cfg(feature = "fmt-legacy")]
+        crate::format::Format::Q8_0 => Slot::MatQ8_0,
+        #[cfg(feature = "fmt-kquant")]
+        crate::format::Format::Q6_K => Slot::MatQ6K,
+        #[cfg(feature = "fmt-kquant")]
+        crate::format::Format::Q4_K => Slot::MatQ4K,
+        _ => Slot::MatOther,
+    }
+}
+
+/// Add `ns` nanoseconds to a worker-side `slot` (one of the detail subtimers).
 #[inline]
 pub fn add_shared(slot: Slot, ns: u64) {
     if enabled() {
@@ -158,5 +185,10 @@ pub fn names() -> [&'static str; N] {
         "  attn softmax",
         "  attn mix",
         "  attn kv decode",
+        "  fmt Q5_0",
+        "  fmt Q8_0",
+        "  fmt Q6_K",
+        "  fmt Q4_K",
+        "  fmt other",
     ]
 }
