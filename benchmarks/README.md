@@ -50,6 +50,30 @@ Each number is measured at three standard context lengths defined in `docs/targe
   $$\text{Fraction of Ceiling} = \frac{\text{Bytes moved per token} \times \text{Decode tok/s}}{\text{Machine streaming bandwidth ceiling}}$$
   Where bytes moved per token is measured directly via Peregrine's telemetry (`TokenTelem`), and the streaming bandwidth ceiling is measured via the hardware probe (`Machine::probe`).
 
+### Flash attention (llama.cpp): compare against the faster setting
+
+llama.cpp v0.9.0 defaults to `-fa auto`, which resolves to flash attention **on** on the CPU
+backend. On some hosts that path is slower than `-fa off`, and at long contexts it can be much
+slower: on the 4-core bluefin (Zen 2) host it decodes a 4096-token Llama 3.2 1B prompt at 13.0
+tok/s by default and 29.1 tok/s with `-fa off`, while short-context decode is about 10% faster
+with `-fa off` too.
+
+The policy for every published ratio is therefore:
+
+- **Compare Peregrine against llama.cpp's faster flash-attention setting for each row** (`on` or
+  `off`, whichever measures faster with the same harness method and harness settings).
+- **Never count a win against a misconfigured competitor.** A ratio produced against the slower
+  setting is not a result.
+- **Show the default-setting number only as a secondary note**, clearly labelled as
+  "llama.cpp defaults (`-fa auto`)", alongside the like-for-like ratio.
+
+`run.py` takes `--llama-fa {auto,on,off}` (default `auto`). The setting is passed as `-fa` to both
+`llama-server` and `llama-bench`, and recorded in every JSON manifest under
+`settings.llama_flash_attn` and `engine.flash_attn`, so a run can never be misread. The default is
+`auto` so that older invocations reproduce their original configuration; benchmarks intended for
+publication should measure both settings on the same day (or reuse a same-day default run) and use
+the faster of the two in each ratio.
+
 ---
 
 ## 3. Pinned Competitor Engines
@@ -118,6 +142,24 @@ python3 benchmarks/run.py \
     --threads 8 \
     --output-dir benchmarks/results
 ```
+
+### llama.cpp with flash attention off (the published comparison setting)
+
+```sh
+LLAMA_SERVER_BIN=/path/to/llama-server \
+python3 benchmarks/run.py \
+    --models /path/to/model.gguf \
+    --engines llama_cpp \
+    --contexts 512,4096 \
+    --runs 3 \
+    --threads 4 \
+    --llama-fa off \
+    --output-dir benchmarks/results
+```
+
+`--llama-fa auto` (the default) reproduces llama.cpp's built-in default; `on` forces flash
+attention on. The choice is written to the run manifest, so published numbers always say which
+setting produced them.
 
 ### Dry Run (Inspect Build & Execution Commands)
 
