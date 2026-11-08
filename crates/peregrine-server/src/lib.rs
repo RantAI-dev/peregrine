@@ -142,6 +142,9 @@ struct App {
     tokens: AtomicU64,
     started: Instant,
     simd: &'static str,
+    /// The kernel tier the run takes, reported beside `simd` so a manifest names
+    /// the kernels that ran rather than the build's instruction-set baseline.
+    simd_tier: String,
     /// "dense" or "littlebit", reported in every response's timings.
     weights: &'static str,
 }
@@ -306,6 +309,7 @@ pub async fn run(a: Args) {
         tokens: AtomicU64::new(0),
         started: Instant::now(),
         simd: peregrine_core::simd_name(),
+        simd_tier: peregrine_core::simd_tier(),
         weights: if model.lb_summary().is_some() {
             "littlebit"
         } else {
@@ -324,7 +328,7 @@ pub async fn run(a: Args) {
         a.model.display(),
         t0.elapsed().as_secs_f64(),
         threads,
-        app.simd,
+        app.simd_tier,
         max_ctx,
         a.slots,
         cache_mb,
@@ -1016,7 +1020,7 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
         usage: json!({"prompt_tokens": run.prompt_n + run.cache_n, "completion_tokens": predicted_n, "total_tokens": run.prompt_n + run.cache_n + predicted_n}),
         timings: json!({"prompt_n": run.prompt_n, "cache_n": run.cache_n, "prompt_ms": run.prompt_ms, "predicted_n": predicted_n, "predicted_ms": run.predicted_ms,
             "predicted_per_second": if run.predicted_ms > 0.0 { predicted_n as f64 / run.predicted_ms * 1e3 } else { 0.0 },
-            "peregrine": {"simd": app.simd, "weights": app.weights, "budget_forced": run.budget_hit, "wall_ms": wall_ms,
+            "peregrine": {"simd": app.simd, "simd_tier": app.simd_tier, "weights": app.weights, "budget_forced": run.budget_hit, "wall_ms": wall_ms,
                 "phases_ms": {"names": ["matmul", "head", "attention", "other", "sampling", "drafting"], "decode": app.engine.phases(), "prefill": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
                 "concurrency": {"slots": app.max_slots, "active": app.engine.active.load(Ordering::SeqCst), "waiting": app.engine.waiting.load(Ordering::SeqCst),
                     "decode_steps": steps, "decode_rows": rows,

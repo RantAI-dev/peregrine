@@ -77,6 +77,9 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
             .unwrap_or_else(|| peregrine_core::pool::physical_cores().unwrap_or(1));
         let obj = serde_json::json!({
             "model": args.model.display().to_string(),
+            // The kernel tier this run takes, so a saved result names the kernels
+            // that produced it (the instruction-set string alone stops at AVX2).
+            "simd_tier": peregrine_core::simd_tier(),
             "config": {
                 "decode_threads": decode_th,
                 "spin_us": effective_opts.spin_us,

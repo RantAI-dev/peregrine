@@ -13,13 +13,14 @@ fn main() {
         });
     let m = Machine::probe(threads);
     println!(
-        "{{\n  \"bandwidth_bytes_per_s\": {},\n  \"bandwidth_gb_s\": {:.3},\n  \"flops\": {},\n  \"gflops\": {:.3},\n  \"threads\": {},\n  \"simd\": \"{}\",\n  \"ridge\": {:.3}\n}}",
+        "{{\n  \"bandwidth_bytes_per_s\": {},\n  \"bandwidth_gb_s\": {:.3},\n  \"flops\": {},\n  \"gflops\": {:.3},\n  \"threads\": {},\n  \"simd\": \"{}\",\n  \"simd_tier\": \"{}\",\n  \"ridge\": {:.3}\n}}",
         m.bandwidth,
         m.bandwidth / 1e9,
         m.flops,
         m.flops / 1e9,
         m.threads,
         m.simd,
+        m.simd_tier,
         m.ridge()
     );
 }
