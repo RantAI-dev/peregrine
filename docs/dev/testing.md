@@ -35,7 +35,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    were recorded on an Intel host and reproduced bit for bit on an AMD host.
    CI's pinned tiers (scalar, AVX2 and the AVX-512 tier under SDE) run with `PEREGRINE_GOLDEN=require`,
    so a new model or format must commit its goldens for all three; `PEREGRINE_GOLDEN=record` writes the
-   missing ones (the AVX-512 ones on an AVX-512 machine).
+   missing ones (the AVX-512 ones on an AVX-512 machine). For the real-model goldens (`tests/golden.rs`), `require` fails a model file that is present but has no golden for the tier, and still skips a file that is absent. A golden pins one upload, byte for byte: a different upload of the same quant (the Qwen official `qwen2.5-0.5b-instruct-q4_k_m.gguf` is not bartowski's `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf`) fails at the golden's `model … bytes` line, so check the SHA-256 listed here before reading a mismatch as a regression.
    `tests/runtime_parity.rs` pins what the session and a one-slot engine must agree on, since ADR 0007
    made the engine the only runtime: the same prompt through `Session` and through a one-slot `Engine`
    (greedy: the same tokens; sampled: the session counts conversation turns into the sampling key and the
@@ -59,6 +59,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 | Gemma 3 1B Instruct Q4_K_M (`google_gemma-3-1b-it-Q4_K_M.gguf`) | `~/models/` |
 | Qwen3-30B-A3B Q2_K (`Qwen3-30B-A3B-Q2_K.gguf`) | `~/models/` |
 | Qwen3.5-2B Q4_K_M (`Qwen3.5-2B-Q4_K_M.gguf`) | `~/models/` |
+| Phi-4 14B Q4_K_M (`phi-4-Q4_K_M.gguf`) | `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
 | TheBloke's Mistral 7B Instruct v0.2 and Llama 2 7B Chat Q4_K_M | `~/models/` (see below) |
@@ -176,6 +177,19 @@ The file carries no `prism.hadamard.*` metadata and is verified by `peregrine in
 The tokenizer was checked across 22 test strings against `llama-tokenize --ids --no-bos` (100% agreement, 22/22 matches).
 Greedy decoding (32 tokens, 8 threads) was checked against llama.cpp across four prompts, including a 602-token prompt from wikitext-2: prompts 1, 2, and 4 match bit for bit across all 32 steps (32/32), while prompt 3 matches through the first 27 tokens with the first divergence at token 27 being a near-tie between " book" (Peregrine top-1, logit 14.92) and " printing" (llama.cpp top-1, logit 14.97, logprob margin 0.045).
 The chat path (`/v1/chat/completions`) generates matching reasoning tokens with answers identifying Paris as the capital of France.
+The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512`, 20 chunks).
+
+### Phi-4 (Phi 4, 14B)
+
+Phi-4 is checked end to end against llama.cpp v0.9.0 on the Q4_K_M file:
+
+| File | Download | Bytes | SHA-256 |
+|---|---|---|---|
+| `phi-4-Q4_K_M.gguf` | `~/models/phi-4-Q4_K_M.gguf` | 9053114816 | `009aba717c09d4a35890c7d35eb59d54e1dba884c7c526e7197d9c13ab5911d9` |
+
+The file declares the `phi3` architecture (40 blocks, embedding 5120, feed-forward 17920, context 16384) and a GPT-2 byte-level BPE vocabulary whose pre-tokenizer is `dbrx`. llama.cpp v0.9.0 splits that with the Llama 3 pattern (`src/llama-vocab.cpp`, lines 310-315), so `dbrx` is a Peregrine pre-type of its own now, and the ids are checked against `llama-tokenize` in `crates/peregrine-core/tests/fixtures/tokenize-golden-phi4.tsv`: 22 of 22 strings match exactly (`llama-tokenize --ids --no-bos`, 100% agreement).
+Greedy decoding (32 tokens, 8 threads) was checked against llama.cpp on three prompts: all three match bit for bit across all 32 steps (32/32 each, 96/96 steps in all). The end-of-generation tokens are taken out of the running on both sides — exactly what `llama-server`'s `ignore_eos` does — so the comparison runs the full 32 steps instead of stopping at the model's own end token.
+The chat path (`/v1/chat/completions`) answers "The capital of France is Paris.", like llama.cpp's `--jinja` server, on the same prompts: 14 tokens without a system message and 24 with one. The file's template is Phi-4's own ChatML variant (`<|im_start|>role<|im_sep|>text<|im_end|>`, no newlines), which Peregrine detects by `<|im_sep|>` as llama.cpp v0.9.0 does (`src/llama-chat.cpp:99-101`, rendered at `:345-352`).
 The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512`, 20 chunks).
 
 ## Accuracy against llama.cpp

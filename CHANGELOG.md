@@ -6,8 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The prefill chunk's default now follows the worker pool. 16 is right on a pool as wide as the physical
+  cores, but the engine builds `available_parallelism()` workers, which on an SMT machine is twice the
+  core count. A 16-row pass is only 16 rows deep: its row-deep blocks (the rotation) give one row to 16
+  workers and leave the other 8 spinning on the siblings of the cores doing the work, and every parallel
+  region is short enough that its slowest worker is a large share of it. Measured on the reference
+  machine at 24 workers, a forward pass carries about 20 ms that does not scale with rows, on both Bonsai
+  sizes (2B and 9B), so a 512-token prompt pays it 32 times instead of 8. The default is now 64 when the
+  pool is wider than the physical cores and stays 16 otherwise (`options::prefill_chunk_default_for`).
+  At 24 workers, medians of four rounds: Bonsai-2B 304 prompt tok/s against 212 (+43 %), Bonsai-9B 90.7
+  against 79.4 (+14 %), Llama-3.2-1B 225 against 189 (+19 %); decode is unchanged on all three. At 12
+  workers 16 keeps winning (257 against 248, 69.0 against 64.9, 180 against 168), and the default stays
+  16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
+
 ### Added
-- A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16): the prompt tokens one weight pass
+- A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical
+  cores and 64 when the pool is wider; see the fix below): the prompt tokens one weight pass
   carries. The engine prefills a prompt in pieces of this size, and the piece is how the prompt is
   *read*, not what it produces: the same prompt, read in pieces of 16, 32, 64 or 128 tokens, gives the
   same KV cache, the same logits and the same tokens (`crates/peregrine-models/tests/prefill_chunk.rs`).
