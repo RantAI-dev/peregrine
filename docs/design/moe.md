@@ -199,5 +199,6 @@ The MXFP4 format the roadmap expected is already in the kernels (S2.1), so no ne
 was needed: the experts are read as the same 2D views as `qwen3moe`'s, in MXFP4.
 
 The gaps left for later: the real-file check (a `gpt-oss-20b` file, on a machine that has
-one), the harmony chat template (llama.cpp's built-in one is a small rendering, but the
-model file's own Jinja template is the one that matters), and the AVX-512 goldens.
+one), the split of Harmony's `analysis` and `final` channels into `reasoning_content` and
+`content` (the model file's own Jinja template is rendered exactly; llama.cpp's built-in one is
+only a small rendering, but the file's template is the one that matters), and the AVX-512 goldens.
