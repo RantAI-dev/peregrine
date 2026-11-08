@@ -14,11 +14,14 @@ const KQ_TILE_ROWS: usize = 8;
 
 /// The bytes one repacked tile of a k-quant format takes.
 ///
-/// Q4_K and Q6_K have their own tile sizes (S3.4).
+/// Q4_K and Q6_K have their own tile sizes (S3.4). The match is exhaustive over
+/// the formats `kq_repacked` selects, so a format added to the repack without a
+/// tile cannot silently be read at Q4_K's stride.
 fn kq_tile_bytes(kind: Format) -> usize {
     match kind {
+        Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
         Format::Q6_K => peregrine_kernels::kq::Q6K8::SIZE,
-        _ => peregrine_kernels::kq::Q4K8::SIZE,
+        other => unreachable!("{other:?} has no repacked k-quant tile"),
     }
 }
 
@@ -199,15 +202,19 @@ pub fn matmul_group(
                             let out = &mut blk[..KQ_TILE_ROWS * nb];
                             if nb >= 4 {
                                 match j.w.kind {
+                                    Format::Q4_K => mk.kq_tiles_q4k(tile, n_sb, kq, nb, out),
                                     Format::Q6_K => mk.kq_tiles_q6k(tile, n_sb, kq, nb, out),
-                                    _ => mk.kq_tiles_q4k(tile, n_sb, kq, nb, out),
+                                    other => unreachable!("{other:?} has no repacked k-quant GEMM"),
                                 }
                             } else {
                                 match j.w.kind {
+                                    Format::Q4_K => {
+                                        mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out)
+                                    }
                                     Format::Q6_K => {
                                         mk.kq_tiles_q6k_gemv(tile, n_sb, &acts[..nb], nb, out)
                                     }
-                                    _ => mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out),
+                                    other => unreachable!("{other:?} has no repacked k-quant GEMV"),
                                 }
                             }
                             for i in 0..KQ_TILE_ROWS {

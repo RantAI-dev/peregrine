@@ -608,6 +608,12 @@ unsafe fn q6_codes_v(qlv: __m256i, qhv: __m256i, g: usize) -> __m256i {
 /// The tile is `n_sb` super-blocks of eight rows; `out` receives
 /// `out[b · 8 + r]` for the rows `row0 .. row0 + N` of the activation.
 ///
+/// This is the small-batch kernel: the GEMV's one to three rows and the
+/// four-row decode block. A four-row call decodes the tile once per
+/// super-block either way, and the four accumulators fit in registers. The
+/// wider prefill batches take [`q6k8_gemm_wide`], which decodes once per
+/// super-block across every row of the call.
+///
 /// `N` is a const generic rather than a parameter so that the activation loop
 /// unrolls, exactly as `q4k8_group` does it: with a runtime bound the compiler
 /// kept the loop rolled inside the inner loops, which cost the decode GEMV more
@@ -628,10 +634,7 @@ unsafe fn q6k8_group<S: ActSrc, const N: usize>(
     row0: usize,
     out: &mut [f32],
 ) {
-    assert!(
-        (1..=4 * ACT_GROUP).contains(&N),
-        "one to sixteen activation rows"
-    );
+    assert!((1..=ACT_GROUP).contains(&N), "one to four activation rows");
     assert!(out.len() >= N * ROWS, "the output holds eight rows per row");
     // The tile is a decode step's whole weight stream, so the next one is
     // prefetched while this one is decoded: without it the GEMV was latency-
@@ -645,6 +648,30 @@ unsafe fn q6k8_group<S: ActSrc, const N: usize>(
         let dv = _mm256_cvtph_ps(_mm_loadu_si128(t.add(crate::kq::q6_d()) as *const __m128i));
         let mut sumi = [_mm256_setzero_si256(); N];
         let mut off = [_mm256_setzero_si256(); N];
+        // The sixteen sub-block scales, decoded once: the main loop and the
+        // offset both read them, and pairing the two runs of a group halves the
+        // offset's madds.
+        let mut svs = [_mm256_setzero_si256(); 16];
+        for half in 0..2 {
+            for run in 0..2 {
+                for g in 0..4 {
+                    let sub = half * 8 + g * 2 + run;
+                    svs[sub] = scale_vec6(t.add(crate::kq::q6_sc() + sub * 8));
+                }
+            }
+        }
+        for half in 0..2 {
+            for g in 0..4 {
+                let sub = half * 8 + g * 2;
+                let sv32 = _mm256_slli_epi16(_mm256_blend_epi16(svs[sub], svs[sub + 1], 0xAA), 5);
+                for u in 0..N {
+                    let b0 = src.run_sum(row0 + u, sb, sub) as i16 as u16 as u32;
+                    let b1 = src.run_sum(row0 + u, sb, sub + 1) as i16 as u16 as u32;
+                    let bz = _mm256_set1_epi32((b0 | (b1 << 16)) as i32);
+                    off[u] = _mm256_add_epi32(off[u], _mm256_madd_epi16(sv32, bz));
+                }
+            }
+        }
         // Two halves of 128 weights, four groups of 32, two runs of 16.
         //
         // Each four-weight chunk of the tile holds all eight rows, and the four
@@ -683,39 +710,29 @@ unsafe fn q6k8_group<S: ActSrc, const N: usize>(
                     let qh1 = _mm256_loadu_si256(
                         t.add(crate::kq::q6_qh() + (half * 8 + cc + 1) * 32) as *const __m256i,
                     );
+                    // The even groups (0 and 2) take the half's first eight
+                    // `ql` chunks, the odd groups (1 and 3) its last eight, so
+                    // each pair of chunks is loaded once for its two groups.
+                    let ql_e0 = _mm256_loadu_si256(
+                        t.add(crate::kq::q6_ql() + (half * 16 + cc) * 32) as *const __m256i,
+                    );
+                    let ql_e1 = _mm256_loadu_si256(
+                        t.add(crate::kq::q6_ql() + (half * 16 + cc + 1) * 32) as *const __m256i,
+                    );
+                    let ql_o0 = _mm256_loadu_si256(
+                        t.add(crate::kq::q6_ql() + (half * 16 + 8 + cc) * 32) as *const __m256i,
+                    );
+                    let ql_o1 = _mm256_loadu_si256(
+                        t.add(crate::kq::q6_ql() + (half * 16 + 8 + cc + 1) * 32) as *const __m256i,
+                    );
                     for g in 0..4 {
                         let sub = half * 8 + g * 2 + run;
-                        let sv = scale_vec6(t.add(crate::kq::q6_sc() + sub * 8));
-                        // The offset: 32 on every code, against the run's
-                        // sum. The sum is exact, so the whole term is exact in
-                        // the integer lanes, as the ordinary kernel has it.
-                        // It is one term per run, so only the first pair adds
-                        // it.
-                        if pair == 0 {
-                            for u in 0..N {
-                                let b = src.run_sum(row0 + u, sb, sub) as i16;
-                                let bz = _mm256_blend_epi16(
-                                    _mm256_set1_epi16(b),
-                                    _mm256_setzero_si256(),
-                                    0xAA,
-                                );
-                                off[u] = _mm256_add_epi32(
-                                    off[u],
-                                    _mm256_slli_epi32(_mm256_madd_epi16(sv, bz), 5),
-                                );
-                            }
-                        }
-                        // The even groups (0 and 2) take the half's first
-                        // eight `ql` chunks, the odd groups (1 and 3) its last
-                        // eight.
-                        let base = if g & 1 == 0 { cc } else { 8 + cc };
-                        let ql0 =
-                            _mm256_loadu_si256(t.add(crate::kq::q6_ql() + (half * 16 + base) * 32)
-                                as *const __m256i);
-                        let ql1 = _mm256_loadu_si256(
-                            t.add(crate::kq::q6_ql() + (half * 16 + base + 1) * 32)
-                                as *const __m256i,
-                        );
+                        let sv = svs[sub];
+                        let (ql0, ql1) = if g & 1 == 0 {
+                            (ql_e0, ql_e1)
+                        } else {
+                            (ql_o0, ql_o1)
+                        };
                         let c0 = q6_codes_v(ql0, qh0, g);
                         let c1 = q6_codes_v(ql1, qh1, g);
                         let win = half * 16 + g * 4 + cc / 2;
@@ -750,13 +767,233 @@ unsafe fn q6k8_group<S: ActSrc, const N: usize>(
     }
 }
 
+/// The activation rows one wide Q6_K GEMM pass holds: the matmul scratch's row
+/// limit (`blocks::linear::MAX_BATCH`). Wider calls are split, and the tile is
+/// decoded once per pass.
+const MAX_WIDE_ACT: usize = 128;
+
+/// The activation rows one wide GEMM chunk holds.
+///
+/// The decoded codes are re-read per chunk, so a wider chunk costs fewer of
+/// those reads; it also widens the live `sumi`/`off` state and spills more. On
+/// this host a four-row chunk measured faster than eight: the eight-row state
+/// spills more than the saved code reads are worth.
+const WIDE_CHUNK: usize = ACT_GROUP;
+
+/// The four groups of a half, times the two `ql` vectors of a chunk.
+const CODE_VECTORS: usize = 8 * 4 * 2;
+
+/// The codes of one Q6_K super-block, decoded once for every activation row of
+/// the call.
+///
+/// `codes[step * 8 + g * 2 + i]` is the chunk vector `i` of group `g` of the
+/// step `step = half * 4 + run * 2 + pair`, and `scales[sub]` is sub-block
+/// `sub`'s eight-row scale vector. Both are read by every activation chunk: the
+/// decode is the part that the per-row kernel amortises over its whole batch,
+/// and this is the same amortisation for the eight output rows of the tile.
+#[inline(always)]
+unsafe fn q6k8_decode_sb(
+    t: *const u8,
+    codes: &mut [__m256i; CODE_VECTORS],
+    scales: &mut [__m256i; 16],
+) -> __m256 {
+    let dv = _mm256_cvtph_ps(_mm_loadu_si128(t.add(crate::kq::q6_d()) as *const __m128i));
+    for half in 0..2 {
+        for run in 0..2 {
+            for pair in 0..2 {
+                let step = half * 4 + run * 2 + pair;
+                let cc = run * 4 + pair * 2;
+                let qh0 = _mm256_loadu_si256(
+                    t.add(crate::kq::q6_qh() + (half * 8 + cc) * 32) as *const __m256i
+                );
+                let qh1 = _mm256_loadu_si256(
+                    t.add(crate::kq::q6_qh() + (half * 8 + cc + 1) * 32) as *const __m256i
+                );
+                // The even groups (0 and 2) take the half's first eight `ql`
+                // chunks, the odd groups (1 and 3) its last eight, so each
+                // pair of chunks is loaded once for its two groups.
+                let ql_e0 = _mm256_loadu_si256(
+                    t.add(crate::kq::q6_ql() + (half * 16 + cc) * 32) as *const __m256i
+                );
+                let ql_e1 = _mm256_loadu_si256(
+                    t.add(crate::kq::q6_ql() + (half * 16 + cc + 1) * 32) as *const __m256i,
+                );
+                let ql_o0 = _mm256_loadu_si256(
+                    t.add(crate::kq::q6_ql() + (half * 16 + 8 + cc) * 32) as *const __m256i,
+                );
+                let ql_o1 = _mm256_loadu_si256(
+                    t.add(crate::kq::q6_ql() + (half * 16 + 8 + cc + 1) * 32) as *const __m256i,
+                );
+                for g in 0..4 {
+                    let sub = half * 8 + g * 2 + run;
+                    scales[sub] = scale_vec6(t.add(crate::kq::q6_sc() + sub * 8));
+                    let (ql0, ql1) = if g & 1 == 0 {
+                        (ql_e0, ql_e1)
+                    } else {
+                        (ql_o0, ql_o1)
+                    };
+                    codes[step * 8 + g * 2] = q6_codes_v(ql0, qh0, g);
+                    codes[step * 8 + g * 2 + 1] = q6_codes_v(ql1, qh1, g);
+                }
+            }
+        }
+    }
+    dv
+}
+
+/// One activation chunk of one Q6_K super-block against the tile's decoded
+/// codes, folded into the chunk's accumulators.
+///
+/// Every row is independent: the chunk's place in the call does not enter any
+/// expression, so the same row computed in a chunk with a different width, in a
+/// different pass, or alone in the GEMV gets the same bits.
+#[inline(always)]
+unsafe fn q6k8_sb_chunk<S: ActSrc, const N: usize>(
+    src: &S,
+    row0: usize,
+    sb: usize,
+    codes: &[__m256i; CODE_VECTORS],
+    scales: &[__m256i; 16],
+    dv: __m256,
+    acc: &mut [__m256],
+) {
+    let mut sumi = [_mm256_setzero_si256(); N];
+    let mut off = [_mm256_setzero_si256(); N];
+    // The offset: the run scales against the activation's run sums. The two
+    // runs of a group are consecutive sub-blocks, so one `vpmaddwd` covers
+    // both — the scale pair in the two 16-bit lanes of each output row, the
+    // sums in the same lanes — and the format's 32 is folded into the scale
+    // (at most 127, so `<< 5` stays inside i16).
+    for half in 0..2 {
+        for g in 0..4 {
+            let sub = half * 8 + g * 2;
+            let sv32 = _mm256_slli_epi16(_mm256_blend_epi16(scales[sub], scales[sub + 1], 0xAA), 5);
+            for u in 0..N {
+                let b0 = src.run_sum(row0 + u, sb, sub) as i16 as u16 as u32;
+                let b1 = src.run_sum(row0 + u, sb, sub + 1) as i16 as u16 as u32;
+                let bz = _mm256_set1_epi32((b0 | (b1 << 16)) as i32);
+                off[u] = _mm256_add_epi32(off[u], _mm256_madd_epi16(sv32, bz));
+            }
+        }
+    }
+    // The order of the steps is the one the GEMV walks: half, run, pair, group.
+    for half in 0..2 {
+        for run in 0..2 {
+            for pair in 0..2 {
+                let step = half * 4 + run * 2 + pair;
+                for g in 0..4 {
+                    let c0 = codes[step * 8 + g * 2];
+                    let c1 = codes[step * 8 + g * 2 + 1];
+                    let sv = scales[half * 8 + g * 2 + run];
+                    let win = half * 16 + g * 4 + run * 2 + pair;
+                    for u in 0..N {
+                        let a0 = bcast4(src.quad(row0 + u, sb, win, 0));
+                        let a1 = bcast4(src.quad(row0 + u, sb, win, 1));
+                        let i16 = _mm256_add_epi16(
+                            _mm256_maddubs_epi16(c0, a0),
+                            _mm256_maddubs_epi16(c1, a1),
+                        );
+                        sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(sv, i16));
+                    }
+                }
+            }
+        }
+    }
+    for u in 0..N {
+        let v = _mm256_sub_epi32(sumi[u], off[u]);
+        let dk = _mm256_set1_ps(src.scale(row0 + u, sb));
+        acc[u] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(v), _mm256_mul_ps(dv, dk), acc[u]);
+    }
+}
+
+/// Eight output rows of a repacked Q6_K tile against a batch of activations,
+/// with the tile decoded once per super-block for the whole call.
+///
+/// The tile's codes and scales are decoded into a stack buffer once per
+/// super-block, then every four-row activation chunk of the call multiplies
+/// against them. That is the same amortisation `wide_q6_k` gets from decoding
+/// one output row once for the whole batch; here one pass serves eight output
+/// rows. The accumulators are the only per-row state touched between
+/// super-blocks, so register pressure stays at one four-row chunk.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn q6k8_gemm_wide(
+    tile: &[u8],
+    n_sb: usize,
+    acts: &KqActs,
+    row0: usize,
+    nb: usize,
+    out: &mut [f32],
+) {
+    debug_assert!(nb <= MAX_WIDE_ACT);
+    let src = Interleaved { acts };
+    // The pass's accumulators, touched once per super-block per chunk.
+    let mut acc = [_mm256_setzero_ps(); MAX_WIDE_ACT];
+    let mut codes = [_mm256_setzero_si256(); CODE_VECTORS];
+    let mut scales = [_mm256_setzero_si256(); 16];
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q6K8::SIZE);
+        let dv = q6k8_decode_sb(t, &mut codes, &mut scales);
+        let mut b0 = 0;
+        while b0 < nb {
+            let n = (nb - b0).min(WIDE_CHUNK);
+            match n {
+                4 => q6k8_sb_chunk::<_, 4>(
+                    &src,
+                    row0 + b0,
+                    sb,
+                    &codes,
+                    &scales,
+                    dv,
+                    &mut acc[b0..b0 + 4],
+                ),
+                3 => q6k8_sb_chunk::<_, 3>(
+                    &src,
+                    row0 + b0,
+                    sb,
+                    &codes,
+                    &scales,
+                    dv,
+                    &mut acc[b0..b0 + 3],
+                ),
+                2 => q6k8_sb_chunk::<_, 2>(
+                    &src,
+                    row0 + b0,
+                    sb,
+                    &codes,
+                    &scales,
+                    dv,
+                    &mut acc[b0..b0 + 2],
+                ),
+                1 => q6k8_sb_chunk::<_, 1>(
+                    &src,
+                    row0 + b0,
+                    sb,
+                    &codes,
+                    &scales,
+                    dv,
+                    &mut acc[b0..b0 + 1],
+                ),
+                _ => unreachable!("a chunk holds four activation rows"),
+            }
+            b0 += n;
+        }
+    }
+    for u in 0..nb {
+        _mm256_storeu_ps(out.as_mut_ptr().add(u * ROWS), acc[u]);
+    }
+}
+
 /// Eight output rows of a repacked Q6_K tile against a batch of activations.
 ///
-/// The weight tile is decoded once per chunk of up to sixteen activation rows:
-/// the interleaved source addresses the four-row groups itself, and one decode
-/// pass per prefill chunk is what keeps the prefill competitive with the wide
-/// per-row kernel. A chunk with fewer rows left is padded with zero codes,
-/// whose results are discarded.
+/// The wide path decodes the tile once per super-block for every activation
+/// row of the call ([`q6k8_gemm_wide`]); a four-row call is the decode block's
+/// width and stays on the const-generic kernel, whose four accumulators fit in
+/// registers and which needs no decode buffer. Both paths have the same
+/// per-(row, super-block) arithmetic, so their bits agree.
 ///
 /// # Safety
 ///
@@ -768,33 +1005,33 @@ pub unsafe fn q6k8_gemm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out:
         out.len() >= nb * ROWS,
         "the output holds fewer than eight rows per activation"
     );
-    let src = Interleaved { acts };
-    // The weight tile is decoded once for sixteen activation rows: the
-    // interleaved source addresses row groups itself, and one decode pass per
-    // prefill chunk is what keeps the prefill ahead of the wide per-row
-    // kernel. The rows are independent, so any chunking gives the same bits.
+    if nb <= ACT_GROUP {
+        let src = Interleaved { acts };
+        match nb {
+            4 => q6k8_group::<_, 4>(tile, n_sb, &src, 0, out),
+            3 => q6k8_group::<_, 3>(tile, n_sb, &src, 0, out),
+            2 => q6k8_group::<_, 2>(tile, n_sb, &src, 0, out),
+            1 => q6k8_group::<_, 1>(tile, n_sb, &src, 0, out),
+            0 => {}
+            _ => unreachable!("a group holds four activation rows"),
+        }
+        return;
+    }
+    // The core's matmul scratch caps a call at MAX_WIDE_ACT; a direct caller
+    // with a wider batch is split into passes of that width, and the tile is
+    // decoded once per pass. The rows are independent, so the split does not
+    // change a bit.
     let mut b0 = 0;
     while b0 < nb {
-        let n = (nb - b0).min(4 * ACT_GROUP);
-        match n {
-            16 => q6k8_group::<_, 16>(tile, n_sb, &src, b0, out),
-            15 => q6k8_group::<_, 15>(tile, n_sb, &src, b0, out),
-            14 => q6k8_group::<_, 14>(tile, n_sb, &src, b0, out),
-            13 => q6k8_group::<_, 13>(tile, n_sb, &src, b0, out),
-            12 => q6k8_group::<_, 12>(tile, n_sb, &src, b0, out),
-            11 => q6k8_group::<_, 11>(tile, n_sb, &src, b0, out),
-            10 => q6k8_group::<_, 10>(tile, n_sb, &src, b0, out),
-            9 => q6k8_group::<_, 9>(tile, n_sb, &src, b0, out),
-            8 => q6k8_group::<_, 8>(tile, n_sb, &src, b0, out),
-            7 => q6k8_group::<_, 7>(tile, n_sb, &src, b0, out),
-            6 => q6k8_group::<_, 6>(tile, n_sb, &src, b0, out),
-            5 => q6k8_group::<_, 5>(tile, n_sb, &src, b0, out),
-            4 => q6k8_group::<_, 4>(tile, n_sb, &src, b0, out),
-            3 => q6k8_group::<_, 3>(tile, n_sb, &src, b0, out),
-            2 => q6k8_group::<_, 2>(tile, n_sb, &src, b0, out),
-            1 => q6k8_group::<_, 1>(tile, n_sb, &src, b0, out),
-            _ => unreachable!("a chunk holds sixteen activation rows"),
-        }
+        let n = (nb - b0).min(MAX_WIDE_ACT);
+        q6k8_gemm_wide(
+            tile,
+            n_sb,
+            acts,
+            b0,
+            n,
+            &mut out[b0 * ROWS..(b0 + n) * ROWS],
+        );
         b0 += n;
     }
 }
@@ -1090,6 +1327,11 @@ mod tests {
     /// The Q6_K repacked GEMM against the scalar reference, and the GEMV against
     /// the GEMM: the two paths have to agree bit for bit, because a row's
     /// result must not depend on the batch it ran in.
+    ///
+    /// The batch is wider than one activation group on purpose: it exercises
+    /// the wide GEMM (one tile decode per super-block, all chunks), the
+    /// four-row kernel, the tail chunk of a width that is not a multiple of
+    /// four, and a pass that starts part-way through the batch.
     #[test]
     fn the_repacked_q6_k_kernels_match_the_reference_and_each_other() {
         if !crate::simd::have_batched() {
@@ -1100,14 +1342,16 @@ mod tests {
         let mut rng = Rng(0xC0DE_0BAD_5EED_1234);
         let tile = q6k8_tile(&mut rng, n_sb);
 
-        // The batch: four rows for the GEMM, and the same rows one at a time
-        // for the GEMV.
-        let batch = acts(&mut rng, 4, n);
+        // The batch: five activation groups, so the wide path and its tail run.
+        const ROWS: usize = 20;
+        let batch = acts(&mut rng, ROWS, n);
         let mut kq = KqActs::default();
         kq.fill(&batch);
-        let mut gemm = vec![0.0f32; 4 * 8];
-        unsafe { q6k8_gemm(&tile, n_sb, &kq, 4, &mut gemm) };
-        for b in 0..4 {
+
+        // The widest call is the canonical value of every row.
+        let mut gemm = vec![0.0f32; ROWS * 8];
+        unsafe { q6k8_gemm(&tile, n_sb, &kq, ROWS, &mut gemm) };
+        for b in 0..ROWS {
             for r in 0..8 {
                 let want = crate::kq::dot_q6k8_ref(&tile, n_sb, r, &batch[b]);
                 let got = gemm[b * 8 + r];
@@ -1118,16 +1362,53 @@ mod tests {
             }
         }
 
-        // The GEMV, one to three rows at a time.
-        for nb in 1..=3 {
-            let mut gemv = vec![0.0f32; 3 * 8];
-            unsafe { q6k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut gemv) };
+        // Every narrower width must give the same bits for the rows it holds:
+        // the batch width, the chunk width and the tail must not enter a row's
+        // arithmetic.
+        for nb in 1..ROWS {
+            let mut narrow = vec![0.0f32; nb * 8];
+            unsafe { q6k8_gemm(&tile, n_sb, &kq, nb, &mut narrow) };
+            for b in 0..nb {
+                for r in 0..8 {
+                    assert_eq!(
+                        narrow[b * 8 + r].to_bits(),
+                        gemm[b * 8 + r].to_bits(),
+                        "width {nb} disagrees with width {ROWS} on row {r} of batch {b}"
+                    );
+                }
+            }
+        }
+
+        // A pass that starts at an offset — what a worker takes when it claims
+        // a range of rows — must agree with the same rows in the whole call.
+        for (row0, nb) in [(13usize, 4usize), (9, 7), (16, 3)] {
+            let mut part = vec![0.0f32; nb * 8];
+            unsafe { q6k8_gemm_wide(&tile, n_sb, &kq, row0, nb, &mut part) };
+            for b in 0..nb {
+                for r in 0..8 {
+                    assert_eq!(
+                        part[b * 8 + r].to_bits(),
+                        gemm[(row0 + b) * 8 + r].to_bits(),
+                        "pass {row0}..{} disagrees on row {r} of batch {b}",
+                        row0 + nb
+                    );
+                }
+            }
+        }
+
+        // The GEMV, one to three rows at a time, on rows from the start and
+        // from the middle of the batch: it reads the plain layout, and it must
+        // still agree with the wide GEMM bit for bit.
+        for (start, nb) in [(0usize, 1usize), (0, 2), (0, 3), (7, 1), (13, 3)] {
+            let mut gemv = vec![0.0f32; nb * 8];
+            unsafe { q6k8_gemv(&tile, n_sb, &batch[start..start + nb], nb, &mut gemv) };
             for b in 0..nb {
                 for r in 0..8 {
                     assert_eq!(
                         gemv[b * 8 + r].to_bits(),
-                        gemm[b * 8 + r].to_bits(),
-                        "the GEMV and the GEMM disagree on row {r} of the batch {b}"
+                        gemm[(start + b) * 8 + r].to_bits(),
+                        "the GEMV and the GEMM disagree on row {r} of batch {}",
+                        start + b
                     );
                 }
             }

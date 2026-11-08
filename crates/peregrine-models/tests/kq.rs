@@ -197,7 +197,8 @@ fn check_matrix(kind: Format, src: &[u8], stored: &[u8], rows: usize, cols: usiz
             let t = &stored[at..at + tile];
             match kind {
                 Format::Q4_K => unrepack_q4k8(t, &mut back),
-                _ => unrepack_q6k8(t, &mut back),
+                Format::Q6_K => unrepack_q6k8(t, &mut back),
+                other => panic!("{other:?} has no repacked layout"),
             }
             for r in 0..8 {
                 let want = &src[(g * TILE_ROWS + r) * rb + s * blk..][..blk];
