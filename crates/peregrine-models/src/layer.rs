@@ -147,21 +147,18 @@ pub(crate) fn attention_rows(
 
     let t_attn = std::time::Instant::now();
     peregrine_core::prof::time(peregrine_core::prof::Slot::Attn, || {
-        for (r0, len, c) in caches.runs(nb) {
-            peregrine_core::blocks::attn::attend(
-                cfg,
-                &mut st.attn,
-                &st.q,
-                &mut st.xb,
-                caches.cache(c),
-                pool,
-                li,
-                len,
-                positions[r0],
-                r0,
-                stats,
-            );
-        }
+        peregrine_core::blocks::attn::attend_mapped(
+            cfg,
+            &mut st.attn,
+            &st.q,
+            &mut st.xb,
+            caches,
+            pool,
+            li,
+            nb,
+            positions,
+            stats,
+        );
     });
     stats.ns_attn += t_attn.elapsed().as_nanos() as u64;
 

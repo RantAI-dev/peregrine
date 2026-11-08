@@ -163,6 +163,27 @@ All notable changes to this project are documented here. The format follows
   end-to-end token rate moved +0.4 % and +2.8 % respectively, within the host's
   noise). Prefill attention was unchanged (11.4-12.0 s and 16.8 to 16.4 s over a 4096
   token prompt), and its end-to-end rate was within noise.
+- A decode step's attention is one parallel region for every decoding user, not one per
+  user. Each user has a separate cache, so the dense layer used to call attention once
+  per user per layer — ten fork-joins per layer at ten users, each splintering the same
+  KV head's positions across the pool. The single-row runs now become one task per
+  (KV head, row) in a single region; a row walks its own canonical position chunks with
+  the same per-chunk kernel a solo decode chooses (the F16-direct one where the cache
+  allows it) and merges them in the same order, so its arithmetic is its solo arithmetic
+  and does not depend on the batch (a new test pins three users' rows against their solo
+  decodes bit for bit). On the 12-core desktop with the server's default 24-thread pool
+  (Llama-3.2-1B Q4_K_M, 512 positions, ten users) the step fell from 82-90 to 69-72 ms
+  and ten-user aggregate throughput from 63.2 to 76.8 tok/s (+21.5 %; llama.cpp v0.9.0
+  `-fa auto`: 78.0 tok/s), with decode-only aggregate 119.4 -> 157.4 (+31.8 %). On a
+  12-thread pool the change is neutral (ten users 76.4 -> 76.5), because ten one-row
+  calls already fit one wave of twelve workers.
+- A prompt longer than 1024 tokens is prefilled in 64-token pieces instead of the tuned
+  16. At 4096 positions with ten users the time to first token fell from 158.3 s to
+  152.3 s (llama.cpp v0.9.0 `-fa auto`: 144.2 s), and single-user prefill of that prompt
+  is no slower. The chunk changes how the prompt is read, not what it produces.
+- `PEREGRINE_PROF2=1` now prints a periodic per-bucket breakdown of the server's engine
+  thread to stderr (steps, rows per step, wall per step, matmul by phase, attention,
+  quantise, barrier wait); `=full` adds the inner-loop timers.
 - The startup calibration is off by default: `PEREGRINE_CALIBRATE=1` turns it on (S2.6 decision 6).
   A wrong thread count costs far more than the tuned default it replaces, and the calibration is only
   switched on by default once it has passed A/Bs on two machines.
