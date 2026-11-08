@@ -13,7 +13,8 @@ engines on the same bytes, the same host, the same thread count and the same req
   `62c418ccd7aefee37997e94c2d9fac1eed7fc89b` (the commit `docs/reference/bonsai2_spec.md`
   was written against). It fetched and built as pinned; no fallback to the branch head.
   CMake Release, default native CPU dispatch (`-march=native`, AVX-512 on this host).
-- Models (SHA-256 taken from the manifests):  - `Ternary-Bonsai-2-2B-PQ2_0.gguf`, 517,312,992 bytes,
+- Models (SHA-256 taken from the manifests):
+  - `Ternary-Bonsai-2-2B-PQ2_0.gguf`, 517,312,992 bytes,
     `d5f01a4ecaf49239653308ee732ad1a0c5f802c0ddb997549fc7b694c8b45928`
   - `Ternary-Bonsai-2-9B-PQ2_0.gguf`, 2,416,851,840 bytes,
     `7a89ab48f5038c704480f60781f9b8d4035351f5f6beb7d11fad80001fde23f9`
@@ -26,6 +27,11 @@ engines on the same bytes, the same host, the same thread count and the same req
   per-request nonce, prompt lengths calibrated per engine and model (every measured prompt
   within 5% of the target). Threads: **12**, one per physical core, the same count as the
   desktop baseline in PR #98.
+- Flash attention: measured on the fork in both explicit settings, `-fa on` and `-fa off`,
+  for every row, and cross-checked with `llama-bench`. The fork's default is `-fa auto`,
+  which resolves to on (its default and explicit-on server numbers agree on every plain-model
+  row). The adapter accepts the setting, passes it to both `llama-server` and `llama-bench`,
+  and records it in the manifest as `engine.flash_attn`.
 
 The 4B file is not on this host; the only MTP-capable file available here is the 9B
 `-MTP-Q8_0` file, so the MTP comparison uses that one.
@@ -65,13 +71,16 @@ one. Each round is therefore several invocations:
   several 4k prompts).
 - The engine order alternates between rounds (Peregrine first in round 1 and 3, the fork
   first in round 2; the 10-user and 4096 measurement order alternates the same way).
+- The flash-attention sweeps are fork-only (Peregrine has no such switch) and alternate
+  `-fa on`, `-fa off` between rounds.
 
 The raw per-invocation manifests are in [`raw/`](raw/). [`merge.py`](merge.py) concatenates
 their sample arrays into the one-manifest-per-engine shape a single `--runs 3` invocation
-would write, recomputing medians and half-ranges with the harness's rule. Run it with
-`python3 merge.py` from this directory to regenerate the eight manifests beside it.
+would write, recomputing medians and half-ranges with the harness's rule, and puts the
+flash-attention setting in the output name. Run it with `python3 merge.py` from this
+directory to regenerate the manifests beside it.
 
-Two harness additions were needed for this model family and are in the same PR:
+Three harness additions were needed for this model family and are in the same PR:
 
 - `--chat-template-kwargs '{"enable_thinking": false}'`, sent to both engines. Bonsai 2 uses
   the Qwen3 template; with thinking on, both servers put the whole answer in
@@ -82,33 +91,37 @@ Two harness additions were needed for this model family and are in the same PR:
   control token that carries no text. The sample is kept, and its throughput is still
   `reported_tokens / reported_decode_time`; the fork reported 256 on every request. This is
   at most a 0.4% difference in the token count, and it is applied to both engines.
+- `--flash-attn {default,auto,on,off}` and `--engine-args`, so the fork can be run in each
+  flash-attention setting and the setting lands in the manifest.
 
 ## Results
 
-Medians of 3 rounds, spread is the half-range. "Peregrine ÷ fork" above 1 means Peregrine is
-faster; for TTFT, below 1 means Peregrine's first token arrives sooner.
+Medians of 3 rounds, spread is the half-range. "Fork best" is the faster of the two explicit
+flash-attention settings for that row (lower for TTFT); the ratio is Peregrine ÷ "fork best".
+"Fork default" is the fork with its own default (`-fa auto`) as a secondary column. Above 1
+means Peregrine is faster; for TTFT, below 1 means Peregrine's first token arrives sooner.
 
 ### Bonsai 2 2B, PQ2_0
 
-| Context | Users | Metric | Peregrine | Fork | Peregrine ÷ fork |
-|---|---|---|---|---|---|
-| 512 | 1 | Decode tok/s | 70.64 ± 0.77 | 32.67 ± 0.61 | **2.16x** |
-| 512 | 1 | Prompt tok/s | 259.25 | 112.19 | **2.31x** |
-| 512 | 10 | Aggregate tok/s | 80.59 | 29.79 | **2.71x** |
-| 512 | 10 | TTFT (s) | 12.92 | 45.40 | **0.28x** |
-| 4096 | 1 | Decode tok/s | 60.64 ± 0.59 | 30.76 ± 0.49 | **1.97x** |
-| 4096 | 1 | Prompt tok/s | 202.94 | 103.90 | **1.95x** |
+| Context | Users | Metric | Peregrine | Fork best (-fa) | Ratio | Fork default |
+|---|---|---|---|---|---|---|
+| 512 | 1 | Decode tok/s | 70.64 ± 0.77 | 32.66 ± 0.63 (on) | **2.16x** | 32.67 |
+| 512 | 1 | Prompt tok/s | 259.25 ± 14.28 | 108.24 ± 1.69 (on) | **2.40x** | 112.19 |
+| 512 | 10 | Aggregate tok/s | 80.59 ± 3.53 | 29.96 ± 0.61 (on) | **2.69x** | 29.79 |
+| 512 | 10 | TTFT (s) | 12.92 ± 1.50 | 42.79 ± 1.62 (on) | **0.30x** | 45.40 |
+| 4096 | 1 | Decode tok/s | 60.64 ± 0.59 | 30.47 ± 0.59 (on) | **1.99x** | 30.76 |
+| 4096 | 1 | Prompt tok/s | 202.94 ± 0.83 | 105.19 ± 0.43 (off) | **1.93x** | 103.90 |
 
 ### Bonsai 2 9B, PQ2_0
 
-| Context | Users | Metric | Peregrine | Fork | Peregrine ÷ fork |
-|---|---|---|---|---|---|
-| 512 | 1 | Decode tok/s | 22.97 ± 0.22 | 9.82 ± 0.09 | **2.34x** |
-| 512 | 1 | Prompt tok/s | 67.24 | 26.63 | **2.52x** |
-| 512 | 10 | Aggregate tok/s | 21.62 | 7.76 | **2.79x** |
-| 512 | 10 | TTFT (s) | 51.66 | 185.48 | **0.28x** |
-| 4096 | 1 | Decode tok/s | 20.36 ± 0.22 | 8.93 ± 0.38 | **2.28x** |
-| 4096 | 1 | Prompt tok/s | 57.42 | 25.33 | **2.27x** |
+| Context | Users | Metric | Peregrine | Fork best (-fa) | Ratio | Fork default |
+|---|---|---|---|---|---|---|
+| 512 | 1 | Decode tok/s | 22.97 ± 0.22 | 9.85 ± 0.06 (off) | **2.33x** | 9.82 |
+| 512 | 1 | Prompt tok/s | 67.24 ± 0.18 | 26.12 ± 0.30 (off) | **2.57x** | 26.63 |
+| 512 | 10 | Aggregate tok/s | 21.62 ± 0.57 | 7.83 ± 0.09 (on) | **2.76x** | 7.76 |
+| 512 | 10 | TTFT (s) | 51.66 ± 0.66 | 183.40 ± 3.22 (on) | **0.28x** | 185.48 |
+| 4096 | 1 | Decode tok/s | 20.36 ± 0.22 | 9.22 ± 0.02 (on) | **2.21x** | 8.93 |
+| 4096 | 1 | Prompt tok/s | 57.42 ± 0.39 | 25.53 ± 0.01 (off) | **2.25x** | 25.33 |
 
 ### MTP on the 9B `-MTP-Q8_0` file, 512 tokens, 1 user
 
@@ -116,17 +129,63 @@ Peregrine's MTP speculation is on by default and was disabled with `--opt MTP=0`
 enables the same head with `--spec-type draft-mtp` (its `--mtp` flag is a download option,
 not a server option); the "off" row is the fork with no speculative flag.
 
-| Configuration | Peregrine decode tok/s | Fork decode tok/s | Peregrine ÷ fork |
-|---|---|---|---|
-| MTP off | 22.75 ± 0.09 | 9.83 ± 0.07 | 2.31x |
-| MTP on | 25.01 ± 0.77 | 9.77 ± 0.53 | 2.56x |
-| On ÷ off | **1.10x** | **0.99x** | — |
+| Configuration | Peregrine | Fork best (-fa) | Ratio | Fork default |
+|---|---|---|---|---|
+| MTP off | 22.75 ± 0.09 | 10.69 ± 0.03 (on) | **2.13x** | 9.83 |
+| MTP on | 25.01 ± 0.77 | 9.66 ± 0.44 (on) | **2.59x** | 9.77 |
+| On ÷ off | **1.10x** | 0.90x | — | 0.99x |
 
 Peregrine's MTP adds about 10% at this prompt length. The fork's speculative mode runs (its
 log says `speculative decoding enabled: draft-mtp`, and its timings report `draft_n` and
-`draft_n_accepted`), but at 256 tokens of this corpus it did not move decode beyond the
-round-to-round spread. A separate 64-token check on the same file reported 66 drafted and 40
-accepted tokens for the fork.
+`draft_n_accepted`), but at 256 tokens of this corpus it did not beat its own non-speculative
+decode; the fork's MTP-on and MTP-off rows were measured about an hour apart and differ by
+more than any MTP effect that appeared in the interleaved runs, so read the fork's own
+on/off as parity and the 2.13x–2.59x against Peregrine as the measured result. A separate
+64-token check on the same file reported 66 drafted and 40 accepted tokens for the fork.
+
+## Flash attention: on, off and the default
+
+Upstream llama.cpp on the bluefin host showed a large depth penalty from its default flash
+attention (1B at 4096: 13.0 tok/s with the default, 29.1 with `-fa 0`). That is **not** what
+this fork does to Bonsai 2. Across every server row, explicit `-fa on` and `-fa off` land
+within 0–2% of each other, and the default (`-fa auto`) is the on setting:
+
+| Row | Fork `-fa on` | Fork `-fa off` |
+|---|---|---|
+| 2B, 512, 1 user, decode tok/s | 32.66 ± 0.63 | 32.41 ± 0.37 |
+| 2B, 512, 1 user, prompt tok/s | 108.24 ± 1.69 | 107.77 ± 0.51 |
+| 2B, 512, 10 users, aggregate tok/s | 29.96 ± 0.61 | 28.25 ± 0.15 |
+| 2B, 4096, 1 user, decode tok/s | 30.47 ± 0.59 | 29.91 ± 0.31 |
+| 2B, 4096, 1 user, prompt tok/s | 102.65 ± 0.66 | 105.19 ± 0.43 |
+| 9B, 512, 1 user, decode tok/s | 9.83 ± 0.03 | 9.85 ± 0.06 |
+| 9B, 512, 1 user, prompt tok/s | 26.04 ± 0.09 | 26.12 ± 0.30 |
+| 9B, 512, 10 users, aggregate tok/s | 7.83 ± 0.09 | 7.62 ± 0.08 |
+| 9B, 4096, 1 user, decode tok/s | 9.22 ± 0.02 | 9.10 ± 0.03 |
+| 9B, 4096, 1 user, prompt tok/s | 25.41 ± 0.07 | 25.53 ± 0.01 |
+
+`llama-bench` (raw JSON in [`llama-bench/`](llama-bench/)) agrees after taking medians: the
+host has a second, ~35% faster decode mode that hits roughly one sample in five regardless
+of `-fa`, so the averages in its JSON are not usable as-is.
+
+| Model | Test | `-fa auto` | `-fa on` | `-fa off` |
+|---|---|---|---|---|
+| 2B | pp 512 tok/s | 108.12 | 109.86 | 109.92 |
+| 2B | tg 256 at depth 0 | 33.39 | 32.89 | 33.87 |
+| 2B | tg 256 at depth 4096 | — | 33.70 | 33.30 |
+| 9B | pp 512 tok/s | 30.64 | 30.47 | 30.49 |
+| 9B | tg 256 at depth 0 | 11.09 | 11.05 | 9.88 |
+| 9B | tg 256 at depth 4096 | — | 10.20 | 10.05 |
+
+The 9B depth-0 `-fa off` median (9.88) is the one number that differs by more than the
+server's spread; its three samples were 8.32, 9.88 and 10.93, and the server at the same
+setting measures 9.85. Read it as noise. `llama-bench`'s depth-4096 decode is about 10%
+faster than the server at the same setting for the 2B and about 10% faster for the 9B, so
+the two tools are not interchangeable in absolute terms; both agree on the direction, which
+is that turning flash attention off does not help here.
+
+The reason may be the hybrid architecture: these Bonsai 2 files spend most layers in the
+gated recurrent path and only some in attention, so the attention kernel is a smaller share
+of the step than in the dense 1B where the bluefin penalty appeared.
 
 ## The models produce the same text
 
@@ -153,10 +212,13 @@ past the model's end-of-turn token and the tail of a 256-token reply is not mean
 ## What was checked, and what was not
 
 - Checked: both engines load and decode all three files; every measured prompt is within 5%
-  of its target length; every phase has 3 samples per engine; the 9B fits at 4096 with one
-  user on this host, and 10 users fit at 512; the host did not become memory-bound (9.7 GiB
-  still available after the last run).
+  of its target length; every phase has 3 samples per engine and per flash-attention setting;
+  the 9B fits at 4096 with one user on this host, and 10 users fit at 512; the host did not
+  become memory-bound (9.7 GiB still available after the last run).
+- Checked: the fork's `-fa auto` equals `-fa on` for the plain models (server default and
+  explicit-on agree within 0.2% on 2B and 0.1% on 9B at 512), and `-fa off` does not produce
+  the bluefin depth gain on these files.
 - Not measured: 10 users at 4096 (not in the requested matrix), 4 users (not requested), any
   other quantisation, and the 4B file (absent).
-- The fork's 10-user TTFT at 9B (185 s) is a real number, not a timeout: ten 512-token
+- The fork's 10-user TTFT at 9B (183–185 s) is a real number, not a timeout: ten 512-token
   prefills at about 26 tok/s serialise before the first user sees a token.

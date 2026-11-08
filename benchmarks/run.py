@@ -289,6 +289,13 @@ def parse_args() -> argparse.Namespace:
         "some servers do not count as content.",
     )
     parser.add_argument(
+        "--flash-attn",
+        choices=["default", "auto", "on", "off"],
+        default="default",
+        help="Flash-attention setting for engines that support it (currently the PrismML "
+        "fork). 'default' leaves the engine's own default (-fa auto).",
+    )
+    parser.add_argument(
         "--port", "-p",
         type=int,
         default=8201,
@@ -367,6 +374,18 @@ def main():
             print(f"Error: unknown engine '{name}'. Available: {list(engine_map.keys())}", file=sys.stderr)
             sys.exit(1)
         selected_engines.append(engine_map[name])
+
+    if args.flash_attn != "default":
+        supported = [eng for eng in selected_engines if hasattr(eng, "flash_attn")]
+        if not supported:
+            print(
+                "Error: --flash-attn was given but no selected engine supports it "
+                "(the PrismML fork adapter does).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for eng in supported:
+            eng.flash_attn = args.flash_attn
 
     # 2. Build or locate selected engines
     print("=== Building / Locating Engines ===")

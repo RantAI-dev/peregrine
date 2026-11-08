@@ -37,6 +37,7 @@ class PrismLlamaCppAdapter(LlamaCppAdapter):
         pinned_tag: str = DEFAULT_PINNED_TAG,
         pinned_commit: str = DEFAULT_PINNED_COMMIT,
         custom_bin_dir: Optional[Path] = None,
+        flash_attn: Optional[str] = None,
     ):
         super().__init__(
             pinned_tag=pinned_tag,
@@ -49,6 +50,37 @@ class PrismLlamaCppAdapter(LlamaCppAdapter):
         self.commit_fallback = False
         self.repo_dir: Optional[Path] = None
         self.build_flags = "CMake Release, native CPU (AVX-512 on this host)"
+        if flash_attn not in (None, "auto", "on", "off"):
+            raise ValueError(f"flash_attn must be auto, on or off, not {flash_attn!r}")
+        # None leaves the fork's own default (`-fa auto`); the value is recorded in
+        # every run set so a reader can tell which setting produced the numbers.
+        self.flash_attn = flash_attn
+
+    def _flash_attn_args(self, extra_args: Optional[List[str]]) -> List[str]:
+        """Return extra_args with this adapter's explicit -fa setting in front."""
+        args = list(extra_args or [])
+        if self.flash_attn and not any(a in ("-fa", "--flash-attn") for a in args):
+            args = ["-fa", self.flash_attn] + args
+        return args
+
+    def start_server(
+        self,
+        model_path: str,
+        port: int = 8201,
+        threads: int = 8,
+        ctx: int = 4096,
+        slots: int = 16,
+        extra_args: Optional[List[str]] = None,
+    ) -> subprocess.Popen:
+        """Start `llama-server`, with the adapter's flash-attention setting applied."""
+        return super().start_server(
+            model_path=model_path,
+            port=port,
+            threads=threads,
+            ctx=ctx,
+            slots=slots,
+            extra_args=self._flash_attn_args(extra_args),
+        )
 
     def _git(self, args: List[str], cwd: Path) -> Optional[str]:
         try:
@@ -187,6 +219,7 @@ class PrismLlamaCppAdapter(LlamaCppAdapter):
             "commit_fallback": self.commit_fallback,
             "repo": self.GIT_REPO_URL,
             "build_type": self.build_flags,
+            "flash_attn": self.flash_attn or "default",
             "server_binary": str(self.server_bin) if self.server_bin else "pending",
         }
 
@@ -216,8 +249,7 @@ class PrismLlamaCppAdapter(LlamaCppAdapter):
             "-t", str(threads),
             "-o", "json",
         ]
-        if extra_args:
-            cmd.extend(extra_args)
+        cmd.extend(self._flash_attn_args(extra_args))
 
         res = subprocess.run(
             cmd,

@@ -129,6 +129,9 @@ def merge(group):
     stem = Path(model_and_engine[0]).stem
     is_mtp_model = "MTP" in stem
     suffix = f"-{label}" if is_mtp_model else ""
+    fa = base["engine"].get("flash_attn", "default")
+    if fa != "default":
+        suffix += f"-fa-{fa}"
     stamp = datetime.datetime.fromisoformat(runs[0]["timestamp"]).strftime("%Y-%m-%d-%H%M%S")
     out = OUT / f"{stamp}-{engine_name}-{stem}{suffix}.json"
     with open(out, "w", encoding="utf-8") as f:
@@ -145,7 +148,8 @@ def main():
         run["_source"] = str(path)
         engine_name = run["engine"]["name"]
         label = config_label(engine_name, run["settings"].get("engine_args", {}))
-        key = (run["model"]["filename"], engine_name, label)
+        fa = run["engine"].get("flash_attn", "default")
+        key = (run["model"]["filename"], engine_name, label, fa)
         groups.setdefault(key, []).append(run)
 
     for key in sorted(groups):

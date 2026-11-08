@@ -186,6 +186,7 @@ python3 benchmarks/run.py \
     --contexts 512 --user-counts 1,10 --runs 3 --threads 12 \
     --engine-args 'peregrine=--opt MTP=0' \
     --engine-args 'prism_llama_cpp=--spec-type draft-mtp' \
+    --flash-attn off \
     --chat-template-kwargs '{"enable_thinking": false}' \
     --token-tolerance 1 \
     --output-dir benchmarks/results
@@ -193,7 +194,9 @@ python3 benchmarks/run.py \
 
 `--token-tolerance N` keeps a sample whose reply is up to `N` tokens short of `--tokens`,
 for servers that do not count an empty control token at the end of a reasoning-template
-reply.
+reply. `--flash-attn {default,auto,on,off}` sets the PrismML fork's `-fa` value on both
+`llama-server` and `llama-bench`; it is recorded as `engine.flash_attn` in every manifest so
+a reader can tell which setting produced the numbers.
 
 ### Generate Markdown Comparison Report
 

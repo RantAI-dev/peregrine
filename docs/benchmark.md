@@ -166,27 +166,39 @@ greedy tokens, prompt lengths calibrated per engine. Peregrine at `bf241fe`; for
 `62c418ccd7aefee37997e94c2d9fac1eed7fc89b` (branch `prism`). Full method, raw manifests and
 the greedy-text check: [`benchmarks/results/2026-11-08-bonsai2-prism/`](../benchmarks/results/2026-11-08-bonsai2-prism/).
 
-Medians. "Ratio" is Peregrine ÷ fork; above 1 means Peregrine is faster, and for TTFT below 1
-means Peregrine's first token arrives sooner.
+Medians. "Fork best" is the faster of the fork's explicit `-fa on` and `-fa off` server
+settings for that row (lower for TTFT); "ratio" is Peregrine ÷ fork best, so above 1 means
+Peregrine is faster and, for TTFT, below 1 means Peregrine's first token arrives sooner. The
+fork's own default (`-fa auto`, which resolves to on here) is the secondary column.
 
-| Model | Context | Users | Metric | Peregrine | Fork | Ratio |
-|---|---|---|---|---|---|---|
-| Bonsai 2 2B PQ2_0 | 512 | 1 | Decode tok/s | 70.64 | 32.67 | 2.16x |
-| Bonsai 2 2B PQ2_0 | 512 | 1 | Prompt tok/s | 259.25 | 112.19 | 2.31x |
-| Bonsai 2 2B PQ2_0 | 512 | 10 | Aggregate tok/s | 80.59 | 29.79 | 2.71x |
-| Bonsai 2 2B PQ2_0 | 512 | 10 | TTFT (s) | 12.92 | 45.40 | 0.28x |
-| Bonsai 2 2B PQ2_0 | 4096 | 1 | Decode tok/s | 60.64 | 30.76 | 1.97x |
-| Bonsai 2 2B PQ2_0 | 4096 | 1 | Prompt tok/s | 202.94 | 103.90 | 1.95x |
-| Bonsai 2 9B PQ2_0 | 512 | 1 | Decode tok/s | 22.97 | 9.82 | 2.34x |
-| Bonsai 2 9B PQ2_0 | 512 | 1 | Prompt tok/s | 67.24 | 26.63 | 2.52x |
-| Bonsai 2 9B PQ2_0 | 512 | 10 | Aggregate tok/s | 21.62 | 7.76 | 2.79x |
-| Bonsai 2 9B PQ2_0 | 512 | 10 | TTFT (s) | 51.66 | 185.48 | 0.28x |
-| Bonsai 2 9B PQ2_0 | 4096 | 1 | Decode tok/s | 20.36 | 8.93 | 2.28x |
-| Bonsai 2 9B PQ2_0 | 4096 | 1 | Prompt tok/s | 57.42 | 25.33 | 2.27x |
+| Model | Context | Users | Metric | Peregrine | Fork best | Ratio | Fork default |
+|---|---|---|---|---|---|---|---|
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Decode tok/s | 70.64 | 32.66 (`-fa on`) | 2.16x | 32.67 |
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Prompt tok/s | 259.25 | 108.24 (`-fa on`) | 2.40x | 112.19 |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | Aggregate tok/s | 80.59 | 29.96 (`-fa on`) | 2.69x | 29.79 |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | TTFT (s) | 12.92 | 42.79 (`-fa on`) | 0.30x | 45.40 |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Decode tok/s | 60.64 | 30.47 (`-fa on`) | 1.99x | 30.76 |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Prompt tok/s | 202.94 | 105.19 (`-fa off`) | 1.93x | 103.90 |
+| Bonsai 2 9B PQ2_0 | 512 | 1 | Decode tok/s | 22.97 | 9.85 (`-fa off`) | 2.33x | 9.82 |
+| Bonsai 2 9B PQ2_0 | 512 | 1 | Prompt tok/s | 67.24 | 26.12 (`-fa off`) | 2.57x | 26.63 |
+| Bonsai 2 9B PQ2_0 | 512 | 10 | Aggregate tok/s | 21.62 | 7.83 (`-fa on`) | 2.76x | 7.76 |
+| Bonsai 2 9B PQ2_0 | 512 | 10 | TTFT (s) | 51.66 | 183.40 (`-fa on`) | 0.28x | 185.48 |
+| Bonsai 2 9B PQ2_0 | 4096 | 1 | Decode tok/s | 20.36 | 9.22 (`-fa on`) | 2.21x | 8.93 |
+| Bonsai 2 9B PQ2_0 | 4096 | 1 | Prompt tok/s | 57.42 | 25.53 (`-fa off`) | 2.25x | 25.33 |
 
 MTP speculation on the 9B `-MTP-Q8_0` file (512 tokens, 1 user): Peregrine decodes 25.01
-tok/s with MTP and 22.75 without (1.10x); the fork decodes 9.77 tok/s with `--spec-type
-draft-mtp` and 9.83 without (0.99x, unchanged within the spread).
+tok/s with MTP and 22.75 without (1.10x). The fork's `--spec-type draft-mtp` did not beat its
+own non-speculative decode; against its faster measured setting the ratios are 2.59x (MTP on)
+and 2.13x (MTP off). The fork's two MTP rows were measured an hour apart and their on/off
+difference is inside the host's between-batch drift, so treat the fork's MTP as parity.
+
+Flash attention: explicit `-fa on` and `-fa off` land within 0–2% of each other on every
+server row. The large depth penalty upstream llama.cpp's default showed on the bluefin 1B
+(13.0 vs 29.1 tok/s at 4096) does not reproduce on these hybrid-architecture Bonsai 2 files;
+turning flash attention off is not a win here, and the default is the faster or equal
+setting. `llama-bench` agrees after medians (its averages are contaminated by a second,
+~35% faster decode mode that hits one sample in five). The full on/off tables are in the
+results folder.
 
 Peregrine's binary reports the `avx2+fma` SIMD tier on this host, while the fork was built
 with native dispatch (AVX-512). That difference, if it matters, favours the fork.
