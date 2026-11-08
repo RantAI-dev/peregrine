@@ -25,23 +25,27 @@ load, PrismML's llama.cpp fork.
 ![Where Peregrine is fastest](docs/img/bench-wins.svg)
 
 - **Single-user decode up to 1.39× faster** (Llama 3.2 1B at a 4096-token context, 12-core desktop),
-  and ahead in 5 of 8 confirmed cases. Against llama.cpp's faster flash-attention setting the 1B is
-  1.21× ahead at 512 tokens and 1.39× at 4096 on the desktop, and 1.10× and 1.26× on the 4-core
-  Ryzen 3; the 0.5B at 4096 on the Ryzen 3 is a loss (0.87×), as is its 512-token row on the desktop
-  (0.92×). The lead grows with context: attention reads each cached key and value once per group of
-  heads.
-- **1.48× the throughput with 10 users at once** on a 4-core Ryzen 3 (Llama 3.2 1B at a 512-token
-  context; 1.52× at 4096), against llama.cpp's faster setting.
-- **Prompt processing level with llama.cpp on AVX2** after the repacked Q4_K kernels (1.02-1.05× on
-  the 4-core Ryzen 3; +46% from the kernels on Llama 3.2 1B). The desktop is at 0.69-0.74×.
+  and ahead in 9 of 10 confirmed cases. Against llama.cpp's faster flash-attention setting the 1B is
+  1.21× ahead at 512 tokens and 1.39× at 4096 on the desktop. On the 4-core Ryzen 3 all three models
+  are ahead: Llama 3.2 1B 1.10× and 1.26×, Qwen 2.5 0.5B 1.07× and 1.26×, SmolLM2 360M 1.15× and
+  1.34×. The only decode loss is the 0.5B at 512 on the desktop (0.92×). The lead grows with
+  context: attention reads each cached key and value once per group of heads.
+- **Up to 1.80× the throughput with 10 users at once** on a 4-core Ryzen 3 (SmolLM2 360M at 4096;
+  1.73× at 512), and 1.47× on Llama 3.2 1B at 512 (1.52× at 4096), against llama.cpp's faster
+  setting.
+- **Prompt processing ahead on Q5_0-heavy files and level on the 1B** on bluefin: 1.43× and 1.17× on
+  Qwen 2.5 0.5B, 1.39× and 1.05× on SmolLM2 360M, 1.03-1.04× on Llama 3.2 1B, after the Q5_0
+  kernels (#103-#105). The desktop is at 0.69-0.74×.
 - **Bonsai 2 (ternary): 2.0-2.3× the decode and 1.9-2.6× the prompt speed of PrismML's own
   llama.cpp fork, 2.7× with 10 users** (12-core desktop), against the fork's faster
   flash-attention setting for each row. Upstream llama.cpp cannot load these PQ2_0 files, so the
   fork is the only comparison that exists for them.
 
-Losses are in the same report: the 0.5B model on the 4-core Ryzen 3 (both contexts) and at 512 on
-the desktop, and prompt processing on the desktop. Every number, chart and machine record is in
-[docs/benchmark.md](docs/benchmark.md).
+Losses are in the same report: on the desktop, the 0.5B at 512 tokens (0.92× decode), prompt
+processing (0.69-0.74×) and multi-user throughput (0.87× at 10 users, 0.95× at 4); and on bluefin,
+time to first token with 10 users for the 1B at 4096 (1.04×). At 512 Peregrine is faster on all three
+TTFT rows, and at 4096 on the two small models. No bluefin throughput row is below 1.0×. Every
+number, chart and machine record is in [docs/benchmark.md](docs/benchmark.md).
 
 ## Progress
 
@@ -54,9 +58,13 @@ As of November 2026; the plan with every item is in the [roadmap](docs/roadmap.m
 | 2. Breadth | done for the architectures, formats and templates in the table below; open: a real gpt-oss file, startup calibration, ARM (not yet decided) |
 | 3. Speed and proof | under way: the benchmark harness, a first desktop baseline against llama.cpp and the KL check per model are in; the first kernel and scheduling speed-ups have landed |
 
-Speed-ups that landed in November 2026, each checked against llama.cpp's KL on real files and against
-the batch-invariance tests:
+Speed-ups that landed in November 2026:
 
+- **Q5_0 kernels** (#103 wide prefill, #104 eight-row Q5_0/Q8_0 decode GEMV, #105 repacked tiles):
+  on a Ryzen 3 PRO 4350G, Qwen 2.5 0.5B (a mostly-Q5_0 file) goes from 52.9 to 83.5 tok/s decode and
+  263 to 435 tok/s prompt at 512 tokens (+58% and +65%), and from 45.2 to 65.9 decode and 198 to 278
+  prompt at 4096 (+46% and +40%); 10-user throughput rises 51% and 46%. The Llama 3.2 1B file has no
+  Q5_0 tensors and stays within 2% on every row, as expected.
 - **Repacked Q4_K kernels** (AVX2): prompt processing on a Ryzen 3 PRO 4350G goes from 104 to 152 tok/s
   on Llama 3.2 1B and from 72 to 96 tok/s on Qwen 3.5 2B; decode is unchanged. The Q5_0 tile takes
   the small models' prefill further (Qwen 0.5B 1.69× at 512). On the AVX-512 host the repack is on
