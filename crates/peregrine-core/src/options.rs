@@ -56,13 +56,40 @@ pub const TUNABLE: &[(&str, &str)] = &[
     ("PEREGRINE_PREFILL_CHUNK", "prefill_chunk"),
 ];
 
-/// The default prompt chunk: the prompt tokens one weight pass carries (`PEREGRINE_PREFILL_CHUNK`).
+/// The default prompt chunk on a pool no wider than the machine's physical cores: the prompt tokens one
+/// weight pass carries (`PEREGRINE_PREFILL_CHUNK`).
 ///
 /// 16, from the A/B on the reference machine (12 threads, `peregrine bench --prompt-tokens 512
 /// --tokens 1`, four rotating rounds): Llama-3.2-1B 165.9 tok/s against 154.3 at 64 (+7.5 %),
 /// Bonsai-2B 239.2 against 227.0 (+5.4 %), Qwen2.5-0.5B 257.3 against 270.7 (-5.0 %). The tenth
 /// user's first token does not get later (19.8 s against 21.8 s at 64).
 pub const PREFILL_CHUNK_DEFAULT: usize = 16;
+
+/// The default prompt chunk when the worker pool is wider than the machine's physical cores (an SMT
+/// machine, where `available_parallelism` reports the logical CPUs).
+///
+/// A 16-row pass is only 16 rows deep: the rotation hands one row to 16 of the workers and leaves the rest
+/// spinning for the 1 ms window on the siblings of the cores doing the work, and every parallel region is
+/// short enough that its slowest worker is a large share of it. The fixed part of that cost is about 20 ms
+/// per pass on both Bonsai sizes — it does not grow with rows or with the model — and a 512-token prompt
+/// pays it 32 times instead of 8. 64 rows amortise it: at 24 workers, medians of four rounds give
+/// Bonsai-2B 304 prompt tok/s against 212 (+43 %), Bonsai-9B 90.7 against 79.4 (+14 %), Llama-3.2-1B 225
+/// against 189 (+19 %), with decode unchanged on all three. The same measurements on a 12-worker pool
+/// keep 16: 257 against 248, 69.0 against 64.9, and 180 against 168. See [`prefill_chunk_default_for`].
+pub const PREFILL_CHUNK_SMT: usize = 64;
+
+/// The default prompt chunk for a pool of `threads` workers.
+///
+/// [`PREFILL_CHUNK_DEFAULT`] was tuned on a pool as wide as the physical cores; when the pool is wider,
+/// the per-pass cost of rows spread thinly over SMT siblings dominates, and [`PREFILL_CHUNK_SMT`] wins.
+/// The chunk only changes how the prompt is read, not what it produces, so the choice is output-neutral
+/// (`crates/peregrine-models/tests/prefill_chunk.rs`).
+pub fn prefill_chunk_default_for(threads: usize) -> usize {
+    match crate::pool::physical_cores() {
+        Some(cores) if threads > cores => PREFILL_CHUNK_SMT,
+        _ => PREFILL_CHUNK_DEFAULT,
+    }
+}
 
 /// The largest prompt chunk one weight pass may carry: the matmul scratch's row limit
 /// (`blocks::linear::MAX_BATCH`). The engine lowers it further when the decode rows of the
@@ -126,12 +153,13 @@ pub struct EngineOptions {
     /// `PEREGRINE_MIX=0`: no mixed prefill/decode steps. Speculation (MTP, suffix, DSpark) is verified only in
     /// the mixed step, so this also turns speculation off, for the server and for conversations (`Session`).
     pub mix: bool,
-    /// `PEREGRINE_PREFILL_CHUNK`: prompt tokens one weight pass carries (default 16).
+    /// `PEREGRINE_PREFILL_CHUNK`: prompt tokens one weight pass carries (default: 16, or 64 when the
+    /// pool is wider than the physical cores — [`prefill_chunk_default_for`]).
     ///
     /// The engine prefills a prompt in pieces of this size, so a long prompt is read in several passes.
     /// Smaller pieces keep the activation scratch in cache and read the weights more often; the tokens
     /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that).
-    pub prefill_chunk: usize,
+    pub prefill_chunk: Option<usize>,
     /// `PEREGRINE_MTP=0`: no MTP speculation.
     pub mtp: bool,
     /// `PEREGRINE_MTP_VOCAB`: vocabulary rows the MTP drafter scores (default 32768).
@@ -183,7 +211,7 @@ impl Default for EngineOptions {
             kv_rotate: true,
             kv_prec: crate::kv::KvPrec::F16,
             mix: true,
-            prefill_chunk: PREFILL_CHUNK_DEFAULT,
+            prefill_chunk: None,
             mtp: true,
             mtp_vocab: 32768,
             dspark: DsparkOptions {
@@ -282,9 +310,7 @@ impl EngineOptions {
                 .and_then(|v| crate::kv::KvPrec::parse(&v))
                 .unwrap_or(d.kv_prec),
             mix: unless("MIX", "0"),
-            prefill_chunk: num("PREFILL_CHUNK")
-                .filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v))
-                .unwrap_or(d.prefill_chunk),
+            prefill_chunk: num("PREFILL_CHUNK").filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v)),
             mtp: unless("MTP", "0"),
             mtp_vocab: num("MTP_VOCAB").unwrap_or(d.mtp_vocab),
             dspark: DsparkOptions {
@@ -382,7 +408,7 @@ impl EngineOptions {
             ("kv_rotate", self.kv_rotate.to_string()),
             ("kv_prec", self.kv_prec.name().to_string()),
             ("mix", self.mix.to_string()),
-            ("prefill_chunk", self.prefill_chunk.to_string()),
+            ("prefill_chunk", opt(self.prefill_chunk)),
             ("mtp", self.mtp.to_string()),
             ("mtp_vocab", self.mtp_vocab.to_string()),
             ("dspark.logits_start", self.dspark.logits_start.to_string()),
@@ -510,6 +536,18 @@ mod tests {
     }
 
     #[test]
+    fn the_default_chunk_follows_the_pool() {
+        // A pool no wider than the physical cores keeps the tuned 16; a pool that adds SMT siblings
+        // reads the prompt in 64-row pieces, which amortise the per-pass cost (S3.5 step 2).
+        let Some(cores) = crate::pool::physical_cores() else {
+            return; // no physical-core count on this host: the plain default
+        };
+        assert_eq!(prefill_chunk_default_for(1), PREFILL_CHUNK_DEFAULT);
+        assert_eq!(prefill_chunk_default_for(cores), PREFILL_CHUNK_DEFAULT);
+        assert_eq!(prefill_chunk_default_for(cores + 1), PREFILL_CHUNK_SMT);
+    }
+
+    #[test]
     fn each_switch_keeps_its_historical_rule() {
         // On unless "0".
         assert!(!with(&[("ZMM", "0")]).zmm);
@@ -559,20 +597,11 @@ mod tests {
             LbSidecar::Path("/x.slb".into())
         );
         // The prefill chunk: from one token to the matmul scratch's row limit. Anything
-        // else leaves the default.
-        assert_eq!(with(&[("PREFILL_CHUNK", "32")]).prefill_chunk, 32);
-        assert_eq!(
-            with(&[("PREFILL_CHUNK", "0")]).prefill_chunk,
-            PREFILL_CHUNK_DEFAULT
-        );
-        assert_eq!(
-            with(&[("PREFILL_CHUNK", "1000")]).prefill_chunk,
-            PREFILL_CHUNK_DEFAULT
-        );
-        assert_eq!(
-            with(&[("PREFILL_CHUNK", "x")]).prefill_chunk,
-            PREFILL_CHUNK_DEFAULT
-        );
+        // else leaves the choice to the pool (`prefill_chunk_default_for`).
+        assert_eq!(with(&[("PREFILL_CHUNK", "32")]).prefill_chunk, Some(32));
+        assert_eq!(with(&[("PREFILL_CHUNK", "0")]).prefill_chunk, None);
+        assert_eq!(with(&[("PREFILL_CHUNK", "1000")]).prefill_chunk, None);
+        assert_eq!(with(&[("PREFILL_CHUNK", "x")]).prefill_chunk, None);
     }
 
     #[test]
@@ -711,6 +740,6 @@ mod tests {
         );
         assert_eq!(o.spin_us, 7);
         // The prefill chunk is output-neutral, so a profile may set it.
-        assert_eq!(o.prefill_chunk, 32);
+        assert_eq!(o.prefill_chunk, Some(32));
     }
 }

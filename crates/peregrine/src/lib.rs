@@ -94,8 +94,14 @@ pub fn inspect(path: &std::path::Path) -> Result<String, String> {
 /// The CPU kernel tier and every engine option in effect.
 pub fn describe_runtime() -> String {
     let o = peregrine_core::options::get();
+    // The prefill chunk's default depends on the pool, so the resolved value is printed beside the
+    // option: `prefill_chunk=default` alone does not say what the next engine will use.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let chunk = o
+        .prefill_chunk
+        .unwrap_or_else(|| peregrine_core::options::prefill_chunk_default_for(threads));
     format!(
-        "kernel tier   {}\nsimd          {}\nkq_repack     {}\noptions:\n{}",
+        "kernel tier   {}\nsimd          {}\nkq_repack     {}\nprefill chunk {chunk} (for {threads} workers)\noptions:\n{}",
         peregrine_kernels::cpu::tier_name(),
         peregrine_core::simd_name(),
         o.kq_repack_note(),

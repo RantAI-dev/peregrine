@@ -43,7 +43,7 @@ matches the code.
 | S2.1 | Formats: Q5_K, Q4_0, then IQ4_XS / IQ4_NL, then Q2_K / Q3_K; BF16 in matrix multiplies — done (also MXFP4) | 1.5 |
 | S2.2 | Plain Qwen 3.5 (rotation optional); check Llama 3.x and Mistral on real files — done | 1.0 |
 | S2.3 | SentencePiece tokenizer; chat templates rendered from the model file's own template — done | 1.0 |
-| S2.4 | Gemma 3 (sliding-window attention, its norms) and Phi-4 — Gemma 3 done; Phi-4 synthetic done, real-file check open | 1.0 |
+| S2.4 | Gemma 3 (sliding-window attention, its norms) and Phi-4 — done | 1.0 |
 | S2.5 | Mixture of experts: qwen3moe, then gpt-oss (MXFP4) — qwen3moe done; gpt-oss synthetic done, real-file check and harmony template open | 1.5 |
 | S2.6 | Every format on AVX2; AVX-VNNI-256 tier; startup calibration of thread count and spin window — every format has an AVX2 kernel; the VNNI-256 tier is in, its kernels on hold (#77); calibration open (#80) | 1.0 |
 | S2.7 | Support table generated from the kernel table and the architecture registry, checked in CI — done | 0.25 |
@@ -59,7 +59,7 @@ Each model is checked against llama.cpp on the same file before it is listed.
 | S3.2 | Competitor baselines on H1, H2 and H3 — desktop (H1) baseline in (#82); H2 and H3 open | 1.0 |
 | S3.3 | Task-accuracy gate against the reference engine (GSM8K, HumanEval+, MMLU subset), batch and speculation invariance on 500+ prompts — KL against llama.cpp per model done (docs/targets.md); the task-accuracy gate and invariance runs open | 1.0 |
 | S3.4 | Faster k-quant kernels (repacked row tiles, int8 dot products) | 1.5 |
-| S3.5 | Batched ternary GEMM toward the int8 compute roof; prompt path (large tiles, chunked Gated DeltaNet scan) — the prefill chunk is an option now (`PEREGRINE_PREFILL_CHUNK`, default 16, #87); the ternary GEMM open | 1.5 |
+| S3.5 | Batched ternary GEMM toward the int8 compute roof; prompt path (large tiles, chunked Gated DeltaNet scan) — the prefill chunk is an option now (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical cores and 64 when the pool is wider, #87 then S3.5 step 2); the ternary GEMM open | 1.5 |
 | S3.6 | Faster PTQ1_0 for the 27B | 0.5 |
 | S3.7 | Long context: split-K attention per length; q8 KV as an opt-in with its own accuracy report | 1.0 |
 | S3.8 | Serving: first token at 10 users, MTP at 2-3 users, server overhead | 1.0 |
