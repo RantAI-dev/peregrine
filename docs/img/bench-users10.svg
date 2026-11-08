@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="274" viewBox="0 0 760 274" role="img" aria-label="Total throughput, 10 users at once">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="314" viewBox="0 0 760 314" role="img" aria-label="Total throughput, 10 users at once">
 
 <style>
   .surface { fill: #fcfcfb; }
@@ -16,44 +16,51 @@
   }
 </style>
 
-<rect class="surface" width="760" height="274" rx="6"/>
+<rect class="surface" width="760" height="314" rx="6"/>
 <text class="t1" x="20" y="30" font-size="16" font-weight="600">Total throughput, 10 users at once</text>
 <text class="t2" x="20" y="50" font-size="12">tok/s summed over all users, 512-token context, higher is better</text>
 <rect class="s1" x="530" y="20" width="10" height="10" rx="2"/>
 <text class="t2" x="545" y="29" font-size="12">Peregrine</text>
 <rect class="s2" x="630" y="20" width="10" height="10" rx="2"/>
 <text class="t2" x="645" y="29" font-size="12">llama.cpp</text>
-<line class="grid" x1="250.0" y1="66" x2="250.0" y2="226" stroke-width="1"/>
-<text class="t2" x="250.0" y="242" font-size="11" text-anchor="middle">0</text>
-<line class="grid" x1="338.0" y1="66" x2="338.0" y2="226" stroke-width="1"/>
-<text class="t2" x="338.0" y="242" font-size="11" text-anchor="middle">20</text>
-<line class="grid" x1="426.0" y1="66" x2="426.0" y2="226" stroke-width="1"/>
-<text class="t2" x="426.0" y="242" font-size="11" text-anchor="middle">40</text>
-<line class="grid" x1="514.0" y1="66" x2="514.0" y2="226" stroke-width="1"/>
-<text class="t2" x="514.0" y="242" font-size="11" text-anchor="middle">60</text>
-<line class="grid" x1="602.0" y1="66" x2="602.0" y2="226" stroke-width="1"/>
-<text class="t2" x="602.0" y="242" font-size="11" text-anchor="middle">80</text>
-<line class="grid" x1="690.0" y1="66" x2="690.0" y2="226" stroke-width="1"/>
-<text class="t2" x="690.0" y="242" font-size="11" text-anchor="middle">100</text>
+<line class="grid" x1="250.0" y1="66" x2="250.0" y2="266" stroke-width="1"/>
+<text class="t2" x="250.0" y="282" font-size="11" text-anchor="middle">0</text>
+<line class="grid" x1="323.3" y1="66" x2="323.3" y2="266" stroke-width="1"/>
+<text class="t2" x="323.3" y="282" font-size="11" text-anchor="middle">20</text>
+<line class="grid" x1="396.7" y1="66" x2="396.7" y2="266" stroke-width="1"/>
+<text class="t2" x="396.7" y="282" font-size="11" text-anchor="middle">40</text>
+<line class="grid" x1="470.0" y1="66" x2="470.0" y2="266" stroke-width="1"/>
+<text class="t2" x="470.0" y="282" font-size="11" text-anchor="middle">60</text>
+<line class="grid" x1="543.3" y1="66" x2="543.3" y2="266" stroke-width="1"/>
+<text class="t2" x="543.3" y="282" font-size="11" text-anchor="middle">80</text>
+<line class="grid" x1="616.7" y1="66" x2="616.7" y2="266" stroke-width="1"/>
+<text class="t2" x="616.7" y="282" font-size="11" text-anchor="middle">100</text>
+<line class="grid" x1="690.0" y1="66" x2="690.0" y2="266" stroke-width="1"/>
+<text class="t2" x="690.0" y="282" font-size="11" text-anchor="middle">120</text>
 <text class="t1" x="238" y="89.0" font-size="12" text-anchor="end">Desktop · Llama 3.2 1B · 512</text>
-<path class="s1" d="M250.0,72.0 H481.0 A4.0,4.0 0 0 1 485.0,76.0 V80.0 A4.0,4.0 0 0 1 481.0,84.0 H250.0 Z"/>
-<text class="t2" x="491.0" y="82" font-size="11">53.4</text>
-<path class="s2" d="M250.0,86.0 H517.5 A4.0,4.0 0 0 1 521.5,90.0 V94.0 A4.0,4.0 0 0 1 517.5,98.0 H250.0 Z"/>
-<text class="t2" x="527.5" y="96" font-size="11">61.7</text>
+<path class="s1" d="M250.0,72.0 H441.8 A4.0,4.0 0 0 1 445.8,76.0 V80.0 A4.0,4.0 0 0 1 441.8,84.0 H250.0 Z"/>
+<text class="t2" x="451.8" y="82" font-size="11">53.4</text>
+<path class="s2" d="M250.0,86.0 H472.2 A4.0,4.0 0 0 1 476.2,90.0 V94.0 A4.0,4.0 0 0 1 472.2,98.0 H250.0 Z"/>
+<text class="t2" x="482.2" y="96" font-size="11">61.7</text>
 <text class="t1" x="238" y="129.0" font-size="12" text-anchor="end">Desktop · Qwen 2.5 0.5B · 512</text>
-<path class="s1" d="M250.0,112.0 H613.0 A4.0,4.0 0 0 1 617.0,116.0 V120.0 A4.0,4.0 0 0 1 613.0,124.0 H250.0 Z"/>
-<text class="t2" x="623.0" y="122" font-size="11">83.4</text>
-<path class="s2" d="M250.0,126.0 H657.0 A4.0,4.0 0 0 1 661.0,130.0 V134.0 A4.0,4.0 0 0 1 657.0,138.0 H250.0 Z"/>
-<text class="t2" x="667.0" y="136" font-size="11">93.4</text>
+<path class="s1" d="M250.0,112.0 H551.8 A4.0,4.0 0 0 1 555.8,116.0 V120.0 A4.0,4.0 0 0 1 551.8,124.0 H250.0 Z"/>
+<text class="t2" x="561.8" y="122" font-size="11">83.4</text>
+<path class="s2" d="M250.0,126.0 H588.5 A4.0,4.0 0 0 1 592.5,130.0 V134.0 A4.0,4.0 0 0 1 588.5,138.0 H250.0 Z"/>
+<text class="t2" x="598.5" y="136" font-size="11">93.4</text>
 <text class="t1" x="238" y="169.0" font-size="12" text-anchor="end">Bluefin · Llama 3.2 1B · 512</text>
-<path class="s1" d="M250.0,152.0 H488.8 A4.0,4.0 0 0 1 492.8,156.0 V160.0 A4.0,4.0 0 0 1 488.8,164.0 H250.0 Z"/>
-<text class="t2" x="498.8" y="162" font-size="11">55.2</text>
-<path class="s2" d="M250.0,166.0 H410.4 A4.0,4.0 0 0 1 414.4,170.0 V174.0 A4.0,4.0 0 0 1 410.4,178.0 H250.0 Z"/>
-<text class="t2" x="420.4" y="176" font-size="11">37.4</text>
+<path class="s1" d="M250.0,152.0 H449.6 A4.0,4.0 0 0 1 453.6,156.0 V160.0 A4.0,4.0 0 0 1 449.6,164.0 H250.0 Z"/>
+<text class="t2" x="459.6" y="162" font-size="11">55.5</text>
+<path class="s2" d="M250.0,166.0 H384.4 A4.0,4.0 0 0 1 388.4,170.0 V174.0 A4.0,4.0 0 0 1 384.4,178.0 H250.0 Z"/>
+<text class="t2" x="394.4" y="176" font-size="11">37.7</text>
 <text class="t1" x="238" y="209.0" font-size="12" text-anchor="end">Bluefin · Qwen 2.5 0.5B · 512</text>
-<path class="s1" d="M250.0,192.0 H561.6 A4.0,4.0 0 0 1 565.6,196.0 V200.0 A4.0,4.0 0 0 1 561.6,204.0 H250.0 Z"/>
-<text class="t2" x="571.6" y="202" font-size="11">71.7</text>
-<path class="s2" d="M250.0,206.0 H548.2 A4.0,4.0 0 0 1 552.2,210.0 V214.0 A4.0,4.0 0 0 1 548.2,218.0 H250.0 Z"/>
-<text class="t2" x="558.2" y="216" font-size="11">68.7</text>
-<text class="t2" x="470.0" y="260" font-size="11" text-anchor="middle">tokens per second</text>
+<path class="s1" d="M250.0,192.0 H643.5 A4.0,4.0 0 0 1 647.5,196.0 V200.0 A4.0,4.0 0 0 1 643.5,204.0 H250.0 Z"/>
+<text class="t2" x="653.5" y="202" font-size="11">108</text>
+<path class="s2" d="M250.0,206.0 H496.7 A4.0,4.0 0 0 1 500.7,210.0 V214.0 A4.0,4.0 0 0 1 496.7,218.0 H250.0 Z"/>
+<text class="t2" x="506.7" y="216" font-size="11">68.4</text>
+<text class="t1" x="238" y="249.0" font-size="12" text-anchor="end">Bluefin · SmolLM2 360M · 512</text>
+<path class="s1" d="M250.0,232.0 H674.1 A4.0,4.0 0 0 1 678.1,236.0 V240.0 A4.0,4.0 0 0 1 674.1,244.0 H250.0 Z"/>
+<text class="t2" x="684.1" y="242" font-size="11">117</text>
+<path class="s2" d="M250.0,246.0 H494.0 A4.0,4.0 0 0 1 498.0,250.0 V254.0 A4.0,4.0 0 0 1 494.0,258.0 H250.0 Z"/>
+<text class="t2" x="504.0" y="256" font-size="11">67.6</text>
+<text class="t2" x="470.0" y="300" font-size="11" text-anchor="middle">tokens per second</text>
 </svg>
