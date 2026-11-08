@@ -36,10 +36,11 @@ load, PrismML's llama.cpp fork.
 - **Prompt processing ahead on Q5_0-heavy files and level on the 1B** on bluefin: 1.43× and 1.17× on
   Qwen 2.5 0.5B, 1.39× and 1.05× on SmolLM2 360M, 1.03-1.04× on Llama 3.2 1B, after the Q5_0
   kernels (#103-#105). The desktop is at 0.69-0.74×.
-- **Bonsai 2 (ternary): 2.0-2.3× the decode and 1.9-2.6× the prompt speed of PrismML's own
-  llama.cpp fork, 2.7× with 10 users** (12-core desktop), against the fork's faster
-  flash-attention setting for each row. Upstream llama.cpp cannot load these PQ2_0 files, so the
-  fork is the only comparison that exists for them.
+- **Bonsai 2 (ternary): 1.4-2.3× the decode and 1.9-2.6× the prompt speed of PrismML's own
+  llama.cpp fork, 1.8-2.7× with 10 users** (12-core desktop and 4-core bluefin; the AVX2
+  bluefin sits at the bottom of the decode range), against the fork's faster flash-attention
+  setting for each row. Upstream llama.cpp cannot load these PQ2_0 files, so the fork is the
+  only comparison that exists for them.
 
 Losses are in the same report: on the desktop, the 0.5B at 512 tokens (0.92× decode), prompt
 processing (0.69-0.74×) and multi-user throughput (0.87× at 10 users, 0.95× at 4); and on bluefin,
