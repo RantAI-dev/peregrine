@@ -143,6 +143,12 @@ invocation (interleaved ABAB rounds, as in 2026-11-07); the 4096-token pairs ran
 per invocation. The four KREPACK=1 passes are Peregrine only and are documented by their
 filenames (`*-peregrine-krepack-*.json`). Every file carries its own full machine record.
 
+An attempted interleaved Llama 4096 run was started by hand while the queued Peregrine pass
+was starting; the two fought over port 8201 and the hand-started run was discarded after
+calibration produced no valid sample. The kept Peregrine 4096 pass overlapped it for about
+ninety seconds, but its three single-user samples (44.7, 43.6, 44.2 tok/s) show no outlier
+and its multi-user samples are tight.
+
 | File | Model | Ctx | Engine | Env |
 |---|---|---|---|---|
 | `2026-11-08-101658-*` | qwen 0.5B | 512 | peregrine + llama.cpp | default |
@@ -155,3 +161,13 @@ filenames (`*-peregrine-krepack-*.json`). Every file carries its own full machin
 | `2026-11-08-121304-peregrine-krepack-*` | qwen 0.5B | 4096 | peregrine | KREPACK=1 |
 | `2026-11-08-121645-peregrine-krepack-*` | 1B | 512 | peregrine | KREPACK=1 |
 | `2026-11-08-124103-peregrine-krepack-*` | 1B | 4096 | peregrine | KREPACK=1 |
+
+## Notes
+
+- `P / llama` and `KREPACK / default` are ratios of medians. In the head-to-head TTFT row a
+  value below 1.0 means Peregrine is slower (TTFT is a time, not a rate).
+- The same-day llama.cpp control moved by up to 7.1% on decode (Qwen 512: 70.8 → 75.8
+  tok/s) and by 0–4% on the other rate metrics versus 2026-11-07, so the host ran slightly
+  faster; read the Peregrine deltas against that drift.
+- `% of ceiling` uses each run's own bandwidth probe, which ranged 29.29–47.91 GB/s; the
+  column is not comparable across rows or days.

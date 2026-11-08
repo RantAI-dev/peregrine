@@ -71,7 +71,8 @@ models and both contexts, but the 1B gap narrowed from 0.58x to 0.66x at 512 and
 The repacked kernels are a clear win, but only on the 1B. With `PEREGRINE_KREPACK=1` the 1B
 prefills at 211.5 tok/s at 512 (+22% over the default build, 0.81x of llama.cpp) and 144.6
 tok/s at 4096 (+15%, 0.77x), its 10-user throughput reaches 62.7 tok/s at 512 (1.02x
-llama.cpp — the first time Peregrine leads llama.cpp on a multi-user number) and 8.4 tok/s
+llama.cpp, and its 4-user figure is 56.4 vs 54.5 — the first time Peregrine leads
+llama.cpp on the multi-user numbers) and 8.4 tok/s
 at 4096 (0.98x), and its 10-user TTFT drops from 20.95 s to 15.16 s at 512 (2.7% *better*
 than llama.cpp) and from 204.6 s to 177.5 s at 4096 (still 1.23x llama.cpp's). On the 0.5B
 the same switch does nothing measurable (prefill −2.6% at 512, −2.4% at 4096, within the
@@ -102,9 +103,16 @@ Three numbers moved the wrong way and are worth calling out rather than smoothin
 One caveat on all of the above: the 4096-token sweeps ran one engine per invocation instead
 of interleaving Peregrine and llama.cpp inside one invocation, because the full sweep does
 not fit a 10-minute command on this host. The 512-token sweeps kept the interleaved ABAB
-order. llama.cpp's own numbers reproduce 2026-11-07 to within 0–4% at every context, which
-argues the host was behaving the same way, but the peregrine/llama comparison at 4096 is
-slightly less tight than the 2026-11-07 one.
+order. llama.cpp's own numbers moved by up to 7.1% (Qwen 512 decode 70.8 → 75.8 tok/s) and
+by 0–4% on the other rate metrics, so the host ran slightly faster than on 2026-11-07; the
+Peregrine/llama comparison at 4096 is therefore less tight than the 2026-11-07 one, and the
+Peregrine deltas above should be read against that drift rather than as pure code effects.
+
+One more detail about the 4096 Peregrine pass: an attempted interleaved Llama 4096 run was
+started by hand while the queued Peregrine pass was starting, the two fought over port 8201,
+and the hand-started run was discarded after its calibration produced no valid sample. The
+kept Peregrine pass overlapped it for about ninety seconds; its three single-user samples
+(44.7, 43.6 and 44.2 tok/s) show no outlier, and its multi-user samples are tight.
 
 The full tables, with medians and spreads, are in [`report.md`](report.md). The raw JSON
 manifests next to it carry every individual sample, the machine record and the engine builds.
