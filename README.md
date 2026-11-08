@@ -32,16 +32,15 @@ own memory-bandwidth ceiling.
 <!-- support:begin -->
 | | Supported now |
 |---|---|
-| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Qwen 3 MoE, gpt-oss (synthetic check; real file pending), Phi-3 / Phi-4 (synthetic check; real file pending) |
+| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Qwen 3 MoE, gpt-oss (synthetic check; real file pending), Phi-3 / Phi-4 |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 AVX2, AVX-VNNI (256-bit), AVX-512 (VNNI, GFNI, VBMI); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE, SentencePiece (llama) |
-| Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
+| Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 <!-- support:end -->
 
 ### On the roadmap
 
-- **Architectures**: Phi-4
 - **CPUs**: AVX-VNNI-256, ARM NEON/SDOT
 - **Chat templates**: more of llama.cpp's built-ins
 
@@ -73,6 +72,10 @@ The same holds for plain **Qwen 3.5 (Qwen3.5-2B)** (Q4_K_M): the tokenizer produ
 llama.cpp's `llama-tokenize` (22/22 strings), greedy decoding matches bit for bit on prompts 1, 2, and 4
 (32/32 steps, including across a 602-token prompt) and through 27 tokens on prompt 3 (first divergence
 at a near-tie of 0.045 logit difference), and the chat path returns matching answers with reasoning tokens.
+
+The same holds for **Phi-4 (Phi 4, 14B)** (Q4_K_M): the tokenizer produces the same ids as
+llama.cpp's `llama-tokenize` (22/22 strings), greedy decoding matches bit for bit on all three prompts
+(32/32 steps each), and the chat path answers the same question the same way.
 
 ## Quick start
 

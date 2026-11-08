@@ -47,9 +47,11 @@ fn mixed() -> bool {
 /// The engine prefills a prompt in pieces of this size, so a long prompt is read in several passes.
 /// Smaller pieces keep the activation scratch small (it stays in cache) and read the weights more
 /// often; the tokens do not depend on it — `crates/peregrine-models/tests/prefill_chunk.rs` pins
-/// that.
-fn prefill_chunk() -> usize {
-    crate::options::get().prefill_chunk
+/// that. Unset, the chunk follows the pool: [`crate::options::prefill_chunk_default_for`].
+fn prefill_chunk(threads: usize) -> usize {
+    crate::options::get()
+        .prefill_chunk
+        .unwrap_or_else(|| crate::options::prefill_chunk_default_for(threads))
 }
 
 /// Users served at once by default. Above the machine's roofline ridge (about seven rows) another user adds no
@@ -424,7 +426,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// The engine with the process's prefill chunk (`PEREGRINE_PREFILL_CHUNK`).
+    /// The engine with the process's prefill chunk (`PEREGRINE_PREFILL_CHUNK`, or the pool's default).
     pub fn new(
         model: Arc<Model>,
         threads: usize,
@@ -440,7 +442,7 @@ impl Engine {
             max_slots,
             kv_prec,
             prefix_cache_bytes,
-            prefill_chunk(),
+            prefill_chunk(threads),
         )
     }
 

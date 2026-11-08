@@ -30,6 +30,9 @@ use crate::tokenizer::Tokenizer;
 pub enum Template {
     /// `<|im_start|>role\n…<|im_end|>\n`
     ChatMl,
+    /// Phi-4's ChatML: `<|im_start|>role<|im_sep|>…<|im_end|>`, with no newlines
+    /// between the parts (llama.cpp's `phi4`).
+    Phi4,
     /// `<|begin_of_text|><|start_header_id|>role<|end_header_id|>\n\n…<|eot_id|>`
     Llama3,
     /// Qwen3's ChatML: no default system message, and a reasoning block the model
@@ -64,6 +67,7 @@ pub enum Template {
 /// for `--chat-template`.
 pub const TEMPLATES: &[&str] = &[
     "chatml",
+    "phi4",
     "llama3",
     "qwen3",
     "gemma",
@@ -79,6 +83,7 @@ impl Template {
     pub fn name(self) -> &'static str {
         match self {
             Template::ChatMl => "chatml",
+            Template::Phi4 => "phi4",
             Template::Llama3 => "llama3",
             Template::Qwen3 => "qwen3",
             Template::Gemma => "gemma",
@@ -96,6 +101,7 @@ impl Template {
     pub fn from_name(name: &str) -> Option<Template> {
         Some(match name {
             "chatml" => Template::ChatMl,
+            "phi4" => Template::Phi4,
             "llama3" => Template::Llama3,
             "qwen3" => Template::Qwen3,
             "gemma" => Template::Gemma,
@@ -148,6 +154,9 @@ impl Template {
             // gpt-oss's own Jinja template. llama.cpp's heuristic detector reads the
             // same pair of markers (`src/llama-chat.cpp:222-223`, v0.9.0).
             Ok(Template::Harmony)
+        } else if tpl.contains("<|im_start|>") && tpl.contains("<|im_sep|>") {
+            // llama.cpp v0.9.0 src/llama-chat.cpp:99-101.
+            Ok(Template::Phi4)
         } else if tpl.contains("<|im_start|>") && tpl.contains("enable_thinking") {
             Ok(Template::Qwen3)
         } else if tpl.contains("<|im_start|>") || (tpl.is_empty() && has("<|im_start|>")) {
@@ -201,6 +210,7 @@ impl Template {
     pub fn required_tokens(self) -> &'static [&'static str] {
         match self {
             Template::ChatMl => &["<|im_start|>", "<|im_end|>"],
+            Template::Phi4 => &["<|im_start|>", "<|im_sep|>", "<|im_end|>"],
             Template::Qwen3 => &["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
             Template::Llama3 => &[
                 "<|begin_of_text|>",
@@ -229,7 +239,7 @@ impl Template {
     /// emit `<|eom_id|>`; `<|end_of_text|>` ends the document.
     pub fn stop_ids(self, tk: &Tokenizer) -> Vec<u32> {
         let names: &[&str] = match self {
-            Template::ChatMl | Template::Qwen3 => &["<|im_end|>", "<|endoftext|>"],
+            Template::ChatMl | Template::Phi4 | Template::Qwen3 => &["<|im_end|>", "<|endoftext|>"],
             Template::Llama3 => &["<|eot_id|>", "<|eom_id|>", "<|end_of_text|>"],
             Template::Gemma => &["<end_of_turn>"],
             Template::MistralV0
@@ -254,16 +264,23 @@ impl Template {
 
     /// The system message the model's own template inserts when the caller gives
     /// none. SmolLM2 and Qwen2.5 each name themselves; Llama 3.2 inserts only its
-    /// date header (rendered in `system_block`).
+    /// date header (rendered in `system_block`). A model that names neither gets
+    /// none: its own template writes no system message, and one invented for it
+    /// would be a stranger's sentence.
     pub fn default_system(self, model_name: &str) -> Option<&'static str> {
         match self {
-            Template::ChatMl if model_name.to_ascii_lowercase().contains("qwen") => {
-                Some("You are Qwen, created by Alibaba Cloud. You are a helpful assistant.")
-            }
             Template::ChatMl => {
-                Some("You are a helpful AI assistant named SmolLM, trained by Hugging Face")
+                let name = model_name.to_ascii_lowercase();
+                if name.contains("qwen") {
+                    Some("You are Qwen, created by Alibaba Cloud. You are a helpful assistant.")
+                } else if name.contains("smollm") {
+                    Some("You are a helpful AI assistant named SmolLM, trained by Hugging Face")
+                } else {
+                    None
+                }
             }
             Template::Llama3
+            | Template::Phi4
             | Template::Qwen3
             | Template::Gemma
             | Template::MistralV0
@@ -293,6 +310,10 @@ impl Template {
         match self {
             Template::ChatMl | Template::Qwen3 => match system {
                 Some(sys) => format!("<|im_start|>system\n{sys}<|im_end|>\n"),
+                None => String::new(),
+            },
+            Template::Phi4 => match system {
+                Some(sys) => format!("<|im_start|>system<|im_sep|>{sys}<|im_end|>"),
                 None => String::new(),
             },
             // Llama 3.2's template always writes the header with the knowledge
@@ -363,6 +384,9 @@ impl Template {
             Template::ChatMl | Template::Qwen3 => {
                 format!("<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n")
             }
+            Template::Phi4 => {
+                format!("<|im_start|>user<|im_sep|>{user}<|im_end|><|im_start|>assistant<|im_sep|>")
+            }
             Template::Llama3 => format!(
                 "<|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|>\
                  <|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -394,6 +418,7 @@ impl Template {
     pub fn assistant_turn(self, text: &str) -> String {
         match self {
             Template::ChatMl | Template::Qwen3 => format!("{text}<|im_end|>\n"),
+            Template::Phi4 => format!("{text}<|im_end|>"),
             Template::Llama3 => format!("{text}<|eot_id|>"),
             Template::Gemma => format!("{}<end_of_turn>\n<start_of_turn>user\n", text.trim()),
             Template::MistralV1 => format!(" {text}</s> [INST] "),
@@ -422,6 +447,7 @@ impl Template {
     pub fn close_previous(self) -> &'static str {
         match self {
             Template::ChatMl | Template::Qwen3 => "<|im_end|>\n",
+            Template::Phi4 => "<|im_end|>",
             Template::Llama3 => "<|eot_id|>",
             Template::Gemma => "<end_of_turn>\n<start_of_turn>user\n",
             Template::MistralV1 => "</s> [INST] ",
@@ -549,6 +575,35 @@ mod tests {
         assert_eq!(t.assistant_turn("A"), "A<|im_end|>\n");
         assert_eq!(t.close_previous(), "<|im_end|>\n");
         assert_eq!(t.system_block(None, "x"), "");
+    }
+
+    /// Phi-4's format, from llama.cpp v0.9.0 src/llama-chat.cpp:345-352: the role
+    /// and the text joined by `<|im_sep|>`, no newlines anywhere.
+    #[test]
+    fn phi4_renders_llama_cpps_strings() {
+        let t = Template::Phi4;
+        assert_eq!(
+            render_chat_prompt(t, None, &[], "U"),
+            "<|im_start|>user<|im_sep|>U<|im_end|><|im_start|>assistant<|im_sep|>"
+        );
+        assert_eq!(
+            render_chat_prompt(t, Some("S"), &[], "U"),
+            "<|im_start|>system<|im_sep|>S<|im_end|>\
+             <|im_start|>user<|im_sep|>U<|im_end|><|im_start|>assistant<|im_sep|>"
+        );
+        assert_eq!(
+            render_chat_prompt(t, Some("S"), &[("U1", "A1")], "U2"),
+            "<|im_start|>system<|im_sep|>S<|im_end|>\
+             <|im_start|>user<|im_sep|>U1<|im_end|><|im_start|>assistant<|im_sep|>A1<|im_end|>\
+             <|im_start|>user<|im_sep|>U2<|im_end|><|im_start|>assistant<|im_sep|>"
+        );
+        // A continued conversation closes the answer exactly as a replayed one does.
+        assert_eq!(t.close_previous(), t.assistant_turn(""));
+        assert!(t.default_system("phi-4").is_none());
+        assert_eq!(Template::from_name("phi4"), Some(t));
+        // Phi-4's own Jinja template (microsoft/phi-4 tokenizer_config.json).
+        let phi4_tmpl = "{% for message in messages %}{% if (message['role'] == 'system') %}{{'<|im_start|>system<|im_sep|>' + message['content'] + '<|im_end|>'}}{% elif (message['role'] == 'user') %}{{'<|im_start|>user<|im_sep|>' + message['content'] + '<|im_end|>'}}{% elif (message['role'] == 'assistant') %}{{'<|im_start|>assistant<|im_sep|>' + message['content'] + '<|im_end|>'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant<|im_sep|>' }}{% endif %}";
+        assert_eq!(Template::detect_from_str(phi4_tmpl), Ok(Template::Phi4));
     }
 
     #[test]
@@ -955,6 +1010,12 @@ mod tests {
             .default_system("SmolLM2 360M Instruct")
             .unwrap()
             .contains("SmolLM"));
+        // A ChatML file that names neither family gets no system message of its own:
+        // the SmolLM one would be a stranger's sentence in someone else's conversation.
+        assert!(Template::ChatMl.default_system("Phi 4").is_none());
+        assert!(Template::ChatMl
+            .default_system("Llama 3.2 1B Instruct")
+            .is_none());
         assert!(Template::Llama3
             .default_system("Llama 3.2 1B Instruct")
             .is_none());

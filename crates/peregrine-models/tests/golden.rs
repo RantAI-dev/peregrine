@@ -10,9 +10,11 @@
 //!
 //!   cargo test --release --test golden                     # compare against stored goldens
 //!   PEREGRINE_GOLDEN=record cargo test --release --test golden -- --nocapture   # (re)write them
+//!   PEREGRINE_GOLDEN=require ...    # a present model with no golden for this tier fails
 //!   PEREGRINE_GOLDEN_MODELS=Qwen3-1.7B,bonsai2-2b ...      # only models whose path contains one of these
 //!
-//! Models are looked up in `models/` at the repository root and in `~/models/`. A missing model is skipped.
+//! Models are looked up in `models/` at the repository root and in `~/models/`. A missing model is skipped, even under
+//! `PEREGRINE_GOLDEN=require`; a present model with no golden for the tier fails under it.
 
 use peregrine_core::gguf::Gguf;
 use peregrine_core::kv::KvPrec;
@@ -31,7 +33,7 @@ const GREEDY_TOKENS: usize = 24;
 const MAX_CTX: usize = 512;
 
 /// Candidate model files, relative to `models/` (repo) or `~/models/`.
-const MODELS: [&str; 14] = [
+const MODELS: [&str; 15] = [
     "SmolLM2-360M-Instruct.Q4_K_M.gguf",
     "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
     "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
@@ -42,6 +44,7 @@ const MODELS: [&str; 14] = [
     "Qwen3-4B-Q4_K_M.gguf",
     "Qwen3-30B-A3B-Q2_K.gguf",
     "Qwen3.5-2B-Q4_K_M.gguf",
+    "phi-4-Q4_K_M.gguf",
     "bonsai2-2b/Ternary-Bonsai-2-2B-PQ2_0.gguf",
     "bonsai2-4b/Ternary-Bonsai-2-4B-PQ2_0-MTP-Q8_0.gguf",
     "bonsai2-9b/Ternary-Bonsai-2-9B-PQ2_0.gguf",
@@ -135,6 +138,9 @@ fn run(model: &Model, threads: usize) -> String {
 #[test]
 fn golden_outputs() {
     let record = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record");
+    // `require`: a model file that is present must have a golden for this tier. A
+    // missing model file is still a skip (CI has none of these files).
+    let require = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "require");
     let only: Vec<String> = std::env::var("PEREGRINE_GOLDEN_MODELS")
         .map(|v| v.split(',').map(str::to_string).collect())
         .unwrap_or_default();
@@ -167,7 +173,13 @@ fn golden_outputs() {
             .to_string();
         let gpath = dir.join(format!("{name}.golden"));
         if (!record || tier == "x86_64-avx2-vnni256") && !gpath.is_file() {
-            eprintln!("golden: skip {rel} (no golden for tier {tier}; record one)");
+            if require {
+                failures.push(format!(
+                    "{rel}: no golden for tier {tier} (PEREGRINE_GOLDEN=require; record one)"
+                ));
+            } else {
+                eprintln!("golden: skip {rel} (no golden for tier {tier}; record one)");
+            }
             continue;
         }
         let model = peregrine_models::load(Gguf::open(&path).unwrap()).unwrap();
