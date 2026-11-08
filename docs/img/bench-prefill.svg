@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="434" viewBox="0 0 760 434" role="img" aria-label="Prompt processing">
+
+<style>
+  .surface { fill: #fcfcfb; }
+  .t1 { fill: #0b0b0b; } .t2 { fill: #52514e; }
+  .grid { stroke: #e4e3df; } .ref { stroke: #52514e; }
+  .s1 { fill: #2a78d6; } .s2 { fill: #eb6834; }
+  .gap { stroke: #fcfcfb; }
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .t1 { fill: #f0efec; } .t2 { fill: #c3c2b7; }
+    .grid { stroke: #383835; } .ref { stroke: #c3c2b7; }
+    .s1 { fill: #3987e5; } .s2 { fill: #d95926; }
+    .gap { stroke: #1a1a19; }
+  }
+</style>
+
+<rect class="surface" width="760" height="434" rx="6"/>
+<text class="t1" x="20" y="30" font-size="16" font-weight="600">Prompt processing</text>
+<text class="t2" x="20" y="50" font-size="12">tok/s, higher is better; context length after the model name</text>
+<rect class="s1" x="530" y="20" width="10" height="10" rx="2"/>
+<text class="t2" x="545" y="29" font-size="12">Peregrine</text>
+<rect class="s2" x="630" y="20" width="10" height="10" rx="2"/>
+<text class="t2" x="645" y="29" font-size="12">llama.cpp</text>
+<line class="grid" x1="250.0" y1="66" x2="250.0" y2="386" stroke-width="1"/>
+<text class="t2" x="250.0" y="402" font-size="11" text-anchor="middle">0</text>
+<line class="grid" x1="338.0" y1="66" x2="338.0" y2="386" stroke-width="1"/>
+<text class="t2" x="338.0" y="402" font-size="11" text-anchor="middle">100</text>
+<line class="grid" x1="426.0" y1="66" x2="426.0" y2="386" stroke-width="1"/>
+<text class="t2" x="426.0" y="402" font-size="11" text-anchor="middle">200</text>
+<line class="grid" x1="514.0" y1="66" x2="514.0" y2="386" stroke-width="1"/>
+<text class="t2" x="514.0" y="402" font-size="11" text-anchor="middle">300</text>
+<line class="grid" x1="602.0" y1="66" x2="602.0" y2="386" stroke-width="1"/>
+<text class="t2" x="602.0" y="402" font-size="11" text-anchor="middle">400</text>
+<line class="grid" x1="690.0" y1="66" x2="690.0" y2="386" stroke-width="1"/>
+<text class="t2" x="690.0" y="402" font-size="11" text-anchor="middle">500</text>
+<text class="t1" x="238" y="89.0" font-size="12" text-anchor="end">Desktop · Llama 3.2 1B · 512</text>
+<path class="s1" d="M250.0,72.0 H398.7 A4.0,4.0 0 0 1 402.7,76.0 V80.0 A4.0,4.0 0 0 1 398.7,84.0 H250.0 Z"/>
+<text class="t2" x="408.7" y="82" font-size="11">174</text>
+<path class="s2" d="M250.0,86.0 H476.6 A4.0,4.0 0 0 1 480.6,90.0 V94.0 A4.0,4.0 0 0 1 476.6,98.0 H250.0 Z"/>
+<text class="t2" x="486.6" y="96" font-size="11">262</text>
+<text class="t1" x="238" y="129.0" font-size="12" text-anchor="end">Desktop · Llama 3.2 1B · 4096</text>
+<path class="s1" d="M250.0,112.0 H356.4 A4.0,4.0 0 0 1 360.4,116.0 V120.0 A4.0,4.0 0 0 1 356.4,124.0 H250.0 Z"/>
+<text class="t2" x="366.4" y="122" font-size="11">125</text>
+<path class="s2" d="M250.0,126.0 H412.3 A4.0,4.0 0 0 1 416.3,130.0 V134.0 A4.0,4.0 0 0 1 412.3,138.0 H250.0 Z"/>
+<text class="t2" x="422.3" y="136" font-size="11">189</text>
+<text class="t1" x="238" y="169.0" font-size="12" text-anchor="end">Desktop · Qwen 2.5 0.5B · 512</text>
+<path class="s1" d="M250.0,152.0 H484.1 A4.0,4.0 0 0 1 488.1,156.0 V160.0 A4.0,4.0 0 0 1 484.1,164.0 H250.0 Z"/>
+<text class="t2" x="494.1" y="162" font-size="11">271</text>
+<path class="s2" d="M250.0,166.0 H629.0 A4.0,4.0 0 0 1 633.0,170.0 V174.0 A4.0,4.0 0 0 1 629.0,178.0 H250.0 Z"/>
+<text class="t2" x="639.0" y="176" font-size="11">435</text>
+<text class="t1" x="238" y="209.0" font-size="12" text-anchor="end">Desktop · Qwen 2.5 0.5B · 4096</text>
+<path class="s1" d="M250.0,192.0 H408.7 A4.0,4.0 0 0 1 412.7,196.0 V200.0 A4.0,4.0 0 0 1 408.7,204.0 H250.0 Z"/>
+<text class="t2" x="418.7" y="202" font-size="11">185</text>
+<path class="s2" d="M250.0,206.0 H491.9 A4.0,4.0 0 0 1 495.9,210.0 V214.0 A4.0,4.0 0 0 1 491.9,218.0 H250.0 Z"/>
+<text class="t2" x="501.9" y="216" font-size="11">279</text>
+<text class="t1" x="238" y="249.0" font-size="12" text-anchor="end">Bluefin · Llama 3.2 1B · 512</text>
+<path class="s1" d="M250.0,232.0 H418.7 A4.0,4.0 0 0 1 422.7,236.0 V240.0 A4.0,4.0 0 0 1 418.7,244.0 H250.0 Z"/>
+<text class="t2" x="428.7" y="242" font-size="11">196</text>
+<path class="s2" d="M250.0,246.0 H411.7 A4.0,4.0 0 0 1 415.7,250.0 V254.0 A4.0,4.0 0 0 1 411.7,258.0 H250.0 Z"/>
+<text class="t2" x="421.7" y="256" font-size="11">188</text>
+<text class="t1" x="238" y="289.0" font-size="12" text-anchor="end">Bluefin · Llama 3.2 1B · 4096</text>
+<path class="s1" d="M250.0,272.0 H372.5 A4.0,4.0 0 0 1 376.5,276.0 V280.0 A4.0,4.0 0 0 1 372.5,284.0 H250.0 Z"/>
+<text class="t2" x="382.5" y="282" font-size="11">144</text>
+<path class="s2" d="M250.0,286.0 H370.3 A4.0,4.0 0 0 1 374.3,290.0 V294.0 A4.0,4.0 0 0 1 370.3,298.0 H250.0 Z"/>
+<text class="t2" x="380.3" y="296" font-size="11">141</text>
+<text class="t1" x="238" y="329.0" font-size="12" text-anchor="end">Bluefin · Qwen 2.5 0.5B · 512</text>
+<path class="s1" d="M250.0,312.0 H474.8 A4.0,4.0 0 0 1 478.8,316.0 V320.0 A4.0,4.0 0 0 1 474.8,324.0 H250.0 Z"/>
+<text class="t2" x="484.8" y="322" font-size="11">260</text>
+<path class="s2" d="M250.0,326.0 H512.6 A4.0,4.0 0 0 1 516.6,330.0 V334.0 A4.0,4.0 0 0 1 512.6,338.0 H250.0 Z"/>
+<text class="t2" x="522.6" y="336" font-size="11">303</text>
+<text class="t1" x="238" y="369.0" font-size="12" text-anchor="end">Bluefin · Qwen 2.5 0.5B · 4096</text>
+<path class="s1" d="M250.0,352.0 H417.8 A4.0,4.0 0 0 1 421.8,356.0 V360.0 A4.0,4.0 0 0 1 417.8,364.0 H250.0 Z"/>
+<text class="t2" x="427.8" y="362" font-size="11">195</text>
+<path class="s2" d="M250.0,366.0 H453.7 A4.0,4.0 0 0 1 457.7,370.0 V374.0 A4.0,4.0 0 0 1 453.7,378.0 H250.0 Z"/>
+<text class="t2" x="463.7" y="376" font-size="11">236</text>
+<text class="t2" x="470.0" y="420" font-size="11" text-anchor="middle">tokens per second</text>
+</svg>

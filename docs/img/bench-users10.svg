@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="274" viewBox="0 0 760 274" role="img" aria-label="Total throughput, 10 users at once">
+
+<style>
+  .surface { fill: #fcfcfb; }
+  .t1 { fill: #0b0b0b; } .t2 { fill: #52514e; }
+  .grid { stroke: #e4e3df; } .ref { stroke: #52514e; }
+  .s1 { fill: #2a78d6; } .s2 { fill: #eb6834; }
+  .gap { stroke: #fcfcfb; }
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .t1 { fill: #f0efec; } .t2 { fill: #c3c2b7; }
+    .grid { stroke: #383835; } .ref { stroke: #c3c2b7; }
+    .s1 { fill: #3987e5; } .s2 { fill: #d95926; }
+    .gap { stroke: #1a1a19; }
+  }
+</style>
+
+<rect class="surface" width="760" height="274" rx="6"/>
+<text class="t1" x="20" y="30" font-size="16" font-weight="600">Total throughput, 10 users at once</text>
+<text class="t2" x="20" y="50" font-size="12">tok/s summed over all users, 512-token context, higher is better</text>
+<rect class="s1" x="530" y="20" width="10" height="10" rx="2"/>
+<text class="t2" x="545" y="29" font-size="12">Peregrine</text>
+<rect class="s2" x="630" y="20" width="10" height="10" rx="2"/>
+<text class="t2" x="645" y="29" font-size="12">llama.cpp</text>
+<line class="grid" x1="250.0" y1="66" x2="250.0" y2="226" stroke-width="1"/>
+<text class="t2" x="250.0" y="242" font-size="11" text-anchor="middle">0</text>
+<line class="grid" x1="338.0" y1="66" x2="338.0" y2="226" stroke-width="1"/>
+<text class="t2" x="338.0" y="242" font-size="11" text-anchor="middle">20</text>
+<line class="grid" x1="426.0" y1="66" x2="426.0" y2="226" stroke-width="1"/>
+<text class="t2" x="426.0" y="242" font-size="11" text-anchor="middle">40</text>
+<line class="grid" x1="514.0" y1="66" x2="514.0" y2="226" stroke-width="1"/>
+<text class="t2" x="514.0" y="242" font-size="11" text-anchor="middle">60</text>
+<line class="grid" x1="602.0" y1="66" x2="602.0" y2="226" stroke-width="1"/>
+<text class="t2" x="602.0" y="242" font-size="11" text-anchor="middle">80</text>
+<line class="grid" x1="690.0" y1="66" x2="690.0" y2="226" stroke-width="1"/>
+<text class="t2" x="690.0" y="242" font-size="11" text-anchor="middle">100</text>
+<text class="t1" x="238" y="89.0" font-size="12" text-anchor="end">Desktop · Llama 3.2 1B · 512</text>
+<path class="s1" d="M250.0,72.0 H473.9 A4.0,4.0 0 0 1 477.9,76.0 V80.0 A4.0,4.0 0 0 1 473.9,84.0 H250.0 Z"/>
+<text class="t2" x="483.9" y="82" font-size="11">51.8</text>
+<path class="s2" d="M250.0,86.0 H517.5 A4.0,4.0 0 0 1 521.5,90.0 V94.0 A4.0,4.0 0 0 1 517.5,98.0 H250.0 Z"/>
+<text class="t2" x="527.5" y="96" font-size="11">61.7</text>
+<text class="t1" x="238" y="129.0" font-size="12" text-anchor="end">Desktop · Qwen 2.5 0.5B · 512</text>
+<path class="s1" d="M250.0,112.0 H589.2 A4.0,4.0 0 0 1 593.2,116.0 V120.0 A4.0,4.0 0 0 1 589.2,124.0 H250.0 Z"/>
+<text class="t2" x="599.2" y="122" font-size="11">78.0</text>
+<path class="s2" d="M250.0,126.0 H657.0 A4.0,4.0 0 0 1 661.0,130.0 V134.0 A4.0,4.0 0 0 1 657.0,138.0 H250.0 Z"/>
+<text class="t2" x="667.0" y="136" font-size="11">93.4</text>
+<text class="t1" x="238" y="169.0" font-size="12" text-anchor="end">Bluefin · Llama 3.2 1B · 512</text>
+<path class="s1" d="M250.0,152.0 H490.2 A4.0,4.0 0 0 1 494.2,156.0 V160.0 A4.0,4.0 0 0 1 490.2,164.0 H250.0 Z"/>
+<text class="t2" x="500.2" y="162" font-size="11">55.5</text>
+<path class="s2" d="M250.0,166.0 H410.6 A4.0,4.0 0 0 1 414.6,170.0 V174.0 A4.0,4.0 0 0 1 410.6,178.0 H250.0 Z"/>
+<text class="t2" x="420.6" y="176" font-size="11">37.4</text>
+<text class="t1" x="238" y="209.0" font-size="12" text-anchor="end">Bluefin · Qwen 2.5 0.5B · 512</text>
+<path class="s1" d="M250.0,192.0 H559.7 A4.0,4.0 0 0 1 563.7,196.0 V200.0 A4.0,4.0 0 0 1 559.7,204.0 H250.0 Z"/>
+<text class="t2" x="569.7" y="202" font-size="11">71.3</text>
+<path class="s2" d="M250.0,206.0 H548.3 A4.0,4.0 0 0 1 552.3,210.0 V214.0 A4.0,4.0 0 0 1 548.3,218.0 H250.0 Z"/>
+<text class="t2" x="558.3" y="216" font-size="11">68.7</text>
+<text class="t2" x="470.0" y="260" font-size="11" text-anchor="middle">tokens per second</text>
+</svg>
