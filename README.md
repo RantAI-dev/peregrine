@@ -58,8 +58,10 @@ Speed-ups that landed in November 2026, each checked against llama.cpp's KL on r
 the batch-invariance tests:
 
 - **Repacked Q4_K kernels** (AVX2): prompt processing on a Ryzen 3 PRO 4350G goes from 104 to 152 tok/s
-  on Llama 3.2 1B and from 72 to 96 tok/s on Qwen 3.5 2B; decode is unchanged. Off by default on
-  AVX-512 until that tier has its own repacked kernel (`PEREGRINE_KREPACK=1` turns it on).
+  on Llama 3.2 1B and from 72 to 96 tok/s on Qwen 3.5 2B; decode is unchanged. The Q5_0 tile takes
+  the small models' prefill further (Qwen 0.5B 1.69× at 512). On the AVX-512 host the repack is on
+  by default too: the 1B's prompt is +26% at 512 tokens for −1.2% decode, and the 0.5B (Q4_K + Q5_0)
+  is +19.7% prompt and +18.7% decode (`PEREGRINE_KREPACK=0` is the control).
 - **The prefill chunk follows the worker pool**: on the Ryzen AI 9 HX 370, prompt processing is 14-43%
   faster (Bonsai 2 2B +43%, Bonsai 2 9B +14%, Llama 3.2 1B +19%).
 - **More attention tasks at short context**: decode is 0.6-2.9% faster, and a row's attention no longer

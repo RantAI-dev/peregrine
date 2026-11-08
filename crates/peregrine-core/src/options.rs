@@ -97,8 +97,8 @@ pub fn prefill_chunk_default_for(threads: usize) -> usize {
 pub const MAX_PREFILL_CHUNK: usize = crate::blocks::linear::MAX_BATCH;
 
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
-/// One default depends on the machine: the k-quant repack is off on the AVX-512 tier
-/// ([`EngineOptions::kq_repack_note`] says which applied).
+/// The k-quant repack is on by default on every tier, the AVX-512 tier included
+/// ([`EngineOptions::kq_repack_note`] says whether the switch overrode it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineOptions {
     // Thread pool.
@@ -119,9 +119,9 @@ pub struct EngineOptions {
     /// `PEREGRINE_TILES=0` turns off the repacked row tiles for ternary weights.
     pub tiles: bool,
     /// `PEREGRINE_KREPACK`: repack the k-quant matrices (and Q5_0) into eight-row tiles and
-    /// multiply them with the repacked kernels. On by default below the AVX-512 tier; off by default on it, where only
-    /// the AVX2 repacked kernel exists and decode is slower with it (S3.4 decision 9). The switch
-    /// overrides the default in both directions.
+    /// multiply them with the repacked kernels. On by default on every tier, the AVX-512 tier
+    /// included (it runs the AVX2 repacked kernels; the A/B accepts a small decode cost for the
+    /// prompt win — S3.4 §10). The switch overrides the default in both directions.
     pub kq_repack: bool,
     /// Whether `PEREGRINE_KREPACK` was given, so [`EngineOptions::kq_repack_note`] can say why the
     /// switch has its value.
@@ -385,9 +385,8 @@ impl EngineOptions {
             .collect()
     }
 
-    /// The repack setting and why, for `peregrine tier`: `off (AVX-512 tier default)`. The tier is
-    /// the one the kernels resolve to, so `PEREGRINE_ISA=avx2` on an AVX-512 host reports the AVX2
-    /// default.
+    /// The repack setting and why, for `peregrine tier`: `on (tier default)`, or
+    /// `off (PEREGRINE_KREPACK)` when the switch turned it off.
     pub fn kq_repack_note(&self) -> String {
         Self::kq_repack_note_for(
             self.kq_repack,
@@ -397,12 +396,10 @@ impl EngineOptions {
     }
 
     /// [`Self::kq_repack_note`] for a tier given directly, without reading the machine.
-    pub fn kq_repack_note_for(on: bool, switch: bool, tier: crate::cpu::Tier) -> String {
+    pub fn kq_repack_note_for(on: bool, switch: bool, _tier: crate::cpu::Tier) -> String {
         let state = if on { "on" } else { "off" };
         let why = if switch {
             "PEREGRINE_KREPACK"
-        } else if tier == crate::cpu::Tier::Avx512 {
-            "AVX-512 tier default"
         } else {
             "tier default"
         };
@@ -683,8 +680,8 @@ mod tests {
     fn the_repack_note_names_the_switch_or_the_tier() {
         use crate::cpu::Tier;
         assert_eq!(
-            EngineOptions::kq_repack_note_for(false, false, Tier::Avx512),
-            "off (AVX-512 tier default)"
+            EngineOptions::kq_repack_note_for(true, false, Tier::Avx512),
+            "on (tier default)"
         );
         assert_eq!(
             EngineOptions::kq_repack_note_for(true, false, Tier::Avx2),
