@@ -24,22 +24,23 @@ load, PrismML's llama.cpp fork.
 
 ![Where Peregrine is fastest](docs/img/bench-wins.svg)
 
-- **Single-user decode up to 1.36× faster** (Llama 3.2 1B at a 4096-token context, 12-core desktop),
-  and ahead in 5 of 8 confirmed cases. On the 4-core Ryzen 3 the 1B is 1.10× ahead at 512 tokens and
-  1.26× at 4096 against llama.cpp's faster flash-attention setting; the 0.5B at 4096 is a loss
-  (0.87×). The lead grows with context: attention reads each cached key and value once per group of
+- **Single-user decode up to 1.39× faster** (Llama 3.2 1B at a 4096-token context, 12-core desktop),
+  and ahead in 5 of 8 confirmed cases. Against llama.cpp's faster flash-attention setting the 1B is
+  1.21× ahead at 512 tokens and 1.39× at 4096 on the desktop, and 1.10× and 1.26× on the 4-core
+  Ryzen 3; the 0.5B at 4096 on the Ryzen 3 is a loss (0.87×), as is its 512-token row on the desktop
+  (0.92×). The lead grows with context: attention reads each cached key and value once per group of
   heads.
 - **1.48× the throughput with 10 users at once** on a 4-core Ryzen 3 (Llama 3.2 1B at a 512-token
   context; 1.52× at 4096), against llama.cpp's faster setting.
 - **Prompt processing level with llama.cpp on AVX2** after the repacked Q4_K kernels (1.02-1.05× on
-  the 4-core Ryzen 3; +46% from the kernels on Llama 3.2 1B).
+  the 4-core Ryzen 3; +46% from the kernels on Llama 3.2 1B). The desktop is at 0.69-0.74×.
 - **Bonsai 2 (ternary): 2.0-2.3× the decode and 1.9-2.6× the prompt speed of PrismML's own
   llama.cpp fork, 2.7× with 10 users** (12-core desktop), against the fork's faster
   flash-attention setting for each row. Upstream llama.cpp cannot load these PQ2_0 files, so the
   fork is the only comparison that exists for them.
 
-Losses are in the same report: the 0.5B model on the 4-core Ryzen 3 (both contexts) and prompt
-processing on the desktop. Every number, chart and machine record is in
+Losses are in the same report: the 0.5B model on the 4-core Ryzen 3 (both contexts) and at 512 on
+the desktop, and prompt processing on the desktop. Every number, chart and machine record is in
 [docs/benchmark.md](docs/benchmark.md).
 
 ## Progress

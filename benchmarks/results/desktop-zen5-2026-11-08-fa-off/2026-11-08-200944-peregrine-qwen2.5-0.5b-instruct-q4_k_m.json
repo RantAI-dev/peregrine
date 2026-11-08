@@ -1,0 +1,251 @@
+{
+  "benchmark": "peregrine-s3.1",
+  "timestamp": "2026-11-08T13:05:06.406898+00:00",
+  "model": {
+    "path": "/home/uaa/models-ab/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "filename": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "size_bytes": 491400032,
+    "bytes_per_token_telemetry": 392357992.0
+  },
+  "machine": {
+    "hostname": "DESKTOP-4TS2NH4",
+    "os": "Linux",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "cpu_model": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+    "cpu_features": [
+      "fma",
+      "avx",
+      "avx2",
+      "avx512f",
+      "avx_vnni",
+      "avx512_bf16"
+    ],
+    "threads_tested": 12,
+    "governor": "unknown (VM or fixed frequency)",
+    "bandwidth_ceiling_bytes_per_s": 35737359246.15315,
+    "bandwidth_ceiling_gb_s": 35.737,
+    "flops_ceiling": 327727383844.7526,
+    "gflops_ceiling": 327.727,
+    "simd_tier": "avx2+fma",
+    "ridge_point": 9.17
+  },
+  "engine": {
+    "name": "peregrine",
+    "version": "0.1.0",
+    "commit": "58253c964a473a6ca00d361f182a38953f7e118d",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "build_command": "cargo build --release -p peregrine"
+  },
+  "settings": {
+    "contexts": [
+      512
+    ],
+    "runs": 3,
+    "decode_tokens": 256,
+    "threads": 12,
+    "mode": "server",
+    "user_counts": [
+      1,
+      10
+    ],
+    "engine_args": {},
+    "chat_template_kwargs": null,
+    "token_tolerance": 0,
+    "interleaved": true,
+    "llama_flash_attn": "off"
+  },
+  "results": {
+    "512": {
+      "single_user": {
+        "decode_tok_s": [
+          71.44661941477322,
+          69.95848523296033,
+          69.59302050270766
+        ],
+        "prefill_tok_s": [
+          323.4396312504604,
+          321.89969541111043,
+          318.6254398780047
+        ],
+        "ttft_s": [
+          1.5026700496673584,
+          1.5227711200714111,
+          1.537355899810791
+        ],
+        "prompt_tokens": [
+          509,
+          508,
+          508
+        ]
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": [],
+        "decode_aggregate_tok_s": [],
+        "ttft_s": [],
+        "prompt_tokens": []
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": [
+          83.79805668817225,
+          82.77048581268382,
+          83.35450940849599
+        ],
+        "decode_aggregate_tok_s": [
+          328.04689190530036,
+          324.1233617799682,
+          320.177967334138
+        ],
+        "ttft_s": [
+          12.118736505508423,
+          12.235816955566406,
+          12.022222518920898
+        ],
+        "prompt_tokens": [
+          511.5,
+          511.0,
+          511.0
+        ]
+      }
+    }
+  },
+  "summary": {
+    "512": {
+      "context": 512,
+      "actual_prompt_tokens": 508,
+      "single_user": {
+        "decode_tok_s": {
+          "median": 69.96,
+          "spread": 0.93,
+          "min": 69.59,
+          "max": 71.45
+        },
+        "prefill_tok_s": {
+          "median": 321.9,
+          "spread": 2.41,
+          "min": 318.63,
+          "max": 323.44
+        },
+        "ttft_s": {
+          "median": 1.52,
+          "spread": 0.02,
+          "min": 1.5,
+          "max": 1.54
+        },
+        "prompt_tokens": {
+          "median": 508,
+          "spread": 0.5,
+          "min": 508,
+          "max": 509
+        },
+        "bytes_per_token": 392357992.0,
+        "fraction_of_ceiling": 0.7681,
+        "percent_of_ceiling": 76.81,
+        "raw_samples": {
+          "decode_tok_s": [
+            71.44661941477322,
+            69.95848523296033,
+            69.59302050270766
+          ],
+          "prefill_tok_s": [
+            323.4396312504604,
+            321.89969541111043,
+            318.6254398780047
+          ],
+          "ttft_s": [
+            1.5026700496673584,
+            1.5227711200714111,
+            1.537355899810791
+          ],
+          "prompt_tokens": [
+            509,
+            508,
+            508
+          ]
+        }
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "decode_aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "ttft_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "prompt_tokens": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [],
+          "decode_aggregate_tok_s": [],
+          "ttft_s": [],
+          "prompt_tokens": []
+        }
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": {
+          "median": 83.35,
+          "spread": 0.51,
+          "min": 82.77,
+          "max": 83.8
+        },
+        "decode_aggregate_tok_s": {
+          "median": 324.12,
+          "spread": 3.93,
+          "min": 320.18,
+          "max": 328.05
+        },
+        "first_token_time_s": {
+          "median": 12.12,
+          "spread": 0.11,
+          "min": 12.02,
+          "max": 12.24
+        },
+        "prompt_tokens": {
+          "median": 511.0,
+          "spread": 0.25,
+          "min": 511.0,
+          "max": 511.5
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [
+            83.79805668817225,
+            82.77048581268382,
+            83.35450940849599
+          ],
+          "decode_aggregate_tok_s": [
+            328.04689190530036,
+            324.1233617799682,
+            320.177967334138
+          ],
+          "ttft_s": [
+            12.118736505508423,
+            12.235816955566406,
+            12.022222518920898
+          ],
+          "prompt_tokens": [
+            511.5,
+            511.0,
+            511.0
+          ]
+        }
+      }
+    }
+  }
+}

@@ -10,20 +10,21 @@ count. Wins and losses are both here. The raw data, method and machine records a
 ## The short version
 
 - **Single-user decode is Peregrine's strongest result.** It beats llama.cpp in 5 of the 8 confirmed cases,
-  by up to 1.36× (Llama 3.2 1B at a 4096-token context on the desktop). The gap grows with context:
+  by up to 1.39× (Llama 3.2 1B at a 4096-token context on the desktop). The gap grows with context:
   Peregrine's attention reads each cached key and value once per group of heads, and spends about
-  2.3× less time per context position than llama.cpp. On bluefin, against llama.cpp's faster
-  flash-attention setting, the 1B is ahead 1.10× at 512 and 1.26× at 4096, while the 0.5B at 4096
-  is now a loss (0.87×).
+  2.3× less time per context position than llama.cpp. Against llama.cpp's faster flash-attention
+  setting, the desktop 1B is ahead 1.21× at 512 and 1.39× at 4096, and on bluefin 1.10× and 1.26×;
+  the 0.5B at 4096 on bluefin is a loss (0.87×).
 - **Many users on a small machine.** On the 4-core bluefin, Peregrine serves 10 users at once 1.48×
   faster than llama.cpp on Llama 3.2 1B at a 512-token context (1.52× at 4096), against llama.cpp's
   faster setting.
 - **Prompt processing has caught up on AVX2.** On bluefin, with the repacked Q4_K kernels, Peregrine
-  matches llama.cpp on Llama 3.2 1B (1.02-1.05×). On the desktop it is at 0.62-0.66×; the same
-  kernels lift the desktop's Llama 3.2 1B from 0.66× to 0.81×, but they are not on by default there yet.
+  matches llama.cpp on Llama 3.2 1B (1.02-1.05×). On the desktop it is at 0.69-0.74×; the same
+  kernels lift the desktop's Llama 3.2 1B from 0.70× to 0.89× at 512 (0.83× at 4096), but they are
+  not on by default there yet.
 - **Where it loses:** the 0.5B model at both contexts on bluefin (decode 0.68× at 512 and 0.87× at
-  4096; 0.90× at 512 on the desktop), prompt processing on the desktop, and multi-user throughput on
-  the desktop (0.84×).
+  4096; 0.92× at 512 on the desktop), prompt processing on the desktop, and multi-user throughput on
+  the desktop (0.87× at 10 users, 0.95× at 4).
 
 ## The machines
 
@@ -33,8 +34,8 @@ count. Wins and losses are both here. The raw data, method and machine records a
 | SIMD | AVX2, AVX-512 (VNNI, GFNI, VBMI) | AVX2 |
 | Threads used | 12 (one per core) | 4 (one per core) |
 | OS | Linux under WSL2 | Fedora, bare metal |
-| Peregrine | `5f76d48` (2026-11-08), defaults: repacked Q4_K kernels off | `9bcf524` (2026-11-08; engine sources unchanged since `5f76d48`), defaults: repacked Q4_K kernels on |
-| Results | [desktop-zen5-2026-11-08](../benchmarks/results/desktop-zen5-2026-11-08/README.md) | [bluefin-zen2-2026-11-08-fa-off](../benchmarks/results/bluefin-zen2-2026-11-08-fa-off/README.md) |
+| Peregrine | `e48aea5` (2026-11-08 re-run, 20:00), defaults: repacked Q4_K kernels off | `9bcf524` (2026-11-08; engine sources unchanged since `5f76d48`), defaults: repacked Q4_K kernels on |
+| Results | [desktop-zen5-2026-11-08-fa-off](../benchmarks/results/desktop-zen5-2026-11-08-fa-off/README.md), with the same-day default-setting baseline in [desktop-zen5-2026-11-08](../benchmarks/results/desktop-zen5-2026-11-08/README.md) | [bluefin-zen2-2026-11-08-fa-off](../benchmarks/results/bluefin-zen2-2026-11-08-fa-off/README.md) |
 
 The desktop's same-day llama.cpp ran 0-7% faster than on 2026-11-07
 ([first desktop baseline](../benchmarks/results/desktop-zen5-2026-11-07/README.md)), so compare
@@ -50,10 +51,11 @@ defaults to `-fa auto`, which resolves to flash attention on here; that path is 
 single-user decode, and `-fa off` is used for those rows, while the default is faster for prompt
 processing and multi-user throughput and is used there. The default-setting number is kept as a
 secondary note. The bluefin re-run and both settings are in
-[`bluefin-zen2-2026-11-08-fa-off`](../benchmarks/results/bluefin-zen2-2026-11-08-fa-off/README.md).
-
-Desktop llama.cpp numbers on this page were taken at its defaults and are being re-checked with
-flash attention off; the bluefin rows below already use the faster setting.
+[`bluefin-zen2-2026-11-08-fa-off`](../benchmarks/results/bluefin-zen2-2026-11-08-fa-off/README.md);
+the desktop re-run is in
+[`desktop-zen5-2026-11-08-fa-off`](../benchmarks/results/desktop-zen5-2026-11-08-fa-off/README.md)
+and finds `-fa off` faster for single-user decode and for the 0.5B at 4096, and slower for the 1B's
+prompt processing and for every multi-user row.
 
 ## Single-user decode
 
@@ -61,10 +63,10 @@ flash attention off; the bluefin rows below already use the faster setting.
 
 | Machine | Model | Context | Peregrine | llama.cpp | Peregrine ÷ llama.cpp |
 |---|---|---|---|---|---|
-| Desktop | Llama 3.2 1B | 512 | 59.4 | 51.0 | **1.16×** |
-| Desktop | Llama 3.2 1B | 4096 | 44.2 | 32.4 | **1.36×** |
-| Desktop | Qwen 2.5 0.5B | 512 | 68.1 | 75.8 | 0.90× |
-| Desktop | Qwen 2.5 0.5B | 4096 | 51.6 | 48.8 | **1.06×** |
+| Desktop | Llama 3.2 1B | 512 | 62.6 | 51.8 | **1.21×** |
+| Desktop | Llama 3.2 1B | 4096 | 47.0 | 33.8 | **1.39×** |
+| Desktop | Qwen 2.5 0.5B | 512 | 70.0 | 75.8 | 0.92× |
+| Desktop | Qwen 2.5 0.5B | 4096 | 54.9 | 49.1 | **1.12×** |
 | Bluefin | Llama 3.2 1B | 512 | 46.1 | 42.0 | **1.10×** |
 | Bluefin | Llama 3.2 1B | 4096 | 36.9 | 29.3 | **1.26×** |
 | Bluefin | Qwen 2.5 0.5B | 512 | 52.9 | 77.4 | 0.68× |
@@ -73,8 +75,9 @@ flash attention off; the bluefin rows below already use the faster setting.
 Tokens per second. Bluefin compares against llama.cpp's faster flash-attention setting: `-fa off`
 for these rows. Against llama.cpp's defaults the same rows are 1.17×, 2.83× (13.0 tok/s), 0.71× and
 1.10× (41.0 tok/s). The Qwen 0.5B at 4096 is a loss now that the default is not the competitor: with
-`-fa off` llama.cpp decodes at 52.0 tok/s, above Peregrine's 45.2. Desktop numbers are at llama.cpp's
-defaults until its re-check lands.
+`-fa off` llama.cpp decodes at 52.0 tok/s, above Peregrine's 45.2. On the desktop `-fa off` is the
+faster setting for the 1B at both contexts and for the 0.5B at 4096 (and 1.7% slower on the 0.5B at
+512, where the default is used); at llama.cpp's defaults the 1B ratios would be 1.23× and 1.45×.
 
 Why the 0.5B loses at a short context: with only two KV heads its attention splits into fewer tasks
 than there are cores, and a few steps in each layer still run on one thread. Both matter more on a
@@ -86,10 +89,10 @@ small model, where each token's weight pass is short.
 
 | Machine | Model | Context | Peregrine | llama.cpp | Peregrine ÷ llama.cpp |
 |---|---|---|---|---|---|
-| Desktop | Llama 3.2 1B | 512 | 173.5 | 262.0 | 0.66× |
-| Desktop | Llama 3.2 1B | 4096 | 125.4 | 189.0 | 0.66× |
-| Desktop | Qwen 2.5 0.5B | 512 | 270.6 | 435.2 | 0.62× |
-| Desktop | Qwen 2.5 0.5B | 4096 | 184.9 | 279.4 | 0.66× |
+| Desktop | Llama 3.2 1B | 512 | 183.8 | 262.0 | 0.70× |
+| Desktop | Llama 3.2 1B | 4096 | 130.9 | 189.0 | 0.69× |
+| Desktop | Qwen 2.5 0.5B | 512 | 321.9 | 435.2 | 0.74× |
+| Desktop | Qwen 2.5 0.5B | 4096 | 215.1 | 293.1 | 0.73× |
 | Bluefin | Llama 3.2 1B | 512 | 197.3 | 188.3 | **1.05×** |
 | Bluefin | Llama 3.2 1B | 4096 | 144.6 | 141.2 | **1.02×** |
 | Bluefin | Qwen 2.5 0.5B | 512 | 263.2 | 302.9 | 0.87× |
@@ -99,10 +102,14 @@ On bluefin, llama.cpp's default (`-fa auto` on) is faster than `-fa off` for pro
 (`-fa off` gives 173.6 and 122.2 tok/s on the 1B, 277.1 and 192.9 on the 0.5B), so the default is
 the like-for-like competitor here.
 
+On the desktop, llama.cpp's default stays the faster prompt setting for the 1B: `-fa off` gives 251.5
+and 178.5 tok/s, 4.0% and 5.6% slower. On the 0.5B it is 1.0% slower at 512 and 4.9% faster at 4096,
+so that row uses `-fa off`.
+
 On the desktop the repacked Q4_K kernels are off by default (AVX-512 has no kernel of its own yet).
-Turned on with `PEREGRINE_KREPACK=1`, Llama 3.2 1B goes to 211.5 tok/s at 512 (0.81×) and 144.6 at
-4096 (0.77×), and its 10-user throughput to 62.7 tok/s (1.02×), with decode within 1%. The 0.5B
-does not gain from them.
+Five alternating rounds with `PEREGRINE_KREPACK=1` on Llama 3.2 1B take prompt processing from 185.5
+to 233.9 tok/s at 512 (0.89× of llama.cpp's default) and from 130.6 to 156.1 at 4096 (0.83×), with
+decode 1.2% lower at 512 and flat at 4096. The 0.5B does not gain from them.
 
 ## Many users at once
 
@@ -110,19 +117,24 @@ does not gain from them.
 
 | Machine | Model | 4 users | 10 users | 10 users, Peregrine ÷ llama.cpp |
 |---|---|---|---|---|
-| Desktop | Llama 3.2 1B | 52.9 vs 54.5 | 51.8 vs 61.7 | 0.84× |
-| Desktop | Qwen 2.5 0.5B | 70.6 vs 81.8 | 78.0 vs 93.4 | 0.84× |
+| Desktop | Llama 3.2 1B | 51.6 vs 54.5 | 53.4 vs 61.7 | 0.87× |
+| Desktop | Qwen 2.5 0.5B | 78.3 vs 81.8 | 83.4 vs 93.4 | 0.89× |
 | Bluefin | Llama 3.2 1B | 53.8 vs 39.6 | 55.2 vs 37.4 | **1.48×** |
 | Bluefin | Qwen 2.5 0.5B | 70.7 vs 65.2 | 71.7 vs 68.7 | **1.04×** |
 
 Total tokens per second over all users at a 512-token context, Peregrine vs llama.cpp. On bluefin
 the default is the faster llama.cpp setting for multi-user throughput: `-fa off` drops it to 34.2
 and 23.9 tok/s (1B, 4 and 10 users) and 55.0 and 42.5 tok/s (0.5B), so these ratios use the default.
-At 4096 tokens the 1B is 7.65 vs 5.36 (4 users, 1.43×) and 7.73 vs 5.07 (10 users, 1.52×); the 0.5B
-is 9.97 vs 10.88 (0.92×) and 9.81 vs 10.13 (0.97×). The 10-user, 4096, `-fa off` phase does not
-finish inside the 10-minute command cap on this host, so those two rows use the default, which is
-already about 2× faster at 4 users there. At 4096 tokens both engines fall to 5-14 tok/s in total,
-too coarse to compare closely; those numbers are in the result folders.
+The desktop agrees, and by a wider margin: `-fa off` drops llama.cpp to 41.6 and 36.0 tok/s (1B)
+and 63.7 and 56.8 (0.5B) at 4 and 10 users, so the default is the competitor for every desktop
+multi-user row too.
+At 4096 tokens on bluefin the 1B is 7.65 vs 5.36 (4 users, 1.43×) and 7.73 vs 5.07 (10 users,
+1.52×); the 0.5B is 9.97 vs 10.88 (0.92×) and 9.81 vs 10.13 (0.97×). The 10-user, 4096, `-fa off`
+phase does not finish inside the 10-minute command cap on either host, so those rows use the
+default where one exists (bluefin) and are recorded as not completed on the desktop, where the
+default-setting numbers from the same day are still in its baseline folder. At 4096 tokens both
+engines fall to 5-14 tok/s in total, too coarse to compare closely; those numbers are in the result
+folders.
 
 ## What changed in November
 
