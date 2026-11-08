@@ -86,7 +86,7 @@ As specified in `docs/targets.md`:
 | **llama.cpp** | `v0.9.0` (commit `cd959ba`) | Standard CPU release; CMake Release build with AVX2/FMA |
 | **ik_llama.cpp** | `master` (`ikawrakow/ik_llama.cpp`) | Pinned fork optimized for x86 CPU matrix kernels |
 | **bitnet.cpp** | Pinned release | Pinned for ternary model baselines (Claim 1) |
-| **PrismML llama.cpp** | Pinned release | Pinned fork for ternary PQ2_0 baselines |
+| **PrismML llama.cpp** | `prism` branch, commit `62c418c` | Pinned fork for ternary PQ2_0 baselines; CMake Release build with native CPU dispatch |
 
 ---
 
@@ -116,7 +116,8 @@ benchmarks/
 │   ├── base.py           # EngineAdapter base class & HTTP streaming client
 │   ├── peregrine.py      # Peregrine engine adapter (CLI bench & server)
 │   ├── llama_cpp.py      # llama.cpp adapter (clone, CMake build, server)
-│   └── ik_llama_cpp.py   # ik_llama.cpp adapter
+│   ├── ik_llama_cpp.py   # ik_llama.cpp adapter
+│   └── prism_llama_cpp.py # PrismML's llama.cpp fork adapter (PQ2_0/PTQ1_0)
 ├── results/              # Directory where raw JSON run sets are stored
 └── samples/              # Committed sample run JSONs and reports
 ```
@@ -169,6 +170,30 @@ python3 benchmarks/run.py \
     --engines peregrine,llama_cpp \
     --dry-run
 ```
+
+### Split a Long Sweep, or Change One Engine's Options
+
+`--user-counts 1,10` drops the 4-user phase, which lets a slow host keep each invocation
+under a wall-clock limit; run the rounds as separate invocations and combine their raw
+sample arrays (see `benchmarks/results/2026-11-08-bonsai2-prism/merge.py`). `--engine-args`
+adds arguments to one engine only, and `--chat-template-kwargs` sends the same
+`chat_template_kwargs` to every engine's chat requests:
+
+```sh
+python3 benchmarks/run.py \
+    --models /path/to/bonsai.gguf \
+    --engines peregrine,prism_llama_cpp \
+    --contexts 512 --user-counts 1,10 --runs 3 --threads 12 \
+    --engine-args 'peregrine=--opt MTP=0' \
+    --engine-args 'prism_llama_cpp=--spec-type draft-mtp' \
+    --chat-template-kwargs '{"enable_thinking": false}' \
+    --token-tolerance 1 \
+    --output-dir benchmarks/results
+```
+
+`--token-tolerance N` keeps a sample whose reply is up to `N` tokens short of `--tokens`,
+for servers that do not count an empty control token at the end of a reasoning-template
+reply.
 
 ### Generate Markdown Comparison Report
 

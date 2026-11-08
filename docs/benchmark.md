@@ -155,3 +155,38 @@ faster setting per row.
 
 The charts are drawn by [`benchmarks/charts.py`](../benchmarks/charts.py) from the medians in the
 result folders; update its tables when a new result lands, then rerun it.
+
+## Bonsai 2 vs PrismML's fork
+
+Bonsai 2's ternary files (PQ2_0, ggml type 142) do not load in upstream llama.cpp, so the
+llama.cpp comparison above cannot cover them. [PrismML's
+fork](https://github.com/PrismML-Eng/llama.cpp) is the other engine that reads them. Measured
+2026-11-08 on the Ryzen AI 9 HX 370 desktop (12 threads, WSL2), 3 interleaved rounds, 256
+greedy tokens, prompt lengths calibrated per engine. Peregrine at `bf241fe`; fork at
+`62c418ccd7aefee37997e94c2d9fac1eed7fc89b` (branch `prism`). Full method, raw manifests and
+the greedy-text check: [`benchmarks/results/2026-11-08-bonsai2-prism/`](../benchmarks/results/2026-11-08-bonsai2-prism/).
+
+Medians. "Ratio" is Peregrine ÷ fork; above 1 means Peregrine is faster, and for TTFT below 1
+means Peregrine's first token arrives sooner.
+
+| Model | Context | Users | Metric | Peregrine | Fork | Ratio |
+|---|---|---|---|---|---|---|
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Decode tok/s | 70.64 | 32.67 | 2.16x |
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Prompt tok/s | 259.25 | 112.19 | 2.31x |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | Aggregate tok/s | 80.59 | 29.79 | 2.71x |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | TTFT (s) | 12.92 | 45.40 | 0.28x |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Decode tok/s | 60.64 | 30.76 | 1.97x |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Prompt tok/s | 202.94 | 103.90 | 1.95x |
+| Bonsai 2 9B PQ2_0 | 512 | 1 | Decode tok/s | 22.97 | 9.82 | 2.34x |
+| Bonsai 2 9B PQ2_0 | 512 | 1 | Prompt tok/s | 67.24 | 26.63 | 2.52x |
+| Bonsai 2 9B PQ2_0 | 512 | 10 | Aggregate tok/s | 21.62 | 7.76 | 2.79x |
+| Bonsai 2 9B PQ2_0 | 512 | 10 | TTFT (s) | 51.66 | 185.48 | 0.28x |
+| Bonsai 2 9B PQ2_0 | 4096 | 1 | Decode tok/s | 20.36 | 8.93 | 2.28x |
+| Bonsai 2 9B PQ2_0 | 4096 | 1 | Prompt tok/s | 57.42 | 25.33 | 2.27x |
+
+MTP speculation on the 9B `-MTP-Q8_0` file (512 tokens, 1 user): Peregrine decodes 25.01
+tok/s with MTP and 22.75 without (1.10x); the fork decodes 9.77 tok/s with `--spec-type
+draft-mtp` and 9.83 without (0.99x, unchanged within the spread).
+
+Peregrine's binary reports the `avx2+fma` SIMD tier on this host, while the fork was built
+with native dispatch (AVX-512). That difference, if it matters, favours the fork.
