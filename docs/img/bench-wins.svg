@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="338" viewBox="0 0 760 338" role="img" aria-label="Where Peregrine is fastest against llama.cpp">
+
+<style>
+  .surface { fill: #fcfcfb; }
+  .t1 { fill: #0b0b0b; } .t2 { fill: #52514e; }
+  .grid { stroke: #e4e3df; } .ref { stroke: #52514e; }
+  .s1 { fill: #2a78d6; } .s2 { fill: #eb6834; }
+  .gap { stroke: #fcfcfb; }
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .t1 { fill: #f0efec; } .t2 { fill: #c3c2b7; }
+    .grid { stroke: #383835; } .ref { stroke: #c3c2b7; }
+    .s1 { fill: #3987e5; } .s2 { fill: #d95926; }
+    .gap { stroke: #1a1a19; }
+  }
+</style>
+
+<rect class="surface" width="760" height="338" rx="6"/>
+<text class="t1" x="20" y="30" font-size="16" font-weight="600">Where Peregrine is fastest against llama.cpp</text>
+<text class="t2" x="20" y="50" font-size="12">Peregrine ÷ llama.cpp v0.9.0, same machine, same Q4_K_M file; the dashed line is level</text>
+<line class="grid" x1="250.0" y1="66" x2="250.0" y2="290" stroke-width="1"/>
+<text class="t2" x="250.0" y="306" font-size="11" text-anchor="middle">0×</text>
+<line class="grid" x1="323.3" y1="66" x2="323.3" y2="290" stroke-width="1"/>
+<text class="t2" x="323.3" y="306" font-size="11" text-anchor="middle">0.25×</text>
+<line class="grid" x1="396.7" y1="66" x2="396.7" y2="290" stroke-width="1"/>
+<text class="t2" x="396.7" y="306" font-size="11" text-anchor="middle">0.5×</text>
+<line class="grid" x1="470.0" y1="66" x2="470.0" y2="290" stroke-width="1"/>
+<text class="t2" x="470.0" y="306" font-size="11" text-anchor="middle">0.75×</text>
+<line class="grid" x1="543.3" y1="66" x2="543.3" y2="290" stroke-width="1"/>
+<text class="t2" x="543.3" y="306" font-size="11" text-anchor="middle">1×</text>
+<line class="grid" x1="616.7" y1="66" x2="616.7" y2="290" stroke-width="1"/>
+<text class="t2" x="616.7" y="306" font-size="11" text-anchor="middle">1.25×</text>
+<line class="grid" x1="690.0" y1="66" x2="690.0" y2="290" stroke-width="1"/>
+<text class="t2" x="690.0" y="306" font-size="11" text-anchor="middle">1.5×</text>
+<line class="ref" x1="543.3" y1="62" x2="543.3" y2="290" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text class="t1" x="238" y="83" font-size="12" text-anchor="end">10 users · Llama 1B · 512 · Bluefin</text>
+<path class="s1" d="M250.0,72.0 H681.3 A4.0,4.0 0 0 1 685.3,76.0 V82.0 A4.0,4.0 0 0 1 681.3,86.0 H250.0 Z"/>
+<text class="t1" x="691.3" y="84" font-size="12" font-weight="600">1.48×</text>
+<text class="t1" x="238" y="111" font-size="12" text-anchor="end">Decode · Llama 1B · 4096 · Desktop</text>
+<path class="s1" d="M250.0,100.0 H646.2 A4.0,4.0 0 0 1 650.2,104.0 V110.0 A4.0,4.0 0 0 1 646.2,114.0 H250.0 Z"/>
+<text class="t1" x="656.2" y="112" font-size="12" font-weight="600">1.36×</text>
+<text class="t1" x="238" y="139" font-size="12" text-anchor="end">4 users · Llama 1B · 512 · Bluefin</text>
+<path class="s1" d="M250.0,128.0 H643.3 A4.0,4.0 0 0 1 647.3,132.0 V138.0 A4.0,4.0 0 0 1 643.3,142.0 H250.0 Z"/>
+<text class="t1" x="653.3" y="140" font-size="12" font-weight="600">1.35×</text>
+<text class="t1" x="238" y="167" font-size="12" text-anchor="end">Decode · Llama 1B · 512 · Desktop</text>
+<path class="s1" d="M250.0,156.0 H587.6 A4.0,4.0 0 0 1 591.6,160.0 V166.0 A4.0,4.0 0 0 1 587.6,170.0 H250.0 Z"/>
+<text class="t1" x="597.6" y="168" font-size="12" font-weight="600">1.16×</text>
+<text class="t1" x="238" y="195" font-size="12" text-anchor="end">Decode · Llama 1B · 512 · Bluefin</text>
+<path class="s1" d="M250.0,184.0 H583.1 A4.0,4.0 0 0 1 587.1,188.0 V194.0 A4.0,4.0 0 0 1 583.1,198.0 H250.0 Z"/>
+<text class="t1" x="593.1" y="196" font-size="12" font-weight="600">1.15×</text>
+<text class="t1" x="238" y="223" font-size="12" text-anchor="end">Decode · Qwen 0.5B · 4096 · Bluefin</text>
+<path class="s1" d="M250.0,212.0 H568.7 A4.0,4.0 0 0 1 572.7,216.0 V222.0 A4.0,4.0 0 0 1 568.7,226.0 H250.0 Z"/>
+<text class="t1" x="578.7" y="224" font-size="12" font-weight="600">1.10×</text>
+<text class="t1" x="238" y="251" font-size="12" text-anchor="end">Decode · Qwen 0.5B · 4096 · Desktop</text>
+<path class="s1" d="M250.0,240.0 H556.2 A4.0,4.0 0 0 1 560.2,244.0 V250.0 A4.0,4.0 0 0 1 556.2,254.0 H250.0 Z"/>
+<text class="t1" x="566.2" y="252" font-size="12" font-weight="600">1.06×</text>
+<text class="t1" x="238" y="279" font-size="12" text-anchor="end">Prompt · Llama 1B · 512 · Bluefin</text>
+<path class="s1" d="M250.0,268.0 H551.8 A4.0,4.0 0 0 1 555.8,272.0 V278.0 A4.0,4.0 0 0 1 551.8,282.0 H250.0 Z"/>
+<text class="t1" x="561.8" y="280" font-size="12" font-weight="600">1.04×</text>
+<text class="t2" x="470.0" y="324" font-size="11" text-anchor="middle">times llama.cpp's speed (tok/s)</text>
+</svg>
