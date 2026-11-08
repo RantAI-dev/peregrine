@@ -1,0 +1,243 @@
+{
+  "benchmark": "peregrine-s3.1",
+  "timestamp": "2026-11-08T11:45:39.040001+00:00",
+  "model": {
+    "path": "models/bonsai2-9b/Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.gguf",
+    "filename": "Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.gguf",
+    "sha256": "c79fcdfaf6b7bf47089b50dadcfd11f9ce7d3e96adf3bbefde7912e5ef69e22b",
+    "size_bytes": 2675410720,
+    "bytes_per_token_telemetry": 2234451008.0
+  },
+  "machine": {
+    "hostname": "DESKTOP-4TS2NH4",
+    "os": "Linux",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "cpu_model": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+    "cpu_features": [
+      "fma",
+      "avx",
+      "avx2",
+      "avx512f",
+      "avx_vnni",
+      "avx512_bf16"
+    ],
+    "threads_tested": 12,
+    "governor": "unknown (VM or fixed frequency)",
+    "bandwidth_ceiling_bytes_per_s": 42868508583.7481,
+    "bandwidth_ceiling_gb_s": 42.869,
+    "flops_ceiling": 306645666407.3133,
+    "gflops_ceiling": 306.646,
+    "simd_tier": "avx2+fma",
+    "ridge_point": 7.153
+  },
+  "engine": {
+    "name": "prism-llama.cpp",
+    "version": "prism (62c418ccd)",
+    "commit": "62c418ccd7aefee37997e94c2d9fac1eed7fc89b",
+    "pinned_commit": "62c418ccd7aefee37997e94c2d9fac1eed7fc89b",
+    "commit_fallback": false,
+    "repo": "https://github.com/PrismML-Eng/llama.cpp.git",
+    "build_type": "CMake Release, native CPU (AVX-512 on this host)",
+    "flash_attn": "on",
+    "server_binary": "/home/uaa/.cache/peregrine-bench/llama.cpp-prism-62c418ccd/build/bin/llama-server"
+  },
+  "settings": {
+    "contexts": [
+      512
+    ],
+    "runs": 4,
+    "decode_tokens": 256,
+    "threads": 12,
+    "mode": "server",
+    "user_counts": [
+      1
+    ],
+    "engine_args": {
+      "prism-llama.cpp": [
+        "--spec-type",
+        "draft-mtp"
+      ]
+    },
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "token_tolerance": 1,
+    "interleaved": true,
+    "llama_flash_attn": "on"
+  },
+  "results": {
+    "512": {
+      "single_user": {
+        "decode_tok_s": [
+          9.041188014930531,
+          9.879698843623702,
+          9.43217079126407,
+          9.928764219464163
+        ],
+        "prefill_tok_s": [
+          24.316972265260365,
+          24.22580192026696,
+          24.2553235925979,
+          26.706019552735224
+        ],
+        "ttft_s": [
+          18.19282627105713,
+          18.584551095962524,
+          18.600252628326416,
+          19.112972736358643
+        ],
+        "prompt_tokens": [
+          503,
+          511,
+          511,
+          503
+        ]
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": [],
+        "decode_aggregate_tok_s": [],
+        "ttft_s": [],
+        "prompt_tokens": []
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": [],
+        "decode_aggregate_tok_s": [],
+        "ttft_s": [],
+        "prompt_tokens": []
+      }
+    }
+  },
+  "summary": {
+    "512": {
+      "context": 512,
+      "actual_prompt_tokens": 507.0,
+      "single_user": {
+        "decode_tok_s": {
+          "median": 9.66,
+          "spread": 0.44,
+          "min": 9.04,
+          "max": 9.93
+        },
+        "prefill_tok_s": {
+          "median": 24.29,
+          "spread": 1.24,
+          "min": 24.23,
+          "max": 26.71
+        },
+        "ttft_s": {
+          "median": 18.59,
+          "spread": 0.46,
+          "min": 18.19,
+          "max": 19.11
+        },
+        "prompt_tokens": {
+          "median": 507.0,
+          "spread": 4.0,
+          "min": 503.0,
+          "max": 511.0
+        },
+        "bytes_per_token": 2234451008.0,
+        "fraction_of_ceiling": 0.5035,
+        "percent_of_ceiling": 50.35,
+        "raw_samples": {
+          "decode_tok_s": [
+            9.041188014930531,
+            9.879698843623702,
+            9.43217079126407,
+            9.928764219464163
+          ],
+          "prefill_tok_s": [
+            24.316972265260365,
+            24.22580192026696,
+            24.2553235925979,
+            26.706019552735224
+          ],
+          "ttft_s": [
+            18.19282627105713,
+            18.584551095962524,
+            18.600252628326416,
+            19.112972736358643
+          ],
+          "prompt_tokens": [
+            503,
+            511,
+            511,
+            503
+          ]
+        }
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "decode_aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "ttft_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "prompt_tokens": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [],
+          "decode_aggregate_tok_s": [],
+          "ttft_s": [],
+          "prompt_tokens": []
+        }
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "decode_aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "first_token_time_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "prompt_tokens": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [],
+          "decode_aggregate_tok_s": [],
+          "ttft_s": [],
+          "prompt_tokens": []
+        }
+      }
+    }
+  },
+  "_source": "/home/uaa/w-bonsai/benchmarks/results/2026-11-08-bonsai2-prism/raw/2026-11-08-184727-prism-llama.cpp-Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.json",
+  "merged_from": [
+    "2026-11-08-184727-prism-llama.cpp-Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.json",
+    "2026-11-08-184948-prism-llama.cpp-Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.json",
+    "2026-11-08-185711-prism-llama.cpp-Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.json",
+    "2026-11-08-195147-prism-llama.cpp-Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.json"
+  ]
+}

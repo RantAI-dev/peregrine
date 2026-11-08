@@ -18,9 +18,11 @@ own memory-bandwidth ceiling.
 
 ## Biggest wins
 
-Against llama.cpp v0.9.0 on the same machine, model file and thread count:
+Against the fastest engine that runs the same file on the same machine and thread count:
+llama.cpp v0.9.0 for the Q4_K_M models, and for the ternary files upstream llama.cpp cannot
+load, PrismML's llama.cpp fork.
 
-![Where Peregrine is fastest against llama.cpp](docs/img/bench-wins.svg)
+![Where Peregrine is fastest](docs/img/bench-wins.svg)
 
 - **Single-user decode up to 1.36× faster** (Llama 3.2 1B at a 4096-token context, 12-core desktop),
   and ahead in 5 of 8 confirmed cases. On the 4-core Ryzen 3 the 1B is 1.10× ahead at 512 tokens and
@@ -31,6 +33,10 @@ Against llama.cpp v0.9.0 on the same machine, model file and thread count:
   context; 1.52× at 4096), against llama.cpp's faster setting.
 - **Prompt processing level with llama.cpp on AVX2** after the repacked Q4_K kernels (1.02-1.05× on
   the 4-core Ryzen 3; +46% from the kernels on Llama 3.2 1B).
+- **Bonsai 2 (ternary): 2.0-2.3× the decode and 1.9-2.6× the prompt speed of PrismML's own
+  llama.cpp fork, 2.7× with 10 users** (12-core desktop), against the fork's faster
+  flash-attention setting for each row. Upstream llama.cpp cannot load these PQ2_0 files, so the
+  fork is the only comparison that exists for them.
 
 Losses are in the same report: the 0.5B model on the 4-core Ryzen 3 (both contexts) and prompt
 processing on the desktop. Every number, chart and machine record is in

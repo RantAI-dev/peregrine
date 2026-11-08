@@ -17,6 +17,8 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parent.parent / "docs" / "img"
 
 # Desktop: Ryzen AI 9 HX 370, 12 threads (benchmarks/results/desktop-zen5-2026-11-08).
+# Bonsai 2: the same desktop, against PrismML's fork (benchmarks/results/2026-11-08-bonsai2-prism);
+# upstream llama.cpp cannot load PQ2_0. The fork bar is its faster flash-attention setting per row.
 # Bluefin: Ryzen 3 PRO 4350G, 4 threads (benchmarks/results/bluefin-zen2-2026-11-08-fa-off).
 # The bluefin llama.cpp bar is the faster flash-attention setting for that row (-fa off for
 # single-user decode, llama.cpp's default for prefill and multi-user throughput).
@@ -47,8 +49,23 @@ USERS10 = [
     ("Bluefin · Llama 3.2 1B · 512", 55.18, 37.36),
     ("Bluefin · Qwen 2.5 0.5B · 512", 71.72, 68.69),
 ]
-# The biggest wins, Peregrine ÷ llama.cpp on the same machine and file.
+BONSAI = [
+    ("Bonsai 2 2B · 512 · decode", 70.64, 32.66),
+    ("Bonsai 2 2B · 4096 · decode", 60.64, 30.47),
+    ("Bonsai 2 2B · 512 · prompt", 259.25, 108.24),
+    ("Bonsai 2 2B · 4096 · prompt", 202.94, 105.19),
+    ("Bonsai 2 9B · 512 · decode", 22.97, 9.85),
+    ("Bonsai 2 9B · 4096 · decode", 20.36, 9.22),
+    ("Bonsai 2 9B · 512 · prompt", 67.24, 26.12),
+    ("Bonsai 2 9B · 4096 · prompt", 57.42, 25.53),
+]
+# The biggest wins, Peregrine ÷ the competitor that runs the same file on the same machine:
+# llama.cpp for the Q4_K_M rows, PrismML's fork for the Bonsai 2 rows.
 WINS = [
+    ("10 users · Bonsai 9B · 512 · Desktop", 21.62 / 7.83),
+    ("10 users · Bonsai 2B · 512 · Desktop", 80.59 / 29.96),
+    ("Prompt · Bonsai 9B · 512 · Desktop", 67.24 / 26.12),
+    ("Decode · Bonsai 9B · 512 · Desktop", 22.97 / 9.85),
     ("10 users · Llama 1B · 512 · Bluefin", 55.18 / 37.36),
     ("Decode · Llama 1B · 4096 · Desktop", 44.2 / 32.4),
     ("4 users · Llama 1B · 512 · Bluefin", 53.82 / 39.55),
@@ -126,7 +143,8 @@ def fmt(v: float, unit: str) -> str:
     return f"{v:.0f}" if v >= 100 else f"{v:.1f}"
 
 
-def svg(title: str, subtitle: str, body: list[str], h: int, legend: bool) -> str:
+def svg(title: str, subtitle: str, body: list[str], h: int, legend: bool,
+        rival: str = "llama.cpp") -> str:
     head = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{h}" '
         f'viewBox="0 0 {W} {h}" role="img" aria-label="{esc(title)}">',
@@ -141,7 +159,7 @@ def svg(title: str, subtitle: str, body: list[str], h: int, legend: bool) -> str
             f'<rect class="s1" x="{lx}" y="20" width="10" height="10" rx="2"/>',
             f'<text class="t2" x="{lx + 15}" y="29" font-size="12">Peregrine</text>',
             f'<rect class="s2" x="{lx + 100}" y="20" width="10" height="10" rx="2"/>',
-            f'<text class="t2" x="{lx + 115}" y="29" font-size="12">llama.cpp</text>',
+            f'<text class="t2" x="{lx + 115}" y="29" font-size="12">{esc(rival)}</text>',
         ]
     return "\n".join(head + body + ["</svg>\n"])
 
@@ -161,7 +179,8 @@ def axis(top: int, bottom: int, vmax: float, step: float, unit: str) -> list[str
     return out
 
 
-def paired(name: str, title: str, subtitle: str, rows: list[tuple[str, float, float]], unit_label: str):
+def paired(name: str, title: str, subtitle: str, rows: list[tuple[str, float, float]], unit_label: str,
+           rival: str = "llama.cpp"):
     top = 72
     group_h = 2 * BAR_H + PAIR_GAP
     bottom = top + len(rows) * (group_h + GROUP_GAP) - GROUP_GAP + 8
@@ -184,7 +203,7 @@ def paired(name: str, title: str, subtitle: str, rows: list[tuple[str, float, fl
     body.append(
         f'<text class="t2" x="{LABEL_W + plot_w / 2:.1f}" y="{bottom + 34}" font-size="11" text-anchor="middle">{esc(unit_label)}</text>'
     )
-    (OUT / f"{name}.svg").write_text(svg(title, subtitle, body, bottom + 48, True))
+    (OUT / f"{name}.svg").write_text(svg(title, subtitle, body, bottom + 48, True, rival))
 
 
 def single(name: str, title: str, subtitle: str, rows: list[tuple[str, float]], unit: str, axis_label: str):
@@ -219,11 +238,21 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     single(
         "bench-wins",
-        "Where Peregrine is fastest against llama.cpp",
-        "Peregrine ÷ llama.cpp v0.9.0, same machine, same Q4_K_M file; the dashed line is level",
+        "Where Peregrine is fastest",
+        "Peregrine ÷ the competitor on the same machine and file (llama.cpp, or PrismML's fork for "
+        "Bonsai 2); the dashed line is level",
         WINS,
         "x",
-        "times llama.cpp's speed (tok/s)",
+        "times the competitor's speed (tok/s)",
+    )
+    paired(
+        "bench-bonsai",
+        "Bonsai 2 against PrismML's llama.cpp fork",
+        "tok/s, higher is better; upstream llama.cpp cannot load these PQ2_0 files, so the fork is the "
+        "competitor",
+        BONSAI,
+        "tokens per second",
+        rival="PrismML fork",
     )
     paired(
         "bench-decode",

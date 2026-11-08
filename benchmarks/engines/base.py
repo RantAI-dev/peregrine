@@ -95,6 +95,7 @@ def send_chat_completion(
     model_alias: str = "peregrine",
     timeout: float = 3600.0,
     ignore_eos: bool = True,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Send an OpenAI-compatible chat completion request and measure timings.
 
@@ -119,6 +120,8 @@ def send_chat_completion(
     }
     if stream:
         payload["stream_options"] = {"include_usage": True}
+    if chat_template_kwargs:
+        payload["chat_template_kwargs"] = chat_template_kwargs
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         endpoint,
@@ -225,6 +228,8 @@ def run_concurrent_requests(
     model_alias: str = "peregrine",
     timeout: float = 3600.0,
     ignore_eos: bool = True,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+    token_tolerance: int = 0,
 ) -> Dict[str, Any]:
     """Execute concurrent user completions synchronized by a thread barrier.
 
@@ -256,8 +261,9 @@ def run_concurrent_requests(
                 model_alias=model_alias,
                 timeout=timeout,
                 ignore_eos=ignore_eos,
+                chat_template_kwargs=chat_template_kwargs,
             )
-            if res.get("completion_tokens") != max_tokens:
+            if abs(int(res.get("completion_tokens") or 0) - max_tokens) > token_tolerance:
                 print(
                     f"[warning] concurrent user {idx} completion_tokens ({res.get('completion_tokens')}) != max_tokens ({max_tokens}); dropping user sample",
                     file=sys.stderr,

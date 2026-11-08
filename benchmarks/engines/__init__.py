@@ -4,10 +4,12 @@ from .base import EngineAdapter
 from .peregrine import PeregrineAdapter
 from .llama_cpp import LlamaCppAdapter
 from .ik_llama_cpp import IkLlamaCppAdapter
+from .prism_llama_cpp import PrismLlamaCppAdapter
 
 __all__ = [
     "EngineAdapter",
     "PeregrineAdapter",
     "LlamaCppAdapter",
     "IkLlamaCppAdapter",
+    "PrismLlamaCppAdapter",
 ]

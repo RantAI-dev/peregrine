@@ -5,7 +5,7 @@ count. Wins and losses are both here. The raw data, method and machine records a
 [`benchmarks/results/`](../benchmarks/results/); the targets these numbers are held to are in
 [targets.md](targets.md).
 
-![Where Peregrine is fastest against llama.cpp](img/bench-wins.svg)
+![Where Peregrine is fastest](img/bench-wins.svg)
 
 ## The short version
 
@@ -155,3 +155,62 @@ faster setting per row.
 
 The charts are drawn by [`benchmarks/charts.py`](../benchmarks/charts.py) from the medians in the
 result folders; update its tables when a new result lands, then rerun it.
+
+## Bonsai 2 vs PrismML's fork
+
+Bonsai 2's ternary files (PQ2_0, ggml type 142) do not load in upstream llama.cpp, so the
+llama.cpp comparison above cannot cover them. [PrismML's
+fork](https://github.com/PrismML-Eng/llama.cpp) is the other engine that reads them. Measured
+2026-11-08 on the Ryzen AI 9 HX 370 desktop (12 threads, WSL2), 3 interleaved rounds, 256
+greedy tokens, prompt lengths calibrated per engine. Peregrine at `bf241fe`; fork at
+`62c418ccd7aefee37997e94c2d9fac1eed7fc89b` (branch `prism`). Full method, raw manifests and
+the greedy-text check: [`benchmarks/results/2026-11-08-bonsai2-prism/`](../benchmarks/results/2026-11-08-bonsai2-prism/).
+
+![Bonsai 2: Peregrine against PrismML's fork](img/bench-bonsai.svg)
+
+Medians. "Fork best" is the faster of the fork's explicit `-fa on` and `-fa off` server
+settings for that row (lower for TTFT); "ratio" is Peregrine ÷ fork best, so above 1 means
+Peregrine is faster and, for TTFT, below 1 means Peregrine's first token arrives sooner. The
+fork's own default (`-fa auto`, which resolves to on here) is the secondary column.
+
+| Model | Context | Users | Metric | Peregrine | Fork best | Ratio | Fork default |
+|---|---|---|---|---|---|---|---|
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Decode tok/s | 70.64 | 32.66 (`-fa on`) | 2.16x | 32.67 |
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Prompt tok/s | 259.25 | 108.24 (`-fa on`) | 2.40x | 112.19 |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | Aggregate tok/s | 80.59 | 29.96 (`-fa on`) | 2.69x | 29.79 |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | TTFT (s) | 12.92 | 42.79 (`-fa on`) | 0.30x | 45.40 |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Decode tok/s | 60.64 | 30.47 (`-fa on`) | 1.99x | 30.76 |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Prompt tok/s | 202.94 | 105.19 (`-fa off`) | 1.93x | 103.90 |
+| Bonsai 2 9B PQ2_0 | 512 | 1 | Decode tok/s | 22.97 | 9.85 (`-fa off`) | 2.33x | 9.82 |
+| Bonsai 2 9B PQ2_0 | 512 | 1 | Prompt tok/s | 67.24 | 26.12 (`-fa off`) | 2.57x | 26.63 |
+| Bonsai 2 9B PQ2_0 | 512 | 10 | Aggregate tok/s | 21.62 | 7.83 (`-fa on`) | 2.76x | 7.76 |
+| Bonsai 2 9B PQ2_0 | 512 | 10 | TTFT (s) | 51.66 | 183.40 (`-fa on`) | 0.28x | 185.48 |
+| Bonsai 2 9B PQ2_0 | 4096 | 1 | Decode tok/s | 20.36 | 9.22 (`-fa on`) | 2.21x | 8.93 |
+| Bonsai 2 9B PQ2_0 | 4096 | 1 | Prompt tok/s | 57.42 | 25.53 (`-fa off`) | 2.25x | 25.33 |
+
+MTP speculation on the 9B `-MTP-Q8_0` file (512 tokens, 1 user): Peregrine decodes 25.01
+tok/s with MTP and 22.75 without (1.10x). The fork's `--spec-type draft-mtp` did not beat its
+own non-speculative decode; against its faster measured setting the ratios are 2.59x (MTP on)
+and 2.13x (MTP off). The fork's two MTP rows were measured an hour apart and their on/off
+difference is inside the host's between-batch drift, so treat the fork's MTP as parity.
+
+Flash attention: explicit `-fa on` and `-fa off` land within 0–2% of each other on every
+server row. The large depth penalty upstream llama.cpp's default showed on the bluefin 1B
+(13.0 vs 29.1 tok/s at 4096) does not reproduce on these hybrid-architecture Bonsai 2 files;
+turning flash attention off is not a win here, and the default is the faster or equal
+setting. `llama-bench` agrees after medians (its averages are contaminated by a second,
+~35% faster decode mode that hits one sample in five). The full on/off tables are in the
+results folder.
+
+The manifests record `machine.simd_tier: avx2+fma` on this host, but that is a stale label,
+not the tier the kernels ran at. `peregrine tier` on this machine prints
+`kernel tier x86_64-avx2-avx512-vnni-gfni-vbmi` beside `simd avx2+fma`: two functions feed
+those lines, and only the first resolves the kernel tier (AVX-512 here, `isa=native`).
+`peregrine_core::simd_name()` knows `scalar`, `avx2`, `avx2+fma` and `neon` only and returns
+the first that matches, and the hardware probe writes that coarse name into
+`machine.simd_tier`. Bonsai 2 does run the AVX-512 tier: PQ2_0's fastest kernel is the
+16-row repacked-tile path built on AVX-512 VNNI and GFNI (`MatPath::Tiles` in
+`peregrine-kernels/src/table.rs`), selected with `zmm=true`, `tiles=true` and `isa=native`.
+So both engines use AVX-512 here; the fork was also built with `-march=native`. The label is
+a probe bug, not an AVX-512 tier that was skipped, and it does not change any number on this
+page.

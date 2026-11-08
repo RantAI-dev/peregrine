@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shlex
 import statistics
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from engines import (
     PeregrineAdapter,
     LlamaCppAdapter,
     IkLlamaCppAdapter,
+    PrismLlamaCppAdapter,
 )
 from engines.base import send_chat_completion, run_concurrent_requests
 
@@ -146,6 +148,7 @@ def calibrate_prompt_chars(
     model_alias: str = "peregrine",
     max_iters: int = 10,
     tolerance: float = 0.02,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Calibrate character count for a target prompt token length by probing the server.
 
@@ -174,6 +177,7 @@ def calibrate_prompt_chars(
                 stream=False,
                 model_alias=model_alias,
                 ignore_eos=True,
+                chat_template_kwargs=chat_template_kwargs,
             )
         except Exception as e:
             if char_count > 40:
@@ -222,7 +226,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--engines", "-e",
         default="peregrine",
-        help="Comma-separated engine names (peregrine, llama_cpp, ik_llama_cpp).",
+        help="Comma-separated engine names (peregrine, llama_cpp, ik_llama_cpp, prism_llama_cpp).",
     )
     parser.add_argument(
         "--contexts", "-c",
@@ -257,9 +261,33 @@ def parse_args() -> argparse.Namespace:
         "--llama-fa",
         choices=["auto", "on", "off"],
         default="auto",
-        help="llama.cpp flash attention setting, passed as -fa to both llama-server and "
-        "llama-bench. The default reproduces llama.cpp's own default and older runs; "
-        "benchmark reports compare against the faster setting per row (see benchmarks/README.md).",
+        help="Flash attention for the llama.cpp-family adapters (llama.cpp and the "
+        "PrismML fork), passed as -fa to both llama-server and llama-bench. The default "
+        "reproduces the engine's own default and older runs; benchmark reports compare "
+        "against the faster setting per row (see benchmarks/README.md).",
+    )
+    parser.add_argument(
+        "--engine-args",
+        action="append",
+        default=[],
+        metavar="ENGINE=ARGS",
+        help="Extra arguments for one engine, e.g. --engine-args 'peregrine=--opt MTP=0'. "
+        "Repeatable; ARGS is split like a shell command line.",
+    )
+    parser.add_argument(
+        "--chat-template-kwargs",
+        default=None,
+        metavar="JSON",
+        help="JSON object sent as chat_template_kwargs on every chat request, e.g. "
+        "'{\"enable_thinking\": false}' for reasoning models.",
+    )
+    parser.add_argument(
+        "--token-tolerance",
+        type=int,
+        default=0,
+        help="How many tokens a reply may fall short of --tokens without the sample being "
+        "dropped. A reasoning template can spend one token on an empty control token that "
+        "some servers do not count as content.",
     )
     parser.add_argument(
         "--port", "-p",
@@ -330,6 +358,7 @@ def main():
         "peregrine": peregrine_adapter,
         "llama_cpp": LlamaCppAdapter(flash_attn=args.llama_fa),
         "ik_llama_cpp": IkLlamaCppAdapter(),
+        "prism_llama_cpp": PrismLlamaCppAdapter(flash_attn=args.llama_fa),
     }
 
     selected_engine_names = [e.strip() for e in args.engines.split(",") if e.strip()]
@@ -367,6 +396,36 @@ def main():
     if not selected_user_counts or any(c not in (1, 4, 10) for c in selected_user_counts):
         print("Error: --user-counts must be a subset of 1,4,10.", file=sys.stderr)
         sys.exit(1)
+
+    engine_extra_args: Dict[str, List[str]] = {eng.name: [] for eng in selected_engines}
+    for spec in args.engine_args:
+        if "=" not in spec:
+            print(
+                f"Error: --engine-args expects ENGINE=ARGS, got '{spec}'.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        eng_key, raw_args = spec.split("=", 1)
+        eng_key = eng_key.strip()
+        if eng_key not in engine_map:
+            print(
+                f"Error: --engine-args names unknown engine '{eng_key}'. "
+                f"Available: {list(engine_map.keys())}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        engine_extra_args.setdefault(engine_map[eng_key].name, []).extend(shlex.split(raw_args))
+
+    chat_template_kwargs = None
+    if args.chat_template_kwargs:
+        try:
+            chat_template_kwargs = json.loads(args.chat_template_kwargs)
+        except json.JSONDecodeError as e:
+            print(f"Error: --chat-template-kwargs is not valid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(chat_template_kwargs, dict):
+            print("Error: --chat-template-kwargs must be a JSON object.", file=sys.stderr)
+            sys.exit(1)
     if args.smoke:
         contexts = [512]
         runs = 1
@@ -432,6 +491,9 @@ def main():
                     "threads": args.threads,
                     "mode": args.mode,
                     "user_counts": selected_user_counts,
+                    "engine_args": {k: v for k, v in engine_extra_args.items() if v},
+                    "chat_template_kwargs": chat_template_kwargs,
+                    "token_tolerance": args.token_tolerance,
                     "interleaved": True,
                     "llama_flash_attn": args.llama_fa,
                 },
@@ -467,6 +529,7 @@ def main():
                             prompt_tokens=ctx,
                             decode_tokens=decode_tokens,
                             threads=args.threads,
+                            extra_args=engine_extra_args.get(eng.name, []),
                         )
                         ctx_k = str(ctx)
                         engine_results[eng.name]["results"][ctx_k]["single_user"]["decode_tok_s"].append(res["decode_tok_s"])
@@ -498,6 +561,7 @@ def main():
                             threads=args.threads,
                             ctx=server_ctx,
                             slots=users,
+                            extra_args=engine_extra_args.get(eng.name, []),
                         )
                         server_url = f"http://127.0.0.1:{args.port}"
 
@@ -510,6 +574,7 @@ def main():
                                 max_tokens=8,
                                 stream=True,
                                 ignore_eos=True,
+                                chat_template_kwargs=chat_template_kwargs,
                             )
 
                             # Calibrate prompt character count for this engine, model, and context
@@ -520,6 +585,7 @@ def main():
                                     corpus=corpus,
                                     target_tokens=ctx,
                                     model_alias=eng.name,
+                                    chat_template_kwargs=chat_template_kwargs,
                                 )
                             calibrated_chars = calibrated_chars_cache[cache_key]
 
@@ -532,6 +598,7 @@ def main():
                                     stream=True,
                                     model_alias=eng.name,
                                     ignore_eos=True,
+                                    chat_template_kwargs=chat_template_kwargs,
                                 )
                                 actual_pt = r1.get("prompt_tokens", 0)
                                 off_ratio = abs(actual_pt - ctx) / float(ctx)
@@ -539,7 +606,7 @@ def main():
                                     raise RuntimeError(
                                         f"[{eng.name}] Actual prompt tokens ({actual_pt}) is {off_ratio * 100.0:.1f}% off target ({ctx}) > 5% allowed threshold!"
                                     )
-                                if r1.get("completion_tokens") != decode_tokens:
+                                if abs(int(r1.get("completion_tokens") or 0) - decode_tokens) > args.token_tolerance:
                                     print(
                                         f"[warning] [{eng.name}] 1 user completion_tokens {r1.get('completion_tokens')} != max_tokens {decode_tokens}; dropping sample",
                                         file=sys.stderr,
@@ -562,9 +629,11 @@ def main():
                                     max_tokens=decode_tokens,
                                     model_alias=eng.name,
                                     ignore_eos=True,
+                                    chat_template_kwargs=chat_template_kwargs,
+                                    token_tolerance=args.token_tolerance,
                                 )
                                 user_results = r4.get("user_results", [])
-                                if len(user_results) != 4 or any(u.get("completion_tokens") != decode_tokens for u in user_results):
+                                if len(user_results) != 4 or any(abs(int(u.get("completion_tokens") or 0) - decode_tokens) > args.token_tolerance for u in user_results):
                                     print(
                                         f"[warning] [{eng.name}] 4 users: not all users produced max_tokens={decode_tokens}; dropping sample",
                                         file=sys.stderr,
@@ -595,9 +664,11 @@ def main():
                                     max_tokens=decode_tokens,
                                     model_alias=eng.name,
                                     ignore_eos=True,
+                                    chat_template_kwargs=chat_template_kwargs,
+                                    token_tolerance=args.token_tolerance,
                                 )
                                 user_results = r10.get("user_results", [])
-                                if len(user_results) != 10 or any(u.get("completion_tokens") != decode_tokens for u in user_results):
+                                if len(user_results) != 10 or any(abs(int(u.get("completion_tokens") or 0) - decode_tokens) > args.token_tolerance for u in user_results):
                                     print(
                                         f"[warning] [{eng.name}] 10 users: not all users produced max_tokens={decode_tokens}; dropping sample",
                                         file=sys.stderr,
