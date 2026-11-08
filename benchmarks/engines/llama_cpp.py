@@ -18,16 +18,24 @@ class LlamaCppAdapter(EngineAdapter):
     DEFAULT_PINNED_COMMIT = "cd959ba"
     GIT_REPO_URL = "https://github.com/ggml-org/llama.cpp.git"
 
+    FLASH_ATTN_CHOICES = ("auto", "on", "off")
+
     def __init__(
         self,
         pinned_tag: str = DEFAULT_PINNED_TAG,
         pinned_commit: str = DEFAULT_PINNED_COMMIT,
         custom_bin_dir: Optional[Path] = None,
+        flash_attn: str = "auto",
     ):
         super().__init__(name="llama.cpp", pinned_version=f"{pinned_tag} ({pinned_commit})")
+        if flash_attn not in self.FLASH_ATTN_CHOICES:
+            raise ValueError(
+                f"flash_attn must be one of {self.FLASH_ATTN_CHOICES}, got {flash_attn!r}"
+            )
         self.pinned_tag = pinned_tag
         self.pinned_commit = pinned_commit
         self.custom_bin_dir = custom_bin_dir
+        self.flash_attn = flash_attn
         self.server_bin: Optional[Path] = None
         self.bench_bin: Optional[Path] = None
 
@@ -115,6 +123,7 @@ class LlamaCppAdapter(EngineAdapter):
             "repo": self.GIT_REPO_URL,
             "build_type": "CMake Release AVX2/FMA CPU",
             "server_binary": str(self.server_bin) if self.server_bin else "pending",
+            "flash_attn": self.flash_attn,
         }
 
     def supports_kv_unified(self) -> bool:
@@ -161,6 +170,7 @@ class LlamaCppAdapter(EngineAdapter):
             "--host", "127.0.0.1",
             "--port", str(port),
             "-t", str(threads),
+            "-fa", self.flash_attn,
         ] + kv_args
         if extra_args:
             cmd.extend(extra_args)
@@ -204,6 +214,7 @@ class LlamaCppAdapter(EngineAdapter):
             "-p", str(prompt_tokens),
             "-n", str(decode_tokens),
             "-t", str(threads),
+            "-fa", self.flash_attn,
             "-o", "json",
         ]
         if extra_args:

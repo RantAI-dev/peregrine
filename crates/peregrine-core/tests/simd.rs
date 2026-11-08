@@ -325,3 +325,161 @@ fn batched_kernels_agree_on_rows_of_the_real_model() {
     }
     eprintln!("batched ≡ scalar on {checked} (row, activation) pairs of real weights");
 }
+
+/// Total-order key of a finite float, so `ulps` counts representable values between
+/// two numbers regardless of sign.
+#[cfg(target_arch = "x86_64")]
+fn f32_ord(x: f32) -> u32 {
+    let u = x.to_bits();
+    if u & 0x8000_0000 != 0 {
+        !u
+    } else {
+        u | 0x8000_0000
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn ulps(a: f32, b: f32) -> u32 {
+    f32_ord(a).abs_diff(f32_ord(b))
+}
+
+/// The wide Q5_0 kernel has to leave a row's value untouched by the batch it ran
+/// in, and the narrow (decode) path must agree with it bit for bit. Q8_0 is the
+/// control: it still takes the tiled kernel, and must stay batch-invariant too.
+///
+/// The canonical call runs the largest width (twenty activations: one sixteen-wide
+/// window plus a four-activation tail), and every narrower call — including widths
+/// 1, 2 and 3 that take the tiled kernel — must reproduce the same bits for the
+/// rows it holds. Passes that start part-way through the batch stand in for a
+/// worker that claimed a range of rows, and must agree too. Finally each result is
+/// checked against the scalar twin of the kernel's fold within one ULP: the
+/// kernels reorder the float sum, but not by more than the last bit of the result.
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn q5_0_wide_windows_are_invariant_and_match_the_scalar_fold() {
+    use peregrine_core::quant::dot_batch;
+    if !peregrine_core::simd::have_batched() {
+        eprintln!("  SKIPPED: needs AVX2 + FMA + F16C, both paths are the scalar one");
+        return;
+    }
+    // 896 is the Qwen2.5-0.5B width: twenty-eight 32-value blocks and not a multiple
+    // of 256, the shape that puts this model on the legacy formats.
+    const N: usize = 896;
+    for fmt in [Format::Q5_0, Format::Q8_0] {
+        let mut w = prng_bytes(0x5A17_0000 + fmt.block_bytes() as u64, row_bytes(fmt, N));
+        sane(fmt, &mut w);
+        const ROWS: usize = 20;
+        let acts: Vec<QuantAct> = (0..ROWS)
+            .map(|i| activations(N, 0xFACE_0000 + i as u64 * 7919))
+            .collect();
+
+        // The widest call is the canonical value of every row.
+        let mut full = vec![0.0f32; ROWS];
+        dot_batch(fmt, &w, &acts, &mut full);
+
+        // Every narrower width, from one activation (the decode path) through the
+        // five-group tail, must give the same bits for the rows it holds.
+        for nb in 1..ROWS {
+            let mut got = vec![0.0f32; nb];
+            dot_batch(fmt, &w, &acts[..nb], &mut got);
+            for b in 0..nb {
+                assert_eq!(
+                    got[b].to_bits(),
+                    full[b].to_bits(),
+                    "{} width {nb} disagrees with width {ROWS} on activation {b}",
+                    fmt.label()
+                );
+            }
+        }
+
+        // A pass that starts at an offset — what a worker takes when it claims a
+        // range of rows — must agree with the same rows in the whole call.
+        for (start, nb) in [(13usize, 4usize), (9, 7), (16, 3), (6, 2), (0, 1)] {
+            let mut part = vec![0.0f32; nb];
+            dot_batch(fmt, &w, &acts[start..start + nb], &mut part);
+            for b in 0..nb {
+                assert_eq!(
+                    part[b].to_bits(),
+                    full[start + b].to_bits(),
+                    "{} pass {start}..{} disagrees on activation {}",
+                    fmt.label(),
+                    start + nb,
+                    start + b
+                );
+            }
+        }
+
+        // The scalar twin of the kernel's fixed fold, within one ULP. The format's
+        // own scalar specification (`dot_scalar`) reduces all 32 products of a block
+        // in integer and rounds once; the kernels reduce four products per lane and
+        // fold the eight lanes in float, which the batched-kernel test above holds
+        // to a relative tolerance. Here the reference is the scalar version of the
+        // *kernel's* fold, so a divergence is a rounding bug rather than a
+        // different summation order.
+        for (b, a) in acts.iter().enumerate() {
+            let want = fold_reference(fmt, &w, a);
+            assert!(
+                ulps(full[b], want) <= 1,
+                "{} activation {b}: {} against the scalar fold {want} ({} ulps)",
+                fmt.label(),
+                full[b],
+                ulps(full[b], want)
+            );
+        }
+    }
+}
+
+/// The row's codes as `dot_scalar` reads them: 32 per block, `[0,31]` for Q5_0 and
+/// signed for Q8_0.
+#[cfg(target_arch = "x86_64")]
+fn block_codes(fmt: Format, blk: &[u8], out: &mut [i32; 32]) {
+    match fmt {
+        Format::Q5_0 => {
+            let qh = u32::from_le_bytes([blk[2], blk[3], blk[4], blk[5]]);
+            let qs = &blk[6..22];
+            for j in 0..16 {
+                let hi0 = ((qh >> j) << 4) as u8 & 0x10;
+                let hi1 = (qh >> (j + 12)) as u8 & 0x10;
+                out[j] = ((qs[j] & 0x0F) | hi0) as i32;
+                out[j + 16] = ((qs[j] >> 4) | hi1) as i32;
+            }
+        }
+        Format::Q8_0 => {
+            for j in 0..32 {
+                out[j] = blk[2 + j] as i8 as i32;
+            }
+        }
+        other => panic!("no block decoder for {other:?}"),
+    }
+}
+
+/// The scalar twin of `wide_q5_0` / `wide_q8_0`: four contiguous products per
+/// integer lane, each lane converted to `f32` and fused into its own accumulator
+/// once per block, then the eight lanes reduced in `hsum_ps`'s order.
+#[cfg(target_arch = "x86_64")]
+fn fold_reference(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
+    let bb = fmt.block_bytes();
+    let mut acc = [0.0f32; 8];
+    let mut codes = [0i32; 32];
+    for (b, blk) in w.chunks_exact(bb).enumerate() {
+        block_codes(fmt, blk, &mut codes);
+        let h = u16::from_le_bytes([blk[0], blk[1]]);
+        let d = peregrine_core::format::f16(h) * a.d[b];
+        for l in 0..8 {
+            let mut lane = 0i32;
+            for k in 0..4 {
+                let i = 4 * l + k;
+                lane += codes[i] * a.q[b * 32 + i] as i32;
+            }
+            if fmt == Format::Q5_0 {
+                lane -= a.lane_sums[b * 8 + l] << 4;
+            }
+            acc[l] = (lane as f32).mul_add(d, acc[l]);
+        }
+    }
+    let s0 = acc[0] + acc[4];
+    let s1 = acc[1] + acc[5];
+    let s2 = acc[2] + acc[6];
+    let s3 = acc[3] + acc[7];
+    (s0 + s2) + (s1 + s3)
+}

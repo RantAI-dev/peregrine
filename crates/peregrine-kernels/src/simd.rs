@@ -1707,6 +1707,81 @@ unsafe fn wide_q6_k(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
     }
 }
 
+/// Activations one `wide_q5_0` window carries.
+///
+/// Sixteen is where the accumulator array still fits the core's L1 beside the
+/// activation rows. Decoding once for a whole 64-token prefill chunk is cheaper on
+/// paper but spills: measured on the 0.5B's 4864x896 shape at eight threads, a
+/// single 64-wide pass gives ~98 G MAC/s against the tiled kernel's ~104, while
+/// 16-wide windows give ~114.5 (12: 111, 20: 112, 24: 111, 32: 100). The window
+/// also keeps the working set independent of `PREFILL_CHUNK`, so widening the
+/// chunk cannot turn the kernel into a regression.
+const Q5_0_WINDOW: usize = 16;
+
+/// Q5_0 against a *wide* batch; see `wide_q4_k`.
+///
+/// A window of sixteen activations is run against each decoded block at once,
+/// where the tiled kernel expands the block again for every group of four. The
+/// per-activation arithmetic is the tiled kernel's — the same integer lane sums,
+/// then one fused multiply-add per block into a vector accumulator, reduced once
+/// per row — so a row's result is bit-identical at every batch width, and
+/// independent of where the windows fall. The fifth bit is folded into the codes
+/// as `codes − 16`, which carries the block's bias in the weight and removes the
+/// per-activation lane-sum load, shift and subtract (exactly: `|c|·sign(c)·a` in
+/// `vmaddubsw` is `c·a` for these ranges).
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn wide_q5_0(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let n = acts.len();
+    let mut t = 0;
+    while t < n {
+        let tw = (n - t).min(Q5_0_WINDOW);
+        wide_q5_0_group(w, &acts[t..t + tw], &mut out[t..t + tw]);
+        t += tw;
+    }
+}
+
+/// One window of `wide_q5_0`: all of `acts` against each block decoded once.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn wide_q5_0_group(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let pf = prefetch_distance();
+    let n = acts.len();
+    debug_assert!(n <= Q5_0_WINDOW);
+    let lownib = _mm256_set1_epi8(0x0F);
+    let nib_shift = _mm256_set_epi64x(4, 4, 0, 0);
+    let sixteen = _mm256_set1_epi8(16);
+    let nblk = w.len() / 22;
+    for a in acts {
+        assert!(a.d.len() >= nblk && a.q.len() >= nblk * 32);
+    }
+    let mut acc = [_mm256_setzero_ps(); Q5_0_WINDOW];
+    for (b, blk) in w.chunks_exact(22).enumerate() {
+        prefetch_ahead(blk.as_ptr(), pf, 1);
+        let qh = (blk.as_ptr().add(2) as *const u32).read_unaligned();
+        let qs =
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(blk.as_ptr().add(6) as *const __m128i));
+        let nib = _mm256_and_si256(_mm256_srlv_epi64(qs, nib_shift), lownib);
+        // `codes − 16` makes the unsigned code a signed one, so the block's bias is
+        // carried in the weights and the per-activation lane sums are not needed.
+        // The exact integer product is `madd_offset_ps::<4>`'s.
+        let codes = _mm256_sub_epi8(
+            _mm256_or_si256(nib, q5_high_bits(u32::from_le(qh))),
+            sixteen,
+        );
+        let absw = _mm256_sign_epi8(codes, codes);
+        let dw = f16_at4(blk.as_ptr());
+        for (t, a) in acts.iter().enumerate() {
+            let sa = _mm256_sign_epi8(acts32(a, b), codes);
+            let v = madd_ps(absw, sa);
+            // SAFETY: `n` is at most `Q5_0_WINDOW` (checked above).
+            let acc_t = acc.get_unchecked_mut(t);
+            *acc_t = _mm256_fmadd_ps(v, _mm256_set1_ps(dw * *a.d.get_unchecked(b)), *acc_t);
+        }
+    }
+    for b in 0..n {
+        out[b] = hsum_ps(acc[b]);
+    }
+}
+
 /// One weight row against `acts.len()` activations, writing `out[b]` for each.
 ///
 /// # Safety
@@ -1730,6 +1805,12 @@ pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32
         }};
     }
     match fmt {
+        // A prompt-sized batch decodes the row once for all of it; decode and the
+        // speculative block (≤ 4) keep the tiled kernels, so their figures are unchanged.
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q5_0 if acts.len() > TILE && acts.len() <= MAX_WIDE && wide_enabled() => {
+            wide_q5_0(w, acts, out)
+        }
         #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => run!(tile_q8_0),
         #[cfg(feature = "fmt-legacy")]

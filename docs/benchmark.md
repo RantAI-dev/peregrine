@@ -5,21 +5,25 @@ count. Wins and losses are both here. The raw data, method and machine records a
 [`benchmarks/results/`](../benchmarks/results/); the targets these numbers are held to are in
 [targets.md](targets.md).
 
-![Where Peregrine is fastest against llama.cpp](img/bench-wins.svg)
+![Where Peregrine is fastest](img/bench-wins.svg)
 
 ## The short version
 
-- **Single-user decode is Peregrine's strongest result.** It beats llama.cpp in 5 of the 7 confirmed cases,
+- **Single-user decode is Peregrine's strongest result.** It beats llama.cpp in 5 of the 8 confirmed cases,
   by up to 1.36× (Llama 3.2 1B at a 4096-token context on the desktop). The gap grows with context:
   Peregrine's attention reads each cached key and value once per group of heads, and spends about
-  2.3× less time per context position than llama.cpp.
+  2.3× less time per context position than llama.cpp. On bluefin, against llama.cpp's faster
+  flash-attention setting, the 1B is ahead 1.10× at 512 and 1.26× at 4096, while the 0.5B at 4096
+  is now a loss (0.87×).
 - **Many users on a small machine.** On the 4-core bluefin, Peregrine serves 10 users at once 1.48×
-  faster than llama.cpp on Llama 3.2 1B.
+  faster than llama.cpp on Llama 3.2 1B at a 512-token context (1.52× at 4096), against llama.cpp's
+  faster setting.
 - **Prompt processing has caught up on AVX2.** On bluefin, with the repacked Q4_K kernels, Peregrine
-  matches llama.cpp on Llama 3.2 1B (1.02-1.04×). On the desktop it is at 0.62-0.66×; the same
+  matches llama.cpp on Llama 3.2 1B (1.02-1.05×). On the desktop it is at 0.62-0.66×; the same
   kernels lift the desktop's Llama 3.2 1B from 0.66× to 0.81×, but they are not on by default there yet.
-- **Where it loses:** the 0.5B model at a short context (decode 0.70× on bluefin, 0.90× on the
-  desktop), prompt processing on the desktop, and multi-user throughput on the desktop (0.84×).
+- **Where it loses:** the 0.5B model at both contexts on bluefin (decode 0.68× at 512 and 0.87× at
+  4096; 0.90× at 512 on the desktop), prompt processing on the desktop, and multi-user throughput on
+  the desktop (0.84×).
 
 ## The machines
 
@@ -29,8 +33,8 @@ count. Wins and losses are both here. The raw data, method and machine records a
 | SIMD | AVX2, AVX-512 (VNNI, GFNI, VBMI) | AVX2 |
 | Threads used | 12 (one per core) | 4 (one per core) |
 | OS | Linux under WSL2 | Fedora, bare metal |
-| Peregrine | `5f76d48` (2026-11-08), defaults: repacked Q4_K kernels off | `5f76d48` (2026-11-08), defaults: repacked Q4_K kernels on |
-| Results | [desktop-zen5-2026-11-08](../benchmarks/results/desktop-zen5-2026-11-08/README.md) | [bluefin-zen2-2026-11-08](../benchmarks/results/bluefin-zen2-2026-11-08/README.md) |
+| Peregrine | `5f76d48` (2026-11-08), defaults: repacked Q4_K kernels off | `9bcf524` (2026-11-08; engine sources unchanged since `5f76d48`), defaults: repacked Q4_K kernels on |
+| Results | [desktop-zen5-2026-11-08](../benchmarks/results/desktop-zen5-2026-11-08/README.md) | [bluefin-zen2-2026-11-08-fa-off](../benchmarks/results/bluefin-zen2-2026-11-08-fa-off/README.md) |
 
 The desktop's same-day llama.cpp ran 0-7% faster than on 2026-11-07
 ([first desktop baseline](../benchmarks/results/desktop-zen5-2026-11-07/README.md)), so compare
@@ -40,6 +44,16 @@ Both run llama.cpp v0.9.0 (`cd959ba`) as a server against Peregrine's server, wi
 per request, prompts calibrated to the target context, three interleaved rounds and the median
 reported. The models are the Q4_K_M files of Llama 3.2 1B Instruct and Qwen 2.5 0.5B Instruct, with
 the same file (by SHA-256) for both engines.
+
+**Each ratio is against llama.cpp's faster flash-attention setting for that row.** llama.cpp
+defaults to `-fa auto`, which resolves to flash attention on here; that path is slower for
+single-user decode, and `-fa off` is used for those rows, while the default is faster for prompt
+processing and multi-user throughput and is used there. The default-setting number is kept as a
+secondary note. The bluefin re-run and both settings are in
+[`bluefin-zen2-2026-11-08-fa-off`](../benchmarks/results/bluefin-zen2-2026-11-08-fa-off/README.md).
+
+Desktop llama.cpp numbers on this page were taken at its defaults and are being re-checked with
+flash attention off; the bluefin rows below already use the faster setting.
 
 ## Single-user decode
 
@@ -51,14 +65,16 @@ the same file (by SHA-256) for both engines.
 | Desktop | Llama 3.2 1B | 4096 | 44.2 | 32.4 | **1.36×** |
 | Desktop | Qwen 2.5 0.5B | 512 | 68.1 | 75.8 | 0.90× |
 | Desktop | Qwen 2.5 0.5B | 4096 | 51.6 | 48.8 | **1.06×** |
-| Bluefin | Llama 3.2 1B | 512 | 45.4 | 39.5 | **1.15×** |
-| Bluefin | Llama 3.2 1B | 4096 | 36.7 | 13.0 | 2.82×, being checked |
-| Bluefin | Qwen 2.5 0.5B | 512 | 52.8 | 74.9 | 0.70× |
-| Bluefin | Qwen 2.5 0.5B | 4096 | 45.1 | 41.0 | **1.10×** |
+| Bluefin | Llama 3.2 1B | 512 | 46.1 | 42.0 | **1.10×** |
+| Bluefin | Llama 3.2 1B | 4096 | 36.9 | 29.3 | **1.26×** |
+| Bluefin | Qwen 2.5 0.5B | 512 | 52.9 | 77.4 | 0.68× |
+| Bluefin | Qwen 2.5 0.5B | 4096 | 45.2 | 52.0 | 0.87× |
 
-Tokens per second. The bluefin Llama 3.2 1B row at 4096 is left out of the charts until it is
-re-measured: llama.cpp fell from 39.5 to 13.0 tok/s between the two contexts there, against 51.0 to
-32.4 on the desktop, and the host was using some swap during the run.
+Tokens per second. Bluefin compares against llama.cpp's faster flash-attention setting: `-fa off`
+for these rows. Against llama.cpp's defaults the same rows are 1.17×, 2.83× (13.0 tok/s), 0.71× and
+1.10× (41.0 tok/s). The Qwen 0.5B at 4096 is a loss now that the default is not the competitor: with
+`-fa off` llama.cpp decodes at 52.0 tok/s, above Peregrine's 45.2. Desktop numbers are at llama.cpp's
+defaults until its re-check lands.
 
 Why the 0.5B loses at a short context: with only two KV heads its attention splits into fewer tasks
 than there are cores, and a few steps in each layer still run on one thread. Both matter more on a
@@ -74,10 +90,14 @@ small model, where each token's weight pass is short.
 | Desktop | Llama 3.2 1B | 4096 | 125.4 | 189.0 | 0.66× |
 | Desktop | Qwen 2.5 0.5B | 512 | 270.6 | 435.2 | 0.62× |
 | Desktop | Qwen 2.5 0.5B | 4096 | 184.9 | 279.4 | 0.66× |
-| Bluefin | Llama 3.2 1B | 512 | 196.3 | 188.3 | **1.04×** |
-| Bluefin | Llama 3.2 1B | 4096 | 143.7 | 141.2 | **1.02×** |
-| Bluefin | Qwen 2.5 0.5B | 512 | 260.0 | 302.9 | 0.86× |
-| Bluefin | Qwen 2.5 0.5B | 4096 | 195.2 | 236.0 | 0.83× |
+| Bluefin | Llama 3.2 1B | 512 | 197.3 | 188.3 | **1.05×** |
+| Bluefin | Llama 3.2 1B | 4096 | 144.6 | 141.2 | **1.02×** |
+| Bluefin | Qwen 2.5 0.5B | 512 | 263.2 | 302.9 | 0.87× |
+| Bluefin | Qwen 2.5 0.5B | 4096 | 198.2 | 236.0 | 0.84× |
+
+On bluefin, llama.cpp's default (`-fa auto` on) is faster than `-fa off` for prompt processing
+(`-fa off` gives 173.6 and 122.2 tok/s on the 1B, 277.1 and 192.9 on the 0.5B), so the default is
+the like-for-like competitor here.
 
 On the desktop the repacked Q4_K kernels are off by default (AVX-512 has no kernel of its own yet).
 Turned on with `PEREGRINE_KREPACK=1`, Llama 3.2 1B goes to 211.5 tok/s at 512 (0.81×) and 144.6 at
@@ -92,12 +112,17 @@ does not gain from them.
 |---|---|---|---|---|
 | Desktop | Llama 3.2 1B | 52.9 vs 54.5 | 51.8 vs 61.7 | 0.84× |
 | Desktop | Qwen 2.5 0.5B | 70.6 vs 81.8 | 78.0 vs 93.4 | 0.84× |
-| Bluefin | Llama 3.2 1B | 53.5 vs 39.5 | 55.5 vs 37.4 | **1.48×** |
-| Bluefin | Qwen 2.5 0.5B | 70.1 vs 65.2 | 71.3 vs 68.7 | **1.04×** |
+| Bluefin | Llama 3.2 1B | 53.8 vs 39.6 | 55.2 vs 37.4 | **1.48×** |
+| Bluefin | Qwen 2.5 0.5B | 70.7 vs 65.2 | 71.7 vs 68.7 | **1.04×** |
 
-Total tokens per second over all users at a 512-token context, Peregrine vs llama.cpp. At 4096 tokens
-both engines fall to 5-14 tok/s in total, too coarse to compare closely; those numbers are in the
-result folders.
+Total tokens per second over all users at a 512-token context, Peregrine vs llama.cpp. On bluefin
+the default is the faster llama.cpp setting for multi-user throughput: `-fa off` drops it to 34.2
+and 23.9 tok/s (1B, 4 and 10 users) and 55.0 and 42.5 tok/s (0.5B), so these ratios use the default.
+At 4096 tokens the 1B is 7.65 vs 5.36 (4 users, 1.43×) and 7.73 vs 5.07 (10 users, 1.52×); the 0.5B
+is 9.97 vs 10.88 (0.92×) and 9.81 vs 10.13 (0.97×). The 10-user, 4096, `-fa off` phase does not
+finish inside the 10-minute command cap on this host, so those two rows use the default, which is
+already about 2× faster at 4 users there. At 4096 tokens both engines fall to 5-14 tok/s in total,
+too coarse to compare closely; those numbers are in the result folders.
 
 ## What changed in November
 
@@ -124,5 +149,68 @@ python3 benchmarks/run.py --help     # the harness: one engine, one model, the f
 python3 benchmarks/charts.py         # redraws the charts on this page from the numbers in it
 ```
 
+Pass `--llama-fa off` (or `on`) to pin llama.cpp's flash attention; the default `auto` reproduces
+llama.cpp's own default. The choice is written to the run manifest. Ratios on this page use the
+faster setting per row.
+
 The charts are drawn by [`benchmarks/charts.py`](../benchmarks/charts.py) from the medians in the
 result folders; update its tables when a new result lands, then rerun it.
+
+## Bonsai 2 vs PrismML's fork
+
+Bonsai 2's ternary files (PQ2_0, ggml type 142) do not load in upstream llama.cpp, so the
+llama.cpp comparison above cannot cover them. [PrismML's
+fork](https://github.com/PrismML-Eng/llama.cpp) is the other engine that reads them. Measured
+2026-11-08 on the Ryzen AI 9 HX 370 desktop (12 threads, WSL2), 3 interleaved rounds, 256
+greedy tokens, prompt lengths calibrated per engine. Peregrine at `bf241fe`; fork at
+`62c418ccd7aefee37997e94c2d9fac1eed7fc89b` (branch `prism`). Full method, raw manifests and
+the greedy-text check: [`benchmarks/results/2026-11-08-bonsai2-prism/`](../benchmarks/results/2026-11-08-bonsai2-prism/).
+
+![Bonsai 2: Peregrine against PrismML's fork](img/bench-bonsai.svg)
+
+Medians. "Fork best" is the faster of the fork's explicit `-fa on` and `-fa off` server
+settings for that row (lower for TTFT); "ratio" is Peregrine ÷ fork best, so above 1 means
+Peregrine is faster and, for TTFT, below 1 means Peregrine's first token arrives sooner. The
+fork's own default (`-fa auto`, which resolves to on here) is the secondary column.
+
+| Model | Context | Users | Metric | Peregrine | Fork best | Ratio | Fork default |
+|---|---|---|---|---|---|---|---|
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Decode tok/s | 70.64 | 32.66 (`-fa on`) | 2.16x | 32.67 |
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Prompt tok/s | 259.25 | 108.24 (`-fa on`) | 2.40x | 112.19 |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | Aggregate tok/s | 80.59 | 29.96 (`-fa on`) | 2.69x | 29.79 |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | TTFT (s) | 12.92 | 42.79 (`-fa on`) | 0.30x | 45.40 |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Decode tok/s | 60.64 | 30.47 (`-fa on`) | 1.99x | 30.76 |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Prompt tok/s | 202.94 | 105.19 (`-fa off`) | 1.93x | 103.90 |
+| Bonsai 2 9B PQ2_0 | 512 | 1 | Decode tok/s | 22.97 | 9.85 (`-fa off`) | 2.33x | 9.82 |
+| Bonsai 2 9B PQ2_0 | 512 | 1 | Prompt tok/s | 67.24 | 26.12 (`-fa off`) | 2.57x | 26.63 |
+| Bonsai 2 9B PQ2_0 | 512 | 10 | Aggregate tok/s | 21.62 | 7.83 (`-fa on`) | 2.76x | 7.76 |
+| Bonsai 2 9B PQ2_0 | 512 | 10 | TTFT (s) | 51.66 | 183.40 (`-fa on`) | 0.28x | 185.48 |
+| Bonsai 2 9B PQ2_0 | 4096 | 1 | Decode tok/s | 20.36 | 9.22 (`-fa on`) | 2.21x | 8.93 |
+| Bonsai 2 9B PQ2_0 | 4096 | 1 | Prompt tok/s | 57.42 | 25.53 (`-fa off`) | 2.25x | 25.33 |
+
+MTP speculation on the 9B `-MTP-Q8_0` file (512 tokens, 1 user): Peregrine decodes 25.01
+tok/s with MTP and 22.75 without (1.10x). The fork's `--spec-type draft-mtp` did not beat its
+own non-speculative decode; against its faster measured setting the ratios are 2.59x (MTP on)
+and 2.13x (MTP off). The fork's two MTP rows were measured an hour apart and their on/off
+difference is inside the host's between-batch drift, so treat the fork's MTP as parity.
+
+Flash attention: explicit `-fa on` and `-fa off` land within 0–2% of each other on every
+server row. The large depth penalty upstream llama.cpp's default showed on the bluefin 1B
+(13.0 vs 29.1 tok/s at 4096) does not reproduce on these hybrid-architecture Bonsai 2 files;
+turning flash attention off is not a win here, and the default is the faster or equal
+setting. `llama-bench` agrees after medians (its averages are contaminated by a second,
+~35% faster decode mode that hits one sample in five). The full on/off tables are in the
+results folder.
+
+The manifests record `machine.simd_tier: avx2+fma` on this host, but that is a stale label,
+not the tier the kernels ran at. `peregrine tier` on this machine prints
+`kernel tier x86_64-avx2-avx512-vnni-gfni-vbmi` beside `simd avx2+fma`: two functions feed
+those lines, and only the first resolves the kernel tier (AVX-512 here, `isa=native`).
+`peregrine_core::simd_name()` knows `scalar`, `avx2`, `avx2+fma` and `neon` only and returns
+the first that matches, and the hardware probe writes that coarse name into
+`machine.simd_tier`. Bonsai 2 does run the AVX-512 tier: PQ2_0's fastest kernel is the
+16-row repacked-tile path built on AVX-512 VNNI and GFNI (`MatPath::Tiles` in
+`peregrine-kernels/src/table.rs`), selected with `zmm=true`, `tiles=true` and `isa=native`.
+So both engines use AVX-512 here; the fork was also built with `-march=native`. The label is
+a probe bug, not an AVX-512 tier that was skipped, and it does not change any number on this
+page.
