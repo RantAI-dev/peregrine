@@ -249,6 +249,14 @@ pub fn attend_scaled_window(
         let sc = unsafe { worker_scratch.get(wk) };
         for i in lo..hi {
             let t = attn::task(&sh, &plan, i);
+            if !split && nb > 1 {
+                // Rows split, positions stay with each row: walk every row's own
+                // canonical chunks inside the task and merge them there.
+                // SAFETY: rows `b0..b1` of the output belong exclusively to this task.
+                let dst = unsafe { out.chunk(t.b0 * qd, (t.b1 - t.b0) * qd) };
+                attn::run_rows(kv, li, &sh, q, &t, sc, dst);
+                continue;
+            }
             attn::run(kv, li, &sh, q, &t, sc);
             let pi = i % plan.pos_chunks;
             for bi in 0..t.b1 - t.b0 {
@@ -303,7 +311,20 @@ pub fn attend_scaled_window(
     let per_head_pos = kv.bytes_per_position_per_layer() / c.n_kv_head as u64;
     for i in 0..tasks {
         let t = attn::task(&sh, &plan, i);
-        let decoded = t.p1.min(start_pos + t.b1).saturating_sub(t.p0) as u64;
+        let decoded = if !split && nb > 1 {
+            // [`attn::run_rows`] walks sub-blocks of at most `MAX_PARTIAL_ROWS`
+            // query rows; each re-reads the K/V up to its own last row's context.
+            let rows = (t.b1 - t.b0) * gqa;
+            let mut d = 0u64;
+            for r0 in (0..rows).step_by(attn::MAX_PARTIAL_ROWS) {
+                let r1 = (r0 + attn::MAX_PARTIAL_ROWS).min(rows);
+                let last = t.b0 + (r1 - 1) / gqa;
+                d += (start_pos + last + 1) as u64;
+            }
+            d
+        } else {
+            t.p1.min(start_pos + t.b1).saturating_sub(t.p0) as u64
+        };
         stats.bytes_kv += per_head_pos * decoded;
     }
     for b in 0..nb {
