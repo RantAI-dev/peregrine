@@ -70,6 +70,15 @@ fn bench_json_and_tune_smoke_test() {
         stdout_str.contains("\"bytes_per_token\":"),
         "stdout: {stdout_str}"
     );
+    assert!(stdout_str.contains("\"config\":"), "stdout: {stdout_str}");
+    assert!(
+        stdout_str.contains("\"tuning_source\":"),
+        "stdout: {stdout_str}"
+    );
+    assert!(
+        stdout_str.contains("\"calibration_ms\":"),
+        "stdout: {stdout_str}"
+    );
 
     // 2. Smoke test: `peregrine tune`
     let profile_path = dir.join("test.profile");

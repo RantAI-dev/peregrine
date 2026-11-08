@@ -51,10 +51,38 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
 
     let report = session.bench(args.prompt_tokens, args.tokens)?;
 
+    if prof.is_some() {
+        let p_path = args
+            .profile
+            .as_deref()
+            .map(|p| p.to_path_buf())
+            .or_else(|| profile::default_path(&args.model).ok());
+        if let Some(p) = p_path {
+            let dt = effective_opts
+                .decode_threads
+                .unwrap_or_else(|| peregrine_core::pool::physical_cores().unwrap_or(1));
+            eprintln!(
+                "peregrine: using tuning profile {} (decode_threads={}, spin_us={})",
+                p.display(),
+                dt,
+                effective_opts.spin_us
+            );
+        }
+    }
+
     if args.json {
         let opts_map: BTreeMap<&str, String> = effective_opts.pairs().into_iter().collect();
+        let decode_th = effective_opts
+            .decode_threads
+            .unwrap_or_else(|| peregrine_core::pool::physical_cores().unwrap_or(1));
         let obj = serde_json::json!({
             "model": args.model.display().to_string(),
+            "config": {
+                "decode_threads": decode_th,
+                "spin_us": effective_opts.spin_us,
+                "tuning_source": effective_opts.tuning_source.as_str(),
+                "calibration_ms": effective_opts.calibration_ms(),
+            },
             "prefill_tok_s": report.prefill_tok_s,
             "decode_tok_s": report.decode_tok_s,
             "bytes_per_token": report.bytes_per_token,
