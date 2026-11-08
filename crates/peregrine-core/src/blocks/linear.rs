@@ -1,7 +1,7 @@
 //! Fused linear transformation blocks (dense GEMM groups and LittleBit).
 
 use crate::blocks::par::{OutPtr, SharedBuf};
-use crate::gguf::TensorInfo;
+use crate::gguf::{Format, TensorInfo};
 use crate::lbq::Slb;
 use crate::model::{Linear, StepStats, Weights};
 use crate::pool::{share, Pool};
@@ -100,11 +100,17 @@ pub fn matmul_group(
     }
     let paths = &paths[..jobs.len()];
     let tiled = paths.contains(&MatPath::Tiles);
-    let kq_tiled = paths.contains(&MatPath::KqTiles);
     // The interleaved activation is built once for the group, from the
     // activation the group shares: every output row of the group reads it, so
-    // building it per matrix would multiply the work by the group's size.
-    if kq_tiled && nb >= 4 {
+    // building it per matrix would multiply the work by the group's size. Only
+    // the k-quant tiles need it — the Q5_0 tile reads the per-32 layout the
+    // activation already has — and its fill requires a whole number of 256-weight
+    // super-blocks, which a Q5_0 matrix's 896-wide rows are not.
+    let kq_fill = jobs
+        .iter()
+        .zip(paths)
+        .any(|(j, &p)| p == MatPath::KqTiles && j.w.kind == Format::Q4_K);
+    if kq_fill && nb >= 4 {
         kq.fill(&acts[..nb]);
     }
     // The rows `lo..hi` of the concatenated row space.
@@ -171,7 +177,11 @@ pub fn matmul_group(
                     // depends only on its index.
                     let kq_off = j.w.kq_off.expect("the repacked path has a store offset");
                     let n_sb = n / j.w.kind.block();
-                    let tile_bytes = peregrine_kernels::kq::Q4K8::SIZE;
+                    let tile_bytes = match j.w.kind {
+                        Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
+                        Format::Q5_0 => peregrine_kernels::kq::Q5_08::SIZE,
+                        _ => unreachable!("a repacked path has a repacked format"),
+                    };
                     let store = w.kq();
                     let rows = j.rows();
                     let repacked = (rows / KQ_TILE_ROWS) * KQ_TILE_ROWS;
@@ -188,10 +198,23 @@ pub fn matmul_group(
                             let at = kq_off + t * n_sb * tile_bytes;
                             let tile = &store[at..at + n_sb * tile_bytes];
                             let out = &mut blk[..KQ_TILE_ROWS * nb];
-                            if nb >= 4 {
-                                mk.kq_tiles_q4k(tile, n_sb, kq, nb, out);
-                            } else {
-                                mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                            match j.w.kind {
+                                Format::Q5_0 => {
+                                    // The Q5_0 tile reads the per-32 activation
+                                    // layout, the same one decode uses.
+                                    if nb >= 4 {
+                                        mk.kq_tiles_q5_0(tile, n_sb, &acts[..nb], nb, out);
+                                    } else {
+                                        mk.kq_tiles_q5_0_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    }
+                                }
+                                _ => {
+                                    if nb >= 4 {
+                                        mk.kq_tiles_q4k(tile, n_sb, kq, nb, out);
+                                    } else {
+                                        mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    }
+                                }
                             }
                             for i in 0..KQ_TILE_ROWS {
                                 let row = t * KQ_TILE_ROWS + i;

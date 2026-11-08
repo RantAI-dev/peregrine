@@ -103,9 +103,8 @@ impl MatKernels {
             MatPath::RowsPtq1
         } else if fmt == Format::PQ2_0 && self.pq2_rows {
             MatPath::RowsPq2
-        } else if kq && self.kq_tiles && fmt == Format::Q4_K {
-            // The repacked k-quant tiles: eight output rows at once, against the
-            // interleaved activation.
+        } else if kq && self.kq_tiles && matches!(fmt, Format::Q4_K | Format::Q5_0) {
+            // The repacked k-quant and Q5_0 tiles: eight output rows at once.
             MatPath::KqTiles
         } else {
             MatPath::PerRow
@@ -188,6 +187,76 @@ impl MatKernels {
         {
             let _ = (tile, n_sb, acts);
             unreachable!("no repacked k-quant kernel on this architecture")
+        }
+    }
+
+    /// Eight rows of a repacked Q5_0 tile against a batch of activations.
+    ///
+    /// Q5_0's activation is the ordinary per-32 layout, so the batched and the
+    /// single-row paths read the same bytes and the kernel is one code path.
+    pub fn kq_tiles_q5_0(
+        &self,
+        tile: &[u8],
+        n_blk: usize,
+        acts: &[QuantAct],
+        nb: usize,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.kq_tiles,
+            "the repacked Q5_0 kernel used where it cannot run"
+        );
+        assert!(
+            !acts.is_empty() && nb <= acts.len(),
+            "more rows than activations"
+        );
+        assert!(
+            out.len() >= nb * 8,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
+        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
+        // `n_blk` tiles and the activation the rows the caller says.
+        unsafe {
+            crate::kqsimd::q5_08_gemm(tile, n_blk, acts, nb, out)
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        {
+            let _ = (tile, n_blk, acts, nb, out);
+            unreachable!("no repacked Q5_0 kernel on this architecture")
+        }
+    }
+
+    /// Eight rows of a repacked Q5_0 tile against one to three activations.
+    pub fn kq_tiles_q5_0_gemv(
+        &self,
+        tile: &[u8],
+        n_blk: usize,
+        acts: &[QuantAct],
+        nb: usize,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.kq_tiles,
+            "the repacked Q5_0 kernel used where it cannot run"
+        );
+        assert!(
+            (1..=3).contains(&nb),
+            "the Q5_0 GEMV takes one to three rows"
+        );
+        assert!(
+            out.len() >= nb * 8,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
+        // SAFETY: as above.
+        unsafe {
+            crate::kqsimd::q5_08_gemv(tile, n_blk, acts, nb, out)
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        {
+            let _ = (tile, n_blk, acts, nb, out);
+            unreachable!("no repacked Q5_0 kernel on this architecture")
         }
     }
 
@@ -376,7 +445,7 @@ mod tests {
             kq_tiles: true,
             exact: true,
         };
-        for f in [Format::PQ2_0, Format::PTQ1_0, Format::Q4_K] {
+        for f in [Format::PQ2_0, Format::PTQ1_0, Format::Q4_K, Format::Q5_0] {
             assert_eq!(t.path(f, true, true, true), MatPath::PerRow);
         }
     }
@@ -408,6 +477,9 @@ mod tests {
         // repacked goes the old way.
         assert_eq!(all.path(Format::Q4_K, false, true, false), MatPath::KqTiles);
         assert_eq!(all.path(Format::Q4_K, false, false, false), MatPath::PerRow);
+        // Q5_0 has its own repacked tile (the small-model prefill fix).
+        assert_eq!(all.path(Format::Q5_0, false, true, false), MatPath::KqTiles);
+        assert_eq!(all.path(Format::Q5_0, false, false, false), MatPath::PerRow);
         // The other k-quants are not repacked yet (S3.4 PR 3 and PR 4).
         assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::PerRow);
         let avx2 = MatKernels {

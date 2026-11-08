@@ -208,8 +208,8 @@ impl TileStore {
     }
 }
 
-/// The repacked k-quant weights: the Q4_K and Q6_K matrices, repacked into eight-row
-/// tiles at load (`TensorInfo::kq_off` points here). Built the way the [`TileStore`]
+/// The repacked k-quant weights: the Q4_K and Q6_K matrices, and the Q5_0 matrices
+/// of a model whose shape forces the legacy format, repacked into eight-row tiles at load (`TensorInfo::kq_off` points here). Built the way the [`TileStore`]
 /// is — an anonymous mapping that asks for transparent huge pages, since a decode
 /// step streams all of it every token — and `PEREGRINE_TILE_HUGEPAGES=0` uses a plain
 /// heap buffer, for the A/B.
@@ -261,7 +261,7 @@ impl Model {
     /// `PEREGRINE_KREPACK` says — and only where the kernel table has a kernel
     /// that will read the store.
     pub fn load_with(g: Gguf, families: &[&dyn crate::arch::Family]) -> Result<Model, String> {
-        // The repack costs the resident memory of every Q4_K and Q6_K matrix, so it is
+        // The repack costs the resident memory of every Q4_K, Q6_K and Q5_0 matrix, so it is
         // built only where a kernel multiplies from it. With the switch on but the
         // repacked kernel unavailable (a `PEREGRINE_ISA` cap below AVX2, a build with
         // the k-quant kernels off) the store would be RSS nothing reads.
@@ -310,8 +310,8 @@ impl Model {
                     )
                 }
             })?;
-        // The k-quant repack (S3.4): the Q4_K and Q6_K matrices are rewritten into
-        // eight-row tiles before the family reads the file, so every matrix the
+        // The k-quant repack (S3.4): the Q4_K and Q6_K matrices, and Q5_0, are
+        // rewritten into eight-row tiles before the family reads the file, so every matrix the
         // family holds knows where its repacked bytes are.
         let mut g = g;
         let kq = if kq {
@@ -490,8 +490,8 @@ impl Model {
         &self.w.g
     }
 
-    /// The repacked k-quant store: the Q4_K and Q6_K matrices, rewritten into
-    /// eight-row tiles at load (S3.4). Empty when the repack is off, and empty
+    /// The repacked k-quant store: the Q4_K and Q6_K matrices, and Q5_0, rewritten
+    /// into eight-row tiles at load (S3.4). Empty when the repack is off, and empty
     /// where the kernel table has no kernel to read it.
     pub fn kq(&self) -> &[u8] {
         self.w.kq.bytes()
