@@ -35,6 +35,7 @@ pub struct MatKernels {
     pq2_rows: bool,
     ptq1_rows: bool,
     kq_tiles: bool,
+    kq_zmm: bool,
     exact: bool,
 }
 
@@ -60,11 +61,19 @@ impl MatKernels {
         let kq_tiles = crate::simd::have_batched() && crate::options::get().kq_repack;
         #[cfg(not(target_arch = "x86_64"))]
         let kq_tiles = false;
+        // The AVX-512 variant of the same kernels (S3.4 follow-up): the same
+        // tiles, 64 bytes at a time. `cpu_has!` honours `PEREGRINE_ISA`, so an
+        // `avx2` cap keeps the AVX2 kernel.
+        #[cfg(target_arch = "x86_64")]
+        let kq_zmm = kq_tiles && crate::kqsimd::have_zmm512();
+        #[cfg(not(target_arch = "x86_64"))]
+        let kq_zmm = false;
         MatKernels {
             tiles,
             pq2_rows,
             ptq1_rows,
             kq_tiles,
+            kq_zmm,
             exact: crate::quant::exact_ternary(),
         }
     }
@@ -141,9 +150,14 @@ impl MatKernels {
         );
         #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
         // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
-        // `n_sb` tiles and the activation the rows the caller says.
+        // `n_sb` tiles and the activation the rows the caller says. `kq_zmm` is
+        // `have_zmm512()`, which is a superset of those.
         unsafe {
-            crate::kqsimd::q4k8_gemm(tile, n_sb, acts, nb, out)
+            if self.kq_zmm {
+                crate::kqsimd::q4k8_gemm_zmm(tile, n_sb, acts, nb, out)
+            } else {
+                crate::kqsimd::q4k8_gemm(tile, n_sb, acts, nb, out)
+            }
         }
         #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
         {
@@ -178,10 +192,13 @@ impl MatKernels {
             "the output holds fewer than eight rows per activation"
         );
         #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
-        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
-        // `n_sb` tiles and the activation the rows the caller says.
+        // SAFETY: as above.
         unsafe {
-            crate::kqsimd::q4k8_gemv(tile, n_sb, acts, nb, out)
+            if self.kq_zmm {
+                crate::kqsimd::q4k8_gemv_zmm(tile, n_sb, acts, nb, out)
+            } else {
+                crate::kqsimd::q4k8_gemv(tile, n_sb, acts, nb, out)
+            }
         }
         #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
         {
@@ -216,9 +233,14 @@ impl MatKernels {
         );
         #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
         // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
-        // `n_blk` tiles and the activation the rows the caller says.
+        // `n_blk` tiles and the activation the rows the caller says. `kq_zmm` is
+        // `have_zmm512()`, which is a superset of those.
         unsafe {
-            crate::kqsimd::q5_08_gemm(tile, n_blk, acts, nb, out)
+            if self.kq_zmm {
+                crate::kqsimd::q5_08_gemm_zmm(tile, n_blk, acts, nb, out)
+            } else {
+                crate::kqsimd::q5_08_gemm(tile, n_blk, acts, nb, out)
+            }
         }
         #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
         {
@@ -251,7 +273,11 @@ impl MatKernels {
         #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
         // SAFETY: as above.
         unsafe {
-            crate::kqsimd::q5_08_gemv(tile, n_blk, acts, nb, out)
+            if self.kq_zmm {
+                crate::kqsimd::q5_08_gemv_zmm(tile, n_blk, acts, nb, out)
+            } else {
+                crate::kqsimd::q5_08_gemv(tile, n_blk, acts, nb, out)
+            }
         }
         #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
         {
@@ -377,11 +403,15 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
     match fmt {
         Format::F32 | Format::F16 | Format::BF16 => &[Tier::Scalar, Tier::Avx2],
         #[cfg(feature = "fmt-legacy")]
-        Format::Q4_0 | Format::Q5_0 | Format::Q8_0 => &[Tier::Scalar, Tier::Avx2],
+        Format::Q4_0 | Format::Q8_0 => &[Tier::Scalar, Tier::Avx2],
+        // Q5_0 has a repacked tile with an AVX-512 variant (S3.4 §11 and §12).
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q5_0 => &[Tier::Scalar, Tier::Avx2, Tier::Avx512],
         #[cfg(feature = "fmt-kquant")]
-        Format::Q2_K | Format::Q3_K | Format::Q4_K | Format::Q5_K | Format::Q6_K => {
-            &[Tier::Scalar, Tier::Avx2]
-        }
+        Format::Q2_K | Format::Q3_K | Format::Q5_K | Format::Q6_K => &[Tier::Scalar, Tier::Avx2],
+        // Q4_K's repacked tile has an AVX-512 variant (S3.4 §12).
+        #[cfg(feature = "fmt-kquant")]
+        Format::Q4_K => &[Tier::Scalar, Tier::Avx2, Tier::Avx512],
         #[cfg(feature = "fmt-iq")]
         Format::IQ4_NL | Format::IQ4_XS => &[Tier::Scalar, Tier::Avx2],
         #[cfg(feature = "fmt-mxfp4")]
@@ -405,12 +435,18 @@ mod tests {
         #[cfg(feature = "fmt-legacy")]
         {
             assert_eq!(kernels_for(Format::Q4_0), &[Tier::Scalar, Tier::Avx2]);
-            assert_eq!(kernels_for(Format::Q5_0), &[Tier::Scalar, Tier::Avx2]);
+            assert_eq!(
+                kernels_for(Format::Q5_0),
+                &[Tier::Scalar, Tier::Avx2, Tier::Avx512]
+            );
             assert_eq!(kernels_for(Format::Q8_0), &[Tier::Scalar, Tier::Avx2]);
         }
         #[cfg(feature = "fmt-kquant")]
         {
-            assert_eq!(kernels_for(Format::Q4_K), &[Tier::Scalar, Tier::Avx2]);
+            assert_eq!(
+                kernels_for(Format::Q4_K),
+                &[Tier::Scalar, Tier::Avx2, Tier::Avx512]
+            );
             assert_eq!(kernels_for(Format::Q5_K), &[Tier::Scalar, Tier::Avx2]);
             assert_eq!(kernels_for(Format::Q6_K), &[Tier::Scalar, Tier::Avx2]);
         }
@@ -443,6 +479,7 @@ mod tests {
             pq2_rows: true,
             ptq1_rows: true,
             kq_tiles: true,
+            kq_zmm: true,
             exact: true,
         };
         for f in [Format::PQ2_0, Format::PTQ1_0, Format::Q4_K, Format::Q5_0] {
@@ -457,6 +494,7 @@ mod tests {
             pq2_rows: true,
             ptq1_rows: true,
             kq_tiles: true,
+            kq_zmm: true,
             exact: false,
         };
         assert_eq!(all.path(Format::PQ2_0, true, false, false), MatPath::Tiles);
@@ -487,6 +525,7 @@ mod tests {
             pq2_rows: true,
             ptq1_rows: false,
             kq_tiles: true,
+            kq_zmm: false,
             exact: false,
         };
         // A tiled matrix on a CPU without the tile kernel cannot happen (no repack), but stays correct.
@@ -503,6 +542,7 @@ mod tests {
             pq2_rows: false,
             ptq1_rows: false,
             kq_tiles: false,
+            kq_zmm: false,
             exact: false,
         };
         assert_eq!(

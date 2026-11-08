@@ -604,6 +604,7 @@ name = "peregrine-bench"
 version = "0.1.0"
 dependencies = [
  "peregrine-core",
+ "peregrine-kernels",
  "peregrine-models",
 ]
 
