@@ -11,7 +11,8 @@
 //! family's.
 
 use peregrine_core::blocks::linear::LinJob;
-use peregrine_core::blocks::par::Disjoint;
+use peregrine_core::blocks::par::{for_row_chunks, for_row_chunks_2, Disjoint, Sched};
+use peregrine_core::blocks::ROW_PARALLEL;
 use peregrine_core::gguf::TensorInfo;
 use peregrine_core::model::{Config, Linear, State, StepStats, Weights};
 use peregrine_core::pool::Pool;
@@ -147,30 +148,45 @@ pub(crate) fn attention_rows(
 
     let t_attn = std::time::Instant::now();
     peregrine_core::prof::time(peregrine_core::prof::Slot::Attn, || {
-        for (r0, len, c) in caches.runs(nb) {
-            peregrine_core::blocks::attn::attend(
-                cfg,
-                &mut st.attn,
-                &st.q,
-                &mut st.xb,
-                caches.cache(c),
-                pool,
-                li,
-                len,
-                positions[r0],
-                r0,
-                stats,
-            );
-        }
+        peregrine_core::blocks::attn::attend_mapped(
+            cfg,
+            &mut st.attn,
+            &st.q,
+            &mut st.xb,
+            caches,
+            pool,
+            li,
+            nb,
+            positions,
+            stats,
+        );
     });
     stats.ns_attn += t_attn.elapsed().as_nanos() as u64;
 
     // ---- the attention's output, projected back into the residual ----
-    peregrine_core::prof::time(peregrine_core::prof::Slot::Quant, || {
-        for b in 0..nb {
-            st.acts[b].fill(&st.xb[b * qd..(b + 1) * qd]);
+    {
+        let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+        peregrine_core::prof::time(peregrine_core::prof::Slot::Quant, || {
+            for_row_chunks_2(
+                pool,
+                parallel,
+                &mut st.xb,
+                qd,
+                &mut st.acts,
+                1,
+                nb,
+                Sched::Static,
+                |_wk, rows, xb, acts| {
+                    for i in 0..rows.len() {
+                        acts[i].fill(&xb[i * qd..(i + 1) * qd]);
+                    }
+                },
+            );
+        });
+        if parallel {
+            stats.barriers += 1;
         }
-    });
+    }
     {
         let lbx = Disjoint::new(&mut st.lb_x);
         let lbt = Disjoint::new(&mut st.lb_t);
@@ -196,11 +212,29 @@ pub(crate) fn attention_rows(
             )
         });
     }
-    peregrine_core::prof::time(peregrine_core::prof::Slot::Resid, || {
-        for i in 0..nb * cfg.d_model {
-            st.x[i] += st.xb2[i];
+    {
+        let xb2: &[f32] = &st.xb2;
+        let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+        peregrine_core::prof::time(peregrine_core::prof::Slot::Resid, || {
+            for_row_chunks(
+                pool,
+                parallel,
+                &mut st.x,
+                cfg.d_model,
+                nb,
+                Sched::Static,
+                |_wk, rows, xc| {
+                    let base = rows.start * cfg.d_model;
+                    for (i, x) in xc.iter_mut().enumerate() {
+                        *x += xb2[base + i];
+                    }
+                },
+            );
+        });
+        if parallel {
+            stats.barriers += 1;
         }
-    });
+    }
 }
 
 /// The output head: the final norm and the projection into the vocabulary, for the rows the

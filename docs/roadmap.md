@@ -57,7 +57,7 @@ Each model is checked against llama.cpp on the same file before it is listed.
 |---|---|---|
 | S3.1 | Benchmark harness (`benchmarks/`): one script per engine at pinned versions, the four numbers at three contexts, fraction-of-ceiling, raw JSON — done | 1.0 |
 | S3.2 | Competitor baselines on H1, H2 and H3 — desktop (H1) baseline in (#82); H2 and H3 open | 1.0 |
-| S3.3 | Task-accuracy gate against the reference engine (GSM8K, HumanEval+, MMLU subset), batch and speculation invariance on 500+ prompts — KL against llama.cpp per model done (docs/targets.md); the task-accuracy gate and invariance runs open | 1.0 |
+| S3.3 | Task-accuracy gate against the reference engine (GSM8K, HumanEval+, MMLU subset), batch and speculation invariance on 500+ prompts — KL against llama.cpp per model done (docs/targets.md); harness, gate proposal and invariance runs in (benchmarks/accuracy/, docs/dev/accuracy.md), full Peregrine sweep on x86 open | 1.0 |
 | S3.4 | Faster k-quant kernels (repacked row tiles, int8 dot products) — the repacked store (#86) and the Q4_K kernels on AVX2 (#88) done; the AVX-512 Q4_K kernel and Q6_K (#89) open | 1.5 |
 | S3.5 | Batched ternary GEMM toward the int8 compute roof; prompt path (large tiles, chunked Gated DeltaNet scan) — the prefill chunk is an option now (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical cores and 64 when the pool is wider, #87 then S3.5 step 2); the ternary GEMM open | 1.5 |
 | S3.6 | Faster PTQ1_0 for the 27B | 0.5 |

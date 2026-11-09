@@ -17,6 +17,10 @@ pub struct AttnScratch {
     pub part: Vec<f32>,
     /// The matching partial `(m, l)`.
     pub ml: Vec<(f32, f64)>,
+    /// Reused by [`attend_mapped`]: the batch's runs of one cache, and the rows that
+    /// have a cache of their own (the decoding users of a mixed step).
+    runs: Vec<(usize, usize, usize)>,
+    rows: Vec<usize>,
 }
 
 impl AttnScratch {
@@ -31,6 +35,8 @@ impl AttnScratch {
                 cfg.n_kv_head * attn::MAX_CHUNKS * attn::MAX_PARTIAL_ROWS * cfg.head_dim
             ],
             ml: vec![(0.0, 0.0); cfg.n_kv_head * attn::MAX_CHUNKS * attn::MAX_PARTIAL_ROWS],
+            runs: Vec::new(),
+            rows: Vec::new(),
         }
     }
 }
@@ -361,6 +367,129 @@ pub fn attend_scaled_window(
         let n_ctx = (start_pos + b + 1) as u64;
         stats.macs += (c.n_head * hd) as u64 * n_ctx * 2;
     }
+}
+
+/// Attention for a batch whose rows do not all share one cache: a decode step of several
+/// users (each row reads its own slot's cache), or such a step beside one prompt chunk.
+///
+/// Runs of one cache with several rows keep the single-cache path unchanged (a prompt
+/// chunk). The single-row runs — one per decoding user — become one task per KV head in a
+/// **single** parallel region, instead of a fork–join per user per layer. A row's
+/// arithmetic is the multi-row path's (`attn::run_range` walking that row's own canonical
+/// chunks), so its bits do not depend on how many users share the call.
+#[allow(clippy::too_many_arguments)]
+pub fn attend_mapped(
+    cfg: &Config,
+    scratch: &mut AttnScratch,
+    q: &[f32],
+    xb: &mut [f32],
+    caches: &Caches<'_>,
+    pool: &Pool,
+    li: usize,
+    nb: usize,
+    positions: &[usize],
+    stats: &mut StepStats,
+) {
+    let c = cfg;
+    let hd = c.head_dim;
+    let qd = c.q_dim();
+    // The runs, and the rows that are alone in their cache, into reused buffers.
+    let mut runs = std::mem::take(&mut scratch.runs);
+    runs.clear();
+    runs.extend(caches.runs(nb));
+    let mut rows = std::mem::take(&mut scratch.rows);
+    rows.clear();
+    for &(r0, len, _) in &runs {
+        if len == 1 {
+            rows.push(r0);
+        }
+    }
+    let last = positions.iter().copied().max().unwrap_or(0);
+    let work = nb * c.n_head * (last + 1) * hd * 2;
+    // One row per KV head does not fill a pool: leave a single row to the single-cache
+    // path, which splits its positions across workers (flash decoding).
+    let batch_rows = rows.len() >= 2 && pool.width() > 1 && work >= 1 << 19;
+    if batch_rows {
+        let sh = attn::Shape {
+            n_head: c.n_head,
+            n_kv_head: c.n_kv_head,
+            head_dim: hd,
+            nb,
+            start_pos: 0,
+            scale: 1.0 / (hd as f32).sqrt(),
+            window: None,
+            sinks: None,
+        };
+        let tasks = rows.len() * c.n_kv_head;
+        let out = Disjoint::new(&mut xb[..nb * qd]);
+        let worker_scratch = Disjoint::new(&mut scratch.per_worker);
+        let body = |wk: usize, nw: usize| {
+            // SAFETY: worker `wk` alone uses scratch slot `wk` (the pool has as many
+            // workers as `AttnScratch` has scratches).
+            let sc = unsafe { worker_scratch.get(wk) };
+            let (lo, hi) = share(tasks, wk, nw);
+            for i in lo..hi {
+                let b = rows[i / c.n_kv_head];
+                let kh = i % c.n_kv_head;
+                let mut dst = TaskOut {
+                    out: &out,
+                    row0: b,
+                    qd,
+                    hd,
+                };
+                // SAFETY: `(b, head)` is written by exactly one task, and the row's
+                // `head_dim`-wide slices are disjoint.
+                attn::run_row(
+                    caches.get(b),
+                    li,
+                    &sh,
+                    &q[b * qd..],
+                    kh,
+                    positions[b],
+                    sc,
+                    &mut dst,
+                );
+            }
+        };
+        if pool.width() > 1 {
+            pool.run(body);
+            stats.barriers += 1;
+        } else {
+            #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
+            crate::blocks::par::bump_epoch();
+            body(0, 1);
+        }
+        let per_head_pos = caches.get(rows[0]).bytes_per_position_per_layer() / c.n_kv_head as u64;
+        for &b in &rows {
+            let n_ctx = (positions[b] + 1) as u64;
+            stats.bytes_kv += per_head_pos * n_ctx;
+            stats.macs += (c.n_head * hd) as u64 * n_ctx * 2;
+        }
+    }
+    // Every other run is a chunk of one cache: the path it always took.
+    for &(r0, len, cidx) in &runs {
+        if batch_rows && len == 1 {
+            continue;
+        }
+        attend_scaled_window(
+            cfg,
+            scratch,
+            q,
+            xb,
+            caches.cache(cidx),
+            pool,
+            li,
+            len,
+            positions[r0],
+            r0,
+            None,
+            None,
+            None,
+            stats,
+        );
+    }
+    scratch.runs = runs;
+    scratch.rows = rows;
 }
 
 #[cfg(test)]

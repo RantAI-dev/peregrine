@@ -1,0 +1,16 @@
+# neonbench: one thread, one core, L1/L2-resident synthetic data, 200 reps.
+# host: DGX Spark, Cortex-X925, aarch64-neon-dotprod, rustc 1.99.1, release profile.
+#   cargo run --release -p peregrine-bench --example neonbench
+# Best of three runs (the host is shared; the spread between runs is a few percent).
+n=2048 rows=256 reps=200 tier=aarch64-neon-dotprod
+Q8_0 scalar, 1 row                    87726.8 ns       6.0 GMAC/s
+Q8_0 sdot, 1 row                      23707.7 ns      22.1 GMAC/s
+Q8_0 sdot rows8 (decode)              11753.3 ns      44.6 GMAC/s
+Q8_0 sdot batch-4                     12830.9 ns      40.9 GMAC/s
+Q4_K scalar, 1 row                    39138.3 ns      13.4 GMAC/s
+Q4_K sdot, 1 row                      12360.6 ns      42.4 GMAC/s
+Q4_K tile ref, GEMV                  206246.9 ns       2.5 GMAC/s
+Q4_K tile sdot, GEMV                  10734.1 ns      51.2 GMAC/s
+Q4_K tile sdot, GEMM 4                27358.0 ns      76.7 GMAC/s
+Q4_K tile sdot, GEMM 16               53333.3 ns      78.6 GMAC/s
+

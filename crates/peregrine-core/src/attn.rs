@@ -27,10 +27,38 @@
 //!   busy with one task per head at decode. The positions are then split into chunks;
 //!   each chunk writes its partial `(o, m, l)` and a combine step merges them with
 //!   `exp(m_i − m*)` weights — uzu's `combine.metal`.
-//! * The scores use eight keys per pass with a transposed horizontal add instead of
-//!   one reduction per key, and the exponentials are `vmath`'s vector `exp`.
+//! * The scores use a transposed horizontal add instead of one reduction per key,
+//!   and the exponentials are `vmath`'s vector `exp`.
+//! * **Decode reads F16 K/V directly.** A one-row call (decode, or a chunk of one)
+//!   consumes the stored halves in registers with `vcvtph2ps`; no f32 tile is
+//!   written. The score pass is register-blocked four keys deep, two query rows share
+//!   each loaded K vector, and the value mix keeps its accumulators in registers while
+//!   two rows share each loaded V vector. A decode head group (seven query heads per
+//!   KV head on Qwen2.5-0.5B) therefore reads the cache once per two query heads.
+//! * **Prefill widens the block once** below ~1k positions of context: the tile is
+//!   small enough to sit in cache, and one widening amortises over every query row
+//!   that reads it. Past that the cache no longer fits, so the rows read the stored
+//!   halves in registers instead (two rows share each loaded K and V vector), which
+//!   halves the bytes they pull. Both paths use the same per-key reduction tree, so
+//!   which one a row takes cannot change its bits.
+//! * **The value mix widens to sixteen lanes on AVX-512.** `vcvtph2ps zmm` reads
+//!   sixteen stored halves per instruction and 512-bit fused multiply-adds consume
+//!   them; the mix is conversion-bound, so on the Ryzen AI 9 HX 370 the pair kernel
+//!   is ~27% faster than the AVX2 one at 4096 positions. Scores keep the AVX2 tree on
+//!   every tier: a zmm score row needs a 16-lane horizontal reduction, which measured
+//!   30–70% *slower* than the AVX2 reduction at head width 64, so the tier keeps one
+//!   score tree and every path agrees bit for bit with AVX2. The softmax's 16-wide
+//!   `exp` keeps the eight-lane sum grouping, so it too is the AVX2 result bit for
+//!   bit; the mix is per-element and matches for the same reason. Attention's output
+//!   is therefore the AVX2 tier's, and this tier's goldens move only where another
+//!   kernel (the repacked k-quant matmuls) does.
+//! * **A sliding window is only the visible range.** A row with a window sees its
+//!   last `window` positions; the position chunks are the even cut of that range, and
+//!   every tile walk starts at it, so a windowed layer reads its window rather than
+//!   the whole context. A window may start inside a tile: the fast kernels offset
+//!   into the cache's halves at the same position the widened tile would start at.
 //! * **A row's partition is its own.** The position chunks a row is cut into are a
-//!   function of that row's context length and the model shape alone — never of the
+//!   function of that row's visible context and the model shape alone — never of the
 //!   other rows in the call, the call width, the prefill chunk or the pool. A
 //!   single-row call spreads the chunks over tasks; a multi-row call spreads the
 //!   rows and walks each row's chunks inside its task, in the same order. The merge
@@ -45,6 +73,16 @@ use crate::kv::KvCache;
 /// Positions decoded and scored per step. 64 × 128 floats is a 32 KB tile each for
 /// K and V — inside L2 with room to spare, and long enough to amortise the rescale.
 pub const BLOCK: usize = 64;
+
+/// The shortest visible context at which a prefill tile reads the F16 cache directly.
+///
+/// Below it a row's K/V fits in the core's private caches, so halving the bytes the
+/// tile reads buys less than the per-row `vcvtph2ps` costs — the direct path measured
+/// about 1% slower on 512-position prompts. The crossover is around a thousand
+/// positions (five alternating rounds on H0), so shorter contexts keep the widened
+/// tile while long ones read the halves in registers.
+#[cfg(target_arch = "x86_64")]
+const DIRECT_MIN_VIS: usize = 1024;
 
 /// Most position chunks per KV head, which bounds the partial-result buffer.
 pub const MAX_CHUNKS: usize = 8;
@@ -118,11 +156,12 @@ impl Plan {
 /// positions, into chunks of at least `BLOCK` positions and enough of them to reach
 /// `TARGET_TASKS` tasks for the call.
 ///
-/// A row's arithmetic must depend only on that row's own context length and the model
-/// shape — never on the other rows in the call, the call width (`nb`), the prefill
-/// chunk or the pool. The position partition therefore is not a property of the call
-/// at all: `row_chunks` gives every row its own chunk count from its own context,
-/// and the cut is the even one. A single-row call splits those chunks across tasks
+/// A row's arithmetic must depend only on that row's own visible context and the
+/// model shape — never on the other rows in the call, the call width (`nb`), the
+/// prefill chunk or the pool. The position partition therefore is not a property of
+/// the call at all: `row_chunks` gives every row its own chunk count from its own
+/// visible context (a sliding window is the last `window` positions), and the cut is
+/// the even one over that range. A single-row call splits those chunks across tasks
 /// (flash decoding); a multi-row call splits rows across tasks and each task walks
 /// every row's chunks serially with the same boundaries and the same merge order (see
 /// [`run_rows`]). Both paths compute the same partials and call [`combine_row`] over
@@ -185,17 +224,31 @@ pub fn plan(sh: &Shape<'_>, workers: usize) -> Plan {
 ///
 /// The chunk count is the task target spread over the KV heads, capped so a chunk
 /// holds at least one decode tile (`BLOCK`) and by `MAX_CHUNKS` (the partial buffer).
-/// The boundaries are the even cut `i·n_ctx/k`, which is what the single-row decode
-/// path uses too; they need not land on the `BLOCK` grid (see [`run_rows`]). The work
-/// gate is per row, so a short row is never split just because a wide call is long.
+/// Only the visible positions count as work: a sliding window can leave a 4096-token
+/// row with just its last 512 positions. The boundaries are the even cut of that
+/// visible range, which is what the single-row decode path uses too; they need not
+/// land on the `BLOCK` grid (see [`run_rows`]). The work gate is per row, so a short
+/// row is never split just because a wide call is long.
 fn row_chunks(sh: &Shape<'_>, n_ctx: usize) -> usize {
-    let work = sh.n_head * n_ctx * sh.head_dim * 2;
+    // Only the visible positions are work: a sliding window can leave a 4096-token
+    // row with nothing but its last 512 positions to read and score.
+    let visible = n_ctx - visible_start(sh, n_ctx);
+    let work = sh.n_head * visible * sh.head_dim * 2;
     if work < 1 << 19 {
         return 1;
     }
-    let by_ctx = (n_ctx / BLOCK).max(1);
+    let by_ctx = (visible / BLOCK).max(1);
     let by_heads = TARGET_TASKS.div_ceil(sh.n_kv_head);
     by_heads.min(by_ctx).clamp(1, MAX_CHUNKS)
+}
+
+/// The first position a row with `n_ctx` positions can see: the whole context, or,
+/// with a sliding window, only its last `window` positions.
+fn visible_start(sh: &Shape<'_>, n_ctx: usize) -> usize {
+    match sh.window {
+        Some(w) => n_ctx.saturating_sub(w),
+        None => 0,
+    }
 }
 
 /// One task: KV head `kh`, batch rows `b0..b1`, cache positions `p0..p1`.
@@ -215,7 +268,20 @@ pub fn task(sh: &Shape<'_>, p: &Plan, i: usize) -> Task {
     let kh = i / (p.pos_chunks * p.row_blocks);
     let (b0, b1) = (ri * sh.nb / p.row_blocks, (ri + 1) * sh.nb / p.row_blocks);
     let ctx = sh.start_pos + sh.nb;
-    let (p0, p1) = (pi * ctx / p.pos_chunks, (pi + 1) * ctx / p.pos_chunks);
+    // A single row partitions its visible positions — the even cut of the window when
+    // there is one, not of the context, so a windowed layer's tasks split the work it
+    // actually has. A multi-row task keeps the whole-context marker and walks each
+    // row's own visible chunks inside it ([`run_rows`]).
+    let (p0, p1) = if sh.nb == 1 {
+        let v0 = visible_start(sh, ctx);
+        let visible = ctx - v0;
+        (
+            v0 + pi * visible / p.pos_chunks,
+            v0 + (pi + 1) * visible / p.pos_chunks,
+        )
+    } else {
+        (0, ctx)
+    };
     Task { kh, b0, b1, p0, p1 }
 }
 
@@ -228,6 +294,10 @@ pub struct Scratch {
     pub o: Vec<f32>,
     pub m: Vec<f32>,
     pub l: Vec<f64>,
+    /// One tile's raw scores per query row, `row · BLOCK` floats, so every row of a
+    /// multi-row task can be scored against the shared K tile in one pass, and the
+    /// tile can be widened again as V before the mixes consume the scores.
+    s_tile: Vec<f32>,
     /// One row's per-chunk partials while [`run_rows`] walks its chunks: `MAX_CHUNKS`
     /// contiguous `(o, m, l)` triples per row, for at most `MAX_PARTIAL_ROWS` rows.
     partial_o: Vec<f32>,
@@ -245,6 +315,7 @@ impl Scratch {
             o: vec![0.0; max_rows * head_dim],
             m: vec![0.0; max_rows],
             l: vec![0.0; max_rows],
+            s_tile: vec![0.0; MAX_PARTIAL_ROWS * BLOCK],
             partial_o: vec![0.0; MAX_PARTIAL_ROWS * MAX_CHUNKS * head_dim],
             partial_m: vec![0.0; MAX_PARTIAL_ROWS * MAX_CHUNKS],
             partial_l: vec![0.0; MAX_PARTIAL_ROWS * MAX_CHUNKS],
@@ -257,6 +328,10 @@ impl Scratch {
 /// buffer, `[nb][n_head][head_dim]`, after RoPE. When the cache is rotated, the
 /// queries are rotated here into scratch; the cache's values stay rotated in `o`.
 pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: &mut Scratch) {
+    #[cfg(target_arch = "x86_64")]
+    if t.b1 - t.b0 == 1 && f16_direct(kv, sh) {
+        return run_f16(kv, layer, sh, q, t, sc);
+    }
     let hd = sh.head_dim;
     let gqa = sh.gqa();
     let qd = sh.q_dim();
@@ -278,10 +353,18 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
 
     // No row of this task sees past `start_pos + b1 − 1`.
     let p_end = t.p1.min(sh.start_pos + t.b1);
+    // A sliding window keeps every row from seeing further back than its own
+    // `n_ctx − window`; no row of the task sees further back than its first row's.
+    // Tiles entirely before it contribute nothing, so they are not decoded at all —
+    // this is the read a windowed layer would otherwise do over the whole context.
+    let p_min_task = match sh.window {
+        Some(w) => (sh.start_pos + t.b0 + 1).saturating_sub(w),
+        None => 0,
+    };
     // Tiles stay on the global `BLOCK` grid: a chunk may start inside one, and the
     // multi-row walker ([`run_rows`]) then scores the same tile for every row. Only
     // the part from `t.p0` on is read, so a chunk is never decoded twice.
-    let mut blk = t.p0;
+    let mut blk = t.p0.max(p_min_task / BLOCK * BLOCK);
     while blk < p_end {
         let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
         let tdec = crate::prof::detail().then(std::time::Instant::now);
@@ -360,6 +443,157 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
     }
 }
 
+/// [`run`] for one or more query rows of one KV head when the cache is f16 and the
+/// half-precision tile can be consumed in registers ([`f16_direct`]).
+///
+/// Every row of the task sees the same positions (one batch row), so the tile is
+/// scored for all of them — two rows share each decoded K vector — then each row runs
+/// its own online-softmax update, and the value mix shares each decoded V vector
+/// between two rows. The per-row arithmetic is the same as the scalar fallback's: a
+/// score is a dot over ascending dimension blocks, the softmax rescales at the same
+/// tile boundaries, and the mix accumulates ascending positions. Only the loaded
+/// operands are shared.
+#[cfg(target_arch = "x86_64")]
+fn run_f16(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: &mut Scratch) {
+    let hd = sh.head_dim;
+    let gqa = sh.gqa();
+    let qd = sh.q_dim();
+    let rows = (t.b1 - t.b0) * gqa;
+    for bi in 0..t.b1 - t.b0 {
+        for g in 0..gqa {
+            let h = t.kh * gqa + g;
+            let src = &q[(t.b0 + bi) * qd + h * hd..][..hd];
+            sc.q[(bi * gqa + g) * hd..][..hd].copy_from_slice(src);
+        }
+    }
+    sc.o[..rows * hd].fill(0.0);
+    sc.m[..rows].fill(f32::NEG_INFINITY);
+    sc.l[..rows].fill(0.0);
+
+    // One batch row, so every query row of this task has the same context and the
+    // same sliding-window start.
+    let n_ctx = sh.start_pos + t.b0 + 1;
+    let p_end = t.p1.min(n_ctx);
+    let p_min = match sh.window {
+        Some(w) => n_ctx.saturating_sub(w),
+        None => 0,
+    };
+    // The first tile a row can see; anything before it contributes no partial and is
+    // not decoded. Starting on the global `BLOCK` grid keeps the tile boundaries — and
+    // therefore every score's reduction tree — exactly the widened path's.
+    let mut blk = t.p0.max(p_min / BLOCK * BLOCK);
+    while blk < p_end {
+        let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
+        let vis_end = (blk + bn).min(n_ctx);
+        let start = blk.max(p_min);
+        // A tile wholly before the window still advances the tile loop; it has no
+        // visible position and must not be read.
+        if start >= vis_end {
+            blk += bn;
+            continue;
+        }
+        // A window can begin inside a tile, so the visible keys and values start at
+        // `j_start` in the cache's own halves.
+        let j_start = start - blk;
+        let vis = vis_end - start;
+        let kb = &kv.block_bytes(true, layer, t.kh, blk, bn)[j_start * hd * 2..];
+        let vb = &kv.block_bytes(false, layer, t.kh, blk, bn)[j_start * hd * 2..];
+        if vis > 0 {
+            let ts = crate::prof::detail().then(std::time::Instant::now);
+            for r in (0..rows).step_by(2) {
+                if r + 1 < rows {
+                    let (s_all, tail) = sc.s_tile.split_at_mut((r + 1) * BLOCK);
+                    let s = &mut s_all[r * BLOCK..];
+                    let s1 = &mut tail[..BLOCK];
+                    // SAFETY: AVX2+FMA+F16C checked; the tile holds `vis · hd` halves.
+                    unsafe {
+                        scores_f16_pair(
+                            &sc.q[r * hd..],
+                            &sc.q[(r + 1) * hd..],
+                            kb,
+                            vis,
+                            vis,
+                            hd,
+                            sh.scale,
+                            s,
+                            s1,
+                        )
+                    };
+                } else {
+                    let s = &mut sc.s_tile[r * BLOCK..(r + 1) * BLOCK];
+                    // SAFETY: features checked; the tile holds `vis · hd` halves.
+                    unsafe { scores_f16(&sc.q[r * hd..], kb, vis, hd, sh.scale, s) };
+                }
+            }
+            if let Some(t) = ts {
+                crate::prof::add_shared(
+                    crate::prof::Slot::AttnScores,
+                    t.elapsed().as_nanos() as u64,
+                );
+            }
+            // One online-softmax step per row, as in the widened path.
+            let mut alpha = [0.0f32; MAX_PARTIAL_ROWS];
+            let tsm = crate::prof::detail().then(std::time::Instant::now);
+            for r in 0..rows {
+                let s = &mut sc.s_tile[r * BLOCK..r * BLOCK + vis];
+                let m_old = sc.m[r];
+                let m_new = m_old.max(crate::vmath::max(s));
+                let psum = crate::vmath::exp_shift_sum(s, m_new);
+                alpha[r] = (m_old - m_new).exp();
+                sc.l[r] = sc.l[r] * alpha[r] as f64 + psum;
+                sc.m[r] = m_new;
+            }
+            if let Some(t) = tsm {
+                crate::prof::add_shared(
+                    crate::prof::Slot::AttnSoftmax,
+                    t.elapsed().as_nanos() as u64,
+                );
+            }
+            let tm = crate::prof::detail().then(std::time::Instant::now);
+            for r in (0..rows).step_by(2) {
+                let p = &sc.s_tile[r * BLOCK..r * BLOCK + vis];
+                if r + 1 < rows {
+                    let (lo, hi) = sc.o.split_at_mut((r + 1) * hd);
+                    let p1 = &sc.s_tile[(r + 1) * BLOCK..(r + 1) * BLOCK + vis];
+                    // A tile in `run_f16` never crosses a row chunk (`run` is one
+                    // chunk per task), so the end list holds one entry and no partial
+                    // is banked inside the tile.
+                    let one = [usize::MAX];
+                    // SAFETY: features checked; `vb` holds `vis · hd` halves.
+                    unsafe {
+                        mix_f16_pair(
+                            &mut lo[r * hd..],
+                            &mut hi[..hd],
+                            alpha[r],
+                            alpha[r + 1],
+                            p,
+                            p1,
+                            vis,
+                            vis,
+                            blk,
+                            0,
+                            0,
+                            &one,
+                            &one,
+                            vb,
+                            hd,
+                            &mut [],
+                            &mut [],
+                        )
+                    };
+                } else {
+                    // SAFETY: features checked; `vb` holds `vis · hd` halves.
+                    unsafe { mix_f16(&mut sc.o[r * hd..], alpha[r], p, vb, hd) };
+                }
+            }
+            if let Some(t) = tm {
+                crate::prof::add_shared(crate::prof::Slot::AttnMix, t.elapsed().as_nanos() as u64);
+            }
+        }
+        blk += bn;
+    }
+}
+
 /// Where a multi-row task's finished rows go.
 ///
 /// A task owns the `gqa` query heads of one KV head in rows `b0..b1`, and each of
@@ -388,6 +622,15 @@ pub trait RowSink {
 /// buffer stays bounded; a sub-block reads its K/V again, but the arithmetic of a row
 /// does not depend on which sub-block it landed in.
 ///
+/// # The query-row × position tile
+///
+/// A prefill task carries tens of query rows over the same KV head, and each of them
+/// scores the same tile of positions. The tile is therefore widened once and consumed
+/// by every row (`run_range`): keys first, scored for all rows, then values, mixed
+/// into all rows. Two rows share each loaded K vector (`scores_pair`) — the loads
+/// are shared, the accumulators, the chunk boundaries and the merge order are not, so
+/// a row's bits stay a function of its own query and context alone.
+///
 /// `out` receives only this task's query heads (`kh·gqa..kh·gqa+gqa`) of its rows.
 pub fn run_rows<O: RowSink>(
     kv: &KvCache,
@@ -409,9 +652,28 @@ pub fn run_rows<O: RowSink>(
     }
 }
 
+/// One row's visible part of the tile at `blk..blk + bn`: `(start, len)`, where
+/// `start` is the absolute position of the first visible score.
+///
+/// A row sees up to its own context (`blk` may lie past it, for a shorter row of the
+/// same call) and, with a sliding window, no further back than `n_ctx − window`.
+fn vis_range(sh: &Shape<'_>, n_ctx: usize, blk: usize, bn: usize) -> (usize, usize) {
+    if n_ctx <= blk {
+        return (blk, 0);
+    }
+    let p_min = match sh.window {
+        Some(w) => n_ctx.saturating_sub(w),
+        None => 0,
+    };
+    let start = blk.max(p_min);
+    let end = (blk + bn).min(n_ctx);
+    (start, end.saturating_sub(start))
+}
+
 /// One sub-block `r0..r1` of [`run_rows`]' query rows.
+///
 #[allow(clippy::too_many_arguments)]
-fn run_range<O: RowSink>(
+pub(crate) fn run_range<O: RowSink>(
     kv: &KvCache,
     layer: usize,
     sh: &Shape<'_>,
@@ -455,55 +717,147 @@ fn run_range<O: RowSink>(
         max_ctx = max_ctx.max(n_ctx);
     }
 
+    // Two rows can share one pass over a widened tile with the register-blocked
+    // score kernel, ten percent short of doubling the FMAs it issues.
+    let pairs = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            hd.is_multiple_of(8) && crate::cpu_has!("avx2") && crate::cpu_has!("fma")
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = hd;
+            false
+        }
+    };
     let p_end = t.p1.min(max_ctx);
-    let mut blk = t.p0;
+    // The cache's own f16 halves can be read in the kernels' registers, as the
+    // single-row path does: the widened f32 tile is then never built, and the rows
+    // read half the bytes. That only pays once a row's visible context is long
+    // enough that the extra `vcvtph2ps` work is cheaper than the bytes it saves
+    // (`DIRECT_MIN_VIS`); shorter prefill keeps the widened tile. The per-row
+    // arithmetic is unchanged either way — the f16 kernels are the same FMAs in the
+    // same order (their test pins them to the widened ones bit for bit), so a row
+    // keeps its bits whichever path it takes. A sliding window caps what any row can
+    // see, so the threshold is judged on the visible span, not the whole context: a
+    // 512-position window keeps the widened tile at any context length.
+    let direct = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let vis_span = match sh.window {
+                Some(w) => max_ctx.min(w),
+                None => max_ctx,
+            };
+            prefill_direct(kv, sh, vis_span)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            false
+        }
+    };
+    // No row of the task sees further back than the first row's window start; tiles
+    // before it contribute nothing, so they are never decoded.
+    let p_min_task = match sh.window {
+        Some(w) => (sh.start_pos + t.b0 + 1).saturating_sub(w),
+        None => 0,
+    };
+    let mut blk = t.p0.max(p_min_task / BLOCK * BLOCK);
     while blk < p_end {
-        let bn = BLOCK.min(p_end - blk);
-        kv.decode_block(true, layer, kh, blk, bn, &mut sc.kf);
-        kv.decode_block(false, layer, kh, blk, bn, &mut sc.vf);
+        let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
+        // The tile is walked in two phases over the same widened buffer: keys first,
+        // scored for every row, then values, mixed into every row's accumulator. One
+        // resident tile the size of `bn × hd` floats plus the task's banked scores is
+        // what keeps the row loop in L1; widening both K and V at once does not fit,
+        // and every row then reads both tiles from L2.
+        let k16 = direct.then(|| kv.block_bytes(true, layer, kh, blk, bn));
+        if k16.is_none() {
+            kv.decode_block(true, layer, kh, blk, bn, &mut sc.kf);
+        }
+        let mut lr = 0;
+        while lr < sub {
+            let (start, len) = vis_range(sh, ctx_of[lr], blk, bn);
+            // A second row can ride the same pass when it sees the tile from the same
+            // position: rows of one batch row always do, and different batch rows do
+            // when their windows happen to start together.
+            let paired = lr + 1 < sub && vis_range(sh, ctx_of[lr + 1], blk, bn).0 == start;
+            let len1 = if paired {
+                vis_range(sh, ctx_of[lr + 1], blk, bn).1
+            } else {
+                0
+            };
+            if len + len1 > 0 {
+                score_tile(
+                    sc,
+                    pairs,
+                    lr,
+                    paired,
+                    start - blk,
+                    len,
+                    len1,
+                    hd,
+                    sh.scale,
+                    k16,
+                );
+            }
+            lr += if paired { 2 } else { 1 };
+        }
+        // The values replace the keys in the same buffer; each row's own chunk
+        // boundaries cut its banked scores into the same pieces as before. Within the
+        // tile `pos` walks this row's chunks: usually once, twice when a chunk
+        // boundary falls inside the tile.
+        let v16 = direct.then(|| kv.block_bytes(false, layer, kh, blk, bn));
+        if v16.is_none() {
+            kv.decode_block(false, layer, kh, blk, bn, &mut sc.kf);
+        }
         for lr in 0..sub {
             let n_ctx = ctx_of[lr];
             if n_ctx <= blk {
                 continue;
             }
-            let p_min = match sh.window {
-                Some(w) => n_ctx.saturating_sub(w),
-                None => 0,
-            };
-            let vis_end = (blk + bn).min(n_ctx);
-            // Within the tile, `pos` walks this row's chunks: usually once, twice
-            // when a chunk boundary falls inside the tile.
+            let (vis_start, vis_len) = vis_range(sh, n_ctx, blk, bn);
+            let vis_end = vis_start + vis_len;
+            // The row's canonical chunks are the even cut of its visible positions.
+            let v0 = visible_start(sh, n_ctx);
+            let visible = n_ctx - v0;
             let mut pos = blk;
             while pos < vis_end {
                 let ci = cur[lr];
-                // The row's chunks are `[i·n_ctx/k, (i+1)·n_ctx/k)`.
-                let chunk_end = (ci + 1) * n_ctx / count[lr];
+                let chunk_end = v0 + (ci + 1) * visible / count[lr];
                 let end = vis_end.min(chunk_end);
-                let start = pos.max(p_min);
+                let start = pos.max(vis_start);
                 if start < end {
                     let j_start = start - blk;
                     let len = end - start;
-                    let s = &mut sc.s[..len];
-                    scores(
-                        &sc.q[lr * hd..][..hd],
-                        &sc.kf[j_start * hd..],
-                        len,
-                        hd,
-                        sh.scale,
-                        s,
-                    );
+                    let base = start - vis_start;
+                    let s = &mut sc.s_tile[lr * BLOCK + base..lr * BLOCK + base + len];
                     let m_old = sc.m[lr];
                     let m_new = m_old.max(crate::vmath::max(s));
                     let psum = crate::vmath::exp_shift_sum(s, m_new);
                     let alpha = (m_old - m_new).exp();
                     sc.l[lr] = sc.l[lr] * alpha as f64 + psum;
-                    mix(
-                        &mut sc.o[lr * hd..][..hd],
-                        alpha,
-                        s,
-                        &sc.vf[j_start * hd..],
-                        hd,
-                    );
+                    match v16 {
+                        #[cfg(target_arch = "x86_64")]
+                        Some(v) => {
+                            // SAFETY: F16 directness checked (`f16_direct`); `v` holds the
+                            // tile's halves and `s` the row's scores for the positions mixed.
+                            unsafe {
+                                mix_f16(
+                                    &mut sc.o[lr * hd..][..hd],
+                                    alpha,
+                                    s,
+                                    &v[j_start * hd * 2..],
+                                    hd,
+                                )
+                            }
+                        }
+                        _ => mix(
+                            &mut sc.o[lr * hd..][..hd],
+                            alpha,
+                            s,
+                            &sc.kf[j_start * hd..],
+                            hd,
+                        ),
+                    }
                     sc.m[lr] = m_new;
                 }
                 pos = end;
@@ -540,6 +894,156 @@ fn run_range<O: RowSink>(
         }
         let sink = sh.sinks.map(|s| s[h]);
         combine_row(&parts[..count[lr]], sink, rotated, out.head(bi, h));
+    }
+}
+
+/// One row of one KV head at its own position, as one task: the row is cut into its
+/// own canonical position chunks, each chunk is computed by [`run`] (so a one-row chunk
+/// takes the F16-direct kernel when the cache allows it), and the chunks are merged by
+/// [`combine_row`] in chunk order.
+///
+/// This is exactly what [`attend_scaled_window`]'s split path does for a solo row — the
+/// same chunk boundaries, the same per-chunk kernel choice, the same merge order — so a
+/// row's bits in a shared call are its solo bits, while the tasks of all the decoding
+/// users still share one parallel region.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_row<O: RowSink>(
+    kv: &KvCache,
+    layer: usize,
+    sh: &Shape<'_>,
+    q_row: &[f32],
+    kh: usize,
+    pos: usize,
+    sc: &mut Scratch,
+    out: &mut O,
+) {
+    let hd = sh.head_dim;
+    let gqa = sh.gqa();
+    let n_ctx = pos + 1;
+    let count = row_chunks(sh, n_ctx);
+    // The row alone, at its own position: the shape a solo decode would see.
+    let one = Shape {
+        nb: 1,
+        start_pos: pos,
+        ..*sh
+    };
+    // The same visible-position cut [`task`] makes for a solo row.
+    let v0 = visible_start(&one, n_ctx);
+    let visible = n_ctx - v0;
+    for ci in 0..count {
+        let t = Task {
+            kh,
+            b0: 0,
+            b1: 1,
+            p0: v0 + ci * visible / count,
+            p1: v0 + (ci + 1) * visible / count,
+        };
+        run(kv, layer, &one, q_row, &t, sc);
+        for g in 0..gqa {
+            save_part(sc, g, ci, hd);
+        }
+    }
+    for g in 0..gqa {
+        let h = kh * gqa + g;
+        let mut parts = [(&[][..], f32::NEG_INFINITY, 0.0f64); MAX_CHUNKS];
+        for (ci, p) in parts.iter_mut().enumerate().take(count) {
+            let slot = g * MAX_CHUNKS + ci;
+            *p = (
+                &sc.partial_o[slot * hd..(slot + 1) * hd],
+                sc.partial_m[slot],
+                sc.partial_l[slot],
+            );
+        }
+        let sink = sh.sinks.map(|s| s[h]);
+        combine_row(&parts[..count], sink, kv.rotated(), out.head(0, h));
+    }
+}
+
+/// Score `len` positions of the widened tile for row `lr` of the task's scratch, and
+/// `len1` for the next row when `paired` — both start at tile position `j_start`.
+///
+/// The two rows' score rows land in their own `s_tile` slices. Only the loaded K
+/// vectors are shared; each row's accumulator and reduction order are its own, so the
+/// pairing cannot move a bit.
+#[allow(clippy::too_many_arguments)]
+fn score_tile(
+    sc: &mut Scratch,
+    pairs: bool,
+    lr: usize,
+    paired: bool,
+    j_start: usize,
+    len: usize,
+    len1: usize,
+    hd: usize,
+    scale: f32,
+    // The tile's f16 halves in the cache, when the f16 kernels may read them; `None`
+    // means the widened f32 tile in `sc.kf`.
+    k16: Option<&[u8]>,
+) {
+    let Scratch { kf, q, s_tile, .. } = sc;
+    let (lo, mid) = s_tile.split_at_mut((lr + 1) * BLOCK);
+    let s0 = &mut lo[lr * BLOCK..lr * BLOCK + len];
+    let s1 = &mut mid[..len1];
+    if let Some(k) = k16 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // A window can start inside the tile, so the visible keys begin at
+            // `j_start` in the cache's own halves — the same position the widened
+            // tile's `kf[j_start * hd..]` starts at.
+            let k = &k[j_start * hd * 2..];
+            if paired && pairs {
+                // SAFETY: F16 directness checked; `k` holds `max(len, len1)` keys.
+                unsafe {
+                    scores_f16_pair(
+                        &q[lr * hd..],
+                        &q[(lr + 1) * hd..],
+                        k,
+                        len,
+                        len1,
+                        hd,
+                        scale,
+                        s0,
+                        s1,
+                    )
+                };
+                return;
+            }
+            // SAFETY: F16 directness checked; `k` holds the tile's keys.
+            unsafe {
+                scores_f16(&q[lr * hd..][..hd], k, len, hd, scale, s0);
+                if paired {
+                    scores_f16(&q[(lr + 1) * hd..][..hd], k, len1, hd, scale, s1);
+                }
+            }
+            return;
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = k;
+    }
+    let kf = &kf[j_start * hd..];
+    #[cfg(target_arch = "x86_64")]
+    if paired && pairs {
+        // SAFETY: AVX2+FMA checked; `kf` holds the rest of the tile and each `s` row
+        // holds `len`/`len1` floats.
+        unsafe {
+            scores_pair(
+                &q[lr * hd..],
+                &q[(lr + 1) * hd..],
+                kf,
+                len,
+                len1,
+                hd,
+                scale,
+                s0,
+                s1,
+            )
+        };
+        return;
+    }
+    let _ = pairs;
+    scores(&q[lr * hd..][..hd], kf, len, hd, scale, s0);
+    if paired {
+        scores(&q[(lr + 1) * hd..][..hd], kf, len1, hd, scale, s1);
     }
 }
 
@@ -628,7 +1132,691 @@ pub fn combine_row(
     }
 }
 
-/// `s[j] = scale · q·k_j` for the first `vis` keys of the decoded tile.
+/// Whether the F16 cache can be consumed directly by the register-blocked kernels.
+///
+/// F16C widens the stored halves in registers; AVX2+FMA do the arithmetic. A
+/// sliding window only moves where the visible range starts: the decode path skips
+/// every tile before it and offsets into the tile that holds it, so the same kernels
+/// read the same positions the widened path would.
+#[cfg(target_arch = "x86_64")]
+fn f16_direct(kv: &KvCache, sh: &Shape<'_>) -> bool {
+    kv.prec() == crate::kv::KvPrec::F16
+        && sh.head_dim.is_multiple_of(8)
+        && crate::cpu_has!("avx2")
+        && crate::cpu_has!("fma")
+        && crate::cpu_has!("f16c")
+}
+
+/// Whether a prefill task whose longest row sees `vis` positions reads the F16 cache
+/// directly instead of widening a tile ([`DIRECT_MIN_VIS`]).
+#[cfg(target_arch = "x86_64")]
+fn prefill_direct(kv: &KvCache, sh: &Shape<'_>, vis: usize) -> bool {
+    vis >= DIRECT_MIN_VIS && f16_direct(kv, sh)
+}
+
+/// Whether the sixteen-lane value-mix kernels can run for this head width.
+///
+/// Only the mix is widened. The score kernels keep the AVX2 tree on every tier: a
+/// 512-bit score row needs a 512-bit horizontal reduction, and on this host
+/// (Ryzen AI 9 HX 370) that costs more than the halved FMA and load count saves —
+/// measured at every visible length, the zmm score kernels were 30–70% slower than
+/// the AVX2 ones at head width 64. Keeping one score tree everywhere also makes a
+/// row's score bits independent of the path by construction. The mix is
+/// per-element and conversion-bound, so widening it cannot move a bit either; the
+/// tier's `mix` golden is the AVX2 one.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn avx512_attn(head_dim: usize) -> bool {
+    head_dim.is_multiple_of(16)
+        && crate::cpu_has!("avx512f")
+        && crate::cpu_has!("avx512dq")
+        && crate::cpu_has!("avx2")
+        && crate::cpu_has!("fma")
+        && crate::cpu_has!("f16c")
+}
+
+/// The per-key reduction tree of the four-key score block: `((d0+d1)+(d2+d3)) +
+/// ((d4+d5)+(d6+d7))`. A tail key reduced with this tree gets the same bits as one
+/// that sat in a block, so a key's score does not depend on the block boundaries —
+/// which is what lets positions be grouped by how many rows share them.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn hsum_grouped_ps(v: std::arch::x86_64::__m256) -> f32 {
+    use std::arch::x86_64::*;
+    let t = _mm256_hadd_ps(v, v);
+    let t = _mm256_hadd_ps(t, t);
+    let lo = _mm256_castps256_ps128(t);
+    let hi = _mm256_extractf128_ps(t, 1);
+    _mm_cvtss_f32(_mm_add_ss(lo, hi))
+}
+
+/// `s[j] = scale · q·k_j` with K read from the cache as f16 and widened in registers.
+///
+/// Four keys per pass, so two query rows can share each loaded K vector in
+/// [`scores_f16_pair`]; the per-key dot order is the widened kernel's (dimensions
+/// ascending in eight-lane blocks).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn scores_f16(q: &[f32], k: &[u8], vis: usize, hd: usize, scale: f32, s: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let qp = q.as_ptr();
+    let kp = k.as_ptr();
+    let sc = _mm_set1_ps(scale);
+    let mut j = 0;
+    while j + 4 <= vis {
+        let mut a = [_mm256_setzero_ps(); 4];
+        let mut i = 0;
+        while i < hd {
+            let qv = _mm256_loadu_ps(qp.add(i));
+            for (u, acc) in a.iter_mut().enumerate() {
+                let kv = _mm256_cvtph_ps(_mm_loadu_si128(
+                    kp.add(((j + u) * hd + i) * 2) as *const __m128i
+                ));
+                *acc = _mm256_fmadd_ps(qv, kv, *acc);
+            }
+            i += 8;
+        }
+        let t0 = _mm256_hadd_ps(a[0], a[1]);
+        let t1 = _mm256_hadd_ps(a[2], a[3]);
+        let u0 = _mm256_hadd_ps(t0, t1);
+        let lo = _mm256_castps256_ps128(u0);
+        let hi = _mm256_extractf128_ps(u0, 1);
+        _mm_storeu_ps(s.as_mut_ptr().add(j), _mm_mul_ps(_mm_add_ps(lo, hi), sc));
+        j += 4;
+    }
+    while j < vis {
+        let mut acc = _mm256_setzero_ps();
+        let mut i = 0;
+        while i < hd {
+            acc = _mm256_fmadd_ps(
+                _mm256_loadu_ps(qp.add(i)),
+                _mm256_cvtph_ps(_mm_loadu_si128(kp.add((j * hd + i) * 2) as *const __m128i)),
+                acc,
+            );
+            i += 8;
+        }
+        s[j] = hsum_grouped_ps(acc) * scale;
+        j += 1;
+    }
+}
+
+/// Two query rows scored from one decoded K vector.
+///
+/// Each row's accumulator takes the same `fma(q_row, k, acc)` in the same order as
+/// [`scores_f16`], so the sharing cannot change a bit. Rows may have different visible
+/// lengths; beyond a row's own length the K is read but its score is not stored.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn scores_f16_pair(
+    q0: &[f32],
+    q1: &[f32],
+    k: &[u8],
+    vis0: usize,
+    vis1: usize,
+    hd: usize,
+    scale: f32,
+    s0: &mut [f32],
+    s1: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+    let vis = vis0.max(vis1);
+    let common = vis0.min(vis1);
+    let (q0p, q1p, kp) = (q0.as_ptr(), q1.as_ptr(), k.as_ptr());
+    let sc = _mm_set1_ps(scale);
+    let mut j = 0;
+    while j + 4 <= common {
+        let mut a0 = [_mm256_setzero_ps(); 4];
+        let mut a1 = [_mm256_setzero_ps(); 4];
+        let mut i = 0;
+        while i < hd {
+            let qv0 = _mm256_loadu_ps(q0p.add(i));
+            let qv1 = _mm256_loadu_ps(q1p.add(i));
+            for u in 0..4 {
+                let kv = _mm256_cvtph_ps(_mm_loadu_si128(
+                    kp.add(((j + u) * hd + i) * 2) as *const __m128i
+                ));
+                a0[u] = _mm256_fmadd_ps(qv0, kv, a0[u]);
+                a1[u] = _mm256_fmadd_ps(qv1, kv, a1[u]);
+            }
+            i += 8;
+        }
+        let t0 = _mm256_hadd_ps(a0[0], a0[1]);
+        let t1 = _mm256_hadd_ps(a0[2], a0[3]);
+        let u0 = _mm256_hadd_ps(t0, t1);
+        let lo = _mm256_castps256_ps128(u0);
+        let hi = _mm256_extractf128_ps(u0, 1);
+        if j + 4 <= vis0 {
+            _mm_storeu_ps(s0.as_mut_ptr().add(j), _mm_mul_ps(_mm_add_ps(lo, hi), sc));
+        }
+        let t0 = _mm256_hadd_ps(a1[0], a1[1]);
+        let t1 = _mm256_hadd_ps(a1[2], a1[3]);
+        let u0 = _mm256_hadd_ps(t0, t1);
+        let lo = _mm256_castps256_ps128(u0);
+        let hi = _mm256_extractf128_ps(u0, 1);
+        if j + 4 <= vis1 {
+            _mm_storeu_ps(s1.as_mut_ptr().add(j), _mm_mul_ps(_mm_add_ps(lo, hi), sc));
+        }
+        j += 4;
+    }
+    while j < vis {
+        if j < vis0 {
+            let mut acc = _mm256_setzero_ps();
+            let mut i = 0;
+            while i < hd {
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(q0p.add(i)),
+                    _mm256_cvtph_ps(_mm_loadu_si128(kp.add((j * hd + i) * 2) as *const __m128i)),
+                    acc,
+                );
+                i += 8;
+            }
+            s0[j] = hsum_grouped_ps(acc) * scale;
+        }
+        if j < vis1 {
+            let mut acc = _mm256_setzero_ps();
+            let mut i = 0;
+            while i < hd {
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(q1p.add(i)),
+                    _mm256_cvtph_ps(_mm_loadu_si128(kp.add((j * hd + i) * 2) as *const __m128i)),
+                    acc,
+                );
+                i += 8;
+            }
+            s1[j] = hsum_grouped_ps(acc) * scale;
+        }
+        j += 1;
+    }
+}
+
+/// `o = α·o + Σ_j p_j · v_j` with V read from the cache as f16 and widened in
+/// registers. The output accumulators stay in registers across the whole block of
+/// positions; `j` accumulates ascending exactly as the widened kernel does.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn mix_f16_avx2(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
+    use std::arch::x86_64::*;
+    let al = _mm256_set1_ps(alpha);
+    let vp = v.as_ptr();
+    let mut d0 = 0;
+    while d0 + 32 <= hd {
+        let mut acc = [_mm256_setzero_ps(); 4];
+        for (l, a) in acc.iter_mut().enumerate() {
+            *a = _mm256_mul_ps(_mm256_loadu_ps(o.as_ptr().add(d0 + l * 8)), al);
+        }
+        for (j, &w) in p.iter().enumerate() {
+            let wv = _mm256_set1_ps(w);
+            for (l, a) in acc.iter_mut().enumerate() {
+                *a = _mm256_fmadd_ps(
+                    wv,
+                    _mm256_cvtph_ps(_mm_loadu_si128(
+                        vp.add((j * hd + d0 + l * 8) * 2) as *const __m128i
+                    )),
+                    *a,
+                );
+            }
+        }
+        for (l, a) in acc.iter().enumerate() {
+            _mm256_storeu_ps(o.as_mut_ptr().add(d0 + l * 8), *a);
+        }
+        d0 += 32;
+    }
+    while d0 < hd {
+        let mut acc = _mm256_mul_ps(_mm256_loadu_ps(o.as_ptr().add(d0)), al);
+        for (j, &w) in p.iter().enumerate() {
+            acc = _mm256_fmadd_ps(
+                _mm256_set1_ps(w),
+                _mm256_cvtph_ps(_mm_loadu_si128(vp.add((j * hd + d0) * 2) as *const __m128i)),
+                acc,
+            );
+        }
+        _mm256_storeu_ps(o.as_mut_ptr().add(d0), acc);
+        d0 += 8;
+    }
+}
+
+/// Two rows' value mixes sharing each decoded V vector, with per-row chunk-boundary
+/// resets. `ends[ci]` is the absolute end of chunk `ci` (see [`row_chunks`]); when a
+/// row's position scan reaches one, its accumulator is banked into `part` at that
+/// chunk's slot and restarts at zero — the same bank-and-restart [`run`] does per
+/// piece, in the same position order.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_f16_pair_avx2(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    vis0: usize,
+    vis1: usize,
+    blk: usize,
+    cur0: usize,
+    cur1: usize,
+    ends0: &[usize],
+    ends1: &[usize],
+    v: &[u8],
+    hd: usize,
+    part0: &mut [f32],
+    part1: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+    let vis = vis0.max(vis1);
+    if vis == 0 {
+        return;
+    }
+    let vp = v.as_ptr();
+    let (al0, al1) = (_mm256_set1_ps(alpha0), _mm256_set1_ps(alpha1));
+    let mut d0 = 0;
+    while d0 < hd {
+        let lanes = (hd - d0).min(32) / 8;
+        let mut a0 = [_mm256_setzero_ps(); 4];
+        let mut a1 = [_mm256_setzero_ps(); 4];
+        if vis0 > 0 {
+            for (l, a) in a0.iter_mut().enumerate().take(lanes) {
+                *a = _mm256_mul_ps(_mm256_loadu_ps(o0.as_ptr().add(d0 + l * 8)), al0);
+            }
+        }
+        if vis1 > 0 {
+            for (l, a) in a1.iter_mut().enumerate().take(lanes) {
+                *a = _mm256_mul_ps(_mm256_loadu_ps(o1.as_ptr().add(d0 + l * 8)), al1);
+            }
+        }
+        let (mut c0, mut c1) = (cur0, cur1);
+        for j in 0..vis {
+            if j < vis0 {
+                let wv = _mm256_set1_ps(p0[j]);
+                for (l, a) in a0.iter_mut().enumerate().take(lanes) {
+                    *a = _mm256_fmadd_ps(
+                        wv,
+                        _mm256_cvtph_ps(_mm_loadu_si128(
+                            vp.add((j * hd + d0 + l * 8) * 2) as *const __m128i
+                        )),
+                        *a,
+                    );
+                }
+                while c0 + 1 < ends0.len() && blk + j + 1 >= ends0[c0] {
+                    for (l, a) in a0.iter().enumerate().take(lanes) {
+                        _mm256_storeu_ps(part0.as_mut_ptr().add(c0 * hd + d0 + l * 8), *a);
+                    }
+                    a0 = [_mm256_setzero_ps(); 4];
+                    c0 += 1;
+                }
+            }
+            if j < vis1 {
+                let wv = _mm256_set1_ps(p1[j]);
+                for (l, a) in a1.iter_mut().enumerate().take(lanes) {
+                    *a = _mm256_fmadd_ps(
+                        wv,
+                        _mm256_cvtph_ps(_mm_loadu_si128(
+                            vp.add((j * hd + d0 + l * 8) * 2) as *const __m128i
+                        )),
+                        *a,
+                    );
+                }
+                while c1 + 1 < ends1.len() && blk + j + 1 >= ends1[c1] {
+                    for (l, a) in a1.iter().enumerate().take(lanes) {
+                        _mm256_storeu_ps(part1.as_mut_ptr().add(c1 * hd + d0 + l * 8), *a);
+                    }
+                    a1 = [_mm256_setzero_ps(); 4];
+                    c1 += 1;
+                }
+            }
+        }
+        if vis0 > 0 {
+            for (l, a) in a0.iter().enumerate().take(lanes) {
+                _mm256_storeu_ps(o0.as_mut_ptr().add(d0 + l * 8), *a);
+            }
+        }
+        if vis1 > 0 {
+            for (l, a) in a1.iter().enumerate().take(lanes) {
+                _mm256_storeu_ps(o1.as_mut_ptr().add(d0 + l * 8), *a);
+            }
+        }
+        d0 += lanes * 8;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The AVX-512 tier's sixteen-lane kernels.
+//
+// Every path on the tier — solo decode, the prefill tile, and a mapped
+// multi-user row — takes these, and the f32-tile and F16-direct variants are the
+// same arithmetic with the widening moved into the load. A row's bits therefore
+// depend on neither the path nor the width.
+
+/// `o = α·o + Σ_j p_j · v_j` over a widened f32 tile, sixteen lanes at a time.
+/// The accumulators stay in registers across the positions; `j` accumulates
+/// ascending, exactly as [`mix_avx2`] does.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512dq,avx2,fma,f16c")]
+unsafe fn mix_avx512(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
+    use std::arch::x86_64::*;
+    let al = _mm512_set1_ps(alpha);
+    let vp = vf.as_ptr();
+    let op = o.as_mut_ptr();
+    let mut d0 = 0;
+    while d0 + 64 <= hd {
+        let mut acc = [_mm512_setzero_ps(); 4];
+        for (l, a) in acc.iter_mut().enumerate() {
+            *a = _mm512_mul_ps(_mm512_loadu_ps(op.add(d0 + l * 16)), al);
+        }
+        for (j, &w) in p.iter().enumerate() {
+            let wv = _mm512_set1_ps(w);
+            for (l, a) in acc.iter_mut().enumerate() {
+                *a = _mm512_fmadd_ps(wv, _mm512_loadu_ps(vp.add(j * hd + d0 + l * 16)), *a);
+            }
+        }
+        for (l, a) in acc.iter().enumerate() {
+            _mm512_storeu_ps(op.add(d0 + l * 16), *a);
+        }
+        d0 += 64;
+    }
+    while d0 < hd {
+        let mut acc = _mm512_mul_ps(_mm512_loadu_ps(op.add(d0)), al);
+        for (j, &w) in p.iter().enumerate() {
+            acc = _mm512_fmadd_ps(_mm512_set1_ps(w), _mm512_loadu_ps(vp.add(j * hd + d0)), acc);
+        }
+        _mm512_storeu_ps(op.add(d0), acc);
+        d0 += 16;
+    }
+}
+
+/// [`mix_avx512`] with V read as f16 halves; same operands and order.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512dq,avx2,fma,f16c")]
+unsafe fn mix_f16_avx512(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
+    use std::arch::x86_64::*;
+    let al = _mm512_set1_ps(alpha);
+    let vp = v.as_ptr();
+    let op = o.as_mut_ptr();
+    let mut d0 = 0;
+    while d0 + 64 <= hd {
+        let mut acc = [_mm512_setzero_ps(); 4];
+        for (l, a) in acc.iter_mut().enumerate() {
+            *a = _mm512_mul_ps(_mm512_loadu_ps(op.add(d0 + l * 16)), al);
+        }
+        for (j, &w) in p.iter().enumerate() {
+            let wv = _mm512_set1_ps(w);
+            for (l, a) in acc.iter_mut().enumerate() {
+                *a = _mm512_fmadd_ps(
+                    wv,
+                    _mm512_cvtph_ps(_mm256_loadu_si256(
+                        vp.add((j * hd + d0 + l * 16) * 2) as *const __m256i
+                    )),
+                    *a,
+                );
+            }
+        }
+        for (l, a) in acc.iter().enumerate() {
+            _mm512_storeu_ps(op.add(d0 + l * 16), *a);
+        }
+        d0 += 64;
+    }
+    while d0 < hd {
+        let mut acc = _mm512_mul_ps(_mm512_loadu_ps(op.add(d0)), al);
+        for (j, &w) in p.iter().enumerate() {
+            acc = _mm512_fmadd_ps(
+                _mm512_set1_ps(w),
+                _mm512_cvtph_ps(_mm256_loadu_si256(
+                    vp.add((j * hd + d0) * 2) as *const __m256i
+                )),
+                acc,
+            );
+        }
+        _mm512_storeu_ps(op.add(d0), acc);
+        d0 += 16;
+    }
+}
+
+/// Two rows' sixteen-lane value mixes with the per-row chunk-boundary resets of
+/// [`mix_f16_pair_avx2`]. Each output element sees the same ascending-position
+/// `α·o + p_j·v_j` as every other mix kernel on the tier.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512dq,avx2,fma,f16c")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_f16_pair_avx512(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    vis0: usize,
+    vis1: usize,
+    blk: usize,
+    cur0: usize,
+    cur1: usize,
+    ends0: &[usize],
+    ends1: &[usize],
+    v: &[u8],
+    hd: usize,
+    part0: &mut [f32],
+    part1: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+    let vis = vis0.max(vis1);
+    if vis == 0 {
+        return;
+    }
+    let vp = v.as_ptr();
+    let (al0, al1) = (_mm512_set1_ps(alpha0), _mm512_set1_ps(alpha1));
+    let mut d0 = 0;
+    while d0 < hd {
+        let lanes = (hd - d0).min(64) / 16;
+        let mut a0 = [_mm512_setzero_ps(); 4];
+        let mut a1 = [_mm512_setzero_ps(); 4];
+        if vis0 > 0 {
+            for (l, a) in a0.iter_mut().enumerate().take(lanes) {
+                *a = _mm512_mul_ps(_mm512_loadu_ps(o0.as_ptr().add(d0 + l * 16)), al0);
+            }
+        }
+        if vis1 > 0 {
+            for (l, a) in a1.iter_mut().enumerate().take(lanes) {
+                *a = _mm512_mul_ps(_mm512_loadu_ps(o1.as_ptr().add(d0 + l * 16)), al1);
+            }
+        }
+        let (mut c0, mut c1) = (cur0, cur1);
+        for j in 0..vis {
+            if j < vis0 {
+                let wv = _mm512_set1_ps(p0[j]);
+                for (l, a) in a0.iter_mut().enumerate().take(lanes) {
+                    *a = _mm512_fmadd_ps(
+                        wv,
+                        _mm512_cvtph_ps(_mm256_loadu_si256(
+                            vp.add((j * hd + d0 + l * 16) * 2) as *const __m256i
+                        )),
+                        *a,
+                    );
+                }
+                while c0 + 1 < ends0.len() && blk + j + 1 >= ends0[c0] {
+                    for (l, a) in a0.iter().enumerate().take(lanes) {
+                        _mm512_storeu_ps(part0.as_mut_ptr().add(c0 * hd + d0 + l * 16), *a);
+                    }
+                    a0 = [_mm512_setzero_ps(); 4];
+                    c0 += 1;
+                }
+            }
+            if j < vis1 {
+                let wv = _mm512_set1_ps(p1[j]);
+                for (l, a) in a1.iter_mut().enumerate().take(lanes) {
+                    *a = _mm512_fmadd_ps(
+                        wv,
+                        _mm512_cvtph_ps(_mm256_loadu_si256(
+                            vp.add((j * hd + d0 + l * 16) * 2) as *const __m256i
+                        )),
+                        *a,
+                    );
+                }
+                while c1 + 1 < ends1.len() && blk + j + 1 >= ends1[c1] {
+                    for (l, a) in a1.iter().enumerate().take(lanes) {
+                        _mm512_storeu_ps(part1.as_mut_ptr().add(c1 * hd + d0 + l * 16), *a);
+                    }
+                    a1 = [_mm512_setzero_ps(); 4];
+                    c1 += 1;
+                }
+            }
+        }
+        if vis0 > 0 {
+            for (l, a) in a0.iter().enumerate().take(lanes) {
+                _mm512_storeu_ps(o0.as_mut_ptr().add(d0 + l * 16), *a);
+            }
+        }
+        if vis1 > 0 {
+            for (l, a) in a1.iter().enumerate().take(lanes) {
+                _mm512_storeu_ps(o1.as_mut_ptr().add(d0 + l * 16), *a);
+            }
+        }
+        d0 += lanes * 16;
+    }
+}
+
+/// [`mix_f16_avx512`] or [`mix_f16_avx2`], by the tier.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn mix_f16(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
+    if avx512_attn(hd) {
+        return mix_f16_avx512(o, alpha, p, v, hd);
+    }
+    mix_f16_avx2(o, alpha, p, v, hd)
+}
+
+/// [`mix_f16_pair_avx512`] or [`mix_f16_pair_avx2`], by the tier.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_f16_pair(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    vis0: usize,
+    vis1: usize,
+    blk: usize,
+    cur0: usize,
+    cur1: usize,
+    ends0: &[usize],
+    ends1: &[usize],
+    v: &[u8],
+    hd: usize,
+    part0: &mut [f32],
+    part1: &mut [f32],
+) {
+    if avx512_attn(hd) {
+        return mix_f16_pair_avx512(
+            o0, o1, alpha0, alpha1, p0, p1, vis0, vis1, blk, cur0, cur1, ends0, ends1, v, hd,
+            part0, part1,
+        );
+    }
+    mix_f16_pair_avx2(
+        o0, o1, alpha0, alpha1, p0, p1, vis0, vis1, blk, cur0, cur1, ends0, ends1, v, hd, part0,
+        part1,
+    )
+}
+
+/// Two query rows scored from one widened K tile.
+///
+/// Four keys per pass and four accumulators per row, so the loaded K vectors are
+/// shared and each row adds them in the same order as [`scores`] does. `s0`/`s1` hold
+/// `vis0`/`vis1` scores of the same starting position. Groups are taken only while
+/// both rows see four whole keys; the shorter row's last keys, and the longer row's
+/// keys past them, are scored one at a time with the same tree. The per-key reduction
+/// is the widened kernel's `((d0+d1)+(d2+d3))+((d4+d5)+(d6+d7))`, so pairing changes
+/// no bit, whatever the two visible lengths.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn scores_pair(
+    q0: &[f32],
+    q1: &[f32],
+    kf: &[f32],
+    vis0: usize,
+    vis1: usize,
+    hd: usize,
+    scale: f32,
+    s0: &mut [f32],
+    s1: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+    let (q0p, q1p, kp) = (q0.as_ptr(), q1.as_ptr(), kf.as_ptr());
+    let sc = _mm256_set1_ps(scale);
+    let vis = vis0.max(vis1);
+    // Groups only where both rows see the whole group; a row's keys past the other
+    // row's last group are scored one at a time below (same reduction tree).
+    let common = vis0.min(vis1);
+    let mut j = 0;
+    while j + 4 <= common {
+        let mut a0 = [_mm256_setzero_ps(); 4];
+        let mut a1 = [_mm256_setzero_ps(); 4];
+        let mut i = 0;
+        while i < hd {
+            let qv0 = _mm256_loadu_ps(q0p.add(i));
+            let qv1 = _mm256_loadu_ps(q1p.add(i));
+            let mut kv = [_mm256_setzero_ps(); 4];
+            for (u, k) in kv.iter_mut().enumerate() {
+                *k = _mm256_loadu_ps(kp.add((j + u) * hd + i));
+            }
+            for u in 0..4 {
+                a0[u] = _mm256_fmadd_ps(qv0, kv[u], a0[u]);
+                a1[u] = _mm256_fmadd_ps(qv1, kv[u], a1[u]);
+            }
+            i += 8;
+        }
+        let t0 = _mm256_hadd_ps(a0[0], a0[1]);
+        let t1 = _mm256_hadd_ps(a0[2], a0[3]);
+        let u0 = _mm256_hadd_ps(t0, t1);
+        let lo = _mm256_castps256_ps128(u0);
+        let hi = _mm256_extractf128_ps(u0, 1);
+        _mm_storeu_ps(
+            s0.as_mut_ptr().add(j),
+            _mm_mul_ps(_mm_add_ps(lo, hi), _mm256_castps256_ps128(sc)),
+        );
+        let t0 = _mm256_hadd_ps(a1[0], a1[1]);
+        let t1 = _mm256_hadd_ps(a1[2], a1[3]);
+        let u0 = _mm256_hadd_ps(t0, t1);
+        let lo = _mm256_castps256_ps128(u0);
+        let hi = _mm256_extractf128_ps(u0, 1);
+        _mm_storeu_ps(
+            s1.as_mut_ptr().add(j),
+            _mm_mul_ps(_mm_add_ps(lo, hi), _mm256_castps256_ps128(sc)),
+        );
+        j += 4;
+    }
+    while j < vis {
+        if j < vis0 {
+            let mut acc = _mm256_setzero_ps();
+            let mut i = 0;
+            while i < hd {
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(q0p.add(i)),
+                    _mm256_loadu_ps(kp.add(j * hd + i)),
+                    acc,
+                );
+                i += 8;
+            }
+            s0[j] = hsum_grouped_ps(acc) * scale;
+        }
+        if j < vis1 {
+            let mut acc = _mm256_setzero_ps();
+            let mut i = 0;
+            while i < hd {
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(q1p.add(i)),
+                    _mm256_loadu_ps(kp.add(j * hd + i)),
+                    acc,
+                );
+                i += 8;
+            }
+            s1[j] = hsum_grouped_ps(acc) * scale;
+        }
+        j += 1;
+    }
+}
 fn scores(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32]) {
     #[cfg(target_arch = "x86_64")]
     {
@@ -647,6 +1835,10 @@ fn scores(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32
 fn mix(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
     #[cfg(target_arch = "x86_64")]
     {
+        if avx512_attn(hd) {
+            // SAFETY: AVX-512F+FMA checked; `vf` holds at least `p.len() · hd` floats.
+            return unsafe { mix_avx512(o, alpha, p, vf, hd) };
+        }
         if hd.is_multiple_of(8) && crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
             // SAFETY: features checked; `vf` holds at least `p.len() · hd` floats.
             return unsafe { mix_avx2(o, alpha, p, vf, hd) };
@@ -707,7 +1899,7 @@ unsafe fn scores_avx2(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, 
             );
             i += 8;
         }
-        s[j] = crate::simd::hsum_ps(acc) * scale;
+        s[j] = hsum_grouped_ps(acc) * scale;
         j += 1;
     }
 }
@@ -718,26 +1910,39 @@ unsafe fn mix_avx2(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) 
     use std::arch::x86_64::*;
     let al = _mm256_set1_ps(alpha);
     let vp = vf.as_ptr();
+    let op = o.as_mut_ptr();
     // Sixty-four dimensions at a time: eight accumulators stay in registers for the
-    // whole block of values.
+    // whole block of values, and each position's eight value vectors are loaded into
+    // registers before they are used, so the loads do not sit in the FMAs' shadow.
     let mut d0 = 0;
-    while d0 < hd {
-        let lanes = (hd - d0).min(64) / 8;
+    while d0 + 64 <= hd {
         let mut acc = [_mm256_setzero_ps(); 8];
-        for (l, a) in acc.iter_mut().enumerate().take(lanes) {
-            *a = _mm256_mul_ps(_mm256_loadu_ps(o.as_ptr().add(d0 + l * 8)), al);
+        for l in 0..8 {
+            acc[l] = _mm256_mul_ps(_mm256_loadu_ps(op.add(d0 + l * 8)), al);
         }
         for (j, &w) in p.iter().enumerate() {
             let wv = _mm256_set1_ps(w);
             let row = vp.add(j * hd + d0);
-            for (l, a) in acc.iter_mut().enumerate().take(lanes) {
-                *a = _mm256_fmadd_ps(wv, _mm256_loadu_ps(row.add(l * 8)), *a);
+            let mut v = [_mm256_setzero_ps(); 8];
+            for l in 0..8 {
+                v[l] = _mm256_loadu_ps(row.add(l * 8));
+            }
+            for l in 0..8 {
+                acc[l] = _mm256_fmadd_ps(wv, v[l], acc[l]);
             }
         }
-        for (l, a) in acc.iter().enumerate().take(lanes) {
-            _mm256_storeu_ps(o.as_mut_ptr().add(d0 + l * 8), *a);
+        for l in 0..8 {
+            _mm256_storeu_ps(op.add(d0 + l * 8), acc[l]);
         }
-        d0 += lanes * 8;
+        d0 += 64;
+    }
+    while d0 < hd {
+        let mut acc = _mm256_mul_ps(_mm256_loadu_ps(op.add(d0)), al);
+        for (j, &w) in p.iter().enumerate() {
+            acc = _mm256_fmadd_ps(_mm256_set1_ps(w), _mm256_loadu_ps(vp.add(j * hd + d0)), acc);
+        }
+        _mm256_storeu_ps(op.add(d0), acc);
+        d0 += 8;
     }
 }
 
@@ -1240,6 +2445,42 @@ mod tests {
         }
     }
 
+    /// A windowed single row assigns only its visible positions, each exactly once,
+    /// and never reads a tile before them.
+    #[test]
+    fn a_windowed_plan_covers_every_visible_position_exactly_once() {
+        let sh = Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 1,
+            start_pos: 4095,
+            scale: 0.1,
+            window: Some(320),
+            sinks: None,
+        };
+        let p = plan(&sh, 4);
+        assert!(p.pos_chunks > 1, "{p:?}");
+        let ctx = sh.start_pos + sh.nb;
+        let v0 = visible_start(&sh, ctx);
+        let mut seen = vec![0u32; ctx];
+        for i in 0..p.tasks(&sh) {
+            let t = task(&sh, &p, i);
+            // Positions are per KV head; the first head's tasks must cover the row.
+            if t.kh != 0 {
+                continue;
+            }
+            for pos in t.p0..t.p1 {
+                seen[pos] += 1;
+            }
+        }
+        assert!(seen[..v0].iter().all(|&c| c == 0), "read before the window");
+        assert!(
+            seen[v0..].iter().all(|&c| c == 1),
+            "visible positions were not covered exactly once"
+        );
+    }
+
     /// The invariant this whole partition exists for: the same cache row, the same
     /// query, the same bits — whether it is one row in the call or one of many.
     ///
@@ -1360,5 +2601,541 @@ mod tests {
             lens.iter().max().unwrap() - lens.iter().min().unwrap() <= 1,
             "{lens:?}"
         );
+    }
+
+    fn same_bits(a: &[f32], b: &[f32]) -> bool {
+        a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    /// One pass of an `n`-position prompt in pieces of `chunk` rows on a pool of
+    /// `threads`, the way the engine reads it.
+    fn read_prompt(
+        cfg: &crate::model::Config,
+        kv: &KvCache,
+        q: &[f32],
+        n: usize,
+        chunk: usize,
+        threads: usize,
+    ) -> Vec<f32> {
+        use crate::blocks::attn::{attend, AttnScratch};
+        use crate::pool::Pool;
+        use crate::state::StepStats;
+        let pool = Pool::new(threads);
+        let mut scratch = AttnScratch::new(cfg, chunk, threads);
+        let mut stats = StepStats::default();
+        let qd = cfg.q_dim();
+        let mut out = vec![0.0f32; n * qd];
+        let mut start = 0;
+        while start < n {
+            let nb = chunk.min(n - start);
+            let mut xb = vec![0.0f32; nb * qd];
+            attend(
+                cfg,
+                &mut scratch,
+                &q[start * qd..],
+                &mut xb,
+                kv,
+                &pool,
+                0,
+                nb,
+                start,
+                0,
+                &mut stats,
+            );
+            out[start * qd..(start + nb) * qd].copy_from_slice(&xb);
+            start += nb;
+        }
+        out
+    }
+
+    /// The hard rule of the prefill tiling: a row's output bits are a function of its
+    /// query, its own context and the model shape alone — never of the prompt chunk it
+    /// was read in or of the pool width. Read every row of a 512-position context as a
+    /// solo decode (one row per call: the F16-direct path) and then as prompt pieces of
+    /// 3, 16 and 64 rows on pools of 1, 2, 4 and 8 workers (the tiled prefill path,
+    /// where `gqa` rows share every loaded K and V vector). All must agree bit for bit.
+    ///
+    /// Three geometries: Llama-3.2's 8×2/64 (four rows per KV head, so every pair is
+    /// within one batch row), a 9×3/64 (three rows per head, so a pair straddles two
+    /// batch rows with different context lengths), and Qwen2.5-0.5B's 14×2/64 (seven).
+    #[test]
+    fn prefill_tiles_are_bit_identical_to_a_solo_decode() {
+        use crate::model::Config;
+
+        let n = 512usize;
+
+        let mut failures = Vec::new();
+        for &(n_head, n_kv_head, hd) in &[(8usize, 2usize, 64usize), (9, 3, 64), (14, 2, 64)] {
+            let cfg = Config {
+                arch_name: "test",
+                rope_neox: false,
+                n_layer: 1,
+                n_kv_layer: 1,
+                n_head,
+                n_kv_head,
+                head_dim: hd,
+                d_model: n_head * hd,
+                n_ff: 4 * n_head * hd,
+                n_vocab: 32,
+                rope_dim: hd,
+                eps: 1e-5,
+                rope_base: 10_000.0,
+                ctx_train: 1024,
+                rope_yarn: None,
+            };
+            let mut kv = KvCache::new(KvPrec::F16, 1, n_kv_head, hd, n + 1);
+            for p in 0..n {
+                for h in 0..n_kv_head {
+                    let k = prng((p * 31 + h * 7 + 1) as u64, hd);
+                    let v = prng((p * 17 + h * 5 + 2) as u64, hd);
+                    kv.put(0, h, p, &k, &v);
+                }
+            }
+            kv.advance(n);
+            let qd = cfg.q_dim();
+            let q = prng(99, n * qd);
+            // The reference is the decode path: one row, on the widest pool.
+            let want = read_prompt(&cfg, &kv, &q, n, 1, 4);
+            for &chunk in &[3usize, 16, 64] {
+                for &threads in &[1usize, 2, 4, 8] {
+                    let got = read_prompt(&cfg, &kv, &q, n, chunk, threads);
+                    if let Some(row) = (0..n).find(|&row| {
+                        !same_bits(
+                            &got[row * qd..(row + 1) * qd],
+                            &want[row * qd..(row + 1) * qd],
+                        )
+                    }) {
+                        let at = (0..qd)
+                            .find(|&d| got[row * qd + d].to_bits() != want[row * qd + d].to_bits())
+                            .unwrap();
+                        failures.push(format!(
+                            "{n_head}x{n_kv_head}/{hd}: chunk {chunk}, {threads} threads: row {row} differs at {at}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "the prompt tiling changed a row:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// The prefill F16-direct switch has a context threshold ([`DIRECT_MIN_VIS`]):
+    /// below it a task widens the tile, at and above it the task reads the cache's
+    /// halves. Crossing the line must not move a row's bits.
+    ///
+    /// A `DIRECT_MIN_VIS + 1`-position context is read as prompt pieces of 16 rows —
+    /// the pieces that end below the line widen, the ones that end at or above it go
+    /// direct, so both sides and the boundary itself appear in one pass — and then
+    /// row by row, which is the decode path and always direct. Qwen2.5-0.5B's
+    /// 14×2/64 geometry is used, the one the direct kernels exist for.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_direct_prefill_threshold_does_not_move_a_bit() {
+        use crate::model::Config;
+
+        let n = DIRECT_MIN_VIS + 1;
+        let (n_head, n_kv_head, hd) = (14usize, 2usize, 64usize);
+        let cfg = Config {
+            arch_name: "test",
+            rope_neox: false,
+            n_layer: 1,
+            n_kv_layer: 1,
+            n_head,
+            n_kv_head,
+            head_dim: hd,
+            d_model: n_head * hd,
+            n_ff: 4 * n_head * hd,
+            n_vocab: 32,
+            rope_dim: hd,
+            eps: 1e-5,
+            rope_base: 10_000.0,
+            ctx_train: 2 * DIRECT_MIN_VIS,
+            rope_yarn: None,
+        };
+        let mut kv = KvCache::new(KvPrec::F16, 1, n_kv_head, hd, n + 1);
+        for p in 0..n {
+            for h in 0..n_kv_head {
+                let k = prng((p * 31 + h * 7 + 1) as u64, hd);
+                let v = prng((p * 17 + h * 5 + 2) as u64, hd);
+                kv.put(0, h, p, &k, &v);
+            }
+        }
+        kv.advance(n);
+        let qd = cfg.q_dim();
+        let q = prng(99, n * qd);
+
+        // Row by row is the always-direct decode path; pieces of 16 cross the line.
+        let want = read_prompt(&cfg, &kv, &q, n, 1, 4);
+        let got = read_prompt(&cfg, &kv, &q, n, 16, 4);
+        let row = (0..n).find(|&row| {
+            !same_bits(
+                &got[row * qd..(row + 1) * qd],
+                &want[row * qd..(row + 1) * qd],
+            )
+        });
+        assert!(row.is_none(), "the switch moved row {:?}", row);
+
+        // And the switch itself: off one position below the line, on at it.
+        if crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c") {
+            let sh = Shape {
+                n_head,
+                n_kv_head,
+                head_dim: hd,
+                nb: 1,
+                start_pos: 0,
+                scale: 1.0 / 8.0,
+                window: None,
+                sinks: None,
+            };
+            assert!(
+                !prefill_direct(&kv, &sh, DIRECT_MIN_VIS - 1),
+                "the direct path was taken below the threshold"
+            );
+            assert!(
+                prefill_direct(&kv, &sh, DIRECT_MIN_VIS),
+                "the direct path was not taken at the threshold"
+            );
+        }
+    }
+
+    /// The hard rule of the F16-direct path: a row's output bits are a function of
+    /// that row's query, context and the model shape alone — not of the other rows in
+    /// the call, the prefill chunk width, the worker count or which worker runs it.
+    ///
+    /// Qwen2.5-0.5B's geometry (14 query heads / 2 KV heads, 64-wide) is used because
+    /// it is the model this path was written for: seven query heads share a KV head,
+    /// so the row-pair kernel never degenerates to one row.
+    #[test]
+    fn a_f16_rows_bits_are_identical_alone_in_a_chunk_and_at_any_pool_width() {
+        let base = Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 16,
+            start_pos: 400,
+            scale: 1.0 / 8.0,
+            window: None,
+            sinks: None,
+        };
+        let hd = base.head_dim;
+        let qd = base.q_dim();
+        let (kv, q, _, _) = setup(KvPrec::F16, &base, 1);
+        let pool = [1usize, 2, 4, 8];
+        // The batch of 16, at each width: the table every row is checked against.
+        let batched: Vec<Vec<f32>> = pool
+            .iter()
+            .map(|&w| grouped(&kv, 0, &base, &q, plan(&base, w)))
+            .collect();
+        for w in 1..batched.len() {
+            for b in 0..base.nb {
+                let lo = b * base.n_head * hd;
+                let hi = (b + 1) * base.n_head * hd;
+                assert!(
+                    same_bits(&batched[w][lo..hi], &batched[0][lo..hi]),
+                    "row {b} moved with the pool width {}",
+                    pool[w]
+                );
+            }
+        }
+        for (wi, batch) in batched.iter().enumerate() {
+            for b in 0..base.nb {
+                // The same row read alone: its context ends where its batch row's does.
+                let solo = Shape {
+                    nb: 1,
+                    start_pos: base.start_pos + b,
+                    ..base
+                };
+                let got = grouped(&kv, 0, &solo, &q[b * qd..], plan(&solo, pool[wi]));
+                let lo = b * base.n_head * hd;
+                assert!(
+                    same_bits(&got, &batch[lo..(b + 1) * base.n_head * hd]),
+                    "row {b} changed in a chunk of 16 at pool width {}",
+                    pool[wi]
+                );
+                // ... and in a chunk of 3, where the row sharing changes entirely.
+                if b + 3 <= base.nb {
+                    let small = Shape {
+                        nb: 3,
+                        start_pos: base.start_pos + b,
+                        ..base
+                    };
+                    let got = grouped(&kv, 0, &small, &q[b * qd..], plan(&small, pool[wi]));
+                    assert!(
+                        same_bits(&got[..base.n_head * hd], &batch[lo..lo + base.n_head * hd]),
+                        "row {b} changed in a chunk of 3 at pool width {}",
+                        pool[wi]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The sixteen-lane value mix is the eight-lane mix widened: each output
+    /// element sees `α·o` then `p_j·v_j` over ascending positions, in the same
+    /// order and with the same operands (F16C's widening is exact). The tier's
+    /// goldens therefore keep the AVX2 tier's bits for attention.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_sixteen_lane_mix_is_the_eight_lane_mix_bit_for_bit() {
+        if !avx512_attn(64) {
+            return;
+        }
+        let hd = 64;
+        let n = 17;
+        let mut c = KvCache::new(KvPrec::F16, 1, 1, hd, n + 2);
+        for p in 0..n {
+            let k = prng((p * 13 + 3) as u64, hd);
+            let v = prng((p * 29 + 5) as u64, hd);
+            c.put(0, 0, p, &k, &v);
+        }
+        c.advance(n);
+        let vb = c.block_bytes(false, 0, 0, 0, n);
+        let mut vf = vec![0.0f32; n * hd];
+        c.decode_block(false, 0, 0, 0, n, &mut vf);
+        let p: Vec<f32> = prng(91, n).iter().map(|x| x.abs() + 0.01).collect();
+        let one = [usize::MAX];
+        for vis in 1..=n {
+            let o = prng(123, hd);
+            let (mut a, mut b) = (o.clone(), o.clone());
+            // SAFETY: AVX2+FMA+F16C and AVX-512 checked.
+            unsafe {
+                mix_f16_avx2(&mut a, 0.75, &p[..vis], vb, hd);
+                mix_f16_avx512(&mut b, 0.75, &p[..vis], vb, hd);
+            }
+            assert!(same_bits(&a, &b), "mix at vis {vis}");
+            let (mut a, mut b) = (o.clone(), o.clone());
+            mix(&mut a, 0.75, &p[..vis], &vf, hd);
+            // SAFETY: checked above.
+            unsafe { mix_avx512(&mut b, 0.75, &p[..vis], &vf, hd) };
+            assert!(same_bits(&a, &b), "widened mix at vis {vis}");
+        }
+        // The pair kernel shares each V read between two rows; each row's own
+        // accumulation still has the single kernel's order.
+        let mut failures = Vec::new();
+        for vis0 in 1..=n {
+            for vis1 in 1..=n {
+                let o0: Vec<f32> = prng(123, hd);
+                let o1: Vec<f32> = prng(124, hd);
+                let (mut x0, mut x1) = (o0.clone(), o1.clone());
+                let (mut y0, mut y1) = (o0.clone(), o1.clone());
+                unsafe {
+                    mix(&mut x0, 0.75, &p[..vis0], &vf, hd);
+                    mix(&mut x1, 0.75, &p[..vis1], &vf, hd);
+                    mix_f16_pair_avx512(
+                        &mut y0,
+                        &mut y1,
+                        0.75,
+                        0.75,
+                        &p[..vis0],
+                        &p[..vis1],
+                        vis0,
+                        vis1,
+                        0,
+                        0,
+                        0,
+                        &one,
+                        &one,
+                        vb,
+                        hd,
+                        &mut [],
+                        &mut [],
+                    );
+                }
+                if !(same_bits(&x0, &y0) && same_bits(&x1, &y1)) {
+                    failures.push(format!("pair mix {vis0} {vis1}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// The hard rule with a sliding window: a row's bits are its query, its own
+    /// context and the window's shape alone — not the other rows in the call, the
+    /// prefill chunk width or the pool width.
+    ///
+    /// The window starts mid-tile and its visible positions are split across the
+    /// canonical chunks, so this exercises both sides of the window change at once:
+    /// the F16-direct decode path (which now takes windowed layers, skipping every
+    /// tile before the window) and the widened prefill-tile path must agree bit for
+    /// bit, and a row read alone must match the same row in a chunk of 16 or 3.
+    #[test]
+    fn a_windowed_rows_bits_are_identical_alone_in_a_chunk_and_at_any_pool_width() {
+        let base = Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 16,
+            start_pos: 400,
+            scale: 1.0 / 8.0,
+            window: Some(320),
+            sinks: None,
+        };
+        // The window leaves the longest rows 320 visible positions: five chunks of
+        // 64, and a start that is not on the `BLOCK` grid.
+        assert_eq!(row_chunks(&base, base.start_pos + base.nb), 5);
+        assert_ne!(visible_start(&base, base.start_pos + base.nb) % BLOCK, 0);
+        let hd = base.head_dim;
+        let qd = base.q_dim();
+        let (kv, q, _, _) = setup(KvPrec::F16, &base, 1);
+        let pool = [1usize, 2, 4, 8];
+        let batched: Vec<Vec<f32>> = pool
+            .iter()
+            .map(|&w| grouped(&kv, 0, &base, &q, plan(&base, w)))
+            .collect();
+        for w in 1..batched.len() {
+            for b in 0..base.nb {
+                let lo = b * base.n_head * hd;
+                let hi = (b + 1) * base.n_head * hd;
+                assert!(
+                    same_bits(&batched[w][lo..hi], &batched[0][lo..hi]),
+                    "row {b} moved with the pool width {}",
+                    pool[w]
+                );
+            }
+        }
+        for (wi, batch) in batched.iter().enumerate() {
+            for b in 0..base.nb {
+                let solo = Shape {
+                    nb: 1,
+                    start_pos: base.start_pos + b,
+                    ..base
+                };
+                let got = grouped(&kv, 0, &solo, &q[b * qd..], plan(&solo, pool[wi]));
+                let lo = b * base.n_head * hd;
+                assert!(
+                    same_bits(&got, &batch[lo..(b + 1) * base.n_head * hd]),
+                    "windowed row {b} changed in a chunk of 16 at pool width {}",
+                    pool[wi]
+                );
+                if b + 3 <= base.nb {
+                    let small = Shape {
+                        nb: 3,
+                        start_pos: base.start_pos + b,
+                        ..base
+                    };
+                    let got = grouped(&kv, 0, &small, &q[b * qd..], plan(&small, pool[wi]));
+                    assert!(
+                        same_bits(&got[..base.n_head * hd], &batch[lo..lo + base.n_head * hd]),
+                        "windowed row {b} changed in a chunk of 3 at pool width {}",
+                        pool[wi]
+                    );
+                }
+            }
+        }
+    }
+
+    /// A window long enough to keep the prefill tile on the F16-direct path
+    /// ([`DIRECT_MIN_VIS`]) must still agree with a solo decode, including when its
+    /// start falls inside a tile (the offset the fast kernels take).
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn a_windowed_prefill_direct_tile_is_bit_identical_to_a_solo_decode() {
+        let base = Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 6,
+            start_pos: 1300,
+            scale: 1.0 / 8.0,
+            window: Some(1200),
+            sinks: None,
+        };
+        let hd = base.head_dim;
+        let qd = base.q_dim();
+        let (kv, q, _, _) = setup(KvPrec::F16, &base, 1);
+        if crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c") {
+            assert!(
+                prefill_direct(&kv, &base, 1300 + base.nb),
+                "the test needs the prefill direct path"
+            );
+        }
+        assert_ne!(
+            visible_start(&base, base.start_pos + base.nb) % BLOCK,
+            0,
+            "the window must start inside a tile"
+        );
+        let batch = grouped(&kv, 0, &base, &q, plan(&base, 4));
+        for b in 0..base.nb {
+            let solo = Shape {
+                nb: 1,
+                start_pos: base.start_pos + b,
+                ..base
+            };
+            let got = grouped(&kv, 0, &solo, &q[b * qd..], plan(&solo, 4));
+            let lo = b * base.n_head * hd;
+            assert!(
+                same_bits(&got, &batch[lo..(b + 1) * base.n_head * hd]),
+                "windowed direct row {b} changed between prefill and decode"
+            );
+        }
+    }
+
+    /// The direct kernels are the widened kernels with the widening moved into the
+    /// load: same operands (F16C is exact), same per-key dot order, same per-dimension
+    /// accumulation order. With whole blocks (no tail, where the widened kernel picks
+    /// a different horizontal sum) the results must be bit-identical.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn f16_direct_kernels_match_the_widened_kernels_bit_for_bit() {
+        if !(crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c")) {
+            return;
+        }
+        let hd = 64;
+        let n = 17;
+        let mut c = KvCache::new(KvPrec::F16, 1, 1, hd, n + 2);
+        for p in 0..n {
+            let k = prng((p * 13 + 3) as u64, hd);
+            let v = prng((p * 29 + 5) as u64, hd);
+            c.put(0, 0, p, &k, &v);
+        }
+        c.advance(n);
+        let q = prng(77, hd);
+        let mut kf = vec![0.0f32; n * hd];
+        c.decode_block(true, 0, 0, 0, n, &mut kf);
+        // Every visible length, including the tails of the score blocks: the direct
+        // path must agree with the widened path at every one, not only on whole
+        // blocks, because a prefill tile can end anywhere.
+        for vis in 1..=n {
+            let (mut wide, mut direct) = (vec![0.0f32; vis], vec![0.0f32; vis]);
+            scores(&q, &kf, vis, hd, 0.125, &mut wide);
+            // SAFETY: features checked above; `block_bytes` holds `n · hd` halves.
+            unsafe {
+                scores_f16(
+                    &q,
+                    c.block_bytes(true, 0, 0, 0, n),
+                    vis,
+                    hd,
+                    0.125,
+                    &mut direct,
+                )
+            };
+            assert!(
+                same_bits(&wide, &direct),
+                "scores at vis {vis}: {wide:?} vs {direct:?}"
+            );
+        }
+
+        let mut vf = vec![0.0f32; n * hd];
+        c.decode_block(false, 0, 0, 0, n, &mut vf);
+        let p: Vec<f32> = prng(91, n).iter().map(|x| x.abs() + 0.01).collect();
+        let o0 = prng(123, hd);
+        for vis in 1..=n {
+            let (mut a, mut b) = (o0.clone(), o0.clone());
+            mix(&mut a, 0.75, &p[..vis], &vf, hd);
+            // SAFETY: features checked above; `block_bytes` holds `n · hd` halves.
+            unsafe {
+                mix_f16(
+                    &mut b,
+                    0.75,
+                    &p[..vis],
+                    c.block_bytes(false, 0, 0, 0, n),
+                    hd,
+                )
+            };
+            assert!(same_bits(&a, &b), "mix at vis {vis}");
+        }
     }
 }

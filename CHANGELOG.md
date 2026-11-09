@@ -144,6 +144,145 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- Q5_K prefill keeps eight activation accumulators in registers. `wide_q5_k` decoded a
+  super-block once and then ran it against four activations at a time, folding each row
+  into a `MAX_WIDE`-long stack array; it now walks eight at a time with the accumulators
+  in registers, the shape #118 gave `wide_q6_k`, and the five-bit codes are still decoded
+  once per super-block for the group. The arithmetic is unchanged — the same lane sums,
+  the same per-block fused multiply-add and the same final horizontal sum — and a new
+  test compares every window and ragged tail against the one-row kernel bit for bit.
+  On bluefin (`PERGEGRINE_PROF2=full`, 512-token prompt) the Q5_K bucket runs
+  140.5 → 171.9 GMAC/s, level with wide Q6_K's 183.4 and against the Q4_K tile's 282.5;
+  its share of the prompt's wall falls from 30 % to 26 %. Five alternating rounds on
+  Qwen3.5-2B Q4_K_M: prompt 139.4 → 148.9 tok/s at 512 (+6.8 %) and 132.4 → 139.3 at
+  4096 (+5.2 %), decode flat; against llama.cpp v0.9.0 at its faster flash-attention
+  setting the prompt rows move from 1.11× to 1.19× and 1.17×. Llama-3.2-1B (Q4_K/Q6_K)
+  and Qwen3-1.7B (Q4_K/Q6_K) controls stay inside 1 %. The AVX2 real-model goldens for
+  the three files this covers were re-recorded after the prefill-attention change
+  (#115) that left them stale on main; the branch reproduces main's logits exactly on
+  all of them.
+- Attention's value mix widens to sixteen lanes on the AVX-512 tier. The mix is
+  conversion-bound: it widens every stored half of V into f32 and accumulates it into
+  the output, so `vcvtph2ps zmm` with 512-bit fused multiply-adds halves that work.
+  Every path takes it — solo decode's F16-direct mix, the prefill tile's widened and
+  F16-direct mixes, and a mapped multi-user row's chunked mix — and the pair kernel
+  still shares each V read between two rows. The per-element order is the AVX2
+  kernel's (`α·o`, then `p_j·v_j` over ascending positions) and F16C's widening is
+  exact, so the widened mix is bit-identical to AVX2; the tier's real-model goldens
+  for Llama-3.2-1B and Qwen2.5-0.5B came back unchanged. The softmax's `exp` is also
+  sixteen wide (`exp16` is `exp8` lane for lane) with the eight-value f64 sum grouping
+  kept, so its denominator is unchanged too. Attention-only at 4096 positions, one
+  thread: 32.9 -> 29.9 ms/token (medians of three); at twelve threads the mix pass
+  falls from ~2.55 to ~2.08 ms per token and attention from ~6.51 to ~5.93 ms.
+  Whole-pass decode (medians of five alternating rounds, twelve threads): Llama-3.2-1B
+  59.9 -> 60.9 tok/s at 512 and 47.9 -> 49.1 at 4096; Qwen2.5-0.5B 98.4 -> 99.8 at 512
+  (nine rounds) and 71.7 -> 73.3 at 4096. Prompt processing is a wash inside the
+  host's spread. Scores stay on the AVX2 tree on every tier: a zmm score row needs a
+  sixteen-lane horizontal reduction and, measured at every visible length at head
+  width 64, the zmm variants (including one that packs two keys into the two halves
+  to keep the AVX2 reduction tree exactly) were 30–70 % slower. One score tree
+  everywhere also keeps a row's score bits independent of its path by construction.
+- Prefill attention reads the F16 K/V cache directly. The multi-row tile used to be
+  widened f16 -> f32 before every score and every value mix; it now hands the cache's
+  halves to the same register-blocked kernels the decode path reads, so a K or V tile
+  is half the bytes and the widening pass is gone. The f16 kernels are the widened
+  kernels' FMAs in the same order (`f16_direct_kernels_match_the_widened_kernels_bit_for_bit`),
+  so a row's bits are unchanged: the real-model goldens for Llama-3.2-1B and
+  Qwen2.5-0.5B do not move, nor do the synthetic ones at either tier. The path is
+  taken once a row's visible context reaches 1024 positions; shorter prompts keep the
+  widened tile, where the two measure the same. Prompt processing at 4096 tokens on
+  four cores (H0, Llama-3.2-1B Q4_K_M): 75.9 -> 79.4 tok/s (medians of five
+  alternating rounds); attention's share of the pass fell from 51.8 to 46.1 ms per
+  16-token chunk.
+- The repacked Q4_K prefill kernel takes eight activation rows per weight decode, and a
+  sixteen-row prompt chunk shares one scale/min/code unpack between its two groups. The old
+  kernel decoded a tile's scales, its mins and its sixteen windows once per group of four
+  activations, so a 16-row chunk decoded every tile four times; the per-row arithmetic is
+  untouched (the same `vpmaddubsw` pairs, the same int32 sum and float fold in the same order),
+  so a row's bits do not move and the GEMV still agrees with the GEMM bit for bit. The
+  sixteen-row block predecodes the super-block's window codes once and hands them to both
+  groups, and the min term is one `vpmaddwd` per sub-block per row. On H0 (Xeon E5-2680 v4,
+  AVX2) a 2048-wide row streamed from memory with sixteen activations went 32.4 -> 40.1 GMAC/s
+  (33.1 -> 45.7 with the tile in L2); four pinned cores, on top of the Q6_K and attention
+  changes already merged: Llama-3.2-1B Q4_K_M prefill 512 tokens 110.2 -> 120.1 tok/s and
+  4096 83.2 -> 89.6, Qwen2.5-0.5B 232.4 -> 235.7 and 156.0 -> 161.5 (medians of five
+  alternating rounds; Qwen is mostly Q5_0 and Q8_0, so little of it is this kernel). Decode is
+  untouched: the GEMV is arithmetically the same and still agrees with the GEMM bit for bit.
+  The prefill chunk is unchanged.
+- The wide Q6_K prefill kernel keeps its activations' accumulators in registers. A
+  super-block's codes are still decoded once, but they are now consumed by a group of
+  eight activations whose eight integer lane sums and eight f32 accumulators never leave
+  the registers: the old form kept a `MAX_WIDE`-long array in memory and reloaded it once
+  per block per row. The arithmetic and its order are unchanged — the same `maddubs`/`madd`
+  lane sums, the same per-block fused multiply-add, the same lane-wise float accumulation
+  and final horizontal sum — so a row's bits do not move and do not depend on the width of
+  the window it lands in. On H0 an 8192-wide row with sixteen activations went 6352 ->
+  5486 ns (20.6 -> 23.9 GMAC/s), and the width cliff above sixteen activations is gone
+  (32 activations: 17144 -> 11809 ns). Llama-3.2-1B Q4_K_M prefill at 4096 tokens on four
+  cores: 76.1 -> 82.8 tok/s (medians of five alternating rounds).
+- Prefill's remaining serial element-wise passes run in the pool. The attention output's
+  quantisation and the two residual adds were loops on the calling thread between parallel
+  regions; above one row they now go through the same row-parallel helper the norms and
+  SwiGLU use. Element-wise and row-disjoint, so the bits do not move; decode keeps the
+  serial form.
+- Prefill attention now tiles over query rows as well as positions. A prefill task
+  carries tens of query rows over one KV head, all scoring the same positions, so the
+  64-position tile is widened once and walked in two phases over one buffer: keys
+  first, scored for every row, then values, mixed into every row. Widening K and V
+  together overflowed L1 and every row re-read both tiles from L2. Two rows share each
+  loaded K vector in a register-blocked score kernel (their own accumulators, chunk
+  boundaries and merge order are untouched), and the widened value mix now loads a
+  position's eight value vectors into registers before the FMAs. A row's bits are
+  unchanged: the tests read a 512-position context as a solo decode and as prompt
+  pieces of 3, 16 and 64 rows on pools of 1, 2, 4 and 8 workers and require identical
+  bits, for three attention geometries. On the 4-core Xeon (H0), attention-only
+  prefill at 4096 fell from 16.6 s to 12.4 s on Llama-3.2-1B Q4_K_M and from 11.2 s to
+  6.2 s on Qwen2.5-0.5B Q4_K_M. End-to-end prompt processing (medians of three
+  alternating rounds) went 74.1 -> 79.9 tok/s (+7.8 %) and 130.7 -> 159.0 (+21.6 %) at
+  4096, and 99.4 -> 103.5 (+4.1 %) and 221.0 -> 234.8 (+6.3 %) at 512. Decode does not
+  move: attention-only decode at 4096 is 10.7-11.0 ms/token on both builds, and the
+  end-to-end decode deltas of six alternating rounds have paired medians of -0.2 %
+  and +3.1 % against a per-round spread of 20 %.
+- Decode attention reads the F16 KV cache directly instead of widening a 64-position
+  tile to f32 first. The stored halves are widened in registers (`vcvtph2ps`), the
+  score pass is register-blocked four keys deep with two query rows sharing each
+  loaded K vector, and the value mix keeps two rows' accumulators in registers while
+  they share each loaded V vector. Prefill still widens a block once and lets every
+  query row of the task read that tile: with tens of rows per block one widening
+  amortises, whereas re-converting per row pair does not. Both paths use the same
+  per-key reduction tree, so a row's bits are the same whether it is decoded alone,
+  read in a prefill chunk, verified in a batch or run on a different pool width
+  (`crates/peregrine-core/src/attn.rs`, `crates/peregrine-models/tests/attn_invariance.rs`).
+  The tail key of a score block reduces with the same tree as a key inside one, so a
+  position's score no longer depends on where its block ends; that is a one-time change
+  to logits for contexts whose last tile ends mid-group, and the goldens are re-recorded.
+  On the 4-core Xeon (H0), attention-only at 4096 context fell from 8.17 to 6.88
+  ms/token on Qwen2.5-0.5B Q4_K_M and from 14.28 to 11.68 on Llama-3.2-1B Q4_K_M
+  (medians of five alternating runs; decode attention is 25-30 % of a token, so the
+  end-to-end token rate moved +0.4 % and +2.8 % respectively, within the host's
+  noise). Prefill attention was unchanged (11.4-12.0 s and 16.8 to 16.4 s over a 4096
+  token prompt), and its end-to-end rate was within noise.
+- A decode step's attention is one parallel region for every decoding user, not one per
+  user. Each user has a separate cache, so the dense layer used to call attention once
+  per user per layer — ten fork-joins per layer at ten users, each splintering the same
+  KV head's positions across the pool. The single-row runs now become one task per
+  (KV head, row) in a single region; a row walks its own canonical position chunks with
+  the same per-chunk kernel a solo decode chooses (the F16-direct one where the cache
+  allows it) and merges them in the same order, so its arithmetic is its solo arithmetic
+  and does not depend on the batch (a new test pins three users' rows against their solo
+  decodes bit for bit). On the 12-core desktop with the server's default 24-thread pool
+  (Llama-3.2-1B Q4_K_M, 512 positions, ten users) the step fell from 82-90 to 69-72 ms
+  and ten-user aggregate throughput from 63.2 to 76.8 tok/s (+21.5 %; llama.cpp v0.9.0
+  `-fa auto`: 78.0 tok/s), with decode-only aggregate 119.4 -> 157.4 (+31.8 %). On a
+  12-thread pool the change is neutral (ten users 76.4 -> 76.5), because ten one-row
+  calls already fit one wave of twelve workers.
+- A prompt longer than 1024 tokens is prefilled in 64-token pieces instead of the tuned
+  16. At 4096 positions with ten users the time to first token fell from 158.3 s to
+  152.3 s (llama.cpp v0.9.0 `-fa auto`: 144.2 s), and single-user prefill of that prompt
+  is no slower. The chunk changes how the prompt is read, not what it produces.
+- `PEREGRINE_PROF2=1` now prints a periodic per-bucket breakdown of the server's engine
+  thread to stderr (steps, rows per step, wall per step, matmul by phase, attention,
+  quantise, barrier wait); `=full` adds the inner-loop timers.
 - The startup calibration is off by default: `PEREGRINE_CALIBRATE=1` turns it on (S2.6 decision 6).
   A wrong thread count costs far more than the tuned default it replaces, and the calibration is only
   switched on by default once it has passed A/Bs on two machines.

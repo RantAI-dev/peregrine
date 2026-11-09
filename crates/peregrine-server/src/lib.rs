@@ -718,6 +718,15 @@ fn engine_thread(
 ) {
     let mut routes: HashMap<SlotId, tokio::sync::mpsc::UnboundedSender<Emission>> = HashMap::new();
     let mut waiting: VecDeque<Job> = VecDeque::new();
+    // `PEREGRINE_PROF2=1`: a periodic breakdown of the engine thread's step, on stderr.
+    // The engine's own phase counters are caller-thread timers, so this is where they
+    // can be read without touching the hot path. `=full` adds the inner-loop buckets.
+    let profiled = peregrine_core::prof::enabled();
+    let mut prof_last = peregrine_core::prof::snapshot();
+    let mut prof_steps = 0u64;
+    let mut prof_rows = 0u64;
+    let mut prof_wall = std::time::Duration::ZERO;
+    let mut prof_at = Instant::now();
     let take = |msg,
                 waiting: &mut VecDeque<Job>,
                 engine: &mut Engine,
@@ -768,7 +777,39 @@ fn engine_thread(
             }
             continue;
         }
-        for em in engine.step() {
+        let t_step = profiled.then(Instant::now);
+        let emitted = engine.step();
+        if let Some(t) = t_step {
+            prof_wall += t.elapsed();
+            prof_steps += 1;
+            prof_rows += engine.last_step.rows as u64;
+        }
+        if profiled && prof_steps >= 32 && prof_at.elapsed().as_secs_f64() >= 1.0 {
+            let now = peregrine_core::prof::snapshot();
+            let names = peregrine_core::prof::names();
+            let mut parts = Vec::new();
+            for (n, (a, b)) in names.iter().zip(prof_last.iter().zip(now.iter())) {
+                let ms = b.saturating_sub(*a) as f64 / 1e6;
+                if ms >= 0.05 {
+                    parts.push(format!("{n} {ms:.1}"));
+                }
+            }
+            eprintln!(
+                "prof: {} steps, {} rows, wall {:.0} ms, per step {:.2} ms, rows/step {:.1}; {}",
+                prof_steps,
+                prof_rows,
+                prof_wall.as_secs_f64() * 1e3,
+                prof_wall.as_secs_f64() * 1e3 / prof_steps as f64,
+                prof_rows as f64 / prof_steps as f64,
+                parts.join(", ")
+            );
+            prof_last = now;
+            prof_steps = 0;
+            prof_rows = 0;
+            prof_wall = std::time::Duration::ZERO;
+            prof_at = Instant::now();
+        }
+        for em in emitted {
             let done = em.finish.is_some();
             let slot = em.slot;
             if let Some(tx) = routes.get(&slot) {

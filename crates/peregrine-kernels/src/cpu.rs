@@ -1,15 +1,25 @@
-//! CPU feature checks with a cap (roadmap S0.3).
+//! CPU feature checks with a cap (roadmap S0.3, S2.8).
 //!
 //! Every kernel choice asks `cpu_has!` instead of `is_x86_feature_detected!`. The answer is the real
-//! detection AND the tier cap from `PEREGRINE_ISA` (`scalar`, `avx2`, `avx-vnni`, `avx512`; default `native`, no cap).
-//! Forcing a lower tier runs that tier's kernels on any machine that has it, so one host can test every
-//! tier below its own, and two hosts can be checked against each other on a shared tier.
+//! detection AND the tier cap from `PEREGRINE_ISA` (`scalar`, `avx2`, `avx-vnni`, `avx512`, and on
+//! aarch64 `neon`, `neon-dotprod`; default `native`, no cap). Forcing a lower tier runs that tier's
+//! kernels on any machine that has it, so one host can test every tier below its own, and two hosts
+//! can be checked against each other on a shared tier.
 //!
-//! Hot paths ask cached answers (`simd::have_batched`, `tern::have_zmm`, ...), never `cpu_has!` per row.
+//! The ladder is one ordering across both architectures: the x86 rungs come first, the aarch64 rungs
+//! after them, and a host only ever detects its own. [`Tier::top`] is therefore the no-cap sentinel,
+//! not `Avx512`.
+//!
+//! Hot paths ask cached answers (`simd::have_batched`, `neon::have_dotprod`, `tern::have_zmm`, ...),
+//! never `cpu_has!` per row.
 
 use std::sync::OnceLock;
 
 /// Kernel tiers, lowest first.
+///
+/// The aarch64 rungs sit above the x86 ones because the ordering is only ever compared within one
+/// host's detection: a cap is a ceiling, and a ceiling named for another architecture is simply no
+/// ceiling here (the detected tier is always the lower of the two).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
     /// Portable code only.
@@ -20,16 +30,27 @@ pub enum Tier {
     AvxVnni,
     /// AVX-512 and the extensions used with it (VNNI, GFNI, VBMI).
     Avx512,
+    /// aarch64 Advanced SIMD (`asimd`), without the dot-product extension.
+    Neon,
+    /// aarch64 `asimd` + `asimddp` (`sdot`): the shipping ARM tier.
+    NeonDotprod,
 }
 
 impl Tier {
-    /// String name of the kernel tier: `scalar`, `avx2`, `avx512`.
+    /// The highest rung: the value of "no `PEREGRINE_ISA` cap".
+    pub const fn top() -> Tier {
+        Tier::NeonDotprod
+    }
+
+    /// String name of the kernel tier: `scalar`, `avx2`, `avx512`, `neon`, `neon-dotprod`.
     pub const fn as_str(self) -> &'static str {
         match self {
             Tier::Scalar => "scalar",
             Tier::Avx2 => "avx2",
             Tier::AvxVnni => "avx-vnni",
             Tier::Avx512 => "avx512",
+            Tier::Neon => "neon",
+            Tier::NeonDotprod => "neon-dotprod",
         }
     }
 }
@@ -44,7 +65,7 @@ impl std::fmt::Display for Tier {
 #[inline]
 pub fn cap() -> Tier {
     static CAP: OnceLock<Tier> = OnceLock::new();
-    *CAP.get_or_init(|| crate::options::get().isa.unwrap_or(Tier::Avx512))
+    *CAP.get_or_init(|| crate::options::get().isa.unwrap_or(Tier::top()))
 }
 
 /// The highest tier this CPU reaches on its own, before `PEREGRINE_ISA` caps it.
@@ -70,7 +91,19 @@ pub fn detected() -> Tier {
                 Tier::Scalar
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                if std::arch::is_aarch64_feature_detected!("dotprod") {
+                    Tier::NeonDotprod
+                } else {
+                    Tier::Neon
+                }
+            } else {
+                Tier::Scalar
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             Tier::Scalar
         }
@@ -80,7 +113,7 @@ pub fn detected() -> Tier {
 /// The tier the kernels run at under a `PEREGRINE_ISA` cap (`None` = native): the lower of what the
 /// CPU detects and the cap. This is the tier a tier-dependent default is resolved against.
 pub fn resolved_under(isa: Option<Tier>) -> Tier {
-    detected().min(isa.unwrap_or(Tier::Avx512))
+    detected().min(isa.unwrap_or(Tier::top()))
 }
 
 /// The tier the kernels run at: [`detected`] capped by `PEREGRINE_ISA`.
@@ -88,13 +121,16 @@ pub fn resolved() -> Tier {
     resolved_under(crate::options::get().isa)
 }
 
-/// `PEREGRINE_ISA`'s value as a tier: `scalar`, `avx2`, `avx-vnni`, `avx512`; anything else (or unset) is no cap.
+/// `PEREGRINE_ISA`'s value as a tier: `scalar`, `avx2`, `avx-vnni`, `avx512`, `neon`,
+/// `neon-dotprod`; anything else (or unset) is no cap.
 pub fn parse_isa(v: Option<&str>) -> Option<Tier> {
     match v {
         Some("scalar") => Some(Tier::Scalar),
         Some("avx2") => Some(Tier::Avx2),
         Some("avx-vnni") => Some(Tier::AvxVnni),
         Some("avx512") => Some(Tier::Avx512),
+        Some("neon") => Some(Tier::Neon),
+        Some("neon-dotprod") => Some(Tier::NeonDotprod),
         _ => None,
     }
 }
@@ -107,7 +143,11 @@ pub fn tier_of(feature: &str) -> Tier {
         "sse2" | "sse3" | "ssse3" | "sse4.1" | "sse4.2" | "popcnt" => Tier::Scalar,
         "avx" | "avx2" | "fma" | "f16c" | "bmi1" | "bmi2" | "lzcnt" | "movbe" => Tier::Avx2,
         "avxvnni" => Tier::AvxVnni,
-        _ => Tier::Avx512,
+        "avx512vnni" | "avx512bw" | "avx512vl" | "avx512vbmi" | "avx512f" | "avx512dq"
+        | "avx512cd" | "avx512bitalg" | "avx512vpopcntdq" | "gfni" => Tier::Avx512,
+        "neon" | "asimd" => Tier::Neon,
+        "dotprod" | "asimddp" => Tier::NeonDotprod,
+        _ => Tier::top(),
     }
 }
 
@@ -126,7 +166,8 @@ macro_rules! cpu_has {
 }
 
 /// The kernel tier in effect on this machine, as a name: `x86_64-avx2-avx512-vnni-gfni-vbmi` and so on,
-/// or the architecture name elsewhere. Golden outputs are stored per tier name.
+/// or on aarch64 `aarch64-neon-dotprod` / `aarch64-neon` / `aarch64`. Golden outputs are stored per
+/// tier name.
 pub fn tier_name() -> String {
     #[cfg(target_arch = "x86_64")]
     {
@@ -155,9 +196,50 @@ pub fn tier_name() -> String {
             String::from("x86_64")
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        if !have_neon() {
+            return String::from("aarch64");
+        }
+        if have_dotprod() {
+            String::from("aarch64-neon-dotprod")
+        } else {
+            String::from("aarch64-neon")
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         std::env::consts::ARCH.to_string()
+    }
+}
+
+/// Cached check for Advanced SIMD under the tier cap (`PEREGRINE_ISA=scalar` turns it off).
+#[inline]
+pub fn have_neon() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::arch::is_aarch64_feature_detected!("neon") && allowed("neon"))
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
+
+/// Cached check for the aarch64 dot-product extension (`asimddp`, `sdot`) under the tier cap.
+#[inline]
+pub fn have_dotprod() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            have_neon() && std::arch::is_aarch64_feature_detected!("dotprod") && allowed("dotprod")
+        })
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
     }
 }
 
@@ -220,10 +302,22 @@ mod tests {
         assert_eq!(tier_of("avxvnni"), Tier::AvxVnni);
         assert_eq!(tier_of("avx512vnni"), Tier::Avx512);
         assert_eq!(tier_of("gfni"), Tier::Avx512);
-        assert_eq!(tier_of("something-new"), Tier::Avx512);
+        assert_eq!(tier_of("neon"), Tier::Neon);
+        assert_eq!(tier_of("asimddp"), Tier::NeonDotprod);
+        assert_eq!(tier_of("something-new"), Tier::top());
         assert!(
             Tier::Scalar < Tier::Avx2 && Tier::Avx2 < Tier::AvxVnni && Tier::AvxVnni < Tier::Avx512
         );
+        assert!(Tier::Avx512 < Tier::Neon && Tier::Neon < Tier::NeonDotprod);
+        assert_eq!(Tier::top(), Tier::NeonDotprod);
+    }
+
+    /// A cap never lets a feature above it through, on either architecture's rungs.
+    #[test]
+    fn the_cap_gates_both_ladders() {
+        assert_eq!(tier_of("avx512f"), Tier::Avx512);
+        assert_eq!(tier_of("avx512bw"), Tier::Avx512);
+        assert_eq!(tier_of("dotprod"), Tier::NeonDotprod);
     }
 
     #[test]
@@ -232,8 +326,17 @@ mod tests {
         assert_eq!(resolved_under(None), d);
         assert_eq!(resolved_under(Some(d)), d);
         assert_eq!(resolved_under(Some(Tier::Scalar)), Tier::Scalar);
+        assert_eq!(resolved_under(Some(Tier::top())), d);
+        // A cap below the detected tier lowers it; the rungs of the other architecture are either
+        // above this host's detection (no cap) or below it (a cap).
         assert_eq!(resolved_under(Some(Tier::Avx2)), d.min(Tier::Avx2));
+        #[cfg(target_arch = "x86_64")]
         assert_eq!(resolved_under(Some(Tier::Avx512)), d);
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(resolved_under(Some(Tier::Avx512)), Tier::Avx512);
+            assert_eq!(resolved_under(Some(Tier::Neon)), d.min(Tier::Neon));
+        }
     }
 
     #[test]
@@ -242,6 +345,8 @@ mod tests {
         assert_eq!(parse_isa(Some("avx2")), Some(Tier::Avx2));
         assert_eq!(parse_isa(Some("avx-vnni")), Some(Tier::AvxVnni));
         assert_eq!(parse_isa(Some("avx512")), Some(Tier::Avx512));
+        assert_eq!(parse_isa(Some("neon")), Some(Tier::Neon));
+        assert_eq!(parse_isa(Some("neon-dotprod")), Some(Tier::NeonDotprod));
         assert_eq!(parse_isa(Some("native")), None);
         assert_eq!(parse_isa(None), None);
     }

@@ -14,7 +14,7 @@ use peregrine_core::model::Model;
 use peregrine_core::session::{Session, SessionCfg};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use support::models::{write_dense, Dense};
+use support::models::{write_dense, write_hybrid, Dense};
 
 /// The turn the conversation makes.
 const USER: &str = "Name three colours.";
@@ -51,6 +51,35 @@ fn turn(s: &mut Session) -> Vec<u32> {
     let mut ids = Vec::new();
     s.generate(USER, |e| ids.push(e.id)).expect("generate");
     ids
+}
+
+/// **MTP in `peregrine bench`.** A speculative step may commit more than one token;
+/// the report counts the tokens emitted, so a run with MTP on is measured per token,
+/// not per step. Turning it off measures the target alone again.
+#[test]
+fn the_benchmark_counts_the_tokens_mtp_emits() {
+    let dir = tmpdir("mtp");
+    let path = write_hybrid(&dir, Format::PQ2_0, 991, true);
+    let model = load(&path);
+    let mut s = Session::from_model(model, session_cfg()).expect("session");
+    assert!(!s.speculates(), "a session starts without MTP");
+    s.set_mtp(true);
+    assert!(s.speculates(), "the MTP block was not engaged");
+    let report = s.bench(32, 12).expect("bench");
+    assert!(
+        report.decode_tokens >= 12,
+        "the report counted fewer tokens than steps: {report:?}"
+    );
+    assert!(report.decode_tok_s > 0.0, "{report:?}");
+    assert!(report.bytes_per_token > 0.0, "{report:?}");
+    s.set_mtp(false);
+    assert!(!s.speculates(), "MTP was not turned off");
+    let plain = s.bench(32, 12).expect("bench off");
+    assert_eq!(
+        plain.decode_tokens, 12,
+        "without MTP a step emits one token"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// **ADR 0007, decision 1: the engine is the one runtime.**
