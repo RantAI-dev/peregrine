@@ -58,11 +58,12 @@ pub enum Slot {
     MatQ8_0,
     MatQ6K,
     MatQ4K,
+    MatQ5K,
     MatOther,
 }
 
 /// The number of slots.
-pub const N: usize = 23;
+pub const N: usize = 24;
 
 thread_local! {
     static NS: [Cell<u64>; N] = const { [const { Cell::new(0) }; N] };
@@ -71,7 +72,8 @@ thread_local! {
 /// Counters that workers add to directly. Adding a shared counter is an atomic
 /// read-modify-write, so only the attention subtimers (which run per block inside the
 /// workers) use it, and only when the timers are on.
-static SHARED: [AtomicU64; 9] = [
+static SHARED: [AtomicU64; 10] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -131,6 +133,8 @@ pub fn format_slot(fmt: crate::format::Format) -> Slot {
         crate::format::Format::Q6_K => Slot::MatQ6K,
         #[cfg(feature = "fmt-kquant")]
         crate::format::Format::Q4_K => Slot::MatQ4K,
+        #[cfg(feature = "fmt-kquant")]
+        crate::format::Format::Q5_K => Slot::MatQ5K,
         _ => Slot::MatOther,
     }
 }
@@ -189,6 +193,7 @@ pub fn names() -> [&'static str; N] {
         "  fmt Q8_0",
         "  fmt Q6_K",
         "  fmt Q4_K",
+        "  fmt Q5_K",
         "  fmt other",
     ]
 }
