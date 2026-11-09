@@ -1831,6 +1831,36 @@ fn scores(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32
     }
 }
 
+/// The NEON value mix (S2.8 F5): four dimensions at a time, the keys in the scalar
+/// loop's order and each accumulator updated with a multiply and then an add, so the
+/// result is bit-identical to [`mix`]'s scalar loop. Only the lanes change.
+///
+/// # Safety
+/// The CPU must have NEON; `vf` holds at least `p.len() · hd` floats.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn mix_neon(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
+    use std::arch::aarch64::*;
+    if alpha != 1.0 {
+        o.iter_mut().for_each(|x| *x *= alpha);
+    }
+    for (j, &w) in p.iter().enumerate() {
+        let v = &vf[j * hd..(j + 1) * hd];
+        let wv = vdupq_n_f32(w);
+        let mut d = 0;
+        while d + 4 <= hd {
+            let ov = vld1q_f32(o.as_ptr().add(d));
+            let vv = vld1q_f32(v.as_ptr().add(d));
+            vst1q_f32(o.as_mut_ptr().add(d), vaddq_f32(ov, vmulq_f32(wv, vv)));
+            d += 4;
+        }
+        while d < hd {
+            o[d] += w * v[d];
+            d += 1;
+        }
+    }
+}
+
 /// `o = α·o + Σ_j p_j · v_j` over the first `p.len()` values of the decoded tile.
 fn mix(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
     #[cfg(target_arch = "x86_64")]
@@ -1842,6 +1872,13 @@ fn mix(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
         if hd.is_multiple_of(8) && crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
             // SAFETY: features checked; `vf` holds at least `p.len() · hd` floats.
             return unsafe { mix_avx2(o, alpha, p, vf, hd) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if hd.is_multiple_of(4) && crate::cpu::have_neon() {
+            // SAFETY: NEON checked; `vf` holds at least `p.len() · hd` floats.
+            return unsafe { mix_neon(o, alpha, p, vf, hd) };
         }
     }
     if alpha != 1.0 {
@@ -1961,6 +1998,47 @@ mod tests {
                 (s >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
             })
             .collect()
+    }
+
+    /// The NEON value mix against the scalar loop, bit for bit, at the head widths the
+    /// gate models use and at every lane remainder.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_mix_is_bit_identical_to_the_scalar_mix() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skip: no NEON");
+            return;
+        }
+        for hd in [4usize, 7, 8, 64, 80, 100, 128] {
+            for vis in [1usize, 3, 7, 64] {
+                let p: Vec<f32> = prng(0x51 + vis as u64, vis)
+                    .iter()
+                    .map(|x| x.abs())
+                    .collect();
+                let vf = prng(0x77 + hd as u64, vis * hd);
+                let o = prng(0x99 + hd as u64, hd);
+                for alpha in [1.0f32, 0.37] {
+                    let mut got = o.clone();
+                    mix(&mut got, alpha, &p, &vf, hd);
+                    let mut want = o.clone();
+                    if alpha != 1.0 {
+                        want.iter_mut().for_each(|x| *x *= alpha);
+                    }
+                    for (j, &w) in p.iter().enumerate() {
+                        for (x, &v) in want.iter_mut().zip(&vf[j * hd..(j + 1) * hd]) {
+                            *x += w * v;
+                        }
+                    }
+                    for i in 0..hd {
+                        assert_eq!(
+                            got[i].to_bits(),
+                            want[i].to_bits(),
+                            "hd={hd} vis={vis} alpha={alpha} i={i}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The cache, the queries, and the keys and values exactly as written.

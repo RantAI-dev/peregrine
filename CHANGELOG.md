@@ -35,6 +35,16 @@ All notable changes to this project are documented here. The format follows
   16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
 
 ### Added
+- NEON `vmath` and activation quantisation on aarch64 (S2.8 F5/F6). `exp` is now a four-lane
+  `exp4` with `exp8`'s constants, operation order and fused multiply-adds (bit-identical to the
+  scalar twin `exp_scalar`), used by softmax (`exp_shift_sum`, `exp_scaled_sum`), SwiGLU, SiLU,
+  `mul_silu`, `mul_sigmoid` and `swiglu_oai`; the attention value mix is a four-dimension NEON loop
+  that is bit-identical to the scalar one; and `QuantAct::fill` takes `absmax`/`quantize32` on
+  NEON (also bit-identical, rebuilding `round` as `trunc(|y|) + (frac ≥ 0.5)`). Micro-benchmarks on
+  the X925 core: SwiGLU 2.34x, SiLU 2.77x, softmax exp 2.32x, activation quantisation 2.32x over
+  the same binary with `PEREGRINE_ISA=scalar`. This replaces libm's `expf` on the tier with the
+  engine's deterministic `exp` (the x86 tier's, issue #64), so all `aarch64-neon-dotprod` goldens
+  move in the last bits and were re-recorded; the scalar tier's goldens are unchanged.
 - NEON kernels for **Q6_K** on aarch64 (S2.8 F3): the repacked `Q6K8` tile as a GEMM and a GEMV,
   plus a per-row `sdot` kernel. The six-bit codes are a nibble from `ql` and two bits from `qh`,
   expanded with a mask, a shift and an OR before each `sdot`; the run's offset is applied once per

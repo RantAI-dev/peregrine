@@ -145,6 +145,70 @@ unsafe fn dot32_s8(w: *const i8, a0: int8x16_t, a1: int8x16_t) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// Activation quantisation and the small float helpers (S2.8 F6)
+// ---------------------------------------------------------------------------
+
+/// The largest absolute value of `x` (0 for an empty slice), the same fold the scalar
+/// loop makes.
+///
+/// # Safety
+/// The CPU must have NEON.
+#[target_feature(enable = "neon")]
+pub unsafe fn absmax(x: &[f32]) -> f32 {
+    let mut m = vdupq_n_f32(0.0);
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        m = vmaxq_f32(m, vabsq_f32(vld1q_f32(x.as_ptr().add(i))));
+        i += 4;
+    }
+    let mut lanes = [0.0f32; 4];
+    vst1q_f32(lanes.as_mut_ptr(), m);
+    let mut r = lanes.iter().fold(0.0f32, |a, &b| a.max(b));
+    for &v in &x[i..] {
+        r = r.max(v.abs());
+    }
+    r
+}
+
+/// `out[i] = clamp(round(x[i] · inv), ±127)` for 32 values.
+///
+/// `round` is half away from zero; it is rebuilt as `trunc(|y|) + (frac ≥ 0.5)` with the
+/// sign put back, exactly the scalar loop's and the AVX2 kernel's construction, so the
+/// codes are bit-identical to both.
+///
+/// # Safety
+/// The CPU must have NEON; `x` must point at 32 readable floats and `out` at 32
+/// writable bytes.
+#[target_feature(enable = "neon")]
+pub unsafe fn quantize32(x: *const f32, inv: f32, out: *mut i8) {
+    let vinv = vdupq_n_f32(inv);
+    let half = vdupq_n_f32(0.5);
+    let zero = vdupq_n_f32(0.0);
+    let hi = vdupq_n_s32(127);
+    let lo = vdupq_n_s32(-127);
+    let one = vdupq_n_s32(1);
+    for k in (0..32).step_by(4) {
+        let y = vmulq_f32(vld1q_f32(x.add(k)), vinv);
+        let ay = vabsq_f32(y);
+        let t = vcvtq_s32_f32(ay);
+        let tf = vcvtq_f32_s32(t);
+        // `frac >= 0.5`, as a 0/1 integer, then the sign and the clamp.
+        let up = vandq_s32(
+            vreinterpretq_s32_u32(vcgeq_f32(vsubq_f32(ay, tf), half)),
+            one,
+        );
+        let mut r = vaddq_s32(t, up);
+        r = vbslq_s32(vcltq_f32(y, zero), vnegq_s32(r), r);
+        r = vminq_s32(vmaxq_s32(r, lo), hi);
+        let mut vals = [0i32; 4];
+        vst1q_s32(vals.as_mut_ptr(), r);
+        for (j, &v) in vals.iter().enumerate() {
+            *out.add(k + j) = v as i8;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Q8_0: a block is one f16 scale and 32 signed codes
 // ---------------------------------------------------------------------------
 
@@ -1329,6 +1393,42 @@ mod tests {
             w.extend_from_slice(&rng.bytes(128));
         }
         w
+    }
+
+    #[test]
+    fn quantisation_matches_the_scalar_loop() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skip: no NEON on this CPU");
+            return;
+        }
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for trial in 0..2000 {
+            // Magnitudes around and inside the scale, so the half-way rule and the
+            // clamp both get exercised.
+            let inv: f32 = match trial % 4 {
+                0 => 1.0,
+                1 => 127.0,
+                2 => 0.5,
+                _ => 3.7,
+            };
+            let x: Vec<f32> = (0..32)
+                .map(|_| (rng.f32() * inv.recip()) * if trial % 3 == 0 { 1.3 } else { 1.0 })
+                .collect();
+            let mut want = [0i8; 32];
+            for (j, &v) in x.iter().enumerate() {
+                want[j] = (v * inv).round().clamp(-127.0, 127.0) as i8;
+            }
+            let mut got = [0i8; 32];
+            unsafe { quantize32(x.as_ptr(), inv, got.as_mut_ptr()) };
+            assert_eq!(got, want, "trial {trial} inv {inv}");
+            // And the absmax fold.
+            let m = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            assert_eq!(
+                unsafe { absmax(&x) }.to_bits(),
+                m.to_bits(),
+                "trial {trial}"
+            );
+        }
     }
 
     #[test]
