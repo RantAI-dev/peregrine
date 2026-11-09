@@ -145,11 +145,21 @@ fn golden_outputs() {
         .map(|v| v.split(',').map(str::to_string).collect())
         .unwrap_or_default();
     let tier = tier();
-    let golden_tier = if tier == "x86_64-avx2-vnni256" {
-        "x86_64-avx2"
-    } else {
-        tier.as_str()
-    };
+    // Goldens are recorded on Linux; macOS libm (sin, cos, exp) rounds differently, so macOS
+    // keys its own directory and skips until one is recorded there.
+    let golden_tier = format!(
+        "{}{}",
+        if tier == "x86_64-avx2-vnni256" {
+            "x86_64-avx2"
+        } else {
+            tier.as_str()
+        },
+        if cfg!(target_os = "macos") {
+            "-macos"
+        } else {
+            ""
+        }
+    );
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(golden_tier);
