@@ -1,0 +1,3 @@
+# Fetch dependencies for the accuracy harness. The runner itself is stdlib-only.
+pyarrow>=14          # MMLU is distributed as parquet
+numpy>=1.24          # used by the HumanEval+ tests inside the sandbox
