@@ -109,6 +109,91 @@ pub unsafe fn exp8(x: __m256) -> __m256 {
     )
 }
 
+/// Sixteen `exp`s at once — the same polynomial as [`exp8`], lane for lane.
+///
+/// The constants, the FMA order and the denormal handling are identical to the
+/// eight-lane routine, so lane `i` of the result has the same bits as [`exp8`]'s
+/// lane `i` had it seen the same input. The softmax sum keeps the eight-lane
+/// grouping on top (see `exp_shift_sum_avx512`), so widening only the bank
+/// of exponentials cannot move a softmax denominator.
+///
+/// # Safety
+/// AVX-512F and FMA must be available.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn exp16(x: __m512) -> __m512 {
+    let r = _mm512_set1_ps(f32::from_bits(0x4b40_0000)); // 0x1.8p23
+    let z = _mm512_fmadd_ps(x, _mm512_set1_ps(f32::from_bits(0x3fb8_aa3b)), r); // log2(e)
+    let n = _mm512_sub_ps(z, r);
+    let b = _mm512_fnmadd_ps(
+        n,
+        _mm512_set1_ps(f32::from_bits(0x35bf_be8e)), // 0x1.7f7d1cp-20
+        _mm512_fnmadd_ps(n, _mm512_set1_ps(f32::from_bits(0x3f31_7200)), x), // 0x1.62e4p-1
+    );
+    let e = _mm512_slli_epi32(_mm512_castps_si512(z), 23);
+    let k = _mm512_castsi512_ps(_mm512_add_epi32(
+        e,
+        _mm512_castps_si512(_mm512_set1_ps(1.0)),
+    ));
+    let c = _mm512_cmp_ps_mask(
+        _mm512_andnot_ps(_mm512_set1_ps(-0.0), n),
+        _mm512_set1_ps(126.0),
+        _CMP_GT_OQ,
+    );
+    let u = _mm512_mul_ps(b, b);
+    let j = _mm512_fmadd_ps(
+        _mm512_fmadd_ps(
+            _mm512_fmadd_ps(
+                _mm512_set1_ps(f32::from_bits(0x3c07_2010)),
+                b,
+                _mm512_set1_ps(f32::from_bits(0x3d2b_9f17)),
+            ),
+            u,
+            _mm512_fmadd_ps(
+                _mm512_set1_ps(f32::from_bits(0x3e2a_af33)),
+                b,
+                _mm512_set1_ps(f32::from_bits(0x3eff_fedb)),
+            ),
+        ),
+        u,
+        _mm512_mul_ps(_mm512_set1_ps(f32::from_bits(0x3f7f_fff6)), b),
+    );
+    if c == 0 {
+        return _mm512_fmadd_ps(j, k, k);
+    }
+    let c0 = _mm512_cmp_ps_mask(n, _mm512_setzero_ps(), _CMP_LE_OQ);
+    let g = _mm512_and_si512(
+        _mm512_maskz_set1_epi32(c0, -1),
+        _mm512_set1_epi32(0x8200_0000u32 as i32),
+    );
+    let s1 = _mm512_castsi512_ps(_mm512_add_epi32(g, _mm512_set1_epi32(0x7f00_0000)));
+    let s2 = _mm512_castsi512_ps(_mm512_sub_epi32(e, g));
+    let d = _mm512_cmp_ps_mask(
+        _mm512_andnot_ps(_mm512_set1_ps(-0.0), n),
+        _mm512_set1_ps(192.0),
+        _CMP_GT_OQ,
+    );
+    let cm = _mm512_maskz_set1_epi32(c, -1);
+    let dm = _mm512_maskz_set1_epi32(d, -1);
+    _mm512_or_ps(
+        _mm512_castsi512_ps(_mm512_and_si512(
+            dm,
+            _mm512_castps_si512(_mm512_mul_ps(s1, s1)),
+        )),
+        _mm512_castsi512_ps(_mm512_andnot_si512(
+            dm,
+            _mm512_or_si512(
+                _mm512_and_si512(
+                    cm,
+                    _mm512_castps_si512(_mm512_mul_ps(_mm512_fmadd_ps(s2, j, s2), s1)),
+                ),
+                _mm512_andnot_si512(cm, _mm512_castps_si512(_mm512_fmadd_ps(k, j, k))),
+            ),
+        )),
+    )
+}
+
 /// `exp8`'s magic constant: `0x1.8p23`. Adding it to `x·log2(e)` keeps the integer part of
 /// `x·log2(e)` in the low bits of the sum's mantissa, which is where `2ⁿ` is read from.
 const EXP_BIAS: f32 = f32::from_bits(0x4b40_0000);
@@ -337,6 +422,10 @@ pub fn exp_shift_sum(x: &mut [f32], shift: f32) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
         if vector_ok() {
+            if crate::cpu_has!("avx512f") {
+                // SAFETY: features checked.
+                return unsafe { exp_shift_sum_avx512(x, shift) };
+            }
             // SAFETY: features checked.
             return unsafe { exp_shift_sum_avx2(x, shift) };
         }
@@ -345,6 +434,41 @@ pub fn exp_shift_sum(x: &mut [f32], shift: f32) -> f64 {
     for v in x.iter_mut() {
         *v = (*v - shift).exp();
         sum += *v as f64;
+    }
+    sum
+}
+
+/// Sixteen lanes per pass, but the accumulator keeps [`exp_shift_sum_avx2`]'s
+/// eight-value grouping: each half is horizontally summed with the same
+/// [`crate::simd::hsum_ps`] and added to the `f64` in the same order. `exp16` is
+/// `exp8` lane for lane, so the denominator is bit-identical to the AVX2 tier's.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn exp_shift_sum_avx512(x: &mut [f32], shift: f32) -> f64 {
+    let s = _mm512_set1_ps(shift);
+    let mut sum = 0.0f64;
+    let mut i = 0;
+    while i + 16 <= x.len() {
+        let v = exp16(_mm512_sub_ps(_mm512_loadu_ps(x.as_ptr().add(i)), s));
+        _mm512_storeu_ps(x.as_mut_ptr().add(i), v);
+        sum += crate::simd::hsum_ps(_mm512_castps512_ps256(v)) as f64;
+        sum += crate::simd::hsum_ps(_mm512_extractf32x8_ps(v, 1)) as f64;
+        i += 16;
+    }
+    // Keep the AVX2 tier's eight-value grouping for the last block too.
+    if i + 8 <= x.len() {
+        let v = exp8(_mm256_sub_ps(
+            _mm256_loadu_ps(x.as_ptr().add(i)),
+            _mm512_castps512_ps256(s),
+        ));
+        _mm256_storeu_ps(x.as_mut_ptr().add(i), v);
+        sum += crate::simd::hsum_ps(v) as f64;
+        i += 8;
+    }
+    while i < x.len() {
+        x[i] = (x[i] - shift).exp();
+        sum += x[i] as f64;
+        i += 1;
     }
     sum
 }
@@ -416,11 +540,35 @@ pub fn max(x: &[f32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
         if vector_ok() && x.len() >= 16 {
+            if crate::cpu_has!("avx512f") {
+                // SAFETY: features checked.
+                return unsafe { max_avx512(x) };
+            }
             // SAFETY: features checked.
             return unsafe { max_avx2(x) };
         }
     }
     x.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// Sixteen lanes per pass. Max is order-free, so the result is the AVX2 tier's.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn max_avx512(x: &[f32]) -> f32 {
+    let mut m = _mm512_set1_ps(f32::NEG_INFINITY);
+    let mut i = 0;
+    while i + 16 <= x.len() {
+        m = _mm512_max_ps(m, _mm512_loadu_ps(x.as_ptr().add(i)));
+        i += 16;
+    }
+    let mut lanes = [0.0f32; 16];
+    _mm512_storeu_ps(lanes.as_mut_ptr(), m);
+    let mut r = lanes.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    while i < x.len() {
+        r = r.max(x[i]);
+        i += 1;
+    }
+    r
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -979,6 +1127,61 @@ mod tests {
                     exp_scalar(x)
                 );
             }
+        }
+    }
+
+    /// The sixteen-lane `exp` must be the eight-lane one, lane for lane: same
+    /// constants, same FMA order. Only the bank width changes.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn exp16_is_exp8_bit_for_bit() {
+        if !crate::cpu_has!("avx512f") || !vector_ok() {
+            eprintln!("skipped: no AVX-512F or AVX2+FMA");
+            return;
+        }
+        let xs = prng(17, 16_000, -120.0, 120.0);
+        for chunk in xs.chunks(16) {
+            let mut lane = [0f32; 16];
+            lane[..chunk.len()].copy_from_slice(chunk);
+            // SAFETY: AVX2, FMA and AVX-512F are available (checked above).
+            let got = unsafe {
+                let v = exp16(_mm512_loadu_ps(lane.as_ptr()));
+                let mut out = [0f32; 16];
+                _mm512_storeu_ps(out.as_mut_ptr(), v);
+                out
+            };
+            for (i, &x) in chunk.iter().enumerate() {
+                assert_eq!(got[i].to_bits(), exp_scalar(x).to_bits(), "exp({x})");
+            }
+        }
+    }
+
+    /// The widened softmax pass keeps the eight-lane sum grouping, so its
+    /// denominator is the AVX2 tier's bit for bit — the widening alone cannot move
+    /// a golden.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn exp_shift_sum_avx512_matches_avx2_bit_for_bit() {
+        if !crate::cpu_has!("avx512f") || !vector_ok() {
+            eprintln!("skipped: no AVX-512F or AVX2+FMA");
+            return;
+        }
+        for n in [1usize, 7, 8, 15, 16, 17, 31, 64, 1001] {
+            let xs = prng(19 + n as u64, n, -50.0, 50.0);
+            let mut a = xs.clone();
+            let mut b = xs;
+            // SAFETY: features checked above.
+            let (sa, sb) = unsafe {
+                (
+                    exp_shift_sum_avx2(&mut a, 3.25),
+                    exp_shift_sum_avx512(&mut b, 3.25),
+                )
+            };
+            assert_eq!(sa.to_bits(), sb.to_bits(), "sum at n {n}");
+            assert!(
+                a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+                "values at n {n}"
+            );
         }
     }
 
