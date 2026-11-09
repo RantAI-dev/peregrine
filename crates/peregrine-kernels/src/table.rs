@@ -24,7 +24,7 @@ pub enum MatPath {
     RowsPtq1,
     /// One row at a time through `quant::dot_batch` (every format; scalar fallback inside).
     PerRow,
-    /// Repacked eight-row k-quant tiles against the interleaved activation (AVX2 and up).
+    /// Repacked eight-row k-quant, Q5_0 or Q8_0 tiles (AVX2 and up).
     KqTiles,
 }
 
@@ -112,8 +112,8 @@ impl MatKernels {
             MatPath::RowsPtq1
         } else if fmt == Format::PQ2_0 && self.pq2_rows {
             MatPath::RowsPq2
-        } else if kq && self.kq_tiles && matches!(fmt, Format::Q4_K | Format::Q5_0) {
-            // The repacked k-quant and Q5_0 tiles: eight output rows at once.
+        } else if kq && self.kq_tiles && matches!(fmt, Format::Q4_K | Format::Q5_0 | Format::Q8_0) {
+            // The repacked k-quant and Q5_0/Q8_0 tiles: eight output rows at once.
             MatPath::KqTiles
         } else {
             MatPath::PerRow
@@ -286,6 +286,85 @@ impl MatKernels {
         }
     }
 
+    /// Eight rows of a repacked Q8_0 tile against a batch of activations.
+    ///
+    /// Q8_0's activation is the ordinary per-32 layout, so the batched and the
+    /// single-row paths read the same bytes and the kernel is one code path.
+    pub fn kq_tiles_q8_0(
+        &self,
+        tile: &[u8],
+        n_blk: usize,
+        acts: &[QuantAct],
+        nb: usize,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.kq_tiles,
+            "the repacked Q8_0 kernel used where it cannot run"
+        );
+        assert!(
+            !acts.is_empty() && nb <= acts.len(),
+            "more rows than activations"
+        );
+        assert!(
+            out.len() >= nb * 8,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
+        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
+        // `n_blk` tiles and the activation the rows the caller says. `kq_zmm` is
+        // `have_zmm512()`, which is a superset of those.
+        unsafe {
+            if self.kq_zmm {
+                crate::kqsimd::q8_08_gemm_zmm(tile, n_blk, acts, nb, out)
+            } else {
+                crate::kqsimd::q8_08_gemm(tile, n_blk, acts, nb, out)
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        {
+            let _ = (tile, n_blk, acts, nb, out);
+            unreachable!("no repacked Q8_0 kernel on this architecture")
+        }
+    }
+
+    /// Eight rows of a repacked Q8_0 tile against one to three activations.
+    pub fn kq_tiles_q8_0_gemv(
+        &self,
+        tile: &[u8],
+        n_blk: usize,
+        acts: &[QuantAct],
+        nb: usize,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.kq_tiles,
+            "the repacked Q8_0 kernel used where it cannot run"
+        );
+        assert!(
+            (1..=3).contains(&nb),
+            "the Q8_0 GEMV takes one to three rows"
+        );
+        assert!(
+            out.len() >= nb * 8,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
+        // SAFETY: as above.
+        unsafe {
+            if self.kq_zmm {
+                crate::kqsimd::q8_08_gemv_zmm(tile, n_blk, acts, nb, out)
+            } else {
+                crate::kqsimd::q8_08_gemv(tile, n_blk, acts, nb, out)
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        {
+            let _ = (tile, n_blk, acts, nb, out);
+            unreachable!("no repacked Q8_0 kernel on this architecture")
+        }
+    }
+
     /// `nt` tiles of a repacked PQ2_0 matrix with `ng` groups of 128 per row, against every activation, into
     /// `out[r·nb + b]` for the tiles' 16·nt rows.
     pub fn tiles_pq2(&self, wt: &[u8], ng: usize, nt: usize, acts: &[QuantAct], out: &mut [f32]) {
@@ -403,7 +482,10 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
     match fmt {
         Format::F32 | Format::F16 | Format::BF16 => &[Tier::Scalar, Tier::Avx2],
         #[cfg(feature = "fmt-legacy")]
-        Format::Q4_0 | Format::Q8_0 => &[Tier::Scalar, Tier::Avx2],
+        Format::Q4_0 => &[Tier::Scalar, Tier::Avx2],
+        // Q8_0's repacked tile has an AVX-512 variant, like Q5_0's.
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q8_0 => &[Tier::Scalar, Tier::Avx2, Tier::Avx512],
         // Q5_0 has a repacked tile with an AVX-512 variant (S3.4 §11 and §12).
         #[cfg(feature = "fmt-legacy")]
         Format::Q5_0 => &[Tier::Scalar, Tier::Avx2, Tier::Avx512],
@@ -439,7 +521,10 @@ mod tests {
                 kernels_for(Format::Q5_0),
                 &[Tier::Scalar, Tier::Avx2, Tier::Avx512]
             );
-            assert_eq!(kernels_for(Format::Q8_0), &[Tier::Scalar, Tier::Avx2]);
+            assert_eq!(
+                kernels_for(Format::Q8_0),
+                &[Tier::Scalar, Tier::Avx2, Tier::Avx512]
+            );
         }
         #[cfg(feature = "fmt-kquant")]
         {
@@ -518,6 +603,9 @@ mod tests {
         // Q5_0 has its own repacked tile (the small-model prefill fix).
         assert_eq!(all.path(Format::Q5_0, false, true, false), MatPath::KqTiles);
         assert_eq!(all.path(Format::Q5_0, false, false, false), MatPath::PerRow);
+        // Q8_0's repacked tile: the tied output head and the other Q8_0 matrices.
+        assert_eq!(all.path(Format::Q8_0, false, true, false), MatPath::KqTiles);
+        assert_eq!(all.path(Format::Q8_0, false, false, false), MatPath::PerRow);
         // The other k-quants are not repacked yet (S3.4 PR 3 and PR 4).
         assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::PerRow);
         let avx2 = MatKernels {

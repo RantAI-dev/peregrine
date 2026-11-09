@@ -564,7 +564,7 @@ fn prefetch_distance() -> usize {
 /// so every page still costs a DRAM round trip. 4 KB — one page — keeps all eight fed.
 /// Measured on the 4-core Xeon (Qwen2.5-0.5B Q4_K_M, 512 context): decode 36.4 → 38.5
 /// tok/s, prefill 124.0 → 126.9. `PEREGRINE_PF=0` still turns prefetching off.
-fn rows8_prefetch() -> usize {
+pub(crate) fn rows8_prefetch() -> usize {
     match prefetch_distance() {
         0 => 0,
         pf => pf.max(4096),

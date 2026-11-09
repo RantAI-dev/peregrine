@@ -1,0 +1,90 @@
+base file    /var/tmp/q8work/qwen.f32.base.bin
+  n_ctx 512, n_vocab 151936, n_chunk 40
+  255 scored positions per chunk (the second half, the last one excluded), 10200 in total
+model        /var/home/shiro/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+  n_vocab 151936, add_bos false
+  KV cache    f32
+   1    PPL    9.9487    KLD   0.00315    same top p 96.863 %
+   2    PPL   13.7278    KLD   0.00316    same top p 97.255 %
+   3    PPL   13.7161    KLD   0.00329    same top p 97.778 %
+   4    PPL   13.5522    KLD   0.00329    same top p 96.667 %
+   5    PPL   13.6539    KLD   0.00331    same top p 96.941 %
+   6    PPL   14.1184    KLD   0.00332    same top p 96.863 %
+   7    PPL   14.4627    KLD   0.00328    same top p 96.807 %
+   8    PPL   15.5650    KLD   0.00336    same top p 96.716 %
+   9    PPL   16.5182    KLD   0.00340    same top p 96.601 %
+  10    PPL   17.1022    KLD   0.00341    same top p 96.353 %
+  11    PPL   17.3914    KLD   0.00344    same top p 96.435 %
+  12    PPL   17.5134    KLD   0.00346    same top p 96.373 %
+  13    PPL   18.2784    KLD   0.00347    same top p 96.259 %
+  14    PPL   17.7274    KLD   0.00347    same top p 96.246 %
+  15    PPL   17.5462    KLD   0.00350    same top p 96.288 %
+  16    PPL   18.0155    KLD   0.00351    same top p 96.348 %
+  17    PPL   16.7299    KLD   0.00345    same top p 96.401 %
+  18    PPL   16.8347    KLD   0.00348    same top p 96.427 %
+  19    PPL   16.6510    KLD   0.00350    same top p 96.450 %
+  20    PPL   16.6464    KLD   0.00350    same top p 96.392 %
+  21    PPL   16.2989    KLD   0.00348    same top p 96.452 %
+  22    PPL   16.3191    KLD   0.00350    same top p 96.506 %
+  23    PPL   15.5965    KLD   0.00345    same top p 96.488 %
+  24    PPL   14.8656    KLD   0.00343    same top p 96.552 %
+  25    PPL   14.5678    KLD   0.00342    same top p 96.612 %
+  26    PPL   14.1856    KLD   0.00340    same top p 96.667 %
+  27    PPL   13.8017    KLD   0.00339    same top p 96.674 %
+  28    PPL   13.5741    KLD   0.00336    same top p 96.723 %
+  29    PPL   13.6973    KLD   0.00335    same top p 96.755 %
+  30    PPL   13.6860    KLD   0.00336    same top p 96.667 %
+  31    PPL   13.5428    KLD   0.00334    same top p 96.635 %
+  32    PPL   13.5767    KLD   0.00333    same top p 96.630 %
+  33    PPL   13.3454    KLD   0.00334    same top p 96.649 %
+  34    PPL   13.4655    KLD   0.00337    same top p 96.632 %
+  35    PPL   13.5867    KLD   0.00338    same top p 96.605 %
+  36    PPL   13.7687    KLD   0.00339    same top p 96.656 %
+  37    PPL   14.0027    KLD   0.00341    same top p 96.630 %
+  38    PPL   14.0975    KLD   0.00342    same top p 96.646 %
+  39    PPL   13.9121    KLD   0.00341    same top p 96.601 %
+  40    PPL   13.9663    KLD   0.00341    same top p 96.608 %
+
+base file only
+  Mean PPL(base)                :  13.908042
+  base top-1 == target          :    47.1176 %   (the token array lines up)
+
+====== Perplexity statistics ======
+Mean PPL(Q)                   :  13.966253 ±   0.397107
+Mean PPL(base)                :  13.908042 ±   0.394039
+Cor(ln(PPL(Q)), ln(PPL(base))):  99.91%
+Mean ln(PPL(Q)/PPL(base))     :   0.004177 ±   0.001241
+Mean PPL(Q)/PPL(base)         :   1.004185 ±   0.001246
+Mean PPL(Q)-PPL(base)         :   0.058212 ±   0.017508
+
+====== KL divergence statistics ======
+Mean    KLD:   0.003412 ±   0.000041
+Maximum KLD:   0.126168
+99.9%   KLD:   0.044602
+99.0%   KLD:   0.019216
+95.0%   KLD:   0.009538
+90.0%   KLD:   0.006961
+Median  KLD:   0.002565
+10.0%   KLD:   0.000183
+ 5.0%   KLD:   0.000046
+ 1.0%   KLD:   0.000002
+ 0.1%   KLD:  -0.000009
+Minimum KLD:  -0.000033
+
+====== Token probability statistics ======
+Mean    Δp: -0.043 ± 0.014 %
+Maximum Δp:  0.219%
+99.9%   Δp:  0.085%
+99.0%   Δp:  0.040%
+95.0%   Δp:  0.020%
+90.0%   Δp:  0.011%
+75.0%   Δp:  0.002%
+Median  Δp: -0.000%
+25.0%   Δp: -0.003%
+10.0%   Δp: -0.013%
+ 5.0%   Δp: -0.022%
+ 1.0%   Δp: -0.044%
+ 0.1%   Δp: -0.089%
+Minimum Δp: -0.159%
+RMS Δp    :  1.395 ± 0.031 %
+Same top p: 96.608 ± 0.179 %

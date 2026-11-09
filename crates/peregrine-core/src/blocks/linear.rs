@@ -103,9 +103,9 @@ pub fn matmul_group(
     // The interleaved activation is built once for the group, from the
     // activation the group shares: every output row of the group reads it, so
     // building it per matrix would multiply the work by the group's size. Only
-    // the k-quant tiles need it — the Q5_0 tile reads the per-32 layout the
-    // activation already has — and its fill requires a whole number of 256-weight
-    // super-blocks, which a Q5_0 matrix's 896-wide rows are not.
+    // the k-quant tiles need it — the Q5_0 and Q8_0 tiles read the per-32 layout
+    // the activation already has — and its fill requires a whole number of 256-weight
+    // super-blocks, which a Q5_0 or Q8_0 matrix's 896-wide rows are not.
     let kq_fill = jobs
         .iter()
         .zip(paths)
@@ -180,6 +180,7 @@ pub fn matmul_group(
                     let tile_bytes = match j.w.kind {
                         Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
                         Format::Q5_0 => peregrine_kernels::kq::Q5_08::SIZE,
+                        Format::Q8_0 => peregrine_kernels::kq::Q8_08::SIZE,
                         _ => unreachable!("a repacked path has a repacked format"),
                     };
                     let store = w.kq();
@@ -206,6 +207,15 @@ pub fn matmul_group(
                                         mk.kq_tiles_q5_0(tile, n_sb, &acts[..nb], nb, out);
                                     } else {
                                         mk.kq_tiles_q5_0_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    }
+                                }
+                                Format::Q8_0 => {
+                                    // Q8_0 also reads the per-32 layout: no
+                                    // interleaved activation to build.
+                                    if nb >= 4 {
+                                        mk.kq_tiles_q8_0(tile, n_sb, &acts[..nb], nb, out);
+                                    } else {
+                                        mk.kq_tiles_q8_0_gemv(tile, n_sb, &acts[..nb], nb, out);
                                     }
                                 }
                                 _ => {
