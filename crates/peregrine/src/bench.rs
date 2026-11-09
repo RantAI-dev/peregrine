@@ -22,6 +22,10 @@ pub struct BenchArgs {
     /// Output results as a single JSON object.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+    /// Speculate with the model's MTP block (files with an MTP head). Off by
+    /// default, so a plain `bench` measures the target alone.
+    #[arg(long, default_value_t = false)]
+    pub mtp: bool,
     /// A tuning profile file to apply (default: default profile for model and machine).
     #[arg(long)]
     pub profile: Option<PathBuf>,
@@ -48,6 +52,9 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
 
     let mut session = peregrine_models::session::open(&args.model, cfg)
         .map_err(|e| format!("cannot open session for {}: {e}", args.model.display()))?;
+    if args.mtp {
+        session.set_mtp(true);
+    }
 
     let report = session.bench(args.prompt_tokens, args.tokens)?;
 
@@ -88,6 +95,7 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
             },
             "prefill_tok_s": report.prefill_tok_s,
             "decode_tok_s": report.decode_tok_s,
+            "mtp": args.mtp,
             "bytes_per_token": report.bytes_per_token,
             "prefill_bytes_acts": report.prefill_bytes_acts,
             "decode_bytes_acts": report.decode_bytes_acts,

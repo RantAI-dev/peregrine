@@ -93,6 +93,23 @@ unsafe fn dot32_avx2(codes: __m256i, a: __m256i, ones: __m256i) -> __m256i {
     _mm256_madd_epi16(_mm256_maddubs_epi16(codes, a), ones)
 }
 
+/// One 128-weight group's four planes against one activation, summed in 16-bit lanes.
+///
+/// `VPMADDUBSW` turns each plane into 16 pair sums; adding the four planes in `i16` (the
+/// widest is 4 × 2 × 2 × 127 = 2032, so no lane can saturate) and widening once with
+/// `VPMADDWD` gives the same eight 16-value `i32` lane sums as four separate
+/// `VPMADDUBSW`+`VPMADDWD` pairs, with three vector instructions fewer. Integer
+/// arithmetic is exact, so every lane is bit-identical to the old form.
+#[inline(always)]
+unsafe fn dot128_avx2(c: [__m256i; 4], a: [__m256i; 4], ones: __m256i) -> __m256i {
+    let m0 = _mm256_maddubs_epi16(c[0], a[0]);
+    let m1 = _mm256_maddubs_epi16(c[1], a[1]);
+    let m2 = _mm256_maddubs_epi16(c[2], a[2]);
+    let m3 = _mm256_maddubs_epi16(c[3], a[3]);
+    let s = _mm256_add_epi16(_mm256_add_epi16(m0, m1), _mm256_add_epi16(m2, m3));
+    _mm256_madd_epi16(s, ones)
+}
+
 /// One row of PQ2_0 against `T` activations (AVX2: `VPMADDUBSW` cannot saturate here, 2·2·127 = 508).
 #[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn pq2_avx2<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
@@ -104,20 +121,24 @@ unsafe fn pq2_avx2<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32])
     for g in 0..ng {
         let blk = wp.add(g * 34);
         let wq = _mm256_loadu_si256(blk.add(2) as *const __m256i);
-        let c0 = _mm256_and_si256(wq, m3);
-        let c1 = _mm256_and_si256(_mm256_srli_epi16(wq, 2), m3);
-        let c2 = _mm256_and_si256(_mm256_srli_epi16(wq, 4), m3);
-        let c3 = _mm256_and_si256(_mm256_srli_epi16(wq, 6), m3);
+        let codes = [
+            _mm256_and_si256(wq, m3),
+            _mm256_and_si256(_mm256_srli_epi16(wq, 2), m3),
+            _mm256_and_si256(_mm256_srli_epi16(wq, 4), m3),
+            _mm256_and_si256(_mm256_srli_epi16(wq, 6), m3),
+        ];
         let dw = f16_at(blk);
         for t in 0..T {
             let a = acts.get_unchecked(t);
             let ap = a.tp.as_ptr().add(crate::quant::tp_off(g)) as *const __m256i;
-            let mut s = dot32_avx2(c0, _mm256_loadu_si256(ap), ones);
-            s = _mm256_add_epi32(s, dot32_avx2(c1, _mm256_loadu_si256(ap.add(2)), ones));
-            s = _mm256_add_epi32(s, dot32_avx2(c2, _mm256_loadu_si256(ap.add(4)), ones));
-            s = _mm256_add_epi32(s, dot32_avx2(c3, _mm256_loadu_si256(ap.add(6)), ones));
+            let planes = [
+                _mm256_loadu_si256(ap),
+                _mm256_loadu_si256(ap.add(2)),
+                _mm256_loadu_si256(ap.add(4)),
+                _mm256_loadu_si256(ap.add(6)),
+            ];
             let ls = _mm256_loadu_si256(a.tls.as_ptr().add(g * 8) as *const __m256i);
-            s = _mm256_sub_epi32(s, ls);
+            let s = _mm256_sub_epi32(dot128_avx2(codes, planes, ones), ls);
             let sc = _mm256_mul_ps(
                 _mm256_set1_ps(dw),
                 _mm256_loadu_ps(a.td.as_ptr().add(g * 8)),
@@ -127,6 +148,83 @@ unsafe fn pq2_avx2<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32])
     }
     for t in 0..T {
         out[t] = hsum(acc[t]);
+    }
+}
+
+/// `ROWS` consecutive PQ2_0 rows against one activation: the decode GEMV, sharing the
+/// activation side of the pass.
+///
+/// A group is 34 bytes of weights but four 32-byte activation planes plus the offset
+/// and scale vectors, so the one-row kernel loads more activation than weight bytes for
+/// every row it computes. Here the planes, the offset and the scale are loaded once per
+/// group for `ROWS` rows; each row still runs exactly the instructions the one-row
+/// kernel runs, group by group, so a row's bits do not depend on how many rows shared
+/// the pass.
+///
+/// `w` holds `ROWS` consecutive rows of `rb` bytes (34 per 128 weights); `out[r]` is row
+/// `r`'s result.
+///
+/// # Safety
+/// The caller must have checked AVX2, FMA and F16C, and `w.len() >= ROWS * rb`.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn pq2_avx2_rows<const ROWS: usize>(w: &[u8], rb: usize, a: &QuantAct, out: &mut [f32]) {
+    debug_assert!(rb % 34 == 0 && w.len() >= ROWS * rb && out.len() >= ROWS);
+    let m3 = _mm256_set1_epi8(3);
+    let ones = _mm256_set1_epi16(1);
+    let ng = rb / 34;
+    let wp = w.as_ptr();
+    let pf = crate::simd::pq2_rows_prefetch();
+    let mut acc = [_mm256_setzero_ps(); ROWS];
+    for g in 0..ng {
+        let ap = a.tp.as_ptr().add(crate::quant::tp_off(g)) as *const __m256i;
+        let planes = [
+            _mm256_loadu_si256(ap),
+            _mm256_loadu_si256(ap.add(2)),
+            _mm256_loadu_si256(ap.add(4)),
+            _mm256_loadu_si256(ap.add(6)),
+        ];
+        let ls = _mm256_loadu_si256(a.tls.as_ptr().add(g * 8) as *const __m256i);
+        let td = _mm256_loadu_ps(a.td.as_ptr().add(g * 8));
+        for r in 0..ROWS {
+            let blk = wp.add(r * rb + g * 34);
+            crate::simd::prefetch_ahead(blk, pf, 1);
+            let wq = _mm256_loadu_si256(blk.add(2) as *const __m256i);
+            let codes = [
+                _mm256_and_si256(wq, m3),
+                _mm256_and_si256(_mm256_srli_epi16(wq, 2), m3),
+                _mm256_and_si256(_mm256_srli_epi16(wq, 4), m3),
+                _mm256_and_si256(_mm256_srli_epi16(wq, 6), m3),
+            ];
+            let s = _mm256_sub_epi32(dot128_avx2(codes, planes, ones), ls);
+            let sc = _mm256_mul_ps(_mm256_set1_ps(f16_at(blk)), td);
+            acc[r] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(s), sc, acc[r]);
+        }
+    }
+    for r in 0..ROWS {
+        out[r] = hsum(acc[r]);
+    }
+}
+
+/// Rows of a PQ2_0 matrix through the AVX2 multi-row decode GEMV. `a` must be one
+/// activation. Safety as `dot_rows_pq2`.
+#[doc(hidden)]
+pub unsafe fn dot_rows_pq2_avx2(w: &[u8], rb: usize, rows: usize, a: &QuantAct, out: &mut [f32]) {
+    // Two rows per pass: two open streams per worker (eight across the pool) is what
+    // this 4-core Zen 2 host streams best. Four and six rows measured 4-7% slower there
+    // (more streams than the memory system schedules well) and eight regressed 25% on
+    // register spills; the one-row kernel is about a quarter slower again.
+    const R: usize = 2;
+    let mut r = 0;
+    while r + R <= rows {
+        pq2_avx2_rows::<R>(&w[r * rb..(r + R) * rb], rb, a, &mut out[r..r + R]);
+        r += R;
+    }
+    for r in r..rows {
+        pq2_avx2::<1>(
+            &w[r * rb..(r + 1) * rb],
+            std::slice::from_ref(a),
+            &mut out[r..r + 1],
+        );
     }
 }
 
@@ -668,6 +766,13 @@ pub unsafe fn dot_rows_pq2(w: &[u8], rb: usize, rows: usize, acts: &[QuantAct], 
         pq2_rows_zmm(w, rb, rows, acts, out);
     } else {
         let nb = acts.len();
+        if nb == 1 && !have_vnni() {
+            // Decode on an AVX2-only host: the multi-row GEMV loads the activation side
+            // once for both rows. `PEREGRINE_ZMM=0` on an AVX-512 host keeps the 256-bit
+            // VNNI kernel, so the A/B switch changes nothing but the width.
+            dot_rows_pq2_avx2(w, rb, rows, &acts[0], out);
+            return;
+        }
         for r in 0..rows {
             dot_batch_pq2(
                 &w[r * rb..(r + 1) * rb],
