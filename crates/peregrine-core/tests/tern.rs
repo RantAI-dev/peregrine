@@ -180,6 +180,45 @@ fn pq2_rows_entry_matches_per_row() {
     }
 }
 
+/// The multi-row decode GEMV against the one-row kernel, bit for bit, at every row count
+/// (including the ones that leave a shorter tail). A row's bits must not depend on how
+/// many rows shared the pass — the batch-invariance rule the MTP verify path relies on.
+#[test]
+fn pq2_multirow_decode_matches_one_row_kernel_exactly() {
+    if !peregrine_core::simd::have_batched() {
+        return;
+    }
+    let mut r = Rng(0xA11CE);
+    for n in [2048usize, 4096] {
+        for rows in 1..=11usize {
+            let w: Vec<u8> = (0..rows).flat_map(|_| pq2_row(&mut r, n)).collect();
+            let rb = n / 128 * 34;
+            let a = acts(&mut r, n, 1).pop().unwrap();
+            let mut got = vec![0.0f32; rows];
+            // SAFETY: AVX2/FMA/F16C checked above; the lengths are the kernel's.
+            unsafe { peregrine_core::tern::dot_rows_pq2_avx2(&w, rb, rows, &a, &mut got) };
+            for row in 0..rows {
+                let mut want = [0.0f32; 1];
+                // SAFETY: as above.
+                unsafe {
+                    peregrine_core::tern::dot_batch_pq2_avx2(
+                        &w[row * rb..(row + 1) * rb],
+                        std::slice::from_ref(&a),
+                        &mut want,
+                    )
+                };
+                assert_eq!(
+                    got[row].to_bits(),
+                    want[0].to_bits(),
+                    "n={n} rows={rows} row={row}: {} vs {}",
+                    got[row],
+                    want[0]
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn plane_permutation_vbmi_equals_scalar() {
     if !peregrine_core::tern::have_vbmi() {
