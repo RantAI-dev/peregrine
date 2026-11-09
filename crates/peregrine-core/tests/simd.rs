@@ -48,8 +48,11 @@ fn simd_and_scalar_agree_on_every_row_of_real_tensors() {
         eprintln!("\n  SKIPPED: A4 (SIMD ≡ scalar) needs the model at {path:?}\n");
         return;
     }
-    if !peregrine_core::simd_name().starts_with("avx2") {
-        eprintln!("  SKIPPED: no AVX2 on this machine, both paths are the scalar one");
+    let simd = peregrine_core::simd_name();
+    if !simd.starts_with("avx2") && !simd.starts_with("neon") {
+        eprintln!(
+            "  SKIPPED: no vector kernels on this machine ({simd}), both paths are the scalar one"
+        );
         return;
     }
     let g = Gguf::open(&path).expect("open model");
