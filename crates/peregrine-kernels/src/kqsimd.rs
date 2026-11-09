@@ -314,10 +314,220 @@ unsafe fn fold(
     _mm256_fmadd_ps(x, _mm256_set1_ps(dk), acc)
 }
 
+/// The most activation rows one pass over a tile decodes its weights for.
+///
+/// The activation side of the kernel is four rows per interleaved group and the
+/// weight side is eight output rows, so eight activation rows (two groups) are
+/// the widest block whose per-row state — one integer sum and one float
+/// accumulator, two registers — still leaves room for the decoded window and
+/// the scale/min vectors. Sixteen rows would need thirty-two accumulator
+/// registers against the sixteen an AVX2 core has. Eight halves the number of
+/// times a tile's weights are decoded per prefill pass, which is the decode the
+/// four-row block repeated once per group.
+const MAX_GROUP_ROWS: usize = 2 * ACT_GROUP;
+
+/// The scale and min vectors of one super-block, in the kernel's lane order.
+#[inline(always)]
+unsafe fn q4k8_scale(
+    t: *const u8,
+    lane: __m256i,
+) -> (__m256, __m256, [__m256i; SUBS], [__m256i; SUBS]) {
+    // The scales and the mins come in the tile's row order; the fold wants
+    // the lane order.
+    let dv = _mm256_castsi256_ps(_mm256_permutevar8x32_epi32(
+        _mm256_castps_si256(_mm256_cvtph_ps(_mm_loadu_si128(
+            t.add(crate::kq::q4_d()) as *const __m128i
+        ))),
+        lane,
+    ));
+    let dminv = _mm256_castsi256_ps(_mm256_permutevar8x32_epi32(
+        _mm256_castps_si256(_mm256_cvtph_ps(_mm_loadu_si128(
+            t.add(crate::kq::q4_dmin()) as *const __m128i,
+        ))),
+        lane,
+    ));
+    let (sv, mv) = unpack_scales(t);
+    (dv, dminv, sv, mv)
+}
+
+/// The mins packed into the even 16-bit lanes, zeros in the odd, so the min term
+/// is one `vpmaddwd` per sub-block per row instead of a 32-bit multiply.
+///
+/// Only the sixteen-row block builds these: a decode row would spend more on
+/// packing them than the multiply they save.
+#[inline(always)]
+unsafe fn q4k8_mins16(mv: &[__m256i; SUBS]) -> [__m256i; SUBS] {
+    let zero = _mm256_setzero_si256();
+    let mut mv16 = [_mm256_setzero_si256(); SUBS];
+    for j in 0..SUBS {
+        // `packs` puts the eight mins in both halves of each 128-bit lane; the
+        // unpack then leaves each min in an even 16-bit lane.
+        let p = _mm256_packs_epi32(mv[j], mv[j]);
+        mv16[j] = _mm256_unpacklo_epi16(p, zero);
+    }
+    mv16
+}
+
+/// A window's four code vectors: its low nibbles in two four-byte groups and
+/// its high nibbles in the same two.
+type WindowCodes = (__m256i, __m256i, __m256i, __m256i);
+
+/// Where a super-block's window codes come from.
+///
+/// The GEMV decodes a window just before using it; the sixteen-row GEMM decodes
+/// the whole super-block once and hands the same vectors to both row groups.
+trait CodeSrc {
+    /// # Safety
+    ///
+    /// `w` must be a window of the super-block the source was built for.
+    unsafe fn window(&self, w: usize) -> WindowCodes;
+}
+
+/// The window decode, done on demand: two loads and the nibble masks.
+struct InlineCodes {
+    t: *const u8,
+}
+
+impl CodeSrc for InlineCodes {
+    #[inline(always)]
+    unsafe fn window(&self, w: usize) -> WindowCodes {
+        let lownib = _mm256_set1_epi8(0x0F);
+        let (g0, g1) = window_groups(self.t.add(crate::kq::q4_qs()), w);
+        (
+            _mm256_and_si256(g0, lownib),
+            _mm256_and_si256(g1, lownib),
+            _mm256_and_si256(_mm256_srli_epi16(g0, 4), lownib),
+            _mm256_and_si256(_mm256_srli_epi16(g1, 4), lownib),
+        )
+    }
+}
+
+/// The sixteen windows of a super-block's codes, decoded once.
+#[inline(always)]
+unsafe fn q4k8_codes(t: *const u8) -> [WindowCodes; WINDOWS] {
+    let src = InlineCodes { t };
+    let mut codes = [(
+        _mm256_setzero_si256(),
+        _mm256_setzero_si256(),
+        _mm256_setzero_si256(),
+        _mm256_setzero_si256(),
+    ); WINDOWS];
+    for w in 0..WINDOWS {
+        codes[w] = src.window(w);
+    }
+    codes
+}
+
+/// The codes [`q4k8_codes`] decoded.
+struct DecodedCodes<'a> {
+    codes: &'a [WindowCodes; WINDOWS],
+}
+
+impl CodeSrc for DecodedCodes<'_> {
+    #[inline(always)]
+    unsafe fn window(&self, w: usize) -> WindowCodes {
+        self.codes[w]
+    }
+}
+
+/// One super-block of a tile against `N` activation rows, folded into `facc`.
+///
+/// The window and scale work does not change with the batch or with where the
+/// codes come from: the sixteen-row block hands the same `codes` to both row
+/// groups, the GEMV and the narrow groups decode each window in place.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn q4k8_sb<C: CodeSrc, S: ActSrc, const N: usize>(
+    codes: &C,
+    sb: usize,
+    src: &S,
+    row0: usize,
+    dv: __m256,
+    dminv: __m256,
+    sv: &[__m256i; SUBS],
+    mv: &[__m256i; SUBS],
+    facc: &mut [__m256; N],
+) {
+    let mut sumi = [_mm256_setzero_si256(); N];
+    // A window's low nibbles are the weights of sub-block 2g and its high
+    // nibbles sub-block 2g+1, so one decode of the window feeds both. The
+    // weights of a super-block are unpacked once, not once per sub-block.
+    for g in 0..WINDOWS / 4 {
+        let mut lo16 = [_mm256_setzero_si256(); N];
+        let mut hi16 = [_mm256_setzero_si256(); N];
+        for k in 0..4 {
+            let w = g * 4 + k;
+            let (vlo0, vlo1, vhi0, vhi1) = codes.window(w);
+            for u in 0..N {
+                let q = src.quads(row0 + u, sb, w);
+                let (x1, x2) = (bcast4(q[0]), bcast4(q[1]));
+                let (y1, y2) = (bcast4(q[2]), bcast4(q[3]));
+                // Two `vpmaddubsw` per nibble half: one for each four-byte
+                // group of the window. Their int16 lanes are the rows' two
+                // products each, the rows in the lanes' order. Eight
+                // `vpmaddubsw` reach one lane before the scale madd, which is
+                // the int16 headroom the test below pins.
+                let p = _mm256_add_epi16(
+                    _mm256_maddubs_epi16(vlo0, x1),
+                    _mm256_maddubs_epi16(vlo1, x2),
+                );
+                lo16[u] = _mm256_add_epi16(lo16[u], p);
+                let p = _mm256_add_epi16(
+                    _mm256_maddubs_epi16(vhi0, y1),
+                    _mm256_maddubs_epi16(vhi1, y2),
+                );
+                hi16[u] = _mm256_add_epi16(hi16[u], p);
+            }
+        }
+        // The scale madd: the int16 sums become the int32 sums of the
+        // super-block, one lane per row.
+        let (svlo, svhi) = (sv[2 * g], sv[2 * g + 1]);
+        for u in 0..N {
+            sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(svlo, lo16[u]));
+            sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(svhi, hi16[u]));
+        }
+    }
+    // The min term: the rows' six-bit mins against the activation's
+    // per-sub-block sums. Every product is at most 63 · 4064, and every
+    // partial sum at most 2 048 256, so all of them are integers the f32
+    // can hold exactly, and the int32 accumulation and the float chain
+    // round to the same bits.
+    for u in 0..N {
+        let mut mt = _mm256_setzero_si256();
+        for j in 0..SUBS {
+            mt = _mm256_add_epi32(
+                mt,
+                _mm256_mullo_epi32(mv[j], _mm256_set1_epi32(src.min_sum(row0 + u, sb, j))),
+            );
+        }
+        facc[u] = fold(
+            facc[u],
+            sumi[u],
+            _mm256_cvtepi32_ps(mt),
+            dv,
+            dminv,
+            src.scale(row0 + u, sb),
+        );
+    }
+}
+
+/// The eight lanes are the eight output rows, in the lane order.
+#[inline(always)]
+unsafe fn q4k8_write<const N: usize>(facc: &[__m256; N], nvalid: usize, out: &mut [f32]) {
+    let mut lane = [0f32; ROWS];
+    for u in 0..nvalid {
+        _mm256_storeu_ps(lane.as_mut_ptr(), facc[u]);
+        for k in 0..ROWS {
+            out[u * ROWS + LANES[k]] = lane[k];
+        }
+    }
+}
+
 /// Eight output rows of a repacked Q4_K tile against `N` activation rows.
 ///
 /// The tile is `n_sb` super-blocks of eight rows; `out` receives
-/// `out[b · 8 + r]` for the rows `row0 .. row0 + N` of the activation.
+/// `out[b · 8 + r]` for the rows `0 .. nvalid` of the group whose first row is
+/// `row0` of the activation.
 ///
 /// `N` is a const generic rather than a parameter so that the activation loop
 /// unrolls: with a runtime bound the compiler kept the loop rolled and branched
@@ -330,110 +540,81 @@ unsafe fn fold(
 ///
 /// The caller must have checked that the CPU has AVX2, FMA and F16C. The tile
 /// must hold `n_sb` tiles, and the activation must carry the per-256 layout.
+/// Rows past the activation's own count must be readable (the interleaved buffer
+/// pads a group with zero codes); the GEMM only ever asks for them with `N`
+/// covering a padded group, whose results are discarded.
 #[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn q4k8_group<S: ActSrc, const N: usize>(
     tile: &[u8],
     n_sb: usize,
     src: &S,
     row0: usize,
+    nvalid: usize,
     out: &mut [f32],
 ) {
-    assert!((1..=ACT_GROUP).contains(&N), "one to four activation rows");
-    assert!(out.len() >= N * ROWS, "the output holds eight rows per row");
-    let lownib = _mm256_set1_epi8(0x0F);
+    assert!(
+        (1..=MAX_GROUP_ROWS).contains(&N),
+        "one to eight activation rows"
+    );
+    assert!(nvalid > 0 && nvalid <= N, "the valid rows fit the group");
+    assert!(
+        out.len() >= nvalid * ROWS,
+        "the output holds eight rows per row"
+    );
+    let lane = _mm256_loadu_si256(LANEPERM.as_ptr() as *const __m256i);
     let mut facc = [_mm256_setzero_ps(); N];
     for sb in 0..n_sb {
         let t = tile.as_ptr().add(sb * Q4K8::SIZE);
-        // The scales and the mins come in the tile's row order; the fold wants
-        // the lane order.
-        let dv = _mm256_castsi256_ps(_mm256_permutevar8x32_epi32(
-            _mm256_castps_si256(_mm256_cvtph_ps(_mm_loadu_si128(
-                t.add(crate::kq::q4_d()) as *const __m128i
-            ))),
-            _mm256_loadu_si256(LANEPERM.as_ptr() as *const __m256i),
-        ));
-        let dminv = _mm256_castsi256_ps(_mm256_permutevar8x32_epi32(
-            _mm256_castps_si256(_mm256_cvtph_ps(_mm_loadu_si128(
-                t.add(crate::kq::q4_dmin()) as *const __m128i,
-            ))),
-            _mm256_loadu_si256(LANEPERM.as_ptr() as *const __m256i),
-        ));
-        let (sv, mv) = unpack_scales(t);
-        let mut sumi = [_mm256_setzero_si256(); N];
-        // A window's low nibbles are the weights of sub-block 2g and its high
-        // nibbles sub-block 2g+1, so one decode of the window feeds both. The
-        // weights of a super-block are unpacked once, not once per sub-block.
-        for g in 0..WINDOWS / 4 {
-            let mut lo16 = [_mm256_setzero_si256(); N];
-            let mut hi16 = [_mm256_setzero_si256(); N];
-            for k in 0..4 {
-                let w = g * 4 + k;
-                let (g0, g1) = window_groups(t.add(crate::kq::q4_qs()), w);
-                let vlo = (_mm256_and_si256(g0, lownib), _mm256_and_si256(g1, lownib));
-                let vhi = (
-                    _mm256_and_si256(_mm256_srli_epi16(g0, 4), lownib),
-                    _mm256_and_si256(_mm256_srli_epi16(g1, 4), lownib),
-                );
-                for u in 0..N {
-                    let q = src.quads(row0 + u, sb, w);
-                    let (x1, x2) = (bcast4(q[0]), bcast4(q[1]));
-                    let (y1, y2) = (bcast4(q[2]), bcast4(q[3]));
-                    // Two `vpmaddubsw` per nibble half: one for each four-byte
-                    // group of the window. Their int16 lanes are the rows' two
-                    // products each, the rows in the lanes' order. Eight
-                    // `vpmaddubsw` reach one lane before the scale madd, which is
-                    // the int16 headroom the test below pins.
-                    let p = _mm256_add_epi16(
-                        _mm256_maddubs_epi16(vlo.0, x1),
-                        _mm256_maddubs_epi16(vlo.1, x2),
-                    );
-                    lo16[u] = _mm256_add_epi16(lo16[u], p);
-                    let p = _mm256_add_epi16(
-                        _mm256_maddubs_epi16(vhi.0, y1),
-                        _mm256_maddubs_epi16(vhi.1, y2),
-                    );
-                    hi16[u] = _mm256_add_epi16(hi16[u], p);
-                }
-            }
-            // The scale madd: the int16 sums become the int32 sums of the
-            // super-block, one lane per row.
-            let (svlo, svhi) = (sv[2 * g], sv[2 * g + 1]);
-            for u in 0..N {
-                sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(svlo, lo16[u]));
-                sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(svhi, hi16[u]));
-            }
-        }
-        // The min term: the rows' six-bit mins against the activation's
-        // per-sub-block sums. Every product is at most 63 · 4064, and every
-        // partial sum at most 2 048 256, so all of them are integers the f32
-        // can hold exactly, and the int32 accumulation and the float chain
-        // round to the same bits.
-        for u in 0..N {
-            let mut mt = _mm256_setzero_si256();
-            for j in 0..SUBS {
-                mt = _mm256_add_epi32(
-                    mt,
-                    _mm256_mullo_epi32(mv[j], _mm256_set1_epi32(src.min_sum(row0 + u, sb, j))),
-                );
-            }
-            facc[u] = fold(
-                facc[u],
-                sumi[u],
-                _mm256_cvtepi32_ps(mt),
-                dv,
-                dminv,
-                src.scale(row0 + u, sb),
-            );
-        }
+        let (dv, dminv, sv, mv) = q4k8_scale(t, lane);
+        let codes = InlineCodes { t };
+        q4k8_sb(&codes, sb, src, row0, dv, dminv, &sv, &mv, &mut facc);
     }
-    // The eight lanes are the eight output rows, in the lane order.
-    let mut lane = [0f32; ROWS];
-    for u in 0..N {
-        _mm256_storeu_ps(lane.as_mut_ptr(), facc[u]);
-        for k in 0..ROWS {
-            out[(row0 + u) * ROWS + LANES[k]] = lane[k];
-        }
+    q4k8_write(&facc, nvalid, &mut out[row0 * ROWS..]);
+}
+
+/// Sixteen output rows (two groups of eight) of a repacked Q4_K tile against
+/// sixteen activation rows.
+///
+/// The prefill case: a prompt chunk is sixteen rows, and the two groups share
+/// the super-block's scale and min unpack. The per-row arithmetic is
+/// `q4k8_group`'s exactly — the seconds group's `row0` is just eight rows on —
+/// so every row's bits are what the one-group kernel gives it.
+///
+/// # Safety
+///
+/// As [`q4k8_group`], with `nvalid <= 16`.
+#[inline(never)]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn q4k8_pair<S: ActSrc>(
+    tile: &[u8],
+    n_sb: usize,
+    src: &S,
+    row0: usize,
+    nvalid: usize,
+    out: &mut [f32],
+) {
+    assert!(
+        (9..=16).contains(&nvalid),
+        "a pair covers nine to sixteen rows"
+    );
+    assert!(
+        out.len() >= nvalid * ROWS,
+        "the output holds eight rows per row"
+    );
+    let lane = _mm256_loadu_si256(LANEPERM.as_ptr() as *const __m256i);
+    let mut fa = [_mm256_setzero_ps(); 8];
+    let mut fb = [_mm256_setzero_ps(); 8];
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q4K8::SIZE);
+        let (dv, dminv, sv, mv) = q4k8_scale(t, lane);
+        let mv16 = q4k8_mins16(&mv);
+        let decoded = q4k8_codes(t);
+        let codes = DecodedCodes { codes: &decoded };
+        q4k8_sb(&codes, sb, src, row0, dv, dminv, &sv, &mv16, &mut fa);
+        q4k8_sb(&codes, sb, src, row0 + 8, dv, dminv, &sv, &mv16, &mut fb);
     }
+    q4k8_write(&fa, nvalid.min(8), out);
+    q4k8_write(&fb, nvalid - 8, &mut out[8 * ROWS..]);
 }
 
 /// Eight output rows of a repacked Q4_K tile against a batch of activations.
@@ -453,21 +634,32 @@ pub unsafe fn q4k8_gemm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out:
         "the output holds fewer than eight rows per activation"
     );
     let src = Interleaved { acts };
+    let stride = MAX_GROUP_ROWS;
+    // A prompt chunk is sixteen rows: one pass per tile for both groups.
+    let mut b0 = 0;
+    while nb - b0 >= 2 * stride {
+        q4k8_pair(tile, n_sb, &src, b0, 2 * stride, &mut out[b0 * ROWS..]);
+        b0 += 2 * stride;
+    }
     // The batch's groups, not the buffer's: a caller may pass a narrower `nb`
     // than the interleaved buffer holds.
-    let groups = nb.div_ceil(ACT_GROUP);
+    let groups = (nb - b0).div_ceil(stride);
     for g in 0..groups {
-        let b0 = g * ACT_GROUP;
-        let n = (nb - b0).min(ACT_GROUP);
-        // A group of four rows is the common case; the last group of a batch
-        // whose width is not a multiple of four is the only narrow one.
+        let b0 = b0 + g * stride;
+        let n = (nb - b0).min(stride);
+        // A group of eight rows (two interleaved groups) is the common case; the
+        // last group of a batch whose width is not a multiple of eight is narrow.
         match n {
-            4 => q4k8_group::<_, 4>(tile, n_sb, &src, b0, out),
-            3 => q4k8_group::<_, 3>(tile, n_sb, &src, b0, out),
-            2 => q4k8_group::<_, 2>(tile, n_sb, &src, b0, out),
-            1 => q4k8_group::<_, 1>(tile, n_sb, &src, b0, out),
+            8 => q4k8_group::<_, 8>(tile, n_sb, &src, b0, n, out),
+            7 => q4k8_group::<_, 7>(tile, n_sb, &src, b0, n, out),
+            6 => q4k8_group::<_, 6>(tile, n_sb, &src, b0, n, out),
+            5 => q4k8_group::<_, 5>(tile, n_sb, &src, b0, n, out),
+            4 => q4k8_group::<_, 4>(tile, n_sb, &src, b0, n, out),
+            3 => q4k8_group::<_, 3>(tile, n_sb, &src, b0, n, out),
+            2 => q4k8_group::<_, 2>(tile, n_sb, &src, b0, n, out),
+            1 => q4k8_group::<_, 1>(tile, n_sb, &src, b0, n, out),
             0 => break,
-            _ => unreachable!("a group holds four activation rows"),
+            _ => unreachable!("a group holds eight activation rows"),
         }
     }
 }
@@ -490,9 +682,9 @@ pub unsafe fn q4k8_gemv(tile: &[u8], n_sb: usize, acts: &[QuantAct], nb: usize, 
     // The rows together: the weight side is then unpacked once for all of them.
     let src = Plain { acts };
     match nb {
-        1 => q4k8_group::<_, 1>(tile, n_sb, &src, 0, out),
-        2 => q4k8_group::<_, 2>(tile, n_sb, &src, 0, out),
-        _ => q4k8_group::<_, 3>(tile, n_sb, &src, 0, out),
+        1 => q4k8_group::<_, 1>(tile, n_sb, &src, 0, nb, out),
+        2 => q4k8_group::<_, 2>(tile, n_sb, &src, 0, nb, out),
+        _ => q4k8_group::<_, 3>(tile, n_sb, &src, 0, nb, out),
     }
 }
 
