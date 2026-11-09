@@ -337,6 +337,10 @@ fn run_delay_ns() -> Option<u64> {
 }
 
 /// The second field of a `schedstat` line: run-queue delay in nanoseconds.
+///
+/// Only Linux reads it in a normal build; the unit test exercises the parser on every
+/// platform, so a `cfg(test)` build keeps it there too.
+#[cfg(any(target_os = "linux", test))]
 fn parse_run_delay(line: &str) -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
