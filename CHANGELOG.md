@@ -144,6 +144,27 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- Attention's value mix widens to sixteen lanes on the AVX-512 tier. The mix is
+  conversion-bound: it widens every stored half of V into f32 and accumulates it into
+  the output, so `vcvtph2ps zmm` with 512-bit fused multiply-adds halves that work.
+  Every path takes it — solo decode's F16-direct mix, the prefill tile's widened and
+  F16-direct mixes, and a mapped multi-user row's chunked mix — and the pair kernel
+  still shares each V read between two rows. The per-element order is the AVX2
+  kernel's (`α·o`, then `p_j·v_j` over ascending positions) and F16C's widening is
+  exact, so the widened mix is bit-identical to AVX2; the tier's real-model goldens
+  for Llama-3.2-1B and Qwen2.5-0.5B came back unchanged. The softmax's `exp` is also
+  sixteen wide (`exp16` is `exp8` lane for lane) with the eight-value f64 sum grouping
+  kept, so its denominator is unchanged too. Attention-only at 4096 positions, one
+  thread: 32.9 -> 29.9 ms/token (medians of three); at twelve threads the mix pass
+  falls from ~2.55 to ~2.08 ms per token and attention from ~6.51 to ~5.93 ms.
+  Whole-pass decode (medians of five alternating rounds, twelve threads): Llama-3.2-1B
+  59.9 -> 60.9 tok/s at 512 and 47.9 -> 49.1 at 4096; Qwen2.5-0.5B 98.4 -> 99.8 at 512
+  (nine rounds) and 71.7 -> 73.3 at 4096. Prompt processing is a wash inside the
+  host's spread. Scores stay on the AVX2 tree on every tier: a zmm score row needs a
+  sixteen-lane horizontal reduction and, measured at every visible length at head
+  width 64, the zmm variants (including one that packs two keys into the two halves
+  to keep the AVX2 reduction tree exactly) were 30–70 % slower. One score tree
+  everywhere also keeps a row's score bits independent of its path by construction.
 - Prefill attention reads the F16 K/V cache directly. The multi-row tile used to be
   widened f16 -> f32 before every score and every value mix; it now hands the cache's
   halves to the same register-blocked kernels the decode path reads, so a K or V tile
