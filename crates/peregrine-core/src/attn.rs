@@ -52,8 +52,13 @@
 //!   bit; the mix is per-element and matches for the same reason. Attention's output
 //!   is therefore the AVX2 tier's, and this tier's goldens move only where another
 //!   kernel (the repacked k-quant matmuls) does.
+//! * **A sliding window is only the visible range.** A row with a window sees its
+//!   last `window` positions; the position chunks are the even cut of that range, and
+//!   every tile walk starts at it, so a windowed layer reads its window rather than
+//!   the whole context. A window may start inside a tile: the fast kernels offset
+//!   into the cache's halves at the same position the widened tile would start at.
 //! * **A row's partition is its own.** The position chunks a row is cut into are a
-//!   function of that row's context length and the model shape alone — never of the
+//!   function of that row's visible context and the model shape alone — never of the
 //!   other rows in the call, the call width, the prefill chunk or the pool. A
 //!   single-row call spreads the chunks over tasks; a multi-row call spreads the
 //!   rows and walks each row's chunks inside its task, in the same order. The merge
@@ -151,11 +156,12 @@ impl Plan {
 /// positions, into chunks of at least `BLOCK` positions and enough of them to reach
 /// `TARGET_TASKS` tasks for the call.
 ///
-/// A row's arithmetic must depend only on that row's own context length and the model
-/// shape — never on the other rows in the call, the call width (`nb`), the prefill
-/// chunk or the pool. The position partition therefore is not a property of the call
-/// at all: `row_chunks` gives every row its own chunk count from its own context,
-/// and the cut is the even one. A single-row call splits those chunks across tasks
+/// A row's arithmetic must depend only on that row's own visible context and the
+/// model shape — never on the other rows in the call, the call width (`nb`), the
+/// prefill chunk or the pool. The position partition therefore is not a property of
+/// the call at all: `row_chunks` gives every row its own chunk count from its own
+/// visible context (a sliding window is the last `window` positions), and the cut is
+/// the even one over that range. A single-row call splits those chunks across tasks
 /// (flash decoding); a multi-row call splits rows across tasks and each task walks
 /// every row's chunks serially with the same boundaries and the same merge order (see
 /// [`run_rows`]). Both paths compute the same partials and call [`combine_row`] over
@@ -218,17 +224,31 @@ pub fn plan(sh: &Shape<'_>, workers: usize) -> Plan {
 ///
 /// The chunk count is the task target spread over the KV heads, capped so a chunk
 /// holds at least one decode tile (`BLOCK`) and by `MAX_CHUNKS` (the partial buffer).
-/// The boundaries are the even cut `i·n_ctx/k`, which is what the single-row decode
-/// path uses too; they need not land on the `BLOCK` grid (see [`run_rows`]). The work
-/// gate is per row, so a short row is never split just because a wide call is long.
+/// Only the visible positions count as work: a sliding window can leave a 4096-token
+/// row with just its last 512 positions. The boundaries are the even cut of that
+/// visible range, which is what the single-row decode path uses too; they need not
+/// land on the `BLOCK` grid (see [`run_rows`]). The work gate is per row, so a short
+/// row is never split just because a wide call is long.
 fn row_chunks(sh: &Shape<'_>, n_ctx: usize) -> usize {
-    let work = sh.n_head * n_ctx * sh.head_dim * 2;
+    // Only the visible positions are work: a sliding window can leave a 4096-token
+    // row with nothing but its last 512 positions to read and score.
+    let visible = n_ctx - visible_start(sh, n_ctx);
+    let work = sh.n_head * visible * sh.head_dim * 2;
     if work < 1 << 19 {
         return 1;
     }
-    let by_ctx = (n_ctx / BLOCK).max(1);
+    let by_ctx = (visible / BLOCK).max(1);
     let by_heads = TARGET_TASKS.div_ceil(sh.n_kv_head);
     by_heads.min(by_ctx).clamp(1, MAX_CHUNKS)
+}
+
+/// The first position a row with `n_ctx` positions can see: the whole context, or,
+/// with a sliding window, only its last `window` positions.
+fn visible_start(sh: &Shape<'_>, n_ctx: usize) -> usize {
+    match sh.window {
+        Some(w) => n_ctx.saturating_sub(w),
+        None => 0,
+    }
 }
 
 /// One task: KV head `kh`, batch rows `b0..b1`, cache positions `p0..p1`.
@@ -248,7 +268,20 @@ pub fn task(sh: &Shape<'_>, p: &Plan, i: usize) -> Task {
     let kh = i / (p.pos_chunks * p.row_blocks);
     let (b0, b1) = (ri * sh.nb / p.row_blocks, (ri + 1) * sh.nb / p.row_blocks);
     let ctx = sh.start_pos + sh.nb;
-    let (p0, p1) = (pi * ctx / p.pos_chunks, (pi + 1) * ctx / p.pos_chunks);
+    // A single row partitions its visible positions — the even cut of the window when
+    // there is one, not of the context, so a windowed layer's tasks split the work it
+    // actually has. A multi-row task keeps the whole-context marker and walks each
+    // row's own visible chunks inside it ([`run_rows`]).
+    let (p0, p1) = if sh.nb == 1 {
+        let v0 = visible_start(sh, ctx);
+        let visible = ctx - v0;
+        (
+            v0 + pi * visible / p.pos_chunks,
+            v0 + (pi + 1) * visible / p.pos_chunks,
+        )
+    } else {
+        (0, ctx)
+    };
     Task { kh, b0, b1, p0, p1 }
 }
 
@@ -320,10 +353,18 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
 
     // No row of this task sees past `start_pos + b1 − 1`.
     let p_end = t.p1.min(sh.start_pos + t.b1);
+    // A sliding window keeps every row from seeing further back than its own
+    // `n_ctx − window`; no row of the task sees further back than its first row's.
+    // Tiles entirely before it contribute nothing, so they are not decoded at all —
+    // this is the read a windowed layer would otherwise do over the whole context.
+    let p_min_task = match sh.window {
+        Some(w) => (sh.start_pos + t.b0 + 1).saturating_sub(w),
+        None => 0,
+    };
     // Tiles stay on the global `BLOCK` grid: a chunk may start inside one, and the
     // multi-row walker ([`run_rows`]) then scores the same tile for every row. Only
     // the part from `t.p0` on is read, so a chunk is never decoded twice.
-    let mut blk = t.p0;
+    let mut blk = t.p0.max(p_min_task / BLOCK * BLOCK);
     while blk < p_end {
         let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
         let tdec = crate::prof::detail().then(std::time::Instant::now);
@@ -429,13 +470,34 @@ fn run_f16(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
     sc.m[..rows].fill(f32::NEG_INFINITY);
     sc.l[..rows].fill(0.0);
 
-    let p_end = t.p1.min(sh.start_pos + t.b1);
-    let mut blk = t.p0;
+    // One batch row, so every query row of this task has the same context and the
+    // same sliding-window start.
+    let n_ctx = sh.start_pos + t.b0 + 1;
+    let p_end = t.p1.min(n_ctx);
+    let p_min = match sh.window {
+        Some(w) => n_ctx.saturating_sub(w),
+        None => 0,
+    };
+    // The first tile a row can see; anything before it contributes no partial and is
+    // not decoded. Starting on the global `BLOCK` grid keeps the tile boundaries — and
+    // therefore every score's reduction tree — exactly the widened path's.
+    let mut blk = t.p0.max(p_min / BLOCK * BLOCK);
     while blk < p_end {
         let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
-        let kb = kv.block_bytes(true, layer, t.kh, blk, bn);
-        let vb = kv.block_bytes(false, layer, t.kh, blk, bn);
-        let vis = bn.min(sh.start_pos + t.b0 + 1 - blk);
+        let vis_end = (blk + bn).min(n_ctx);
+        let start = blk.max(p_min);
+        // A tile wholly before the window still advances the tile loop; it has no
+        // visible position and must not be read.
+        if start >= vis_end {
+            blk += bn;
+            continue;
+        }
+        // A window can begin inside a tile, so the visible keys and values start at
+        // `j_start` in the cache's own halves.
+        let j_start = start - blk;
+        let vis = vis_end - start;
+        let kb = &kv.block_bytes(true, layer, t.kh, blk, bn)[j_start * hd * 2..];
+        let vb = &kv.block_bytes(false, layer, t.kh, blk, bn)[j_start * hd * 2..];
         if vis > 0 {
             let ts = crate::prof::detail().then(std::time::Instant::now);
             for r in (0..rows).step_by(2) {
@@ -676,20 +738,32 @@ pub(crate) fn run_range<O: RowSink>(
     // (`DIRECT_MIN_VIS`); shorter prefill keeps the widened tile. The per-row
     // arithmetic is unchanged either way — the f16 kernels are the same FMAs in the
     // same order (their test pins them to the widened ones bit for bit), so a row
-    // keeps its bits whichever path it takes.
+    // keeps its bits whichever path it takes. A sliding window caps what any row can
+    // see, so the threshold is judged on the visible span, not the whole context: a
+    // 512-position window keeps the widened tile at any context length.
     let direct = {
         #[cfg(target_arch = "x86_64")]
         {
-            prefill_direct(kv, sh, max_ctx)
+            let vis_span = match sh.window {
+                Some(w) => max_ctx.min(w),
+                None => max_ctx,
+            };
+            prefill_direct(kv, sh, vis_span)
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
             false
         }
     };
-    let mut blk = t.p0;
+    // No row of the task sees further back than the first row's window start; tiles
+    // before it contribute nothing, so they are never decoded.
+    let p_min_task = match sh.window {
+        Some(w) => (sh.start_pos + t.b0 + 1).saturating_sub(w),
+        None => 0,
+    };
+    let mut blk = t.p0.max(p_min_task / BLOCK * BLOCK);
     while blk < p_end {
-        let bn = BLOCK.min(p_end - blk);
+        let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
         // The tile is walked in two phases over the same widened buffer: keys first,
         // scored for every row, then values, mixed into every row's accumulator. One
         // resident tile the size of `bn × hd` floats plus the task's banked scores is
@@ -703,7 +777,8 @@ pub(crate) fn run_range<O: RowSink>(
         while lr < sub {
             let (start, len) = vis_range(sh, ctx_of[lr], blk, bn);
             // A second row can ride the same pass when it sees the tile from the same
-            // position — always without a window, where every row starts at the tile.
+            // position: rows of one batch row always do, and different batch rows do
+            // when their windows happen to start together.
             let paired = lr + 1 < sub && vis_range(sh, ctx_of[lr + 1], blk, bn).0 == start;
             let len1 = if paired {
                 vis_range(sh, ctx_of[lr + 1], blk, bn).1
@@ -741,10 +816,13 @@ pub(crate) fn run_range<O: RowSink>(
             }
             let (vis_start, vis_len) = vis_range(sh, n_ctx, blk, bn);
             let vis_end = vis_start + vis_len;
+            // The row's canonical chunks are the even cut of its visible positions.
+            let v0 = visible_start(sh, n_ctx);
+            let visible = n_ctx - v0;
             let mut pos = blk;
             while pos < vis_end {
                 let ci = cur[lr];
-                let chunk_end = (ci + 1) * n_ctx / count[lr];
+                let chunk_end = v0 + (ci + 1) * visible / count[lr];
                 let end = vis_end.min(chunk_end);
                 let start = pos.max(vis_start);
                 if start < end {
@@ -849,13 +927,16 @@ pub(crate) fn run_row<O: RowSink>(
         start_pos: pos,
         ..*sh
     };
+    // The same visible-position cut [`task`] makes for a solo row.
+    let v0 = visible_start(&one, n_ctx);
+    let visible = n_ctx - v0;
     for ci in 0..count {
         let t = Task {
             kh,
             b0: 0,
             b1: 1,
-            p0: ci * n_ctx / count,
-            p1: (ci + 1) * n_ctx / count,
+            p0: v0 + ci * visible / count,
+            p1: v0 + (ci + 1) * visible / count,
         };
         run(kv, layer, &one, q_row, &t, sc);
         for g in 0..gqa {
@@ -906,10 +987,10 @@ fn score_tile(
     if let Some(k) = k16 {
         #[cfg(target_arch = "x86_64")]
         {
-            // The direct path never carries a window (`f16_direct` excludes it), so
-            // every row starts at the tile's first position.
-            debug_assert_eq!(j_start, 0, "a windowed tile is not read as f16");
-            let _ = j_start;
+            // A window can start inside the tile, so the visible keys begin at
+            // `j_start` in the cache's own halves — the same position the widened
+            // tile's `kf[j_start * hd..]` starts at.
+            let k = &k[j_start * hd * 2..];
             if paired && pairs {
                 // SAFETY: F16 directness checked; `k` holds `max(len, len1)` keys.
                 unsafe {
@@ -1053,13 +1134,13 @@ pub fn combine_row(
 
 /// Whether the F16 cache can be consumed directly by the register-blocked kernels.
 ///
-/// F16C widens the stored halves in registers; AVX2+FMA do the arithmetic. The
-/// sliding-window path keeps the widened tile because its visible range starts
-/// mid-tile, and it is not the case this path exists for.
+/// F16C widens the stored halves in registers; AVX2+FMA do the arithmetic. A
+/// sliding window only moves where the visible range starts: the decode path skips
+/// every tile before it and offsets into the tile that holds it, so the same kernels
+/// read the same positions the widened path would.
 #[cfg(target_arch = "x86_64")]
 fn f16_direct(kv: &KvCache, sh: &Shape<'_>) -> bool {
     kv.prec() == crate::kv::KvPrec::F16
-        && sh.window.is_none()
         && sh.head_dim.is_multiple_of(8)
         && crate::cpu_has!("avx2")
         && crate::cpu_has!("fma")
@@ -2364,6 +2445,42 @@ mod tests {
         }
     }
 
+    /// A windowed single row assigns only its visible positions, each exactly once,
+    /// and never reads a tile before them.
+    #[test]
+    fn a_windowed_plan_covers_every_visible_position_exactly_once() {
+        let sh = Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 1,
+            start_pos: 4095,
+            scale: 0.1,
+            window: Some(320),
+            sinks: None,
+        };
+        let p = plan(&sh, 4);
+        assert!(p.pos_chunks > 1, "{p:?}");
+        let ctx = sh.start_pos + sh.nb;
+        let v0 = visible_start(&sh, ctx);
+        let mut seen = vec![0u32; ctx];
+        for i in 0..p.tasks(&sh) {
+            let t = task(&sh, &p, i);
+            // Positions are per KV head; the first head's tasks must cover the row.
+            if t.kh != 0 {
+                continue;
+            }
+            for pos in t.p0..t.p1 {
+                seen[pos] += 1;
+            }
+        }
+        assert!(seen[..v0].iter().all(|&c| c == 0), "read before the window");
+        assert!(
+            seen[v0..].iter().all(|&c| c == 1),
+            "visible positions were not covered exactly once"
+        );
+    }
+
     /// The invariant this whole partition exists for: the same cache row, the same
     /// query, the same bits — whether it is one row in the call or one of many.
     ///
@@ -2833,6 +2950,127 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// The hard rule with a sliding window: a row's bits are its query, its own
+    /// context and the window's shape alone — not the other rows in the call, the
+    /// prefill chunk width or the pool width.
+    ///
+    /// The window starts mid-tile and its visible positions are split across the
+    /// canonical chunks, so this exercises both sides of the window change at once:
+    /// the F16-direct decode path (which now takes windowed layers, skipping every
+    /// tile before the window) and the widened prefill-tile path must agree bit for
+    /// bit, and a row read alone must match the same row in a chunk of 16 or 3.
+    #[test]
+    fn a_windowed_rows_bits_are_identical_alone_in_a_chunk_and_at_any_pool_width() {
+        let base = Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 16,
+            start_pos: 400,
+            scale: 1.0 / 8.0,
+            window: Some(320),
+            sinks: None,
+        };
+        // The window leaves the longest rows 320 visible positions: five chunks of
+        // 64, and a start that is not on the `BLOCK` grid.
+        assert_eq!(row_chunks(&base, base.start_pos + base.nb), 5);
+        assert_ne!(visible_start(&base, base.start_pos + base.nb) % BLOCK, 0);
+        let hd = base.head_dim;
+        let qd = base.q_dim();
+        let (kv, q, _, _) = setup(KvPrec::F16, &base, 1);
+        let pool = [1usize, 2, 4, 8];
+        let batched: Vec<Vec<f32>> = pool
+            .iter()
+            .map(|&w| grouped(&kv, 0, &base, &q, plan(&base, w)))
+            .collect();
+        for w in 1..batched.len() {
+            for b in 0..base.nb {
+                let lo = b * base.n_head * hd;
+                let hi = (b + 1) * base.n_head * hd;
+                assert!(
+                    same_bits(&batched[w][lo..hi], &batched[0][lo..hi]),
+                    "row {b} moved with the pool width {}",
+                    pool[w]
+                );
+            }
+        }
+        for (wi, batch) in batched.iter().enumerate() {
+            for b in 0..base.nb {
+                let solo = Shape {
+                    nb: 1,
+                    start_pos: base.start_pos + b,
+                    ..base
+                };
+                let got = grouped(&kv, 0, &solo, &q[b * qd..], plan(&solo, pool[wi]));
+                let lo = b * base.n_head * hd;
+                assert!(
+                    same_bits(&got, &batch[lo..(b + 1) * base.n_head * hd]),
+                    "windowed row {b} changed in a chunk of 16 at pool width {}",
+                    pool[wi]
+                );
+                if b + 3 <= base.nb {
+                    let small = Shape {
+                        nb: 3,
+                        start_pos: base.start_pos + b,
+                        ..base
+                    };
+                    let got = grouped(&kv, 0, &small, &q[b * qd..], plan(&small, pool[wi]));
+                    assert!(
+                        same_bits(&got[..base.n_head * hd], &batch[lo..lo + base.n_head * hd]),
+                        "windowed row {b} changed in a chunk of 3 at pool width {}",
+                        pool[wi]
+                    );
+                }
+            }
+        }
+    }
+
+    /// A window long enough to keep the prefill tile on the F16-direct path
+    /// ([`DIRECT_MIN_VIS`]) must still agree with a solo decode, including when its
+    /// start falls inside a tile (the offset the fast kernels take).
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn a_windowed_prefill_direct_tile_is_bit_identical_to_a_solo_decode() {
+        let base = Shape {
+            n_head: 14,
+            n_kv_head: 2,
+            head_dim: 64,
+            nb: 6,
+            start_pos: 1300,
+            scale: 1.0 / 8.0,
+            window: Some(1200),
+            sinks: None,
+        };
+        let hd = base.head_dim;
+        let qd = base.q_dim();
+        let (kv, q, _, _) = setup(KvPrec::F16, &base, 1);
+        if crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c") {
+            assert!(
+                prefill_direct(&kv, &base, 1300 + base.nb),
+                "the test needs the prefill direct path"
+            );
+        }
+        assert_ne!(
+            visible_start(&base, base.start_pos + base.nb) % BLOCK,
+            0,
+            "the window must start inside a tile"
+        );
+        let batch = grouped(&kv, 0, &base, &q, plan(&base, 4));
+        for b in 0..base.nb {
+            let solo = Shape {
+                nb: 1,
+                start_pos: base.start_pos + b,
+                ..base
+            };
+            let got = grouped(&kv, 0, &solo, &q[b * qd..], plan(&solo, 4));
+            let lo = b * base.n_head * hd;
+            assert!(
+                same_bits(&got, &batch[lo..(b + 1) * base.n_head * hd]),
+                "windowed direct row {b} changed between prefill and decode"
+            );
+        }
     }
 
     /// The direct kernels are the widened kernels with the widening moved into the
