@@ -428,10 +428,7 @@ impl EngineOptions {
                 "isa",
                 match self.isa {
                     None => "native".into(),
-                    Some(crate::cpu::Tier::Scalar) => "scalar".into(),
-                    Some(crate::cpu::Tier::Avx2) => "avx2".into(),
-                    Some(crate::cpu::Tier::AvxVnni) => "avx-vnni".into(),
-                    Some(crate::cpu::Tier::Avx512) => "avx512".into(),
+                    Some(t) => t.as_str().into(),
                 },
             ),
             ("zmm", self.zmm.to_string()),

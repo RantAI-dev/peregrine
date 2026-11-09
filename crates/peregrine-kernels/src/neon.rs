@@ -1,0 +1,1003 @@
+//! aarch64 NEON kernels (roadmap S2.8).
+//!
+//! The ARM twin of `simd.rs` and `kqsimd.rs`: decode and prefill kernels for the formats whose
+//! arithmetic is an int8 dot product, built on `sdot` (`asimddp`) and the eight-row tiles of S3.4.
+//! The scalar references in `quant.rs` and `kq.rs` are the specification; this file only makes them
+//! fast, and `docs/design/s2.8-neon.md` records the tier, the format order and the invariance
+//! argument.
+//!
+//! # What `sdot` decides
+//!
+//! `vdotq_s32` multiplies sixteen signed bytes by sixteen signed bytes and adds four products into
+//! each of four int32 lanes. That is exactly the shape of every dot product here: the weight codes
+//! (Q8_0's signed bytes, Q4_K's 0..15 nibbles) against the int8 activations. There is no int16
+//! stage and no saturation question — the lanes are int32, and every integer this file forms is
+//! four orders of magnitude below the overflow point — so the kernels inherit the AVX-512 variant's
+//! freedom rather than the AVX2 one's int16 bound (`docs/design/s3.4.md` §4.1).
+//!
+//! # Bit identity
+//!
+//! Integer sums are exact and associative, so the only thing a vector kernel can change is the
+//! order of the float fold. Each kernel keeps the fold of the reference it replaces, operand for
+//! operand:
+//!
+//! * the per-row Q8_0 and Q4_K kernels evaluate `quant::dot_scalar`'s expression in its order and
+//!   are **bit-identical** to it;
+//! * the repacked Q4_K kernels evaluate `kq::dot_q4k8_ref`'s `mul_add` chain and are **bit-identical**
+//!   to it, hence to the AVX2 tier's tile kernels.
+//!
+//! The tests at the bottom of this file assert `to_bits()` equality, not a tolerance. That is what
+//! keeps a row's result independent of batch width, chunk, pass width, thread count and
+//! speculation (`docs/design/s2.8-neon.md` §5).
+
+#![cfg(target_arch = "aarch64")]
+#![cfg_attr(
+    not(all(feature = "fmt-kquant", feature = "fmt-legacy")),
+    allow(dead_code)
+)]
+
+use crate::format::{f16, Format};
+use crate::kq::{tile_q4k_min, tile_q4k_scale, KqActs, ACT_GROUP, Q4K8, Q8_08, Q8_0_WEIGHTS};
+use crate::quant::QuantAct;
+use std::arch::aarch64::*;
+
+/// The eight rows a repacked tile holds.
+const ROWS: usize = 8;
+/// The byte offset of a Q4_K tile's nibbles (from `kq::q4_qs`).
+#[inline(always)]
+fn q4_qs() -> usize {
+    crate::kq::q4_qs()
+}
+/// The byte offset of a Q4_K tile's super-block scales.
+#[inline(always)]
+fn q4_d() -> usize {
+    crate::kq::q4_d()
+}
+/// The byte offset of a Q4_K tile's super-block min scales.
+#[inline(always)]
+fn q4_dmin() -> usize {
+    crate::kq::q4_dmin()
+}
+
+/// An f16 field of a byte slice, little endian.
+#[inline(always)]
+fn f16_at(b: &[u8], at: usize) -> f32 {
+    f16(u16::from_le_bytes([b[at], b[at + 1]]))
+}
+
+/// An f16 read through a raw pointer.
+///
+/// # Safety
+/// `p` must be readable for two bytes.
+#[inline(always)]
+unsafe fn f16_ptr(p: *const u8) -> f32 {
+    f16(u16::from_le_bytes([*p, *p.add(1)]))
+}
+
+/// `sdot`: four int32 lanes of four signed byte products each.
+///
+/// The intrinsic (`vdotq_s32`) is stable only since Rust 1.98 and the workspace's MSRV is 1.96, so
+/// the one instruction is written out. The macro expands inside the caller, whose
+/// `#[target_feature(enable = "dotprod")]` is what makes the assembler accept it; a function would
+/// have to carry the attribute too and could then not be `#[inline(always)]` into it.
+#[inline]
+#[target_feature(enable = "dotprod")]
+unsafe fn sdot(acc: int32x4_t, a: int8x16_t, b: int8x16_t) -> int32x4_t {
+    let mut r = acc;
+    std::arch::asm!(
+        "sdot {r:v}.4s, {a:v}.16b, {b:v}.16b",
+        r = inout(vreg) r,
+        a = in(vreg) a,
+        b = in(vreg) b,
+        options(pure, nomem, nostack),
+    );
+    r
+}
+
+/// The sum of an `i32x4`'s four lanes.
+///
+/// `vaddvq_s32` is also newer than the MSRV, and the lane extracts are the older spelling of the
+/// same three additions.
+#[inline(always)]
+unsafe fn hsum_s32x4(v: int32x4_t) -> i32 {
+    #[allow(clippy::incompatible_msrv)]
+    {
+        vaddvq_s32(v)
+    }
+}
+
+/// 32 signed codes against 32 signed activations, one int32 sum.
+///
+/// The two `sdot`s are one asm block so the accumulator stays in one register: as two separate
+/// blocks the compiler cannot coalesce them and copies the vector between them (measured: 25
+/// against 40 GMAC/s on this host).
+///
+/// # Safety
+/// The CPU must have `asimddp`. Both pairs of vectors are read whole.
+#[inline]
+#[target_feature(enable = "dotprod")]
+unsafe fn dot32_sum(x0: int8x16_t, x1: int8x16_t, a0: int8x16_t, a1: int8x16_t) -> i32 {
+    let mut t = vdupq_n_s32(0);
+    std::arch::asm!(
+        "sdot {t:v}.4s, {x0:v}.16b, {a0:v}.16b",
+        "sdot {t:v}.4s, {x1:v}.16b, {a1:v}.16b",
+        t = inout(vreg) t,
+        x0 = in(vreg) x0,
+        x1 = in(vreg) x1,
+        a0 = in(vreg) a0,
+        a1 = in(vreg) a1,
+        options(pure, nomem, nostack),
+    );
+    hsum_s32x4(t)
+}
+
+/// 32 signed codes against 32 signed activations, one int32 sum.
+///
+/// # Safety
+/// The CPU must have `asimddp`. Both pointers must be readable for 32 bytes.
+#[inline]
+#[target_feature(enable = "dotprod")]
+unsafe fn dot32_s8(w: *const i8, a0: int8x16_t, a1: int8x16_t) -> i32 {
+    dot32_sum(vld1q_s8(w), vld1q_s8(w.add(16)), a0, a1)
+}
+
+// ---------------------------------------------------------------------------
+// Q8_0: a block is one f16 scale and 32 signed codes
+// ---------------------------------------------------------------------------
+
+/// One Q8_0 row against one activation: [`crate::quant::dot_scalar`]'s expression, vectorised.
+///
+/// # Safety
+/// The CPU must have `asimddp`; `w` must be `row_bytes(Q8_0, a.n)` long.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn dot_q8_0(w: &[u8], a: &QuantAct) -> f32 {
+    debug_assert_eq!(w.len(), crate::quant::row_bytes(Format::Q8_0, a.n));
+    let mut acc = 0.0f32;
+    for (b, blk) in w.chunks_exact(34).enumerate() {
+        let a0 = vld1q_s8(a.q.as_ptr().add(b * 32));
+        let a1 = vld1q_s8(a.q.as_ptr().add(b * 32 + 16));
+        let s = dot32_s8(blk.as_ptr().add(2) as *const i8, a0, a1);
+        // The scalar reference's expression, in its order.
+        acc += f16_at(blk, 0) * a.d[b] * s as f32;
+    }
+    acc
+}
+
+/// Eight Q8_0 rows against one activation: the activation block is loaded once per block.
+///
+/// Every row's block loop is [`dot_q8_0`]'s, so the result is bit-identical to the one-row kernel.
+///
+/// # Safety
+/// The CPU must have `asimddp`; `w` must hold eight rows of `rb` bytes and `out` eight floats.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn q8_0_rows8(w: &[u8], rb: usize, a: &QuantAct, out: &mut [f32]) {
+    assert!(rb % 34 == 0, "a Q8_0 row is a whole number of blocks");
+    assert!(w.len() >= 8 * rb, "the kernel takes eight rows");
+    assert!(out.len() >= 8, "the output holds eight rows");
+    let mut acc = [0.0f32; 8];
+    for blk in 0..rb / 34 {
+        let a0 = vld1q_s8(a.q.as_ptr().add(blk * 32));
+        let a1 = vld1q_s8(a.q.as_ptr().add(blk * 32 + 16));
+        let ad = a.d[blk];
+        // The row loop is unrolled by hand: an `asm!` block makes the loop unroller treat the body
+        // as a call, so the eight rows of a block would otherwise stay a small non-unrolled loop and
+        // the accumulators would round-trip through the stack (measured: 25 against 40 GMAC/s).
+        macro_rules! row {
+            ($r:literal) => {{
+                let p = w.as_ptr().add($r * rb + blk * 34);
+                let wd = f16_ptr(p);
+                let s = dot32_s8(p.add(2) as *const i8, a0, a1);
+                acc[$r] += wd * ad * s as f32;
+            }};
+        }
+        row!(0);
+        row!(1);
+        row!(2);
+        row!(3);
+        row!(4);
+        row!(5);
+        row!(6);
+        row!(7);
+    }
+    out[..8].copy_from_slice(&acc);
+}
+
+/// Four Q8_0 rows against a batch of activations of the same width.
+///
+/// The weight block is loaded once per four activation rows; each (row, activation) pair keeps the
+/// one-row kernel's block order and fold, so a row's bits do not depend on the batch.
+///
+/// # Safety
+/// The CPU must have `asimddp`; `w` must be one row of `row_bytes(Q8_0, acts[0].n)` and `out` one
+/// float per activation.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn q8_0_batch(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    assert!(!acts.is_empty(), "no activation");
+    assert!(out.len() >= acts.len(), "the output holds fewer rows");
+    let n = acts[0].n;
+    assert_eq!(w.len(), crate::quant::row_bytes(Format::Q8_0, n));
+    let nb = acts.len();
+    let mut b0 = 0usize;
+    while b0 < nb {
+        let t = (nb - b0).min(4);
+        let mut acc = [0.0f32; 4];
+        for blk in 0..n / 32 {
+            let wd = f16_at(&w[blk * 34..], 0);
+            let w0 = vld1q_s8(w.as_ptr().add(blk * 34 + 2) as *const i8);
+            let w1 = vld1q_s8(w.as_ptr().add(blk * 34 + 18) as *const i8);
+            for u in 0..t {
+                let a = &acts[b0 + u];
+                let a0 = vld1q_s8(a.q.as_ptr().add(blk * 32));
+                let a1 = vld1q_s8(a.q.as_ptr().add(blk * 32 + 16));
+                let s = dot32_sum(w0, w1, a0, a1);
+                acc[u] += wd * a.d[blk] * s as f32;
+            }
+        }
+        out[b0..b0 + t].copy_from_slice(&acc[..t]);
+        b0 += t;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Q8_0's repacked tile (S3.4 follow-up, the #122 layout): eight rows per block
+// ---------------------------------------------------------------------------
+
+/// One block of a repacked Q8_0 tile against `N` activation rows, folded into `facc`.
+///
+/// The tile's window is two output rows of eight signed codes — one `sdot` operand — and the four
+/// windows of a block are summed in int32; the fold is `kq::dot_q8_08_ref`'s `(d·dk).mul_add(s,
+/// acc)`. The GEMV and the GEMM are this one function, so a row's bits do not depend on the batch.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn q8_08_group<const N: usize>(
+    tile: &[u8],
+    n_blk: usize,
+    acts: &[QuantAct],
+    out: &mut [f32],
+) {
+    assert!((1..=4).contains(&N), "one to four activation rows");
+    assert!(
+        out.len() >= N * ROWS,
+        "the output holds eight rows per activation"
+    );
+    let mut facc = [[vdupq_n_f32(0.0); 2]; N];
+    for t in 0..n_blk {
+        let b = tile.as_ptr().add(t * Q8_08::SIZE);
+        // [activation][window][row pair]
+        let mut acc = [[[vdupq_n_s32(0); 4]; 4]; N];
+        for w in 0..4 {
+            let mut av = [vdupq_n_s8(0); N];
+            for (u, a) in av.iter_mut().enumerate() {
+                let p = acts[u].q.as_ptr().add(t * Q8_0_WEIGHTS + w * 8);
+                *a = vcombine_s8(vld1_s8(p), vld1_s8(p));
+            }
+            for pair in 0..4 {
+                let codes = vld1q_s8(
+                    b.add(crate::kq::q8_qs() + w * crate::kq::Q8_WINDOW + pair * 16) as *const i8,
+                );
+                for u in 0..N {
+                    acc[u][w][pair] = sdot(acc[u][w][pair], codes, av[u]);
+                }
+            }
+        }
+        let dv = rows_f16(tile, t * Q8_08::SIZE + crate::kq::q8_d());
+        for u in 0..N {
+            let mut pairs = [vdupq_n_s32(0); 4];
+            for (pair, p) in pairs.iter_mut().enumerate() {
+                let mut s = acc[u][0][pair];
+                s = vaddq_s32(s, acc[u][1][pair]);
+                s = vaddq_s32(s, acc[u][2][pair]);
+                s = vaddq_s32(s, acc[u][3][pair]);
+                *p = s;
+            }
+            let s = rows_of(&pairs);
+            let dk = vdupq_n_f32(acts[u].d[t]);
+            for h in 0..2 {
+                // `dot_q8_08_ref`'s fold, in its order: `(d·dk)` first, then one fused multiply-add.
+                let dd = vmulq_f32(dv[h], dk);
+                facc[u][h] = vfmaq_f32(facc[u][h], dd, vcvtq_f32_s32(s[h]));
+            }
+        }
+    }
+    for u in 0..N {
+        vst1q_f32(out.as_mut_ptr().add(u * ROWS), facc[u][0]);
+        vst1q_f32(out.as_mut_ptr().add(u * ROWS + 4), facc[u][1]);
+    }
+}
+
+/// Eight output rows of a repacked Q8_0 tile against a batch of activations.
+///
+/// # Safety
+/// The CPU must have `asimddp`; the tile must hold `n_blk` blocks, `acts` the rows the caller
+/// says, and `out` `nb · 8` floats.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn q8_08_gemm(tile: &[u8], n_blk: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
+    assert!(
+        !acts.is_empty() && nb <= acts.len(),
+        "more rows than activations"
+    );
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    assert!(
+        tile.len() >= n_blk * Q8_08::SIZE,
+        "the tile is shorter than its blocks"
+    );
+    let mut b = 0;
+    while b + 4 <= nb {
+        q8_08_group::<4>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]);
+        b += 4;
+    }
+    match nb - b {
+        3 => q8_08_group::<3>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        2 => q8_08_group::<2>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        1 => q8_08_group::<1>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        _ => {}
+    }
+}
+
+/// Eight output rows of a repacked Q8_0 tile against one to three activations.
+///
+/// # Safety
+/// As [`q8_08_gemm`].
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn q8_08_gemv(tile: &[u8], n_blk: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
+    assert!(
+        (1..=3).contains(&nb),
+        "the Q8_0 GEMV takes one to three rows"
+    );
+    q8_08_gemm(tile, n_blk, acts, nb, out);
+}
+
+// ---------------------------------------------------------------------------
+// Q4_K: the per-row kernel, against the per-256 activation layout
+// ---------------------------------------------------------------------------
+
+/// One Q4_K row against one activation: [`crate::quant::dot_scalar`]'s expression, vectorised.
+///
+/// The super-block's eight sub-block products are summed in int32 with their 6-bit scales, the min
+/// term in int32 with the activation's run sums, and the two are folded in the reference's order.
+///
+/// # Safety
+/// The CPU must have `asimddp`; `w` must be `row_bytes(Q4_K, a.n)` long, the activation must carry
+/// the per-256 layout, and the width must be a whole number of super-blocks.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn dot_q4_k(w: &[u8], a: &QuantAct) -> f32 {
+    debug_assert_eq!(w.len(), crate::quant::row_bytes(Format::Q4_K, a.n));
+    assert!(
+        !a.qk.is_empty(),
+        "a k-quant row needs a multiple-of-256 activation"
+    );
+    let mut acc = 0.0f32;
+    for (sb, blk) in w.chunks_exact(144).enumerate() {
+        let d = f16_at(blk, 0);
+        let dmin = f16_at(blk, 2);
+        let scales = &blk[4..16];
+        let qs = &blk[16..144];
+        let aq = a.qk.as_ptr().add(sb * 256);
+        let bs = &a.bsums[sb * 16..sb * 16 + 16];
+        let mut sumi = 0i32;
+        let mut summ = 0i32;
+        // Unrolled for the same reason as the eight-row blocks of the Q8_0 kernel: with the
+        // `asm!` in the body the loop would not unroll, and `j % 2` would stay a branch.
+        macro_rules! sub {
+            ($j:literal) => {{
+                let (sc, m) = q4k_scale_min($j, scales);
+                let p = qs.as_ptr().add(($j / 2) * 32);
+                let a0 = vld1q_s8(aq.add($j * 32));
+                let a1 = vld1q_s8(aq.add($j * 32 + 16));
+                let s = if $j % 2 == 0 {
+                    let lo_mask = vdupq_n_u8(0x0F);
+                    dot32_sum(
+                        vreinterpretq_s8_u8(vandq_u8(vld1q_u8(p), lo_mask)),
+                        vreinterpretq_s8_u8(vandq_u8(vld1q_u8(p.add(16)), lo_mask)),
+                        a0,
+                        a1,
+                    )
+                } else {
+                    dot32_sum(
+                        vreinterpretq_s8_u8(vshrq_n_u8(vld1q_u8(p), 4)),
+                        vreinterpretq_s8_u8(vshrq_n_u8(vld1q_u8(p.add(16)), 4)),
+                        a0,
+                        a1,
+                    )
+                };
+                sumi += sc as i32 * s;
+                summ += m as i32 * (bs[2 * $j] as i32 + bs[2 * $j + 1] as i32);
+            }};
+        }
+        sub!(0);
+        sub!(1);
+        sub!(2);
+        sub!(3);
+        sub!(4);
+        sub!(5);
+        sub!(6);
+        sub!(7);
+        // The reference's arithmetic, in its order: two multiplies, a subtract, one multiply-add.
+        acc += a.dk[sb] * (d * sumi as f32 - dmin * summ as f32);
+    }
+    acc
+}
+
+/// ggml's `get_scale_min_k4`: the six-bit scale and min of sub-block `j`.
+#[inline(always)]
+fn q4k_scale_min(j: usize, q: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (q[j] & 63, q[j + 4] & 63)
+    } else {
+        (
+            (q[j + 4] & 0x0F) | ((q[j - 4] >> 6) << 4),
+            (q[j + 4] >> 4) | ((q[j] >> 6) << 4),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The repacked eight-row tile: GEMV and GEMM
+// ---------------------------------------------------------------------------
+
+/// Where one activation row of a tile multiply reads its window, run sums and scale.
+///
+/// The GEMM reads the interleaved four-row buffer and the GEMV the plain per-row layout; the
+/// arithmetic does not know which, so the fold and the row's bits are the same either way.
+trait ActSrc {
+    /// The eight activations of window `w` of super-block `sb`, duplicated into both halves.
+    ///
+    /// # Safety
+    /// The CPU must have `asimddp`; `row` must be a row the source holds.
+    unsafe fn act8(&self, row: usize, sb: usize, w: usize) -> int8x16_t;
+
+    /// The sum of the 32 activations of sub-block `j` of super-block `sb`.
+    ///
+    /// # Safety
+    /// As [`ActSrc::act8`].
+    unsafe fn sum32(&self, row: usize, sb: usize, j: usize) -> i32;
+
+    /// The activation's per-256 scale.
+    ///
+    /// # Safety
+    /// As [`ActSrc::act8`].
+    unsafe fn dk(&self, row: usize, sb: usize) -> f32;
+}
+
+/// The plain per-row activation of the decode path.
+struct Plain<'a> {
+    acts: &'a [QuantAct],
+}
+
+impl ActSrc for Plain<'_> {
+    #[inline(always)]
+    unsafe fn act8(&self, row: usize, sb: usize, w: usize) -> int8x16_t {
+        let p = self.acts[row].qk.as_ptr().add(sb * 256 + w * 8);
+        let v = vld1_s8(p);
+        vcombine_s8(v, v)
+    }
+
+    #[inline(always)]
+    unsafe fn sum32(&self, row: usize, sb: usize, j: usize) -> i32 {
+        let bs = &self.acts[row].bsums[sb * 16..sb * 16 + 16];
+        bs[2 * j] as i32 + bs[2 * j + 1] as i32
+    }
+
+    #[inline(always)]
+    unsafe fn dk(&self, row: usize, sb: usize) -> f32 {
+        self.acts[row].dk[sb]
+    }
+}
+
+/// The interleaved four-row activation of the prefill path.
+struct Interleaved<'a> {
+    acts: &'a KqActs,
+}
+
+impl ActSrc for Interleaved<'_> {
+    #[inline(always)]
+    unsafe fn act8(&self, row: usize, sb: usize, w: usize) -> int8x16_t {
+        let g = row / ACT_GROUP;
+        let t = row % ACT_GROUP;
+        let base = (g * self.acts.super_blocks() + sb) * 1024 + w * 32 + t * 8;
+        let v = vld1_s8(self.acts.q.as_ptr().add(base));
+        vcombine_s8(v, v)
+    }
+
+    #[inline(always)]
+    unsafe fn sum32(&self, row: usize, sb: usize, j: usize) -> i32 {
+        let g = row / ACT_GROUP;
+        let t = row % ACT_GROUP;
+        self.acts.bs[(g * self.acts.super_blocks() + sb) * 32 + t * 8 + j]
+    }
+
+    #[inline(always)]
+    unsafe fn dk(&self, row: usize, sb: usize) -> f32 {
+        let g = row / ACT_GROUP;
+        let t = row % ACT_GROUP;
+        self.acts.d[(g * self.acts.super_blocks() + sb) * ACT_GROUP + t]
+    }
+}
+
+/// The eight rows' f16 fields of one super-block, widened to two `f32x4`s.
+#[inline(always)]
+unsafe fn rows_f16(t: &[u8], at: usize) -> [float32x4_t; 2] {
+    let mut v = [0.0f32; 8];
+    for (r, x) in v.iter_mut().enumerate() {
+        *x = f16_at(t, at + r * 2);
+    }
+    [vld1q_f32(v.as_ptr()), vld1q_f32(v.as_ptr().add(4))]
+}
+
+/// The eight rows' six-bit scales or mins of sub-block `j`, widened to two `i32x4`s.
+#[inline(always)]
+unsafe fn six_bit(t: &[u8], j: usize, mins: bool) -> [int32x4_t; 2] {
+    let mut v = [0u8; 8];
+    for (r, x) in v.iter_mut().enumerate() {
+        *x = if mins {
+            tile_q4k_min(t, j, r)
+        } else {
+            tile_q4k_scale(t, j, r)
+        };
+    }
+    let u = vmovl_u8(vld1_u8(v.as_ptr()));
+    [
+        vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(u))),
+        vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(u))),
+    ]
+}
+
+/// One super-block of a tile against `N` activation rows, folded into `facc`.
+///
+/// The window decode is shared by both nibble halves — a window's low nibbles are sub-block `2g`,
+/// its high nibbles `2g+1` — and by all `N` activation rows. The four row-pairs' int32 sums are
+/// widened to the eight rows, scaled per sub-block, and the super-block's one float fold is
+/// `kq::dot_q4k8_ref`'s `mul_add` chain, so the result is bit-identical to it.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn q4k8_sb<S: ActSrc, const N: usize>(
+    t: &[u8],
+    sb: usize,
+    src: &S,
+    row0: usize,
+    dv: [float32x4_t; 2],
+    dminv: [float32x4_t; 2],
+    facc: &mut [[float32x4_t; 2]; N],
+) {
+    let qs = t.as_ptr().add(q4_qs());
+    let lo_mask = vdupq_n_u8(0x0F);
+    let mut sumi = [[vdupq_n_s32(0); 2]; N];
+    let mut summ = [[vdupq_n_s32(0); 2]; N];
+    for g in 0..4 {
+        let j0 = 2 * g;
+        let j1 = j0 + 1;
+        // [activation row][sub-block][row pair]
+        let mut acc = [[[vdupq_n_s32(0); 4]; 2]; N];
+        for w in 0..4 {
+            let mut act = [[vdupq_n_s8(0); 2]; N];
+            for u in 0..N {
+                act[u][0] = src.act8(row0 + u, sb, j0 * 4 + w);
+                act[u][1] = src.act8(row0 + u, sb, j1 * 4 + w);
+            }
+            let base = (4 * g + w) * 64;
+            for p in 0..4 {
+                let v = vld1q_u8(qs.add(base + p * 16));
+                let lo = vreinterpretq_s8_u8(vandq_u8(v, lo_mask));
+                let hi = vreinterpretq_s8_u8(vshrq_n_u8(v, 4));
+                for u in 0..N {
+                    acc[u][0][p] = sdot(acc[u][0][p], lo, act[u][0]);
+                    acc[u][1][p] = sdot(acc[u][1][p], hi, act[u][1]);
+                }
+            }
+        }
+        let sc0 = six_bit(t, j0, false);
+        let sc1 = six_bit(t, j1, false);
+        let mn0 = six_bit(t, j0, true);
+        let mn1 = six_bit(t, j1, true);
+        for u in 0..N {
+            let s0 = rows_of(&acc[u][0]);
+            let s1 = rows_of(&acc[u][1]);
+            sumi[u][0] = vmlaq_s32(sumi[u][0], sc0[0], s0[0]);
+            sumi[u][1] = vmlaq_s32(sumi[u][1], sc0[1], s0[1]);
+            sumi[u][0] = vmlaq_s32(sumi[u][0], sc1[0], s1[0]);
+            sumi[u][1] = vmlaq_s32(sumi[u][1], sc1[1], s1[1]);
+            let a0 = vdupq_n_s32(src.sum32(row0 + u, sb, j0));
+            let a1 = vdupq_n_s32(src.sum32(row0 + u, sb, j1));
+            summ[u][0] = vmlaq_s32(summ[u][0], mn0[0], a0);
+            summ[u][1] = vmlaq_s32(summ[u][1], mn0[1], a0);
+            summ[u][0] = vmlaq_s32(summ[u][0], mn1[0], a1);
+            summ[u][1] = vmlaq_s32(summ[u][1], mn1[1], a1);
+        }
+    }
+    for u in 0..N {
+        let dk = vdupq_n_f32(src.dk(row0 + u, sb));
+        for h in 0..2 {
+            let sf = vcvtq_f32_s32(sumi[u][h]);
+            let mf = vcvtq_f32_s32(summ[u][h]);
+            // (-dmin)·summ + d·sumi, one rounding for the product, one for the fused add.
+            let x = vfmsq_f32(vmulq_f32(dv[h], sf), dminv[h], mf);
+            facc[u][h] = vfmaq_f32(facc[u][h], x, dk);
+        }
+    }
+}
+
+/// The eight rows' sums from the four row-pair vectors (rows 2p, 2p+1 in each pair's two lanes).
+#[inline(always)]
+unsafe fn rows_of(acc: &[int32x4_t; 4]) -> [int32x4_t; 2] {
+    let p0 = vpadd_s32(vget_low_s32(acc[0]), vget_high_s32(acc[0]));
+    let p1 = vpadd_s32(vget_low_s32(acc[1]), vget_high_s32(acc[1]));
+    let p2 = vpadd_s32(vget_low_s32(acc[2]), vget_high_s32(acc[2]));
+    let p3 = vpadd_s32(vget_low_s32(acc[3]), vget_high_s32(acc[3]));
+    [vcombine_s32(p0, p1), vcombine_s32(p2, p3)]
+}
+
+/// Eight output rows of a repacked Q4_K tile against `N` activation rows.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn q4k8_group<S: ActSrc, const N: usize>(
+    tile: &[u8],
+    n_sb: usize,
+    src: &S,
+    row0: usize,
+    out: &mut [f32],
+) {
+    assert!((1..=4).contains(&N), "one to four activation rows");
+    assert!(
+        out.len() >= N * ROWS,
+        "the output holds eight rows per activation"
+    );
+    let mut facc = [[vdupq_n_f32(0.0); 2]; N];
+    for sb in 0..n_sb {
+        let t = &tile[sb * Q4K8::SIZE..];
+        q4k8_sb::<S, N>(
+            t,
+            sb,
+            src,
+            row0,
+            rows_f16(t, q4_d()),
+            rows_f16(t, q4_dmin()),
+            &mut facc,
+        );
+    }
+    for u in 0..N {
+        vst1q_f32(out.as_mut_ptr().add(u * ROWS), facc[u][0]);
+        vst1q_f32(out.as_mut_ptr().add(u * ROWS + 4), facc[u][1]);
+    }
+}
+
+/// Eight output rows of a repacked Q4_K tile against a batch of activations.
+///
+/// # Safety
+/// The CPU must have `asimddp`. The tile must hold `n_sb` super-blocks, the activation must carry
+/// the per-256 layout, and `out` must hold `nb · 8` floats.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn q4k8_gemm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    assert!(
+        tile.len() >= n_sb * Q4K8::SIZE,
+        "the tile is shorter than its super-blocks"
+    );
+    let src = Interleaved { acts };
+    let mut b0 = 0;
+    while nb - b0 >= 4 {
+        q4k8_group::<_, 4>(tile, n_sb, &src, b0, &mut out[b0 * ROWS..]);
+        b0 += 4;
+    }
+    while b0 < nb {
+        q4k8_group::<_, 1>(tile, n_sb, &src, b0, &mut out[b0 * ROWS..]);
+        b0 += 1;
+    }
+}
+
+/// Eight output rows of a repacked Q4_K tile against one to three activations.
+///
+/// # Safety
+/// As [`q4k8_gemm`], with one to three activations in the plain per-row layout.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn q4k8_gemv(tile: &[u8], n_sb: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
+    assert!((1..=3).contains(&nb), "the GEMV takes one to three rows");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    assert!(
+        tile.len() >= n_sb * Q4K8::SIZE,
+        "the tile is shorter than its super-blocks"
+    );
+    let src = Plain { acts };
+    for b in 0..nb {
+        q4k8_group::<_, 1>(tile, n_sb, &src, b, &mut out[b * ROWS..]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+/// One row in any format NEON has a kernel for, or `None` when it has none.
+///
+/// # Safety
+/// The CPU must have `asimddp`.
+#[inline]
+pub unsafe fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> Option<f32> {
+    match fmt {
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q8_0 => Some(dot_q8_0(w, a)),
+        #[cfg(feature = "fmt-kquant")]
+        Format::Q4_K => Some(dot_q4_k(w, a)),
+        _ => None,
+    }
+}
+
+/// One row against every activation, for the formats with a batched NEON kernel.
+///
+/// # Safety
+/// The CPU must have `asimddp`.
+#[inline]
+pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32]) -> bool {
+    match fmt {
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q8_0 => {
+            q8_0_batch(w, acts, out);
+            true
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kq::{dot_q4k8_ref, dot_q8_08_ref, repack_q4k8, repack_q8_08, Q4K8, Q8_08};
+
+    /// A seeded generator, so a failure is reproducible.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u8(&mut self) -> u8 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 24) as u8
+        }
+
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next_u8()).collect()
+        }
+
+        fn f32(&mut self) -> f32 {
+            let u = (self.next_u8() as u32) << 16 | (self.next_u8() as u32) << 8;
+            u as f32 / 0x00FF_FFFF as f32 * 6.0 - 3.0
+        }
+    }
+
+    fn activations(rng: &mut Rng, n: usize) -> QuantAct {
+        let x: Vec<f32> = (0..n).map(|_| rng.f32()).collect();
+        let mut a = QuantAct::with_capacity(n);
+        a.fill(&x);
+        a
+    }
+
+    /// A Q8_0 row of `n` weights with plausible scales.
+    fn q8_0_row(rng: &mut Rng, n: usize) -> Vec<u8> {
+        let mut w = rng.bytes(n / 32 * 34);
+        for b in 0..n / 32 {
+            let d = crate::quant::f32_to_f16(0.001 + (b as f32) * 0.0001);
+            w[b * 34..b * 34 + 2].copy_from_slice(&d.to_le_bytes());
+        }
+        w
+    }
+
+    /// A Q4_K row of `n` weights: random codes, real-looking 6-bit scales and mins.
+    fn q4_k_row(rng: &mut Rng, n: usize) -> Vec<u8> {
+        let mut w = Vec::with_capacity(n / 256 * 144);
+        for sb in 0..n / 256 {
+            let d = crate::quant::f32_to_f16(0.002 + (sb as f32) * 0.0001);
+            let dmin = crate::quant::f32_to_f16(0.001);
+            w.extend_from_slice(&d.to_le_bytes());
+            w.extend_from_slice(&dmin.to_le_bytes());
+            // Twelve scale bytes, every bit of which is a field.
+            w.extend_from_slice(&rng.bytes(12));
+            w.extend_from_slice(&rng.bytes(128));
+        }
+        w
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn q8_0_matches_the_scalar_reference_bit_for_bit() {
+        if !crate::cpu::have_dotprod() {
+            eprintln!("skip: no asimddp on this CPU");
+            return;
+        }
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for n in [32usize, 64, 896, 4864] {
+            let w = q8_0_row(&mut rng, n);
+            let a = activations(&mut rng, n);
+            let want = crate::quant::dot_scalar(Format::Q8_0, &w, &a);
+            let got = unsafe { dot_q8_0(&w, &a) };
+            assert_eq!(got.to_bits(), want.to_bits(), "n={n}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-kquant")]
+    fn q4_k_matches_the_scalar_reference_bit_for_bit() {
+        if !crate::cpu::have_dotprod() {
+            eprintln!("skip: no asimddp on this CPU");
+            return;
+        }
+        let mut rng = Rng(0x0123_4567_89ab_cdef);
+        for n in [256usize, 512, 4864] {
+            let w = q4_k_row(&mut rng, n);
+            let a = activations(&mut rng, n);
+            let want = crate::quant::dot_scalar(Format::Q4_K, &w, &a);
+            let got = unsafe { dot_q4_k(&w, &a) };
+            assert_eq!(got.to_bits(), want.to_bits(), "n={n}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn q8_0_batch_is_bit_identical_at_every_width() {
+        if !crate::cpu::have_dotprod() {
+            eprintln!("skip: no asimddp on this CPU");
+            return;
+        }
+        let mut rng = Rng(0xdead_beef_cafe_f00d);
+        let n = 896;
+        let w = q8_0_row(&mut rng, n);
+        let acts: Vec<QuantAct> = (0..16).map(|_| activations(&mut rng, n)).collect();
+        let mut base = vec![0.0f32; acts.len()];
+        for (b, a) in acts.iter().enumerate() {
+            base[b] = unsafe { dot_q8_0(&w, a) };
+        }
+        for nb in [1usize, 2, 3, 4, 5, 7, 8, 16] {
+            let mut got = vec![0.0f32; nb];
+            assert!(unsafe { dot_batch(Format::Q8_0, &w, &acts[..nb], &mut got) });
+            for b in 0..nb {
+                assert_eq!(
+                    got[b].to_bits(),
+                    base[b].to_bits(),
+                    "nb={nb} act {b}: {} vs {}",
+                    got[b],
+                    base[b]
+                );
+            }
+        }
+        // The eight-row decode kernel against the one-row kernel.
+        let mut rows = Vec::with_capacity(8 * n / 32 * 34);
+        let mut starts = [0usize; 8];
+        for r in 0..8 {
+            starts[r] = rows.len();
+            rows.extend_from_slice(&q8_0_row(&mut rng, n));
+        }
+        let rb = n / 32 * 34;
+        let mut eight = vec![0.0f32; 8];
+        unsafe { q8_0_rows8(&rows, rb, &acts[0], &mut eight) };
+        for r in 0..8 {
+            let want = unsafe { dot_q8_0(&rows[starts[r]..starts[r] + rb], &acts[0]) };
+            assert_eq!(eight[r].to_bits(), want.to_bits(), "row {r}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn q8_08_gemv_and_gemm_agree_with_the_tile_reference() {
+        if !crate::cpu::have_dotprod() {
+            eprintln!("skip: no asimddp on this CPU");
+            return;
+        }
+        let mut rng = Rng(0x0808_abcd_1234_5678);
+        let n_blk = 4usize;
+        let n = n_blk * 32;
+        let rows: Vec<Vec<u8>> = (0..8).map(|_| q8_0_row(&mut rng, n)).collect();
+        let mut tile = vec![0u8; n_blk * Q8_08::SIZE];
+        for t in 0..n_blk {
+            let src: Vec<&[u8]> = rows.iter().map(|r| &r[t * 34..][..34]).collect();
+            repack_q8_08(&src, &mut tile[t * Q8_08::SIZE..]);
+        }
+        let acts: Vec<QuantAct> = (0..8).map(|_| activations(&mut rng, n)).collect();
+        for nb in 1..=8 {
+            let mut got = vec![0.0f32; nb * 8];
+            if nb <= 3 {
+                unsafe { q8_08_gemv(&tile, n_blk, &acts[..nb], nb, &mut got) };
+            } else {
+                unsafe { q8_08_gemm(&tile, n_blk, &acts[..nb], nb, &mut got) };
+            }
+            for b in 0..nb {
+                for r in 0..8 {
+                    let want = dot_q8_08_ref(&tile, n_blk, r, &acts[b]);
+                    assert_eq!(
+                        got[b * 8 + r].to_bits(),
+                        want.to_bits(),
+                        "nb={nb} b={b} r={r}: {} vs {want}",
+                        got[b * 8 + r]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-kquant")]
+    fn q4k8_gemv_and_gemm_agree_with_the_reference_at_every_width() {
+        if !crate::cpu::have_dotprod() {
+            eprintln!("skip: no asimddp on this CPU");
+            return;
+        }
+        let mut rng = Rng(0x5150_abcd_1234_5678);
+        let n_sb = 2usize;
+        let n = n_sb * 256;
+        let rows: Vec<Vec<u8>> = (0..8).map(|_| q4_k_row(&mut rng, n)).collect();
+        let mut tile = vec![0u8; n_sb * Q4K8::SIZE];
+        for sb in 0..n_sb {
+            let src: Vec<&[u8]> = rows.iter().map(|r| &r[sb * 144..][..144]).collect();
+            repack_q4k8(&src, &mut tile[sb * Q4K8::SIZE..]);
+        }
+        let acts: Vec<QuantAct> = (0..8).map(|_| activations(&mut rng, n)).collect();
+        // The specification: the tile reference, row by row.
+        let mut want = vec![0.0f32; 8 * 8];
+        for b in 0..8 {
+            for r in 0..8 {
+                want[b * 8 + r] = dot_q4k8_ref(&tile, n_sb, r, &acts[b]);
+            }
+        }
+        // The GEMV (1-3 rows) and the GEMM (4 and up) at every width the engine uses.
+        for nb in 1..=8 {
+            let mut got = vec![0.0f32; nb * 8];
+            if nb <= 3 {
+                unsafe { q4k8_gemv(&tile, n_sb, &acts[..nb], nb, &mut got) };
+            } else {
+                let mut kq = KqActs::default();
+                kq.fill(&acts[..nb]);
+                unsafe { q4k8_gemm(&tile, n_sb, &kq, nb, &mut got) };
+            }
+            for i in 0..nb * 8 {
+                assert_eq!(
+                    got[i].to_bits(),
+                    want[i].to_bits(),
+                    "nb={nb} value {i}: {} vs {}",
+                    got[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-kquant")]
+    fn the_repacked_tile_is_still_the_scalar_expression() {
+        // A row of the tile, computed by the per-row kernel on the file's bytes, is *not* expected
+        // to be bit-identical (the fold differs by design, `docs/design/s3.4.md` §4.2) — but it is
+        // the same real number to a few ulps, which catches a wrong lane.
+        if !crate::cpu::have_dotprod() {
+            eprintln!("skip: no asimddp on this CPU");
+            return;
+        }
+        let mut rng = Rng(0xfeed_face_0bad_c0de);
+        let n = 512usize;
+        let rows: Vec<Vec<u8>> = (0..8).map(|_| q4_k_row(&mut rng, n)).collect();
+        let mut tile = vec![0u8; 2 * Q4K8::SIZE];
+        for sb in 0..2 {
+            let src: Vec<&[u8]> = rows.iter().map(|r| &r[sb * 144..][..144]).collect();
+            repack_q4k8(&src, &mut tile[sb * Q4K8::SIZE..]);
+        }
+        let a = activations(&mut rng, n);
+        let mut out = vec![0.0f32; 8];
+        unsafe { q4k8_gemv(&tile, 2, std::slice::from_ref(&a), 1, &mut out) };
+        for r in 0..8 {
+            let row = unsafe { dot_q4_k(&rows[r], &a) };
+            let scale = row.abs().max(out[r].abs()).max(1.0);
+            assert!(
+                (out[r] - row).abs() <= 1e-4 * scale,
+                "row {r}: tile {} vs per-row {row}",
+                out[r]
+            );
+        }
+    }
+}

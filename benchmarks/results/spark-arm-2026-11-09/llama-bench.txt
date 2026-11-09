@@ -1,0 +1,30 @@
+# llama.cpp v0.9.0-dev (build 1, commit 0c6dca2), CPU only:
+#   CUDA_VISIBLE_DEVICES="" llama-bench -m <file> -t <threads> -p 512 -n 128 -r 3 -ngl 0
+#
+# Every invocation, in the order it ran (pp512 tok/s ± its own 3-rep sd, tg128 tok/s ± sd).
+# The host was shared with two other workers (load average 12-24 on 20 CPUs), so the spread
+# between invocations is large; the README quotes the best of them and says so. One earlier
+# invocation without CUDA_VISIBLE_DEVICES="" ran with the GPU visible and is not listed.
+
+# 20 threads, all CPUs
+Qwen2.5-0.5B-Instruct-Q4_K_M   pp512 711.62 ± 4.50    tg128 156.12 ± 9.23
+Qwen2.5-0.5B-Instruct-Q4_K_M   pp512 715.02 ± 5.77    tg128 142.16 ± 41.75
+Qwen2.5-0.5B-Instruct-Q4_K_M   pp512 701.10 ± 4.50    tg128 113.45 ± 46.37
+Qwen2.5-0.5B-Instruct-Q4_K_M   pp512 649.94 ± 29.38   tg128 113.84 ± 88.88
+Qwen2.5-0.5B-Instruct-Q4_K_M   pp512 578.62 ± 6.95    tg128  87.12 ± 84.63
+Qwen2.5-0.5B-Instruct-Q4_K_M   pp512 571.30 ± 187.79  tg128  12.66 ± 1.84
+
+Llama-3.2-1B-Instruct-Q4_K_M   pp512 365.74 ± 2.23    tg128 103.58 ± 2.34
+Llama-3.2-1B-Instruct-Q4_K_M   pp512 219.95 ± 1.35    tg128   2.99 ± 0.20
+Llama-3.2-1B-Instruct-Q4_K_M   pp512 173.16 ± 5.53    tg128  41.76 ± 55.82
+Llama-3.2-1B-Instruct-Q4_K_M   pp512 355.06 ± 0.85    tg128  90.15 ± 2.54
+Llama-3.2-1B-Instruct-Q4_K_M   pp512 315.89 ± 15.60   tg128  27.71 ± 17.76
+Llama-3.2-1B-Instruct-Q4_K_M   pp512 358.35 ± 2.08    tg128  98.40 ± 5.37
+
+# 10 threads, Cortex-X925 only (taskset -c 5-9,15-19)
+Qwen2.5-0.5B-Instruct-Q4_K_M   pp512 570.55 ± 0.10    tg128  74.73 ± 116.89
+Llama-3.2-1B-Instruct-Q4_K_M   pp512 278.59 ± 0.45    tg128 113.11 ± 0.10
+
+# 10 threads, Cortex-A725 only (taskset -c 0-4,10-14)
+Qwen2.5-0.5B-Instruct-Q4_K_M   pp512 110.66 ± 1.51    tg128  34.35 ± 24.97
+Llama-3.2-1B-Instruct-Q4_K_M   pp512  93.13 ± 0.04    tg128  60.13 ± 0.79

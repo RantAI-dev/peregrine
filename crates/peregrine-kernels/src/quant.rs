@@ -1286,6 +1286,16 @@ pub fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> f32 {
             return unsafe { crate::simd::dot(fmt, w, a) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_dotprod() {
+            // SAFETY: `asimddp` checked immediately above; the lengths are the same
+            // ones `dot_scalar` asserts on.
+            if let Some(v) = unsafe { crate::neon::dot(fmt, w, a) } {
+                return v;
+            }
+        }
+    }
     dot_scalar(fmt, w, a)
 }
 
@@ -1318,6 +1328,16 @@ pub fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
             // SAFETY: feature checked immediately above; the length preconditions are
             // the same ones `matmul` already guarantees for `dot`.
             return unsafe { crate::simd::dot_batch(fmt, w, acts, out) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_dotprod() {
+            // SAFETY: `asimddp` checked immediately above; the width precondition is the
+            // same one the per-row loop below relies on.
+            if unsafe { crate::neon::dot_batch(fmt, w, acts, out) } {
+                return;
+            }
         }
     }
     for (b, a) in acts.iter().enumerate() {
