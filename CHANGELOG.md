@@ -53,15 +53,20 @@ All notable changes to this project are documented here. The format follows
   barrier wait); `=full` adds the attention subtimers. Off by default, no timers in the
   default path.
 - An adaptive spin window (`PEREGRINE_ADAPTIVE_SPIN`, on by default). A pool thread samples its own
-  run-queue delay from `/proc/thread-self/schedstat` every 8 ms and the pool moves the wait window
-  down a ladder (configured, half, zero) when it is spending a large share of its runnable time
-  waiting for a CPU, and back up after consecutive quiet samples. On a quiet host the configured
-  window is untouched; on a host with three runnable threads per core the pool parks at once. On H0
-  (Xeon E5-2680 v4, four threads pinned to four cores) with eight CPU hogs on the same cores:
-  Llama-3.2-1B prefill 12.1 tok/s and decode 1.60 with the default window, 23.2 and 5.65 with the
-  adaptive window, and 22.3 and 4.88 with `PEREGRINE_SPIN_US=0` — the adaptive pool finds the
-  zero-spin answer without giving up the quiet host's window. `PEREGRINE_ADAPTIVE_SPIN=0` keeps the
-  window fixed for measurement. Scheduling only: no kernel, quantisation or arithmetic changes.
+  run-queue delay from `/proc/thread-self/schedstat` every 8 ms; a smoothed reading of that delay is
+  the gate. Below 35 % (quiet, and two runnable threads per core) the configured window is used
+  exactly as before and no A/B runs. Above it the pool tests its own join wait: it holds the current
+  window or parking for a few thousand joins, then measures one window on each and keeps the lower
+  mean (with a 10 % margin, so it does not flap). This is outcome-based because the same run-queue
+  reading maps to different winners on different days and models — a first version mapped the
+  reading to a half-window middle rung, which lost to both the full window and parking and regressed
+  Gemma-3-1B under load. `PEREGRINE_ADAPTIVE_SPIN=0` keeps the window fixed for measurement.
+  `PEREGRINE_ADAPTIVE_LOG=1` prints the rung, the smoothed reading and each trial decision. On H0
+  (Xeon E5-2680 v4, four threads pinned to four cores, shared) the medians of five alternating
+  rounds with four CPU hogs: Llama-3.2-1B prefill/decode 13.2/1.98 with the default window,
+  27.2/6.17 adaptive and 27.4/6.31 at `PEREGRINE_SPIN_US=0`; Gemma-3-1B 11.1/1.41, 28.4/6.07 and
+  28.1/6.11. With eight hogs: Llama 10.3/1.43, 24.4/4.62, 21.6/5.20. Scheduling only: no kernel,
+  quantisation or arithmetic changes.
 - `peregrine bench --threads N` fixes the worker pool width and records it in the JSON `config`, so a
   run can be pinned to the same core count as a comparison engine. The default is unchanged.
 - A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical

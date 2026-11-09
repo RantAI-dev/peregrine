@@ -1,3 +1,7 @@
+> **Superseded.** These are the numbers of the first implementation (configured / half / zero
+> chosen from the run-queue reading). Its Gemma-3-1B result under four hogs exposed the flaw; the
+> review fix, its instrumentation and the re-run are in [`rerun2/README.md`](rerun2/README.md).
+
 # H0 (Xeon E5-2680 v4): adaptive spin-wait, 2026-11-09
 
 An interleaved A/B of the adaptive spin-wait against `main` at `9bcf524`, on H0, a shared virtual
