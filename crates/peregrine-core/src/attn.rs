@@ -328,7 +328,7 @@ impl Scratch {
 /// buffer, `[nb][n_head][head_dim]`, after RoPE. When the cache is rotated, the
 /// queries are rotated here into scratch; the cache's values stay rotated in `o`.
 pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: &mut Scratch) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     if t.b1 - t.b0 == 1 && f16_direct(kv, sh) {
         return run_f16(kv, layer, sh, q, t, sc);
     }
@@ -453,7 +453,7 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
 /// score is a dot over ascending dimension blocks, the softmax rescales at the same
 /// tile boundaries, and the mix accumulates ascending positions. Only the loaded
 /// operands are shared.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn run_f16(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: &mut Scratch) {
     let hd = sh.head_dim;
     let gqa = sh.gqa();
@@ -550,6 +550,7 @@ fn run_f16(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
                 );
             }
             let tm = crate::prof::detail().then(std::time::Instant::now);
+            #[cfg(target_arch = "x86_64")]
             for r in (0..rows).step_by(2) {
                 let p = &sc.s_tile[r * BLOCK..r * BLOCK + vis];
                 if r + 1 < rows {
@@ -585,6 +586,14 @@ fn run_f16(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
                     // SAFETY: features checked; `vb` holds `vis · hd` halves.
                     unsafe { mix_f16(&mut sc.o[r * hd..], alpha[r], p, vb, hd) };
                 }
+            }
+            // On aarch64 the mix already reads the halves in registers; each row is
+            // mixed on its own (the per-element work has no K/V sharing to gain).
+            #[cfg(target_arch = "aarch64")]
+            for r in 0..rows {
+                let p = &sc.s_tile[r * BLOCK..r * BLOCK + vis];
+                // SAFETY: NEON checked; `vb` holds `vis · hd` halves.
+                unsafe { mix_f16(&mut sc.o[r * hd..(r + 1) * hd], alpha[r], p, vb, hd) };
             }
             if let Some(t) = tm {
                 crate::prof::add_shared(crate::prof::Slot::AttnMix, t.elapsed().as_nanos() as u64);
@@ -724,7 +733,13 @@ pub(crate) fn run_range<O: RowSink>(
         {
             hd.is_multiple_of(8) && crate::cpu_has!("avx2") && crate::cpu_has!("fma")
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        // On aarch64 the shared pass exists for the f16-direct tile; the widened
+        // tile keeps the one-row kernel (an f32 cache is the rare path).
+        #[cfg(target_arch = "aarch64")]
+        {
+            hd.is_multiple_of(8) && f16_direct(kv, sh)
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let _ = hd;
             false
@@ -735,14 +750,16 @@ pub(crate) fn run_range<O: RowSink>(
     // single-row path does: the widened f32 tile is then never built, and the rows
     // read half the bytes. That only pays once a row's visible context is long
     // enough that the extra `vcvtph2ps` work is cheaper than the bytes it saves
-    // (`DIRECT_MIN_VIS`); shorter prefill keeps the widened tile. The per-row
-    // arithmetic is unchanged either way — the f16 kernels are the same FMAs in the
-    // same order (their test pins them to the widened ones bit for bit), so a row
-    // keeps its bits whichever path it takes. A sliding window caps what any row can
-    // see, so the threshold is judged on the visible span, not the whole context: a
-    // 512-position window keeps the widened tile at any context length.
+    // (`DIRECT_MIN_VIS`); shorter prefill keeps the widened tile. On aarch64 the
+    // widening itself is element-at-a-time, so the halves are always read in the
+    // kernel when the cache is f16. The per-row arithmetic is unchanged either way —
+    // the f16 kernels are the same FMAs in the same order (their test pins them to
+    // the widened ones bit for bit), so a row keeps its bits whichever path it takes.
+    // A sliding window caps what any row can see, so the threshold is judged on the
+    // visible span, not the whole context: a 512-position window keeps the widened
+    // tile at any context length on x86 (aarch64 has no threshold).
     let direct = {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             let vis_span = match sh.window {
                 Some(w) => max_ctx.min(w),
@@ -750,7 +767,7 @@ pub(crate) fn run_range<O: RowSink>(
             };
             prefill_direct(kv, sh, vis_span)
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             false
         }
@@ -836,7 +853,7 @@ pub(crate) fn run_range<O: RowSink>(
                     let alpha = (m_old - m_new).exp();
                     sc.l[lr] = sc.l[lr] * alpha as f64 + psum;
                     match v16 {
-                        #[cfg(target_arch = "x86_64")]
+                        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                         Some(v) => {
                             // SAFETY: F16 directness checked (`f16_direct`); `v` holds the
                             // tile's halves and `s` the row's scores for the positions mixed.
@@ -985,14 +1002,15 @@ fn score_tile(
     let s0 = &mut lo[lr * BLOCK..lr * BLOCK + len];
     let s1 = &mut mid[..len1];
     if let Some(k) = k16 {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         {
             // A window can start inside the tile, so the visible keys begin at
             // `j_start` in the cache's own halves — the same position the widened
             // tile's `kf[j_start * hd..]` starts at.
             let k = &k[j_start * hd * 2..];
             if paired && pairs {
-                // SAFETY: F16 directness checked; `k` holds `max(len, len1)` keys.
+                // SAFETY: the tier's F16/FMA features are checked (`f16_direct`);
+                // `k` holds `max(len, len1)` keys.
                 unsafe {
                     scores_f16_pair(
                         &q[lr * hd..],
@@ -1017,7 +1035,7 @@ fn score_tile(
             }
             return;
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let _ = k;
     }
     let kf = &kf[j_start * hd..];
@@ -1134,24 +1152,42 @@ pub fn combine_row(
 
 /// Whether the F16 cache can be consumed directly by the register-blocked kernels.
 ///
-/// F16C widens the stored halves in registers; AVX2+FMA do the arithmetic. A
-/// sliding window only moves where the visible range starts: the decode path skips
-/// every tile before it and offsets into the tile that holds it, so the same kernels
-/// read the same positions the widened path would.
-#[cfg(target_arch = "x86_64")]
+/// On x86 F16C widens the stored halves in registers and AVX2+FMA do the arithmetic;
+/// on aarch64 `vcvt_f32_f16` widens and the baseline NEON FMA does it. The widening
+/// itself is exact, so the same product sees the same bits on either path. A sliding
+/// window only moves where the visible range starts: the decode path skips every tile
+/// before it and offsets into the tile that holds it, so the same kernels read the
+/// same positions the widened path would.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn f16_direct(kv: &KvCache, sh: &Shape<'_>) -> bool {
-    kv.prec() == crate::kv::KvPrec::F16
-        && sh.head_dim.is_multiple_of(8)
-        && crate::cpu_has!("avx2")
-        && crate::cpu_has!("fma")
-        && crate::cpu_has!("f16c")
+    let common = kv.prec() == crate::kv::KvPrec::F16 && sh.head_dim.is_multiple_of(8);
+    #[cfg(target_arch = "x86_64")]
+    {
+        common && crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c")
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        common && peregrine_kernels::cpu::have_neon()
+    }
 }
 
 /// Whether a prefill task whose longest row sees `vis` positions reads the F16 cache
-/// directly instead of widening a tile ([`DIRECT_MIN_VIS`]).
-#[cfg(target_arch = "x86_64")]
+/// directly instead of widening a tile (the x86 `DIRECT_MIN_VIS` crossover).
+///
+/// The threshold is an x86 trade (a vector `vcvtph2ps` against the bytes saved). On
+/// aarch64 widening is element-at-a-time, so reading the halves in the kernel wins at
+/// every length.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn prefill_direct(kv: &KvCache, sh: &Shape<'_>, vis: usize) -> bool {
-    vis >= DIRECT_MIN_VIS && f16_direct(kv, sh)
+    #[cfg(target_arch = "x86_64")]
+    {
+        vis >= DIRECT_MIN_VIS && f16_direct(kv, sh)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = vis;
+        f16_direct(kv, sh)
+    }
 }
 
 /// Whether the sixteen-lane value-mix kernels can run for this head width.
@@ -1825,6 +1861,13 @@ fn scores(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32
             return unsafe { scores_avx2(q, kf, vis, hd, scale, s) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if hd.is_multiple_of(8) && peregrine_kernels::cpu::have_neon() {
+            // SAFETY: NEON checked; `kf` holds at least `vis · hd` floats.
+            return unsafe { scores_neon(q, kf, vis, hd, scale, s) };
+        }
+    }
     for (j, sj) in s.iter_mut().enumerate().take(vis) {
         let k = &kf[j * hd..(j + 1) * hd];
         *sj = q.iter().zip(k).map(|(a, b)| a * b).sum::<f32>() * scale;
@@ -1856,6 +1899,267 @@ unsafe fn mix_neon(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) 
         }
         while d < hd {
             o[d] += w * v[d];
+            d += 1;
+        }
+    }
+}
+
+/// The canonical aarch64 attention-score reduction (S2.8 F5).
+///
+/// One key's score is accumulated into two `f32x4` accumulators — dimensions
+/// `0..4` and `4..8` modulo 8 — walking the head ascending, then reduced as
+/// `((d0+d1)+(d2+d3)) + ((d4+d5)+(d6+d7))`. That is the AVX2 tier's
+/// `hsum_grouped_ps` tree with four lanes per half: the same association of the same
+/// products, and the same fused multiply-add, so a key scored on this host has the
+/// bits it would have on the AVX2 tier. It is defined once, here, and every aarch64
+/// path uses it: the single-row decode, the prefill tile and the multi-user mapped
+/// path all reach `scores`/`scores_f16`, so a row's scores never depend on which one
+/// ran. A key's score is independent of the number of keys scored in one pass, which
+/// is why grouping (four keys at a time, then one at a time) cannot move a bit. The
+/// aarch64 goldens were re-recorded when this order replaced the scalar sum.
+///
+/// # Safety
+/// The CPU must have NEON; `vis · hd` floats (or halves) must be readable.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn hsum4_neon(v: std::arch::aarch64::float32x4_t) -> f32 {
+    use std::arch::aarch64::*;
+    let t = vpaddq_f32(v, v);
+    let t = vpaddq_f32(t, t);
+    vgetq_lane_f32(t, 0)
+}
+
+/// [`scores`]'s dot, four keys per pass, on NEON.
+///
+/// # Safety
+/// The CPU must have NEON; `kf` holds at least `vis · hd` floats and `s` `vis`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn scores_neon(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32]) {
+    use std::arch::aarch64::*;
+    let qp = q.as_ptr();
+    let kp = kf.as_ptr();
+    let mut j = 0;
+    while j + 4 <= vis {
+        let mut a0 = [vdupq_n_f32(0.0); 4];
+        let mut a1 = [vdupq_n_f32(0.0); 4];
+        let mut i = 0;
+        while i < hd {
+            let q0 = vld1q_f32(qp.add(i));
+            let q1 = vld1q_f32(qp.add(i + 4));
+            for u in 0..4 {
+                let k0 = vld1q_f32(kp.add((j + u) * hd + i));
+                let k1 = vld1q_f32(kp.add((j + u) * hd + i + 4));
+                a0[u] = vfmaq_f32(a0[u], q0, k0);
+                a1[u] = vfmaq_f32(a1[u], q1, k1);
+            }
+            i += 8;
+        }
+        for u in 0..4 {
+            s[j + u] = (hsum4_neon(a0[u]) + hsum4_neon(a1[u])) * scale;
+        }
+        j += 4;
+    }
+    while j < vis {
+        let mut a0 = vdupq_n_f32(0.0);
+        let mut a1 = vdupq_n_f32(0.0);
+        let mut i = 0;
+        while i < hd {
+            a0 = vfmaq_f32(a0, vld1q_f32(qp.add(i)), vld1q_f32(kp.add(j * hd + i)));
+            a1 = vfmaq_f32(
+                a1,
+                vld1q_f32(qp.add(i + 4)),
+                vld1q_f32(kp.add(j * hd + i + 4)),
+            );
+            i += 8;
+        }
+        s[j] = (hsum4_neon(a0) + hsum4_neon(a1)) * scale;
+        j += 1;
+    }
+}
+
+/// [`scores`] on a F16 cache tile: `vcvt_f32_f16` in registers, then the same tree as
+/// [`scores_neon`]. The conversion is exact, so this is bit-identical to widening the
+/// tile first — the test pins that — and it halves the bytes the tile reads.
+///
+/// # Safety
+/// The CPU must have NEON; `k` holds at least `vis · hd · 2` bytes and `s` `vis`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn scores_f16(q: &[f32], k: &[u8], vis: usize, hd: usize, scale: f32, s: &mut [f32]) {
+    use std::arch::aarch64::*;
+    let qp = q.as_ptr();
+    let kp = k.as_ptr();
+    let mut j = 0;
+    while j + 4 <= vis {
+        let mut a0 = [vdupq_n_f32(0.0); 4];
+        let mut a1 = [vdupq_n_f32(0.0); 4];
+        let mut i = 0;
+        while i < hd {
+            let q0 = vld1q_f32(qp.add(i));
+            let q1 = vld1q_f32(qp.add(i + 4));
+            for u in 0..4 {
+                let at = ((j + u) * hd + i) * 2;
+                let k0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16)));
+                let k1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16)));
+                a0[u] = vfmaq_f32(a0[u], q0, k0);
+                a1[u] = vfmaq_f32(a1[u], q1, k1);
+            }
+            i += 8;
+        }
+        for u in 0..4 {
+            s[j + u] = (hsum4_neon(a0[u]) + hsum4_neon(a1[u])) * scale;
+        }
+        j += 4;
+    }
+    while j < vis {
+        let mut a0 = vdupq_n_f32(0.0);
+        let mut a1 = vdupq_n_f32(0.0);
+        let mut i = 0;
+        while i < hd {
+            let at = ((j * hd) + i) * 2;
+            a0 = vfmaq_f32(
+                a0,
+                vld1q_f32(qp.add(i)),
+                vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16))),
+            );
+            a1 = vfmaq_f32(
+                a1,
+                vld1q_f32(qp.add(i + 4)),
+                vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16))),
+            );
+            i += 8;
+        }
+        s[j] = (hsum4_neon(a0) + hsum4_neon(a1)) * scale;
+        j += 1;
+    }
+}
+
+/// Two query rows scored from one F16 K vector, two keys per pass.
+///
+/// Each row runs the canonical reduction on its own accumulators; only the loaded and
+/// widened key is shared, so the sharing cannot move a bit. Rows may have different
+/// visible lengths; beyond a row's own length the key is loaded but its score is not
+/// stored.
+///
+/// # Safety
+/// The CPU must have NEON; `k` holds `max(vis0, vis1) · hd · 2` bytes and each `s`
+/// row `vis0`/`vis1`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn scores_f16_pair(
+    q0: &[f32],
+    q1: &[f32],
+    k: &[u8],
+    vis0: usize,
+    vis1: usize,
+    hd: usize,
+    scale: f32,
+    s0: &mut [f32],
+    s1: &mut [f32],
+) {
+    use std::arch::aarch64::*;
+    let (q0p, q1p, kp) = (q0.as_ptr(), q1.as_ptr(), k.as_ptr());
+    let vis = vis0.max(vis1);
+    let common = vis0.min(vis1);
+    let mut j = 0;
+    while j + 2 <= common {
+        let mut a00 = [vdupq_n_f32(0.0); 2];
+        let mut a01 = [vdupq_n_f32(0.0); 2];
+        let mut a10 = [vdupq_n_f32(0.0); 2];
+        let mut a11 = [vdupq_n_f32(0.0); 2];
+        let mut i = 0;
+        while i < hd {
+            let q00 = vld1q_f32(q0p.add(i));
+            let q01 = vld1q_f32(q0p.add(i + 4));
+            let q10 = vld1q_f32(q1p.add(i));
+            let q11 = vld1q_f32(q1p.add(i + 4));
+            for u in 0..2 {
+                let at = ((j + u) * hd + i) * 2;
+                let k0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16)));
+                let k1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16)));
+                a00[u] = vfmaq_f32(a00[u], q00, k0);
+                a01[u] = vfmaq_f32(a01[u], q01, k1);
+                a10[u] = vfmaq_f32(a10[u], q10, k0);
+                a11[u] = vfmaq_f32(a11[u], q11, k1);
+            }
+            i += 8;
+        }
+        for u in 0..2 {
+            s0[j + u] = (hsum4_neon(a00[u]) + hsum4_neon(a01[u])) * scale;
+            s1[j + u] = (hsum4_neon(a10[u]) + hsum4_neon(a11[u])) * scale;
+        }
+        j += 2;
+    }
+    while j < vis {
+        for (r, qp) in [(0usize, q0p), (1usize, q1p)] {
+            let own = if r == 0 { vis0 } else { vis1 };
+            if j >= own {
+                continue;
+            }
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut i = 0;
+            while i < hd {
+                let at = ((j * hd) + i) * 2;
+                a0 = vfmaq_f32(
+                    a0,
+                    vld1q_f32(qp.add(i)),
+                    vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16))),
+                );
+                a1 = vfmaq_f32(
+                    a1,
+                    vld1q_f32(qp.add(i + 4)),
+                    vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16))),
+                );
+                i += 8;
+            }
+            let score = (hsum4_neon(a0) + hsum4_neon(a1)) * scale;
+            if r == 0 {
+                s0[j] = score;
+            } else {
+                s1[j] = score;
+            }
+        }
+        j += 1;
+    }
+}
+
+/// [`mix`] on a F16 V tile: `vcvt_f32_f16` in registers and the scalar loop's
+/// multiply-then-add per element, in the same ascending-position order, so the result
+/// is bit-identical to [`mix_neon`] on a widened tile.
+///
+/// # Safety
+/// The CPU must have NEON; `v` holds at least `p.len() · hd · 2` bytes.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn mix_f16(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
+    use std::arch::aarch64::*;
+    if alpha != 1.0 {
+        o.iter_mut().for_each(|x| *x *= alpha);
+    }
+    let vp = v.as_ptr();
+    for (j, &w) in p.iter().enumerate() {
+        let wv = vdupq_n_f32(w);
+        let row = j * hd;
+        let mut d = 0;
+        while d + 8 <= hd {
+            let v0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(
+                vp.add((row + d) * 2) as *const u16
+            )));
+            let v1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(
+                vp.add((row + d + 4) * 2) as *const u16
+            )));
+            let o0 = vld1q_f32(o.as_ptr().add(d));
+            let o1 = vld1q_f32(o.as_ptr().add(d + 4));
+            vst1q_f32(o.as_mut_ptr().add(d), vaddq_f32(o0, vmulq_f32(wv, v0)));
+            vst1q_f32(o.as_mut_ptr().add(d + 4), vaddq_f32(o1, vmulq_f32(wv, v1)));
+            d += 8;
+        }
+        while d < hd {
+            let h = u16::from_le_bytes([*vp.add((row + d) * 2), *vp.add((row + d) * 2 + 1)]);
+            o[d] += w * peregrine_kernels::format::f16(h);
             d += 1;
         }
     }
@@ -2029,6 +2333,168 @@ mod tests {
                             *x += w * v;
                         }
                     }
+                    for i in 0..hd {
+                        assert_eq!(
+                            got[i].to_bits(),
+                            want[i].to_bits(),
+                            "hd={hd} vis={vis} alpha={alpha} i={i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The canonical aarch64 score tree, in scalar Rust: two four-lane accumulators
+    /// (dimensions 0..4 and 4..8 modulo 8) over ascending eight-wide blocks, reduced
+    /// as `((d0+d1)+(d2+d3)) + ((d4+d5)+(d6+d7))`. This is the specification the NEON
+    /// kernels below are checked against; it is also the AVX2 tier's
+    /// `hsum_grouped_ps` tree with four lanes per half.
+    #[cfg(target_arch = "aarch64")]
+    fn canonical_score(q: &[f32], k: &[f32]) -> f32 {
+        let mut a0 = [0.0f32; 4];
+        let mut a1 = [0.0f32; 4];
+        let mut i = 0;
+        while i + 8 <= q.len() {
+            for l in 0..4 {
+                a0[l] = q[i + l].mul_add(k[i + l], a0[l]);
+                a1[l] = q[i + 4 + l].mul_add(k[i + 4 + l], a1[l]);
+            }
+            i += 8;
+        }
+        ((a0[0] + a0[1]) + (a0[2] + a0[3])) + ((a1[0] + a1[1]) + (a1[2] + a1[3]))
+    }
+
+    /// The dispatch layer's `scores` (which takes the NEON kernel on this host) is the
+    /// canonical tree, at every visible length and every head width the models use.
+    /// The group/tail split must not move a bit — that is what lets decode, a prefill
+    /// tile and the mapped path share one order.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_scores_are_the_canonical_tree() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skip: no NEON");
+            return;
+        }
+        for hd in [8usize, 16, 64, 80, 128] {
+            for vis in [1usize, 3, 4, 5, 7, 8, 13] {
+                let q = prng(0x11 + hd as u64, hd);
+                let kf = prng(0x22 + vis as u64, vis * hd);
+                let scale = 0.125f32;
+                let mut got = vec![0.0f32; vis];
+                scores(&q, &kf, vis, hd, scale, &mut got);
+                for j in 0..vis {
+                    let key = &kf[j * hd..(j + 1) * hd];
+                    let want = canonical_score(&q, key) * scale;
+                    assert_eq!(got[j].to_bits(), want.to_bits(), "hd={hd} vis={vis} j={j}");
+                }
+            }
+        }
+    }
+
+    /// A F16 key, widened in the kernel, scores exactly as the widened tile does.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_f16_scores_equal_the_widened_scores() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skip: no NEON");
+            return;
+        }
+        for hd in [8usize, 64, 128] {
+            for vis in [1usize, 3, 4, 9] {
+                let q = prng(0x33 + hd as u64, hd);
+                let wide = prng(0x44 + vis as u64, vis * hd);
+                let mut half = Vec::with_capacity(wide.len() * 2);
+                for x in &wide {
+                    half.extend_from_slice(&crate::gguf::to_f16(*x).to_le_bytes());
+                }
+                let widened: Vec<f32> = half
+                    .chunks_exact(2)
+                    .map(|b| peregrine_kernels::format::f16(u16::from_le_bytes([b[0], b[1]])))
+                    .collect();
+                let scale = 0.25f32;
+                let mut want = vec![0.0f32; vis];
+                let mut got = vec![0.0f32; vis];
+                unsafe {
+                    scores_neon(&q, &widened, vis, hd, scale, &mut want);
+                    scores_f16(&q, &half, vis, hd, scale, &mut got);
+                }
+                for j in 0..vis {
+                    assert_eq!(
+                        got[j].to_bits(),
+                        want[j].to_bits(),
+                        "hd={hd} vis={vis} j={j}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The paired kernel (`run_f16`'s two query heads over one K tile, and the prefill
+    /// tile's paired rows) is each row's single-row score, bit for bit, including when
+    /// the two rows see different lengths.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn the_paired_f16_score_is_each_rows_own_score() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skip: no NEON");
+            return;
+        }
+        for hd in [8usize, 64] {
+            let vis0 = 9usize;
+            let vis1 = 13usize;
+            let q0 = prng(0x55 + hd as u64, hd);
+            let q1 = prng(0x66 + hd as u64, hd);
+            let wide = prng(0x77, vis1 * hd);
+            let mut half = Vec::with_capacity(wide.len() * 2);
+            for x in &wide {
+                half.extend_from_slice(&crate::gguf::to_f16(*x).to_le_bytes());
+            }
+            let scale = 0.125f32;
+            let (mut s0, mut s1) = (vec![0.0f32; vis0], vec![0.0f32; vis1]);
+            unsafe {
+                scores_f16_pair(&q0, &q1, &half, vis0, vis1, hd, scale, &mut s0, &mut s1);
+            }
+            for (v, q, s) in [(vis0, &q0, &s0), (vis1, &q1, &s1)] {
+                let mut want = vec![0.0f32; v];
+                unsafe { scores_f16(q, &half, v, hd, scale, &mut want) };
+                for j in 0..v {
+                    assert_eq!(s[j].to_bits(), want[j].to_bits(), "hd={hd} vis={v} j={j}");
+                }
+            }
+        }
+    }
+
+    /// The F16 value mix against the widened mix, bit for bit.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_mix_f16_is_bit_identical_to_the_widened_mix() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skip: no NEON");
+            return;
+        }
+        for hd in [8usize, 64, 128] {
+            for vis in [1usize, 3, 7] {
+                let p: Vec<f32> = prng(0x88 + vis as u64, vis)
+                    .iter()
+                    .map(|x| x.abs())
+                    .collect();
+                let vf = prng(0x99, vis * hd);
+                let mut half = Vec::with_capacity(vf.len() * 2);
+                for x in &vf {
+                    half.extend_from_slice(&crate::gguf::to_f16(*x).to_le_bytes());
+                }
+                // The widened tile holds exactly the halves' values.
+                let widened: Vec<f32> = half
+                    .chunks_exact(2)
+                    .map(|b| peregrine_kernels::format::f16(u16::from_le_bytes([b[0], b[1]])))
+                    .collect();
+                let o = prng(0xaa + hd as u64, hd);
+                for alpha in [1.0f32, 0.37] {
+                    let mut want = o.clone();
+                    mix(&mut want, alpha, &p, &widened, hd);
+                    let mut got = o.clone();
+                    unsafe { mix_f16(&mut got, alpha, &p, &half, hd) };
                     for i in 0..hd {
                         assert_eq!(
                             got[i].to_bits(),
