@@ -41,6 +41,17 @@
 //!   halves in registers instead (two rows share each loaded K and V vector), which
 //!   halves the bytes they pull. Both paths use the same per-key reduction tree, so
 //!   which one a row takes cannot change its bits.
+//! * **The value mix widens to sixteen lanes on AVX-512.** `vcvtph2ps zmm` reads
+//!   sixteen stored halves per instruction and 512-bit fused multiply-adds consume
+//!   them; the mix is conversion-bound, so on the Ryzen AI 9 HX 370 the pair kernel
+//!   is ~27% faster than the AVX2 one at 4096 positions. Scores keep the AVX2 tree on
+//!   every tier: a zmm score row needs a 16-lane horizontal reduction, which measured
+//!   30–70% *slower* than the AVX2 reduction at head width 64, so the tier keeps one
+//!   score tree and every path agrees bit for bit with AVX2. The softmax's 16-wide
+//!   `exp` keeps the eight-lane sum grouping, so it too is the AVX2 result bit for
+//!   bit; the mix is per-element and matches for the same reason. Attention's output
+//!   is therefore the AVX2 tier's, and this tier's goldens move only where another
+//!   kernel (the repacked k-quant matmuls) does.
 //! * **A row's partition is its own.** The position chunks a row is cut into are a
 //!   function of that row's context length and the model shape alone — never of the
 //!   other rows in the call, the call width, the prefill chunk or the pool. A
@@ -1062,6 +1073,27 @@ fn prefill_direct(kv: &KvCache, sh: &Shape<'_>, vis: usize) -> bool {
     vis >= DIRECT_MIN_VIS && f16_direct(kv, sh)
 }
 
+/// Whether the sixteen-lane value-mix kernels can run for this head width.
+///
+/// Only the mix is widened. The score kernels keep the AVX2 tree on every tier: a
+/// 512-bit score row needs a 512-bit horizontal reduction, and on this host
+/// (Ryzen AI 9 HX 370) that costs more than the halved FMA and load count saves —
+/// measured at every visible length, the zmm score kernels were 30–70% slower than
+/// the AVX2 ones at head width 64. Keeping one score tree everywhere also makes a
+/// row's score bits independent of the path by construction. The mix is
+/// per-element and conversion-bound, so widening it cannot move a bit either; the
+/// tier's `mix` golden is the AVX2 one.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn avx512_attn(head_dim: usize) -> bool {
+    head_dim.is_multiple_of(16)
+        && crate::cpu_has!("avx512f")
+        && crate::cpu_has!("avx512dq")
+        && crate::cpu_has!("avx2")
+        && crate::cpu_has!("fma")
+        && crate::cpu_has!("f16c")
+}
+
 /// The per-key reduction tree of the four-key score block: `((d0+d1)+(d2+d3)) +
 /// ((d4+d5)+(d6+d7))`. A tail key reduced with this tree gets the same bits as one
 /// that sat in a block, so a key's score does not depend on the block boundaries —
@@ -1222,7 +1254,7 @@ unsafe fn scores_f16_pair(
 /// positions; `j` accumulates ascending exactly as the widened kernel does.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c")]
-unsafe fn mix_f16(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
+unsafe fn mix_f16_avx2(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
     use std::arch::x86_64::*;
     let al = _mm256_set1_ps(alpha);
     let vp = v.as_ptr();
@@ -1271,7 +1303,7 @@ unsafe fn mix_f16(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn mix_f16_pair(
+unsafe fn mix_f16_pair_avx2(
     o0: &mut [f32],
     o1: &mut [f32],
     alpha0: f32,
@@ -1365,6 +1397,245 @@ unsafe fn mix_f16_pair(
         }
         d0 += lanes * 8;
     }
+}
+
+// ---------------------------------------------------------------------------
+// The AVX-512 tier's sixteen-lane kernels.
+//
+// Every path on the tier — solo decode, the prefill tile, and a mapped
+// multi-user row — takes these, and the f32-tile and F16-direct variants are the
+// same arithmetic with the widening moved into the load. A row's bits therefore
+// depend on neither the path nor the width.
+
+/// `o = α·o + Σ_j p_j · v_j` over a widened f32 tile, sixteen lanes at a time.
+/// The accumulators stay in registers across the positions; `j` accumulates
+/// ascending, exactly as [`mix_avx2`] does.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512dq,avx2,fma,f16c")]
+unsafe fn mix_avx512(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
+    use std::arch::x86_64::*;
+    let al = _mm512_set1_ps(alpha);
+    let vp = vf.as_ptr();
+    let op = o.as_mut_ptr();
+    let mut d0 = 0;
+    while d0 + 64 <= hd {
+        let mut acc = [_mm512_setzero_ps(); 4];
+        for (l, a) in acc.iter_mut().enumerate() {
+            *a = _mm512_mul_ps(_mm512_loadu_ps(op.add(d0 + l * 16)), al);
+        }
+        for (j, &w) in p.iter().enumerate() {
+            let wv = _mm512_set1_ps(w);
+            for (l, a) in acc.iter_mut().enumerate() {
+                *a = _mm512_fmadd_ps(wv, _mm512_loadu_ps(vp.add(j * hd + d0 + l * 16)), *a);
+            }
+        }
+        for (l, a) in acc.iter().enumerate() {
+            _mm512_storeu_ps(op.add(d0 + l * 16), *a);
+        }
+        d0 += 64;
+    }
+    while d0 < hd {
+        let mut acc = _mm512_mul_ps(_mm512_loadu_ps(op.add(d0)), al);
+        for (j, &w) in p.iter().enumerate() {
+            acc = _mm512_fmadd_ps(_mm512_set1_ps(w), _mm512_loadu_ps(vp.add(j * hd + d0)), acc);
+        }
+        _mm512_storeu_ps(op.add(d0), acc);
+        d0 += 16;
+    }
+}
+
+/// [`mix_avx512`] with V read as f16 halves; same operands and order.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512dq,avx2,fma,f16c")]
+unsafe fn mix_f16_avx512(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
+    use std::arch::x86_64::*;
+    let al = _mm512_set1_ps(alpha);
+    let vp = v.as_ptr();
+    let op = o.as_mut_ptr();
+    let mut d0 = 0;
+    while d0 + 64 <= hd {
+        let mut acc = [_mm512_setzero_ps(); 4];
+        for (l, a) in acc.iter_mut().enumerate() {
+            *a = _mm512_mul_ps(_mm512_loadu_ps(op.add(d0 + l * 16)), al);
+        }
+        for (j, &w) in p.iter().enumerate() {
+            let wv = _mm512_set1_ps(w);
+            for (l, a) in acc.iter_mut().enumerate() {
+                *a = _mm512_fmadd_ps(
+                    wv,
+                    _mm512_cvtph_ps(_mm256_loadu_si256(
+                        vp.add((j * hd + d0 + l * 16) * 2) as *const __m256i
+                    )),
+                    *a,
+                );
+            }
+        }
+        for (l, a) in acc.iter().enumerate() {
+            _mm512_storeu_ps(op.add(d0 + l * 16), *a);
+        }
+        d0 += 64;
+    }
+    while d0 < hd {
+        let mut acc = _mm512_mul_ps(_mm512_loadu_ps(op.add(d0)), al);
+        for (j, &w) in p.iter().enumerate() {
+            acc = _mm512_fmadd_ps(
+                _mm512_set1_ps(w),
+                _mm512_cvtph_ps(_mm256_loadu_si256(
+                    vp.add((j * hd + d0) * 2) as *const __m256i
+                )),
+                acc,
+            );
+        }
+        _mm512_storeu_ps(op.add(d0), acc);
+        d0 += 16;
+    }
+}
+
+/// Two rows' sixteen-lane value mixes with the per-row chunk-boundary resets of
+/// [`mix_f16_pair_avx2`]. Each output element sees the same ascending-position
+/// `α·o + p_j·v_j` as every other mix kernel on the tier.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512dq,avx2,fma,f16c")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_f16_pair_avx512(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    vis0: usize,
+    vis1: usize,
+    blk: usize,
+    cur0: usize,
+    cur1: usize,
+    ends0: &[usize],
+    ends1: &[usize],
+    v: &[u8],
+    hd: usize,
+    part0: &mut [f32],
+    part1: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+    let vis = vis0.max(vis1);
+    if vis == 0 {
+        return;
+    }
+    let vp = v.as_ptr();
+    let (al0, al1) = (_mm512_set1_ps(alpha0), _mm512_set1_ps(alpha1));
+    let mut d0 = 0;
+    while d0 < hd {
+        let lanes = (hd - d0).min(64) / 16;
+        let mut a0 = [_mm512_setzero_ps(); 4];
+        let mut a1 = [_mm512_setzero_ps(); 4];
+        if vis0 > 0 {
+            for (l, a) in a0.iter_mut().enumerate().take(lanes) {
+                *a = _mm512_mul_ps(_mm512_loadu_ps(o0.as_ptr().add(d0 + l * 16)), al0);
+            }
+        }
+        if vis1 > 0 {
+            for (l, a) in a1.iter_mut().enumerate().take(lanes) {
+                *a = _mm512_mul_ps(_mm512_loadu_ps(o1.as_ptr().add(d0 + l * 16)), al1);
+            }
+        }
+        let (mut c0, mut c1) = (cur0, cur1);
+        for j in 0..vis {
+            if j < vis0 {
+                let wv = _mm512_set1_ps(p0[j]);
+                for (l, a) in a0.iter_mut().enumerate().take(lanes) {
+                    *a = _mm512_fmadd_ps(
+                        wv,
+                        _mm512_cvtph_ps(_mm256_loadu_si256(
+                            vp.add((j * hd + d0 + l * 16) * 2) as *const __m256i
+                        )),
+                        *a,
+                    );
+                }
+                while c0 + 1 < ends0.len() && blk + j + 1 >= ends0[c0] {
+                    for (l, a) in a0.iter().enumerate().take(lanes) {
+                        _mm512_storeu_ps(part0.as_mut_ptr().add(c0 * hd + d0 + l * 16), *a);
+                    }
+                    a0 = [_mm512_setzero_ps(); 4];
+                    c0 += 1;
+                }
+            }
+            if j < vis1 {
+                let wv = _mm512_set1_ps(p1[j]);
+                for (l, a) in a1.iter_mut().enumerate().take(lanes) {
+                    *a = _mm512_fmadd_ps(
+                        wv,
+                        _mm512_cvtph_ps(_mm256_loadu_si256(
+                            vp.add((j * hd + d0 + l * 16) * 2) as *const __m256i
+                        )),
+                        *a,
+                    );
+                }
+                while c1 + 1 < ends1.len() && blk + j + 1 >= ends1[c1] {
+                    for (l, a) in a1.iter().enumerate().take(lanes) {
+                        _mm512_storeu_ps(part1.as_mut_ptr().add(c1 * hd + d0 + l * 16), *a);
+                    }
+                    a1 = [_mm512_setzero_ps(); 4];
+                    c1 += 1;
+                }
+            }
+        }
+        if vis0 > 0 {
+            for (l, a) in a0.iter().enumerate().take(lanes) {
+                _mm512_storeu_ps(o0.as_mut_ptr().add(d0 + l * 16), *a);
+            }
+        }
+        if vis1 > 0 {
+            for (l, a) in a1.iter().enumerate().take(lanes) {
+                _mm512_storeu_ps(o1.as_mut_ptr().add(d0 + l * 16), *a);
+            }
+        }
+        d0 += lanes * 16;
+    }
+}
+
+/// [`mix_f16_avx512`] or [`mix_f16_avx2`], by the tier.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn mix_f16(o: &mut [f32], alpha: f32, p: &[f32], v: &[u8], hd: usize) {
+    if avx512_attn(hd) {
+        return mix_f16_avx512(o, alpha, p, v, hd);
+    }
+    mix_f16_avx2(o, alpha, p, v, hd)
+}
+
+/// [`mix_f16_pair_avx512`] or [`mix_f16_pair_avx2`], by the tier.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_f16_pair(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    vis0: usize,
+    vis1: usize,
+    blk: usize,
+    cur0: usize,
+    cur1: usize,
+    ends0: &[usize],
+    ends1: &[usize],
+    v: &[u8],
+    hd: usize,
+    part0: &mut [f32],
+    part1: &mut [f32],
+) {
+    if avx512_attn(hd) {
+        return mix_f16_pair_avx512(
+            o0, o1, alpha0, alpha1, p0, p1, vis0, vis1, blk, cur0, cur1, ends0, ends1, v, hd,
+            part0, part1,
+        );
+    }
+    mix_f16_pair_avx2(
+        o0, o1, alpha0, alpha1, p0, p1, vis0, vis1, blk, cur0, cur1, ends0, ends1, v, hd, part0,
+        part1,
+    )
 }
 
 /// Two query rows scored from one widened K tile.
@@ -1483,6 +1754,10 @@ fn scores(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32
 fn mix(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
     #[cfg(target_arch = "x86_64")]
     {
+        if avx512_attn(hd) {
+            // SAFETY: AVX-512F+FMA checked; `vf` holds at least `p.len() · hd` floats.
+            return unsafe { mix_avx512(o, alpha, p, vf, hd) };
+        }
         if hd.is_multiple_of(8) && crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
             // SAFETY: features checked; `vf` holds at least `p.len() · hd` floats.
             return unsafe { mix_avx2(o, alpha, p, vf, hd) };
@@ -2479,6 +2754,85 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The sixteen-lane value mix is the eight-lane mix widened: each output
+    /// element sees `α·o` then `p_j·v_j` over ascending positions, in the same
+    /// order and with the same operands (F16C's widening is exact). The tier's
+    /// goldens therefore keep the AVX2 tier's bits for attention.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_sixteen_lane_mix_is_the_eight_lane_mix_bit_for_bit() {
+        if !avx512_attn(64) {
+            return;
+        }
+        let hd = 64;
+        let n = 17;
+        let mut c = KvCache::new(KvPrec::F16, 1, 1, hd, n + 2);
+        for p in 0..n {
+            let k = prng((p * 13 + 3) as u64, hd);
+            let v = prng((p * 29 + 5) as u64, hd);
+            c.put(0, 0, p, &k, &v);
+        }
+        c.advance(n);
+        let vb = c.block_bytes(false, 0, 0, 0, n);
+        let mut vf = vec![0.0f32; n * hd];
+        c.decode_block(false, 0, 0, 0, n, &mut vf);
+        let p: Vec<f32> = prng(91, n).iter().map(|x| x.abs() + 0.01).collect();
+        let one = [usize::MAX];
+        for vis in 1..=n {
+            let o = prng(123, hd);
+            let (mut a, mut b) = (o.clone(), o.clone());
+            // SAFETY: AVX2+FMA+F16C and AVX-512 checked.
+            unsafe {
+                mix_f16_avx2(&mut a, 0.75, &p[..vis], vb, hd);
+                mix_f16_avx512(&mut b, 0.75, &p[..vis], vb, hd);
+            }
+            assert!(same_bits(&a, &b), "mix at vis {vis}");
+            let (mut a, mut b) = (o.clone(), o.clone());
+            mix(&mut a, 0.75, &p[..vis], &vf, hd);
+            // SAFETY: checked above.
+            unsafe { mix_avx512(&mut b, 0.75, &p[..vis], &vf, hd) };
+            assert!(same_bits(&a, &b), "widened mix at vis {vis}");
+        }
+        // The pair kernel shares each V read between two rows; each row's own
+        // accumulation still has the single kernel's order.
+        let mut failures = Vec::new();
+        for vis0 in 1..=n {
+            for vis1 in 1..=n {
+                let o0: Vec<f32> = prng(123, hd);
+                let o1: Vec<f32> = prng(124, hd);
+                let (mut x0, mut x1) = (o0.clone(), o1.clone());
+                let (mut y0, mut y1) = (o0.clone(), o1.clone());
+                unsafe {
+                    mix(&mut x0, 0.75, &p[..vis0], &vf, hd);
+                    mix(&mut x1, 0.75, &p[..vis1], &vf, hd);
+                    mix_f16_pair_avx512(
+                        &mut y0,
+                        &mut y1,
+                        0.75,
+                        0.75,
+                        &p[..vis0],
+                        &p[..vis1],
+                        vis0,
+                        vis1,
+                        0,
+                        0,
+                        0,
+                        &one,
+                        &one,
+                        vb,
+                        hd,
+                        &mut [],
+                        &mut [],
+                    );
+                }
+                if !(same_bits(&x0, &y0) && same_bits(&x1, &y1)) {
+                    failures.push(format!("pair mix {vis0} {vis1}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     /// The direct kernels are the widened kernels with the widening moved into the
