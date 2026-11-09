@@ -2407,41 +2407,55 @@ mod tests {
         }
     }
 
-    /// The AVX-512 Q8_0 int32 stage: four products per lane, two lanes per row,
-    /// four windows per block — at most 32 · 128 · 127 = 520 192, exact in int32
-    /// and in the float the fold converts it to.
+    /// The AVX-512 Q8_0 int32 stage: four products per int32 lane per window and four
+    /// windows per block, so one lane holds 16 products of a 128-magnitude weight and
+    /// a 127 activation — at most 16 · 128 · 127 = 260 096. `compact8` sums the two
+    /// lanes a row owns, 520 192. Both are exact in int32 and in the float the fold
+    /// converts them to (< 2^24).
+    ///
+    /// The kernel takes `|w|` as the unsigned operand and negates the activation where
+    /// the weight was negative, so the lane's sign follows the product. This exercises
+    /// both weight signs and both activation signs, and checks the magnitude against
+    /// the bound as well as the value.
     #[test]
     #[cfg(feature = "fmt-legacy")]
     fn the_avx512_q8_0_int32_stage_has_headroom() {
-        let bound = 32 * 128 * 127;
-        assert!(bound < i32::MAX as i64);
-        assert!(bound < 1 << 24, "the fold would round an integer");
+        let per_lane = 16 * 128 * 127; // 260_096
+        let per_row = 2 * per_lane; // what compact8 sums for one row
+        assert!(per_row < i32::MAX as i64, "the int32 lane would wrap");
+        assert!(per_row < 1 << 24, "the fold would round an integer");
         if !crate::simd::have_batched() || !have_zmm512() {
             return;
         }
         unsafe {
-            let codes = _mm512_set1_epi8(-128);
-            let absw = _mm512_abs_epi8(codes);
-            for a in [127i8, -127] {
-                let av = _mm512_set1_epi8(a);
-                let sa = _mm512_mask_sub_epi8(
-                    av,
-                    _mm512_cmpgt_epi8_mask(_mm512_setzero_si512(), codes),
-                    _mm512_setzero_si512(),
-                    av,
-                );
-                let one = _mm512_dpbusd_epi32(_mm512_setzero_si512(), absw, sa);
-                let mut acc = _mm512_setzero_si512();
-                for _ in 0..4 {
-                    acc = _mm512_add_epi32(acc, one);
+            for w in [-128i8, 127] {
+                let codes = _mm512_set1_epi8(w);
+                let absw = _mm512_abs_epi8(codes);
+                let neg = _mm512_cmpgt_epi8_mask(_mm512_setzero_si512(), codes);
+                let mag = i32::from(w.unsigned_abs());
+                for a in [127i8, -127] {
+                    let av = _mm512_set1_epi8(a);
+                    let sa = _mm512_mask_sub_epi8(av, neg, _mm512_setzero_si512(), av);
+                    let one = _mm512_dpbusd_epi32(_mm512_setzero_si512(), absw, sa);
+                    let mut acc = _mm512_setzero_si512();
+                    for _ in 0..4 {
+                        acc = _mm512_add_epi32(acc, one);
+                    }
+                    let mut lanes = [0i32; 16];
+                    _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, acc);
+                    // |w| · (±a), summed over 16 products: the kernel's own math.
+                    let magnitude = 16 * mag * i32::from(a.abs());
+                    let want = 16 * mag * i32::from(a) * if w < 0 { -1 } else { 1 };
+                    assert!(
+                        lanes.iter().all(|&l| l == want),
+                        "w {w}, a {a}: the int32 lane is {lanes:?}, not {want}"
+                    );
+                    assert!(
+                        lanes.iter().all(|&l| l.unsigned_abs() == magnitude as u32),
+                        "w {w}, a {a}: the magnitude is not {magnitude}"
+                    );
+                    assert!(magnitude <= per_lane as i32, "w {w}: bound exceeded");
                 }
-                let mut lanes = [0i32; 16];
-                _mm512_storeu_si512(lanes.as_mut_ptr() as *mut __m512i, acc);
-                let want = 16 * 128 * a as i32;
-                assert!(
-                    lanes.iter().all(|&l| l == want),
-                    "the int32 lane is {lanes:?}, not {want}"
-                );
             }
         }
     }
