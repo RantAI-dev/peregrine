@@ -19,7 +19,7 @@
 //! # The forward path does not call the C library
 //!
 //! The transcendentals the forward path needs are built here, from IEEE basic
-//! operations alone: [`exp_scalar`] is the scalar twin of [`exp8`] (bit for bit), and
+//! operations alone: [`exp_scalar`] is the scalar twin of `exp8` (bit for bit), and
 //! [`tanh`] is built on it. A libm call is not reproducible across C libraries — glibc
 //! 2.40 replaced `tanhf` with a correctly rounded version, and the same kernel then
 //! produced different activations, different logits and different golden files on
@@ -264,7 +264,7 @@ fn greater(x: f32, limit: f32) -> bool {
     )
 }
 
-/// `exp` — the scalar twin of [`exp8`]: the same constants, the same operation order and the
+/// `exp` — the scalar twin of `exp8`: the same constants, the same operation order and the
 /// same overflow and underflow handling, so the two agree bit for bit on every input
 /// (the test sweeps them against each other).
 ///
