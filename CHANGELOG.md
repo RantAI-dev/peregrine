@@ -35,6 +35,16 @@ All notable changes to this project are documented here. The format follows
   16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
 
 ### Added
+- NEON kernels for **Q6_K** on aarch64 (S2.8 F3): the repacked `Q6K8` tile as a GEMM and a GEMV,
+  plus a per-row `sdot` kernel. The six-bit codes are a nibble from `ql` and two bits from `qh`,
+  expanded with a mask, a shift and an OR before each `sdot`; the run's offset is applied once per
+  sixteen weights against the activation's run sum, and the per-super-block fold is the scalar
+  reference's own expression. Unlike the Q5_0 tile, this one is **bit-identical to the scalar
+  kernel**, so no golden was re-recorded (the Q6_K models are byte-for-byte unchanged). The
+  interleaved activation gained `bs16`, the per-16 run sums the kernel needs. On the DGX Spark
+  (X925, one thread) the tile reaches 34.9 GMAC/s in GEMV and 52.8 in the four-row GEMM, against
+  5.8 for the scalar row; Llama-3.2-1B prefill on the X925 cluster goes 203 -> 394 tok/s and
+  decode 68.5 -> 101.3 against the Q5_0-only tree, closing the last weight-format gap to llama.cpp.
 - A NEON kernel for **Q5_0** on aarch64 (S2.8 F1): the repacked `Q5_08` tile on `sdot` (GEMM and
   GEMV), a per-row `sdot` kernel, and an eight-row decode kernel. The tile's sixteen nibble bytes
   are one `sdot` per half of the block, and the fifth bits are spread from the tile's per-window

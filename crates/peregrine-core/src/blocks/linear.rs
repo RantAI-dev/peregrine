@@ -181,6 +181,7 @@ pub fn matmul_group(
                         Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
                         Format::Q5_0 => peregrine_kernels::kq::Q5_08::SIZE,
                         Format::Q8_0 => peregrine_kernels::kq::Q8_08::SIZE,
+                        Format::Q6_K => peregrine_kernels::kq::Q6K8::SIZE,
                         _ => unreachable!("a repacked path has a repacked format"),
                     };
                     let store = w.kq();
@@ -216,6 +217,13 @@ pub fn matmul_group(
                                         mk.kq_tiles_q8_0(tile, n_sb, &acts[..nb], nb, out);
                                     } else {
                                         mk.kq_tiles_q8_0_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    }
+                                }
+                                Format::Q6_K => {
+                                    if nb >= 4 {
+                                        mk.kq_tiles_q6k(tile, n_sb, kq, nb, out);
+                                    } else {
+                                        mk.kq_tiles_q6k_gemv(tile, n_sb, &acts[..nb], nb, out);
                                     }
                                 }
                                 _ => {
