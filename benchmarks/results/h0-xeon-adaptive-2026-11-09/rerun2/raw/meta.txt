@@ -1,0 +1,221 @@
+condition=quiet hogs=0 model=llama1b rounds=1-5 load=7.86 9.87 10.99 3/4550 3224381
+quiet llama1b r1 base load0=7.86 load1=7.26 file=quiet-llama1b-base-r1.json
+quiet llama1b r1 branch load0=7.26 load1=6.83 file=quiet-llama1b-branch-r1.json
+quiet llama1b r1 spin0 load0=6.83 load1=7.45 file=quiet-llama1b-spin0-r1.json
+quiet llama1b r2 spin0 load0=7.45 load1=7.24 file=quiet-llama1b-spin0-r2.json
+quiet llama1b r2 branch load0=7.24 load1=7.29 file=quiet-llama1b-branch-r2.json
+quiet llama1b r2 base load0=7.29 load1=7.65 file=quiet-llama1b-base-r2.json
+quiet llama1b r3 base load0=7.65 load1=7.49 file=quiet-llama1b-base-r3.json
+quiet llama1b r3 branch load0=7.49 load1=7.02 file=quiet-llama1b-branch-r3.json
+quiet llama1b r3 spin0 load0=7.02 load1=6.94 file=quiet-llama1b-spin0-r3.json
+quiet llama1b r4 spin0 load0=6.94 load1=6.80 file=quiet-llama1b-spin0-r4.json
+quiet llama1b r4 branch load0=6.80 load1=8.28 file=quiet-llama1b-branch-r4.json
+quiet llama1b r4 base load0=8.28 load1=7.86 file=quiet-llama1b-base-r4.json
+quiet llama1b r5 base load0=7.86 load1=7.72 file=quiet-llama1b-base-r5.json
+quiet llama1b r5 branch load0=7.72 load1=7.45 file=quiet-llama1b-branch-r5.json
+quiet llama1b r5 spin0 load0=7.45 load1=7.30 file=quiet-llama1b-spin0-r5.json
+done quiet llama1b 1-5 load=7.30 8.78 10.39 1/4516 3226009
+condition=quiet hogs=0 model=qwen05b rounds=1-5 load=6.56 8.57 10.31 2/4530 3226096
+quiet qwen05b r1 base load0=6.56 load1=6.84 file=quiet-qwen05b-base-r1.json
+quiet qwen05b r1 branch load0=6.84 load1=6.85 file=quiet-qwen05b-branch-r1.json
+quiet qwen05b r1 spin0 load0=6.85 load1=7.02 file=quiet-qwen05b-spin0-r1.json
+quiet qwen05b r2 spin0 load0=7.02 load1=6.94 file=quiet-qwen05b-spin0-r2.json
+quiet qwen05b r2 branch load0=6.94 load1=6.80 file=quiet-qwen05b-branch-r2.json
+quiet qwen05b r2 base load0=6.80 load1=6.98 file=quiet-qwen05b-base-r2.json
+quiet qwen05b r3 base load0=6.98 load1=7.06 file=quiet-qwen05b-base-r3.json
+quiet qwen05b r3 branch load0=7.06 load1=6.91 file=quiet-qwen05b-branch-r3.json
+quiet qwen05b r3 spin0 load0=6.91 load1=7.10 file=quiet-qwen05b-spin0-r3.json
+quiet qwen05b r4 spin0 load0=7.10 load1=7.01 file=quiet-qwen05b-spin0-r4.json
+quiet qwen05b r4 branch load0=7.01 load1=8.38 file=quiet-qwen05b-branch-r4.json
+quiet qwen05b r4 base load0=8.38 load1=9.41 file=quiet-qwen05b-base-r4.json
+quiet qwen05b r5 base load0=9.41 load1=10.02 file=quiet-qwen05b-base-r5.json
+quiet qwen05b r5 branch load0=10.02 load1=11.06 file=quiet-qwen05b-branch-r5.json
+quiet qwen05b r5 spin0 load0=11.06 load1=11.53 file=quiet-qwen05b-spin0-r5.json
+done quiet qwen05b 1-5 load=11.53 9.35 10.36 8/4542 3228396
+condition=quiet hogs=0 model=gemma3-1b rounds=1-5 load=10.73 9.26 10.32 11/4514 3228458
+quiet gemma3-1b r1 base load0=10.73 load1=10.88 file=quiet-gemma3-1b-base-r1.json
+quiet gemma3-1b r1 branch load0=10.88 load1=10.24 file=quiet-gemma3-1b-branch-r1.json
+quiet gemma3-1b r1 spin0 load0=10.24 load1=9.35 file=quiet-gemma3-1b-spin0-r1.json
+quiet gemma3-1b r2 spin0 load0=9.35 load1=9.93 file=quiet-gemma3-1b-spin0-r2.json
+quiet gemma3-1b r2 branch load0=9.93 load1=10.80 file=quiet-gemma3-1b-branch-r2.json
+quiet gemma3-1b r2 base load0=10.80 load1=10.25 file=quiet-gemma3-1b-base-r2.json
+quiet gemma3-1b r3 base load0=10.25 load1=10.94 file=quiet-gemma3-1b-base-r3.json
+quiet gemma3-1b r3 branch load0=10.94 load1=10.41 file=quiet-gemma3-1b-branch-r3.json
+quiet gemma3-1b r3 spin0 load0=10.41 load1=10.03 file=quiet-gemma3-1b-spin0-r3.json
+quiet gemma3-1b r4 spin0 load0=10.03 load1=9.65 file=quiet-gemma3-1b-spin0-r4.json
+quiet gemma3-1b r4 branch load0=9.65 load1=8.57 file=quiet-gemma3-1b-branch-r4.json
+quiet gemma3-1b r4 base load0=8.57 load1=8.64 file=quiet-gemma3-1b-base-r4.json
+quiet gemma3-1b r5 base load0=8.64 load1=8.52 file=quiet-gemma3-1b-base-r5.json
+quiet gemma3-1b r5 branch load0=8.52 load1=8.81 file=quiet-gemma3-1b-branch-r5.json
+quiet gemma3-1b r5 spin0 load0=8.81 load1=9.66 file=quiet-gemma3-1b-spin0-r5.json
+done quiet gemma3-1b 1-5 load=9.66 9.31 10.08 9/4526 3232457
+condition=loaded hogs=4 model=llama1b rounds=1-5 load=9.53 9.29 10.07 9/4532 3232540
+loaded llama1b r1 base load0=9.53 load1=17.10 file=loaded-llama1b-base-r1.json
+loaded llama1b r1 branch load0=17.10 load1=17.74 file=loaded-llama1b-branch-r1.json
+loaded llama1b r1 spin0 load0=17.74 load1=22.49 file=loaded-llama1b-spin0-r1.json
+loaded llama1b r2 spin0 load0=22.49 load1=23.25 file=loaded-llama1b-spin0-r2.json
+loaded llama1b r2 branch load0=23.25 load1=24.49 file=loaded-llama1b-branch-r2.json
+loaded llama1b r2 base load0=24.49 load1=23.25 file=loaded-llama1b-base-r2.json
+loaded llama1b r3 base load0=23.25 load1=16.66 file=loaded-llama1b-base-r3.json
+loaded llama1b r3 branch load0=16.66 load1=13.25 file=loaded-llama1b-branch-r3.json
+loaded llama1b r3 spin0 load0=13.25 load1=12.45 file=loaded-llama1b-spin0-r3.json
+loaded llama1b r4 spin0 load0=12.45 load1=12.06 file=loaded-llama1b-spin0-r4.json
+loaded llama1b r4 branch load0=12.06 load1=11.11 file=loaded-llama1b-branch-r4.json
+condition=loaded hogs=4 model=llama1b rounds=4-5 load=13.10 15.52 13.83 8/4541 3246684
+loaded llama1b r4 spin0 load0=13.10 load1=13.30 file=loaded-llama1b-spin0-r4.json
+loaded llama1b r4 branch load0=13.30 load1=12.16 file=loaded-llama1b-branch-r4.json
+loaded llama1b r4 base load0=12.16 load1=13.08 file=loaded-llama1b-base-r4.json
+loaded llama1b r5 base load0=13.08 load1=13.40 file=loaded-llama1b-base-r5.json
+loaded llama1b r5 branch load0=13.40 load1=14.73 file=loaded-llama1b-branch-r5.json
+loaded llama1b r5 spin0 load0=14.73 load1=16.53 file=loaded-llama1b-spin0-r5.json
+done loaded llama1b 4-5 load=16.53 14.93 13.92 16/4549 3252993
+condition=loaded hogs=4 model=qwen05b rounds=1-5 load=15.69 14.78 13.88 15/4560 3253132
+loaded qwen05b r1 base load0=15.69 load1=18.22 file=loaded-qwen05b-base-r1.json
+loaded qwen05b r1 branch load0=18.22 load1=18.69 file=loaded-qwen05b-branch-r1.json
+loaded qwen05b r1 spin0 load0=18.69 load1=18.68 file=loaded-qwen05b-spin0-r1.json
+loaded qwen05b r2 spin0 load0=18.68 load1=17.31 file=loaded-qwen05b-spin0-r2.json
+loaded qwen05b r2 branch load0=17.31 load1=17.03 file=loaded-qwen05b-branch-r2.json
+loaded qwen05b r2 base load0=17.03 load1=17.09 file=loaded-qwen05b-base-r2.json
+loaded qwen05b r3 base load0=17.09 load1=13.95 file=loaded-qwen05b-base-r3.json
+loaded qwen05b r3 branch load0=13.95 load1=12.90 file=loaded-qwen05b-branch-r3.json
+loaded qwen05b r3 spin0 load0=12.90 load1=13.29 file=loaded-qwen05b-spin0-r3.json
+loaded qwen05b r4 spin0 load0=13.29 load1=13.09 file=loaded-qwen05b-spin0-r4.json
+loaded qwen05b r4 branch load0=13.09 load1=12.72 file=loaded-qwen05b-branch-r4.json
+loaded qwen05b r4 base load0=12.72 load1=12.34 file=loaded-qwen05b-base-r4.json
+loaded qwen05b r5 base load0=12.34 load1=13.89 file=loaded-qwen05b-base-r5.json
+loaded qwen05b r5 branch load0=13.89 load1=12.82 file=loaded-qwen05b-branch-r5.json
+loaded qwen05b r5 spin0 load0=12.82 load1=23.59 file=loaded-qwen05b-spin0-r5.json
+done loaded qwen05b 1-5 load=23.59 16.40 14.89 8/5060 3269864
+condition=loaded hogs=4 model=gemma3-1b rounds=1-3 load=23.59 16.40 14.89 6/5054 3269904
+loaded gemma3-1b r1 base load0=23.59 load1=19.29 file=loaded-gemma3-1b-base-r1.json
+loaded gemma3-1b r1 branch load0=19.29 load1=20.26 file=loaded-gemma3-1b-branch-r1.json
+loaded gemma3-1b r1 spin0 load0=20.26 load1=19.00 file=loaded-gemma3-1b-spin0-r1.json
+loaded gemma3-1b r2 spin0 load0=19.00 load1=16.29 file=loaded-gemma3-1b-spin0-r2.json
+loaded gemma3-1b r2 branch load0=16.29 load1=14.90 file=loaded-gemma3-1b-branch-r2.json
+loaded gemma3-1b r2 base load0=14.90 load1=16.87 file=loaded-gemma3-1b-base-r2.json
+loaded gemma3-1b r3 base load0=16.87 load1=12.19 file=loaded-gemma3-1b-base-r3.json
+loaded gemma3-1b r3 branch load0=12.19 load1=13.21 file=loaded-gemma3-1b-branch-r3.json
+loaded gemma3-1b r3 spin0 load0=13.21 load1=27.08 file=loaded-gemma3-1b-spin0-r3.json
+done loaded gemma3-1b 1-3 load=27.08 18.18 16.07 14/5087 3286294
+condition=loaded hogs=4 model=gemma3-1b rounds=4-5 load=35.16 20.01 16.67 16/5097 3286401
+loaded gemma3-1b r4 spin0 load0=35.16 load1=56.21 file=loaded-gemma3-1b-spin0-r4.json
+loaded gemma3-1b r4 branch load0=56.21 load1=47.43 file=loaded-gemma3-1b-branch-r4.json
+loaded gemma3-1b r4 base load0=47.43 load1=25.89 file=loaded-gemma3-1b-base-r4.json
+loaded gemma3-1b r5 base load0=25.89 load1=24.04 file=loaded-gemma3-1b-base-r5.json
+loaded gemma3-1b r5 branch load0=24.04 load1=26.00 file=loaded-gemma3-1b-branch-r5.json
+loaded gemma3-1b r5 spin0 load0=26.00 load1=24.51 file=loaded-gemma3-1b-spin0-r5.json
+done loaded gemma3-1b 4-5 load=24.51 25.77 21.11 37/5107 3304019
+condition=heavy hogs=8 model=llama1b rounds=1-2 load=21.52 25.08 20.94 35/5106 3304488
+heavy llama1b r1 base load0=21.52 load1=20.78 file=heavy-llama1b-base-r1.json
+heavy llama1b r1 branch load0=20.78 load1=19.47 file=heavy-llama1b-branch-r1.json
+heavy llama1b r1 spin0 load0=19.47 load1=23.04 file=heavy-llama1b-spin0-r1.json
+heavy llama1b r2 spin0 load0=23.04 load1=21.94 file=heavy-llama1b-spin0-r2.json
+heavy llama1b r2 branch load0=21.94 load1=19.90 file=heavy-llama1b-branch-r2.json
+heavy llama1b r2 base load0=19.90 load1=16.35 file=heavy-llama1b-base-r2.json
+done heavy llama1b 1-2 load=16.35 20.48 20.40 12/5088 3315253
+condition=heavy hogs=8 model=llama1b rounds=3-4 load=15.28 20.19 20.31 14/5081 3315308
+heavy llama1b r3 base load0=15.28 load1=15.63 file=heavy-llama1b-base-r3.json
+heavy llama1b r3 branch load0=15.63 load1=17.13 file=heavy-llama1b-branch-r3.json
+heavy llama1b r3 spin0 load0=17.13 load1=18.35 file=heavy-llama1b-spin0-r3.json
+heavy llama1b r4 spin0 load0=18.35 load1=17.54 file=heavy-llama1b-spin0-r4.json
+heavy llama1b r4 branch load0=17.54 load1=17.87 file=heavy-llama1b-branch-r4.json
+heavy llama1b r4 base load0=17.87 load1=17.08 file=heavy-llama1b-base-r4.json
+done heavy llama1b 3-4 load=17.08 17.86 19.12 12/5066 3319841
+condition=heavy hogs=8 model=llama1b rounds=5-5 load=15.95 17.61 19.04 15/5069 3319892
+heavy llama1b r5 base load0=15.95 load1=16.41 file=heavy-llama1b-base-r5.json
+heavy llama1b r5 branch load0=16.41 load1=14.75 file=heavy-llama1b-branch-r5.json
+heavy llama1b r5 spin0 load0=14.75 load1=15.05 file=heavy-llama1b-spin0-r5.json
+done heavy llama1b 5-5 load=15.05 16.61 18.40 13/5070 3321059
+condition=heavy hogs=8 model=qwen05b rounds=1-2 load=13.12 16.14 18.23 11/5080 3321130
+heavy qwen05b r1 base load0=13.12 load1=14.77 file=heavy-qwen05b-base-r1.json
+heavy qwen05b r1 branch load0=14.77 load1=16.18 file=heavy-qwen05b-branch-r1.json
+heavy qwen05b r1 spin0 load0=16.18 load1=16.00 file=heavy-qwen05b-spin0-r1.json
+heavy qwen05b r2 spin0 load0=16.00 load1=16.10 file=heavy-qwen05b-spin0-r2.json
+heavy qwen05b r2 branch load0=16.10 load1=16.36 file=heavy-qwen05b-branch-r2.json
+heavy qwen05b r2 base load0=16.36 load1=18.93 file=heavy-qwen05b-base-r2.json
+done heavy qwen05b 1-2 load=18.93 17.20 17.98 17/5088 3324706
+condition=heavy hogs=8 model=qwen05b rounds=3-4 load=18.30 17.09 17.95 16/5096 3324889
+heavy qwen05b r3 base load0=18.30 load1=15.91 file=heavy-qwen05b-base-r3.json
+heavy qwen05b r3 branch load0=15.91 load1=17.26 file=heavy-qwen05b-branch-r3.json
+heavy qwen05b r3 spin0 load0=17.26 load1=18.53 file=heavy-qwen05b-spin0-r3.json
+heavy qwen05b r4 spin0 load0=18.53 load1=20.63 file=heavy-qwen05b-spin0-r4.json
+heavy qwen05b r4 branch load0=20.63 load1=18.98 file=heavy-qwen05b-branch-r4.json
+heavy qwen05b r4 base load0=18.98 load1=17.04 file=heavy-qwen05b-base-r4.json
+done heavy qwen05b 3-4 load=17.04 17.50 17.90 11/5093 3332389
+condition=heavy hogs=8 model=qwen05b rounds=5-5 load=16.09 17.28 17.82 14/5100 3332457
+heavy qwen05b r5 base load0=16.09 load1=14.78 file=heavy-qwen05b-base-r5.json
+heavy qwen05b r5 branch load0=14.78 load1=14.11 file=heavy-qwen05b-branch-r5.json
+heavy qwen05b r5 spin0 load0=14.11 load1=13.65 file=heavy-qwen05b-spin0-r5.json
+done heavy qwen05b 5-5 load=13.65 15.95 17.25 13/5091 3333398
+condition=heavy hogs=8 model=gemma3-1b rounds=1-2 load=12.64 15.70 17.17 12/5091 3333443
+heavy gemma3-1b r1 base load0=12.64 load1=17.03 file=heavy-gemma3-1b-base-r1.json
+heavy gemma3-1b r1 branch load0=17.03 load1=18.48 file=heavy-gemma3-1b-branch-r1.json
+heavy gemma3-1b r1 spin0 load0=18.48 load1=17.42 file=heavy-gemma3-1b-spin0-r1.json
+heavy gemma3-1b r2 spin0 load0=17.42 load1=17.83 file=heavy-gemma3-1b-spin0-r2.json
+heavy gemma3-1b r2 branch load0=17.83 load1=19.90 file=heavy-gemma3-1b-branch-r2.json
+heavy gemma3-1b r2 base load0=19.90 load1=15.47 file=heavy-gemma3-1b-base-r2.json
+done heavy gemma3-1b 1-2 load=15.47 16.60 17.09 12/5064 3338283
+condition=heavy hogs=8 model=gemma3-1b rounds=3-4 load=14.39 16.36 17.01 11/5067 3338348
+heavy gemma3-1b r3 base load0=14.39 load1=18.83 file=heavy-gemma3-1b-base-r3.json
+heavy gemma3-1b r3 branch load0=18.83 load1=17.69 file=heavy-gemma3-1b-branch-r3.json
+heavy gemma3-1b r3 spin0 load0=17.69 load1=20.82 file=heavy-gemma3-1b-spin0-r3.json
+heavy gemma3-1b r4 spin0 load0=20.82 load1=21.77 file=heavy-gemma3-1b-spin0-r4.json
+heavy gemma3-1b r4 branch load0=21.77 load1=21.07 file=heavy-gemma3-1b-branch-r4.json
+heavy gemma3-1b r4 base load0=21.07 load1=23.67 file=heavy-gemma3-1b-base-r4.json
+done heavy gemma3-1b 3-4 load=23.67 21.22 19.01 20/5090 3347718
+condition=heavy hogs=8 model=gemma3-1b rounds=5-5 load=22.02 20.91 18.92 17/5075 3349220
+heavy gemma3-1b r5 base load0=22.02 load1=21.98 file=heavy-gemma3-1b-base-r5.json
+heavy gemma3-1b r5 branch load0=21.98 load1=19.82 file=heavy-gemma3-1b-branch-r5.json
+heavy gemma3-1b r5 spin0 load0=19.82 load1=20.18 file=heavy-gemma3-1b-spin0-r5.json
+done heavy gemma3-1b 5-5 load=20.18 20.63 19.28 21/5081 3353995
+condition=quiet hogs=0 model=llama1b rounds=1-5 load=13.93 18.68 18.69 6/5081 3355327
+quiet llama1b r1 base load0=13.93 load1=13.71 file=quiet-llama1b-base-r1.json
+quiet llama1b r1 branch load0=13.71 load1=12.71 file=quiet-llama1b-branch-r1.json
+quiet llama1b r1 spin0 load0=12.71 load1=11.88 file=quiet-llama1b-spin0-r1.json
+quiet llama1b r2 spin0 load0=11.88 load1=11.74 file=quiet-llama1b-spin0-r2.json
+quiet llama1b r2 branch load0=11.74 load1=12.14 file=quiet-llama1b-branch-r2.json
+quiet llama1b r2 base load0=12.14 load1=11.78 file=quiet-llama1b-base-r2.json
+quiet llama1b r3 base load0=11.78 load1=10.37 file=quiet-llama1b-base-r3.json
+quiet llama1b r3 branch load0=10.37 load1=9.89 file=quiet-llama1b-branch-r3.json
+quiet llama1b r3 spin0 load0=9.89 load1=11.04 file=quiet-llama1b-spin0-r3.json
+quiet llama1b r4 spin0 load0=11.04 load1=10.63 file=quiet-llama1b-spin0-r4.json
+quiet llama1b r4 branch load0=10.63 load1=11.76 file=quiet-llama1b-branch-r4.json
+quiet llama1b r4 base load0=11.76 load1=12.61 file=quiet-llama1b-base-r4.json
+quiet llama1b r5 base load0=12.61 load1=13.66 file=quiet-llama1b-base-r5.json
+quiet llama1b r5 branch load0=13.66 load1=17.94 file=quiet-llama1b-branch-r5.json
+quiet llama1b r5 spin0 load0=17.94 load1=29.22 file=quiet-llama1b-spin0-r5.json
+done quiet llama1b 1-5 load=29.22 19.57 18.35 22/5117 3365826
+condition=quiet hogs=0 model=qwen05b rounds=1-5 load=29.22 19.57 18.35 21/5120 3365833
+quiet qwen05b r1 base load0=29.22 load1=25.98 file=quiet-qwen05b-base-r1.json
+quiet qwen05b r1 branch load0=25.98 load1=24.46 file=quiet-qwen05b-branch-r1.json
+quiet qwen05b r1 spin0 load0=24.46 load1=21.71 file=quiet-qwen05b-spin0-r1.json
+quiet qwen05b r2 spin0 load0=21.71 load1=19.91 file=quiet-qwen05b-spin0-r2.json
+quiet qwen05b r2 branch load0=19.91 load1=18.95 file=quiet-qwen05b-branch-r2.json
+quiet qwen05b r2 base load0=18.95 load1=17.34 file=quiet-qwen05b-base-r2.json
+quiet qwen05b r3 base load0=17.34 load1=16.38 file=quiet-qwen05b-base-r3.json
+quiet qwen05b r3 branch load0=16.38 load1=14.69 file=quiet-qwen05b-branch-r3.json
+quiet qwen05b r3 spin0 load0=14.69 load1=13.91 file=quiet-qwen05b-spin0-r3.json
+quiet qwen05b r4 spin0 load0=13.91 load1=13.21 file=quiet-qwen05b-spin0-r4.json
+quiet qwen05b r4 branch load0=13.21 load1=12.56 file=quiet-qwen05b-branch-r4.json
+quiet qwen05b r4 base load0=12.56 load1=11.91 file=quiet-qwen05b-base-r4.json
+quiet qwen05b r5 base load0=11.91 load1=11.39 file=quiet-qwen05b-base-r5.json
+quiet qwen05b r5 branch load0=11.39 load1=11.70 file=quiet-qwen05b-branch-r5.json
+quiet qwen05b r5 spin0 load0=11.70 load1=11.81 file=quiet-qwen05b-spin0-r5.json
+done quiet qwen05b 1-5 load=11.81 15.83 17.11 4/5069 3367719
+condition=quiet hogs=0 model=gemma3-1b rounds=1-5 load=11.34 15.67 17.05 11/5083 3367778
+quiet gemma3-1b r1 base load0=11.34 load1=11.73 file=quiet-gemma3-1b-base-r1.json
+quiet gemma3-1b r1 branch load0=11.73 load1=11.77 file=quiet-gemma3-1b-branch-r1.json
+quiet gemma3-1b r1 spin0 load0=11.77 load1=12.00 file=quiet-gemma3-1b-spin0-r1.json
+quiet gemma3-1b r2 spin0 load0=12.00 load1=11.87 file=quiet-gemma3-1b-spin0-r2.json
+quiet gemma3-1b r2 branch load0=11.87 load1=11.64 file=quiet-gemma3-1b-branch-r2.json
+quiet gemma3-1b r2 base load0=11.64 load1=13.23 file=quiet-gemma3-1b-base-r2.json
+quiet gemma3-1b r3 base load0=13.23 load1=12.47 file=quiet-gemma3-1b-base-r3.json
+quiet gemma3-1b r3 branch load0=12.47 load1=12.33 file=quiet-gemma3-1b-branch-r3.json
+quiet gemma3-1b r3 spin0 load0=12.33 load1=11.29 file=quiet-gemma3-1b-spin0-r3.json
+quiet gemma3-1b r4 spin0 load0=11.29 load1=11.09 file=quiet-gemma3-1b-spin0-r4.json
+quiet gemma3-1b r4 branch load0=11.09 load1=10.00 file=quiet-gemma3-1b-branch-r4.json
+quiet gemma3-1b r4 base load0=10.00 load1=9.31 file=quiet-gemma3-1b-base-r4.json
+quiet gemma3-1b r5 base load0=9.31 load1=9.08 file=quiet-gemma3-1b-base-r5.json
+quiet gemma3-1b r5 branch load0=9.08 load1=8.97 file=quiet-gemma3-1b-branch-r5.json
+quiet gemma3-1b r5 spin0 load0=8.97 load1=9.62 file=quiet-gemma3-1b-spin0-r5.json
+done quiet gemma3-1b 1-5 load=9.62 12.47 15.35 4/5061 3372352

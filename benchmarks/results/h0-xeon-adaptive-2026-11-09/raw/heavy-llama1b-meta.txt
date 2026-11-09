@@ -1,0 +1,11 @@
+condition=heavy model=llama1b rounds=4 refs=1 hogs=8
+start 2026-11-09T12:52:33Z loadavg=6.28 7.54 9.66 13/1979 2726843
+heavy llama1b r1 base secs=86 loadavg=14.10 9.92 10.33 14/1974 2728538
+heavy llama1b r1 branch secs=37 loadavg=15.71 10.83 10.62 14/1976 2729222
+heavy llama1b r2 branch secs=36 loadavg=17.20 11.71 10.92 14/1974 2729874
+heavy llama1b r2 base secs=83 loadavg=17.13 13.08 11.47 15/1982 2731497
+heavy llama1b r3 base secs=91 loadavg=14.49 13.55 11.81 11/1970 2733922
+heavy llama1b r3 branch secs=44 loadavg=13.55 13.40 11.85 10/1974 2734174
+heavy llama1b r4 branch secs=43 loadavg=12.33 13.11 11.82 11/1972 2734411
+heavy llama1b r4 base secs=86 loadavg=13.88 13.36 12.02 14/1987 2736545
+heavy llama1b r1 spin0 secs=42 loadavg=13.70 13.42 12.11 10/1970 2738689

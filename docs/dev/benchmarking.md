@@ -79,7 +79,22 @@ Run a clean single-user throughput and bytes/token measurement:
 - Decodes `N` greedy tokens (default: 32).
 - Prints prefill tok/s, decode tok/s, bytes/token (from telemetry), and the effective options.
 - `--json` formats results as a single JSON object for automation.
+- `--threads N` fixes the worker count (and the `"config"` object records it). Pin the process to at
+  least `N` CPUs (`taskset -c 0-3`) when comparing against an engine started with `-t N`; the default
+  is every logical CPU.
 - Automatically checks for and applies the default tuning profile for the model and host CPU (or `--profile <path>`, `--no-profile`).
+
+## Adaptive spin window
+
+The spin window the workers use before parking is not fixed at runtime. Every 8 ms each pool thread
+compares the time it spent runnable but not running (`/proc/thread-self/schedstat`, the run-queue
+delay) with the runnable wall time since its last sample, and the pool moves its window down a ladder
+when the share is high: the configured window, then half, then zero (park at once). The full window is
+what a quiet host wants (a 1 ms wake-up window kept desktop decode 8.8x faster than parking); zero is
+what a host with three runnable threads per core wants (measured on H0: Llama-3.2-1B prefill 24 tok/s
+against 12 at the full window). Consecutive quiet samples widen it back. `PEREGRINE_ADAPTIVE_SPIN=0`
+keeps the window fixed, which is how to reproduce the pre-adaptive numbers. The probe is Linux-only;
+elsewhere the configured window is used unchanged.
 
 ## Startup calibration
 
