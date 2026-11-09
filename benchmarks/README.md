@@ -121,10 +121,17 @@ benchmarks/
 │   ├── ik_llama_cpp.py   # ik_llama.cpp adapter
 │   └── prism_llama_cpp.py # PrismML's llama.cpp fork adapter (PQ2_0/PTQ1_0)
 ├── results/              # Directory where raw JSON run sets are stored
+├── accuracy/             # Task-accuracy gate (S3.3): GSM8K, MMLU, HumanEval+,
+│                         #   BF16 vs llama.cpp vs Peregrine, and decoding invariance
 └── samples/              # Committed sample run JSONs and reports
 ```
 
 ---
+
+The task-accuracy gate lives beside this harness in `accuracy/` (its own README): it runs
+GSM8K, MMLU and HumanEval+ against any OpenAI-compatible server, compares Peregrine with a
+BF16 reference and with llama.cpp on the same GGUF, and checks that decoding is byte-identical
+alone, batched and with speculation.
 
 ## 6. How to Run
 
