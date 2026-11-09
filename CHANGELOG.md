@@ -144,6 +144,64 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- Prefill attention now tiles over query rows as well as positions. A prefill task
+  carries tens of query rows over one KV head, all scoring the same positions, so the
+  64-position tile is widened once and walked in two phases over one buffer: keys
+  first, scored for every row, then values, mixed into every row. Widening K and V
+  together overflowed L1 and every row re-read both tiles from L2. Two rows share each
+  loaded K vector in a register-blocked score kernel (their own accumulators, chunk
+  boundaries and merge order are untouched), and the widened value mix now loads a
+  position's eight value vectors into registers before the FMAs. A row's bits are
+  unchanged: the tests read a 512-position context as a solo decode and as prompt
+  pieces of 3, 16 and 64 rows on pools of 1, 2, 4 and 8 workers and require identical
+  bits, for three attention geometries. On the 4-core Xeon (H0), attention-only
+  prefill at 4096 fell from 16.6 s to 12.4 s on Llama-3.2-1B Q4_K_M and from 11.2 s to
+  6.2 s on Qwen2.5-0.5B Q4_K_M. End-to-end prompt processing (medians of three
+  alternating rounds) went 74.1 -> 79.9 tok/s (+7.8 %) and 130.7 -> 159.0 (+21.6 %) at
+  4096, and 99.4 -> 103.5 (+4.1 %) and 221.0 -> 234.8 (+6.3 %) at 512. Decode does not
+  move: attention-only decode at 4096 is 10.7-11.0 ms/token on both builds, and the
+  end-to-end decode deltas of six alternating rounds have paired medians of -0.2 %
+  and +3.1 % against a per-round spread of 20 %.
+- Decode attention reads the F16 KV cache directly instead of widening a 64-position
+  tile to f32 first. The stored halves are widened in registers (`vcvtph2ps`), the
+  score pass is register-blocked four keys deep with two query rows sharing each
+  loaded K vector, and the value mix keeps two rows' accumulators in registers while
+  they share each loaded V vector. Prefill still widens a block once and lets every
+  query row of the task read that tile: with tens of rows per block one widening
+  amortises, whereas re-converting per row pair does not. Both paths use the same
+  per-key reduction tree, so a row's bits are the same whether it is decoded alone,
+  read in a prefill chunk, verified in a batch or run on a different pool width
+  (`crates/peregrine-core/src/attn.rs`, `crates/peregrine-models/tests/attn_invariance.rs`).
+  The tail key of a score block reduces with the same tree as a key inside one, so a
+  position's score no longer depends on where its block ends; that is a one-time change
+  to logits for contexts whose last tile ends mid-group, and the goldens are re-recorded.
+  On the 4-core Xeon (H0), attention-only at 4096 context fell from 8.17 to 6.88
+  ms/token on Qwen2.5-0.5B Q4_K_M and from 14.28 to 11.68 on Llama-3.2-1B Q4_K_M
+  (medians of five alternating runs; decode attention is 25-30 % of a token, so the
+  end-to-end token rate moved +0.4 % and +2.8 % respectively, within the host's
+  noise). Prefill attention was unchanged (11.4-12.0 s and 16.8 to 16.4 s over a 4096
+  token prompt), and its end-to-end rate was within noise.
+- A decode step's attention is one parallel region for every decoding user, not one per
+  user. Each user has a separate cache, so the dense layer used to call attention once
+  per user per layer — ten fork-joins per layer at ten users, each splintering the same
+  KV head's positions across the pool. The single-row runs now become one task per
+  (KV head, row) in a single region; a row walks its own canonical position chunks with
+  the same per-chunk kernel a solo decode chooses (the F16-direct one where the cache
+  allows it) and merges them in the same order, so its arithmetic is its solo arithmetic
+  and does not depend on the batch (a new test pins three users' rows against their solo
+  decodes bit for bit). On the 12-core desktop with the server's default 24-thread pool
+  (Llama-3.2-1B Q4_K_M, 512 positions, ten users) the step fell from 82-90 to 69-72 ms
+  and ten-user aggregate throughput from 63.2 to 76.8 tok/s (+21.5 %; llama.cpp v0.9.0
+  `-fa auto`: 78.0 tok/s), with decode-only aggregate 119.4 -> 157.4 (+31.8 %). On a
+  12-thread pool the change is neutral (ten users 76.4 -> 76.5), because ten one-row
+  calls already fit one wave of twelve workers.
+- A prompt longer than 1024 tokens is prefilled in 64-token pieces instead of the tuned
+  16. At 4096 positions with ten users the time to first token fell from 158.3 s to
+  152.3 s (llama.cpp v0.9.0 `-fa auto`: 144.2 s), and single-user prefill of that prompt
+  is no slower. The chunk changes how the prompt is read, not what it produces.
+- `PEREGRINE_PROF2=1` now prints a periodic per-bucket breakdown of the server's engine
+  thread to stderr (steps, rows per step, wall per step, matmul by phase, attention,
+  quantise, barrier wait); `=full` adds the inner-loop timers.
 - The startup calibration is off by default: `PEREGRINE_CALIBRATE=1` turns it on (S2.6 decision 6).
   A wrong thread count costs far more than the tuned default it replaces, and the calibration is only
   switched on by default once it has passed A/Bs on two machines.

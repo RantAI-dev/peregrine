@@ -63,6 +63,19 @@ pub const DEFAULT_MAX_SLOTS: usize = 4;
 /// chunk must not narrow the drafts.
 const SCRATCH_CHUNK: usize = 64;
 
+/// A long prompt is prefetched in larger pieces than a short one (`LONG_PROMPT_CHUNK`).
+///
+/// The tuned chunk (16) is the best short-prompt setting: at 512 tokens a smaller chunk
+/// keeps the activation scratch in cache. On a long prompt the fixed cost of a pass
+/// dominates instead — 4096 tokens are 256 passes at 16 — and the measured
+/// time-to-first-token at ten users, Llama-3.2-1B, 4096 positions, falls from 158.3 s to
+/// 152.3 s with 64-token pieces (llama.cpp v0.9.0 `-fa auto`: 144.2 s), while
+/// single-user prefill of the same prompt is no slower (24.0 s against 23.4 s in the A/B
+/// that chose it). Neither the tokens nor the logits depend on the chunk
+/// (`crates/peregrine-models/tests/prefill_chunk.rs`), so this is scheduling only.
+const LONG_PROMPT: usize = 1024;
+const LONG_PROMPT_CHUNK: usize = 64;
+
 /// Why a slot stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finish {
@@ -1117,10 +1130,18 @@ impl Engine {
             .filter(|&i| self.slots[i].ready())
             .collect();
         // The chunk, less the rows the decoders take: the whole step is one weight pass, and the
-        // matmul scratch holds at most `MAX_BATCH` rows.
-        let mut budget = self
-            .prefill_chunk
-            .min(self.state.max_batch.saturating_sub(dec.len()));
+        // matmul scratch holds at most `MAX_BATCH` rows. A prompt longer than `LONG_PROMPT` is
+        // read in larger pieces (see `LONG_PROMPT_CHUNK`): the tokens do not depend on it.
+        let long_waiting = self
+            .slots
+            .iter()
+            .any(|s| !s.ready() && s.prompt.len() > LONG_PROMPT);
+        let chunk = if long_waiting {
+            LONG_PROMPT_CHUNK.max(self.prefill_chunk)
+        } else {
+            self.prefill_chunk
+        };
+        let mut budget = chunk.min(self.state.max_batch.saturating_sub(dec.len()));
         let mut pre: Vec<(usize, usize)> = Vec::new(); // (slot index, tokens taken)
         for (i, s) in self.slots.iter().enumerate() {
             if budget == 0 {
