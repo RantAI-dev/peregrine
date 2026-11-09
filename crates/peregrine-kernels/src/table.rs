@@ -105,8 +105,8 @@ impl MatKernels {
     /// Whether `fmt` has a repacked tile kernel on this CPU.
     ///
     /// The tile store holds a Q4_K, Q5_0 and Q8_0 tile on every tier with a repacked kernel:
-    /// Q4_K on both architectures, Q5_0 and Q8_0 on x86 and (S2.8) on aarch64. The aarch64
-    /// tier has Q4_K and Q8_0 in this PR; Q5_0 and Q6_K follow. A format without a kernel keeps
+    /// Q4_K on both architectures, Q5_0 and Q8_0 on x86 and (S2.8 F1) on aarch64. The aarch64
+    /// tier has Q4_K, Q5_0 and Q8_0 here; Q6_K follows (F3). A format without a kernel keeps
     /// the per-row path even when the store holds its tiles.
     #[inline]
     pub fn kq_tiles_for(&self, fmt: Format) -> bool {
@@ -116,7 +116,13 @@ impl MatKernels {
         match fmt {
             #[cfg(feature = "fmt-kquant")]
             Format::Q4_K => true,
-            #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
+            // Q5_0 has a repacked tile on both kernel architectures (S3.4 on x86, S2.8 F1
+            // on NEON); Q6_K has one on aarch64 (S2.8 F3). Every other format keeps the
+            // per-row path even when the store holds its tiles.
+            #[cfg(all(
+                any(target_arch = "x86_64", target_arch = "aarch64"),
+                feature = "fmt-legacy"
+            ))]
             Format::Q5_0 => true,
             #[cfg(all(
                 feature = "fmt-legacy",
@@ -289,7 +295,16 @@ impl MatKernels {
                 crate::kqsimd::q5_08_gemm(tile, n_blk, acts, nb, out)
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-legacy"))]
+        // SAFETY: `kq_tiles` is `have_dotprod()`; the tile holds `n_blk` blocks and
+        // the activation rows the caller says.
+        unsafe {
+            crate::neon::q5_08_gemm(tile, n_blk, acts, nb, out)
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", feature = "fmt-legacy"),
+            all(target_arch = "aarch64", feature = "fmt-legacy")
+        )))]
         {
             let _ = (tile, n_blk, acts, nb, out);
             unreachable!("no repacked Q5_0 kernel on this architecture")
@@ -326,7 +341,15 @@ impl MatKernels {
                 crate::kqsimd::q5_08_gemv(tile, n_blk, acts, nb, out)
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-legacy"))]
+        // SAFETY: as above.
+        unsafe {
+            crate::neon::q5_08_gemv(tile, n_blk, acts, nb, out)
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", feature = "fmt-legacy"),
+            all(target_arch = "aarch64", feature = "fmt-legacy")
+        )))]
         {
             let _ = (tile, n_blk, acts, nb, out);
             unreachable!("no repacked Q5_0 kernel on this architecture")
@@ -505,7 +528,7 @@ impl MatKernels {
             return crate::simd::have_batched();
         }
         #[cfg(all(target_arch = "aarch64", feature = "fmt-legacy"))]
-        if fmt == Format::Q8_0 {
+        if matches!(fmt, Format::Q5_0 | Format::Q8_0) {
             return crate::cpu::have_dotprod();
         }
         let _ = fmt;
@@ -534,6 +557,7 @@ impl MatKernels {
         // the kernel.
         unsafe {
             match fmt {
+                Format::Q5_0 => crate::neon::q5_0_rows8(w, rb, a, out),
                 Format::Q8_0 => crate::neon::q8_0_rows8(w, rb, a, out),
                 _ => unreachable!("rows8 advertised a format without a kernel"),
             }
@@ -565,6 +589,8 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
     let tiers: &[Tier] = match fmt {
         #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => &[Tier::Scalar, Tier::NeonDotprod],
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q5_0 => &[Tier::Scalar, Tier::NeonDotprod],
         #[cfg(feature = "fmt-kquant")]
         Format::Q4_K => &[Tier::Scalar, Tier::NeonDotprod],
         _ => &[Tier::Scalar],
@@ -659,8 +685,11 @@ mod tests {
                 kernels_for(Format::Q8_0),
                 &[Tier::Scalar, Tier::NeonDotprod]
             );
-            // Q5_0 has no NEON tile yet: it keeps the scalar reference.
-            assert_eq!(kernels_for(Format::Q5_0), &[Tier::Scalar]);
+            // Q5_0 has a NEON tile and per-row kernel (S2.8 F1).
+            assert_eq!(
+                kernels_for(Format::Q5_0),
+                &[Tier::Scalar, Tier::NeonDotprod]
+            );
         }
         #[cfg(feature = "fmt-kquant")]
         {
@@ -716,17 +745,13 @@ mod tests {
         // repacked goes the old way.
         assert_eq!(all.path(Format::Q4_K, false, true, false), MatPath::KqTiles);
         assert_eq!(all.path(Format::Q4_K, false, false, false), MatPath::PerRow);
-        // Q5_0 has its own repacked tile (the small-model prefill fix) on x86;
-        // aarch64 has no Q5_0 tile kernel yet.
-        #[cfg(not(target_arch = "aarch64"))]
+        // Q5_0 and Q6_K have their own repacked tiles on aarch64 too (S2.8 F1/F3).
         assert_eq!(all.path(Format::Q5_0, false, true, false), MatPath::KqTiles);
-        #[cfg(target_arch = "aarch64")]
-        assert_eq!(all.path(Format::Q5_0, false, true, false), MatPath::PerRow);
         assert_eq!(all.path(Format::Q5_0, false, false, false), MatPath::PerRow);
         // Q8_0's repacked tile: the tied output head and the other Q8_0 matrices.
         assert_eq!(all.path(Format::Q8_0, false, true, false), MatPath::KqTiles);
         assert_eq!(all.path(Format::Q8_0, false, false, false), MatPath::PerRow);
-        // The other k-quants are not repacked yet (S3.4 PR 3 and PR 4).
+        // Q6_K's tile is NEON-only, and this branch does not have it yet (S2.8 F3).
         assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::PerRow);
         let avx2 = MatKernels {
             tiles: false,

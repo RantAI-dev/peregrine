@@ -35,6 +35,16 @@ All notable changes to this project are documented here. The format follows
   16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
 
 ### Added
+- A NEON kernel for **Q5_0** on aarch64 (S2.8 F1): the repacked `Q5_08` tile on `sdot` (GEMM and
+  GEMV), a per-row `sdot` kernel, and an eight-row decode kernel. The tile's sixteen nibble bytes
+  are one `sdot` per half of the block, and the fifth bits are spread from the tile's per-window
+  bytes with a per-byte shift; the integer sum and the `−16·Σa` bias are exact, and the fold is
+  the tile reference's `(d·dk).mul_add`, so the tile, its GEMV and its GEMM agree bit for bit
+  (tested at every width, and against the scalar reference for the per-row kernel). On this DGX
+  Spark (10 × X925) the tile runs at 21.8 GMAC/s per core in GEMV and 34.5 in the four-row GEMM,
+  against 10.8 for the scalar row. The aarch64 goldens for the Q5_0 models move in the last bits
+  because the tile's fold is fused where the scalar per-row kernel's `+=` is not; they now equal
+  the x86 tile reference by construction.
 - A repacked eight-row store for **Q5_0** (`Q5_08`, 176 bytes = 8 × 22, size-neutral) and an AVX2
   GEMM/GEMV on it, for the small "Q4_K_M" files whose `d_model` is not a multiple of 256 and whose
   matrices llama.cpp therefore left at Q5_0. The tile groups the fifth bits by eight-weight window

@@ -109,7 +109,7 @@ pub fn matmul_group(
     let kq_fill = jobs
         .iter()
         .zip(paths)
-        .any(|(j, &p)| p == MatPath::KqTiles && j.w.kind == Format::Q4_K);
+        .any(|(j, &p)| p == MatPath::KqTiles && matches!(j.w.kind, Format::Q4_K | Format::Q6_K));
     if kq_fill && nb >= 4 {
         kq.fill(&acts[..nb]);
     }
