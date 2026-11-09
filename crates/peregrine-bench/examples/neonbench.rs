@@ -239,6 +239,20 @@ fn main() {
         }
         black_box(out[0]);
     });
+    if peregrine_kernels::cpu::have_i8mm() {
+        bench("Q4_K tile i8mm, GEMM 4", (rows / 8) * 32, &mut || {
+            for _ in 0..rows / 8 {
+                unsafe { peregrine_kernels::neon::q4k8_gemm_i8mm(&tile, n_sb, &kq, 4, &mut out) };
+            }
+            black_box(out[0]);
+        });
+        bench("Q4_K tile i8mm, GEMM 16", (rows / 16) * 128, &mut || {
+            for _ in 0..rows / 16 {
+                unsafe { peregrine_kernels::neon::q4k8_gemm_i8mm(&tile, n_sb, &kq, 16, &mut out) };
+            }
+            black_box(out[0]);
+        });
+    }
 
     bench("Q5_0 scalar, 1 row", rows, &mut || {
         let mut acc = 0.0f32;
@@ -291,6 +305,16 @@ fn main() {
         }
         black_box(out[0]);
     });
+    if peregrine_kernels::cpu::have_i8mm() {
+        bench("Q5_0 tile i8mm, GEMM 4", (rows / 8) * 32, &mut || {
+            for _ in 0..rows / 8 {
+                unsafe {
+                    peregrine_kernels::neon::q5_08_gemm_i8mm(&q5_tile, n_blk, &acts, 4, &mut out)
+                };
+            }
+            black_box(out[0]);
+        });
+    }
 
     bench("Q6_K scalar, 1 row", rows, &mut || {
         let mut acc = 0.0f32;
@@ -341,4 +365,22 @@ fn main() {
         }
         black_box(out[0]);
     });
+    if peregrine_kernels::cpu::have_i8mm() {
+        bench("Q6_K tile i8mm, GEMM 4", (rows / 8) * 32, &mut || {
+            for _ in 0..rows / 8 {
+                unsafe {
+                    peregrine_kernels::neon::q6k8_gemm_i8mm(&q6_tile, n_sb, &kq, 4, &mut out)
+                };
+            }
+            black_box(out[0]);
+        });
+        bench("Q6_K tile i8mm, GEMM 16", (rows / 16) * 128, &mut || {
+            for _ in 0..rows / 16 {
+                unsafe {
+                    peregrine_kernels::neon::q6k8_gemm_i8mm(&q6_tile, n_sb, &kq, 16, &mut out)
+                };
+            }
+            black_box(out[0]);
+        });
+    }
 }
