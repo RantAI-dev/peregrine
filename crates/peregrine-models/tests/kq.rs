@@ -158,7 +158,7 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
         let (b, acts) = prefill(&model);
         assert_eq!(a.len(), b.len());
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            if matches!(fmt, Format::Q4_K | Format::Q5_0) {
+            if peregrine_kernels::table::MatKernels::get().kq_tiles_for(fmt) {
                 // The repacked kernel's fold: the same real number, rounded
                 // once instead of twice. This bound holds here only because a
                 // random-weight model doesn't amplify the few-ulp difference; a
@@ -176,9 +176,7 @@ fn the_store_holds_the_repack_of_every_eligible_matrix() {
                 );
             }
         }
-        if matches!(fmt, Format::Q4_K | Format::Q5_0)
-            && peregrine_kernels::table::MatKernels::get().kq_tiles()
-        {
+        if peregrine_kernels::table::MatKernels::get().kq_tiles_for(fmt) {
             // The repacked tile reads the activation once per eight output rows
             // instead of once per row: the activation traffic falls by the
             // same factor. This is the design note's claim, measured. (Only

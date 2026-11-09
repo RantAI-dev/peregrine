@@ -20,6 +20,8 @@ pub mod hadamard;
 pub mod kq;
 #[cfg(target_arch = "x86_64")]
 pub mod kqsimd;
+#[cfg(target_arch = "aarch64")]
+pub mod neon;
 pub mod options;
 pub mod prof;
 pub mod quant;
