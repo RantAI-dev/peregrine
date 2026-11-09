@@ -1766,6 +1766,259 @@ pub unsafe fn q6k8_gemm_i8mm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize,
 }
 
 // ---------------------------------------------------------------------------
+// PQ2_0: Bonsai 2's 2-bit ternary, one f16 scale per 128 weights
+// ---------------------------------------------------------------------------
+
+/// The four code planes of one 128-weight group, each split into its two 16-byte
+/// halves: `[p0 lo, p0 hi, p1 lo, p1 hi, ...]`, where plane `s` holds the codes of
+/// weights `4k + s` in byte `k`.
+///
+/// `sdot` sees the unsigned codes as signed bytes (they are 0..3), so a plane
+/// against an activation plane is `Σ code·a` in four int32 lanes — lane `l` is the
+/// 16-value block `8g + l` of the group. The `− Σ a` offset the x86 kernels apply
+/// with `tls` is applied in the float fold below, in the reference's own order.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn pq2_planes(wq0: uint8x16_t, wq1: uint8x16_t) -> [int8x16_t; 8] {
+    let m3 = vdupq_n_u8(3);
+    macro_rules! p {
+        (0) => {{
+            (
+                vreinterpretq_s8_u8(vandq_u8(wq0, m3)),
+                vreinterpretq_s8_u8(vandq_u8(wq1, m3)),
+            )
+        }};
+        ($s:literal) => {{
+            (
+                vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<$s>(wq0), m3)),
+                vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<$s>(wq1), m3)),
+            )
+        }};
+    }
+    let (p0l, p0h) = p!(0);
+    let (p1l, p1h) = p!(2);
+    let (p2l, p2h) = p!(4);
+    let (p3l, p3h) = p!(6);
+    [p0l, p0h, p1l, p1h, p2l, p2h, p3l, p3h]
+}
+
+/// One group's four activation planes, in [`pq2_planes`]'s order.
+///
+/// # Safety
+/// `ap` must point at `quant::tp_off(g)` of an activation whose `n` covers group `g`.
+#[inline(always)]
+unsafe fn pq2_acts(ap: *const i8) -> [int8x16_t; 8] {
+    [
+        vld1q_s8(ap),
+        vld1q_s8(ap.add(16)),
+        vld1q_s8(ap.add(64)),
+        vld1q_s8(ap.add(80)),
+        vld1q_s8(ap.add(128)),
+        vld1q_s8(ap.add(144)),
+        vld1q_s8(ap.add(192)),
+        vld1q_s8(ap.add(208)),
+    ]
+}
+
+/// The eight 16-value code sums of one group: `lo` holds blocks 0..4, `hi` 4..8.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn pq2_sums(planes: &[int8x16_t; 8], acts: &[int8x16_t; 8]) -> (int32x4_t, int32x4_t) {
+    let mut lo = vdupq_n_s32(0);
+    let mut hi = vdupq_n_s32(0);
+    lo = sdot(lo, planes[0], acts[0]);
+    hi = sdot(hi, planes[1], acts[1]);
+    lo = sdot(lo, planes[2], acts[2]);
+    hi = sdot(hi, planes[3], acts[3]);
+    lo = sdot(lo, planes[4], acts[4]);
+    hi = sdot(hi, planes[5], acts[5]);
+    lo = sdot(lo, planes[6], acts[6]);
+    hi = sdot(hi, planes[7], acts[7]);
+    (lo, hi)
+}
+
+/// One group's eight integer sums folded into the per-lane float accumulators:
+/// lane `u` of `facc[0]` (blocks 0..4) and `facc[1]` (4..8) takes
+/// `d·td[8g+u]·(s_u − tls[8g+u])`.
+///
+/// The fold is per lane, so the group's eight values never form a serial chain; and
+/// because every path (two-row GEMV, four-activation GEMM, one row) runs this same
+/// fold over the same lanes in the same group order, a row's bits do not depend on
+/// the pass width or the batch.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn pq2_accum(
+    facc: &mut [float32x4_t; 2],
+    lo: int32x4_t,
+    hi: int32x4_t,
+    a: &QuantAct,
+    g: usize,
+    d: f32,
+) {
+    let dv = vdupq_n_f32(d);
+    let tdl = vld1q_f32(a.td.as_ptr().add(8 * g));
+    let tdh = vld1q_f32(a.td.as_ptr().add(8 * g + 4));
+    let tll = vld1q_s32(a.tls.as_ptr().add(8 * g));
+    let tlh = vld1q_s32(a.tls.as_ptr().add(8 * g + 4));
+    let l = vmulq_f32(vmulq_f32(vcvtq_f32_s32(vsubq_s32(lo, tll)), tdl), dv);
+    let h = vmulq_f32(vmulq_f32(vcvtq_f32_s32(vsubq_s32(hi, tlh)), tdh), dv);
+    facc[0] = vaddq_f32(facc[0], l);
+    facc[1] = vaddq_f32(facc[1], h);
+}
+
+/// The two accumulators' sixteen lanes, summed in order.
+#[inline(always)]
+unsafe fn pq2_finish(facc: &[float32x4_t; 2]) -> f32 {
+    hsum_f32x4(vaddq_f32(facc[0], facc[1]))
+}
+
+/// The four lanes of a vector added in order.
+#[inline(always)]
+unsafe fn hsum_f32x4(v: float32x4_t) -> f32 {
+    #[allow(clippy::incompatible_msrv)]
+    {
+        vaddvq_f32(v)
+    }
+}
+
+/// One PQ2_0 row against one activation: eight `sdot`s per 128-weight group.
+///
+/// # Safety
+/// The CPU must have `asimddp`; `w` must be `row_bytes(PQ2_0, a.n)` long and the
+/// activation must be in the ternary layout.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn dot_pq2(w: &[u8], a: &QuantAct) -> f32 {
+    debug_assert_eq!(w.len(), crate::quant::row_bytes(Format::PQ2_0, a.n));
+    let mut facc = [vdupq_n_f32(0.0); 2];
+    for g in 0..w.len() / 34 {
+        let blk = w.as_ptr().add(g * 34);
+        let planes = pq2_planes(vld1q_u8(blk.add(2)), vld1q_u8(blk.add(18)));
+        let acts = pq2_acts(a.tp.as_ptr().add(crate::quant::tp_off(g)));
+        let (lo, hi) = pq2_sums(&planes, &acts);
+        pq2_accum(&mut facc, lo, hi, a, g, f16_ptr(blk));
+    }
+    pq2_finish(&facc)
+}
+
+/// Two PQ2_0 rows against one activation: the activation planes are loaded once
+/// and both rows' chains interleave.
+///
+/// Each row accumulates group by group exactly as [`dot_pq2`] does, so a row's bits
+/// do not depend on how many rows shared the pass.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn pq2_two_rows(w0: *const u8, w1: *const u8, ng: usize, a: &QuantAct) -> (f32, f32) {
+    let mut f0 = [vdupq_n_f32(0.0); 2];
+    let mut f1 = [vdupq_n_f32(0.0); 2];
+    for g in 0..ng {
+        let (b0, b1) = (w0.add(g * 34), w1.add(g * 34));
+        let acts = pq2_acts(a.tp.as_ptr().add(crate::quant::tp_off(g)));
+        let p0 = pq2_planes(vld1q_u8(b0.add(2)), vld1q_u8(b0.add(18)));
+        let p1 = pq2_planes(vld1q_u8(b1.add(2)), vld1q_u8(b1.add(18)));
+        let (l0, h0) = pq2_sums(&p0, &acts);
+        let (l1, h1) = pq2_sums(&p1, &acts);
+        pq2_accum(&mut f0, l0, h0, a, g, f16_ptr(b0));
+        pq2_accum(&mut f1, l1, h1, a, g, f16_ptr(b1));
+    }
+    (pq2_finish(&f0), pq2_finish(&f1))
+}
+
+/// One PQ2_0 row against `T` activations: the row's code planes are decoded once
+/// per group and meet every activation's planes.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn pq2_batch<const T: usize>(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    let mut facc = [[vdupq_n_f32(0.0); 2]; T];
+    for g in 0..w.len() / 34 {
+        let blk = w.as_ptr().add(g * 34);
+        let planes = pq2_planes(vld1q_u8(blk.add(2)), vld1q_u8(blk.add(18)));
+        let d = f16_ptr(blk);
+        for u in 0..T {
+            let av = pq2_acts(acts[u].tp.as_ptr().add(crate::quant::tp_off(g)));
+            let (lo, hi) = pq2_sums(&planes, &av);
+            pq2_accum(&mut facc[u], lo, hi, &acts[u], g, d);
+        }
+    }
+    for u in 0..T {
+        out[u] = pq2_finish(&facc[u]);
+    }
+}
+
+/// One PQ2_0 row against every activation, into `out[b]`.
+///
+/// Every (row, activation) pair runs [`dot_pq2`]'s group loop, so the result is
+/// bit-identical to it at any batch width.
+///
+/// # Safety
+/// The CPU must have `asimddp`; `w` must be one row of `row_bytes(PQ2_0, acts[0].n)`;
+/// the activations must be in the ternary layout.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn dot_batch_pq2(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
+    assert!(!acts.is_empty(), "no activation");
+    assert!(out.len() >= acts.len(), "the output holds fewer rows");
+    assert_eq!(w.len(), crate::quant::row_bytes(Format::PQ2_0, acts[0].n));
+    let nb = acts.len();
+    let mut b = 0;
+    while b < nb {
+        let t = (nb - b).min(4);
+        let (a, o) = (&acts[b..b + t], &mut out[b..b + t]);
+        match t {
+            4 => pq2_batch::<4>(w, a, o),
+            3 => pq2_batch::<3>(w, a, o),
+            2 => pq2_batch::<2>(w, a, o),
+            _ => pq2_batch::<1>(w, a, o),
+        }
+        b += t;
+    }
+}
+
+/// `rows` PQ2_0 rows of `rb` bytes against every activation, into `out[r·nb + b]`.
+///
+/// A decode step (one activation) runs two rows per pass through `pq2_two_rows`;
+/// a prefill runs one row against up to four activations through `pq2_batch`.
+/// Both are [`dot_pq2`]'s arithmetic group by group, so decode and prefill agree bit
+/// for bit on every row, and no row depends on the pass width.
+///
+/// # Safety
+/// The CPU must have `asimddp`; `w.len() >= rows·rb`, `rb` is a whole number of
+/// 34-byte groups, `out.len() >= rows·acts.len()`, and the activations are in the
+/// ternary layout with the row's width.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn dot_rows_pq2(w: &[u8], rb: usize, rows: usize, acts: &[QuantAct], out: &mut [f32]) {
+    assert!(rb % 34 == 0, "a PQ2_0 row is a whole number of groups");
+    assert!(!acts.is_empty(), "no activation");
+    assert!(w.len() >= rows * rb, "the rows are shorter than advertised");
+    assert!(
+        out.len() >= rows * acts.len(),
+        "the output holds fewer rows"
+    );
+    let nb = acts.len();
+    if nb == 1 {
+        let a = &acts[0];
+        let ng = rb / 34;
+        let mut r = 0;
+        while r + 2 <= rows {
+            let (v0, v1) =
+                pq2_two_rows(w.as_ptr().add(r * rb), w.as_ptr().add((r + 1) * rb), ng, a);
+            out[r] = v0;
+            out[r + 1] = v1;
+            r += 2;
+        }
+        if r < rows {
+            out[r] = dot_pq2(&w[r * rb..(r + 1) * rb], a);
+        }
+    } else {
+        for r in 0..rows {
+            dot_batch_pq2(
+                &w[r * rb..(r + 1) * rb],
+                acts,
+                &mut out[r * nb..(r + 1) * nb],
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -1776,6 +2029,8 @@ pub unsafe fn q6k8_gemm_i8mm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize,
 #[inline]
 pub unsafe fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> Option<f32> {
     match fmt {
+        #[cfg(feature = "fmt-ternary")]
+        Format::PQ2_0 => Some(dot_pq2(w, a)),
         #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => Some(dot_q8_0(w, a)),
         #[cfg(feature = "fmt-legacy")]
@@ -1795,6 +2050,11 @@ pub unsafe fn dot(fmt: Format, w: &[u8], a: &QuantAct) -> Option<f32> {
 #[inline]
 pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32]) -> bool {
     match fmt {
+        #[cfg(feature = "fmt-ternary")]
+        Format::PQ2_0 => {
+            dot_batch_pq2(w, acts, out);
+            true
+        }
         #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => {
             q8_0_batch(w, acts, out);
@@ -2387,6 +2647,113 @@ mod tests {
         for r in 0..8 {
             let row = crate::quant::dot_scalar(Format::Q6_K, &rows[r], &a);
             assert_eq!(out[r].to_bits(), row.to_bits(), "row {r}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PQ2_0 (Bonsai 2's ternary format)
+    // -----------------------------------------------------------------------
+
+    /// A PQ2_0 row of `n` weights: one f16 scale per 128, ternary codes 0..2.
+    #[cfg(feature = "fmt-ternary")]
+    fn pq2_row(rng: &mut Rng, n: usize) -> Vec<u8> {
+        let mut w = Vec::with_capacity(n / 128 * 34);
+        for _ in 0..n / 128 {
+            let d = 0.01 + (rng.next_u8() as f32) * 0.0004;
+            w.extend_from_slice(&crate::quant::f32_to_f16(d).to_le_bytes());
+            for _ in 0..32 {
+                let mut b = 0u8;
+                for s in 0..4 {
+                    b |= (rng.next_u8() % 3) << (2 * s);
+                }
+                w.push(b);
+            }
+        }
+        w
+    }
+
+    /// An activation in the ternary layout.
+    #[cfg(feature = "fmt-ternary")]
+    fn pq2_activations(rng: &mut Rng, n: usize) -> QuantAct {
+        let x: Vec<f32> = (0..n).map(|_| rng.f32() * 3.0).collect();
+        let mut a = QuantAct::with_capacity(n);
+        a.ternary = true;
+        a.fill(&x);
+        a
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-ternary")]
+    fn pq2_matches_the_scalar_reference() {
+        if !crate::cpu::have_dotprod() {
+            eprintln!("skip: no asimddp on this CPU");
+            return;
+        }
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for n in [128usize, 384, 4096, 12288] {
+            let w = pq2_row(&mut rng, n);
+            for k in 1..=9 {
+                let acts: Vec<QuantAct> = (0..k).map(|_| pq2_activations(&mut rng, n)).collect();
+                let mut got = vec![0.0f32; k];
+                unsafe { dot_batch_pq2(&w, &acts, &mut got) };
+                for (i, a) in acts.iter().enumerate() {
+                    let want = crate::quant::dot_scalar(Format::PQ2_0, &w, a);
+                    let tol = 1e-4 * want.abs().max(1.0);
+                    assert!(
+                        (got[i] - want).abs() <= tol,
+                        "n={n} k={k} row {i}: {} vs {want}",
+                        got[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every pass width gives a row the same bits: the two-row decode GEMV against
+    /// the one-row kernel, and the batched GEMM against the single-activation one.
+    #[test]
+    #[cfg(feature = "fmt-ternary")]
+    fn pq2_rows_are_independent_of_the_pass_width() {
+        if !crate::cpu::have_dotprod() {
+            eprintln!("skip: no asimddp on this CPU");
+            return;
+        }
+        let mut rng = Rng(0xa11c_e5a1_1ce5_a11c);
+        for n in [128usize, 4096] {
+            for rows in 1..=11usize {
+                let w: Vec<u8> = (0..rows).flat_map(|_| pq2_row(&mut rng, n)).collect();
+                let rb = n / 128 * 34;
+                let a = pq2_activations(&mut rng, n);
+                let mut got = vec![0.0f32; rows];
+                unsafe { dot_rows_pq2(&w, rb, rows, std::slice::from_ref(&a), &mut got) };
+                for row in 0..rows {
+                    let want = unsafe { dot_pq2(&w[row * rb..(row + 1) * rb], &a) };
+                    assert_eq!(
+                        got[row].to_bits(),
+                        want.to_bits(),
+                        "n={n} rows={rows} row={row}"
+                    );
+                }
+            }
+        }
+        // GEMV (one activation) against GEMM (four) on the same row.
+        let n = 4096usize;
+        let rows = 6usize;
+        let w: Vec<u8> = (0..rows).flat_map(|_| pq2_row(&mut rng, n)).collect();
+        let rb = n / 128 * 34;
+        let acts: Vec<QuantAct> = (0..4).map(|_| pq2_activations(&mut rng, n)).collect();
+        let mut gemm = vec![0.0f32; rows * 4];
+        unsafe { dot_rows_pq2(&w, rb, rows, &acts, &mut gemm) };
+        for b in 0..4 {
+            let mut gemv = vec![0.0f32; rows];
+            unsafe { dot_rows_pq2(&w, rb, rows, &acts[b..b + 1], &mut gemv) };
+            for r in 0..rows {
+                assert_eq!(
+                    gemm[r * 4 + b].to_bits(),
+                    gemv[r].to_bits(),
+                    "act {b} row {r}: decode and prefill disagree"
+                );
+            }
         }
     }
 }

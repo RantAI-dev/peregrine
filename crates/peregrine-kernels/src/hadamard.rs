@@ -18,7 +18,121 @@ pub fn fwht(x: &mut [f32]) {
             return;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() && n >= 16 {
+            // SAFETY: NEON checked; n is a power of two ≥ 16.
+            unsafe { fwht_neon(x) };
+            return;
+        }
+    }
     fwht_scalar(x);
+}
+
+/// `x[i] *= signs[i]` for every element, the rotation's sign step.
+///
+/// The multiply is exact and elementwise, so the vector path is bit-identical to the scalar one.
+pub fn mul_signs(x: &mut [f32], signs: &[f32]) {
+    debug_assert!(x.len() <= signs.len());
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() && x.len() >= 16 {
+            // SAFETY: NEON checked; `signs` covers `x`.
+            unsafe { mul_signs_neon(x, signs) };
+            return;
+        }
+    }
+    for (v, s) in x.iter_mut().zip(signs) {
+        *v *= s;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn mul_signs_neon(x: &mut [f32], signs: &[f32]) {
+    use std::arch::aarch64::*;
+    let n = x.len();
+    let p = x.as_mut_ptr();
+    let s = signs.as_ptr();
+    let mut i = 0;
+    while i + 16 <= n {
+        for u in 0..4 {
+            let at = i + 4 * u;
+            vst1q_f32(
+                p.add(at),
+                vmulq_f32(vld1q_f32(p.add(at)), vld1q_f32(s.add(at))),
+            );
+        }
+        i += 16;
+    }
+    while i + 4 <= n {
+        vst1q_f32(
+            p.add(i),
+            vmulq_f32(vld1q_f32(p.add(i)), vld1q_f32(s.add(i))),
+        );
+        i += 4;
+    }
+    for j in i..n {
+        *p.add(j) *= *s.add(j);
+    }
+}
+
+/// NEON twin of [`fwht_avx2`]: strides 1, 2, 4 and 8 in registers over sixteen floats, then the wider
+/// strides in place. Every element is the same `a + b` / `a − b` the scalar loop computes, so the
+/// result is bit-identical to it.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn fwht_neon(x: &mut [f32]) {
+    use std::arch::aarch64::*;
+
+    // Stride 1 inside each four-lane vector: out = [v0+v1, v0−v1, v2+v3, v2−v3].
+    #[inline(always)]
+    unsafe fn s1(v: float32x4_t) -> float32x4_t {
+        let t = vrev64q_f32(v);
+        vtrn1q_f32(vaddq_f32(v, t), vsubq_f32(v, t))
+    }
+    // Stride 2: out = [v0+v2, v1+v3, v0−v2, v1−v3].
+    #[inline(always)]
+    unsafe fn s2(v: float32x4_t) -> float32x4_t {
+        let t = vextq_f32::<2>(v, v);
+        vcombine_f32(vget_low_f32(vaddq_f32(v, t)), vget_low_f32(vsubq_f32(v, t)))
+    }
+
+    let n = x.len();
+    let p = x.as_mut_ptr();
+    let mut i = 0;
+    while i + 16 <= n {
+        let (mut v0, mut v1) = (s1(vld1q_f32(p.add(i))), s1(vld1q_f32(p.add(i + 4))));
+        let (mut v2, mut v3) = (s1(vld1q_f32(p.add(i + 8))), s1(vld1q_f32(p.add(i + 12))));
+        v0 = s2(v0);
+        v1 = s2(v1);
+        v2 = s2(v2);
+        v3 = s2(v3);
+        // Stride 4 across the two halves, then stride 8 across the quarters.
+        let (a0, a1) = (vaddq_f32(v0, v1), vsubq_f32(v0, v1));
+        let (a2, a3) = (vaddq_f32(v2, v3), vsubq_f32(v2, v3));
+        vst1q_f32(p.add(i), vaddq_f32(a0, a2));
+        vst1q_f32(p.add(i + 4), vaddq_f32(a1, a3));
+        vst1q_f32(p.add(i + 8), vsubq_f32(a0, a2));
+        vst1q_f32(p.add(i + 12), vsubq_f32(a1, a3));
+        i += 16;
+    }
+    let mut h = 16;
+    while h < n {
+        let mut i = 0;
+        while i < n {
+            let mut j = i;
+            while j < i + h {
+                let a = vld1q_f32(p.add(j));
+                let b = vld1q_f32(p.add(j + h));
+                vst1q_f32(p.add(j), vaddq_f32(a, b));
+                vst1q_f32(p.add(j + h), vsubq_f32(a, b));
+                j += 4;
+            }
+            i += 2 * h;
+        }
+        h *= 2;
+    }
 }
 
 pub fn fwht_scalar(x: &mut [f32]) {
@@ -105,5 +219,47 @@ mod tests {
         for i in 0..4096 {
             assert!((a[i] - b[i]).abs() < 1e-3, "{i}: {} vs {}", a[i], b[i]);
         }
+    }
+
+    /// The vector path performs the scalar loop's own adds and subtracts, so it must
+    /// reproduce them bit for bit at every block size.
+    #[test]
+    fn fwht_vector_path_is_bit_identical() {
+        for n in [16usize, 64, 256, 1024, 4096] {
+            let x: Vec<f32> = (0..n)
+                .map(|i| ((i * 7919 % 101) as f32) / 50.0 - 1.0)
+                .collect();
+            let (mut want, mut got) = (x.clone(), x.clone());
+            fwht_scalar(&mut want);
+            fwht(&mut got);
+            for i in 0..n {
+                assert_eq!(got[i].to_bits(), want[i].to_bits(), "n={n} i={i}");
+            }
+        }
+    }
+
+    #[test]
+    fn mul_signs_matches_the_scalar_loop() {
+        let n = 4096;
+        let x: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 - 2.0).collect();
+        let signs: Vec<f32> = (0..n)
+            .map(|i| {
+                if (i * 7) % 3 == 0 {
+                    -0.015625
+                } else {
+                    0.015625
+                }
+            })
+            .collect();
+        let mut want = x.clone();
+        for (v, s) in want.iter_mut().zip(&signs) {
+            *v *= s;
+        }
+        let mut got = x;
+        mul_signs(&mut got, &signs);
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
     }
 }

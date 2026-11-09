@@ -59,6 +59,24 @@ All notable changes to this project are documented here. The format follows
   16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
 
 ### Added
+- **Bonsai 2 on the aarch64 NEON tier** (S2.8 F4): the `PQ2_0` ternary kernels, the block
+  Hadamard transform, the Gated DeltaNet recurrent step and the causal conv. `PQ2_0` is 128
+  ternary weights in 34 bytes; the kernel extracts the four code planes with shifts and masks
+  and runs eight `sdot`s per group against the activation's plane layout, so lane `l` is the
+  16-value sum of block `l` and the `−Σq` offset is the reference's own `tls` fold. Decode runs
+  two output rows per pass; prefill decodes a row once and meets four activations with it. Both
+  keep the fold per lane and per group, so a row's bits are the same in the one-row kernel, the
+  two-row decode kernel and the four-activation prefill kernel (asserted with `to_bits()`), and
+  MTP speculation still changes no token. The Hadamard FWHT does strides 1–8 in registers over
+  sixteen floats and is bit-identical to the scalar transform; the sign multiply is a four-lane
+  multiply; the conv's inner accumulate is elementwise and bit-identical. The delta step uses
+  two four-lane accumulators over the state row (tolerance-tested, like the AVX2 kernel). An
+  `smmla` GEMM was prototyped and measured at 1.42× the `sdot` GEMM at eight activations, but its
+  block-before-scale fold would make a row's bits depend on the pass width, so the GEMM stays on
+  `sdot` and the tier is `neon-dotprod` for this format. On the 2B file at ten X925 cores,
+  prefill went 14.8 → 404 tok/s and decode 11.0 → 140 tok/s, and the 4B's MTP decode 64.8 →
+  80.7 tok/s; see
+  `docs/design/s2.8-bonsai2.md` and `benchmarks/results/spark-arm-2026-11-10-bonsai2/`.
 - NEON `vmath` and activation quantisation on aarch64 (S2.8 F5/F6). `exp` is now a four-lane
   `exp4` with `exp8`'s constants, operation order and fused multiply-adds (bit-identical to the
   scalar twin `exp_scalar`), used by softmax (`exp_shift_sum`, `exp_scaled_sum`), SwiGLU, SiLU,
