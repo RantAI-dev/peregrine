@@ -144,6 +144,18 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- Prefill attention reads the F16 K/V cache directly. The multi-row tile used to be
+  widened f16 -> f32 before every score and every value mix; it now hands the cache's
+  halves to the same register-blocked kernels the decode path reads, so a K or V tile
+  is half the bytes and the widening pass is gone. The f16 kernels are the widened
+  kernels' FMAs in the same order (`f16_direct_kernels_match_the_widened_kernels_bit_for_bit`),
+  so a row's bits are unchanged: the real-model goldens for Llama-3.2-1B and
+  Qwen2.5-0.5B do not move, nor do the synthetic ones at either tier. The path is
+  taken once a row's visible context reaches 1024 positions; shorter prompts keep the
+  widened tile, where the two measure the same. Prompt processing at 4096 tokens on
+  four cores (H0, Llama-3.2-1B Q4_K_M): 75.9 -> 79.4 tok/s (medians of five
+  alternating rounds); attention's share of the pass fell from 51.8 to 46.1 ms per
+  16-token chunk.
 - The repacked Q4_K prefill kernel takes eight activation rows per weight decode, and a
   sixteen-row prompt chunk shares one scale/min/code unpack between its two groups. The old
   kernel decoded a tile's scales, its mins and its sixteen windows once per group of four
