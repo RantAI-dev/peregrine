@@ -144,6 +144,23 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- Q5_K prefill keeps eight activation accumulators in registers. `wide_q5_k` decoded a
+  super-block once and then ran it against four activations at a time, folding each row
+  into a `MAX_WIDE`-long stack array; it now walks eight at a time with the accumulators
+  in registers, the shape #118 gave `wide_q6_k`, and the five-bit codes are still decoded
+  once per super-block for the group. The arithmetic is unchanged — the same lane sums,
+  the same per-block fused multiply-add and the same final horizontal sum — and a new
+  test compares every window and ragged tail against the one-row kernel bit for bit.
+  On bluefin (`PERGEGRINE_PROF2=full`, 512-token prompt) the Q5_K bucket runs
+  140.5 → 171.9 GMAC/s, level with wide Q6_K's 183.4 and against the Q4_K tile's 282.5;
+  its share of the prompt's wall falls from 30 % to 26 %. Five alternating rounds on
+  Qwen3.5-2B Q4_K_M: prompt 139.4 → 148.9 tok/s at 512 (+6.8 %) and 132.4 → 139.3 at
+  4096 (+5.2 %), decode flat; against llama.cpp v0.9.0 at its faster flash-attention
+  setting the prompt rows move from 1.11× to 1.19× and 1.17×. Llama-3.2-1B (Q4_K/Q6_K)
+  and Qwen3-1.7B (Q4_K/Q6_K) controls stay inside 1 %. The AVX2 real-model goldens for
+  the three files this covers were re-recorded after the prefill-attention change
+  (#115) that left them stale on main; the branch reproduces main's logits exactly on
+  all of them.
 - Attention's value mix widens to sixteen lanes on the AVX-512 tier. The mix is
   conversion-bound: it widens every stored half of V into f32 and accumulates it into
   the output, so `vcvtph2ps zmm` with 512-bit fused multiply-adds halves that work.

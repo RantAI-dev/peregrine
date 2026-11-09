@@ -977,6 +977,8 @@ impl Session {
         let mut decode_bytes_acts = 0u64;
         let mut cost: Option<SlotCost> = None;
         let mut prof_acc = [0u64; crate::prof::N];
+        let mut prof_pre = [0u64; crate::prof::N];
+        let mut prefill_chunks = 0usize;
         while self.engine.active() > 0 {
             let prof_mark = crate::prof::snapshot();
             let ems = self.engine.step();
@@ -986,6 +988,13 @@ impl Session {
                 prefilled += rep.rows;
                 prefill_s += rep.secs;
                 prefill_bytes_acts += rep.stats.bytes_acts;
+                if crate::prof::detail() {
+                    let prof_now = crate::prof::snapshot();
+                    for i in 0..crate::prof::N {
+                        prof_pre[i] += prof_now[i].saturating_sub(prof_mark[i]);
+                    }
+                    prefill_chunks += 1;
+                }
                 if decode_tokens == 0 && prefilled >= prompt_len - 1 {
                     break;
                 }
@@ -1047,38 +1056,71 @@ impl Session {
             0.0
         };
 
-        if crate::prof::enabled() && decode_steps > 0 {
+        if crate::prof::enabled() && (decode_steps > 0 || prefill_chunks > 0) {
             let names = crate::prof::names();
-            let wall_us = decode_s * 1e6 / decode_steps as f64;
-            eprintln!(
-                "peregrine profile: {decode_steps} decode steps, {emitted_tokens} tokens, mean µs/step (wall {wall_us:.1})"
-            );
-            // The detail timers are added up across the pool's workers, so a full-machine
-            // figure (comparable to the wall) is that sum over the decode pool's width.
+            // The detail timers are added up across the pool's workers, so a
+            // full-machine figure (comparable to the wall) is that sum over the
+            // pool's width. Both sections follow the same rule.
             let detail = crate::prof::detail();
-            let width = if detail {
-                self.engine
-                    .narrow_pool()
-                    .map(|p| p.width())
-                    .unwrap_or_else(|| self.engine.pool().width())
-                    .max(1)
-            } else {
-                1
+            let dump = |what: &str,
+                        steps: usize,
+                        tokens: usize,
+                        wall_s: f64,
+                        acc: &[u64; crate::prof::N],
+                        width: usize| {
+                let wall_us = wall_s * 1e6 / steps as f64;
+                eprintln!(
+                    "peregrine profile: {steps} {what} steps, {tokens} tokens, mean µs/step (wall {wall_us:.1})"
+                );
+                let n = if detail {
+                    crate::prof::N
+                } else {
+                    crate::prof::Slot::AttnScores as usize
+                };
+                for (i, (name, ns)) in names[..n].iter().zip(acc).enumerate() {
+                    let share = if i >= crate::prof::Slot::AttnScores as usize {
+                        width
+                    } else {
+                        1
+                    };
+                    eprintln!(
+                        "  {name:<16} {:>9.1}",
+                        *ns as f64 / 1e3 / steps as f64 / share as f64
+                    );
+                }
             };
-            let n = if detail {
-                crate::prof::N
-            } else {
-                crate::prof::Slot::AttnScores as usize
-            };
-            for (i, (name, ns)) in names[..n].iter().zip(prof_acc).enumerate() {
-                let share = if i >= crate::prof::Slot::AttnScores as usize {
-                    width
+            if decode_steps > 0 {
+                let width = if detail {
+                    self.engine
+                        .narrow_pool()
+                        .map(|p| p.width())
+                        .unwrap_or_else(|| self.engine.pool().width())
+                        .max(1)
                 } else {
                     1
                 };
-                eprintln!(
-                    "  {name:<16} {:>9.1}",
-                    ns as f64 / 1e3 / decode_steps as f64 / share as f64
+                dump(
+                    "decode",
+                    decode_steps,
+                    emitted_tokens,
+                    decode_s,
+                    &prof_acc,
+                    width,
+                );
+            }
+            if prefill_chunks > 0 {
+                let width = if detail {
+                    self.engine.pool().width().max(1)
+                } else {
+                    1
+                };
+                dump(
+                    "prefill",
+                    prefill_chunks,
+                    prefilled,
+                    prefill_s,
+                    &prof_pre,
+                    width,
                 );
             }
         }
