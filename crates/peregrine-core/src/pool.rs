@@ -884,6 +884,11 @@ impl Drop for Pool {
 /// which is the precondition the disjoint writes in `matmul` rely on.
 #[inline]
 /// physical cores (distinct (package, core id) pairs in /proc/cpuinfo), when the OS says.
+///
+/// Linux on aarch64 does not print `physical id`/`core id` in `/proc/cpuinfo` (S2.8), so a host
+/// that names neither falls back to the CPUs this process may actually run on. On the ARM
+/// machines this was written for there is no SMT, so that number is the physical core count too;
+/// the fallback also honours a `taskset` mask, which is what the benchmark's affinity runs need.
 pub fn physical_cores() -> Option<usize> {
     let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
     let mut seen = std::collections::HashSet::new();
@@ -906,7 +911,10 @@ pub fn physical_cores() -> Option<usize> {
             _ => {}
         }
     }
-    (!seen.is_empty()).then_some(seen.len())
+    if seen.is_empty() {
+        return std::thread::available_parallelism().ok().map(|n| n.get());
+    }
+    Some(seen.len())
 }
 
 /// the pool for one-row steps (single-user decode), when it should be narrower than the main one.

@@ -1,7 +1,9 @@
 /target/
 **/*.rs.bk
 # Model files are never committed; see docs/dev/testing.md for where tests look for them.
-/models/
+# `/models` (no trailing slash) matches a symlink as well as a directory: a `models -> ...`
+# link was once committed because `/models/` only matches directories.
+/models
 *.gguf
 *.slb
 # Benchmark scratch output; curated results go under benchmarks/results/.

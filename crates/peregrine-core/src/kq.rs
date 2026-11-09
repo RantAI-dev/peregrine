@@ -1,6 +1,6 @@
 //! The load-time k-quant repack (S3.4, step 1): the Q4_K and Q6_K matrices of a
-//! model file, rewritten into eight-row tiles, and the Q5_0 matrices of a model
-//! whose shape forces the legacy format (the small-model prefill fix).
+//! model file, rewritten into eight-row tiles, and the Q5_0 and Q8_0 matrices of a
+//! model whose shape forces the legacy format (the small-model fixes).
 //!
 //! The repacked GEMM of S3.4 multiplies eight output rows at once, so the weights of
 //! eight rows have to sit side by side; the layout is [`peregrine_kernels::kq`]'s.
@@ -9,12 +9,20 @@
 //!
 //! # Which matrices
 //!
-//! Every Q4_K, Q6_K and Q5_0 matrix of the file, except:
+//! Every Q4_K, Q6_K, Q5_0 and Q8_0 matrix of the file, except:
 //!
 //! * the token embedding, which is gathered row by row and never multiplied, so the
-//!   repacked layout would mean nothing to it;
+//!   repacked layout would mean nothing to it — unless the embedding *is* the output
+//!   head (a tied-head model), which is the one place a Q8_0 embedding is read as a
+//!   matrix; then the file's bytes still feed the gather and the store holds the
+//!   head's tiles;
 //! * a matrix that is not two-dimensional (the mixture-of-experts' experts are
 //!   three-dimensional and are not repacked yet).
+//!
+//! The tied-head copy is limited to Q8_0: it costs the embedding's bytes again in
+//! resident memory, and the Q8_0 head is the one the decode profile showed below the
+//! memory-bandwidth limit. The other formats' tied heads keep the row kernel they
+//! have today.
 //!
 //! # Which rows
 //!
@@ -45,6 +53,7 @@ pub fn tile_size(kind: Format) -> Option<usize> {
         Format::Q4_K => Some(peregrine_kernels::kq::Q4K8::SIZE),
         Format::Q6_K => Some(peregrine_kernels::kq::Q6K8::SIZE),
         Format::Q5_0 => Some(peregrine_kernels::kq::Q5_08::SIZE),
+        Format::Q8_0 => Some(peregrine_kernels::kq::Q8_08::SIZE),
         _ => None,
     }
 }
@@ -54,7 +63,7 @@ pub fn tile_size(kind: Format) -> Option<usize> {
 pub struct KqEntry {
     /// The tensor's name in the file.
     pub name: String,
-    /// The matrix's format: Q4_K or Q6_K.
+    /// The matrix's format: one of the four the store repacks.
     pub kind: Format,
     /// Where the matrix's repacked bytes start in the store.
     pub offset: usize,
@@ -79,8 +88,19 @@ impl KqEntry {
 /// The order is the file's own: the matrices are laid out by their offset in the
 /// data section, so a file always produces the same store.
 pub fn layout(g: &Gguf) -> Vec<KqEntry> {
-    let mut mats: Vec<(&String, &TensorInfo)> =
-        g.tensors.iter().filter(|(_, t)| eligible(t)).collect();
+    // A file with no `output.weight` uses its token embedding as the output head.
+    // The embedding is normally left out — it is gathered, not multiplied — but a
+    // tied Q8_0 head is a matrix the repacked kernel should read, so it is added.
+    // The file's bytes still serve the gather: the store is a second copy of the
+    // same weights, reordered.
+    let tied_q8_head = !g.tensors.contains_key("output.weight");
+    let mut mats: Vec<(&String, &TensorInfo)> = g
+        .tensors
+        .iter()
+        .filter(|(name, t)| {
+            eligible(t) || (tied_q8_head && name.as_str() == EMBEDDING && t.kind == Format::Q8_0)
+        })
+        .collect();
     mats.sort_by_key(|(name, t)| (t.offset, name.as_str()));
     let mut entries = Vec::with_capacity(mats.len());
     let mut at = 0usize;
@@ -168,6 +188,7 @@ fn repack_matrix(file: &Gguf, e: &KqEntry, t: &TensorInfo, dst: &mut [u8]) {
             match e.kind {
                 Format::Q4_K => peregrine_kernels::kq::repack_q4k8(&blocks, out),
                 Format::Q5_0 => peregrine_kernels::kq::repack_q5_08(&blocks, out),
+                Format::Q8_0 => peregrine_kernels::kq::repack_q8_08(&blocks, out),
                 _ => peregrine_kernels::kq::repack_q6k8(&blocks, out),
             }
         }
@@ -183,7 +204,8 @@ mod tests {
         assert_eq!(tile_size(Format::Q4_K), Some(1152));
         assert_eq!(tile_size(Format::Q6_K), Some(1680));
         assert_eq!(tile_size(Format::Q5_0), Some(176));
+        assert_eq!(tile_size(Format::Q8_0), Some(272));
         assert_eq!(tile_size(Format::F16), None);
-        assert_eq!(tile_size(Format::Q8_0), None);
+        assert_eq!(tile_size(Format::Q4_0), None);
     }
 }

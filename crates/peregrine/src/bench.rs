@@ -64,7 +64,37 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
         session.set_mtp(true);
     }
 
+    // The hybrid forward's own buckets (`PEREGRINE_PROF=1`) are process-wide
+    // accumulators: clear anything before the measurement so the report covers
+    // this run only.
+    #[cfg(feature = "arch-qwen35")]
+    let hybrid_prof = peregrine_core::options::get().prof;
+    #[cfg(feature = "arch-qwen35")]
+    if hybrid_prof {
+        let _ = peregrine_models::hybrid::profile();
+    }
+
     let report = session.bench(args.prompt_tokens, args.tokens)?;
+
+    #[cfg(feature = "arch-qwen35")]
+    if hybrid_prof {
+        let pr = peregrine_models::hybrid::profile();
+        let total: u64 = pr.iter().map(|&(_, v)| v).sum();
+        let n = (report.prompt_tokens + report.decode_tokens).max(1) as f64;
+        eprintln!(
+            "peregrine hybrid profile: {} prompt + {} decode tokens, {:.1} ms, µs per token",
+            report.prompt_tokens,
+            report.decode_tokens,
+            total as f64 / 1e6
+        );
+        for (name, ns) in pr {
+            eprintln!(
+                "  {name:<14} {:>10.1}  {:>5.1} %",
+                ns as f64 / 1e3 / n,
+                100.0 * ns as f64 / total.max(1) as f64
+            );
+        }
+    }
 
     if prof.is_some() {
         let p_path = args
