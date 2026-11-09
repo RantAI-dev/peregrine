@@ -613,11 +613,29 @@ impl Architecture for Dense {
                     )
                 });
             }
-            peregrine_core::prof::time(peregrine_core::prof::Slot::Resid, || {
-                for i in 0..nb * cfg.d_model {
-                    st.x[i] += st.xb2[i];
+            {
+                let xb2: &[f32] = &st.xb2;
+                let parallel = nb >= peregrine_core::blocks::ROW_PARALLEL && pool.width() > 1;
+                peregrine_core::prof::time(peregrine_core::prof::Slot::Resid, || {
+                    peregrine_core::blocks::par::for_row_chunks(
+                        pool,
+                        parallel,
+                        &mut st.x,
+                        cfg.d_model,
+                        nb,
+                        peregrine_core::blocks::par::Sched::Static,
+                        |_wk, rows, xc| {
+                            let base = rows.start * cfg.d_model;
+                            for (i, x) in xc.iter_mut().enumerate() {
+                                *x += xb2[base + i];
+                            }
+                        },
+                    );
+                });
+                if parallel {
+                    stats.barriers += 1;
                 }
-            });
+            }
             layer::copy_tap(st, cfg, li, nb);
         }
 

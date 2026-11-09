@@ -1637,7 +1637,7 @@ unsafe fn q6k_acts<const T: usize>(
     scales: &[__m256i; 8],
     acts: &[QuantAct],
     sb: usize,
-    sumi: &mut [__m256i; 4],
+    sumi: &mut [__m256i],
 ) {
     for c in 0..2 {
         for g in 0..4 {
@@ -1652,7 +1652,19 @@ unsafe fn q6k_acts<const T: usize>(
     }
 }
 
-/// Q6_K against a wide batch; see `wide_q4_k`.
+/// Q6_K against a wide batch, eight activations at a time with their accumulators
+/// in registers.
+///
+/// A super-block's codes are decoded once and reused by the whole group; each row
+/// then keeps its eight integer lane sums and its eight f32 lanes in registers
+/// across the block loop, where a `MAX_WIDE`-long array of accumulators would be
+/// loaded and stored once per block per row. The arithmetic is unchanged — the same
+/// `maddubs`/`madd` lane sums, the same per-block `fma`, the same lane-wise float
+/// accumulation and final horizontal sum — so a row's bits do not depend on the
+/// window it lands in (the kernel tests compare every window against the scalar
+/// reference). Eight is the widest group whose accumulators still fit: measured on
+/// H0 at 16 activations, 6052 -> 5278 ns per 8192-wide row, and it removes the
+/// width cliff the array form had above 16 (32 activations: 16354 -> 11528 ns).
 #[target_feature(enable = "avx2,fma,f16c")]
 unsafe fn wide_q6_k(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
     let pf = prefetch_distance();
@@ -1660,60 +1672,62 @@ unsafe fn wide_q6_k(w: &[u8], acts: &[QuantAct], out: &mut [f32]) {
     debug_assert!(n <= MAX_WIDE && acts.iter().all(|a| !a.qk.is_empty()));
     let lownib = _mm256_set1_epi8(0x0F);
     let two = _mm256_set1_epi8(0x03);
-    let mut acc = [_mm256_setzero_ps(); MAX_WIDE];
-    for (sb, blk) in w.chunks_exact(210).enumerate() {
-        prefetch_ahead(blk.as_ptr(), pf, 4);
-        let d = f16_at(blk, 208);
-        let sc16 = _mm256_cvtepi8_epi16(_mm_loadu_si128(blk.as_ptr().add(192) as *const __m128i));
-        // Built once per super-block, not once per tile of activations.
-        let scales = q6k_scales(sc16);
-        let mut codes = [_mm256_setzero_si256(); 8];
-        for c in 0..2 {
-            let ql = blk.as_ptr().add(c * 64);
-            let qh = _mm256_loadu_si256(blk.as_ptr().add(128 + c * 32) as *const __m256i);
-            let ql0 = _mm256_loadu_si256(ql as *const __m256i);
-            let ql1 = _mm256_loadu_si256(ql.add(32) as *const __m256i);
-            for g in 0..4 {
-                let (base, hbits) = match g {
-                    0 => (ql0, _mm256_and_si256(qh, two)),
-                    1 => (ql1, _mm256_and_si256(_mm256_srli_epi16(qh, 2), two)),
-                    2 => (ql0, _mm256_and_si256(_mm256_srli_epi16(qh, 4), two)),
-                    _ => (ql1, _mm256_and_si256(_mm256_srli_epi16(qh, 6), two)),
-                };
-                let low = if g < 2 {
-                    _mm256_and_si256(base, lownib)
-                } else {
-                    _mm256_and_si256(_mm256_srli_epi16(base, 4), lownib)
-                };
-                codes[c * 4 + g] = _mm256_or_si256(low, _mm256_slli_epi16(hbits, 4));
+    let mut base = 0;
+    while base < n {
+        let tw = (n - base).min(8);
+        let acts = &acts[base..base + tw];
+        let mut acc = [_mm256_setzero_ps(); 8];
+        for (sb, blk) in w.chunks_exact(210).enumerate() {
+            prefetch_ahead(blk.as_ptr(), pf, 4);
+            let d = f16_at(blk, 208);
+            let sc16 =
+                _mm256_cvtepi8_epi16(_mm_loadu_si128(blk.as_ptr().add(192) as *const __m128i));
+            let scales = q6k_scales(sc16);
+            let mut codes = [_mm256_setzero_si256(); 8];
+            for c in 0..2 {
+                let ql = blk.as_ptr().add(c * 64);
+                let qh = _mm256_loadu_si256(blk.as_ptr().add(128 + c * 32) as *const __m256i);
+                let ql0 = _mm256_loadu_si256(ql as *const __m256i);
+                let ql1 = _mm256_loadu_si256(ql.add(32) as *const __m256i);
+                for g in 0..4 {
+                    let (b, hbits) = match g {
+                        0 => (ql0, _mm256_and_si256(qh, two)),
+                        1 => (ql1, _mm256_and_si256(_mm256_srli_epi16(qh, 2), two)),
+                        2 => (ql0, _mm256_and_si256(_mm256_srli_epi16(qh, 4), two)),
+                        _ => (ql1, _mm256_and_si256(_mm256_srli_epi16(qh, 6), two)),
+                    };
+                    let low = if g < 2 {
+                        _mm256_and_si256(b, lownib)
+                    } else {
+                        _mm256_and_si256(_mm256_srli_epi16(b, 4), lownib)
+                    };
+                    codes[c * 4 + g] = _mm256_or_si256(low, _mm256_slli_epi16(hbits, 4));
+                }
             }
-        }
-        let mut t = 0;
-        while t < n {
-            let tw = (n - t).min(TILE);
-            let mut sumi = [_mm256_setzero_si256(); 4];
+            let mut sumi = [_mm256_setzero_si256(); 8];
             match tw {
-                4 => q6k_acts::<4>(&codes, &scales, &acts[t..], sb, &mut sumi),
-                3 => q6k_acts::<3>(&codes, &scales, &acts[t..], sb, &mut sumi),
-                2 => q6k_acts::<2>(&codes, &scales, &acts[t..], sb, &mut sumi),
-                _ => q6k_acts::<1>(&codes, &scales, &acts[t..], sb, &mut sumi),
+                8 => q6k_acts::<8>(&codes, &scales, acts, sb, &mut sumi),
+                7 => q6k_acts::<7>(&codes, &scales, acts, sb, &mut sumi),
+                6 => q6k_acts::<6>(&codes, &scales, acts, sb, &mut sumi),
+                5 => q6k_acts::<5>(&codes, &scales, acts, sb, &mut sumi),
+                4 => q6k_acts::<4>(&codes, &scales, acts, sb, &mut sumi),
+                3 => q6k_acts::<3>(&codes, &scales, acts, sb, &mut sumi),
+                2 => q6k_acts::<2>(&codes, &scales, acts, sb, &mut sumi),
+                _ => q6k_acts::<1>(&codes, &scales, acts, sb, &mut sumi),
             }
-            for u in 0..tw {
-                let a = &acts[t + u];
+            for t in 0..tw {
+                let a = &acts[t];
                 let bs = _mm256_loadu_si256(a.bsums.as_ptr().add(sb * 16) as *const __m256i);
                 let off = _mm256_slli_epi32(_mm256_madd_epi16(sc16, bs), 5);
-                let v = _mm256_sub_epi32(sumi[u], off);
-                acc[t + u] = _mm256_fmadd_ps(
-                    _mm256_cvtepi32_ps(v),
-                    _mm256_set1_ps(d * a.dk[sb]),
-                    acc[t + u],
-                );
+                let v = _mm256_sub_epi32(sumi[t], off);
+                acc[t] =
+                    _mm256_fmadd_ps(_mm256_cvtepi32_ps(v), _mm256_set1_ps(d * a.dk[sb]), acc[t]);
             }
-            t += tw;
         }
-    }
-    for b in 0..n {
-        out[b] = hsum_ps(acc[b]);
+        for t in 0..tw {
+            out[base + t] = hsum_ps(acc[t]);
+        }
+        base += tw;
     }
 }
 
@@ -2447,6 +2461,55 @@ mod tests {
                     (got - want).abs() <= tol,
                     "Q5_K max codes n={n}: avx2 {got} vs scalar {want}"
                 );
+            }
+        }
+    }
+
+    /// The wide Q6_K kernel takes its activations eight at a time; a row's bits must
+    /// be the scalar reference's whatever window it lands in. The widths cover whole
+    /// groups and every ragged tail around them.
+    #[test]
+    fn wide_q6_k_matches_one_row_at_every_width() {
+        if !have_avx2() || !have_batched() || !wide_enabled() {
+            return;
+        }
+        let fmt = Format::Q6_K;
+        let mut s = 0x6B6B_1234_9876_5401u64;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let n = 1024;
+        let rb = crate::quant::row_bytes(fmt, n);
+        for trial in 0..5 {
+            let mut w: Vec<u8> = (0..rb).map(|_| (rnd() >> 32) as u8).collect();
+            sane_scales(fmt, &mut w);
+            let acts: Vec<QuantAct> = (0..32)
+                .map(|_| {
+                    let x: Vec<f32> = (0..n)
+                        .map(|_| ((rnd() >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 6.0)
+                        .collect();
+                    let mut a = QuantAct::with_capacity(n);
+                    a.fill(&x);
+                    a
+                })
+                .collect();
+            for &nb in &[5usize, 6, 7, 8, 9, 12, 15, 16, 17, 24, 31, 32] {
+                let mut got = vec![0.0f32; nb];
+                // SAFETY: have_avx2()/have_batched() checked; lengths match preconditions.
+                unsafe { dot_batch(fmt, &w, &acts[..nb], &mut got) };
+                for b in 0..nb {
+                    // SAFETY: as above; `acts[b]` has length n.
+                    let want = unsafe { dot(fmt, &w, &acts[b]) };
+                    assert_eq!(
+                        got[b].to_bits(),
+                        want.to_bits(),
+                        "Q6_K trial {trial} row {b}/{nb}: wide {} vs one row {want}",
+                        got[b]
+                    );
+                }
             }
         }
     }
