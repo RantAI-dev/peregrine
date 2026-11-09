@@ -414,7 +414,7 @@ pub fn run(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
                 let m_new = m_old.max(crate::vmath::max(s));
                 let psum = crate::vmath::exp_shift_sum(s, m_new);
                 // exp(−∞) = 0 on the first block: nothing to rescale.
-                let alpha = (m_old - m_new).exp();
+                let alpha = crate::vmath::det_exp(m_old - m_new);
                 sc.l[r] = sc.l[r] * alpha as f64 + psum;
                 if let Some(t) = tsm {
                     crate::prof::add_shared(
@@ -539,7 +539,7 @@ fn run_f16(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: 
                 let m_old = sc.m[r];
                 let m_new = m_old.max(crate::vmath::max(s));
                 let psum = crate::vmath::exp_shift_sum(s, m_new);
-                alpha[r] = (m_old - m_new).exp();
+                alpha[r] = crate::vmath::det_exp(m_old - m_new);
                 sc.l[r] = sc.l[r] * alpha[r] as f64 + psum;
                 sc.m[r] = m_new;
             }
@@ -850,7 +850,7 @@ pub(crate) fn run_range<O: RowSink>(
                     let m_old = sc.m[lr];
                     let m_new = m_old.max(crate::vmath::max(s));
                     let psum = crate::vmath::exp_shift_sum(s, m_new);
-                    let alpha = (m_old - m_new).exp();
+                    let alpha = crate::vmath::det_exp(m_old - m_new);
                     sc.l[lr] = sc.l[lr] * alpha as f64 + psum;
                     match v16 {
                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -1129,7 +1129,7 @@ pub fn combine_row(
         if li <= 0.0 {
             continue;
         }
-        let w = (m - m_star).exp();
+        let w = crate::vmath::det_exp(m - m_star);
         l += li * w as f64;
         for (d, &x) in out.iter_mut().zip(o) {
             *d += x * w;

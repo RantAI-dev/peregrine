@@ -313,8 +313,8 @@ fn race(sc: &mut Scratch, key: u64) -> u32 {
     let mut best = sc.kept[0];
     let mut bv = f64::NEG_INFINITY;
     for &i in &sc.kept {
-        let e = -uniform(key, i).ln();
-        let v = (sc.p[i as usize] as f64).ln() - e.ln();
+        let e = -crate::vmath::det_ln_f64(uniform(key, i));
+        let v = crate::vmath::det_ln_f64(sc.p[i as usize] as f64) - crate::vmath::det_ln_f64(e);
         if v > bv {
             bv = v;
             best = i;
@@ -344,7 +344,7 @@ fn cut_nucleus(p: &[f32], top_p: f32, top_k: usize, min_p: f32, t: f32, kept: &m
     };
     let z: f64 = c.iter().map(|e| e.1 as f64).sum();
     let floor = if min_p > 0.0 {
-        min_p.powf(1.0 / t) * best
+        crate::vmath::det_pow_f32(min_p, 1.0 / t) * best
     } else {
         0.0
     };

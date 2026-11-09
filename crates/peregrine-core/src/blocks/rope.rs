@@ -56,8 +56,9 @@ pub fn yarn_params(
     let freq_scale = 1.0 / factor;
     // The correction dimensions (`ggml/src/ggml.c:4530-4542`).
     let corr_dim = |n_rot: f32| -> f32 {
-        rope_dim as f32 * (n_ctx_orig as f32 / (n_rot * 2.0 * std::f32::consts::PI)).ln()
-            / (2.0 * rope_base.ln())
+        rope_dim as f32
+            * crate::vmath::det_ln(n_ctx_orig as f32 / (n_rot * 2.0 * std::f32::consts::PI))
+            / (2.0 * crate::vmath::det_ln(rope_base))
     };
     let start = corr_dim(beta_fast).floor();
     let end = corr_dim(beta_slow).ceil();
@@ -67,7 +68,7 @@ pub fn yarn_params(
         if scale <= 1.0 {
             1.0
         } else {
-            0.1 * m * scale.ln() + 1.0
+            0.1 * m * crate::vmath::det_ln(scale) + 1.0
         }
     };
     let mut yarn_attn = if log_mul != 0.0 {
@@ -77,10 +78,10 @@ pub fn yarn_params(
     };
     // The factor the rope applies itself is cancelled in the attention factor and
     // applied to the angles instead (`src/llama-context.cpp:309-314`).
-    yarn_attn *= 1.0 / (1.0 + 0.1 * factor.ln());
+    yarn_attn *= 1.0 / (1.0 + 0.1 * crate::vmath::det_ln(factor));
     yarn_attn *= attn_factor;
     let mscale = if ext_factor != 0.0 {
-        yarn_attn * (1.0 + 0.1 * (1.0 / freq_scale).ln())
+        yarn_attn * (1.0 + 0.1 * crate::vmath::det_ln(1.0 / freq_scale))
     } else {
         yarn_attn
     };
@@ -116,7 +117,8 @@ pub fn build_rope_table(
     let freqs: Vec<(f64, f64)> = (0..half)
         .map(|i| {
             // With factors (Llama 3.x), ggml divides the angle by `factor[i]`.
-            let freq = (rope_base as f64).powf(-((2 * i) as f64) / rope_dim as f64);
+            let freq =
+                crate::vmath::det_pow_f64(rope_base as f64, -((2 * i) as f64) / rope_dim as f64);
             let factor = rope_factors.and_then(|f| f.get(i)).copied().unwrap_or(1.0) as f64;
             (freq, factor)
         })
@@ -124,8 +126,9 @@ pub fn build_rope_table(
     for pos in 0..max_ctx {
         for (i, &(freq, factor)) in freqs.iter().enumerate() {
             let theta = pos as f64 * freq / factor;
-            rope[(pos * half + i) * 2] = theta.cos() as f32;
-            rope[(pos * half + i) * 2 + 1] = theta.sin() as f32;
+            let (sin, cos) = crate::vmath::det_sin_cos(theta);
+            rope[(pos * half + i) * 2] = cos as f32;
+            rope[(pos * half + i) * 2 + 1] = sin as f32;
         }
     }
     rope
@@ -149,7 +152,8 @@ pub fn build_rope_table_yarn(
     let mut rope = vec![0.0f32; max_ctx * half * 2];
     let freqs: Vec<(f64, f64)> = (0..half)
         .map(|i| {
-            let freq = (rope_base as f64).powf(-((2 * i) as f64) / rope_dim as f64);
+            let freq =
+                crate::vmath::det_pow_f64(rope_base as f64, -((2 * i) as f64) / rope_dim as f64);
             let factor = rope_factors.and_then(|f| f.get(i)).copied().unwrap_or(1.0) as f64;
             (freq, factor)
         })
@@ -160,8 +164,9 @@ pub fn build_rope_table_yarn(
             let theta_interp = yarn.freq_scale as f64 * theta_extrap;
             let ramp_mix = yarn_ramp(yarn.corr_dims, i) as f64 * yarn.ext_factor as f64;
             let theta = theta_interp * (1.0 - ramp_mix) + theta_extrap * ramp_mix;
-            rope[(pos * half + i) * 2] = (theta.cos() as f32) * yarn.mscale;
-            rope[(pos * half + i) * 2 + 1] = (theta.sin() as f32) * yarn.mscale;
+            let (sin, cos) = crate::vmath::det_sin_cos(theta);
+            rope[(pos * half + i) * 2] = (cos as f32) * yarn.mscale;
+            rope[(pos * half + i) * 2 + 1] = (sin as f32) * yarn.mscale;
         }
     }
     rope
