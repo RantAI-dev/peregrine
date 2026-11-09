@@ -38,44 +38,44 @@
 <line class="grid" x1="690.0" y1="66" x2="690.0" y2="386" stroke-width="1"/>
 <text class="t2" x="690.0" y="402" font-size="11" text-anchor="middle">300</text>
 <text class="t1" x="238" y="89.0" font-size="12" text-anchor="end">Bonsai 2 2B · 512 · decode</text>
-<path class="s1" d="M250.0,72.0 H349.6 A4.0,4.0 0 0 1 353.6,76.0 V80.0 A4.0,4.0 0 0 1 349.6,84.0 H250.0 Z"/>
-<text class="t2" x="359.6" y="82" font-size="11">70.6</text>
-<path class="s2" d="M250.0,86.0 H293.9 A4.0,4.0 0 0 1 297.9,90.0 V94.0 A4.0,4.0 0 0 1 293.9,98.0 H250.0 Z"/>
-<text class="t2" x="303.9" y="96" font-size="11">32.7</text>
+<path class="s1" d="M250.0,72.0 H356.2 A4.0,4.0 0 0 1 360.2,76.0 V80.0 A4.0,4.0 0 0 1 356.2,84.0 H250.0 Z"/>
+<text class="t2" x="366.2" y="82" font-size="11">75.1</text>
+<path class="s2" d="M250.0,86.0 H297.2 A4.0,4.0 0 0 1 301.2,90.0 V94.0 A4.0,4.0 0 0 1 297.2,98.0 H250.0 Z"/>
+<text class="t2" x="307.2" y="96" font-size="11">34.9</text>
 <text class="t1" x="238" y="129.0" font-size="12" text-anchor="end">Bonsai 2 2B · 4096 · decode</text>
-<path class="s1" d="M250.0,112.0 H334.9 A4.0,4.0 0 0 1 338.9,116.0 V120.0 A4.0,4.0 0 0 1 334.9,124.0 H250.0 Z"/>
-<text class="t2" x="344.9" y="122" font-size="11">60.6</text>
-<path class="s2" d="M250.0,126.0 H290.7 A4.0,4.0 0 0 1 294.7,130.0 V134.0 A4.0,4.0 0 0 1 290.7,138.0 H250.0 Z"/>
-<text class="t2" x="300.7" y="136" font-size="11">30.5</text>
+<path class="s1" d="M250.0,112.0 H340.7 A4.0,4.0 0 0 1 344.7,116.0 V120.0 A4.0,4.0 0 0 1 340.7,124.0 H250.0 Z"/>
+<text class="t2" x="350.7" y="122" font-size="11">64.6</text>
+<path class="s2" d="M250.0,126.0 H293.9 A4.0,4.0 0 0 1 297.9,130.0 V134.0 A4.0,4.0 0 0 1 293.9,138.0 H250.0 Z"/>
+<text class="t2" x="303.9" y="136" font-size="11">32.6</text>
 <text class="t1" x="238" y="169.0" font-size="12" text-anchor="end">Bonsai 2 2B · 512 · prompt</text>
-<path class="s1" d="M250.0,152.0 H626.2 A4.0,4.0 0 0 1 630.2,156.0 V160.0 A4.0,4.0 0 0 1 626.2,164.0 H250.0 Z"/>
-<text class="t2" x="636.2" y="162" font-size="11">259</text>
-<path class="s2" d="M250.0,166.0 H404.8 A4.0,4.0 0 0 1 408.8,170.0 V174.0 A4.0,4.0 0 0 1 404.8,178.0 H250.0 Z"/>
-<text class="t2" x="414.8" y="176" font-size="11">108</text>
+<path class="s1" d="M250.0,152.0 H642.4 A4.0,4.0 0 0 1 646.4,156.0 V160.0 A4.0,4.0 0 0 1 642.4,164.0 H250.0 Z"/>
+<text class="t2" x="652.4" y="162" font-size="11">270</text>
+<path class="s2" d="M250.0,166.0 H421.0 A4.0,4.0 0 0 1 425.0,170.0 V174.0 A4.0,4.0 0 0 1 421.0,178.0 H250.0 Z"/>
+<text class="t2" x="431.0" y="176" font-size="11">119</text>
 <text class="t1" x="238" y="209.0" font-size="12" text-anchor="end">Bonsai 2 2B · 4096 · prompt</text>
-<path class="s1" d="M250.0,192.0 H543.6 A4.0,4.0 0 0 1 547.6,196.0 V200.0 A4.0,4.0 0 0 1 543.6,204.0 H250.0 Z"/>
-<text class="t2" x="553.6" y="202" font-size="11">203</text>
-<path class="s2" d="M250.0,206.0 H400.3 A4.0,4.0 0 0 1 404.3,210.0 V214.0 A4.0,4.0 0 0 1 400.3,218.0 H250.0 Z"/>
-<text class="t2" x="410.3" y="216" font-size="11">105</text>
+<path class="s1" d="M250.0,192.0 H608.7 A4.0,4.0 0 0 1 612.7,196.0 V200.0 A4.0,4.0 0 0 1 608.7,204.0 H250.0 Z"/>
+<text class="t2" x="618.7" y="202" font-size="11">247</text>
+<path class="s2" d="M250.0,206.0 H416.6 A4.0,4.0 0 0 1 420.6,210.0 V214.0 A4.0,4.0 0 0 1 416.6,218.0 H250.0 Z"/>
+<text class="t2" x="426.6" y="216" font-size="11">116</text>
 <text class="t1" x="238" y="249.0" font-size="12" text-anchor="end">Bonsai 2 9B · 512 · decode</text>
-<path class="s1" d="M250.0,232.0 H279.7 A4.0,4.0 0 0 1 283.7,236.0 V240.0 A4.0,4.0 0 0 1 279.7,244.0 H250.0 Z"/>
-<text class="t2" x="289.7" y="242" font-size="11">23.0</text>
-<path class="s2" d="M250.0,246.0 H260.4 A4.0,4.0 0 0 1 264.4,250.0 V254.0 A4.0,4.0 0 0 1 260.4,258.0 H250.0 Z"/>
-<text class="t2" x="270.4" y="256" font-size="11">9.8</text>
+<path class="s1" d="M250.0,232.0 H283.4 A4.0,4.0 0 0 1 287.4,236.0 V240.0 A4.0,4.0 0 0 1 283.4,244.0 H250.0 Z"/>
+<text class="t2" x="293.4" y="242" font-size="11">25.5</text>
+<path class="s2" d="M250.0,246.0 H262.0 A4.0,4.0 0 0 1 266.0,250.0 V254.0 A4.0,4.0 0 0 1 262.0,258.0 H250.0 Z"/>
+<text class="t2" x="272.0" y="256" font-size="11">10.9</text>
 <text class="t1" x="238" y="289.0" font-size="12" text-anchor="end">Bonsai 2 9B · 4096 · decode</text>
-<path class="s1" d="M250.0,272.0 H275.9 A4.0,4.0 0 0 1 279.9,276.0 V280.0 A4.0,4.0 0 0 1 275.9,284.0 H250.0 Z"/>
-<text class="t2" x="285.9" y="282" font-size="11">20.4</text>
-<path class="s2" d="M250.0,286.0 H259.5 A4.0,4.0 0 0 1 263.5,290.0 V294.0 A4.0,4.0 0 0 1 259.5,298.0 H250.0 Z"/>
-<text class="t2" x="269.5" y="296" font-size="11">9.2</text>
+<path class="s1" d="M250.0,272.0 H279.3 A4.0,4.0 0 0 1 283.3,276.0 V280.0 A4.0,4.0 0 0 1 279.3,284.0 H250.0 Z"/>
+<text class="t2" x="289.3" y="282" font-size="11">22.7</text>
+<path class="s2" d="M250.0,286.0 H260.8 A4.0,4.0 0 0 1 264.8,290.0 V294.0 A4.0,4.0 0 0 1 260.8,298.0 H250.0 Z"/>
+<text class="t2" x="270.8" y="296" font-size="11">10.1</text>
 <text class="t1" x="238" y="329.0" font-size="12" text-anchor="end">Bonsai 2 9B · 512 · prompt</text>
-<path class="s1" d="M250.0,312.0 H344.6 A4.0,4.0 0 0 1 348.6,316.0 V320.0 A4.0,4.0 0 0 1 344.6,324.0 H250.0 Z"/>
-<text class="t2" x="354.6" y="322" font-size="11">67.2</text>
-<path class="s2" d="M250.0,326.0 H284.3 A4.0,4.0 0 0 1 288.3,330.0 V334.0 A4.0,4.0 0 0 1 284.3,338.0 H250.0 Z"/>
-<text class="t2" x="294.3" y="336" font-size="11">26.1</text>
+<path class="s1" d="M250.0,312.0 H351.1 A4.0,4.0 0 0 1 355.1,316.0 V320.0 A4.0,4.0 0 0 1 351.1,324.0 H250.0 Z"/>
+<text class="t2" x="361.1" y="322" font-size="11">71.7</text>
+<path class="s2" d="M250.0,326.0 H287.7 A4.0,4.0 0 0 1 291.7,330.0 V334.0 A4.0,4.0 0 0 1 287.7,338.0 H250.0 Z"/>
+<text class="t2" x="297.7" y="336" font-size="11">28.4</text>
 <text class="t1" x="238" y="369.0" font-size="12" text-anchor="end">Bonsai 2 9B · 4096 · prompt</text>
-<path class="s1" d="M250.0,352.0 H330.2 A4.0,4.0 0 0 1 334.2,356.0 V360.0 A4.0,4.0 0 0 1 330.2,364.0 H250.0 Z"/>
-<text class="t2" x="340.2" y="362" font-size="11">57.4</text>
-<path class="s2" d="M250.0,366.0 H283.4 A4.0,4.0 0 0 1 287.4,370.0 V374.0 A4.0,4.0 0 0 1 283.4,378.0 H250.0 Z"/>
-<text class="t2" x="293.4" y="376" font-size="11">25.5</text>
+<path class="s1" d="M250.0,352.0 H338.5 A4.0,4.0 0 0 1 342.5,356.0 V360.0 A4.0,4.0 0 0 1 338.5,364.0 H250.0 Z"/>
+<text class="t2" x="348.5" y="362" font-size="11">63.0</text>
+<path class="s2" d="M250.0,366.0 H286.8 A4.0,4.0 0 0 1 290.8,370.0 V374.0 A4.0,4.0 0 0 1 286.8,378.0 H250.0 Z"/>
+<text class="t2" x="296.8" y="376" font-size="11">27.9</text>
 <text class="t2" x="470.0" y="420" font-size="11" text-anchor="middle">tokens per second</text>
 </svg>
