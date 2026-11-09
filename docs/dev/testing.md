@@ -252,5 +252,8 @@ synthetic models under Intel's Software Development Emulator:
 - `sde64 -adl` (Alder Lake: AVX-VNNI 256-bit, no AVX-512) fails unless the tier reported is `x86_64-avx2-vnni256`.
 
 The jobs download SDE 10.13.1 from Intel's official mirror, check the pinned SHA-256, and cache the unpacked emulator.
-SDE is free of charge for any type of use under the Intel Simplified Software License. No AVX-512 synthetic goldens are
-committed yet, so the tests report `ok (no golden for tier ...)`; a follow-up records them on a real AVX-512 host.
+SDE is free of charge for any type of use under the Intel Simplified Software License. Both jobs run with
+`PEREGRINE_GOLDEN=require`, so every synthetic model must have a golden for its tier; the AVX-512 ones
+live under `tests/golden/synthetic/x86_64-avx2-avx512-vnni-gfni-vbmi/` and are recorded under
+`sde64 -spr`. The real-model goldens under `tests/golden/<tier>/` need the model files, which CI does
+not have, so an AVX-512 host still records those itself.
