@@ -1,0 +1,10 @@
+{
+  "group": 1,
+  "items_per_s": 0.9747001887786172,
+  "max_tokens": 48,
+  "phase": "speculation",
+  "prompts": 520,
+  "server": "peregrine qwen25-05b --speculate",
+  "url": "http://127.0.0.1:8299",
+  "wall_s": 533.4973830790004
+}
