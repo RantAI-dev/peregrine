@@ -237,11 +237,21 @@ fn the_session_s_token_streams_are_the_recorded_ones() {
     }
 
     let tier = peregrine_core::cpu::tier_name();
-    let golden_tier = if tier == "x86_64-avx2-vnni256" {
-        "x86_64-avx2"
-    } else {
-        tier.as_str()
-    };
+    // Goldens are recorded on Linux; macOS libm (sin, cos, exp) rounds differently, so macOS
+    // keys its own directory and skips until one is recorded there.
+    let golden_tier = format!(
+        "{}{}",
+        if tier == "x86_64-avx2-vnni256" {
+            "x86_64-avx2"
+        } else {
+            tier.as_str()
+        },
+        if cfg!(target_os = "macos") {
+            "-macos"
+        } else {
+            ""
+        }
+    );
     let text = render(&tier, &rows);
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/session")
