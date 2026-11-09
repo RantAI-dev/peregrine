@@ -144,6 +144,24 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- Prefill attention now tiles over query rows as well as positions. A prefill task
+  carries tens of query rows over one KV head, all scoring the same positions, so the
+  64-position tile is widened once and walked in two phases over one buffer: keys
+  first, scored for every row, then values, mixed into every row. Widening K and V
+  together overflowed L1 and every row re-read both tiles from L2. Two rows share each
+  loaded K vector in a register-blocked score kernel (their own accumulators, chunk
+  boundaries and merge order are untouched), and the widened value mix now loads a
+  position's eight value vectors into registers before the FMAs. A row's bits are
+  unchanged: the tests read a 512-position context as a solo decode and as prompt
+  pieces of 3, 16 and 64 rows on pools of 1, 2, 4 and 8 workers and require identical
+  bits, for three attention geometries. On the 4-core Xeon (H0), attention-only
+  prefill at 4096 fell from 16.6 s to 12.4 s on Llama-3.2-1B Q4_K_M and from 11.2 s to
+  6.2 s on Qwen2.5-0.5B Q4_K_M. End-to-end prompt processing (medians of three
+  alternating rounds) went 74.1 -> 79.9 tok/s (+7.8 %) and 130.7 -> 159.0 (+21.6 %) at
+  4096, and 99.4 -> 103.5 (+4.1 %) and 221.0 -> 234.8 (+6.3 %) at 512. Decode does not
+  move: attention-only decode at 4096 is 10.7-11.0 ms/token on both builds, and the
+  end-to-end decode deltas of six alternating rounds have paired medians of -0.2 %
+  and +3.1 % against a per-round spread of 20 %.
 - Decode attention reads the F16 KV cache directly instead of widening a 64-position
   tile to f32 first. The stored halves are widened in registers (`vcvtph2ps`), the
   score pass is register-blocked four keys deep with two query rows sharing each
