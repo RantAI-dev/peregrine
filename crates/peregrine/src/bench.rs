@@ -32,6 +32,10 @@ pub struct BenchArgs {
     /// Ignore tuning profiles and use defaults or environment variables.
     #[arg(long, default_value_t = false)]
     pub no_profile: bool,
+    /// Worker threads (default: every logical CPU). Pin the process to as many CPUs when
+    /// comparing against an engine started with `-t N`.
+    #[arg(long)]
+    pub threads: Option<usize>,
 }
 
 /// Run `peregrine bench`.
@@ -43,12 +47,16 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
     let effective_opts = peregrine_core::options::get();
 
     let needed = (args.prompt_tokens + args.tokens).max(64);
-    let cfg = SessionCfg {
+    let mut cfg = SessionCfg {
         speculate: false,
         temperature: 0.0,
         max_ctx: needed.max(512),
         ..Default::default()
     };
+    if let Some(t) = args.threads {
+        cfg.threads = t.max(1);
+    }
+    let threads = cfg.threads;
 
     let mut session = peregrine_models::session::open(&args.model, cfg)
         .map_err(|e| format!("cannot open session for {}: {e}", args.model.display()))?;
@@ -88,6 +96,7 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
             // that produced it (the instruction-set string alone stops at AVX2).
             "simd_tier": peregrine_core::simd_tier(),
             "config": {
+                "threads": threads,
                 "decode_threads": decode_th,
                 "spin_us": effective_opts.spin_us,
                 "tuning_source": effective_opts.tuning_source.as_str(),

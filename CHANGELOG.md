@@ -52,6 +52,18 @@ All notable changes to this project are documented here. The format follows
   by projection, attention, norms, quantisation, RoPE, KV writes, residuals, SwiGLU,
   barrier wait); `=full` adds the attention subtimers. Off by default, no timers in the
   default path.
+- An adaptive spin window (`PEREGRINE_ADAPTIVE_SPIN`, on by default). A pool thread samples its own
+  run-queue delay from `/proc/thread-self/schedstat` every 8 ms and the pool moves the wait window
+  down a ladder (configured, half, zero) when it is spending a large share of its runnable time
+  waiting for a CPU, and back up after consecutive quiet samples. On a quiet host the configured
+  window is untouched; on a host with three runnable threads per core the pool parks at once. On H0
+  (Xeon E5-2680 v4, four threads pinned to four cores) with eight CPU hogs on the same cores:
+  Llama-3.2-1B prefill 12.1 tok/s and decode 1.60 with the default window, 23.2 and 5.65 with the
+  adaptive window, and 22.3 and 4.88 with `PEREGRINE_SPIN_US=0` — the adaptive pool finds the
+  zero-spin answer without giving up the quiet host's window. `PEREGRINE_ADAPTIVE_SPIN=0` keeps the
+  window fixed for measurement. Scheduling only: no kernel, quantisation or arithmetic changes.
+- `peregrine bench --threads N` fixes the worker pool width and records it in the JSON `config`, so a
+  run can be pinned to the same core count as a comparison engine. The default is unchanged.
 - A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical
   cores and 64 when the pool is wider; see the fix below): the prompt tokens one weight pass
   carries. The engine prefills a prompt in pieces of this size, and the piece is how the prompt is

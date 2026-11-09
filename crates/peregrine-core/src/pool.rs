@@ -20,8 +20,8 @@
 //! per-row synchronisation: the ranges are disjoint by construction, which is what
 //! makes the raw-pointer writes in `matmul` sound.
 
-use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::cell::{RefCell, UnsafeCell};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -55,37 +55,301 @@ unsafe fn trampoline<F: Fn(usize, usize) + Sync>(p: *const (), w: usize, n: usiz
 ///
 /// Spinning is also what makes an oversubscribed machine worse: four sessions each
 /// spinning four workers on four cores starve one another (the throughput test
-/// failed only when the suite ran its tests in parallel). So a waiter spins with a
-/// pause instruction for `SPIN`, then yields its core to anything runnable until
-/// `YIELD`, and only then parks.
+/// failed only when the suite ran its tests in parallel). On a shared host with fewer
+/// free cores than workers, a waiter that spins takes the core the straggler it is
+/// waiting for needs, and the whole fork–join takes longer. The waiting policy below
+/// therefore shortens (and finally drops) the spin window when the host says it is
+/// oversubscribed.
+///
+/// # Why the window adapts
+///
+/// One number cannot be right on both kinds of host. On a quiet machine a 1 ms spin
+/// window is what keeps the 160 fork–joins of a token off the kernel scheduler; with
+/// `PEREGRINE_SPIN_US=0` the same desktop decode ran 8.8x slower (97 forks per token
+/// paid a wake-up). On a loaded machine the same window is a self-inflicted denial
+/// of service: bluefin measured Gemma-1B prefill at ~70 tok/s with the default window
+/// and 120-130 tok/s with `PEREGRINE_SPIN_US=0`, on the same loaded host. llama.cpp
+/// survives both by polling a fixed number of `pause` rounds and then taking the
+/// mutex, so it never spins for longer than a few microseconds at a time. That is a
+/// good floor but, like a fixed window, it cannot use a quiet host's spare cycles.
+///
+/// The pool measures what it costs instead. A thread that is runnable but not
+/// running accumulates run-queue delay; `/proc/thread-self/schedstat` reports it
+/// per thread on Linux. Every [`LOAD_SAMPLE`] a worker compares the delay it
+/// accumulated with the runnable wall time since its last sample. If a third or more
+/// of that time was spent waiting for a CPU, the host has more runnable threads than
+/// cores and the window is halved. Half is where two runnable threads per core want
+/// it; whether the queue is actually three deep is then measured from the bottom rung
+/// (a spinning thread's own samples cannot tell two from three, because the spin is
+/// itself part of the queue), and if it is, the window drops to zero and waiters park.
+/// Consecutive quiet samples widen it again one step at a time, so a transient
+/// neighbour costs a few tokens and a host that becomes quiet gets the spinning back.
+/// Nothing here changes what a worker computes.
 ///
 /// The default windows and their measurements are in `options.rs` (`SPIN_DEFAULT_US`).
 ///
 /// The spin and yield windows. `PEREGRINE_SPIN_US` / `PEREGRINE_YIELD_US`
-/// override them (0 and 0 park at once, which is the original condvar pool), so the
+/// override them (0 and 0 park at once, which is the original condvar pool), and
+/// `PEREGRINE_ADAPTIVE_SPIN=0` keeps them fixed even on a busy host, so the
 /// trade-off can be measured on a given machine instead of assumed.
-fn windows() -> (Duration, Duration) {
-    use std::sync::OnceLock;
-    static W: OnceLock<(Duration, Duration)> = OnceLock::new();
-    *W.get_or_init(|| {
-        let o = crate::options::get();
-        (
-            Duration::from_micros(o.spin_us),
-            Duration::from_micros(o.yield_us),
-        )
-    })
+///
+/// # The ladder
+///
+/// `level` 0 is the configured window. Level 1 is half of it: the right compromise
+/// when the host has more runnable threads than cores but not twice as many, where a
+/// waiter that spins long enough still catches a straggler that was descheduled for a
+/// moment, without taking a whole core from it. Level 2 parks at once, like
+/// `PEREGRINE_SPIN_US=0`, which is what heavy oversubscription wants. A busy host
+/// moves down the ladder; a quiet one moves up one level per [`QUIET_SAMPLES`] samples.
+const LOAD_SAMPLE: Duration = Duration::from_millis(8);
+
+/// A sample needs at least this much runnable time behind it to be evidence: a
+/// sample taken across a park (an idle session) would otherwise be mostly denominator.
+const LOAD_MIN_RUNNABLE: Duration = Duration::from_millis(4);
+
+/// Run-queue delay that means the host has more runnable threads than free cores.
+///
+/// Measured on the reference host (Xeon E5-2680 v4, four threads pinned to four cores):
+/// 0.2-0.6 % quiet, 40-53 % with four CPU hogs on the same four cores (two runnable
+/// threads per core) and 61-100 % with eight (three per core). At two per core the
+/// pool gains from a shorter window (half of 1 ms beat both 1 ms and 0 on this host);
+/// at three it wants to park at once. The first step needs [`BUSY_SAMPLES`] consecutive
+/// samples so a single preemption does not move the ladder.
+const LOAD_BUSY_PERMILLE: u32 = 350;
+
+/// At the bottom rung, delay below this means the host has eased to two-per-core or
+/// better, so the window can widen to half. Measured 27-42 % at two per core while
+/// parked and 46-50 % at three, so the rung stays put at three.
+const LOAD_EASED_PERMILLE: u32 = 445;
+
+/// Below this share the host is quiet again (0.2-0.6 % measured on a quiet host).
+const LOAD_LOW_PERMILLE: u32 = 50;
+
+/// Consecutive busy samples before the first step down.
+const BUSY_SAMPLES: u32 = 2;
+
+/// Consecutive samples before the window widens one step (about 24 ms).
+const QUIET_SAMPLES: u32 = 3;
+
+/// How long level 1 runs before it spends one sample window at level 2 to find out
+/// whether the host has got worse.
+///
+/// Level 1's own samples cannot answer that: a thread at the middle rung spends much of
+/// its runnable time spinning, so two threads per core and three both measure 80-100 %.
+/// One window at level 2 measures the queue itself (20-36 % at two per core, 46-50 % at
+/// three on the reference host), and then the ladder decides. The probe costs about
+/// 24 ms of parked waiting per cycle, and only while the host is busy.
+const PROBE_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The spin window, and how much of it the pool believes it can afford.
+struct WaitControl {
+    /// The windows from `options.rs`, never exceeded.
+    max_spin_us: u64,
+    max_yield_us: u64,
+    /// 0 = configured, 1 = half, 2 = park at once. Kept as one value rather than
+    /// two durations so a waiter cannot observe a half-updated pair.
+    level: AtomicU8,
+    state: Mutex<AdaptiveState>,
+}
+
+struct AdaptiveState {
+    level: u8,
+    busy: u32,
+    quiet: u32,
+    /// When the current dwell at level 1 began, or when the last probe ended.
+    dwell: Option<Instant>,
+    enabled: bool,
+}
+
+impl WaitControl {
+    fn new(spin_us: u64, yield_us: u64, enabled: bool) -> WaitControl {
+        WaitControl {
+            max_spin_us: spin_us,
+            max_yield_us: yield_us,
+            level: AtomicU8::new(0),
+            state: Mutex::new(AdaptiveState {
+                level: 0,
+                busy: 0,
+                quiet: 0,
+                dwell: None,
+                enabled,
+            }),
+        }
+    }
+
+    /// The (spin, yield) deadlines for the current level.
+    ///
+    /// The yield deadline is never earlier than the spin deadline: `backoff` treats both
+    /// as absolute offsets from the start of the wait, so a configured `YIELD_US` of 0
+    /// means "no yield phase" and not "yield for minus one millisecond".
+    fn budgets(&self) -> (Duration, Duration) {
+        let spin = match self.level.load(Ordering::Relaxed) {
+            0 => self.max_spin_us,
+            1 => self.max_spin_us / 2,
+            _ => 0,
+        };
+        let yld = self.max_yield_us.max(spin);
+        (Duration::from_micros(spin), Duration::from_micros(yld))
+    }
+
+    /// Move down the ladder on a busy host, up on a quiet one.
+    ///
+    /// The caller holds no reference to the sampler: this is a function of the observed
+    /// share of runnable time spent in the run queue, and it is the only state the
+    /// waiting threads share. Down-steps are immediate; up-steps need a streak, so a
+    /// transient neighbour does not make the window flap. Level 1 cannot classify the
+    /// host from its own samples (spinning dominates them), so it periodically steps to
+    /// level 2 for one measurement and lets that decide.
+    fn observe(&self, delay_permille: u32, now: Instant) {
+        let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.enabled {
+            return;
+        }
+        let mut next = g.level;
+        let mut busy = g.busy;
+        let mut quiet = g.quiet;
+        match g.level {
+            0 => {
+                if delay_permille >= LOAD_BUSY_PERMILLE {
+                    busy += 1;
+                    if busy >= BUSY_SAMPLES {
+                        next = 1;
+                    }
+                } else {
+                    busy = 0;
+                }
+            }
+            1 => {
+                if delay_permille <= LOAD_LOW_PERMILLE {
+                    quiet += 1;
+                    if quiet >= QUIET_SAMPLES {
+                        next = 0;
+                    }
+                } else {
+                    quiet = 0;
+                    if g.dwell
+                        .is_none_or(|t| now.saturating_duration_since(t) >= PROBE_INTERVAL)
+                    {
+                        next = 2;
+                    }
+                }
+            }
+            _ => {
+                if delay_permille <= LOAD_EASED_PERMILLE {
+                    quiet += 1;
+                    if quiet >= QUIET_SAMPLES {
+                        next = 1;
+                    }
+                } else {
+                    quiet = 0;
+                }
+            }
+        }
+        if next != g.level {
+            g.level = next;
+            busy = 0;
+            quiet = 0;
+            g.dwell = (next == 1).then_some(now);
+            self.level.store(next, Ordering::Relaxed);
+        }
+        g.busy = busy;
+        g.quiet = quiet;
+    }
+}
+
+/// What one thread has learnt about being scheduled since its last sample.
+struct LoadProbe {
+    last: Option<(Instant, u64)>,
+    /// Wall time spent parked, which is not time the thread was runnable: it must be
+    /// taken out of the denominator or an idle session would look idle-but-loaded.
+    parked: Duration,
+}
+
+impl LoadProbe {
+    fn new() -> LoadProbe {
+        LoadProbe {
+            last: None,
+            parked: Duration::ZERO,
+        }
+    }
+
+    fn add_parked(&mut self, d: Duration) {
+        self.parked += d;
+    }
+
+    /// Sample the thread's run-queue delay, at most once per [`LOAD_SAMPLE`].
+    fn sample(&mut self, ctl: &WaitControl, now: Instant) {
+        let Some((then, before)) = self.last else {
+            self.last = run_delay_ns().map(|ns| (now, ns));
+            self.parked = Duration::ZERO;
+            return;
+        };
+        let wall = now.saturating_duration_since(then);
+        if wall < LOAD_SAMPLE {
+            return;
+        }
+        let Some(after) = run_delay_ns() else {
+            self.last = None;
+            self.parked = Duration::ZERO;
+            return;
+        };
+        let runnable = wall.saturating_sub(std::mem::take(&mut self.parked));
+        self.last = Some((now, after));
+        if runnable < LOAD_MIN_RUNNABLE {
+            return;
+        }
+        let delayed = after.saturating_sub(before);
+        let permille = (u128::from(delayed) * 1000 / runnable.as_nanos().max(1)) as u32;
+        ctl.observe(permille.min(1000), now);
+    }
+}
+
+thread_local! {
+    /// One probe per thread: what it has to say about the scheduler is its own, and a
+    /// lock around it would put a mutex in the fork–join path this pool exists to keep
+    /// cheap.
+    static PROBE: RefCell<LoadProbe> = RefCell::new(LoadProbe::new());
+}
+
+/// Sample this thread's scheduling pressure. Cheap when not due (a duration compare).
+fn sample_load(ctl: &WaitControl, now: Instant) {
+    PROBE.with(|p| p.borrow_mut().sample(ctl, now));
+}
+
+/// Time this thread has spent runnable but not running, in nanoseconds.
+///
+/// Linux reports it per thread in `/proc/thread-self/schedstat` (second field, in
+/// nanoseconds since the thread started). `/proc/thread-self` is the calling thread,
+/// so no thread id lookup is needed. Elsewhere there is no portable equivalent; the
+/// probe returns `None` and the configured window is used unchanged.
+#[cfg(target_os = "linux")]
+fn run_delay_ns() -> Option<u64> {
+    use std::io::Read;
+    let mut buf = [0u8; 96];
+    let mut f = std::fs::File::open("/proc/thread-self/schedstat").ok()?;
+    let n = f.read(&mut buf).ok()?;
+    parse_run_delay(std::str::from_utf8(&buf[..n]).ok()?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_delay_ns() -> Option<u64> {
+    None
+}
+
+/// The second field of a `schedstat` line: run-queue delay in nanoseconds.
+fn parse_run_delay(line: &str) -> Option<u64> {
+    line.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Wait until `done()` holds: spin, then yield, then (if `park` is given) block.
 #[inline]
-fn backoff(t0: Instant, spins: &mut u32) -> Phase {
+fn backoff(t0: Instant, spins: &mut u32, spin: Duration, yld: Duration) -> Phase {
     *spins = spins.wrapping_add(1);
     if !spins.is_multiple_of(64) {
         std::hint::spin_loop();
         return Phase::Spin;
     }
     let e = t0.elapsed();
-    let (spin, yld) = windows();
     if e < spin {
         std::hint::spin_loop();
         Phase::Spin
@@ -144,6 +408,8 @@ struct Inner {
     /// width late would be told there were fewer workers than there are and would
     /// compute a share overlapping someone else's.
     n: usize,
+    /// The spin window and its adaptive ladder (see [`WaitControl`]).
+    wait: WaitControl,
 }
 
 // SAFETY: `job` is written only by the thread inside `run`, before it publishes a new
@@ -191,6 +457,7 @@ impl Pool {
         let n = n.max(1);
         // Worker 0 is the calling thread, so it is raised along with the others.
         raise_priority();
+        let o = crate::options::get();
         let inner = Arc::new(Inner {
             epoch: Aligned(AtomicU64::new(0)),
             job: UnsafeCell::new(None),
@@ -204,6 +471,7 @@ impl Pool {
             done_mu: Mutex::new(()),
             done_cv: Condvar::new(),
             n,
+            wait: WaitControl::new(o.spin_us, o.yield_us, o.adaptive_spin),
         });
         let mut handles = Vec::with_capacity(n - 1);
         // Worker 0 is the calling thread, so only n-1 are spawned. That keeps the
@@ -214,8 +482,11 @@ impl Pool {
                 raise_priority();
                 let mut seen = 0u64;
                 loop {
-                    // Spin, then park.
+                    // Spin, then park. The window is the current rung of the adaptive
+                    // ladder, read once per wait so a job cannot see it change midway.
                     let t0 = Instant::now();
+                    sample_load(&inner.wait, t0);
+                    let (spin, yld) = inner.wait.budgets();
                     let mut spins = 0u32;
                     loop {
                         if inner.epoch.0.load(Ordering::Acquire) != seen
@@ -223,17 +494,21 @@ impl Pool {
                         {
                             break;
                         }
-                        if backoff(t0, &mut spins) == Phase::Park {
+                        if backoff(t0, &mut spins, spin, yld) == Phase::Park {
                             let mut g = inner.park.lock().unwrap_or_else(|e| e.into_inner());
                             *g += 1;
                             inner.sleepers.store(*g, Ordering::SeqCst);
+                            let parked = Instant::now();
                             while inner.epoch.0.load(Ordering::SeqCst) == seen
                                 && !inner.shutdown.load(Ordering::SeqCst)
                             {
                                 g = inner.wake.wait(g).unwrap_or_else(|e| e.into_inner());
                             }
+                            let idle = parked.elapsed();
                             *g -= 1;
                             inner.sleepers.store(*g, Ordering::SeqCst);
+                            drop(g);
+                            PROBE.with(|p| p.borrow_mut().add_parked(idle));
                             break;
                         }
                     }
@@ -307,17 +582,27 @@ impl Pool {
         // it as "barrier wait"; it overlaps the matmul wall and is never added to it.
         let wait_t0 = crate::prof::enabled().then(Instant::now);
         // Spin for the stragglers: the remaining work is microseconds, and sleeping
-        // here would hand the wake-up latency straight back.
-        let (t0, mut spins) = (Instant::now(), 0u32);
-        let (spin, _) = windows();
-        while self.inner.remaining.0.load(Ordering::Acquire) > 0 {
-            if t0.elapsed() < spin {
+        // here would hand the wake-up latency straight back. The window is the same
+        // adaptive rung the workers use.
+        let (spin, yld) = self.inner.wait.budgets();
+        let t0 = Instant::now();
+        sample_load(&self.inner.wait, t0);
+        loop {
+            if self.inner.remaining.0.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            let e = t0.elapsed();
+            if e < spin {
                 std::hint::spin_loop();
-                spins = spins.wrapping_add(1);
+                continue;
+            }
+            if e < yld {
+                std::thread::yield_now();
                 continue;
             }
             let mut g = self.inner.done_mu.lock().unwrap_or_else(|e| e.into_inner());
             self.inner.caller_sleeping.store(true, Ordering::SeqCst);
+            let parked = Instant::now();
             while self.inner.remaining.0.load(Ordering::SeqCst) > 0 {
                 g = self
                     .inner
@@ -325,9 +610,11 @@ impl Pool {
                     .wait(g)
                     .unwrap_or_else(|e| e.into_inner());
             }
+            let idle = parked.elapsed();
             self.inner.caller_sleeping.store(false, Ordering::SeqCst);
+            drop(g);
+            PROBE.with(|p| p.borrow_mut().add_parked(idle));
         }
-        let _ = spins;
         if let Some(t) = wait_t0 {
             crate::prof::add(crate::prof::Slot::Wait, t.elapsed().as_nanos() as u64);
         }
@@ -553,5 +840,115 @@ mod tests {
         }
         assert_eq!(c.load(Ordering::Relaxed), 4000);
         drop(p); // must join every worker rather than hang
+    }
+
+    #[test]
+    fn a_quiet_host_keeps_the_configured_window() {
+        let w = WaitControl::new(1000, 0, true);
+        let t = Instant::now();
+        for _ in 0..20 {
+            w.observe(0, t);
+        }
+        assert_eq!(w.budgets().0, Duration::from_micros(1000));
+    }
+
+    #[test]
+    fn an_oversubscribed_host_steps_down_to_no_spin() {
+        let w = WaitControl::new(1000, 0, true);
+        let t = Instant::now();
+        w.observe(LOAD_BUSY_PERMILLE, t);
+        assert_eq!(
+            w.budgets().0,
+            Duration::from_micros(1000),
+            "one busy sample is not evidence yet"
+        );
+        w.observe(LOAD_BUSY_PERMILLE, t);
+        assert_eq!(
+            w.budgets().0,
+            Duration::from_micros(500),
+            "two per core takes the window to half"
+        );
+        // Before the probe is due, level 1's own (spin-dominated) samples change nothing.
+        w.observe(1000, t + Duration::from_millis(100));
+        assert_eq!(w.budgets().0, Duration::from_micros(500));
+        // A parking window then measures the queue, and three per core keeps it parked.
+        w.observe(LOAD_EASED_PERMILLE + 1, t + PROBE_INTERVAL);
+        assert_eq!(w.budgets().0, Duration::ZERO);
+        w.observe(1000, t + PROBE_INTERVAL);
+        assert_eq!(w.budgets().0, Duration::ZERO, "the ladder stops at zero");
+    }
+
+    #[test]
+    fn the_window_widens_again_after_a_quiet_streak() {
+        let w = WaitControl::new(1000, 0, true);
+        let t = Instant::now();
+        // Two busy samples take it to half; the probe parks it.
+        w.observe(LOAD_BUSY_PERMILLE, t);
+        w.observe(LOAD_BUSY_PERMILLE, t);
+        w.observe(1000, t + PROBE_INTERVAL);
+        assert_eq!(w.budgets().0, Duration::ZERO);
+
+        // Two eased samples are not enough...
+        w.observe(LOAD_EASED_PERMILLE - 1, t + PROBE_INTERVAL);
+        w.observe(LOAD_EASED_PERMILLE - 1, t + PROBE_INTERVAL);
+        assert_eq!(w.budgets().0, Duration::ZERO);
+        // ...the third widens one step...
+        w.observe(LOAD_EASED_PERMILLE - 1, t + PROBE_INTERVAL);
+        assert_eq!(w.budgets().0, Duration::from_micros(500));
+        // ...and a busy sample in between restarts the quiet streak.
+        w.observe(LOAD_EASED_PERMILLE + 1, t + PROBE_INTERVAL * 2);
+        assert_eq!(w.budgets().0, Duration::ZERO);
+        w.observe(0, t + PROBE_INTERVAL * 2);
+        w.observe(0, t + PROBE_INTERVAL * 2);
+        assert_eq!(w.budgets().0, Duration::ZERO);
+        w.observe(0, t + PROBE_INTERVAL * 2);
+        assert_eq!(w.budgets().0, Duration::from_micros(500));
+        // Level 1 needs a genuinely quiet host to return to the configured window.
+        for _ in 0..3 {
+            w.observe(LOAD_LOW_PERMILLE, t + PROBE_INTERVAL * 2);
+        }
+        assert_eq!(w.budgets().0, Duration::from_micros(1000));
+    }
+
+    #[test]
+    fn adaptation_can_be_turned_off() {
+        let w = WaitControl::new(1000, 0, false);
+        let t = Instant::now();
+        for _ in 0..20 {
+            w.observe(1000, t);
+        }
+        assert_eq!(w.budgets().0, Duration::from_micros(1000));
+    }
+
+    #[test]
+    fn the_yield_deadline_is_never_before_the_spin_deadline() {
+        // Defaults: YIELD_US is 0, which means "no yield phase", not "yield backwards".
+        let w = WaitControl::new(1000, 0, true);
+        assert_eq!(
+            w.budgets(),
+            (Duration::from_micros(1000), Duration::from_micros(1000))
+        );
+        let t = Instant::now();
+        w.observe(LOAD_BUSY_PERMILLE, t);
+        w.observe(LOAD_BUSY_PERMILLE, t);
+        assert_eq!(
+            w.budgets(),
+            (Duration::from_micros(500), Duration::from_micros(500))
+        );
+        // A configured yield window still applies at full spin.
+        let w = WaitControl::new(1000, 2000, true);
+        assert_eq!(
+            w.budgets(),
+            (Duration::from_micros(1000), Duration::from_micros(2000))
+        );
+    }
+
+    #[test]
+    fn the_schedstat_parser_reads_the_run_queue_delay() {
+        assert_eq!(parse_run_delay("794161 123456 1\n"), Some(123_456));
+        assert_eq!(parse_run_delay("794161 0 1"), Some(0));
+        assert_eq!(parse_run_delay(""), None);
+        assert_eq!(parse_run_delay("1"), None);
+        assert_eq!(parse_run_delay("1 x 2"), None);
     }
 }
