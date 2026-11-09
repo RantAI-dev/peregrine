@@ -144,6 +144,22 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- The wide Q6_K prefill kernel keeps its activations' accumulators in registers. A
+  super-block's codes are still decoded once, but they are now consumed by a group of
+  eight activations whose eight integer lane sums and eight f32 accumulators never leave
+  the registers: the old form kept a `MAX_WIDE`-long array in memory and reloaded it once
+  per block per row. The arithmetic and its order are unchanged — the same `maddubs`/`madd`
+  lane sums, the same per-block fused multiply-add, the same lane-wise float accumulation
+  and final horizontal sum — so a row's bits do not move and do not depend on the width of
+  the window it lands in. On H0 an 8192-wide row with sixteen activations went 6352 ->
+  5486 ns (20.6 -> 23.9 GMAC/s), and the width cliff above sixteen activations is gone
+  (32 activations: 17144 -> 11809 ns). Llama-3.2-1B Q4_K_M prefill at 4096 tokens on four
+  cores: 76.1 -> 82.8 tok/s (medians of five alternating rounds).
+- Prefill's remaining serial element-wise passes run in the pool. The attention output's
+  quantisation and the two residual adds were loops on the calling thread between parallel
+  regions; above one row they now go through the same row-parallel helper the norms and
+  SwiGLU use. Element-wise and row-disjoint, so the bits do not move; decode keeps the
+  serial form.
 - Prefill attention now tiles over query rows as well as positions. A prefill task
   carries tens of query rows over one KV head, all scoring the same positions, so the
   64-position tile is widened once and walked in two phases over one buffer: keys
