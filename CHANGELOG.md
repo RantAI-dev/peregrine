@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- A request body that is not valid JSON is now rejected with the OpenAI error object instead of
+  axum's plain-text rejection. The status was already 400; a client that parses `error.message` can
+  now read the reason. The compatibility suite checks the body as well as the code.
 - Small-model decode no longer runs a Q5_0 or Q8_0 row at a time. A Q5_0 row is 22 bytes
   per 32 weights and a Q8_0 row 34, so the 32-byte activation block (and, for Q5_0, its
   32-byte lane sums) is more traffic than the weights; the per-row kernel reloaded both
