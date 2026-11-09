@@ -571,11 +571,21 @@ fn rows8_prefetch() -> usize {
     }
 }
 
+/// The lookahead the multi-row PQ2_0 decode kernel uses: two streams, so a page-size
+/// hint (`PEREGRINE_PF`'s 1 KB default is tuned for the single-stream row kernels and
+/// is too short here). `PEREGRINE_PF=0` still turns prefetching off.
+pub(crate) fn pq2_rows_prefetch() -> usize {
+    match prefetch_distance() {
+        0 => 0,
+        pf => pf.max(2048),
+    }
+}
+
 /// Hint `lines` cache lines starting `pf` bytes past `p`. A prefetch never faults, so
 /// running past the end of the tensor is harmless; `wrapping_add` keeps the pointer
 /// arithmetic defined there.
 #[inline(always)]
-unsafe fn prefetch_ahead(p: *const u8, pf: usize, lines: usize) {
+pub(crate) unsafe fn prefetch_ahead(p: *const u8, pf: usize, lines: usize) {
     if pf == 0 {
         return;
     }

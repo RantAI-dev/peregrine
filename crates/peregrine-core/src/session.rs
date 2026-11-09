@@ -888,6 +888,22 @@ impl Session {
     /// measures the path the server runs, not a copy of it that only the
     /// benchmark walks. The conversation is left as it was: the measurement runs
     /// on a cache of its own.
+    ///
+    /// With MTP on (`set_mtp`) a decode step may emit several tokens; the report
+    /// counts emitted tokens, not steps.
+    pub fn set_mtp(&mut self, on: bool) {
+        if on {
+            self.engine.enable_mtp();
+        } else {
+            self.engine.disable_mtp();
+        }
+    }
+
+    /// Whether this session's engine is speculating with the model's MTP block.
+    pub fn speculates(&self) -> bool {
+        self.engine.speculates()
+    }
+
     pub fn bench(
         &mut self,
         prompt_tokens: usize,
@@ -952,6 +968,7 @@ impl Session {
         };
 
         let mut decode_steps = 0usize;
+        let mut emitted_tokens = 0usize;
         let mut prefilled = 0usize;
         let mut prefill_s = 0.0;
         let mut total_bytes_weights = 0u64;
@@ -990,10 +1007,13 @@ impl Session {
                 prof_acc[i] += prof_now[i].saturating_sub(prof_mark[i]);
             }
             decode_steps += 1;
+            // A speculative step emits the accepted drafts and its own token. Counting
+            // steps would call an MTP run half as fast as it is.
+            emitted_tokens += rep.tokens.max(ems.len()).max(1);
             total_bytes_weights += rep.stats.bytes_weights;
             total_bytes_kv += rep.stats.bytes_kv;
             decode_bytes_acts += rep.stats.bytes_acts;
-            if decode_steps >= decode_tokens {
+            if emitted_tokens >= decode_tokens {
                 break;
             }
         }
@@ -1016,13 +1036,13 @@ impl Session {
         } else {
             0.0
         };
-        let decode_tok_s = if decode_s > 0.0 {
-            decode_tokens as f64 / decode_s
+        let decode_tok_s = if decode_s > 0.0 && emitted_tokens > 0 {
+            emitted_tokens as f64 / decode_s
         } else {
             0.0
         };
-        let bytes_per_token = if decode_tokens > 0 {
-            (total_bytes_weights + total_bytes_kv) as f64 / decode_tokens as f64
+        let bytes_per_token = if emitted_tokens > 0 {
+            (total_bytes_weights + total_bytes_kv) as f64 / emitted_tokens as f64
         } else {
             0.0
         };
@@ -1031,7 +1051,7 @@ impl Session {
             let names = crate::prof::names();
             let wall_us = decode_s * 1e6 / decode_steps as f64;
             eprintln!(
-                "peregrine profile: {decode_steps} decode steps, mean µs/token (wall {wall_us:.1})"
+                "peregrine profile: {decode_steps} decode steps, {emitted_tokens} tokens, mean µs/step (wall {wall_us:.1})"
             );
             // The detail timers are added up across the pool's workers, so a full-machine
             // figure (comparable to the wall) is that sum over the decode pool's width.
@@ -1064,7 +1084,7 @@ impl Session {
         }
         Ok(BenchReport {
             prompt_tokens: ptoks.len(),
-            decode_tokens,
+            decode_tokens: emitted_tokens,
             prefill_s,
             decode_s,
             prefill_tok_s,

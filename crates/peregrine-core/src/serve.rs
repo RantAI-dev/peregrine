@@ -548,6 +548,16 @@ impl Engine {
         self.stop_speculation();
     }
 
+    /// Turn MTP speculation back on when this engine was built able to run it
+    /// (`peregrine bench --mtp`). Does nothing when the model has no MTP block,
+    /// the build has no `mtp` feature, or the state was allocated without the
+    /// second logit row a verify pass needs.
+    pub fn enable_mtp(&mut self) {
+        if cfg!(feature = "mtp") && self.model.has_mtp() && mixed() && self.max_logit_rows >= 2 {
+            self.mtp_available = true;
+        }
+    }
+
     pub fn max_slots(&self) -> usize {
         self.max_slots
     }
