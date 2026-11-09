@@ -144,6 +144,37 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- The repacked Q4_K prefill kernel takes eight activation rows per weight decode, and a
+  sixteen-row prompt chunk shares one scale/min/code unpack between its two groups. The old
+  kernel decoded a tile's scales, its mins and its sixteen windows once per group of four
+  activations, so a 16-row chunk decoded every tile four times; the per-row arithmetic is
+  untouched (the same `vpmaddubsw` pairs, the same int32 sum and float fold in the same order),
+  so a row's bits do not move and the GEMV still agrees with the GEMM bit for bit. The
+  sixteen-row block predecodes the super-block's window codes once and hands them to both
+  groups, and the min term is one `vpmaddwd` per sub-block per row. On H0 (Xeon E5-2680 v4,
+  AVX2) a 2048-wide row streamed from memory with sixteen activations went 32.4 -> 40.1 GMAC/s
+  (33.1 -> 45.7 with the tile in L2); four pinned cores, on top of the Q6_K and attention
+  changes already merged: Llama-3.2-1B Q4_K_M prefill 512 tokens 110.2 -> 120.1 tok/s and
+  4096 83.2 -> 89.6, Qwen2.5-0.5B 232.4 -> 235.7 and 156.0 -> 161.5 (medians of five
+  alternating rounds; Qwen is mostly Q5_0 and Q8_0, so little of it is this kernel). Decode is
+  untouched: the GEMV is arithmetically the same and still agrees with the GEMM bit for bit.
+  The prefill chunk is unchanged.
+- The wide Q6_K prefill kernel keeps its activations' accumulators in registers. A
+  super-block's codes are still decoded once, but they are now consumed by a group of
+  eight activations whose eight integer lane sums and eight f32 accumulators never leave
+  the registers: the old form kept a `MAX_WIDE`-long array in memory and reloaded it once
+  per block per row. The arithmetic and its order are unchanged — the same `maddubs`/`madd`
+  lane sums, the same per-block fused multiply-add, the same lane-wise float accumulation
+  and final horizontal sum — so a row's bits do not move and do not depend on the width of
+  the window it lands in. On H0 an 8192-wide row with sixteen activations went 6352 ->
+  5486 ns (20.6 -> 23.9 GMAC/s), and the width cliff above sixteen activations is gone
+  (32 activations: 17144 -> 11809 ns). Llama-3.2-1B Q4_K_M prefill at 4096 tokens on four
+  cores: 76.1 -> 82.8 tok/s (medians of five alternating rounds).
+- Prefill's remaining serial element-wise passes run in the pool. The attention output's
+  quantisation and the two residual adds were loops on the calling thread between parallel
+  regions; above one row they now go through the same row-parallel helper the norms and
+  SwiGLU use. Element-wise and row-disjoint, so the bits do not move; decode keeps the
+  serial form.
 - Prefill attention now tiles over query rows as well as positions. A prefill task
   carries tens of query rows over one KV head, all scoring the same positions, so the
   64-position tile is widened once and walked in two phases over one buffer: keys
