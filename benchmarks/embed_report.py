@@ -22,9 +22,9 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 CELL_ORDER = [
-    ("L16", 1), ("L16", 8), ("L16", 32), ("L16", 128),
-    ("L128", 1), ("L128", 8), ("L128", 32), ("L128", 128),
-    ("L512", 1), ("L512", 8), ("L512", 32), ("L512", 128),
+    (16, 1), (16, 8), (16, 32), (16, 128),
+    (128, 1), (128, 8), (128, 32), (128, 128),
+    (512, 1), (512, 8), (512, 32), (512, 128),
 ]
 
 
@@ -167,7 +167,7 @@ def table_throughput(models: Dict[str, Any], field: str, nd: int) -> str:
     out = []
     for model, rows in models.items():
         header = "| engine · precision | cos | " + " | ".join(
-            f"{L} b{b}" for L, b in CELL_ORDER
+            f"L{L} b{b}" for L, b in CELL_ORDER
         ) + " |"
         sep = "|" + "---|" * (len(CELL_ORDER) + 2)
         out.append(f"\n**{model}** — {field.replace('_', ' ')}\n")
@@ -233,7 +233,7 @@ def best_per_row(models: Dict[str, Any]) -> str:
                 continue
             r, c = best
             out.append(
-                f"| {model} | {L} b{b} | {engine_label(r['engine'], r['precision'])} | "
+                f"| {model} | L{L} b{b} | {engine_label(r['engine'], r['precision'])} | "
                 f"{fmt(c['texts_per_s'])} | {fmt(c['tokens_per_s'], 0)} | "
                 f"{c['rounds']} rounds |"
             )

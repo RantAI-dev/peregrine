@@ -1,0 +1,2937 @@
+{
+ "results_dir": "benchmarks/results/bluefin-embed-2026-11-10",
+ "models": {
+  "minilm": [
+   {
+    "engine": "fastembed",
+    "precision": "fp32",
+    "rounds": 1,
+    "row": {
+     "engine": "fastembed",
+     "precision": "fp32",
+     "path": "/var/home/shiro/models/embed/prepared/minilm-onnx-fp32",
+     "sha256": "",
+     "size_bytes": 0,
+     "notes": "onnx/model.onnx fp32 from the sentence-transformers repo"
+    },
+    "model": {
+     "name": "minilm",
+     "hf": "sentence-transformers/all-MiniLM-L6-v2",
+     "pooling": "mean",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "minilm/ref"
+    },
+    "engine_info": {
+     "name": "fastembed",
+     "version": "0.9.1",
+     "runtime": "onnxruntime",
+     "venv": "/var/tmp/embed-venv",
+     "python": "/var/tmp/embed-venv/bin/python"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/embed-venv/bin/python",
+      "/var/tmp/wt-s4-2/benchmarks/engines/servers/fastembed_server.py",
+      "--model-name",
+      "sentence-transformers/all-MiniLM-L6-v2",
+      "--model-path",
+      "/var/home/shiro/models/embed/prepared/minilm-onnx-fp32",
+      "--port",
+      "8435",
+      "--threads",
+      "4"
+     ],
+     "pooling": "mean",
+     "threads": 4
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/minilm.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       0.32763671875,
+       1.2451171875,
+       2.4970703125
+      ],
+      "mem_available_gb": 6.28,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.96
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       2.021484375,
+       1.572265625,
+       2.5673828125
+      ],
+      "mem_available_gb": 1.15,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.67
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 239.744,
+      "texts_per_s_spread": [
+       239.744,
+       239.744
+      ],
+      "tokens_per_s": 3835.9,
+      "tokens_per_s_spread": [
+       3835.9,
+       3835.9
+      ],
+      "p50_s": 0.003898,
+      "p50_s_spread": [
+       0.003898,
+       0.003898
+      ],
+      "p99_s": 0.004746,
+      "p99_s_spread": [
+       0.004746,
+       0.004746
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 500.859,
+      "texts_per_s_spread": [
+       500.859,
+       500.859
+      ],
+      "tokens_per_s": 8013.7,
+      "tokens_per_s_spread": [
+       8013.7,
+       8013.7
+      ],
+      "p50_s": 0.01364,
+      "p50_s_spread": [
+       0.01364,
+       0.01364
+      ],
+      "p99_s": 0.020006,
+      "p99_s_spread": [
+       0.020006,
+       0.020006
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 643.066,
+      "texts_per_s_spread": [
+       643.066,
+       643.066
+      ],
+      "tokens_per_s": 10289.1,
+      "tokens_per_s_spread": [
+       10289.1,
+       10289.1
+      ],
+      "p50_s": 0.046037,
+      "p50_s_spread": [
+       0.046037,
+       0.046037
+      ],
+      "p99_s": 0.056107,
+      "p99_s_spread": [
+       0.056107,
+       0.056107
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 606.519,
+      "texts_per_s_spread": [
+       606.519,
+       606.519
+      ],
+      "tokens_per_s": 9704.3,
+      "tokens_per_s_spread": [
+       9704.3,
+       9704.3
+      ],
+      "p50_s": 0.211505,
+      "p50_s_spread": [
+       0.211505,
+       0.211505
+      ],
+      "p99_s": 0.211602,
+      "p99_s_spread": [
+       0.211602,
+       0.211602
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 82.05,
+      "texts_per_s_spread": [
+       82.05,
+       82.05
+      ],
+      "tokens_per_s": 10502.4,
+      "tokens_per_s_spread": [
+       10502.4,
+       10502.4
+      ],
+      "p50_s": 0.011553,
+      "p50_s_spread": [
+       0.011553,
+       0.011553
+      ],
+      "p99_s": 0.017762,
+      "p99_s_spread": [
+       0.017762,
+       0.017762
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 79.37,
+      "texts_per_s_spread": [
+       79.37,
+       79.37
+      ],
+      "tokens_per_s": 10159.3,
+      "tokens_per_s_spread": [
+       10159.3,
+       10159.3
+      ],
+      "p50_s": 0.102276,
+      "p50_s_spread": [
+       0.102276,
+       0.102276
+      ],
+      "p99_s": 0.102302,
+      "p99_s_spread": [
+       0.102302,
+       0.102302
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 75.825,
+      "texts_per_s_spread": [
+       75.825,
+       75.825
+      ],
+      "tokens_per_s": 9705.6,
+      "tokens_per_s_spread": [
+       9705.6,
+       9705.6
+      ],
+      "p50_s": 0.422956,
+      "p50_s_spread": [
+       0.422956,
+       0.422956
+      ],
+      "p99_s": 0.424298,
+      "p99_s_spread": [
+       0.424298,
+       0.424298
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 75.999,
+      "texts_per_s_spread": [
+       75.999,
+       75.999
+      ],
+      "tokens_per_s": 9727.9,
+      "tokens_per_s_spread": [
+       9727.9,
+       9727.9
+      ],
+      "p50_s": 1.683648,
+      "p50_s_spread": [
+       1.683648,
+       1.683648
+      ],
+      "p99_s": 1.692086,
+      "p99_s_spread": [
+       1.692086,
+       1.692086
+      ],
+      "rounds": 1,
+      "requests": [
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 15.719,
+      "texts_per_s_spread": [
+       15.719,
+       15.719
+      ],
+      "tokens_per_s": 8040.3,
+      "tokens_per_s_spread": [
+       8040.3,
+       8040.3
+      ],
+      "p50_s": 0.063352,
+      "p50_s_spread": [
+       0.063352,
+       0.063352
+      ],
+      "p99_s": 0.06517,
+      "p99_s_spread": [
+       0.06517,
+       0.06517
+      ],
+      "rounds": 1,
+      "requests": [
+       32
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 13.914,
+      "texts_per_s_spread": [
+       13.914,
+       13.914
+      ],
+      "tokens_per_s": 7118.2,
+      "tokens_per_s_spread": [
+       7118.2,
+       7118.2
+      ],
+      "p50_s": 0.573661,
+      "p50_s_spread": [
+       0.573661,
+       0.573661
+      ],
+      "p99_s": 0.579487,
+      "p99_s_spread": [
+       0.579487,
+       0.579487
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 13.518,
+      "texts_per_s_spread": [
+       13.518,
+       13.518
+      ],
+      "tokens_per_s": 6914.5,
+      "tokens_per_s_spread": [
+       6914.5,
+       6914.5
+      ],
+      "p50_s": 2.366873,
+      "p50_s_spread": [
+       2.366873,
+       2.366873
+      ],
+      "p99_s": 2.366873,
+      "p99_s_spread": [
+       2.366873,
+       2.366873
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 12.551,
+      "texts_per_s_spread": [
+       12.551,
+       12.551
+      ],
+      "tokens_per_s": 6420.6,
+      "tokens_per_s_spread": [
+       6420.6,
+       6420.6
+      ],
+      "p50_s": 10.198121,
+      "p50_s_spread": [
+       10.198121,
+       10.198121
+      ],
+      "p99_s": 10.198121,
+      "p99_s_spread": [
+       10.198121,
+       10.198121
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 255.842,
+      "texts_per_s_spread": [
+       255.842,
+       255.842
+      ],
+      "tokens_per_s": 4093.5,
+      "tokens_per_s_spread": [
+       4093.5,
+       4093.5
+      ],
+      "p50_s": 0.021177,
+      "p50_s_spread": [
+       0.021177,
+       0.021177
+      ],
+      "p99_s": 0.040125,
+      "p99_s_spread": [
+       0.040125,
+       0.040125
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 1.0,
+     "cosine_min": 1.0,
+     "cosine_p1": 1.0,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "fastembed",
+    "precision": "int8",
+    "rounds": 1,
+    "row": {
+     "engine": "fastembed",
+     "precision": "int8",
+     "path": "/var/home/shiro/models/embed/prepared/minilm-onnx-int8",
+     "sha256": "",
+     "size_bytes": 0,
+     "notes": "onnx/model_quint8_avx2.onnx from the sentence-transformers repo"
+    },
+    "model": {
+     "name": "minilm",
+     "hf": "sentence-transformers/all-MiniLM-L6-v2",
+     "pooling": "mean",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "minilm/ref"
+    },
+    "engine_info": {
+     "name": "fastembed",
+     "version": "0.9.1",
+     "runtime": "onnxruntime",
+     "venv": "/var/tmp/embed-venv",
+     "python": "/var/tmp/embed-venv/bin/python"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/embed-venv/bin/python",
+      "/var/tmp/wt-s4-2/benchmarks/engines/servers/fastembed_server.py",
+      "--model-name",
+      "sentence-transformers/all-MiniLM-L6-v2",
+      "--model-path",
+      "/var/home/shiro/models/embed/prepared/minilm-onnx-int8",
+      "--port",
+      "8407",
+      "--threads",
+      "4"
+     ],
+     "pooling": "mean",
+     "threads": 4
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/minilm.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       2.021484375,
+       1.572265625,
+       2.5673828125
+      ],
+      "mem_available_gb": 6.55,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.67
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       2.69775390625,
+       1.7685546875,
+       2.6064453125
+      ],
+      "mem_available_gb": 1.13,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.64
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 267.219,
+      "texts_per_s_spread": [
+       267.219,
+       267.219
+      ],
+      "tokens_per_s": 4275.5,
+      "tokens_per_s_spread": [
+       4275.5,
+       4275.5
+      ],
+      "p50_s": 0.003309,
+      "p50_s_spread": [
+       0.003309,
+       0.003309
+      ],
+      "p99_s": 0.004366,
+      "p99_s_spread": [
+       0.004366,
+       0.004366
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 448.089,
+      "texts_per_s_spread": [
+       448.089,
+       448.089
+      ],
+      "tokens_per_s": 7169.4,
+      "tokens_per_s_spread": [
+       7169.4,
+       7169.4
+      ],
+      "p50_s": 0.019733,
+      "p50_s_spread": [
+       0.019733,
+       0.019733
+      ],
+      "p99_s": 0.020081,
+      "p99_s_spread": [
+       0.020081,
+       0.020081
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 650.865,
+      "texts_per_s_spread": [
+       650.865,
+       650.865
+      ],
+      "tokens_per_s": 10413.8,
+      "tokens_per_s_spread": [
+       10413.8,
+       10413.8
+      ],
+      "p50_s": 0.044284,
+      "p50_s_spread": [
+       0.044284,
+       0.044284
+      ],
+      "p99_s": 0.058035,
+      "p99_s_spread": [
+       0.058035,
+       0.058035
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 644.92,
+      "texts_per_s_spread": [
+       644.92,
+       644.92
+      ],
+      "tokens_per_s": 10318.7,
+      "tokens_per_s_spread": [
+       10318.7,
+       10318.7
+      ],
+      "p50_s": 0.195265,
+      "p50_s_spread": [
+       0.195265,
+       0.195265
+      ],
+      "p99_s": 0.211371,
+      "p99_s_spread": [
+       0.211371,
+       0.211371
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 87.574,
+      "texts_per_s_spread": [
+       87.574,
+       87.574
+      ],
+      "tokens_per_s": 11209.5,
+      "tokens_per_s_spread": [
+       11209.5,
+       11209.5
+      ],
+      "p50_s": 0.011312,
+      "p50_s_spread": [
+       0.011312,
+       0.011312
+      ],
+      "p99_s": 0.012181,
+      "p99_s_spread": [
+       0.012181,
+       0.012181
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 90.78,
+      "texts_per_s_spread": [
+       90.78,
+       90.78
+      ],
+      "tokens_per_s": 11619.8,
+      "tokens_per_s_spread": [
+       11619.8,
+       11619.8
+      ],
+      "p50_s": 0.085288,
+      "p50_s_spread": [
+       0.085288,
+       0.085288
+      ],
+      "p99_s": 0.093828,
+      "p99_s_spread": [
+       0.093828,
+       0.093828
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 84.368,
+      "texts_per_s_spread": [
+       84.368,
+       84.368
+      ],
+      "tokens_per_s": 10799.2,
+      "tokens_per_s_spread": [
+       10799.2,
+       10799.2
+      ],
+      "p50_s": 0.377985,
+      "p50_s_spread": [
+       0.377985,
+       0.377985
+      ],
+      "p99_s": 0.386937,
+      "p99_s_spread": [
+       0.386937,
+       0.386937
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 81.483,
+      "texts_per_s_spread": [
+       81.483,
+       81.483
+      ],
+      "tokens_per_s": 10429.8,
+      "tokens_per_s_spread": [
+       10429.8,
+       10429.8
+      ],
+      "p50_s": 1.570255,
+      "p50_s_spread": [
+       1.570255,
+       1.570255
+      ],
+      "p99_s": 1.625801,
+      "p99_s_spread": [
+       1.625801,
+       1.625801
+      ],
+      "rounds": 1,
+      "requests": [
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 14.821,
+      "texts_per_s_spread": [
+       14.821,
+       14.821
+      ],
+      "tokens_per_s": 7581.4,
+      "tokens_per_s_spread": [
+       7581.4,
+       7581.4
+      ],
+      "p50_s": 0.067363,
+      "p50_s_spread": [
+       0.067363,
+       0.067363
+      ],
+      "p99_s": 0.068481,
+      "p99_s_spread": [
+       0.068481,
+       0.068481
+      ],
+      "rounds": 1,
+      "requests": [
+       30
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 13.919,
+      "texts_per_s_spread": [
+       13.919,
+       13.919
+      ],
+      "tokens_per_s": 7120.8,
+      "tokens_per_s_spread": [
+       7120.8,
+       7120.8
+      ],
+      "p50_s": 0.576813,
+      "p50_s_spread": [
+       0.576813,
+       0.576813
+      ],
+      "p99_s": 0.578032,
+      "p99_s_spread": [
+       0.578032,
+       0.578032
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 13.517,
+      "texts_per_s_spread": [
+       13.517,
+       13.517
+      ],
+      "tokens_per_s": 6914.1,
+      "tokens_per_s_spread": [
+       6914.1,
+       6914.1
+      ],
+      "p50_s": 2.36702,
+      "p50_s_spread": [
+       2.36702,
+       2.36702
+      ],
+      "p99_s": 2.36702,
+      "p99_s_spread": [
+       2.36702,
+       2.36702
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 13.586,
+      "texts_per_s_spread": [
+       13.586,
+       13.586
+      ],
+      "tokens_per_s": 6950.3,
+      "tokens_per_s_spread": [
+       6950.3,
+       6950.3
+      ],
+      "p50_s": 9.420806,
+      "p50_s_spread": [
+       9.420806,
+       9.420806
+      ],
+      "p99_s": 9.420806,
+      "p99_s_spread": [
+       9.420806,
+       9.420806
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 290.912,
+      "texts_per_s_spread": [
+       290.912,
+       290.912
+      ],
+      "tokens_per_s": 4654.6,
+      "tokens_per_s_spread": [
+       4654.6,
+       4654.6
+      ],
+      "p50_s": 0.019165,
+      "p50_s_spread": [
+       0.019165,
+       0.019165
+      ],
+      "p99_s": 0.036357,
+      "p99_s_spread": [
+       0.036357,
+       0.036357
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.989039,
+     "cosine_min": 0.970046,
+     "cosine_p1": 0.972254,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "llama_cpp",
+    "precision": "f16",
+    "rounds": 1,
+    "row": {
+     "engine": "llama_cpp",
+     "precision": "f16",
+     "path": "/var/home/shiro/models/embed/minilm/minilm-f16.gguf",
+     "sha256": "797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662",
+     "size_bytes": 45949216,
+     "notes": "GGUF from second-state/All-MiniLM-L6-v2-Embedding-GGUF"
+    },
+    "model": {
+     "name": "minilm",
+     "hf": "sentence-transformers/all-MiniLM-L6-v2",
+     "pooling": "mean",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "minilm/ref"
+    },
+    "engine_info": {
+     "name": "llama.cpp",
+     "version": "v0.9.0",
+     "commit": "cd959ba",
+     "repo": "https://github.com/ggml-org/llama.cpp",
+     "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+     "flash_attn": "auto",
+     "parallel_slots": 10,
+     "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/llama.cpp/build/bin/llama-server",
+      "-m",
+      "/var/home/shiro/models/embed/minilm/minilm-f16.gguf",
+      "--embedding",
+      "--pooling",
+      "mean",
+      "-t",
+      "4",
+      "-c",
+      "520",
+      "-b",
+      "1024",
+      "-ub",
+      "1024",
+      "-np",
+      "1",
+      "-fa",
+      "auto",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8440"
+     ],
+     "pooling": "mean",
+     "threads": 4,
+     "parallel": 1,
+     "ctx": 5200,
+     "batch": 1024,
+     "ubatch": 1024
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/minilm.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       0.20263671875,
+       0.6298828125,
+       3.29052734375
+      ],
+      "mem_available_gb": 6.69,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 1.24
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       1.69921875,
+       0.953125,
+       3.31396484375
+      ],
+      "mem_available_gb": 6.66,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 1.24
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 245.595,
+      "texts_per_s_spread": [
+       245.595,
+       245.595
+      ],
+      "tokens_per_s": 3929.5,
+      "tokens_per_s_spread": [
+       3929.5,
+       3929.5
+      ],
+      "p50_s": 0.003941,
+      "p50_s_spread": [
+       0.003941,
+       0.003941
+      ],
+      "p99_s": 0.004531,
+      "p99_s_spread": [
+       0.004531,
+       0.004531
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 269.292,
+      "texts_per_s_spread": [
+       269.292,
+       269.292
+      ],
+      "tokens_per_s": 4308.7,
+      "tokens_per_s_spread": [
+       4308.7,
+       4308.7
+      ],
+      "p50_s": 0.030217,
+      "p50_s_spread": [
+       0.030217,
+       0.030217
+      ],
+      "p99_s": 0.031841,
+      "p99_s_spread": [
+       0.031841,
+       0.031841
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 299.405,
+      "texts_per_s_spread": [
+       299.405,
+       299.405
+      ],
+      "tokens_per_s": 4790.5,
+      "tokens_per_s_spread": [
+       4790.5,
+       4790.5
+      ],
+      "p50_s": 0.104471,
+      "p50_s_spread": [
+       0.104471,
+       0.104471
+      ],
+      "p99_s": 0.110791,
+      "p99_s_spread": [
+       0.110791,
+       0.110791
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 310.738,
+      "texts_per_s_spread": [
+       310.738,
+       310.738
+      ],
+      "tokens_per_s": 4971.8,
+      "tokens_per_s_spread": [
+       4971.8,
+       4971.8
+      ],
+      "p50_s": 0.41095,
+      "p50_s_spread": [
+       0.41095,
+       0.41095
+      ],
+      "p99_s": 0.413125,
+      "p99_s_spread": [
+       0.413125,
+       0.413125
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 56.592,
+      "texts_per_s_spread": [
+       56.592,
+       56.592
+      ],
+      "tokens_per_s": 7243.8,
+      "tokens_per_s_spread": [
+       7243.8,
+       7243.8
+      ],
+      "p50_s": 0.017227,
+      "p50_s_spread": [
+       0.017227,
+       0.017227
+      ],
+      "p99_s": 0.022369,
+      "p99_s_spread": [
+       0.022369,
+       0.022369
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 60.293,
+      "texts_per_s_spread": [
+       60.293,
+       60.293
+      ],
+      "tokens_per_s": 7717.4,
+      "tokens_per_s_spread": [
+       7717.4,
+       7717.4
+      ],
+      "p50_s": 0.132243,
+      "p50_s_spread": [
+       0.132243,
+       0.132243
+      ],
+      "p99_s": 0.133057,
+      "p99_s_spread": [
+       0.133057,
+       0.133057
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 60.079,
+      "texts_per_s_spread": [
+       60.079,
+       60.079
+      ],
+      "tokens_per_s": 7690.1,
+      "tokens_per_s_spread": [
+       7690.1,
+       7690.1
+      ],
+      "p50_s": 0.530543,
+      "p50_s_spread": [
+       0.530543,
+       0.530543
+      ],
+      "p99_s": 0.539108,
+      "p99_s_spread": [
+       0.539108,
+       0.539108
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 60.964,
+      "texts_per_s_spread": [
+       60.964,
+       60.964
+      ],
+      "tokens_per_s": 7803.4,
+      "tokens_per_s_spread": [
+       7803.4,
+       7803.4
+      ],
+      "p50_s": 2.09874,
+      "p50_s_spread": [
+       2.09874,
+       2.09874
+      ],
+      "p99_s": 2.09874,
+      "p99_s_spread": [
+       2.09874,
+       2.09874
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 13.179,
+      "texts_per_s_spread": [
+       13.179,
+       13.179
+      ],
+      "tokens_per_s": 6741.9,
+      "tokens_per_s_spread": [
+       6741.9,
+       6741.9
+      ],
+      "p50_s": 0.075419,
+      "p50_s_spread": [
+       0.075419,
+       0.075419
+      ],
+      "p99_s": 0.077241,
+      "p99_s_spread": [
+       0.077241,
+       0.077241
+      ],
+      "rounds": 1,
+      "requests": [
+       27
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 13.269,
+      "texts_per_s_spread": [
+       13.269,
+       13.269
+      ],
+      "tokens_per_s": 6788.2,
+      "tokens_per_s_spread": [
+       6788.2,
+       6788.2
+      ],
+      "p50_s": 0.602372,
+      "p50_s_spread": [
+       0.602372,
+       0.602372
+      ],
+      "p99_s": 0.603713,
+      "p99_s_spread": [
+       0.603713,
+       0.603713
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 13.318,
+      "texts_per_s_spread": [
+       13.318,
+       13.318
+      ],
+      "tokens_per_s": 6812.4,
+      "tokens_per_s_spread": [
+       6812.4,
+       6812.4
+      ],
+      "p50_s": 2.402363,
+      "p50_s_spread": [
+       2.402363,
+       2.402363
+      ],
+      "p99_s": 2.402363,
+      "p99_s_spread": [
+       2.402363,
+       2.402363
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 13.276,
+      "texts_per_s_spread": [
+       13.276,
+       13.276
+      ],
+      "tokens_per_s": 6791.9,
+      "tokens_per_s_spread": [
+       6791.9,
+       6791.9
+      ],
+      "p50_s": 9.640258,
+      "p50_s_spread": [
+       9.640258,
+       9.640258
+      ],
+      "p99_s": 9.640258,
+      "p99_s_spread": [
+       9.640258,
+       9.640258
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 248.031,
+      "texts_per_s_spread": [
+       248.031,
+       248.031
+      ],
+      "tokens_per_s": 3968.5,
+      "tokens_per_s_spread": [
+       3968.5,
+       3968.5
+      ],
+      "p50_s": 0.022143,
+      "p50_s_spread": [
+       0.022143,
+       0.022143
+      ],
+      "p99_s": 0.039933,
+      "p99_s_spread": [
+       0.039933,
+       0.039933
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.999999,
+     "cosine_min": 0.999997,
+     "cosine_p1": 0.999998,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "llama_cpp",
+    "precision": "q8_0",
+    "rounds": 1,
+    "row": {
+     "engine": "llama_cpp",
+     "precision": "q8_0",
+     "path": "/var/home/shiro/models/embed/minilm/minilm-q8_0.gguf",
+     "sha256": "263215c3cadd6e16740741a7624ab4cbb6c8e777688bd5331ecfbf5681c2f8ed",
+     "size_bytes": 25008064,
+     "notes": "GGUF Q8_0 from second-state/All-MiniLM-L6-v2-Embedding-GGUF"
+    },
+    "model": {
+     "name": "minilm",
+     "hf": "sentence-transformers/all-MiniLM-L6-v2",
+     "pooling": "mean",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "minilm/ref"
+    },
+    "engine_info": {
+     "name": "llama.cpp",
+     "version": "v0.9.0",
+     "commit": "cd959ba",
+     "repo": "https://github.com/ggml-org/llama.cpp",
+     "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+     "flash_attn": "auto",
+     "parallel_slots": 10,
+     "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/llama.cpp/build/bin/llama-server",
+      "-m",
+      "/var/home/shiro/models/embed/minilm/minilm-q8_0.gguf",
+      "--embedding",
+      "--pooling",
+      "mean",
+      "-t",
+      "4",
+      "-c",
+      "520",
+      "-b",
+      "1024",
+      "-ub",
+      "1024",
+      "-np",
+      "1",
+      "-fa",
+      "auto",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8447"
+     ],
+     "pooling": "mean",
+     "threads": 4,
+     "parallel": 1,
+     "ctx": 5200,
+     "batch": 1024,
+     "ubatch": 1024
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/minilm.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       1.69921875,
+       0.953125,
+       3.31396484375
+      ],
+      "mem_available_gb": 6.7,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 1.24
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       2.48583984375,
+       1.19873046875,
+       3.33349609375
+      ],
+      "mem_available_gb": 6.66,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 1.24
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 244.004,
+      "texts_per_s_spread": [
+       244.004,
+       244.004
+      ],
+      "tokens_per_s": 3904.1,
+      "tokens_per_s_spread": [
+       3904.1,
+       3904.1
+      ],
+      "p50_s": 0.003473,
+      "p50_s_spread": [
+       0.003473,
+       0.003473
+      ],
+      "p99_s": 0.005128,
+      "p99_s_spread": [
+       0.005128,
+       0.005128
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 358.215,
+      "texts_per_s_spread": [
+       358.215,
+       358.215
+      ],
+      "tokens_per_s": 5731.4,
+      "tokens_per_s_spread": [
+       5731.4,
+       5731.4
+      ],
+      "p50_s": 0.02208,
+      "p50_s_spread": [
+       0.02208,
+       0.02208
+      ],
+      "p99_s": 0.022524,
+      "p99_s_spread": [
+       0.022524,
+       0.022524
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 369.512,
+      "texts_per_s_spread": [
+       369.512,
+       369.512
+      ],
+      "tokens_per_s": 5912.2,
+      "tokens_per_s_spread": [
+       5912.2,
+       5912.2
+      ],
+      "p50_s": 0.085941,
+      "p50_s_spread": [
+       0.085941,
+       0.085941
+      ],
+      "p99_s": 0.087302,
+      "p99_s_spread": [
+       0.087302,
+       0.087302
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 370.43,
+      "texts_per_s_spread": [
+       370.43,
+       370.43
+      ],
+      "tokens_per_s": 5926.9,
+      "tokens_per_s_spread": [
+       5926.9,
+       5926.9
+      ],
+      "p50_s": 0.343657,
+      "p50_s_spread": [
+       0.343657,
+       0.343657
+      ],
+      "p99_s": 0.348051,
+      "p99_s_spread": [
+       0.348051,
+       0.348051
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 66.11,
+      "texts_per_s_spread": [
+       66.11,
+       66.11
+      ],
+      "tokens_per_s": 8462.0,
+      "tokens_per_s_spread": [
+       8462.0,
+       8462.0
+      ],
+      "p50_s": 0.014986,
+      "p50_s_spread": [
+       0.014986,
+       0.014986
+      ],
+      "p99_s": 0.015902,
+      "p99_s_spread": [
+       0.015902,
+       0.015902
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 70.084,
+      "texts_per_s_spread": [
+       70.084,
+       70.084
+      ],
+      "tokens_per_s": 8970.8,
+      "tokens_per_s_spread": [
+       8970.8,
+       8970.8
+      ],
+      "p50_s": 0.113926,
+      "p50_s_spread": [
+       0.113926,
+       0.113926
+      ],
+      "p99_s": 0.114174,
+      "p99_s_spread": [
+       0.114174,
+       0.114174
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 70.407,
+      "texts_per_s_spread": [
+       70.407,
+       70.407
+      ],
+      "tokens_per_s": 9012.1,
+      "tokens_per_s_spread": [
+       9012.1,
+       9012.1
+      ],
+      "p50_s": 0.453913,
+      "p50_s_spread": [
+       0.453913,
+       0.453913
+      ],
+      "p99_s": 0.455919,
+      "p99_s_spread": [
+       0.455919,
+       0.455919
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 70.431,
+      "texts_per_s_spread": [
+       70.431,
+       70.431
+      ],
+      "tokens_per_s": 9015.1,
+      "tokens_per_s_spread": [
+       9015.1,
+       9015.1
+      ],
+      "p50_s": 1.816584,
+      "p50_s_spread": [
+       1.816584,
+       1.816584
+      ],
+      "p99_s": 1.819854,
+      "p99_s_spread": [
+       1.819854,
+       1.819854
+      ],
+      "rounds": 1,
+      "requests": [
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 14.744,
+      "texts_per_s_spread": [
+       14.744,
+       14.744
+      ],
+      "tokens_per_s": 7542.0,
+      "tokens_per_s_spread": [
+       7542.0,
+       7542.0
+      ],
+      "p50_s": 0.067446,
+      "p50_s_spread": [
+       0.067446,
+       0.067446
+      ],
+      "p99_s": 0.069545,
+      "p99_s_spread": [
+       0.069545,
+       0.069545
+      ],
+      "rounds": 1,
+      "requests": [
+       30
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 14.832,
+      "texts_per_s_spread": [
+       14.832,
+       14.832
+      ],
+      "tokens_per_s": 7588.0,
+      "tokens_per_s_spread": [
+       7588.0,
+       7588.0
+      ],
+      "p50_s": 0.539025,
+      "p50_s_spread": [
+       0.539025,
+       0.539025
+      ],
+      "p99_s": 0.540292,
+      "p99_s_spread": [
+       0.540292,
+       0.540292
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 14.859,
+      "texts_per_s_spread": [
+       14.859,
+       14.859
+      ],
+      "tokens_per_s": 7600.2,
+      "tokens_per_s_spread": [
+       7600.2,
+       7600.2
+      ],
+      "p50_s": 2.153259,
+      "p50_s_spread": [
+       2.153259,
+       2.153259
+      ],
+      "p99_s": 2.153259,
+      "p99_s_spread": [
+       2.153259,
+       2.153259
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 14.922,
+      "texts_per_s_spread": [
+       14.922,
+       14.922
+      ],
+      "tokens_per_s": 7633.9,
+      "tokens_per_s_spread": [
+       7633.9,
+       7633.9
+      ],
+      "p50_s": 8.576792,
+      "p50_s_spread": [
+       8.576792,
+       8.576792
+      ],
+      "p99_s": 8.576792,
+      "p99_s_spread": [
+       8.576792,
+       8.576792
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 358.372,
+      "texts_per_s_spread": [
+       358.372,
+       358.372
+      ],
+      "tokens_per_s": 5734.0,
+      "tokens_per_s_spread": [
+       5734.0,
+       5734.0
+      ],
+      "p50_s": 0.015331,
+      "p50_s_spread": [
+       0.015331,
+       0.015331
+      ],
+      "p99_s": 0.027273,
+      "p99_s_spread": [
+       0.027273,
+       0.027273
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.999614,
+     "cosine_min": 0.999416,
+     "cosine_p1": 0.999454,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "openvino",
+    "precision": "fp32",
+    "rounds": 1,
+    "row": {
+     "engine": "openvino",
+     "precision": "fp32",
+     "path": "/var/home/shiro/models/embed/prepared/minilm-st",
+     "sha256": "",
+     "size_bytes": 0,
+     "notes": "sentence-transformers, OpenVINO backend (exported IR)"
+    },
+    "model": {
+     "name": "minilm",
+     "hf": "sentence-transformers/all-MiniLM-L6-v2",
+     "pooling": "mean",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "minilm/ref"
+    },
+    "engine_info": {
+     "name": "sentence-transformers+openvino",
+     "version": "6.2.0",
+     "openvino": "2026.4.1",
+     "backend": "openvino",
+     "venv": "/var/tmp/embed-venv",
+     "python": "/var/tmp/embed-venv/bin/python"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/embed-venv/bin/python",
+      "/var/tmp/wt-s4-2/benchmarks/engines/servers/openvino_server.py",
+      "--model-path",
+      "/var/home/shiro/models/embed/prepared/minilm-st",
+      "--port",
+      "8409",
+      "--threads",
+      "4"
+     ],
+     "pooling": "mean",
+     "threads": 4,
+     "ov_config": {
+      "INFERENCE_NUM_THREADS": "4"
+     }
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/minilm.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       2.43603515625,
+       1.74267578125,
+       2.5888671875
+      ],
+      "mem_available_gb": 5.75,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.64
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       2.876953125,
+       1.89404296875,
+       2.61669921875
+      ],
+      "mem_available_gb": 4.16,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.64
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 201.769,
+      "texts_per_s_spread": [
+       201.769,
+       201.769
+      ],
+      "tokens_per_s": 3228.3,
+      "tokens_per_s_spread": [
+       3228.3,
+       3228.3
+      ],
+      "p50_s": 0.004903,
+      "p50_s_spread": [
+       0.004903,
+       0.004903
+      ],
+      "p99_s": 0.00521,
+      "p99_s_spread": [
+       0.00521,
+       0.00521
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 536.69,
+      "texts_per_s_spread": [
+       536.69,
+       536.69
+      ],
+      "tokens_per_s": 8587.0,
+      "tokens_per_s_spread": [
+       8587.0,
+       8587.0
+      ],
+      "p50_s": 0.014611,
+      "p50_s_spread": [
+       0.014611,
+       0.014611
+      ],
+      "p99_s": 0.015141,
+      "p99_s_spread": [
+       0.015141,
+       0.015141
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 655.501,
+      "texts_per_s_spread": [
+       655.501,
+       655.501
+      ],
+      "tokens_per_s": 10488.0,
+      "tokens_per_s_spread": [
+       10488.0,
+       10488.0
+      ],
+      "p50_s": 0.048761,
+      "p50_s_spread": [
+       0.048761,
+       0.048761
+      ],
+      "p99_s": 0.048813,
+      "p99_s_spread": [
+       0.048813,
+       0.048813
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 656.243,
+      "texts_per_s_spread": [
+       656.243,
+       656.243
+      ],
+      "tokens_per_s": 10499.9,
+      "tokens_per_s_spread": [
+       10499.9,
+       10499.9
+      ],
+      "p50_s": 0.191215,
+      "p50_s_spread": [
+       0.191215,
+       0.191215
+      ],
+      "p99_s": 0.201074,
+      "p99_s_spread": [
+       0.201074,
+       0.201074
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 78.037,
+      "texts_per_s_spread": [
+       78.037,
+       78.037
+      ],
+      "tokens_per_s": 9988.8,
+      "tokens_per_s_spread": [
+       9988.8,
+       9988.8
+      ],
+      "p50_s": 0.012726,
+      "p50_s_spread": [
+       0.012726,
+       0.012726
+      ],
+      "p99_s": 0.013254,
+      "p99_s_spread": [
+       0.013254,
+       0.013254
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 99.063,
+      "texts_per_s_spread": [
+       99.063,
+       99.063
+      ],
+      "tokens_per_s": 12680.0,
+      "tokens_per_s_spread": [
+       12680.0,
+       12680.0
+      ],
+      "p50_s": 0.080515,
+      "p50_s_spread": [
+       0.080515,
+       0.080515
+      ],
+      "p99_s": 0.081133,
+      "p99_s_spread": [
+       0.081133,
+       0.081133
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 96.275,
+      "texts_per_s_spread": [
+       96.275,
+       96.275
+      ],
+      "tokens_per_s": 12323.1,
+      "tokens_per_s_spread": [
+       12323.1,
+       12323.1
+      ],
+      "p50_s": 0.327143,
+      "p50_s_spread": [
+       0.327143,
+       0.327143
+      ],
+      "p99_s": 0.342006,
+      "p99_s_spread": [
+       0.342006,
+       0.342006
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 97.28,
+      "texts_per_s_spread": [
+       97.28,
+       97.28
+      ],
+      "tokens_per_s": 12451.9,
+      "tokens_per_s_spread": [
+       12451.9,
+       12451.9
+      ],
+      "p50_s": 1.31503,
+      "p50_s_spread": [
+       1.31503,
+       1.31503
+      ],
+      "p99_s": 1.335833,
+      "p99_s_spread": [
+       1.335833,
+       1.335833
+      ],
+      "rounds": 1,
+      "requests": [
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 20.705,
+      "texts_per_s_spread": [
+       20.705,
+       20.705
+      ],
+      "tokens_per_s": 10591.1,
+      "tokens_per_s_spread": [
+       10591.1,
+       10591.1
+      ],
+      "p50_s": 0.047869,
+      "p50_s_spread": [
+       0.047869,
+       0.047869
+      ],
+      "p99_s": 0.050743,
+      "p99_s_spread": [
+       0.050743,
+       0.050743
+      ],
+      "rounds": 1,
+      "requests": [
+       42
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 20.949,
+      "texts_per_s_spread": [
+       20.949,
+       20.949
+      ],
+      "tokens_per_s": 10717.3,
+      "tokens_per_s_spread": [
+       10717.3,
+       10717.3
+      ],
+      "p50_s": 0.381202,
+      "p50_s_spread": [
+       0.381202,
+       0.381202
+      ],
+      "p99_s": 0.382809,
+      "p99_s_spread": [
+       0.382809,
+       0.382809
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 21.199,
+      "texts_per_s_spread": [
+       21.199,
+       21.199
+      ],
+      "tokens_per_s": 10844.5,
+      "tokens_per_s_spread": [
+       10844.5,
+       10844.5
+      ],
+      "p50_s": 1.509221,
+      "p50_s_spread": [
+       1.509221,
+       1.509221
+      ],
+      "p99_s": 1.513713,
+      "p99_s_spread": [
+       1.513713,
+       1.513713
+      ],
+      "rounds": 1,
+      "requests": [
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 20.562,
+      "texts_per_s_spread": [
+       20.562,
+       20.562
+      ],
+      "tokens_per_s": 10519.2,
+      "tokens_per_s_spread": [
+       10519.2,
+       10519.2
+      ],
+      "p50_s": 6.224279,
+      "p50_s_spread": [
+       6.224279,
+       6.224279
+      ],
+      "p99_s": 6.224279,
+      "p99_s_spread": [
+       6.224279,
+       6.224279
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 232.055,
+      "texts_per_s_spread": [
+       232.055,
+       232.055
+      ],
+      "tokens_per_s": 3712.9,
+      "tokens_per_s_spread": [
+       3712.9,
+       3712.9
+      ],
+      "p50_s": 0.023706,
+      "p50_s_spread": [
+       0.023706,
+       0.023706
+      ],
+      "p99_s": 0.042541,
+      "p99_s_spread": [
+       0.042541,
+       0.042541
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 1.0,
+     "cosine_min": 1.0,
+     "cosine_p1": 1.0,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "tei",
+    "precision": "fp32",
+    "rounds": 1,
+    "row": {
+     "engine": "tei",
+     "precision": "fp32",
+     "path": "/var/home/shiro/models/embed/minilm/ref",
+     "sha256": "",
+     "size_bytes": 0,
+     "notes": "safetensors fp32, TEI CPU container (candle backend)"
+    },
+    "model": {
+     "name": "minilm",
+     "hf": "sentence-transformers/all-MiniLM-L6-v2",
+     "pooling": "mean",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "minilm/ref"
+    },
+    "engine_info": {
+     "name": "text-embeddings-inference",
+     "version": "1.9.4",
+     "image": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4",
+     "runtime": "podman",
+     "backend": "candle (CPU image; no ONNX Runtime backend in published CPU images)"
+    },
+    "start": {
+     "cmd": [
+      "podman",
+      "run",
+      "--rm",
+      "--name",
+      "pg-embed-tei",
+      "--network",
+      "host",
+      "-e",
+      "MKL_NUM_THREADS=4",
+      "-e",
+      "OMP_NUM_THREADS=4",
+      "-e",
+      "RAYON_NUM_THREADS=4",
+      "-v",
+      "/var/home/shiro/models/embed/minilm/ref:/data:ro,Z",
+      "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4",
+      "--model-id",
+      "/data",
+      "--hostname",
+      "127.0.0.1",
+      "--port",
+      "8430",
+      "--pooling",
+      "mean",
+      "--dtype",
+      "float32",
+      "--tokenization-workers",
+      "1",
+      "--max-client-batch-size",
+      "128",
+      "--max-batch-tokens",
+      "16384",
+      "--max-batch-requests",
+      "128"
+     ],
+     "pooling": "mean",
+     "threads": 4,
+     "backend": "candle",
+     "dtype": "float32",
+     "max_batch_tokens": 16384,
+     "max_batch_requests": 128
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/minilm.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       2.607421875,
+       1.24560546875,
+       3.33740234375
+      ],
+      "mem_available_gb": 6.52,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 1.24
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       4.12744140625,
+       2.0146484375,
+       3.46728515625
+      ],
+      "mem_available_gb": 6.3,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 1.24
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 153.42,
+      "texts_per_s_spread": [
+       153.42,
+       153.42
+      ],
+      "tokens_per_s": 2454.7,
+      "tokens_per_s_spread": [
+       2454.7,
+       2454.7
+      ],
+      "p50_s": 0.006121,
+      "p50_s_spread": [
+       0.006121,
+       0.006121
+      ],
+      "p99_s": 0.00771,
+      "p99_s_spread": [
+       0.00771,
+       0.00771
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 222.598,
+      "texts_per_s_spread": [
+       222.598,
+       222.598
+      ],
+      "tokens_per_s": 3561.6,
+      "tokens_per_s_spread": [
+       3561.6,
+       3561.6
+      ],
+      "p50_s": 0.035047,
+      "p50_s_spread": [
+       0.035047,
+       0.035047
+      ],
+      "p99_s": 0.038108,
+      "p99_s_spread": [
+       0.038108,
+       0.038108
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 242.997,
+      "texts_per_s_spread": [
+       242.997,
+       242.997
+      ],
+      "tokens_per_s": 3887.9,
+      "tokens_per_s_spread": [
+       3887.9,
+       3887.9
+      ],
+      "p50_s": 0.127222,
+      "p50_s_spread": [
+       0.127222,
+       0.127222
+      ],
+      "p99_s": 0.141133,
+      "p99_s_spread": [
+       0.141133,
+       0.141133
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 254.413,
+      "texts_per_s_spread": [
+       254.413,
+       254.413
+      ],
+      "tokens_per_s": 4070.6,
+      "tokens_per_s_spread": [
+       4070.6,
+       4070.6
+      ],
+      "p50_s": 0.500797,
+      "p50_s_spread": [
+       0.500797,
+       0.500797
+      ],
+      "p99_s": 0.519656,
+      "p99_s_spread": [
+       0.519656,
+       0.519656
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 35.924,
+      "texts_per_s_spread": [
+       35.924,
+       35.924
+      ],
+      "tokens_per_s": 4598.3,
+      "tokens_per_s_spread": [
+       4598.3,
+       4598.3
+      ],
+      "p50_s": 0.026815,
+      "p50_s_spread": [
+       0.026815,
+       0.026815
+      ],
+      "p99_s": 0.034141,
+      "p99_s_spread": [
+       0.034141,
+       0.034141
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 34.382,
+      "texts_per_s_spread": [
+       34.382,
+       34.382
+      ],
+      "tokens_per_s": 4400.9,
+      "tokens_per_s_spread": [
+       4400.9,
+       4400.9
+      ],
+      "p50_s": 0.231731,
+      "p50_s_spread": [
+       0.231731,
+       0.231731
+      ],
+      "p99_s": 0.247999,
+      "p99_s_spread": [
+       0.247999,
+       0.247999
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 37.746,
+      "texts_per_s_spread": [
+       37.746,
+       37.746
+      ],
+      "tokens_per_s": 4831.5,
+      "tokens_per_s_spread": [
+       4831.5,
+       4831.5
+      ],
+      "p50_s": 0.851871,
+      "p50_s_spread": [
+       0.851871,
+       0.851871
+      ],
+      "p99_s": 0.860064,
+      "p99_s_spread": [
+       0.860064,
+       0.860064
+      ],
+      "rounds": 1,
+      "requests": [
+       3
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 37.109,
+      "texts_per_s_spread": [
+       37.109,
+       37.109
+      ],
+      "tokens_per_s": 4749.9,
+      "tokens_per_s_spread": [
+       4749.9,
+       4749.9
+      ],
+      "p50_s": 3.448599,
+      "p50_s_spread": [
+       3.448599,
+       3.448599
+      ],
+      "p99_s": 3.448599,
+      "p99_s_spread": [
+       3.448599,
+       3.448599
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 4.083,
+      "texts_per_s_spread": [
+       4.083,
+       4.083
+      ],
+      "tokens_per_s": 2088.3,
+      "tokens_per_s_spread": [
+       2088.3,
+       2088.3
+      ],
+      "p50_s": 0.234983,
+      "p50_s_spread": [
+       0.234983,
+       0.234983
+      ],
+      "p99_s": 0.28062,
+      "p99_s_spread": [
+       0.28062,
+       0.28062
+      ],
+      "rounds": 1,
+      "requests": [
+       9
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 4.455,
+      "texts_per_s_spread": [
+       4.455,
+       4.455
+      ],
+      "tokens_per_s": 2278.6,
+      "tokens_per_s_spread": [
+       2278.6,
+       2278.6
+      ],
+      "p50_s": 1.795647,
+      "p50_s_spread": [
+       1.795647,
+       1.795647
+      ],
+      "p99_s": 1.907767,
+      "p99_s_spread": [
+       1.907767,
+       1.907767
+      ],
+      "rounds": 1,
+      "requests": [
+       2
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 4.059,
+      "texts_per_s_spread": [
+       4.059,
+       4.059
+      ],
+      "tokens_per_s": 2076.3,
+      "tokens_per_s_spread": [
+       2076.3,
+       2076.3
+      ],
+      "p50_s": 7.882887,
+      "p50_s_spread": [
+       7.882887,
+       7.882887
+      ],
+      "p99_s": 7.882887,
+      "p99_s_spread": [
+       7.882887,
+       7.882887
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 4.012,
+      "texts_per_s_spread": [
+       4.012,
+       4.012
+      ],
+      "tokens_per_s": 2052.5,
+      "tokens_per_s_spread": [
+       2052.5,
+       2052.5
+      ],
+      "p50_s": 31.90282,
+      "p50_s_spread": [
+       31.90282,
+       31.90282
+      ],
+      "p99_s": 31.90282,
+      "p99_s_spread": [
+       31.90282,
+       31.90282
+      ],
+      "rounds": 1,
+      "requests": [
+       1
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 204.34,
+      "texts_per_s_spread": [
+       204.34,
+       204.34
+      ],
+      "tokens_per_s": 3269.4,
+      "tokens_per_s_spread": [
+       3269.4,
+       3269.4
+      ],
+      "p50_s": 0.031189,
+      "p50_s_spread": [
+       0.031189,
+       0.031189
+      ],
+      "p99_s": 0.053217,
+      "p99_s_spread": [
+       0.053217,
+       0.053217
+      ],
+      "rounds": 1,
+      "requests": [
+       60
+      ],
+      "tokens_source": "tokenizer"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.999999,
+     "cosine_min": 0.999998,
+     "cosine_p1": 0.999998,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   }
+  ]
+ }
+}

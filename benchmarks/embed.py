@@ -18,6 +18,7 @@ Standard library only; engine dependencies live in adapters and venv servers.
 import argparse
 import concurrent.futures as futures
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -231,6 +232,24 @@ def run_cell(
     }
 
 
+def path_fingerprint(path: str) -> Dict[str, Any]:
+    """SHA-256 of the weights file, or a manifest hash for a model directory."""
+    p = Path(path)
+    if p.is_file():
+        return {"kind": "file", "sha256": compute_file_sha256(p),
+                "size_bytes": p.stat().st_size}
+    if not p.is_dir():
+        return {"kind": "missing", "sha256": "", "size_bytes": 0}
+    files = []
+    for f in sorted(p.rglob("*")):
+        if f.is_file() and f.stat().st_size > 0:
+            files.append({"name": str(f.relative_to(p)), "size": f.stat().st_size,
+                          "sha256": compute_file_sha256(f)})
+    blob = "\n".join(f"{x['name']}:{x['size']}:{x['sha256']}" for x in files)
+    return {"kind": "dir", "sha256": hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+            "size_bytes": sum(x["size"] for x in files), "files": files}
+
+
 def cell_name(length: int, batch: int, clients: int) -> str:
     return f"L{length}_b{batch}_c{clients}"
 
@@ -263,8 +282,8 @@ def run_bench(args) -> None:
         if not texts_file.exists():
             raise SystemExit(f"missing {texts_file}; run embed_texts.py first")
         tdata = json.loads(texts_file.read_text(encoding="utf-8"))
-        sha = compute_file_sha256(Path(row["path"])) if Path(row["path"]).is_file() else ""
-        size = Path(row["path"]).stat().st_size if Path(row["path"]).is_file() else 0
+        fp = path_fingerprint(row["path"])
+        sha, size = fp["sha256"], fp["size_bytes"]
 
         max_cell_s = float(
             row.get("max_cell_seconds") or model.get("max_cell_seconds") or args.max_cell_seconds
@@ -373,6 +392,7 @@ def run_bench(args) -> None:
                 "path": row["path"],
                 "sha256": sha,
                 "size_bytes": size,
+                "fingerprint": fp,
                 "notes": row.get("notes", ""),
             },
             "machine": machine,
@@ -456,8 +476,8 @@ def run_accuracy(args) -> None:
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "model": {"name": model_name, "hf": model.get("hf"), "pooling": model.get("pooling")},
             "row": {"engine": row["engine"], "precision": row["precision"],
-                    "path": row["path"], "sha256": compute_file_sha256(Path(row["path"]))
-                    if Path(row["path"]).is_file() else ""},
+                    "path": row["path"], **{k: v for k, v in path_fingerprint(row["path"]).items()
+                                            if k != "files"}},
             "reference": {"label": args.ref_label, "backend": ref.get("backend"),
                           "dim": ref.get("dim"), "count": len(ref["vectors"])},
             "engine": adapter.get_version_info(),
