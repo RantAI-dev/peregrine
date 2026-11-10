@@ -1,0 +1,16 @@
+condition=quiet model=qwen05b rounds=5 refs=2 hogs=0
+start 2026-11-09T12:42:29Z loadavg=9.53 11.06 11.98 5/1982 2712281
+quiet qwen05b r1 base secs=8 loadavg=9.82 11.08 11.97 9/1975 2712447
+quiet qwen05b r1 branch secs=8 loadavg=9.99 11.09 11.97 8/1981 2712651
+quiet qwen05b r2 branch secs=9 loadavg=9.77 11.01 11.94 6/1978 2712851
+quiet qwen05b r2 base secs=9 loadavg=9.73 10.96 11.91 6/1976 2713025
+quiet qwen05b r3 base secs=8 loadavg=9.77 10.92 11.89 4/1975 2713220
+quiet qwen05b r3 branch secs=8 loadavg=9.55 10.86 11.86 9/1984 2713405
+quiet qwen05b r4 branch secs=7 loadavg=9.69 10.85 11.85 4/1973 2713598
+quiet qwen05b r4 base secs=8 loadavg=9.47 10.78 11.82 7/1977 2713696
+quiet qwen05b r5 base secs=9 loadavg=8.94 10.63 11.76 3/1960 2713786
+quiet qwen05b r5 branch secs=8 loadavg=8.41 10.46 11.69 5/1966 2713879
+quiet qwen05b r1 spin0 secs=8 loadavg=8.22 10.38 11.66 3/1967 2713943
+quiet qwen05b r2 spin0 secs=8 loadavg=7.81 10.22 11.59 3/1962 2714016
+quiet qwen05b llama secs=22 loadavg=7.46 9.98 11.48 7/1967 2714140
+end 2026-11-09T12:44:29Z loadavg=7.46 9.98 11.48 3/1967 2714142
