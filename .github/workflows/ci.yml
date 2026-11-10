@@ -245,10 +245,23 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with: { command: check }
 
+  # The container image builds from the workspace on a native amd64 runner (Docker and BuildKit are
+  # preinstalled). Build only: nothing is pushed. Gated by a run of the image's own entrypoint, so a
+  # broken ENTRYPOINT/CMD or a binary that cannot start is a failure, not just a successful build.
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: build the image (linux/amd64, no push)
+        run: docker build --platform linux/amd64 --tag peregrine:ci .
+      - name: run the image's entrypoint
+        run: docker run --rm peregrine:ci --help
+
   # One job the branch protection rule can require, whatever the matrix becomes.
   ci-ok:
     if: always()
-    needs: [lint, test, tiers, msrv, supply-chain, compat]
+    needs: [lint, test, tiers, msrv, supply-chain, compat, docker]
     runs-on: ubuntu-24.04
     steps:
       - run: '[ "${{ contains(needs.*.result, ''failure'') || contains(needs.*.result, ''cancelled'') }}" = "false" ]'
