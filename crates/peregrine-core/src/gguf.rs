@@ -219,6 +219,8 @@ impl Gguf {
         // `PEREGRINE_HUGEPAGES=1` copies the file into anonymous memory backed by transparent huge
         // pages. A decode step streams every weight once; with 4 KB page-cache pages that is a TLB miss per 4 KB,
         // with 2 MB pages one per 2 MB. Costs one copy at load and the page cache's copy can then be dropped.
+        #[cfg(not(target_os = "linux"))]
+        let _ = read_options;
         #[cfg(target_os = "linux")]
         let (map, file) = if read_options && crate::options::get().hugepages {
             let mut anon = memmap2::MmapMut::map_anon(map.len())
