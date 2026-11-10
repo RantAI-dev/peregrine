@@ -1,6 +1,17 @@
 # S4.2 embedding baselines — generated tables
 
 
+**bge-small** — texts per s
+
+| engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| fastembed fp32 | 1.0000 | 174 | 267 | 368 | 342 | 46.95 | 48.23 | 38.76 | 38.94 | 8.20 | 7.27 | 7.17 | 6.98 |
+| fastembed int8 | 0.9796 | 206 | 310 | 383 | 389 | 47.02 | 48.36 | 46.88 | 47.15 | 8.37 | 8.32 | 8.31 | 8.47 |
+| llama.cpp f32 | 1.0000 | 150 | 313 | 321 | 331 | 42.08 | 40.76 | 40.94 | 41.08 | 9.20 | 8.34 | 8.24 | 8.31 |
+| llama.cpp q8_0 | 0.9999 | 166 | 257 | 264 | 271 | 34.75 | 31.92 | 32.29 | 32.16 | 7.47 | 6.81 | 6.71 | 6.75 |
+| OpenVINO fp32 | 1.0000 | 142 | 344 | 400 | 385 | 45.47 | 53.22 | 50.86 | 50.87 | 11.11 | 10.79 | 10.98 | 10.78 |
+| TEI fp32 | 1.0000 | 88.58 | 102 | 127 | 127 | 18.16 | 18.04 | 18.84 | 19.39 | 2.19 | 2.18 | 2.12 | 2.04 |
+
 **minilm** — texts per s
 
 | engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
@@ -12,6 +23,17 @@
 | OpenVINO fp32 | 1.0000 | 199 | 537 | 655 | 653 | 78.04 | 98.54 | 95.93 | 96.62 | 20.70 | 20.84 | 21.20 | 20.50 |
 | TEI fp32 | 1.0000 | 153 | 223 | 228 | 247 | 35.77 | 36.39 | 37.75 | 37.45 | 4.26 | 4.46 | 4.10 | 4.01 |
 
+
+**bge-small** — tokens per s
+
+| engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| fastembed fp32 | 1.0000 | 2,784 | 4,266 | 5,888 | 5,476 | 6,009 | 6,173 | 4,961 | 4,984 | 4,193 | 3,720 | 3,666 | 3,570 |
+| fastembed int8 | 0.9796 | 3,296 | 4,962 | 6,126 | 6,220 | 6,018 | 6,191 | 6,001 | 6,035 | 4,282 | 4,259 | 4,251 | 4,332 |
+| llama.cpp f32 | 1.0000 | 2,402 | 5,001 | 5,134 | 5,295 | 5,386 | 5,217 | 5,240 | 5,258 | 4,703 | 4,266 | 4,218 | 4,250 |
+| llama.cpp q8_0 | 0.9999 | 2,659 | 4,106 | 4,231 | 4,335 | 4,448 | 4,085 | 4,133 | 4,117 | 3,822 | 3,484 | 3,431 | 3,454 |
+| OpenVINO fp32 | 1.0000 | 2,275 | 5,508 | 6,398 | 6,155 | 5,820 | 6,812 | 6,510 | 6,511 | 5,681 | 5,519 | 5,616 | 5,517 |
+| TEI fp32 | 1.0000 | 1,417 | 1,636 | 2,026 | 2,028 | 2,325 | 2,309 | 2,412 | 2,481 | 1,120 | 1,116 | 1,084 | 1,043 |
 
 **minilm** — tokens per s
 
@@ -30,6 +52,12 @@
 
 | model | engine · precision | p50 1×16 (ms) | p99 1×16 (ms) | p50 10×1×16 (ms) | p99 10×1×16 (ms) |
 |---|---|---|---|---|---|
+| bge-small | fastembed fp32 | 5.6 | 6.1 | 33.0 | 63.4 |
+| bge-small | fastembed int8 | 4.5 | 6.3 | 28.5 | 55.4 |
+| bge-small | llama.cpp f32 | 6.5 | 7.9 | 32.7 | 42.0 |
+| bge-small | llama.cpp q8_0 | 5.8 | 8.5 | 38.2 | 55.5 |
+| bge-small | OpenVINO fp32 | 7.0 | 7.2 | 35.4 | 63.6 |
+| bge-small | TEI fp32 | 10.8 | 13.5 | 60.5 | 99.1 |
 | minilm | fastembed fp32 | 3.9 | 4.7 | 20.5 | 39.4 |
 | minilm | fastembed int8 | 3.3 | 4.4 | 19.3 | 36.4 |
 | minilm | llama.cpp f16 | 3.9 | 4.3 | 19.8 | 39.7 |
@@ -43,6 +71,18 @@
 
 | model | cell | best competitor | texts/s | tokens/s | worst-cell note |
 |---|---|---|---|---|---|
+| bge-small | L16 b1 | fastembed int8 | 206 | 3,296 | 3 rounds |
+| bge-small | L16 b8 | OpenVINO fp32 | 344 | 5,508 | 3 rounds |
+| bge-small | L16 b32 | OpenVINO fp32 | 400 | 6,398 | 3 rounds |
+| bge-small | L16 b128 | fastembed int8 | 389 | 6,220 | 3 rounds |
+| bge-small | L128 b1 | fastembed int8 | 47.0 | 6,018 | 3 rounds |
+| bge-small | L128 b8 | OpenVINO fp32 | 53.2 | 6,812 | 3 rounds |
+| bge-small | L128 b32 | OpenVINO fp32 | 50.9 | 6,510 | 3 rounds |
+| bge-small | L128 b128 | OpenVINO fp32 | 50.9 | 6,511 | 3 rounds |
+| bge-small | L512 b1 | OpenVINO fp32 | 11.1 | 5,681 | 3 rounds |
+| bge-small | L512 b8 | OpenVINO fp32 | 10.8 | 5,519 | 3 rounds |
+| bge-small | L512 b32 | OpenVINO fp32 | 11.0 | 5,616 | 3 rounds |
+| bge-small | L512 b128 | OpenVINO fp32 | 10.8 | 5,517 | 3 rounds |
 | minilm | L16 b1 | fastembed int8 | 267 | 4,276 | 3 rounds |
 | minilm | L16 b8 | OpenVINO fp32 | 537 | 8,586 | 3 rounds |
 | minilm | L16 b32 | OpenVINO fp32 | 655 | 10,484 | 3 rounds |

@@ -15,6 +15,10 @@ from pathlib import Path
 
 from tokenizers import Tokenizer
 
+# The OpenVINO export writes hundreds of megabytes of intermediates; /tmp is a
+# small tmpfs on this host, so put them on the real disk.
+os.environ.setdefault("TMPDIR", "/var/tmp/ov-tmp")
+Path("/var/tmp/ov-tmp").mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("MKL_NUM_THREADS", "4")
 

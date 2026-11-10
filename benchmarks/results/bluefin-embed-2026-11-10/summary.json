@@ -1,6 +1,3576 @@
 {
  "results_dir": "benchmarks/results/bluefin-embed-2026-11-10",
  "models": {
+  "bge-small": [
+   {
+    "engine": "fastembed",
+    "precision": "fp32",
+    "rounds": 3,
+    "row": {
+     "engine": "fastembed",
+     "precision": "fp32",
+     "path": "/var/home/shiro/models/embed/prepared/bge-small-onnx-fp32",
+     "sha256": "0844cd6d2b5224d7709a5c9fd76f2304aa0e9bd872e50e4a3e79973235b5a35b",
+     "size_bytes": 267131248,
+     "fingerprint": {
+      "kind": "dir",
+      "sha256": "0844cd6d2b5224d7709a5c9fd76f2304aa0e9bd872e50e4a3e79973235b5a35b",
+      "size_bytes": 267131248,
+      "files": [
+       {
+        "name": "1_Pooling/config.json",
+        "size": 190,
+        "sha256": "d1caf60c96f5fba2157c0c26b76d80818fad6cf0b8eb5e73ec372ff9818eba5c"
+       },
+       {
+        "name": "config.json",
+        "size": 683,
+        "sha256": "fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350"
+       },
+       {
+        "name": "model.onnx",
+        "size": 133093490,
+        "sha256": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35"
+       },
+       {
+        "name": "model_optimized.onnx",
+        "size": 133093490,
+        "sha256": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35"
+       },
+       {
+        "name": "special_tokens_map.json",
+        "size": 125,
+        "sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3"
+       },
+       {
+        "name": "tokenizer.json",
+        "size": 711396,
+        "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+       },
+       {
+        "name": "tokenizer_config.json",
+        "size": 366,
+        "sha256": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3"
+       },
+       {
+        "name": "vocab.txt",
+        "size": 231508,
+        "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+       }
+      ]
+     },
+     "notes": "Xenova/bge-small-en-v1.5 onnx/model.onnx fp32"
+    },
+    "model": {
+     "name": "bge-small",
+     "hf": "BAAI/bge-small-en-v1.5",
+     "pooling": "cls",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "bge-small/ref"
+    },
+    "engine_info": {
+     "name": "fastembed",
+     "version": "0.9.1",
+     "runtime": "onnxruntime",
+     "venv": "/var/tmp/embed-venv",
+     "python": "/var/tmp/embed-venv/bin/python"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/embed-venv/bin/python",
+      "/var/tmp/wt-s4-2/benchmarks/engines/servers/fastembed_server.py",
+      "--model-name",
+      "BAAI/bge-small-en-v1.5",
+      "--model-path",
+      "/var/home/shiro/models/embed/prepared/bge-small-onnx-fp32",
+      "--port",
+      "8420",
+      "--threads",
+      "4"
+     ],
+     "pooling": "cls",
+     "threads": 4
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/bge-small.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       4.25537109375,
+       3.00732421875,
+       2.505859375
+      ],
+      "mem_available_gb": 5.97,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.31
+     },
+     {
+      "loadavg": [
+       4.033203125,
+       2.8662109375,
+       2.513671875
+      ],
+      "mem_available_gb": 5.71,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     },
+     {
+      "loadavg": [
+       4.52880859375,
+       3.23974609375,
+       2.73681640625
+      ],
+      "mem_available_gb": 5.43,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.36
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       4.72900390625,
+       3.32958984375,
+       2.64208984375
+      ],
+      "mem_available_gb": 1.62,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.05
+     },
+     {
+      "loadavg": [
+       4.16552734375,
+       3.07177734375,
+       2.6015625
+      ],
+      "mem_available_gb": 1.38,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     },
+     {
+      "loadavg": [
+       4.24755859375,
+       3.34765625,
+       2.79833984375
+      ],
+      "mem_available_gb": 1.3,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.0
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 174.014,
+      "texts_per_s_spread": [
+       165.957,
+       174.541
+      ],
+      "tokens_per_s": 2784.2,
+      "tokens_per_s_spread": [
+       2655.3,
+       2792.7
+      ],
+      "p50_s": 0.005632,
+      "p50_s_spread": [
+       0.005625,
+       0.005652
+      ],
+      "p99_s": 0.006101,
+      "p99_s_spread": [
+       0.005867,
+       0.00709
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 266.635,
+      "texts_per_s_spread": [
+       261.588,
+       342.001
+      ],
+      "tokens_per_s": 4266.2,
+      "tokens_per_s_spread": [
+       4185.4,
+       5472.0
+      ],
+      "p50_s": 0.032509,
+      "p50_s_spread": [
+       0.023301,
+       0.032745
+      ],
+      "p99_s": 0.03454,
+      "p99_s_spread": [
+       0.023315,
+       0.035544
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 368.0,
+      "texts_per_s_spread": [
+       349.324,
+       406.54
+      ],
+      "tokens_per_s": 5888.0,
+      "tokens_per_s_spread": [
+       5589.2,
+       6504.6
+      ],
+      "p50_s": 0.089644,
+      "p50_s_spread": [
+       0.078474,
+       0.089964
+      ],
+      "p99_s": 0.090137,
+      "p99_s_spread": [
+       0.078679,
+       0.104192
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 342.261,
+      "texts_per_s_spread": [
+       341.58,
+       344.03
+      ],
+      "tokens_per_s": 5476.2,
+      "tokens_per_s_spread": [
+       5465.3,
+       5504.5
+      ],
+      "p50_s": 0.373741,
+      "p50_s_spread": [
+       0.369149,
+       0.37442
+      ],
+      "p99_s": 0.377296,
+      "p99_s_spread": [
+       0.376311,
+       0.377368
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 46.947,
+      "texts_per_s_spread": [
+       46.562,
+       47.529
+      ],
+      "tokens_per_s": 6009.2,
+      "tokens_per_s_spread": [
+       5959.9,
+       6083.7
+      ],
+      "p50_s": 0.020475,
+      "p50_s_spread": [
+       0.020433,
+       0.020511
+      ],
+      "p99_s": 0.032368,
+      "p99_s_spread": [
+       0.028951,
+       0.032723
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 48.225,
+      "texts_per_s_spread": [
+       45.092,
+       48.38
+      ],
+      "tokens_per_s": 6172.8,
+      "tokens_per_s_spread": [
+       5771.8,
+       6192.7
+      ],
+      "p50_s": 0.165865,
+      "p50_s_spread": [
+       0.165237,
+       0.173904
+      ],
+      "p99_s": 0.166218,
+      "p99_s_spread": [
+       0.166034,
+       0.190575
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 38.755,
+      "texts_per_s_spread": [
+       38.485,
+       39.128
+      ],
+      "tokens_per_s": 4960.7,
+      "tokens_per_s_spread": [
+       4926.1,
+       5008.4
+      ],
+      "p50_s": 0.824453,
+      "p50_s_spread": [
+       0.819784,
+       0.838739
+      ],
+      "p99_s": 0.828206,
+      "p99_s_spread": [
+       0.820202,
+       0.841136
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 38.936,
+      "texts_per_s_spread": [
+       38.929,
+       38.997
+      ],
+      "tokens_per_s": 4983.8,
+      "tokens_per_s_spread": [
+       4983.0,
+       4991.7
+      ],
+      "p50_s": 3.286618,
+      "p50_s_spread": [
+       3.281532,
+       3.286773
+      ],
+      "p99_s": 3.286618,
+      "p99_s_spread": [
+       3.281532,
+       3.286773
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 8.2,
+      "texts_per_s_spread": [
+       7.937,
+       8.291
+      ],
+      "tokens_per_s": 4193.4,
+      "tokens_per_s_spread": [
+       4059.8,
+       4239.9
+      ],
+      "p50_s": 0.12049,
+      "p50_s_spread": [
+       0.120486,
+       0.121907
+      ],
+      "p99_s": 0.122759,
+      "p99_s_spread": [
+       0.121567,
+       0.184226
+      ],
+      "rounds": 3,
+      "requests": [
+       17,
+       17,
+       16
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 7.272,
+      "texts_per_s_spread": [
+       7.232,
+       7.291
+      ],
+      "tokens_per_s": 3719.5,
+      "tokens_per_s_spread": [
+       3699.2,
+       3729.6
+      ],
+      "p50_s": 1.099987,
+      "p50_s_spread": [
+       1.096973,
+       1.105987
+      ],
+      "p99_s": 1.109688,
+      "p99_s_spread": [
+       1.102306,
+       1.112553
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       2,
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 7.167,
+      "texts_per_s_spread": [
+       7.148,
+       7.248
+      ],
+      "tokens_per_s": 3665.7,
+      "tokens_per_s_spread": [
+       3656.4,
+       3707.3
+      ],
+      "p50_s": 4.464865,
+      "p50_s_spread": [
+       4.414732,
+       4.47624
+      ],
+      "p99_s": 4.464865,
+      "p99_s_spread": [
+       4.414732,
+       4.47624
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 6.979,
+      "texts_per_s_spread": [
+       6.951,
+       7.086
+      ],
+      "tokens_per_s": 3570.2,
+      "tokens_per_s_spread": [
+       3556.1,
+       3625.2
+      ],
+      "p50_s": 18.340643,
+      "p50_s_spread": [
+       18.062381,
+       18.413347
+      ],
+      "p99_s": 18.340643,
+      "p99_s_spread": [
+       18.062381,
+       18.413347
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 165.558,
+      "texts_per_s_spread": [
+       163.467,
+       183.048
+      ],
+      "tokens_per_s": 2648.9,
+      "tokens_per_s_spread": [
+       2615.5,
+       2928.8
+      ],
+      "p50_s": 0.03295,
+      "p50_s_spread": [
+       0.03131,
+       0.033391
+      ],
+      "p99_s": 0.063388,
+      "p99_s_spread": [
+       0.056367,
+       0.064115
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 1.0,
+     "cosine_min": 1.0,
+     "cosine_p1": 1.0,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "fastembed",
+    "precision": "int8",
+    "rounds": 3,
+    "row": {
+     "engine": "fastembed",
+     "precision": "int8",
+     "path": "/var/home/shiro/models/embed/prepared/bge-small-onnx-int8",
+     "sha256": "ca228d46e54254a9b600d2c606df64d9ac3191abce354a7d7213b9c70699fd64",
+     "size_bytes": 68465930,
+     "fingerprint": {
+      "kind": "dir",
+      "sha256": "ca228d46e54254a9b600d2c606df64d9ac3191abce354a7d7213b9c70699fd64",
+      "size_bytes": 68465930,
+      "files": [
+       {
+        "name": "1_Pooling/config.json",
+        "size": 190,
+        "sha256": "d1caf60c96f5fba2157c0c26b76d80818fad6cf0b8eb5e73ec372ff9818eba5c"
+       },
+       {
+        "name": "config.json",
+        "size": 683,
+        "sha256": "fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350"
+       },
+       {
+        "name": "model.onnx",
+        "size": 33760831,
+        "sha256": "bf64d05457cb391fa88d045faf5927a15ea36d96228ddf23ea970087afdc1197"
+       },
+       {
+        "name": "model_optimized.onnx",
+        "size": 33760831,
+        "sha256": "bf64d05457cb391fa88d045faf5927a15ea36d96228ddf23ea970087afdc1197"
+       },
+       {
+        "name": "special_tokens_map.json",
+        "size": 125,
+        "sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3"
+       },
+       {
+        "name": "tokenizer.json",
+        "size": 711396,
+        "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+       },
+       {
+        "name": "tokenizer_config.json",
+        "size": 366,
+        "sha256": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3"
+       },
+       {
+        "name": "vocab.txt",
+        "size": 231508,
+        "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+       }
+      ]
+     },
+     "notes": "Xenova/bge-small-en-v1.5 onnx/model_int8.onnx"
+    },
+    "model": {
+     "name": "bge-small",
+     "hf": "BAAI/bge-small-en-v1.5",
+     "pooling": "cls",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "bge-small/ref"
+    },
+    "engine_info": {
+     "name": "fastembed",
+     "version": "0.9.1",
+     "runtime": "onnxruntime",
+     "venv": "/var/tmp/embed-venv",
+     "python": "/var/tmp/embed-venv/bin/python"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/embed-venv/bin/python",
+      "/var/tmp/wt-s4-2/benchmarks/engines/servers/fastembed_server.py",
+      "--model-name",
+      "BAAI/bge-small-en-v1.5",
+      "--model-path",
+      "/var/home/shiro/models/embed/prepared/bge-small-onnx-int8",
+      "--port",
+      "8401",
+      "--threads",
+      "4"
+     ],
+     "pooling": "cls",
+     "threads": 4
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/bge-small.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       4.72900390625,
+       3.32958984375,
+       2.64208984375
+      ],
+      "mem_available_gb": 6.42,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.06
+     },
+     {
+      "loadavg": [
+       4.16552734375,
+       3.07177734375,
+       2.6015625
+      ],
+      "mem_available_gb": 6.18,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     },
+     {
+      "loadavg": [
+       3.9873046875,
+       3.30859375,
+       2.78857421875
+      ],
+      "mem_available_gb": 6.11,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.0
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       4.44091796875,
+       3.431640625,
+       2.7060546875
+      ],
+      "mem_available_gb": 1.12,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.08
+     },
+     {
+      "loadavg": [
+       4.23779296875,
+       3.22265625,
+       2.67333984375
+      ],
+      "mem_available_gb": 0.9,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.29
+     },
+     {
+      "loadavg": [
+       4.27587890625,
+       3.474609375,
+       2.86767578125
+      ],
+      "mem_available_gb": 0.78,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.0
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 206.029,
+      "texts_per_s_spread": [
+       201.872,
+       218.15
+      ],
+      "tokens_per_s": 3296.5,
+      "tokens_per_s_spread": [
+       3230.0,
+       3490.4
+      ],
+      "p50_s": 0.004467,
+      "p50_s_spread": [
+       0.004466,
+       0.004481
+      ],
+      "p99_s": 0.006342,
+      "p99_s_spread": [
+       0.004965,
+       0.006371
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 310.111,
+      "texts_per_s_spread": [
+       260.671,
+       355.203
+      ],
+      "tokens_per_s": 4961.8,
+      "tokens_per_s_spread": [
+       4170.7,
+       5683.3
+      ],
+      "p50_s": 0.022415,
+      "p50_s_spread": [
+       0.022144,
+       0.034097
+      ],
+      "p99_s": 0.032542,
+      "p99_s_spread": [
+       0.022564,
+       0.03487
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 382.863,
+      "texts_per_s_spread": [
+       370.487,
+       406.088
+      ],
+      "tokens_per_s": 6125.8,
+      "tokens_per_s_spread": [
+       5927.8,
+       6497.4
+      ],
+      "p50_s": 0.079706,
+      "p50_s_spread": [
+       0.07849,
+       0.079985
+      ],
+      "p99_s": 0.09038,
+      "p99_s_spread": [
+       0.078807,
+       0.09798
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 388.76,
+      "texts_per_s_spread": [
+       382.686,
+       389.232
+      ],
+      "tokens_per_s": 6220.2,
+      "tokens_per_s_spread": [
+       6123.0,
+       6227.7
+      ],
+      "p50_s": 0.328913,
+      "p50_s_spread": [
+       0.32881,
+       0.329371
+      ],
+      "p99_s": 0.330717,
+      "p99_s_spread": [
+       0.329869,
+       0.347214
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 47.019,
+      "texts_per_s_spread": [
+       45.22,
+       47.674
+      ],
+      "tokens_per_s": 6018.5,
+      "tokens_per_s_spread": [
+       5788.2,
+       6102.3
+      ],
+      "p50_s": 0.02086,
+      "p50_s_spread": [
+       0.020856,
+       0.021366
+      ],
+      "p99_s": 0.028532,
+      "p99_s_spread": [
+       0.021977,
+       0.029518
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 48.364,
+      "texts_per_s_spread": [
+       48.252,
+       49.39
+      ],
+      "tokens_per_s": 6190.6,
+      "tokens_per_s_spread": [
+       6176.3,
+       6321.9
+      ],
+      "p50_s": 0.16165,
+      "p50_s_spread": [
+       0.161399,
+       0.161793
+      ],
+      "p99_s": 0.172782,
+      "p99_s_spread": [
+       0.162789,
+       0.173234
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 46.882,
+      "texts_per_s_spread": [
+       46.26,
+       46.991
+      ],
+      "tokens_per_s": 6000.9,
+      "tokens_per_s_spread": [
+       5921.2,
+       6014.8
+      ],
+      "p50_s": 0.685726,
+      "p50_s_spread": [
+       0.677766,
+       0.692345
+      ],
+      "p99_s": 0.696186,
+      "p99_s_spread": [
+       0.692887,
+       0.712906
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 47.147,
+      "texts_per_s_spread": [
+       47.13,
+       47.158
+      ],
+      "tokens_per_s": 6034.8,
+      "tokens_per_s_spread": [
+       6032.7,
+       6036.3
+      ],
+      "p50_s": 2.714193,
+      "p50_s_spread": [
+       2.713585,
+       2.714958
+      ],
+      "p99_s": 2.714193,
+      "p99_s_spread": [
+       2.713585,
+       2.714958
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 8.373,
+      "texts_per_s_spread": [
+       8.337,
+       8.377
+      ],
+      "tokens_per_s": 4281.8,
+      "tokens_per_s_spread": [
+       4263.4,
+       4284.3
+      ],
+      "p50_s": 0.119393,
+      "p50_s_spread": [
+       0.119242,
+       0.119403
+      ],
+      "p99_s": 0.120909,
+      "p99_s_spread": [
+       0.120745,
+       0.130559
+      ],
+      "rounds": 3,
+      "requests": [
+       17,
+       17,
+       17
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 8.325,
+      "texts_per_s_spread": [
+       8.319,
+       8.374
+      ],
+      "tokens_per_s": 4259.0,
+      "tokens_per_s_spread": [
+       4256.1,
+       4284.0
+      ],
+      "p50_s": 0.96017,
+      "p50_s_spread": [
+       0.953433,
+       0.962852
+      ],
+      "p99_s": 0.967567,
+      "p99_s_spread": [
+       0.963154,
+       0.968077
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 8.311,
+      "texts_per_s_spread": [
+       8.22,
+       8.314
+      ],
+      "tokens_per_s": 4251.2,
+      "tokens_per_s_spread": [
+       4204.5,
+       4252.5
+      ],
+      "p50_s": 3.849807,
+      "p50_s_spread": [
+       3.848649,
+       3.892546
+      ],
+      "p99_s": 3.849807,
+      "p99_s_spread": [
+       3.848649,
+       3.892546
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 8.467,
+      "texts_per_s_spread": [
+       8.42,
+       8.485
+      ],
+      "tokens_per_s": 4331.7,
+      "tokens_per_s_spread": [
+       4307.3,
+       4340.8
+      ],
+      "p50_s": 15.116375,
+      "p50_s_spread": [
+       15.084505,
+       15.20179
+      ],
+      "p99_s": 15.116375,
+      "p99_s_spread": [
+       15.084505,
+       15.20179
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 200.822,
+      "texts_per_s_spread": [
+       193.002,
+       219.669
+      ],
+      "tokens_per_s": 3213.2,
+      "tokens_per_s_spread": [
+       3088.0,
+       3514.7
+      ],
+      "p50_s": 0.028537,
+      "p50_s_spread": [
+       0.025247,
+       0.029168
+      ],
+      "p99_s": 0.055442,
+      "p99_s_spread": [
+       0.051109,
+       0.057737
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.979639,
+     "cosine_min": 0.960613,
+     "cosine_p1": 0.967428,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "llama_cpp",
+    "precision": "f32",
+    "rounds": 3,
+    "row": {
+     "engine": "llama_cpp",
+     "precision": "f32",
+     "path": "/var/home/shiro/models/embed/bge-small/bge-small-f32.gguf",
+     "sha256": "bf40c42ad7d89382e9ba7376d5c4b73f6b556cb541fab37aaa1da9c320149b65",
+     "size_bytes": 133609568,
+     "fingerprint": {
+      "kind": "file",
+      "sha256": "bf40c42ad7d89382e9ba7376d5c4b73f6b556cb541fab37aaa1da9c320149b65",
+      "size_bytes": 133609568
+     },
+     "notes": "GGUF F32 from CompendiumLabs/bge-small-en-v1.5-gguf"
+    },
+    "model": {
+     "name": "bge-small",
+     "hf": "BAAI/bge-small-en-v1.5",
+     "pooling": "cls",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "bge-small/ref"
+    },
+    "engine_info": {
+     "name": "llama.cpp",
+     "version": "v0.9.0",
+     "commit": "cd959ba",
+     "repo": "https://github.com/ggml-org/llama.cpp",
+     "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+     "flash_attn": "auto",
+     "parallel_slots": 10,
+     "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/llama.cpp/build/bin/llama-server",
+      "-m",
+      "/var/home/shiro/models/embed/bge-small/bge-small-f32.gguf",
+      "--embedding",
+      "--pooling",
+      "cls",
+      "-t",
+      "4",
+      "-c",
+      "5200",
+      "-b",
+      "1024",
+      "-ub",
+      "1024",
+      "-np",
+      "10",
+      "-fa",
+      "auto",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8448"
+     ],
+     "pooling": "cls",
+     "threads": 4,
+     "parallel": 10,
+     "ctx": 5200,
+     "batch": 1024,
+     "ubatch": 1024
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/bge-small.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       0.23291015625,
+       1.54736328125,
+       2.01220703125
+      ],
+      "mem_available_gb": 6.55,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.29
+     },
+     {
+      "loadavg": [
+       0.173828125,
+       1.447265625,
+       2.0654296875
+      ],
+      "mem_available_gb": 6.4,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.12
+     },
+     {
+      "loadavg": [
+       0.4814453125,
+       1.95751953125,
+       2.29052734375
+      ],
+      "mem_available_gb": 6.2,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       2.0693359375,
+       1.8564453125,
+       2.09814453125
+      ],
+      "mem_available_gb": 6.49,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.3
+     },
+     {
+      "loadavg": [
+       2.03955078125,
+       1.76904296875,
+       2.14892578125
+      ],
+      "mem_available_gb": 6.2,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     },
+     {
+      "loadavg": [
+       2.197265625,
+       2.21533203125,
+       2.36474609375
+      ],
+      "mem_available_gb": 6.16,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 150.141,
+      "texts_per_s_spread": [
+       145.047,
+       151.798
+      ],
+      "tokens_per_s": 2402.3,
+      "tokens_per_s_spread": [
+       2320.8,
+       2428.8
+      ],
+      "p50_s": 0.006488,
+      "p50_s_spread": [
+       0.006449,
+       0.006548
+      ],
+      "p99_s": 0.00786,
+      "p99_s_spread": [
+       0.007698,
+       0.007939
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 312.546,
+      "texts_per_s_spread": [
+       307.987,
+       318.415
+      ],
+      "tokens_per_s": 5000.7,
+      "tokens_per_s_spread": [
+       4927.8,
+       5094.6
+      ],
+      "p50_s": 0.025587,
+      "p50_s_spread": [
+       0.024983,
+       0.025653
+      ],
+      "p99_s": 0.025961,
+      "p99_s_spread": [
+       0.025168,
+       0.026555
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 320.897,
+      "texts_per_s_spread": [
+       320.576,
+       320.931
+      ],
+      "tokens_per_s": 5134.4,
+      "tokens_per_s_spread": [
+       5129.2,
+       5134.9
+      ],
+      "p50_s": 0.099798,
+      "p50_s_spread": [
+       0.099796,
+       0.099951
+      ],
+      "p99_s": 0.100054,
+      "p99_s_spread": [
+       0.099963,
+       0.10006
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 330.93,
+      "texts_per_s_spread": [
+       330.249,
+       332.656
+      ],
+      "tokens_per_s": 5294.9,
+      "tokens_per_s_spread": [
+       5284.0,
+       5322.5
+      ],
+      "p50_s": 0.385923,
+      "p50_s_spread": [
+       0.38392,
+       0.387156
+      ],
+      "p99_s": 0.386814,
+      "p99_s_spread": [
+       0.384897,
+       0.391246
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 42.075,
+      "texts_per_s_spread": [
+       41.501,
+       42.522
+      ],
+      "tokens_per_s": 5385.6,
+      "tokens_per_s_spread": [
+       5312.1,
+       5442.9
+      ],
+      "p50_s": 0.023461,
+      "p50_s_spread": [
+       0.023423,
+       0.023486
+      ],
+      "p99_s": 0.028416,
+      "p99_s_spread": [
+       0.023854,
+       0.030049
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 40.761,
+      "texts_per_s_spread": [
+       38.357,
+       40.842
+      ],
+      "tokens_per_s": 5217.4,
+      "tokens_per_s_spread": [
+       4909.7,
+       5227.8
+      ],
+      "p50_s": 0.196674,
+      "p50_s_spread": [
+       0.195158,
+       0.211444
+      ],
+      "p99_s": 0.197395,
+      "p99_s_spread": [
+       0.197073,
+       0.218926
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 40.935,
+      "texts_per_s_spread": [
+       38.575,
+       41.028
+      ],
+      "tokens_per_s": 5239.7,
+      "tokens_per_s_spread": [
+       4937.6,
+       5251.6
+      ],
+      "p50_s": 0.780681,
+      "p50_s_spread": [
+       0.779287,
+       0.813831
+      ],
+      "p99_s": 0.78536,
+      "p99_s_spread": [
+       0.782418,
+       0.893907
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 41.08,
+      "texts_per_s_spread": [
+       40.845,
+       41.166
+      ],
+      "tokens_per_s": 5258.2,
+      "tokens_per_s_spread": [
+       5228.2,
+       5269.2
+      ],
+      "p50_s": 3.114972,
+      "p50_s_spread": [
+       3.108474,
+       3.132878
+      ],
+      "p99_s": 3.114972,
+      "p99_s_spread": [
+       3.108474,
+       3.132878
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 9.196,
+      "texts_per_s_spread": [
+       9.191,
+       9.229
+      ],
+      "tokens_per_s": 4703.4,
+      "tokens_per_s_spread": [
+       4701.2,
+       4720.6
+      ],
+      "p50_s": 0.107411,
+      "p50_s_spread": [
+       0.10738,
+       0.107965
+      ],
+      "p99_s": 0.115366,
+      "p99_s_spread": [
+       0.11155,
+       0.117856
+      ],
+      "rounds": 3,
+      "requests": [
+       19,
+       19,
+       19
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 8.34,
+      "texts_per_s_spread": [
+       8.318,
+       8.366
+      ],
+      "tokens_per_s": 4266.5,
+      "tokens_per_s_spread": [
+       4255.2,
+       4279.7
+      ],
+      "p50_s": 0.958206,
+      "p50_s_spread": [
+       0.957725,
+       0.960953
+      ],
+      "p99_s": 0.971094,
+      "p99_s_spread": [
+       0.964969,
+       0.972096
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 8.245,
+      "texts_per_s_spread": [
+       8.197,
+       8.318
+      ],
+      "tokens_per_s": 4217.5,
+      "tokens_per_s_spread": [
+       4192.8,
+       4254.9
+      ],
+      "p50_s": 3.880606,
+      "p50_s_spread": [
+       3.846532,
+       3.903484
+      ],
+      "p99_s": 3.880606,
+      "p99_s_spread": [
+       3.846532,
+       3.903484
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 8.308,
+      "texts_per_s_spread": [
+       8.217,
+       8.322
+      ],
+      "tokens_per_s": 4250.2,
+      "tokens_per_s_spread": [
+       4203.8,
+       4257.2
+      ],
+      "p50_s": 15.405861,
+      "p50_s_spread": [
+       15.380461,
+       15.575706
+      ],
+      "p99_s": 15.405861,
+      "p99_s_spread": [
+       15.380461,
+       15.575706
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 272.632,
+      "texts_per_s_spread": [
+       264.204,
+       282.612
+      ],
+      "tokens_per_s": 4362.1,
+      "tokens_per_s_spread": [
+       4227.3,
+       4521.8
+      ],
+      "p50_s": 0.0327,
+      "p50_s_spread": [
+       0.032582,
+       0.034702
+      ],
+      "p99_s": 0.042005,
+      "p99_s_spread": [
+       0.041918,
+       0.04225
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.999999,
+     "cosine_min": 0.999997,
+     "cosine_p1": 0.999998,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "llama_cpp",
+    "precision": "q8_0",
+    "rounds": 3,
+    "row": {
+     "engine": "llama_cpp",
+     "precision": "q8_0",
+     "path": "/var/home/shiro/models/embed/bge-small/bge-small-q8_0.gguf",
+     "sha256": "ec38e8da142596baa913124ae50550de284b6916bf59577ef2f0cb9660c2f514",
+     "size_bytes": 36806944,
+     "fingerprint": {
+      "kind": "file",
+      "sha256": "ec38e8da142596baa913124ae50550de284b6916bf59577ef2f0cb9660c2f514",
+      "size_bytes": 36806944
+     },
+     "notes": "GGUF Q8_0 from CompendiumLabs/bge-small-en-v1.5-gguf"
+    },
+    "model": {
+     "name": "bge-small",
+     "hf": "BAAI/bge-small-en-v1.5",
+     "pooling": "cls",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "bge-small/ref"
+    },
+    "engine_info": {
+     "name": "llama.cpp",
+     "version": "v0.9.0",
+     "commit": "cd959ba",
+     "repo": "https://github.com/ggml-org/llama.cpp",
+     "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+     "flash_attn": "auto",
+     "parallel_slots": 10,
+     "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/llama.cpp/build/bin/llama-server",
+      "-m",
+      "/var/home/shiro/models/embed/bge-small/bge-small-q8_0.gguf",
+      "--embedding",
+      "--pooling",
+      "cls",
+      "-t",
+      "4",
+      "-c",
+      "5200",
+      "-b",
+      "1024",
+      "-ub",
+      "1024",
+      "-np",
+      "10",
+      "-fa",
+      "auto",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8433"
+     ],
+     "pooling": "cls",
+     "threads": 4,
+     "parallel": 10,
+     "ctx": 5200,
+     "batch": 1024,
+     "ubatch": 1024
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/bge-small.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       2.0693359375,
+       1.8564453125,
+       2.09814453125
+      ],
+      "mem_available_gb": 6.53,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.3
+     },
+     {
+      "loadavg": [
+       2.19677734375,
+       1.80615234375,
+       2.1591796875
+      ],
+      "mem_available_gb": 6.24,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     },
+     {
+      "loadavg": [
+       2.197265625,
+       2.21533203125,
+       2.36474609375
+      ],
+      "mem_available_gb": 6.19,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       3.22607421875,
+       2.205078125,
+       2.205078125
+      ],
+      "mem_available_gb": 6.45,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.3
+     },
+     {
+      "loadavg": [
+       3.29248046875,
+       2.1474609375,
+       2.25927734375
+      ],
+      "mem_available_gb": 6.21,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     },
+     {
+      "loadavg": [
+       3.48193359375,
+       2.58056640625,
+       2.4833984375
+      ],
+      "mem_available_gb": 6.15,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 166.164,
+      "texts_per_s_spread": [
+       166.003,
+       170.796
+      ],
+      "tokens_per_s": 2658.6,
+      "tokens_per_s_spread": [
+       2656.0,
+       2732.7
+      ],
+      "p50_s": 0.00576,
+      "p50_s_spread": [
+       0.005754,
+       0.005781
+      ],
+      "p99_s": 0.008526,
+      "p99_s_spread": [
+       0.005987,
+       0.008839
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 256.611,
+      "texts_per_s_spread": [
+       250.864,
+       259.421
+      ],
+      "tokens_per_s": 4105.8,
+      "tokens_per_s_spread": [
+       4013.8,
+       4150.7
+      ],
+      "p50_s": 0.030749,
+      "p50_s_spread": [
+       0.030606,
+       0.030842
+      ],
+      "p99_s": 0.031633,
+      "p99_s_spread": [
+       0.031091,
+       0.034007
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 264.412,
+      "texts_per_s_spread": [
+       256.736,
+       265.805
+      ],
+      "tokens_per_s": 4230.6,
+      "tokens_per_s_spread": [
+       4107.8,
+       4252.9
+      ],
+      "p50_s": 0.120641,
+      "p50_s_spread": [
+       0.11975,
+       0.12127
+      ],
+      "p99_s": 0.121749,
+      "p99_s_spread": [
+       0.12107,
+       0.133015
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 270.912,
+      "texts_per_s_spread": [
+       270.312,
+       271.566
+      ],
+      "tokens_per_s": 4334.6,
+      "tokens_per_s_spread": [
+       4325.0,
+       4345.1
+      ],
+      "p50_s": 0.472229,
+      "p50_s_spread": [
+       0.470852,
+       0.472865
+      ],
+      "p99_s": 0.47239,
+      "p99_s_spread": [
+       0.471381,
+       0.473338
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 34.746,
+      "texts_per_s_spread": [
+       34.372,
+       34.848
+      ],
+      "tokens_per_s": 4447.5,
+      "tokens_per_s_spread": [
+       4399.7,
+       4460.6
+      ],
+      "p50_s": 0.02859,
+      "p50_s_spread": [
+       0.02852,
+       0.028708
+      ],
+      "p99_s": 0.029735,
+      "p99_s_spread": [
+       0.029477,
+       0.03556
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 31.917,
+      "texts_per_s_spread": [
+       30.984,
+       32.149
+      ],
+      "tokens_per_s": 4085.4,
+      "tokens_per_s_spread": [
+       3966.0,
+       4115.1
+      ],
+      "p50_s": 0.248962,
+      "p50_s_spread": [
+       0.248887,
+       0.250605
+      ],
+      "p99_s": 0.254566,
+      "p99_s_spread": [
+       0.249213,
+       0.278204
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 32.291,
+      "texts_per_s_spread": [
+       32.132,
+       32.341
+      ],
+      "tokens_per_s": 4133.2,
+      "tokens_per_s_spread": [
+       4113.0,
+       4139.6
+      ],
+      "p50_s": 0.991413,
+      "p50_s_spread": [
+       0.988519,
+       0.995718
+      ],
+      "p99_s": 0.993907,
+      "p99_s_spread": [
+       0.992178,
+       0.997374
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 32.163,
+      "texts_per_s_spread": [
+       31.8,
+       32.201
+      ],
+      "tokens_per_s": 4116.9,
+      "tokens_per_s_spread": [
+       4070.4,
+       4121.7
+      ],
+      "p50_s": 3.978798,
+      "p50_s_spread": [
+       3.974102,
+       4.024299
+      ],
+      "p99_s": 3.978798,
+      "p99_s_spread": [
+       3.974102,
+       4.024299
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 7.473,
+      "texts_per_s_spread": [
+       7.421,
+       7.545
+      ],
+      "tokens_per_s": 3822.2,
+      "tokens_per_s_spread": [
+       3795.8,
+       3859.2
+      ],
+      "p50_s": 0.132111,
+      "p50_s_spread": [
+       0.131979,
+       0.132478
+      ],
+      "p99_s": 0.141368,
+      "p99_s_spread": [
+       0.135232,
+       0.151937
+      ],
+      "rounds": 3,
+      "requests": [
+       15,
+       15,
+       16
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 6.812,
+      "texts_per_s_spread": [
+       6.756,
+       6.829
+      ],
+      "tokens_per_s": 3484.4,
+      "tokens_per_s_spread": [
+       3455.4,
+       3493.2
+      ],
+      "p50_s": 1.174186,
+      "p50_s_spread": [
+       1.171245,
+       1.183887
+      ],
+      "p99_s": 1.188816,
+      "p99_s_spread": [
+       1.185007,
+       1.195963
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       2,
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 6.708,
+      "texts_per_s_spread": [
+       6.682,
+       6.774
+      ],
+      "tokens_per_s": 3431.0,
+      "tokens_per_s_spread": [
+       3417.6,
+       3464.7
+      ],
+      "p50_s": 4.770298,
+      "p50_s_spread": [
+       4.72386,
+       4.78894
+      ],
+      "p99_s": 4.770298,
+      "p99_s_spread": [
+       4.72386,
+       4.78894
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 6.752,
+      "texts_per_s_spread": [
+       6.746,
+       6.806
+      ],
+      "tokens_per_s": 3454.0,
+      "tokens_per_s_spread": [
+       3451.1,
+       3481.7
+      ],
+      "p50_s": 18.957248,
+      "p50_s_spread": [
+       18.806443,
+       18.973081
+      ],
+      "p99_s": 18.957248,
+      "p99_s_spread": [
+       18.806443,
+       18.973081
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 230.533,
+      "texts_per_s_spread": [
+       221.174,
+       251.094
+      ],
+      "tokens_per_s": 3688.5,
+      "tokens_per_s_spread": [
+       3538.8,
+       4017.5
+      ],
+      "p50_s": 0.038237,
+      "p50_s_spread": [
+       0.038111,
+       0.038413
+      ],
+      "p99_s": 0.055548,
+      "p99_s_spread": [
+       0.039661,
+       0.061269
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.99985,
+     "cosine_min": 0.999748,
+     "cosine_p1": 0.999768,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "openvino",
+    "precision": "fp32",
+    "rounds": 3,
+    "row": {
+     "engine": "openvino",
+     "precision": "fp32",
+     "path": "/var/home/shiro/models/embed/prepared/bge-small-st",
+     "sha256": "c79e579ea040baa66294a6a0ac4c389ea79c4528b6361281b8ca77adc363e63c",
+     "size_bytes": 134411097,
+     "fingerprint": {
+      "kind": "dir",
+      "sha256": "c79e579ea040baa66294a6a0ac4c389ea79c4528b6361281b8ca77adc363e63c",
+      "size_bytes": 134411097,
+      "files": [
+       {
+        "name": "1_Pooling/config.json",
+        "size": 190,
+        "sha256": "d1caf60c96f5fba2157c0c26b76d80818fad6cf0b8eb5e73ec372ff9818eba5c"
+       },
+       {
+        "name": "config.json",
+        "size": 683,
+        "sha256": "fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350"
+       },
+       {
+        "name": "config_sentence_transformers.json",
+        "size": 124,
+        "sha256": "940d5f50db195fa6e5e6a4f122c095f77880de259d74b14a65779ed48bdd7c56"
+       },
+       {
+        "name": "model.safetensors",
+        "size": 133466304,
+        "sha256": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad"
+       },
+       {
+        "name": "modules.json",
+        "size": 349,
+        "sha256": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf"
+       },
+       {
+        "name": "sentence_bert_config.json",
+        "size": 52,
+        "sha256": "84e39fda68ccbff05bfa723ae9c0e70e23e2ec373b76e0f8c6e71af72a693cbf"
+       },
+       {
+        "name": "special_tokens_map.json",
+        "size": 125,
+        "sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3"
+       },
+       {
+        "name": "tokenizer.json",
+        "size": 711396,
+        "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+       },
+       {
+        "name": "tokenizer_config.json",
+        "size": 366,
+        "sha256": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3"
+       },
+       {
+        "name": "vocab.txt",
+        "size": 231508,
+        "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+       }
+      ]
+     },
+     "notes": "sentence-transformers, OpenVINO backend (exported IR)"
+    },
+    "model": {
+     "name": "bge-small",
+     "hf": "BAAI/bge-small-en-v1.5",
+     "pooling": "cls",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "bge-small/ref"
+    },
+    "engine_info": {
+     "name": "sentence-transformers+openvino",
+     "version": "6.2.0",
+     "openvino": "2026.4.1",
+     "backend": "openvino",
+     "venv": "/var/tmp/embed-venv",
+     "python": "/var/tmp/embed-venv/bin/python"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/embed-venv/bin/python",
+      "/var/tmp/wt-s4-2/benchmarks/engines/servers/openvino_server.py",
+      "--model-path",
+      "/var/home/shiro/models/embed/prepared/bge-small-st",
+      "--port",
+      "8432",
+      "--threads",
+      "4"
+     ],
+     "pooling": "cls",
+     "threads": 4,
+     "ov_config": {
+      "INFERENCE_NUM_THREADS": "4"
+     }
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/bge-small.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       3.98486328125,
+       3.36767578125,
+       2.69287109375
+      ],
+      "mem_available_gb": 5.63,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.08
+     },
+     {
+      "loadavg": [
+       3.52001953125,
+       3.11279296875,
+       2.6455078125
+      ],
+      "mem_available_gb": 5.37,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.29
+     },
+     {
+      "loadavg": [
+       3.931640625,
+       3.42578125,
+       2.8583984375
+      ],
+      "mem_available_gb": 5.26,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.0
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       3.9931640625,
+       3.439453125,
+       2.7431640625
+      ],
+      "mem_available_gb": 3.91,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.09
+     },
+     {
+      "loadavg": [
+       3.71044921875,
+       3.19921875,
+       2.689453125
+      ],
+      "mem_available_gb": 3.68,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.3
+     },
+     {
+      "loadavg": [
+       3.96337890625,
+       3.49072265625,
+       2.90283203125
+      ],
+      "mem_available_gb": 3.46,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.0
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 142.207,
+      "texts_per_s_spread": [
+       140.116,
+       142.55
+      ],
+      "tokens_per_s": 2275.3,
+      "tokens_per_s_spread": [
+       2241.9,
+       2280.8
+      ],
+      "p50_s": 0.00696,
+      "p50_s_spread": [
+       0.006925,
+       0.006961
+      ],
+      "p99_s": 0.007212,
+      "p99_s_spread": [
+       0.00721,
+       0.008197
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 344.232,
+      "texts_per_s_spread": [
+       342.819,
+       345.561
+      ],
+      "tokens_per_s": 5507.7,
+      "tokens_per_s_spread": [
+       5485.1,
+       5529.0
+      ],
+      "p50_s": 0.023004,
+      "p50_s_spread": [
+       0.022997,
+       0.023222
+      ],
+      "p99_s": 0.023169,
+      "p99_s_spread": [
+       0.023095,
+       0.023231
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 399.867,
+      "texts_per_s_spread": [
+       398.968,
+       400.656
+      ],
+      "tokens_per_s": 6397.9,
+      "tokens_per_s_spread": [
+       6383.5,
+       6410.5
+      ],
+      "p50_s": 0.079927,
+      "p50_s_spread": [
+       0.079712,
+       0.07996
+      ],
+      "p99_s": 0.080032,
+      "p99_s_spread": [
+       0.080004,
+       0.080052
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 384.686,
+      "texts_per_s_spread": [
+       369.435,
+       385.524
+      ],
+      "tokens_per_s": 6155.0,
+      "tokens_per_s_spread": [
+       5911.0,
+       6168.4
+      ],
+      "p50_s": 0.330107,
+      "p50_s_spread": [
+       0.329216,
+       0.339318
+      ],
+      "p99_s": 0.336997,
+      "p99_s_spread": [
+       0.336179,
+       0.366871
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 45.47,
+      "texts_per_s_spread": [
+       45.43,
+       45.496
+      ],
+      "tokens_per_s": 5820.1,
+      "tokens_per_s_spread": [
+       5815.0,
+       5823.4
+      ],
+      "p50_s": 0.021873,
+      "p50_s_spread": [
+       0.021865,
+       0.021885
+      ],
+      "p99_s": 0.023041,
+      "p99_s_spread": [
+       0.022484,
+       0.023171
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 53.223,
+      "texts_per_s_spread": [
+       53.204,
+       53.412
+      ],
+      "tokens_per_s": 6812.5,
+      "tokens_per_s_spread": [
+       6810.2,
+       6836.7
+      ],
+      "p50_s": 0.150098,
+      "p50_s_spread": [
+       0.149322,
+       0.150126
+      ],
+      "p99_s": 0.150342,
+      "p99_s_spread": [
+       0.150211,
+       0.150576
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 50.856,
+      "texts_per_s_spread": [
+       50.818,
+       51.165
+      ],
+      "tokens_per_s": 6509.5,
+      "tokens_per_s_spread": [
+       6504.7,
+       6549.1
+      ],
+      "p50_s": 0.624576,
+      "p50_s_spread": [
+       0.622031,
+       0.624634
+      ],
+      "p99_s": 0.637943,
+      "p99_s_spread": [
+       0.632609,
+       0.639272
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 50.865,
+      "texts_per_s_spread": [
+       50.384,
+       50.949
+      ],
+      "tokens_per_s": 6510.8,
+      "tokens_per_s_spread": [
+       6449.1,
+       6521.4
+      ],
+      "p50_s": 2.515695,
+      "p50_s_spread": [
+       2.51158,
+       2.539606
+      ],
+      "p99_s": 2.515695,
+      "p99_s_spread": [
+       2.51158,
+       2.539606
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 11.105,
+      "texts_per_s_spread": [
+       11.076,
+       11.148
+      ],
+      "tokens_per_s": 5680.7,
+      "tokens_per_s_spread": [
+       5666.0,
+       5702.7
+      ],
+      "p50_s": 0.089241,
+      "p50_s_spread": [
+       0.089082,
+       0.089961
+      ],
+      "p99_s": 0.092427,
+      "p99_s_spread": [
+       0.09218,
+       0.097669
+      ],
+      "rounds": 3,
+      "requests": [
+       23,
+       23,
+       23
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 10.788,
+      "texts_per_s_spread": [
+       10.782,
+       10.811
+      ],
+      "tokens_per_s": 5518.8,
+      "tokens_per_s_spread": [
+       5515.7,
+       5530.8
+      ],
+      "p50_s": 0.73977,
+      "p50_s_spread": [
+       0.739566,
+       0.740047
+      ],
+      "p99_s": 0.745912,
+      "p99_s_spread": [
+       0.740834,
+       0.746448
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 10.98,
+      "texts_per_s_spread": [
+       10.943,
+       11.012
+      ],
+      "tokens_per_s": 5616.4,
+      "tokens_per_s_spread": [
+       5597.3,
+       5632.5
+      ],
+      "p50_s": 2.913883,
+      "p50_s_spread": [
+       2.905547,
+       2.923781
+      ],
+      "p99_s": 2.913883,
+      "p99_s_spread": [
+       2.905547,
+       2.923781
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 10.784,
+      "texts_per_s_spread": [
+       10.739,
+       10.801
+      ],
+      "tokens_per_s": 5517.1,
+      "tokens_per_s_spread": [
+       5493.8,
+       5525.6
+      ],
+      "p50_s": 11.868157,
+      "p50_s_spread": [
+       11.849924,
+       11.918485
+      ],
+      "p99_s": 11.868157,
+      "p99_s_spread": [
+       11.849924,
+       11.918485
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 155.906,
+      "texts_per_s_spread": [
+       155.794,
+       156.337
+      ],
+      "tokens_per_s": 2494.5,
+      "tokens_per_s_spread": [
+       2492.7,
+       2501.4
+      ],
+      "p50_s": 0.035375,
+      "p50_s_spread": [
+       0.035025,
+       0.035483
+      ],
+      "p99_s": 0.063581,
+      "p99_s_spread": [
+       0.063415,
+       0.063629
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 1.0,
+     "cosine_min": 1.0,
+     "cosine_p1": 1.0,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "tei",
+    "precision": "fp32",
+    "rounds": 3,
+    "row": {
+     "engine": "tei",
+     "precision": "fp32",
+     "path": "/var/home/shiro/models/embed/bge-small/ref",
+     "sha256": "c79e579ea040baa66294a6a0ac4c389ea79c4528b6361281b8ca77adc363e63c",
+     "size_bytes": 134411097,
+     "fingerprint": {
+      "kind": "dir",
+      "sha256": "c79e579ea040baa66294a6a0ac4c389ea79c4528b6361281b8ca77adc363e63c",
+      "size_bytes": 134411097,
+      "files": [
+       {
+        "name": "1_Pooling/config.json",
+        "size": 190,
+        "sha256": "d1caf60c96f5fba2157c0c26b76d80818fad6cf0b8eb5e73ec372ff9818eba5c"
+       },
+       {
+        "name": "config.json",
+        "size": 683,
+        "sha256": "fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350"
+       },
+       {
+        "name": "config_sentence_transformers.json",
+        "size": 124,
+        "sha256": "940d5f50db195fa6e5e6a4f122c095f77880de259d74b14a65779ed48bdd7c56"
+       },
+       {
+        "name": "model.safetensors",
+        "size": 133466304,
+        "sha256": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad"
+       },
+       {
+        "name": "modules.json",
+        "size": 349,
+        "sha256": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf"
+       },
+       {
+        "name": "sentence_bert_config.json",
+        "size": 52,
+        "sha256": "84e39fda68ccbff05bfa723ae9c0e70e23e2ec373b76e0f8c6e71af72a693cbf"
+       },
+       {
+        "name": "special_tokens_map.json",
+        "size": 125,
+        "sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3"
+       },
+       {
+        "name": "tokenizer.json",
+        "size": 711396,
+        "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+       },
+       {
+        "name": "tokenizer_config.json",
+        "size": 366,
+        "sha256": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3"
+       },
+       {
+        "name": "vocab.txt",
+        "size": 231508,
+        "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+       }
+      ]
+     },
+     "notes": "safetensors fp32, TEI CPU container (candle backend)"
+    },
+    "model": {
+     "name": "bge-small",
+     "hf": "BAAI/bge-small-en-v1.5",
+     "pooling": "cls",
+     "max_tokens": 512,
+     "dim": 384,
+     "tokenizer_dir": "bge-small/ref"
+    },
+    "engine_info": {
+     "name": "text-embeddings-inference",
+     "version": "1.9.4",
+     "image": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4",
+     "runtime": "podman",
+     "backend": "candle (CPU image; no ONNX Runtime backend in published CPU images)"
+    },
+    "start": {
+     "cmd": [
+      "podman",
+      "run",
+      "--rm",
+      "--name",
+      "pg-embed-tei",
+      "--network",
+      "host",
+      "-e",
+      "MKL_NUM_THREADS=4",
+      "-e",
+      "OMP_NUM_THREADS=4",
+      "-e",
+      "RAYON_NUM_THREADS=4",
+      "-v",
+      "/var/home/shiro/models/embed/bge-small/ref:/data:ro,Z",
+      "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4",
+      "--model-id",
+      "/data",
+      "--hostname",
+      "127.0.0.1",
+      "--port",
+      "8436",
+      "--pooling",
+      "cls",
+      "--dtype",
+      "float32",
+      "--tokenization-workers",
+      "1",
+      "--max-client-batch-size",
+      "128",
+      "--max-batch-tokens",
+      "16384",
+      "--max-batch-requests",
+      "128"
+     ],
+     "pooling": "cls",
+     "threads": 4,
+     "backend": "candle",
+     "dtype": "float32",
+     "max_batch_tokens": 16384,
+     "max_batch_requests": 128
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/bge-small.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       3.5283203125,
+       2.28515625,
+       2.23095703125
+      ],
+      "mem_available_gb": 6.26,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.3
+     },
+     {
+      "loadavg": [
+       3.26904296875,
+       2.16162109375,
+       2.263671875
+      ],
+      "mem_available_gb": 6.04,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     },
+     {
+      "loadavg": [
+       3.5234375,
+       2.6044921875,
+       2.49169921875
+      ],
+      "mem_available_gb": 5.94,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       4.5390625,
+       3.04150390625,
+       2.51416015625
+      ],
+      "mem_available_gb": 6.05,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.31
+     },
+     {
+      "loadavg": [
+       4.29736328125,
+       2.89794921875,
+       2.52197265625
+      ],
+      "mem_available_gb": 5.89,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.35
+     },
+     {
+      "loadavg": [
+       4.52880859375,
+       3.23974609375,
+       2.73681640625
+      ],
+      "mem_available_gb": 5.5,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.36
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 88.583,
+      "texts_per_s_spread": [
+       79.555,
+       89.385
+      ],
+      "tokens_per_s": 1417.3,
+      "tokens_per_s_spread": [
+       1272.9,
+       1430.2
+      ],
+      "p50_s": 0.010811,
+      "p50_s_spread": [
+       0.010761,
+       0.010924
+      ],
+      "p99_s": 0.013476,
+      "p99_s_spread": [
+       0.013284,
+       0.029144
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 102.237,
+      "texts_per_s_spread": [
+       97.358,
+       116.615
+      ],
+      "tokens_per_s": 1635.8,
+      "tokens_per_s_spread": [
+       1557.7,
+       1865.8
+      ],
+      "p50_s": 0.081299,
+      "p50_s_spread": [
+       0.064468,
+       0.083656
+      ],
+      "p99_s": 0.084652,
+      "p99_s_spread": [
+       0.077098,
+       0.087322
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 126.643,
+      "texts_per_s_spread": [
+       126.554,
+       134.872
+      ],
+      "tokens_per_s": 2026.3,
+      "tokens_per_s_spread": [
+       2024.9,
+       2157.9
+      ],
+      "p50_s": 0.249003,
+      "p50_s_spread": [
+       0.236638,
+       0.25441
+      ],
+      "p99_s": 0.260918,
+      "p99_s_spread": [
+       0.245357,
+       0.26215
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 126.716,
+      "texts_per_s_spread": [
+       120.528,
+       128.309
+      ],
+      "tokens_per_s": 2027.5,
+      "tokens_per_s_spread": [
+       1928.5,
+       2052.9
+      ],
+      "p50_s": 1.009416,
+      "p50_s_spread": [
+       0.952793,
+       1.061413
+      ],
+      "p99_s": 1.071626,
+      "p99_s_spread": [
+       1.021749,
+       1.093987
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       3,
+       2
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 18.161,
+      "texts_per_s_spread": [
+       17.803,
+       18.612
+      ],
+      "tokens_per_s": 2324.6,
+      "tokens_per_s_spread": [
+       2278.8,
+       2382.3
+      ],
+      "p50_s": 0.053823,
+      "p50_s_spread": [
+       0.052025,
+       0.054298
+      ],
+      "p99_s": 0.064888,
+      "p99_s_spread": [
+       0.063828,
+       0.068616
+      ],
+      "rounds": 3,
+      "requests": [
+       37,
+       38,
+       36
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 18.04,
+      "texts_per_s_spread": [
+       17.996,
+       19.021
+      ],
+      "tokens_per_s": 2309.1,
+      "tokens_per_s_spread": [
+       2303.5,
+       2434.7
+      ],
+      "p50_s": 0.444732,
+      "p50_s_spread": [
+       0.420201,
+       0.446066
+      ],
+      "p99_s": 0.471658,
+      "p99_s_spread": [
+       0.42495,
+       0.474146
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 18.845,
+      "texts_per_s_spread": [
+       18.588,
+       18.875
+      ],
+      "tokens_per_s": 2412.2,
+      "tokens_per_s_spread": [
+       2379.3,
+       2416.0
+      ],
+      "p50_s": 1.697671,
+      "p50_s_spread": [
+       1.695098,
+       1.721257
+      ],
+      "p99_s": 1.715922,
+      "p99_s_spread": [
+       1.697671,
+       1.752075
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       2,
+       1
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 19.385,
+      "texts_per_s_spread": [
+       18.836,
+       19.396
+      ],
+      "tokens_per_s": 2481.3,
+      "tokens_per_s_spread": [
+       2411.1,
+       2482.7
+      ],
+      "p50_s": 6.602234,
+      "p50_s_spread": [
+       6.598467,
+       6.794454
+      ],
+      "p99_s": 6.602234,
+      "p99_s_spread": [
+       6.598467,
+       6.794454
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 2.191,
+      "texts_per_s_spread": [
+       2.119,
+       2.195
+      ],
+      "tokens_per_s": 1119.6,
+      "tokens_per_s_spread": [
+       1082.6,
+       1121.7
+      ],
+      "p50_s": 0.457784,
+      "p50_s_spread": [
+       0.451928,
+       0.475352
+      ],
+      "p99_s": 0.473239,
+      "p99_s_spread": [
+       0.469284,
+       0.477615
+      ],
+      "rounds": 3,
+      "requests": [
+       5,
+       5,
+       5
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 2.183,
+      "texts_per_s_spread": [
+       2.114,
+       2.192
+      ],
+      "tokens_per_s": 1116.2,
+      "tokens_per_s_spread": [
+       1081.0,
+       1121.0
+      ],
+      "p50_s": 3.665,
+      "p50_s_spread": [
+       3.649035,
+       3.784317
+      ],
+      "p99_s": 3.665,
+      "p99_s_spread": [
+       3.649035,
+       3.784317
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 2.12,
+      "texts_per_s_spread": [
+       2.112,
+       2.125
+      ],
+      "tokens_per_s": 1084.4,
+      "tokens_per_s_spread": [
+       1080.1,
+       1086.9
+      ],
+      "p50_s": 15.093146,
+      "p50_s_spread": [
+       15.058701,
+       15.15412
+      ],
+      "p99_s": 15.093146,
+      "p99_s_spread": [
+       15.058701,
+       15.15412
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L512_b128_c1": {
+      "texts_per_s": 2.039,
+      "texts_per_s_spread": [
+       1.954,
+       2.053
+      ],
+      "tokens_per_s": 1043.3,
+      "tokens_per_s_spread": [
+       999.4,
+       1050.2
+      ],
+      "p50_s": 62.766097,
+      "p50_s_spread": [
+       62.349614,
+       65.519175
+      ],
+      "p99_s": 62.766097,
+      "p99_s_spread": [
+       62.349614,
+       65.519175
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "tokenizer"
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 110.062,
+      "texts_per_s_spread": [
+       109.845,
+       112.5
+      ],
+      "tokens_per_s": 1761.0,
+      "tokens_per_s_spread": [
+       1757.5,
+       1800.0
+      ],
+      "p50_s": 0.060454,
+      "p50_s_spread": [
+       0.057885,
+       0.063945
+      ],
+      "p99_s": 0.099118,
+      "p99_s_spread": [
+       0.09626,
+       0.106504
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "tokenizer"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.999999,
+     "cosine_min": 0.999997,
+     "cosine_p1": 0.999998,
+     "norm_mean": 1.0,
+     "dim": 384,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 384,
+      "count": 200
+     }
+    }
+   }
+  ],
   "minilm": [
    {
     "engine": "fastembed",
