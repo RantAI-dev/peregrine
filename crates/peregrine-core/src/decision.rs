@@ -722,38 +722,52 @@ mod tests {
 
     #[test]
     fn temperature_is_looked_up_by_bucket_then_type_then_one() {
-        for (n, bucket) in [
-            (1usize, "2"),
-            (2, "2"),
-            (3, "3_5"),
-            (5, "3_5"),
-            (6, "6_10"),
-            (10, "6_10"),
-            (11, "11"),
+        // Every bucket key is present, so the answer names the bucket the edge belongs to.
+        let all = temps(&[
+            ("choice.2", 0.2),
+            ("choice.3_5", 0.35),
+            ("choice.6_10", 0.6),
+            ("choice.11", 1.1),
+            ("choice", 9.0),
+        ]);
+        for (n, want) in [
+            (1usize, 0.2f32),
+            (2, 0.2),
+            (3, 0.35),
+            (5, 0.35),
+            (6, 0.6),
+            (10, 0.6),
+            (11, 1.1),
         ] {
             let q = question(QuestionType::Choice, n);
-            let t = temperature(
-                &DecisionType::OpenJev,
-                &q,
-                &temps(&[("choice.2", 0.5), ("choice", 0.25)]),
+            assert_eq!(
+                temperature(&DecisionType::OpenJev, &q, &all),
+                f64::from(want),
+                "{n} options"
             );
-            let want = if bucket == "2" { 0.5 } else { 0.25 };
-            assert_eq!(t, want, "{n} options: bucket {bucket}");
         }
+        // Without a bucket key the type's own key answers, and without that 1.0.
+        let q = question(QuestionType::Choice, 3);
+        assert_eq!(
+            temperature(&DecisionType::OpenJev, &q, &temps(&[("choice", 0.25)])),
+            0.25
+        );
         // Lev uses the fitted small/mid/large buckets, at the edges 8/9 and 26/27.
-        for (n, bucket) in [(8usize, "small"), (9, "mid"), (26, "mid"), (27, "large")] {
-            // A noul question: n_outputs is 9 for every lev noul, so a choice lifts the count.
+        for (n, want) in [(8usize, 0.1f32), (9, 0.2), (26, 0.2), (27, 0.3)] {
             let q = question(QuestionType::Score, n);
-            let t = temperature(
-                &DecisionType::Lev,
-                &q,
-                &temps(&[
-                    ("score.small", 0.1),
-                    ("score.mid", 0.2),
-                    ("score.large", 0.3),
-                ]),
+            assert_eq!(
+                temperature(
+                    &DecisionType::Lev,
+                    &q,
+                    &temps(&[
+                        ("score.small", 0.1),
+                        ("score.mid", 0.2),
+                        ("score.large", 0.3),
+                    ]),
+                ),
+                f64::from(want),
+                "{n} options"
             );
-            assert_eq!(t, f64::from(bucket_value(bucket)), "{n} options: {bucket}");
         }
         // Nothing configured: 1.0.
         let q = question(QuestionType::Choice, 3);
@@ -761,14 +775,6 @@ mod tests {
             temperature(&DecisionType::OpenJev, &q, &HashMap::new()),
             1.0
         );
-    }
-
-    fn bucket_value(bucket: &str) -> f32 {
-        match bucket {
-            "small" => 0.1,
-            "mid" => 0.2,
-            _ => 0.3,
-        }
     }
 
     #[test]
