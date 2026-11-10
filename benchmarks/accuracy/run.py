@@ -243,10 +243,21 @@ def cmd_run(args) -> int:
 
         done = 0
         t0 = time.monotonic()
+
+        def checkpoint():
+            # Write atomically so an interrupted run leaves a complete, resumable file.
+            written = [records[row["id"]] for row in rows if row["id"] in records]
+            path = os.path.join(out, f"{task}.jsonl")
+            tmp = path + ".tmp"
+            write_jsonl(tmp, written)
+            os.replace(tmp, path)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
             for record in pool.map(one, todo):
                 records[record["id"]] = record
                 done += 1
+                if done % 5 == 0:
+                    checkpoint()
                 if done % 25 == 0 or done == len(todo):
                     elapsed = time.monotonic() - t0
                     rate = done / elapsed if elapsed else 0
@@ -259,7 +270,7 @@ def cmd_run(args) -> int:
             raise SystemExit(
                 f"{task}: every request failed ({written[0]['error'][:200]}); refusing to write a dead run"
             )
-        write_jsonl(os.path.join(out, f"{task}.jsonl"), written)
+        checkpoint()
         data.write_subset(os.path.join(out, "items", f"{task}.jsonl"), rows)
 
     manifest = {
