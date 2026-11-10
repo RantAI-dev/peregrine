@@ -1,0 +1,15 @@
+# gpustack/bge-m3-GGUF / bge-m3-Q2_K.gguf (SentencePiece unigram, the XLM-R vocabulary)
+# sha256 8b0dacc25f20c7375700e7143e30ce48a8fbe44e66b035de243113b9cc5d44d8
+# goldens from llama.cpp v0.9.0 (commit cd959bae99ff4bed22bef2604f45241c09bbb8c8) -- llama-tokenize --ids and
+# --ids --no-bos for the ids, llama_detokenize for the last column; see
+# columns: query <TAB> document <TAB> ids, as llama.cpp's format_prompt_rerank builds them
+query one	document one	[0, 41, 1294, 1632, 2, 12937, 1632, 2]
+the capital of Indonesia?	Jakarta is the capital of Indonesia.	[0, 70, 10323, 111, 3799, 32, 2, 18218, 83, 70, 10323, 111, 3799, 5, 2]
+[CLS] literal specials [SEP]	doc with [MASK] and <s> and </s>	[0, 378, 441, 19759, 268, 15659, 289, 5361, 7, 378, 294, 21290, 268, 2, 51584, 678, 378, 40639, 605, 268, 136, 4426, 7, 2740, 136, 6, 42946, 7, 2740, 2]
+café naïve	Ångström über Straße	[0, 26216, 24, 9392, 272, 2, 8839, 449, 30011, 1659, 90515, 2]
+中文查询	日本語の文書と한국어	[0, 6, 32095, 115106, 2, 6, 98449, 154, 192141, 610, 41526, 2211, 2]
+it's 2026!	Don't we've I'll you'd	[0, 442, 25, 7, 387, 4046, 38, 2, 7650, 25, 18, 642, 25, 272, 87, 25, 1181, 398, 25, 71, 2]
+	only a document	[0, 2, 4734, 10, 12937, 2]
+only a query		[0, 4734, 10, 41, 1294, 2, 2]
+what changed in v1.2.3?	line one\nline two\t\n  indented\n	[0, 2367, 98816, 23, 81, 48400, 5, 363, 32, 2, 13315, 1632, 13315, 6626, 18597, 3674, 2]
+emoji 🙂	👨‍👩‍👧 and 🇮🇩	[0, 28, 121505, 3143, 2, 6, 244314, 6, 244785, 6, 245719, 136, 6, 246026, 247289, 2]

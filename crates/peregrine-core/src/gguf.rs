@@ -27,6 +27,8 @@ pub enum Value {
     ArrStr(Vec<String>),
     ArrI32(Vec<i32>),
     ArrF32(Vec<f32>),
+    /// A `uint8`/`int8` array: the tokenizer's precompiled charsmap is one.
+    ArrU8(Vec<u8>),
     /// An array whose element type we do not need; kept so the file still parses.
     ArrOther,
 }
@@ -470,6 +472,14 @@ impl Gguf {
             _ => Err(format!("gguf: missing or non-f32-array metadata {k:?}")),
         }
     }
+
+    /// A `uint8` or `int8` array, as raw bytes.
+    pub fn arr_u8(&self, k: &str) -> Result<&[u8], String> {
+        match self.meta.get(k) {
+            Some(Value::ArrU8(v)) => Ok(v),
+            _ => Err(format!("gguf: missing or non-byte-array metadata {k:?}")),
+        }
+    }
 }
 
 fn read_value(c: &mut Cur) -> Result<Value, String> {
@@ -511,6 +521,7 @@ fn read_value(c: &mut Cur) -> Result<Value, String> {
                             .collect(),
                     )
                 }
+                0 | 1 => Value::ArrU8(c.take(n)?.to_vec()),
                 other => {
                     // Skip it, but only if we know its width — guessing would
                     // desynchronise the cursor and corrupt every later key.

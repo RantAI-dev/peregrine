@@ -77,6 +77,7 @@ pub mod suffix;
 pub mod telem;
 pub mod template;
 pub mod tokenizer;
+mod unicode_data;
 
 pub use gguf::{Format, Gguf};
 // The kernels live in `peregrine-kernels`; they keep their paths here.
@@ -167,9 +168,10 @@ pub fn check_compatible_metadata(
         }
     }
     let tok = g.str("tokenizer.ggml.model").unwrap_or("unknown");
-    if tok != "gpt2" && tok != "llama" {
+    if !matches!(tok, "gpt2" | "llama" | "bert" | "t5") {
         return Err(format!(
-            "tokenizer {tok:?} — Peregrine reads gpt2 (BPE) and llama (SentencePiece) vocabularies"
+            "tokenizer {tok:?} — Peregrine reads gpt2 (BPE), llama (SentencePiece BPE), \
+             bert (WordPiece) and t5 (SentencePiece unigram) vocabularies"
         ));
     }
     if tok == "gpt2" {

@@ -1,0 +1,15 @@
+# lorinet3/kblab-bert-swedish-cased-pos-gguf / bert-swedish-pos-q4_0.gguf (WordPiece, cased vocabulary)
+# sha256 bddde253f057b84bdad09d969ef73b07258661118171a99e34dc8597327096f3
+# goldens from llama.cpp v0.9.0 (commit cd959bae99ff4bed22bef2604f45241c09bbb8c8) -- llama-tokenize --ids and
+# --ids --no-bos for the ids, llama_detokenize for the last column; see
+# columns: query <TAB> document <TAB> ids, as llama.cpp's format_prompt_rerank builds them
+query one	document one	[101, 36889, 855, 28721, 102, 35976, 1401, 28721]
+the capital of Indonesia?	Jakarta is the capital of Indonesia.	[101, 2356, 26724, 3041, 1778, 38431, 600, 302, 102, 2436, 34752, 49792, 2595, 2356, 26724, 3041, 1778, 38431, 600, 7]
+[CLS] literal specials [SEP]	doc with [MASK] and <s> and </s>	[101, 495, 12075, 49796, 496, 7799, 64, 3178, 49796, 495, 1794, 496, 102, 35976, 13649, 495, 7937, 496, 1964, 28660, 8, 20336, 1964, 28660, 284, 8, 20336]
+café naïve	Ångström über Straße	[101, 1371, 5881, 29067, 49791, 102, 2997, 28022, 49801, 56, 227, 1993, 49924, 49791]
+中文查询	日本語の文書と한국어	[101, 100, 100, 100, 100, 102, 100, 100, 100, 100, 100, 100, 100]
+it's 2026!	Don't we've I'll you'd	[101, 7226, 734, 8, 25307, 49846, 421, 102, 11523, 734, 23, 6808, 734, 16557, 31, 734, 11749, 12298, 734, 15]
+	only a document	[101, 102, 1151, 4313, 39, 35976, 1401]
+only a query		[101, 1151, 4313, 39, 36889, 855, 102]
+what changed in v1.2.3?	line one\nline two\t\n  indented\n	[101, 13104, 18, 49343, 1743, 49799, 62, 25, 49819, 7, 93, 7, 159, 302, 102, 37075, 28721, 37075, 19533, 49800, 1209, 7943, 49799]
+emoji 🙂	👨‍👩‍👧 and 🇮🇩	[101, 983, 2455, 49797, 50101, 102, 100, 1964, 100]
