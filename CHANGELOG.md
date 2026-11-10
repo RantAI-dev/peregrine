@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A release pipeline for the first release: `scripts/release/build.sh` builds a stripped, portable
+  archive per target (`peregrine-vX.Y.Z-linux-x86_64.tar.gz` / `-linux-aarch64.tar.gz` with `LICENSE`/`NOTICE` and a SHA256SUMS
+  line), and a `release` workflow on tags `vX.Y.Z` runs the full test suite on both Linux runners,
+  asserts the x86-64 binary keeps the baseline ISA with AVX2/AVX-512 picked at run time (no
+  `-C target-cpu=native`), and uploads the archives and checksums to the GitHub release with notes
+  generated from PR labels. The release step itself — versioning, CHANGELOG conventions, the
+  AVX2-host (H2) full-suite gate on every release candidate (S0.5) — is documented in
+  `docs/dev/releasing.md`.
+
 ### Fixed
 - A request body that is not valid JSON is now rejected with the OpenAI error object instead of
   axum's plain-text rejection. The status was already 400; a client that parses `error.message` can
