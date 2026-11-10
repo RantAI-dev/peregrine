@@ -132,7 +132,7 @@ pub fn route(
     // that quotient (`ggml/src/ggml-cpu/ops.cpp:5888-5896`).
     let mut sum = 0.0f64;
     for &l in router_logits {
-        sum += f64::from((l - max).exp());
+        sum += f64::from(crate::vmath::det_exp(l - max));
     }
     let inv = (1.0 / sum) as f32;
 
@@ -140,7 +140,7 @@ pub fn route(
     //    kept sorted in the caller's buffers, so no scratch is needed.
     let mut n_sel = 0usize;
     for (i, &l) in router_logits.iter().enumerate() {
-        let p = (l - max).exp() * inv;
+        let p = crate::vmath::det_exp(l - max) * inv;
         let id = i as u32;
         // The first entry that is worse than this one; equal probabilities keep the lower index
         // first, because `better` is false for an equal probability and a higher index.
