@@ -212,13 +212,18 @@ pub fn fetch(spec: &Spec) -> Result<PathBuf, String> {
     // resumed part loads as a whole file.
     let complete = total.is_some_and(|t| part_len >= t)
         || (probed && total.is_none() && part_len < PROBE_BYTES)
-        || (total.is_none() && peregrine_core::gguf::Gguf::open(&part).is_ok());
+        || (total.is_none() && peregrine_core::gguf::Gguf::open_plain(&part).is_ok());
     if complete {
         if part_len == 0 {
             return Err(format!("{name}: the download was empty"));
         }
-        peregrine_core::gguf::Gguf::open(&part)
+        // The pre-flight runs before the command line sets the process options, so it uses the
+        // option-free reader and the metadata-only compatibility check. Reading the options here
+        // would latch them and make `options::init` fail afterwards (the first-download bug).
+        let g = peregrine_core::gguf::Gguf::open_plain(&part)
             .map_err(|e| format!("{name}: downloaded file is not a usable GGUF: {e}"))?;
+        peregrine_models::check_compatible_metadata(&g)
+            .map_err(|e| format!("{name} is not runnable by this build: {e}"))?;
         std::fs::rename(&part, &final_path)
             .map_err(|e| format!("cannot finish {}: {e}", final_path.display()))?;
         return Ok(final_path);
@@ -226,8 +231,8 @@ pub fn fetch(spec: &Spec) -> Result<PathBuf, String> {
 
     // The header decides before the weights arrive. A header that does not parse yet is not a
     // verdict: the probe may be smaller than a large tensor directory, so the download continues.
-    match peregrine_core::gguf::Gguf::open_header(&part) {
-        Ok(g) => match peregrine_models::check_compatible(&g) {
+    match peregrine_core::gguf::Gguf::open_header_plain(&part) {
+        Ok(g) => match peregrine_models::check_compatible_metadata(&g) {
             Ok(()) => {}
             Err(e) => {
                 let _ = std::fs::remove_file(&part);
@@ -272,8 +277,10 @@ pub fn fetch(spec: &Spec) -> Result<PathBuf, String> {
         return Err(format!("{name}: the download was empty"));
     }
     // The complete file must also pass the check the partial one skipped.
-    peregrine_core::gguf::Gguf::open(&part)
+    let g = peregrine_core::gguf::Gguf::open_plain(&part)
         .map_err(|e| format!("{name}: downloaded file is not a usable GGUF: {e}"))?;
+    peregrine_models::check_compatible_metadata(&g)
+        .map_err(|e| format!("{name} is not runnable by this build: {e}"))?;
     std::fs::rename(&part, &final_path)
         .map_err(|e| format!("cannot finish {}: {e}", final_path.display()))?;
     Ok(final_path)

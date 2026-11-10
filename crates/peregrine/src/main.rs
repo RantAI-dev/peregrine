@@ -72,7 +72,7 @@ struct UpgradeCmd {
     /// Only report whether a newer release exists; install nothing.
     #[arg(long)]
     check: bool,
-    /// Install this tag instead of the newest release (for example v0.1.0).
+    /// Install this tag instead of the newest release (for example v0.1.2).
     #[arg(long)]
     version: Option<String>,
     /// Release download base: a mirror, or a `file://` directory in tests.

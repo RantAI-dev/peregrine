@@ -24,6 +24,14 @@ required-features = ["cli"]
 name = "support_cmd"
 required-features = ["cli"]
 
+[[test]]
+name = "fetch_preflight"
+required-features = ["cli"]
+
+[[test]]
+name = "hf_cold_cache"
+required-features = ["cli"]
+
 [features]
 default = [
     "cli",

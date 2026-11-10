@@ -97,7 +97,7 @@ pub use session::{BenchReport, Session, SessionCfg};
 /// tokenizer, another chat template — otherwise surfaces at the first token as an
 /// error or, worse, as fluent text from a prompt the model never saw.
 pub fn compatibility(path: &std::path::Path, families: &[&dyn arch::Family]) -> Result<(), String> {
-    let g = Gguf::open(path)?;
+    let g = Gguf::open_plain(path)?;
     check_compatible(&g, families)
 }
 
@@ -111,6 +111,21 @@ pub fn check_compatible(g: &Gguf, families: &[&dyn arch::Family]) -> Result<(), 
 /// does not render — is refused with a message naming the option: the template
 /// is the one thing the file cannot say, and the engine will not guess it.
 pub fn check_compatible_with(
+    g: &Gguf,
+    template: Option<template::Template>,
+    families: &[&dyn arch::Family],
+) -> Result<(), String> {
+    // Everything a check can decide from the file and the build's features lives here. Anything
+    // that needs the process options (the kernel tier, the kernel table) belongs in the load path,
+    // not in this pre-flight: a download happens before the command line has set the options.
+    check_compatible_metadata(g, template, families)
+}
+
+/// The part of [`check_compatible_with`] that reads only the file's metadata and this build's
+/// features: the architecture, the tensor formats, the tokenizer, the rope scaling and the chat
+/// template. It never reads [`crate::options::get`] or the kernel table, so it is safe to run on a
+/// partial `hf:` download before the command line has initialised the process options.
+pub fn check_compatible_metadata(
     g: &Gguf,
     template: Option<template::Template>,
     families: &[&dyn arch::Family],

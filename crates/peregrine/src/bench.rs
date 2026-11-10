@@ -43,7 +43,7 @@ pub fn run(args: &BenchArgs) -> Result<(), String> {
     let (prof, prof_msg) = profile::resolve(&args.model, args.profile.as_deref(), args.no_profile);
 
     let opts = EngineOptions::from_env_and_profile(prof.as_ref());
-    let _ = peregrine_core::options::init(opts.clone());
+    peregrine_core::options::init(opts.clone()).map_err(|e| format!("engine options: {e}"))?;
     let effective_opts = peregrine_core::options::get();
 
     let needed = (args.prompt_tokens + args.tokens).max(64);

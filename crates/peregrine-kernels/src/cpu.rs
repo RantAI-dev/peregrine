@@ -177,18 +177,31 @@ macro_rules! cpu_has {
 /// or on aarch64 `aarch64-neon-dotprod` / `aarch64-neon` / `aarch64`. Golden outputs are stored per
 /// tier name.
 pub fn tier_name() -> String {
+    tier_name_under(crate::options::get().isa)
+}
+
+/// [`tier_name`] under a given `PEREGRINE_ISA` cap (`None` = native), without reading the process
+/// options. A tuning profile is checked before the command initialises the options, and that check
+/// must not latch them; the cap can only come from the environment at that point.
+pub fn tier_name_under(isa: Option<Tier>) -> String {
+    let cap = isa.unwrap_or(Tier::top());
     #[cfg(target_arch = "x86_64")]
     {
-        let has_avx2 = cpu_has!("avx2") && cpu_has!("fma");
-        let has_avx512 = cpu_has!("avx512bw") && cpu_has!("avx512vl");
+        macro_rules! has_under {
+            ($f:tt) => {
+                std::arch::is_x86_feature_detected!($f) && tier_of($f) <= cap
+            };
+        }
+        let has_avx2 = has_under!("avx2") && has_under!("fma");
+        let has_avx512 = has_under!("avx512bw") && has_under!("avx512vl");
         if has_avx512 {
             let mut t = String::from("x86_64");
             for (name, on) in [
                 ("avx2", has_avx2),
                 ("avx512", has_avx512),
-                ("vnni", cpu_has!("avx512vnni")),
-                ("gfni", cpu_has!("gfni")),
-                ("vbmi", cpu_has!("avx512vbmi")),
+                ("vnni", has_under!("avx512vnni")),
+                ("gfni", has_under!("gfni")),
+                ("vbmi", has_under!("avx512vbmi")),
             ] {
                 if on {
                     t.push('-');
@@ -196,7 +209,7 @@ pub fn tier_name() -> String {
                 }
             }
             t
-        } else if has_avx2 && cpu_has!("avxvnni") {
+        } else if has_avx2 && has_under!("avxvnni") {
             String::from("x86_64-avx2-vnni256")
         } else if has_avx2 {
             String::from("x86_64-avx2")
@@ -206,12 +219,17 @@ pub fn tier_name() -> String {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if !have_neon() {
+        macro_rules! has_under {
+            ($f:tt) => {
+                std::arch::is_aarch64_feature_detected!($f) && tier_of($f) <= cap
+            };
+        }
+        if !has_under!("neon") {
             return String::from("aarch64");
         }
-        if have_i8mm() {
+        if has_under!("i8mm") {
             String::from("aarch64-neon-i8mm")
-        } else if have_dotprod() {
+        } else if has_under!("dotprod") {
             String::from("aarch64-neon-dotprod")
         } else {
             String::from("aarch64-neon")
@@ -219,6 +237,7 @@ pub fn tier_name() -> String {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
+        let _ = cap;
         std::env::consts::ARCH.to_string()
     }
 }

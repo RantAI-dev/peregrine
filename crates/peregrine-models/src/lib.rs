@@ -125,6 +125,12 @@ pub fn check_compatible_with(g: &Gguf, template: Option<Template>) -> Result<(),
     peregrine_core::check_compatible_with(g, template, FAMILIES)
 }
 
+/// The file-and-build-only part of [`check_compatible`], for the pre-flight on a partial `hf:`
+/// download: it never reads the process options or the kernel table.
+pub fn check_compatible_metadata(g: &Gguf) -> Result<(), String> {
+    peregrine_core::check_compatible_metadata(g, None, FAMILIES)
+}
+
 /// Check whether the model file at `path` can be loaded and run by Peregrine.
 pub fn compatibility(path: &Path) -> Result<(), String> {
     peregrine_core::compatibility(path, FAMILIES)
