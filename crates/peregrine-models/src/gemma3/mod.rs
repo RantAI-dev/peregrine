@@ -766,7 +766,7 @@ impl Architecture for Gemma3 {
         if let Some(cap) = self.final_logit_softcapping {
             let inv_cap = 1.0 / cap;
             for logit in &mut st.logits[..nl * cfg.n_vocab] {
-                *logit = cap * (*logit * inv_cap).tanh();
+                *logit = cap * peregrine_core::vmath::det_tanh(*logit * inv_cap);
             }
         }
 

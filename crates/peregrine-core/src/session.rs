@@ -183,10 +183,10 @@ pub struct Emitted<'a> {
 // the log-probability of token `id` in one row of logits, with the full normaliser.
 pub(crate) fn logprob_of(logits: &[f32], id: u32) -> f32 {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let sum: f32 = logits.iter().map(|&v| (v - max).exp()).sum();
+    let sum: f32 = logits.iter().map(|&v| crate::vmath::det_exp(v - max)).sum();
     logits
         .get(id as usize)
-        .map_or(f32::NEG_INFINITY, |&v| v - max - sum.ln())
+        .map_or(f32::NEG_INFINITY, |&v| v - max - crate::vmath::det_ln(sum))
 }
 
 impl Session {
