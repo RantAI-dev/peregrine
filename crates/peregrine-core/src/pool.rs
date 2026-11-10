@@ -650,6 +650,90 @@ struct Inner {
 unsafe impl Sync for Inner {}
 unsafe impl Send for Inner {}
 
+/// Pin a pool thread to a physical core when `PEREGRINE_AFFINITY=1`; a no-op otherwise
+/// and on platforms without `sched_setaffinity`.
+///
+/// Worker `w` takes core `w % cores` and, once the pool is wider than the machine's core count,
+/// the `w / cores`-th logical CPU of that core — so a pool as wide as the physical cores puts one
+/// worker on each core and never two on one core's siblings, and a wider pool fills the siblings
+/// in a fixed order instead of leaving it to the scheduler. A pool wider than cores × threads per
+/// core wraps, sharing the primary threads.
+///
+/// The caller is worker 0 and is pinned too, which is the point: leaving it free lets the OS put
+/// it on a core that a worker already owns.
+fn pin_worker(w: usize) {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        if !crate::options::get().affinity {
+            return;
+        }
+        let Some(map) = physical_cpu_map() else {
+            return;
+        };
+        let core = &map[w % map.len()];
+        let cpu = core.get(w / map.len()).copied().unwrap_or(core[0]);
+        // sched_setaffinity(0, ...) is the calling thread only, so a worker pins itself.
+        const CPUSET_BYTES: usize = 128; // 1024 CPUs, the glibc cpu_set_t
+        if cpu >= CPUSET_BYTES * 8 {
+            return;
+        }
+        let mut mask = [0u64; CPUSET_BYTES / 8];
+        mask[cpu / 64] |= 1u64 << (cpu % 64);
+        extern "C" {
+            fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u64) -> i32;
+        }
+        // SAFETY: a libc call that only sets the calling thread's CPU mask; the mask
+        // is a live array of `CPUSET_BYTES` bytes for the duration of the call.
+        unsafe {
+            sched_setaffinity(0, CPUSET_BYTES, mask.as_ptr());
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        let _ = w;
+    }
+}
+
+/// The logical CPUs of every physical core, in the order `/proc/cpuinfo` lists them:
+/// `[[0, 12], [1, 13], ...]` on a two-way-SMT machine. `None` when the topology is unavailable.
+pub fn physical_cpu_map() -> Option<&'static Vec<Vec<usize>>> {
+    static MAP: std::sync::OnceLock<Option<Vec<Vec<usize>>>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut cpus: Vec<Vec<usize>> = Vec::new();
+        let (mut pkg, mut core, mut cpu) = (None::<String>, None::<String>, None::<usize>);
+        for line in info.lines().chain(std::iter::once("")) {
+            if line.trim().is_empty() {
+                if let (Some(p), Some(c), Some(u)) = (pkg.take(), core.take(), cpu.take()) {
+                    let key = (p, c);
+                    match order.iter().position(|k| *k == key) {
+                        Some(i) => cpus[i].push(u),
+                        None => {
+                            order.push(key);
+                            cpus.push(vec![u]);
+                        }
+                    }
+                }
+                continue;
+            }
+            let mut kv = line.splitn(2, ':');
+            let (k, v) = (
+                kv.next().unwrap_or("").trim(),
+                kv.next().unwrap_or("").trim().to_string(),
+            );
+            match k {
+                "physical id" => pkg = Some(v),
+                "core id" => core = Some(v),
+                "processor" => cpu = v.parse().ok(),
+                _ => {}
+            }
+        }
+        (!cpus.is_empty()).then_some(cpus)
+    })
+    .as_ref()
+}
+
 pub struct Pool {
     n: usize,
     inner: Arc<Inner>,
@@ -687,6 +771,7 @@ impl Pool {
         let n = n.max(1);
         // Worker 0 is the calling thread, so it is raised along with the others.
         raise_priority();
+        pin_worker(0);
         let o = crate::options::get();
         let inner = Arc::new(Inner {
             epoch: Aligned(AtomicU64::new(0)),
@@ -710,6 +795,7 @@ impl Pool {
             let inner = Arc::clone(&inner);
             handles.push(std::thread::spawn(move || {
                 raise_priority();
+                pin_worker(w);
                 let mut seen = 0u64;
                 loop {
                     // Spin, then park. The window is the current rung of the adaptive
@@ -970,6 +1056,29 @@ mod tests {
     }
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn the_cpu_map_groups_the_smt_siblings() {
+        let Some(map) = physical_cpu_map() else {
+            return; // no /proc/cpuinfo topology here
+        };
+        assert!(!map.is_empty());
+        assert_eq!(
+            Some(map.len()),
+            physical_cores(),
+            "the map and the core count must agree"
+        );
+        let flat: Vec<usize> = map.iter().flatten().copied().collect();
+        let mut unique = flat.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            flat.len(),
+            unique.len(),
+            "a logical CPU is listed under two cores"
+        );
+        assert!(map.iter().all(|core| !core.is_empty()));
+    }
 
     #[test]
     fn shares_partition_exactly_and_evenly() {

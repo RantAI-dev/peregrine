@@ -59,6 +59,16 @@ All notable changes to this project are documented here. The format follows
   16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
 
 ### Added
+- `PEREGRINE_AFFINITY=1` pins every pool worker, and the caller (worker 0), to a logical CPU chosen
+  from `/proc/cpuinfo`'s `(physical id, core id)` topology: a pool as wide as the physical cores gets
+  one worker per core, and a wider pool fills the SMT siblings in a fixed order. Off by default, Linux
+  only. On the reference machine (24 workers over 12 cores) a warm 512-token prefill gains 2-4 % (medians
+  of in-process repeats over 3-4 processes, two runs: Llama-3.2-1B x1.040/x1.024, Qwen2.5-0.5B
+  x1.026/x1.124, Bonsai-2-2B x1.044/x1.012), decode is unchanged, and the *first* prefill a process runs
+  loses 6-9 % (`peregrine bench`, 9 alternating rounds), so it is a server knob and not a default.
+  First-touch placement does not matter for these working sets on one socket; the mapping is not
+  NUMA-aware and would need one core set per node on a multi-socket host. See `docs/dev/build-profiles.md`
+  for the build-profile A/B it was measured with (S3.9).
 - NEON `vmath` and activation quantisation on aarch64 (S2.8 F5/F6). `exp` is now a four-lane
   `exp4` with `exp8`'s constants, operation order and fused multiply-adds (bit-identical to the
   scalar twin `exp_scalar`), used by softmax (`exp_shift_sum`, `exp_scaled_sum`), SwiGLU, SiLU,
