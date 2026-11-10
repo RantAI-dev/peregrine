@@ -1,0 +1,146 @@
+{
+  "gemma3-1b-llama": {
+    "gsm8k": {
+      "accuracy": 0.472,
+      "correct": 118,
+      "errors": 0,
+      "mean_latency_s": 26.46959443404386,
+      "n": 250
+    },
+    "humaneval": {
+      "accuracy": 0.32515337423312884,
+      "correct": 53,
+      "errors": 0,
+      "mean_exec_s": 0.12714445308433628,
+      "mean_latency_s": 30.511362275165116,
+      "n": 163
+    },
+    "mmlu": {
+      "accuracy": 0.396,
+      "correct": 198,
+      "errors": 0,
+      "mean_latency_s": 5.849581562238979,
+      "n": 500
+    }
+  },
+  "gemma3-1b-peregrine": {
+    "gsm8k": {
+      "accuracy": 0.452,
+      "correct": 113,
+      "errors": 0,
+      "mean_latency_s": 15.868027198244352,
+      "n": 250
+    },
+    "humaneval": {
+      "accuracy": 0.34355828220858897,
+      "correct": 56,
+      "errors": 0,
+      "mean_exec_s": 0.1881611928703732,
+      "mean_latency_s": 18.26203643763795,
+      "n": 163
+    },
+    "mmlu": {
+      "accuracy": 0.398,
+      "correct": 199,
+      "errors": 0,
+      "mean_latency_s": 3.737082230959786,
+      "n": 500
+    }
+  },
+  "gemma3-1b-vllm": {
+    "gsm8k": {
+      "accuracy": 0.54,
+      "correct": 135,
+      "errors": 0,
+      "mean_latency_s": 2.5319620077879663,
+      "n": 250
+    },
+    "humaneval": {
+      "accuracy": 0.38650306748466257,
+      "correct": 63,
+      "errors": 0,
+      "mean_exec_s": 0.13401412852754835,
+      "mean_latency_s": 2.470636175889559,
+      "n": 163
+    },
+    "mmlu": {
+      "accuracy": 0.39,
+      "correct": 195,
+      "errors": 0,
+      "mean_latency_s": 0.10925109050998799,
+      "n": 500
+    }
+  },
+  "qwen25-05b-llama": {
+    "gsm8k": {
+      "accuracy": 0.436,
+      "correct": 109,
+      "errors": 0,
+      "mean_latency_s": 16.79699385598628,
+      "n": 250
+    },
+    "humaneval": {
+      "accuracy": 0.3128834355828221,
+      "correct": 51,
+      "errors": 0,
+      "mean_exec_s": 0.23402015685083835,
+      "mean_latency_s": 15.22614035599485,
+      "n": 163
+    },
+    "mmlu": {
+      "accuracy": 0.32,
+      "correct": 160,
+      "errors": 0,
+      "mean_latency_s": 2.9334736734768376,
+      "n": 500
+    }
+  },
+  "qwen25-05b-peregrine": {
+    "gsm8k": {
+      "accuracy": 0.424,
+      "correct": 106,
+      "errors": 0,
+      "mean_latency_s": 9.661998060103972,
+      "n": 250
+    },
+    "humaneval": {
+      "accuracy": 0.32515337423312884,
+      "correct": 53,
+      "errors": 0,
+      "mean_exec_s": 0.2811229400982383,
+      "mean_latency_s": 8.715416248710655,
+      "n": 163
+    },
+    "mmlu": {
+      "accuracy": 0.336,
+      "correct": 168,
+      "errors": 0,
+      "mean_latency_s": 1.8033863626285456,
+      "n": 500
+    }
+  },
+  "qwen25-05b-vllm": {
+    "gsm8k": {
+      "accuracy": 0.428,
+      "correct": 107,
+      "errors": 0,
+      "mean_latency_s": 1.6252174872479992,
+      "n": 250
+    },
+    "humaneval": {
+      "accuracy": 0.25153374233128833,
+      "correct": 41,
+      "errors": 0,
+      "mean_exec_s": 0.18175292308585805,
+      "mean_latency_s": 1.5416529634416951,
+      "n": 163
+    },
+    "mmlu": {
+      "accuracy": 0.362,
+      "correct": 181,
+      "errors": 0,
+      "mean_latency_s": 0.07398819690198434,
+      "n": 500
+    }
+  }
+}

@@ -1,0 +1,91 @@
+# Release artefacts for a tag vX.Y.Z (docs/dev/releasing.md). Cutting a release is a human
+# action: pushing the tag is what runs this workflow, which builds, tests and uploads the
+# binaries and their checksums to the GitHub release. Nothing else publishes (crates stay
+# `publish = false`; there is no container push yet).
+#
+# The first release ships Linux binaries: linux-x86_64 (the portable x86-64 baseline with
+# run-time ISA dispatch) and linux-aarch64. macOS comes in a later release. Each target is
+# built natively on its own runner, and the tagged commit runs the full test suite in release
+# mode, as it ships. The AVX2-only physical host (H2) runs the suite on every release
+# candidate before the tag is cut (docs/dev/releasing.md, S0.5).
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, name: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, name: linux-aarch64 }
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # The tagged commit must pass the suite in release mode on both targets (mirrors ci.yml's
+      # `test` job: the kernels are tested as they ship).
+      - name: test (x86-64, every target)
+        if: runner.arch == 'X64'
+        run: cargo test --workspace --release --locked
+      - name: test (non-x86, lib + bins + tests)
+        if: runner.arch != 'X64'
+        run: cargo test --workspace --lib --bins --tests --release --locked
+      # Portable-binary proof on x86-64: the build has no target-cpu anywhere, yet this
+      # AVX2-only runner reports an avx2 tier from the baseline binary — the kernel table
+      # dispatches at run time. The PEREGRINE_ISA cap must still reach the baseline tier.
+      - name: run-time ISA dispatch (x86-64)
+        if: runner.arch == 'X64'
+        run: |
+          cargo build --release --locked -p peregrine
+          tier=$(./target/release/peregrine tier | sed -n 's/^kernel tier   //p')
+          echo "native tier of the portable binary: $tier"
+          grep -q '^x86_64-avx2' <<< "$tier"
+          PEREGRINE_ISA=scalar ./target/release/peregrine tier | grep -q '^kernel tier   x86_64$'
+      - name: build archive
+        run: scripts/release/build.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  # Creates the GitHub release with the notes generated from PR labels (.github/release.yml)
+  # and uploads both archives and the combined SHA256SUMS.
+  release:
+    needs: [build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artefacts
+      - name: verify checksums, create the release, upload the archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir staging
+          cp artefacts/dist-*/*.tar.gz staging/
+          cat artefacts/dist-*/SHA256SUMS > staging/SHA256SUMS
+          (cd staging && sha256sum --check --strict SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --generate-notes \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            staging/SHA256SUMS staging/*.tar.gz

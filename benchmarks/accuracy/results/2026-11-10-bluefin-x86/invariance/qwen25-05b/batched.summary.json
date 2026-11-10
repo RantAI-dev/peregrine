@@ -1,0 +1,10 @@
+{
+  "group": 8,
+  "items_per_s": 3.1276080359750176,
+  "max_tokens": 48,
+  "phase": "batched",
+  "prompts": 520,
+  "server": "peregrine 0.1.0 (main 1c93345), qwen25-05b Q4_K_M, x86 AVX2",
+  "url": "http://127.0.0.1:8299",
+  "wall_s": 166.26124310295563
+}
