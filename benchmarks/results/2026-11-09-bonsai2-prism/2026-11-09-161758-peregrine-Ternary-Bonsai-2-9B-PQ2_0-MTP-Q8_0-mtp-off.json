@@ -1,0 +1,229 @@
+{
+  "benchmark": "peregrine-s3.1",
+  "timestamp": "2026-11-09T16:17:58.202840+00:00",
+  "model": {
+    "path": "models/bonsai2-9b/Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.gguf",
+    "filename": "Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.gguf",
+    "sha256": "c79fcdfaf6b7bf47089b50dadcfd11f9ce7d3e96adf3bbefde7912e5ef69e22b",
+    "size_bytes": 2675410720,
+    "bytes_per_token_telemetry": 2234451008.0
+  },
+  "machine": {
+    "hostname": "DESKTOP-4TS2NH4",
+    "os": "Linux",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "cpu_model": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+    "cpu_features": [
+      "fma",
+      "avx",
+      "avx2",
+      "avx512f",
+      "avx_vnni",
+      "avx512_bf16"
+    ],
+    "threads_tested": 12,
+    "governor": "unknown (VM or fixed frequency)",
+    "bandwidth_ceiling_bytes_per_s": 36562256499.47652,
+    "bandwidth_ceiling_gb_s": 36.562,
+    "flops_ceiling": 312036532977.25055,
+    "gflops_ceiling": 312.037,
+    "simd_tier": "x86_64-avx2-avx512-vnni-gfni-vbmi",
+    "ridge_point": 8.534
+  },
+  "engine": {
+    "name": "peregrine",
+    "version": "0.1.0",
+    "commit": "bab3c2a369a52f238cfd6d93dd374ce95177f6cc",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "build_command": "cargo build --release -p peregrine"
+  },
+  "settings": {
+    "contexts": [
+      512
+    ],
+    "runs": 1,
+    "decode_tokens": 256,
+    "threads": 12,
+    "mode": "server",
+    "user_counts": [
+      1
+    ],
+    "engine_args": {
+      "peregrine": [
+        "--opt",
+        "MTP=0"
+      ]
+    },
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "token_tolerance": 1,
+    "interleaved": true,
+    "llama_flash_attn": "auto"
+  },
+  "results": {
+    "512": {
+      "single_user": {
+        "decode_tok_s": [
+          25.29016046194661,
+          25.13807022224392,
+          24.043659948153945
+        ],
+        "prefill_tok_s": [
+          69.33621175084603,
+          70.06421189556221,
+          68.09506999680374
+        ],
+        "ttft_s": [
+          7.405578851699829,
+          7.315753221511841,
+          7.546354532241821
+        ],
+        "prompt_tokens": [
+          511,
+          510,
+          511
+        ]
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": [],
+        "decode_aggregate_tok_s": [],
+        "ttft_s": [],
+        "prompt_tokens": []
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": [],
+        "decode_aggregate_tok_s": [],
+        "ttft_s": [],
+        "prompt_tokens": []
+      }
+    }
+  },
+  "summary": {
+    "512": {
+      "context": 512,
+      "actual_prompt_tokens": 511.0,
+      "single_user": {
+        "decode_tok_s": {
+          "median": 25.14,
+          "spread": 0.62,
+          "min": 24.04,
+          "max": 25.29
+        },
+        "prefill_tok_s": {
+          "median": 69.34,
+          "spread": 0.98,
+          "min": 68.1,
+          "max": 70.06
+        },
+        "ttft_s": {
+          "median": 7.41,
+          "spread": 0.12,
+          "min": 7.32,
+          "max": 7.55
+        },
+        "prompt_tokens": {
+          "median": 511.0,
+          "spread": 0.5,
+          "min": 510.0,
+          "max": 511.0
+        },
+        "bytes_per_token": 2234451008.0,
+        "fraction_of_ceiling": 1.5364,
+        "percent_of_ceiling": 153.64,
+        "raw_samples": {
+          "decode_tok_s": [
+            25.29016046194661,
+            25.13807022224392,
+            24.043659948153945
+          ],
+          "prefill_tok_s": [
+            69.33621175084603,
+            70.06421189556221,
+            68.09506999680374
+          ],
+          "ttft_s": [
+            7.405578851699829,
+            7.315753221511841,
+            7.546354532241821
+          ],
+          "prompt_tokens": [
+            511,
+            510,
+            511
+          ]
+        }
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "decode_aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "ttft_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "prompt_tokens": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [],
+          "decode_aggregate_tok_s": [],
+          "ttft_s": [],
+          "prompt_tokens": []
+        }
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "decode_aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "first_token_time_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "prompt_tokens": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [],
+          "decode_aggregate_tok_s": [],
+          "ttft_s": [],
+          "prompt_tokens": []
+        }
+      }
+    }
+  },
+  "_source": "/home/uaa/peregrine/benchmarks/results/2026-11-09-bonsai2-prism/raw/2026-11-09-232320-peregrine-Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.json",
+  "merged_from": [
+    "2026-11-09-232320-peregrine-Ternary-Bonsai-2-9B-PQ2_0-MTP-Q8_0.json"
+  ]
+}
