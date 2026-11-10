@@ -1,0 +1,10 @@
+{
+  "group": 1,
+  "items_per_s": 1.1798335501433452,
+  "max_tokens": 48,
+  "phase": "speculation",
+  "prompts": 520,
+  "server": "peregrine 1c93345 avx512, slots 4, 24 threads, --speculate",
+  "url": "http://127.0.0.1:8299",
+  "wall_s": 440.7401365530095
+}

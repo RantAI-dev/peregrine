@@ -27,7 +27,7 @@
 //!
 //! One session per process (one stream at a time; requests queue): run one process per model, as with llama-server.
 use axum::{
-    extract::State,
+    extract::{FromRequest, Request, State},
     http::StatusCode,
     response::{sse::Event, IntoResponse, Response, Sse},
     routing::{get, post},
@@ -406,13 +406,36 @@ fn engine_options(
 }
 
 fn bad(msg: impl Into<String>) -> Response {
+    bad_json(msg.into()).into_response()
+}
+
+/// The OpenAI error body and status, before it becomes a response (so a unit test can read it).
+fn bad_json(message: String) -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
-        Json(
-            json!({"error": {"message": msg.into(), "type": "invalid_request_error", "code": 400}}),
-        ),
+        Json(json!({"error": {"message": message, "type": "invalid_request_error", "code": 400}})),
     )
-        .into_response()
+}
+
+/// `Json<Value>`, but a body that is not JSON is answered with the same error object as every
+/// other bad request. Axum's own rejection is `text/plain`, which an OpenAI client cannot read as
+/// an error.
+struct OpenAiJson(Value);
+
+impl<S> FromRequest<S> for OpenAiJson
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<Value>::from_request(req, state).await {
+            Ok(Json(body)) => Ok(OpenAiJson(body)),
+            Err(rejection) => Err(bad(format!(
+                "the request body is not valid JSON: {rejection}"
+            ))),
+        }
+    }
 }
 
 /// What one request asks for, read from the OpenAI-style body.
@@ -1095,7 +1118,7 @@ impl Drop for BusyGuard {
     }
 }
 
-async fn chat(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
+async fn chat(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Response {
     let mut p = match plan(&body) {
         Ok(p) => p,
         Err(e) => return bad(e),
@@ -1245,6 +1268,7 @@ pub fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::{continuation_prefix, plan, Penalties, ReasoningFormat};
+    use axum::Json;
     use serde_json::{json, Value};
 
     fn body(extra: Value) -> Value {
@@ -1255,6 +1279,19 @@ mod tests {
             }
         }
         b
+    }
+
+    #[test]
+    fn malformed_json_has_the_openai_error_shape() {
+        let (status, Json(body)) =
+            super::bad_json("the request body is not valid JSON: messages: EOF".into());
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], 400);
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not valid JSON"));
     }
 
     #[test]

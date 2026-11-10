@@ -192,6 +192,41 @@ jobs:
             < "$RUNNER_TEMP/synthetic-tests" 2>&1 | tee "$RUNNER_TEMP/synthetic.log"
           grep -q 'x86_64-avx2-vnni256' "$RUNNER_TEMP/synthetic.log"
 
+  # The OpenAI compatibility suite: the real server, SmolLM2-360M-Instruct (the upload docs/dev/testing.md
+  # pins), stdlib Python only. The model is cached by its SHA-256. The thinking-model check is skipped
+  # here (it needs a second, larger file); tests/compat/README.md shows the local invocation.
+  compat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo build --release --locked -p peregrine
+      - name: Cache the compatibility model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/peregrine-compat
+          key: compat-smollm2-360m-instruct-q4km-ade7aee1
+      - name: Fetch SmolLM2-360M-Instruct Q4_K_M (pinned SHA-256)
+        run: |
+          dir="$HOME/.cache/peregrine-compat"
+          file="$dir/SmolLM2-360M-Instruct.Q4_K_M.gguf"
+          sha="ade7aee1e5bd7c3b8f1fedafc61a1a0be31e8afa64e006607cd202323e2ccce0"
+          if [ ! -f "$file" ]; then
+            mkdir -p "$dir"
+            curl --fail --location --retry 3 \
+              -o "$file.part" \
+              "https://huggingface.co/mradermacher/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct.Q4_K_M.gguf"
+            echo "$sha  $file.part" | sha256sum --check --strict
+            mv "$file.part" "$file"
+          fi
+          echo "$sha  $file" | sha256sum --check --strict
+      - name: OpenAI compatibility suite
+        run: |
+          python3 tests/compat/compat.py \
+            --model "$HOME/.cache/peregrine-compat/SmolLM2-360M-Instruct.Q4_K_M.gguf" \
+            --peregrine-bin target/release/peregrine --threads 4 --slots 4
+
   # The oldest compiler we promise to build with (workspace `rust-version`).
   msrv:
     runs-on: ubuntu-24.04
@@ -213,7 +248,7 @@ jobs:
   # One job the branch protection rule can require, whatever the matrix becomes.
   ci-ok:
     if: always()
-    needs: [lint, test, tiers, msrv, supply-chain]
+    needs: [lint, test, tiers, msrv, supply-chain, compat]
     runs-on: ubuntu-24.04
     steps:
       - run: '[ "${{ contains(needs.*.result, ''failure'') || contains(needs.*.result, ''cancelled'') }}" = "false" ]'

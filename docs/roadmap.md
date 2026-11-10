@@ -15,7 +15,7 @@ Every item keeps the invariants in `ARCHITECTURE.md`: identical tokens and the a
 | S0.2 | Synthetic test models: tiny random llama, qwen3 and qwen35 (with MTP) GGUFs in every format, checked against the exact reference forward in CI — done | 0.5 |
 | S0.3 | Forced kernel tier (`scalar` / `avx2` / `avx512`) through `EngineOptions`; Intel SDE job in CI for the AVX-512, VNNI and GFNI paths — done | 0.25 |
 | S0.4 | Measure the `quick` profile against `release` (rebuild time, kernel speed); record the result — done | 0.1 |
-| S0.5 | The AVX2-only host (H2) runs the full test suite on every release candidate — open: a release step, not yet written down | 0.1 |
+| S0.5 | The AVX2-only host (H2) runs the full test suite on every release candidate — done: the release step and the gate are written down in `docs/dev/releasing.md` | 0.1 |
 | S0.6 | Presence, frequency and repetition penalties; unknown sampling fields rejected instead of ignored — done | 0.5 |
 
 ## Stage 1: structure (~5-6 pw, ADR 0005; to be discussed before starting)
