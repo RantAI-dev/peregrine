@@ -34,6 +34,12 @@
 | OpenVINO fp32 | 1.0000 | 199 | 537 | 655 | 653 | 78.04 | 98.54 | 95.93 | 96.62 | 20.70 | 20.84 | 21.20 | 20.50 |
 | TEI fp32 | 1.0000 | 153 | 223 | 228 | 247 | 35.77 | 36.39 | 37.75 | 37.45 | 4.26 | 4.46 | 4.10 | 4.01 |
 
+**qwen3-embed-0.6b** — texts per s
+
+| engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| llama.cpp q8_0 | 0.9993 | 15.71 | 15.87 | 15.97 | 15.82 | 2.19 | 2.22 | 2.20 | 2.19 | 0.50 | 0.50 | 0.49 | skip |
+
 
 **bge-base** — tokens per s
 
@@ -68,6 +74,12 @@
 | OpenVINO fp32 | 1.0000 | 3,187 | 8,586 | 10,484 | 10,454 | 9,989 | 12,613 | 12,279 | 12,368 | 10,591 | 10,663 | 10,844 | 10,488 |
 | TEI fp32 | 1.0000 | 2,455 | 3,562 | 3,647 | 3,944 | 4,579 | 4,658 | 4,832 | 4,793 | 2,177 | 2,279 | 2,096 | 2,052 |
 
+**qwen3-embed-0.6b** — tokens per s
+
+| engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| llama.cpp q8_0 | 0.9993 | 251 | 254 | 256 | 253 | 281 | 284 | 281 | 281 | 255 | 254 | 252 | skip |
+
 
 ## single-text latency (batch 1)
 
@@ -92,6 +104,7 @@
 | minilm | llama.cpp q8_0 | 3.4 | 5.0 | 17.4 | 38.6 |
 | minilm | OpenVINO fp32 | 4.9 | 5.3 | 23.5 | 42.6 |
 | minilm | TEI fp32 | 6.1 | 7.6 | 34.8 | 54.3 |
+| qwen3-embed-0.6b | llama.cpp q8_0 | 63.1 | 65.2 | 622.4 | 648.8 |
 
 
 ## fastest competitor per cell
@@ -134,3 +147,14 @@
 | minilm | L512 b8 | OpenVINO fp32 | 20.8 | 10,663 | 3 rounds |
 | minilm | L512 b32 | OpenVINO fp32 | 21.2 | 10,844 | 3 rounds |
 | minilm | L512 b128 | OpenVINO fp32 | 20.5 | 10,488 | 3 rounds |
+| qwen3-embed-0.6b | L16 b1 | llama.cpp q8_0 | 15.7 | 251 | 3 rounds |
+| qwen3-embed-0.6b | L16 b8 | llama.cpp q8_0 | 15.9 | 254 | 3 rounds |
+| qwen3-embed-0.6b | L16 b32 | llama.cpp q8_0 | 16.0 | 256 | 3 rounds |
+| qwen3-embed-0.6b | L16 b128 | llama.cpp q8_0 | 15.8 | 253 | 3 rounds |
+| qwen3-embed-0.6b | L128 b1 | llama.cpp q8_0 | 2.2 | 281 | 3 rounds |
+| qwen3-embed-0.6b | L128 b8 | llama.cpp q8_0 | 2.2 | 284 | 3 rounds |
+| qwen3-embed-0.6b | L128 b32 | llama.cpp q8_0 | 2.2 | 281 | 3 rounds |
+| qwen3-embed-0.6b | L128 b128 | llama.cpp q8_0 | 2.2 | 281 | 3 rounds |
+| qwen3-embed-0.6b | L512 b1 | llama.cpp q8_0 | 0.5 | 255 | 3 rounds |
+| qwen3-embed-0.6b | L512 b8 | llama.cpp q8_0 | 0.5 | 254 | 3 rounds |
+| qwen3-embed-0.6b | L512 b32 | llama.cpp q8_0 | 0.5 | 252 | 3 rounds |

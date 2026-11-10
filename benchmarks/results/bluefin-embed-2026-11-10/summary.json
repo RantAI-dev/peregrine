@@ -10546,6 +10546,555 @@
      }
     }
    }
+  ],
+  "qwen3-embed-0.6b": [
+   {
+    "engine": "llama_cpp",
+    "precision": "q8_0",
+    "rounds": 3,
+    "row": {
+     "engine": "llama_cpp",
+     "precision": "q8_0",
+     "path": "/var/home/shiro/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+     "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+     "size_bytes": 639150592,
+     "fingerprint": {
+      "kind": "file",
+      "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+      "size_bytes": 639150592
+     },
+     "notes": "GGUF Q8_0 from Qwen/Qwen3-Embedding-0.6B-GGUF"
+    },
+    "model": {
+     "name": "qwen3-embed-0.6b",
+     "hf": "Qwen/Qwen3-Embedding-0.6B",
+     "pooling": "last",
+     "max_tokens": 512,
+     "dim": 1024,
+     "tokenizer_dir": "qwen3-embed-0.6b"
+    },
+    "engine_info": {
+     "name": "llama.cpp",
+     "version": "v0.9.0",
+     "commit": "cd959ba",
+     "repo": "https://github.com/ggml-org/llama.cpp",
+     "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+     "flash_attn": "auto",
+     "parallel_slots": 10,
+     "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/llama.cpp/build/bin/llama-server",
+      "-m",
+      "/var/home/shiro/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+      "--embedding",
+      "--pooling",
+      "last",
+      "-t",
+      "4",
+      "-c",
+      "5200",
+      "-b",
+      "1024",
+      "-ub",
+      "1024",
+      "-np",
+      "10",
+      "-fa",
+      "auto",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8450"
+     ],
+     "pooling": "last",
+     "threads": 4,
+     "parallel": 10,
+     "ctx": 5200,
+     "batch": 1024,
+     "ubatch": 1024
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/qwen3-embed-0.6b.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       0.7939453125,
+       1.6337890625,
+       2.392578125
+      ],
+      "mem_available_gb": 5.64,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.63
+     },
+     {
+      "loadavg": [
+       0.80029296875,
+       1.78076171875,
+       2.3408203125
+      ],
+      "mem_available_gb": 5.49,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.81
+     },
+     {
+      "loadavg": [
+       0.95556640625,
+       1.9296875,
+       2.3544921875
+      ],
+      "mem_available_gb": 5.49,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.86
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       3.98095703125,
+       2.9345703125,
+       2.77197265625
+      ],
+      "mem_available_gb": 5.48,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.79
+     },
+     {
+      "loadavg": [
+       4.443359375,
+       3.14697265625,
+       2.775390625
+      ],
+      "mem_available_gb": 5.5,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.86
+     },
+     {
+      "loadavg": [
+       3.9443359375,
+       2.9794921875,
+       2.6943359375
+      ],
+      "mem_available_gb": 5.39,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.88
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 15.708,
+      "texts_per_s_spread": [
+       15.553,
+       15.735
+      ],
+      "tokens_per_s": 251.3,
+      "tokens_per_s_spread": [
+       248.9,
+       251.8
+      ],
+      "p50_s": 0.063145,
+      "p50_s_spread": [
+       0.063063,
+       0.063161
+      ],
+      "p99_s": 0.065196,
+      "p99_s_spread": [
+       0.064612,
+       0.067121
+      ],
+      "rounds": 3,
+      "requests": [
+       32,
+       32,
+       32
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 15.874,
+      "texts_per_s_spread": [
+       14.645,
+       15.893
+      ],
+      "tokens_per_s": 254.0,
+      "tokens_per_s_spread": [
+       234.3,
+       254.3
+      ],
+      "p50_s": 0.502775,
+      "p50_s_spread": [
+       0.502187,
+       0.509465
+      ],
+      "p99_s": 0.507791,
+      "p99_s_spread": [
+       0.504901,
+       0.626065
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 15.974,
+      "texts_per_s_spread": [
+       15.221,
+       15.982
+      ],
+      "tokens_per_s": 255.6,
+      "tokens_per_s_spread": [
+       243.5,
+       255.7
+      ],
+      "p50_s": 2.002712,
+      "p50_s_spread": [
+       2.001642,
+       2.101754
+      ],
+      "p99_s": 2.002712,
+      "p99_s_spread": [
+       2.001642,
+       2.101754
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 15.82,
+      "texts_per_s_spread": [
+       15.58,
+       16.011
+      ],
+      "tokens_per_s": 253.3,
+      "tokens_per_s_spread": [
+       249.4,
+       256.3
+      ],
+      "p50_s": 8.089235,
+      "p50_s_spread": [
+       7.993011,
+       8.214316
+      ],
+      "p99_s": 8.089235,
+      "p99_s_spread": [
+       7.993011,
+       8.214316
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 2.193,
+      "texts_per_s_spread": [
+       2.184,
+       2.22
+      ],
+      "tokens_per_s": 280.7,
+      "tokens_per_s_spread": [
+       279.6,
+       284.1
+      ],
+      "p50_s": 0.452255,
+      "p50_s_spread": [
+       0.451223,
+       0.452821
+      ],
+      "p99_s": 0.47104,
+      "p99_s_spread": [
+       0.452147,
+       0.479005
+      ],
+      "rounds": 3,
+      "requests": [
+       5,
+       5,
+       5
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 2.216,
+      "texts_per_s_spread": [
+       2.213,
+       2.219
+      ],
+      "tokens_per_s": 283.7,
+      "tokens_per_s_spread": [
+       283.3,
+       284.0
+      ],
+      "p50_s": 3.609515,
+      "p50_s_spread": [
+       3.604989,
+       3.614058
+      ],
+      "p99_s": 3.609515,
+      "p99_s_spread": [
+       3.604989,
+       3.614058
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 2.199,
+      "texts_per_s_spread": [
+       2.166,
+       2.204
+      ],
+      "tokens_per_s": 281.4,
+      "tokens_per_s_spread": [
+       277.2,
+       282.2
+      ],
+      "p50_s": 14.553321,
+      "p50_s_spread": [
+       14.515898,
+       14.773956
+      ],
+      "p99_s": 14.553321,
+      "p99_s_spread": [
+       14.515898,
+       14.773956
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 2.192,
+      "texts_per_s_spread": [
+       2.166,
+       2.197
+      ],
+      "tokens_per_s": 280.6,
+      "tokens_per_s_spread": [
+       277.2,
+       281.2
+      ],
+      "p50_s": 58.394784,
+      "p50_s_spread": [
+       58.258381,
+       59.094833
+      ],
+      "p99_s": 58.394784,
+      "p99_s_spread": [
+       58.258381,
+       59.094833
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 0.497,
+      "texts_per_s_spread": [
+       0.497,
+       0.5
+      ],
+      "tokens_per_s": 254.7,
+      "tokens_per_s_spread": [
+       254.3,
+       256.0
+      ],
+      "p50_s": 2.009861,
+      "p50_s_spread": [
+       1.999701,
+       2.013136
+      ],
+      "p99_s": 2.009861,
+      "p99_s_spread": [
+       2.000715,
+       2.013136
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       2,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 0.496,
+      "texts_per_s_spread": [
+       0.494,
+       0.501
+      ],
+      "tokens_per_s": 253.8,
+      "tokens_per_s_spread": [
+       252.9,
+       256.6
+      ],
+      "p50_s": 16.136555,
+      "p50_s_spread": [
+       15.963996,
+       16.195304
+      ],
+      "p99_s": 16.136555,
+      "p99_s_spread": [
+       15.963996,
+       16.195304
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 0.493,
+      "texts_per_s_spread": [
+       0.491,
+       0.497
+      ],
+      "tokens_per_s": 252.3,
+      "tokens_per_s_spread": [
+       251.0,
+       254.5
+      ],
+      "p50_s": 64.926684,
+      "p50_s_spread": [
+       64.347365,
+       65.238561
+      ],
+      "p99_s": 64.926684,
+      "p99_s_spread": [
+       64.347365,
+       65.238561
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "skipped": "128 texts x 512 tokens = 65536 tokens per request exceeds this model's 32768-token batch cap; the padded batch's attention buffers would not fit in the host's memory budget",
+      "batch_tokens": 65536,
+      "batch_token_cap": 32768
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 15.847,
+      "texts_per_s_spread": [
+       15.168,
+       15.923
+      ],
+      "tokens_per_s": 253.6,
+      "tokens_per_s_spread": [
+       242.7,
+       254.8
+      ],
+      "p50_s": 0.622433,
+      "p50_s_spread": [
+       0.619472,
+       0.622679
+      ],
+      "p99_s": 0.648776,
+      "p99_s_spread": [
+       0.637739,
+       0.746346
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.999319,
+     "cosine_min": 0.998576,
+     "cosine_p1": 0.999021,
+     "norm_mean": 1.0,
+     "dim": 1024,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 1024,
+      "count": 200
+     }
+    }
+   }
   ]
  }
 }
