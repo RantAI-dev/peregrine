@@ -228,6 +228,132 @@ pub unsafe fn dot_rows_pq2_avx2(w: &[u8], rb: usize, rows: usize, a: &QuantAct, 
     }
 }
 
+/// Rows per pass and 128-weight groups per K-block in the batched AVX2 GEMM.
+///
+/// A 16-row tile is the widest whose activation window still fits the 32 KiB L1: eight activation
+/// rows at one group are 8 × 192 B of planes, offsets and scales, and an eight-group K-block makes
+/// that 12 KiB. The tile re-reads a block's activation window for each of its 16 output rows, but
+/// every one of those reads hits L1 where the old row-at-a-time loop streamed the same bytes from
+/// L2 once per row.
+const GEMM_ROWS: usize = 16;
+const GEMM_GROUPS: usize = 8;
+
+/// Smallest activation batch that takes the row-tiled GEMM.
+///
+/// Below a prefill chunk the per-row kernel keeps all `T` accumulators in registers. The tile's
+/// accumulators live in a stack array (16 rows × up to 8 activations), which costs two memory
+/// operations per row and activation per group; that is cheaper than the activation stream only
+/// once the batch is a prompt chunk. Measured on the 4B model's MTP verify batch (four rows), the
+/// tile was 26 % slower than the per-row kernel, and it is the prefill chunk (16 or 64) that it
+/// exists for.
+const GEMM_MIN_BATCH: usize = 16;
+
+/// A tile of `T` activations against `rows` output rows, one group at a time.
+///
+/// The loop order is the change: the old prefill path ran one output row through the whole K for
+/// each window of eight activations, so each row streamed the whole activation set from L2. Here a
+/// block of [`GEMM_GROUPS`] groups is walked over a [`GEMM_ROWS`]-row tile before the next block,
+/// which keeps that block's activation window in L1 across the tile. Within a row nothing moves:
+/// the same groups in ascending order, the same four-plane 16-bit sum, the same integer offset
+/// subtraction, the same `d·td` scale and the same lane-wise fused multiply-add. A row's bits are
+/// therefore the GEMV's bits at every tile size and tail.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn pq2_avx2_gemm<const T: usize>(
+    w: *const u8,
+    rb: usize,
+    rows: usize,
+    ng: usize,
+    acts: &[QuantAct],
+    out: *mut f32,
+    stride: usize,
+) {
+    let m3 = _mm256_set1_epi8(3);
+    let ones = _mm256_set1_epi16(1);
+    let mut r0 = 0;
+    while r0 < rows {
+        let rr = GEMM_ROWS.min(rows - r0);
+        let mut acc = [[_mm256_setzero_ps(); T]; GEMM_ROWS];
+        let mut kb = 0;
+        while kb < ng {
+            let ge = (kb + GEMM_GROUPS).min(ng);
+            for r in 0..rr {
+                let wp = w.add((r0 + r) * rb);
+                for g in kb..ge {
+                    let blk = wp.add(g * 34);
+                    let wq = _mm256_loadu_si256(blk.add(2) as *const __m256i);
+                    let codes = [
+                        _mm256_and_si256(wq, m3),
+                        _mm256_and_si256(_mm256_srli_epi16(wq, 2), m3),
+                        _mm256_and_si256(_mm256_srli_epi16(wq, 4), m3),
+                        _mm256_and_si256(_mm256_srli_epi16(wq, 6), m3),
+                    ];
+                    let dw = f16_at(blk);
+                    for t in 0..T {
+                        let a = acts.get_unchecked(t);
+                        let ap = a.tp.as_ptr().add(crate::quant::tp_off(g)) as *const __m256i;
+                        let planes = [
+                            _mm256_loadu_si256(ap),
+                            _mm256_loadu_si256(ap.add(2)),
+                            _mm256_loadu_si256(ap.add(4)),
+                            _mm256_loadu_si256(ap.add(6)),
+                        ];
+                        let ls = _mm256_loadu_si256(a.tls.as_ptr().add(g * 8) as *const __m256i);
+                        let td = _mm256_loadu_ps(a.td.as_ptr().add(g * 8));
+                        let s = _mm256_sub_epi32(dot128_avx2(codes, planes, ones), ls);
+                        let sc = _mm256_mul_ps(_mm256_set1_ps(dw), td);
+                        acc[r][t] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(s), sc, acc[r][t]);
+                    }
+                }
+            }
+            kb = ge;
+        }
+        for r in 0..rr {
+            for t in 0..T {
+                *out.add((r0 + r) * stride + t) = hsum(acc[r][t]);
+            }
+        }
+        r0 += GEMM_ROWS;
+    }
+}
+
+/// Rows of a PQ2_0 matrix against a batch of activations through the AVX2 GEMM, into
+/// `out[r·acts.len() + b]`. The per-row arithmetic is the GEMV's; only the order of the row and
+/// K-block loops changes.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn pq2_rows_avx2_gemm(w: &[u8], rb: usize, rows: usize, acts: &[QuantAct], out: &mut [f32]) {
+    let nb = acts.len();
+    let ng = rb / 34;
+    let mut b0 = 0;
+    while b0 < nb {
+        let tw = (nb - b0).min(TILE);
+        let a = &acts[b0..b0 + tw];
+        let o = out.as_mut_ptr().add(b0);
+        match tw {
+            8 => pq2_avx2_gemm::<8>(w.as_ptr(), rb, rows, ng, a, o, nb),
+            7 => pq2_avx2_gemm::<7>(w.as_ptr(), rb, rows, ng, a, o, nb),
+            6 => pq2_avx2_gemm::<6>(w.as_ptr(), rb, rows, ng, a, o, nb),
+            5 => pq2_avx2_gemm::<5>(w.as_ptr(), rb, rows, ng, a, o, nb),
+            4 => pq2_avx2_gemm::<4>(w.as_ptr(), rb, rows, ng, a, o, nb),
+            3 => pq2_avx2_gemm::<3>(w.as_ptr(), rb, rows, ng, a, o, nb),
+            2 => pq2_avx2_gemm::<2>(w.as_ptr(), rb, rows, ng, a, o, nb),
+            _ => pq2_avx2_gemm::<1>(w.as_ptr(), rb, rows, ng, a, o, nb),
+        }
+        b0 += tw;
+    }
+}
+
+/// The AVX2 batched GEMM path regardless of the CPU, for the tests. Safety as `dot_rows_pq2`.
+#[doc(hidden)]
+pub unsafe fn dot_rows_pq2_gemm_avx2(
+    w: &[u8],
+    rb: usize,
+    rows: usize,
+    acts: &[QuantAct],
+    out: &mut [f32],
+) {
+    pq2_rows_avx2_gemm(w, rb, rows, acts, out)
+}
+
 /// The GFNI affine matrix that moves bits `2s, 2s+1` of every byte to bits 0, 1 (and clears the rest): row `i`
 /// of the matrix is byte `7 − i` of the qword.
 const fn plane_matrix(s: u32) -> i64 {
@@ -766,6 +892,14 @@ pub unsafe fn dot_rows_pq2(w: &[u8], rb: usize, rows: usize, acts: &[QuantAct], 
         pq2_rows_zmm(w, rb, rows, acts, out);
     } else {
         let nb = acts.len();
+        if nb >= GEMM_MIN_BATCH && !have_vnni() {
+            // A prompt chunk on a plain AVX2 host: a row tile over K-blocks, so the
+            // activation window is an L1 read instead of a per-row L2 stream.
+            // Bit-identical per row. A VNNI host keeps its per-row kernel: this one is
+            // the 16-bit `VPMADDUBSW` form, not the narrower VNNI one.
+            pq2_rows_avx2_gemm(w, rb, rows, acts, out);
+            return;
+        }
         if nb == 1 && !have_vnni() {
             // Decode on an AVX2-only host: the multi-row GEMV loads the activation side
             // once for both rows. `PEREGRINE_ZMM=0` on an AVX-512 host keeps the 256-bit
