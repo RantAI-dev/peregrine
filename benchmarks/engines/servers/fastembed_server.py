@@ -9,7 +9,7 @@ POST /embed {"texts": [...]} -> {"embeddings": [[...]], "tokens": n}
 import argparse
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from fastembed import TextEmbedding
@@ -37,10 +37,18 @@ def main() -> None:
         cache_dir=args.cache_dir,
         providers=["CPUExecutionProvider"],
     )
+    # One inference at a time: a single-threaded server queues requests in the
+    # socket backlog, which is how these engines are actually embedded.  A
+    # threaded server with a lock makes ten clients contend on the GIL and
+    # collapses aggregate throughput, which measures Python, not ONNX Runtime.
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # Headers and body are separate small writes; without TCP_NODELAY a
+        # 40 ms delayed-ACK stalls every response (~100 ms per request with
+        # several connections open).  That would measure the kernel, not ONNX.
+        disable_nagle_algorithm = True
 
         def log_message(self, fmt, *a):
             pass
@@ -76,8 +84,13 @@ def main() -> None:
                 vecs = [list(map(float, v)) for v in model.embed(texts, batch_size=max(1, len(texts)))]
             self._send(200, {"embeddings": vecs, "tokens": tokens})
 
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    srv.daemon_threads = True
+    class Server(HTTPServer):
+        # Must be a class attribute: the listen backlog is applied in
+        # server_activate() during __init__.  With the default of 5 a ten-client
+        # cell drops SYNs, and every dropped connect costs a 1 s retransmit.
+        request_queue_size = 128
+
+    srv = Server(("127.0.0.1", args.port), Handler)
     srv.serve_forever()
 
 
