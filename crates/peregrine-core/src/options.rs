@@ -106,6 +106,10 @@ pub struct EngineOptions {
     pub spin_us: u64,
     /// `PEREGRINE_YIELD_US`: how long it then yields before parking (µs).
     pub yield_us: u64,
+    /// `PEREGRINE_ADAPTIVE_SPIN=0`: keep the configured spin window even when the host is
+    /// oversubscribed. On by default: the window shortens (and finally drops) when the
+    /// thread's run-queue delay says there are more runnable threads than cores.
+    pub adaptive_spin: bool,
     /// `PEREGRINE_DECODE_THREADS`: width of the narrower pool for one-row steps (default: physical cores).
     pub decode_threads: Option<usize>,
 
@@ -199,6 +203,7 @@ impl Default for EngineOptions {
         EngineOptions {
             spin_us: SPIN_DEFAULT_US,
             yield_us: 0,
+            adaptive_spin: true,
             decode_threads: None,
             isa: None,
             zmm: true,
@@ -324,6 +329,7 @@ impl EngineOptions {
             yield_us: s("YIELD_US")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.yield_us),
+            adaptive_spin: unless("ADAPTIVE_SPIN", "0"),
             decode_threads: num("DECODE_THREADS").filter(|&v| v > 0),
             isa,
             zmm: unless("ZMM", "0"),
@@ -423,6 +429,7 @@ impl EngineOptions {
         vec![
             ("spin_us", self.spin_us.to_string()),
             ("yield_us", self.yield_us.to_string()),
+            ("adaptive_spin", self.adaptive_spin.to_string()),
             ("decode_threads", opt(self.decode_threads)),
             (
                 "isa",
@@ -487,6 +494,7 @@ impl EngineOptions {
 pub const NAMES: &[&str] = &[
     "SPIN_US",
     "YIELD_US",
+    "ADAPTIVE_SPIN",
     "DECODE_THREADS",
     "ISA",
     "ZMM",
@@ -610,6 +618,10 @@ mod tests {
         assert_eq!(with(&[("TQ_SPAN", "64")]).tq_span, 64);
         assert_eq!(with(&[("TQ_SPAN", "48")]).tq_span, 16);
         assert_eq!(with(&[("TB_SPAN", "16")]).tb_span, 32);
+        // The adaptive window is on unless it is turned off.
+        assert!(with(&[]).adaptive_spin);
+        assert!(with(&[("ADAPTIVE_SPIN", "1")]).adaptive_spin);
+        assert!(!with(&[("ADAPTIVE_SPIN", "0")]).adaptive_spin);
         // Presence-only switches.
         assert!(with(&[("TRACE", "")]).trace);
         assert!(with(&[("DSPARK_PROF", "0")]).dspark.prof);

@@ -1,0 +1,15 @@
+condition=loaded model=llama1b rounds=5 refs=1 hogs=4
+start 2026-11-09T11:48:27Z loadavg=7.01 8.81 9.92 11/1927 2627715
+loaded llama1b r1 base secs=69 loadavg=12.82 10.20 10.32 12/1912 2629559
+loaded llama1b r1 branch secs=34 loadavg=13.66 10.74 10.50 14/1908 2630439
+loaded llama1b r2 branch secs=32 loadavg=13.77 11.05 10.61 10/1911 2631321
+loaded llama1b r2 base secs=69 loadavg=13.91 11.68 10.87 32/1943 2633024
+loaded llama1b r3 base secs=81 loadavg=15.63 12.73 11.30 11/1953 2634748
+loaded llama1b r3 branch secs=41 loadavg=17.33 13.52 11.63 19/1953 2635423
+loaded llama1b r4 branch secs=38 loadavg=16.84 13.87 11.83 6/1912 2635906
+loaded llama1b r4 base secs=32 loadavg=13.55 13.34 11.71 6/1912 2636111
+loaded llama1b r5 base secs=29 loadavg=11.99 12.97 11.64 6/1914 2636541
+loaded llama1b r5 branch secs=32 loadavg=10.48 12.51 11.53 6/1916 2636744
+loaded llama1b r1 spin0 secs=33 loadavg=9.42 12.01 11.40 6/1917 2636949
+loaded llama1b llama secs=40 loadavg=9.60 11.73 11.33 6/1934 2637165
+end 2026-11-09T11:57:17Z loadavg=9.60 11.73 11.33 7/1934 2637167
