@@ -661,7 +661,7 @@ pub fn exp_shift_sum(x: &mut [f32], shift: f32) -> f64 {
     }
     let mut sum = 0.0f64;
     for v in x.iter_mut() {
-        *v = (*v - shift).exp();
+        *v = det_exp(*v - shift);
         sum += *v as f64;
     }
     sum
@@ -741,7 +741,7 @@ pub fn exp_scaled_sum(x: &mut [f32], shift: f32, scale: f32) -> f64 {
     }
     let mut sum = 0.0f64;
     for v in x.iter_mut() {
-        *v = ((*v - shift) * scale).exp();
+        *v = det_exp((*v - shift) * scale);
         sum += *v as f64;
     }
     sum
@@ -845,7 +845,7 @@ pub fn swiglu(gate: &mut [f32], up: &[f32]) {
         }
     }
     for (g, &u) in gate.iter_mut().zip(up) {
-        *g = (*g / (1.0 + (-*g).exp())) * u;
+        *g = (*g / (1.0 + det_exp(-*g))) * u;
     }
 }
 
@@ -1144,7 +1144,7 @@ pub fn mul_sigmoid(x: &mut [f32], z: &[f32]) {
         }
     }
     for (v, &g) in x.iter_mut().zip(z) {
-        *v /= 1.0 + (-g).exp();
+        *v /= 1.0 + det_exp(-g);
     }
 }
 
@@ -1185,7 +1185,7 @@ pub fn silu(x: &mut [f32]) {
         }
     }
     for v in x.iter_mut() {
-        *v /= 1.0 + (-*v).exp();
+        *v /= 1.0 + det_exp(-*v);
     }
 }
 
@@ -1206,7 +1206,7 @@ pub fn mul_silu(o: &mut [f32], z: &[f32]) {
         }
     }
     for (v, &g) in o.iter_mut().zip(z) {
-        *v *= g / (1.0 + (-g).exp());
+        *v *= g / (1.0 + det_exp(-g));
     }
 }
 
@@ -1295,6 +1295,320 @@ fn fwht(x: &mut [f32]) {
     let s = 1.0 / (n as f32).sqrt();
     for v in x.iter_mut() {
         *v *= s;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic f64 transcendentals, for the aarch64 tiers
+// ---------------------------------------------------------------------------
+//
+// libm's `sin`, `cos`, `pow` and `log` are not one function across C libraries:
+// glibc and Apple's libm round their last bits differently. The RoPE tables are
+// built from them, every attention head reads those tables, and the difference is
+// visible in the logits — which is why #140 had to give macOS its own golden
+// directory. The aarch64 tiers use the implementations below instead: they are
+// built from IEEE basic operations only, so one golden set holds on Linux and
+// macOS alike. The x86 tiers recorded their goldens against glibc, so the
+// [`det_*`] dispatchers below call libm off aarch64 and leave those bits alone.
+
+/// `ln 2`, high part: 32 significant bits, so `k·ln2_hi` is exact for every `k`
+/// the `exp` reduction produces.
+#[cfg(any(target_arch = "aarch64", test))]
+const DET_LN2_HI: f64 = f64::from_bits(0x3fe6_2e42_fee0_0000);
+/// `ln 2` minus `DET_LN2_HI`.
+#[cfg(any(target_arch = "aarch64", test))]
+const DET_LN2_LO: f64 = f64::from_bits(0x3dea_39ef_3579_3c76);
+/// `log2(e)`: the `exp` reduction counts whole multiples of `ln 2`.
+#[cfg(any(target_arch = "aarch64", test))]
+const DET_LOG2E: f64 = f64::from_bits(0x3ff7_1547_652b_82fe);
+/// `2/π`: the sine's quadrant count.
+#[cfg(any(target_arch = "aarch64", test))]
+const DET_FRAC_2_PI: f64 = f64::from_bits(0x3fe4_5f30_6dc9_c883);
+/// `π/2`, first part: the low mantissa bits are zero, so `n·PIO2_1` is exact for
+/// `|n| < 2²⁰` and the subtraction that reduces the angle is exact as well.
+#[cfg(any(target_arch = "aarch64", test))]
+const DET_PIO2_1: f64 = f64::from_bits(0x3ff9_21fb_5440_0000);
+/// `π/2 − DET_PIO2_1`, to `f64`.
+#[cfg(any(target_arch = "aarch64", test))]
+const DET_PIO2_2: f64 = f64::from_bits(0x3dd0_b461_1a62_6331);
+/// The rest of `π/2` after `DET_PIO2_2`.
+#[cfg(any(target_arch = "aarch64", test))]
+const DET_PIO2_3: f64 = f64::from_bits(0x3a71_701b_839a_2520);
+
+/// `2^k` for an integer `k`, subnormals included.
+#[cfg(any(target_arch = "aarch64", test))]
+fn pow2(k: i32) -> f64 {
+    if (-1022..=1023).contains(&k) {
+        f64::from_bits(((k + 1023) as u64) << 52)
+    } else if k > 1023 {
+        f64::INFINITY
+    } else if k < -1074 {
+        0.0
+    } else {
+        // Subnormal: `2^k = 2^(k+54) · 2^-54`.
+        f64::from_bits(((k + 54 + 1023) as u64) << 52) * f64::from_bits(969u64 << 52)
+    }
+}
+
+/// `exp(x)`: the reduction `x = k·ln2 + r`, then a degree-14 series on `r`.
+#[cfg(any(target_arch = "aarch64", test))]
+fn exp_f64(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x > 709.78 {
+        return f64::INFINITY;
+    }
+    if x < -745.2 {
+        return 0.0;
+    }
+    let k = (x * DET_LOG2E).round();
+    let r = (x - k * DET_LN2_HI) - k * DET_LN2_LO;
+    // `1 + r + r²/2! + … + r¹⁴/14!`, Horner. `|r| ≤ ln2/2`.
+    //
+    // One Horner step per line, not a single nested expression: rustfmt's
+    // line breaking doubles in cost with every level of nested parentheses,
+    // so a fourteen-deep expression takes hours to format.
+    let mut p = 1.0 / 87178291200.0;
+    p = p * r + 1.0 / 6227020800.0;
+    p = p * r + 1.0 / 479001600.0;
+    p = p * r + 1.0 / 39916800.0;
+    p = p * r + 1.0 / 3628800.0;
+    p = p * r + 1.0 / 362880.0;
+    p = p * r + 1.0 / 40320.0;
+    p = p * r + 1.0 / 5040.0;
+    p = p * r + 1.0 / 720.0;
+    p = p * r + 1.0 / 120.0;
+    p = p * r + 1.0 / 24.0;
+    p = p * r + 1.0 / 6.0;
+    p = p * r + 0.5;
+    p = p * r + 1.0;
+    p = p * r + 1.0;
+    p * pow2(k as i32)
+}
+
+/// `ln(x)`: split `x = m·2^e` with `m ∈ [√2/2, √2]`, then the `atanh` series in
+/// `s = (m−1)/(m+1)`, whose `s²` is at most 0.03, so eleven terms reach `f64`.
+#[cfg(any(target_arch = "aarch64", test))]
+fn ln_f64(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { f64::INFINITY } else { f64::NAN };
+    }
+    if x == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    let mut a = x;
+    let mut e = 0i32;
+    if a < f64::MIN_POSITIVE {
+        a *= pow2(54);
+        e -= 54;
+    }
+    let bits = a.to_bits();
+    e += ((bits >> 52) & 0x7ff) as i32 - 1023;
+    a = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000);
+    if a > std::f64::consts::SQRT_2 {
+        a *= 0.5;
+        e += 1;
+    }
+    let s = (a - 1.0) / (a + 1.0);
+    let u = s * s;
+    // `1 + u/3 + u²/5 + … + u¹⁰/21`, Horner.
+    let mut p = 1.0 / 21.0;
+    for n in (0..10).rev() {
+        p = p * u + 1.0 / (2 * n + 1) as f64;
+    }
+    2.0 * s * p + e as f64 * DET_LN2_HI + e as f64 * DET_LN2_LO
+}
+
+/// `(sin x, cos x)`: Cody–Waite reduction to `|r| ≤ π/4` and the Taylor series.
+///
+/// The three parts of `π/2` keep `x = n·π/2 + r` accurate out to the largest RoPE
+/// angle the engine can build (a few million radians at most); beyond `10⁶`
+/// radians, which no table reaches, libm keeps the job.
+#[cfg(any(target_arch = "aarch64", test))]
+fn sin_cos_f64(x: f64) -> (f64, f64) {
+    if !x.is_finite() {
+        return (f64::NAN, f64::NAN);
+    }
+    if x.abs() > 1.0e6 {
+        return (x.sin(), x.cos());
+    }
+    let n = (x * DET_FRAC_2_PI).round();
+    let mut r = x - n * DET_PIO2_1;
+    r -= n * DET_PIO2_2;
+    r -= n * DET_PIO2_3;
+    let u = r * r;
+    // `sin r = r·(1 − u/6 + … + u⁶/13!)`, Horner.
+    let mut sp = 1.0 / 6227020800.0;
+    sp = sp * u - 1.0 / 39916800.0;
+    sp = sp * u + 1.0 / 362880.0;
+    sp = sp * u - 1.0 / 5040.0;
+    sp = sp * u + 1.0 / 120.0;
+    sp = sp * u - 1.0 / 6.0;
+    sp = sp * u + 1.0;
+    let s = r * sp;
+    // `cos r = 1 − u/2 + … + u⁶/12!`, Horner.
+    let mut cp = 1.0 / 479001600.0;
+    cp = cp * u - 1.0 / 3628800.0;
+    cp = cp * u + 1.0 / 40320.0;
+    cp = cp * u - 1.0 / 720.0;
+    cp = cp * u + 1.0 / 24.0;
+    cp = cp * u - 0.5;
+    cp = cp * u + 1.0;
+    match (n as i64) & 3 {
+        0 => (s, cp),
+        1 => (cp, -s),
+        2 => (-s, -cp),
+        _ => (-cp, s),
+    }
+}
+
+/// `base^exp = exp(exp·ln base)` for `base > 0`; the libm handles the rest.
+#[cfg(any(target_arch = "aarch64", test))]
+fn pow_f64(base: f64, exp: f64) -> f64 {
+    if exp == 0.0 {
+        return 1.0;
+    }
+    if exp == 1.0 {
+        return base;
+    }
+    if base > 0.0 && base.is_finite() && exp.is_finite() {
+        exp_f64(exp * ln_f64(base))
+    } else {
+        base.powf(exp)
+    }
+}
+
+/// `exp` on the forward path.
+///
+/// On aarch64: [`exp_scalar`], the engine's own exponential. Off aarch64: the C
+/// library's `expf`, so the x86 golden tiers do not move.
+#[inline]
+pub fn det_exp(x: f32) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if x.is_nan() {
+            return x;
+        }
+        if x == f32::INFINITY {
+            return x;
+        }
+        if x == f32::NEG_INFINITY {
+            return 0.0;
+        }
+        exp_scalar(x)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        x.exp()
+    }
+}
+
+/// `ln` on the forward path; see [`det_exp`] for the platform split.
+#[inline]
+pub fn det_ln(x: f32) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        ln_f64(x as f64) as f32
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        x.ln()
+    }
+}
+
+/// `ln` of an `f64` on the forward path; see [`det_exp`] for the platform split.
+#[inline]
+pub fn det_ln_f64(x: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        ln_f64(x)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        x.ln()
+    }
+}
+
+/// `tanh` on the forward path; see [`det_exp`] for the platform split.
+#[inline]
+pub fn det_tanh(x: f32) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        tanh(x)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        x.tanh()
+    }
+}
+
+/// `(sin x, cos x)`; see [`det_exp`] for the platform split.
+#[inline]
+pub fn det_sin_cos(x: f64) -> (f64, f64) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        sin_cos_f64(x)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        (x.sin(), x.cos())
+    }
+}
+
+/// `base^exp` for `f64`; see [`det_exp`] for the platform split.
+#[inline]
+pub fn det_pow_f64(base: f64, exp: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        pow_f64(base, exp)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        base.powf(exp)
+    }
+}
+
+/// `base^exp` for `f32`; see [`det_exp`] for the platform split.
+#[inline]
+pub fn det_pow_f32(base: f32, exp: f32) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        pow_f64(base as f64, exp as f64) as f32
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        base.powf(exp)
+    }
+}
+
+/// `√(a² + b²)` without the intermediate overflow; see [`det_exp`] for the platform
+/// split. The sidecar builder's eigensolver uses it, and a sidecar built at test time
+/// feeds a golden, so it is on the numeric path too.
+#[inline]
+pub fn det_hypot(a: f64, b: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let (big, small) = if a.abs() >= b.abs() {
+            (a.abs(), b.abs())
+        } else {
+            (b.abs(), a.abs())
+        };
+        if big == 0.0 {
+            return 0.0;
+        }
+        let r = small / big;
+        big * (1.0 + r * r).sqrt()
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        a.hypot(b)
     }
 }
 
@@ -1977,5 +2291,65 @@ mod tests {
             "peak-to-mean {} after rotation",
             amax_after / mean_after
         );
+    }
+
+    /// The deterministic f64 transcendentals are libm-accurate. Their results are
+    /// cast to `f32` for the RoPE tables, so a relative error of 1e-12 is four
+    /// orders of magnitude below the format's resolution.
+    #[test]
+    fn deterministic_f64_transcendentals_match_libm() {
+        // sin/cos across the angles a small-context table builds ...
+        let mut x = -300.0f64;
+        while x <= 300.0 {
+            let (s, c) = sin_cos_f64(x);
+            assert!((s - x.sin()).abs() < 1e-12, "sin({x}): {s} vs {}", x.sin());
+            assert!((c - x.cos()).abs() < 1e-12, "cos({x}): {c} vs {}", x.cos());
+            x += 0.017_3;
+        }
+        // ... and the largest angles a long-context table reaches.
+        for &x in &[4095.7f64, 16_384.3, 131_071.9, -65_535.5, 524_287.25] {
+            let (s, c) = sin_cos_f64(x);
+            assert!((s - x.sin()).abs() < 1e-11, "sin({x}): {s} vs {}", x.sin());
+            assert!((c - x.cos()).abs() < 1e-11, "cos({x}): {c} vs {}", x.cos());
+        }
+        // pow: the RoPE bases, every exponent a table uses.
+        for &base in &[10_000.0f64, 150_000.0, 500_000.0, 1_000_000.0] {
+            for i in 0..128 {
+                let e = -((2 * i) as f64) / 128.0;
+                let got = pow_f64(base, e);
+                let want = base.powf(e);
+                assert!(
+                    ((got - want) / want).abs() < 1e-12,
+                    "{base}^{e}: {got} vs {want}"
+                );
+            }
+        }
+        // exp and ln over the range the reduction handles.
+        let mut x = -700.0f64;
+        while x <= 700.0 {
+            let e = exp_f64(x);
+            let want = x.exp();
+            assert!(((e - want) / want).abs() < 1e-12, "exp({x}): {e} vs {want}");
+            x += 3.7;
+        }
+        let mut x = 1e-6f64;
+        while x < 1e6 {
+            let l = ln_f64(x);
+            let want = x.ln();
+            assert!(
+                (l - want).abs() < 1e-13 * want.abs().max(1.0),
+                "ln({x}): {l} vs {want}"
+            );
+            x *= 1.37;
+        }
+        // The corners the forward path actually meets.
+        assert_eq!(det_exp(f32::NEG_INFINITY), 0.0);
+        assert_eq!(det_exp(f32::INFINITY), f32::INFINITY);
+        assert!(det_exp(f32::NAN).is_nan());
+        assert_eq!(ln_f64(1.0), 0.0);
+        assert_eq!(ln_f64(0.0), f64::NEG_INFINITY);
+        assert!(ln_f64(-1.0).is_nan());
+        assert_eq!(pow_f64(2.0, 0.0), 1.0);
+        assert_eq!(pow_f64(2.0, 1.0), 2.0);
     }
 }

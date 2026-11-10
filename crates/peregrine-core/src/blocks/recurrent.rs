@@ -53,7 +53,7 @@ impl RecurrentCfg {
 
 #[inline]
 fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
+    1.0 / (1.0 + crate::vmath::det_exp(-x))
 }
 
 #[inline]
@@ -61,7 +61,7 @@ fn softplus(x: f32) -> f32 {
     if x > 20.0 {
         x
     } else {
-        (1.0 + x.exp()).ln()
+        crate::vmath::det_ln(1.0 + crate::vmath::det_exp(x))
     }
 }
 
@@ -225,7 +225,7 @@ pub fn silu_norm_gates(
                     let beta = sigmoid(ab_row[h]);
                     let g = a_log[h] * softplus(ab_row[nv + h] + dt_bias[h]);
                     ab_row[h] = beta;
-                    ab_row[nv + h] = g.exp();
+                    ab_row[nv + h] = crate::vmath::det_exp(g);
                 }
             }
         },

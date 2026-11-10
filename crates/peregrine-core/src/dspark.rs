@@ -490,7 +490,9 @@ impl Drafter {
         };
         let half = cfg.head_dim / 2;
         let inv_freq = (0..half)
-            .map(|i| cfg.rope_theta.powf(-((2 * i) as f64) / cfg.head_dim as f64))
+            .map(|i| {
+                crate::vmath::det_pow_f64(cfg.rope_theta, -((2 * i) as f64) / cfg.head_dim as f64)
+            })
             .collect();
         let mut d = Drafter {
             embed: q("embed_tokens.weight")?,
@@ -580,7 +582,10 @@ impl Drafter {
             let head = &mut v[h * hd..(h + 1) * hd];
             for i in 0..half {
                 let th = pos as f64 * self.inv_freq[i];
-                let (s, c) = (th.sin() as f32, th.cos() as f32);
+                let (s, c) = {
+                    let (sin, cos) = crate::vmath::det_sin_cos(th);
+                    (sin as f32, cos as f32)
+                };
                 let (x0, x1) = (head[i], head[i + half]);
                 head[i] = x0 * c - x1 * s;
                 head[i + half] = x0 * s + x1 * c;
@@ -842,7 +847,7 @@ impl Drafter {
                         .map(|(a, b)| a * b)
                         .sum::<f32>();
                 }
-                conf.push(1.0 / (1.0 + (-z.clamp(-60.0, 60.0)).exp()));
+                conf.push(1.0 / (1.0 + crate::vmath::det_exp(-z.clamp(-60.0, 60.0))));
             }
             tokens.push(tok);
             prev = tok;
