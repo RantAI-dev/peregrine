@@ -25,7 +25,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--batch-size", type=int, default=128)
-    ap.add_argument("--device", default="CPU")
+    ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
 
     from sentence_transformers import SentenceTransformer

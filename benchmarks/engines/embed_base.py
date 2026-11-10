@@ -42,10 +42,17 @@ def get_json(url: str, timeout: float = 5.0) -> Optional[Dict[str, Any]]:
     return None
 
 
-def wait_ready(url: str, timeout: float = 180.0, paths=("/health", "/v1/models")) -> bool:
-    """Poll liveness endpoints until the server answers 200 or the timeout expires."""
+def wait_ready(url: str, timeout: float = 180.0, paths=("/health", "/v1/models"),
+               proc: "subprocess.Popen | None" = None) -> bool:
+    """Poll liveness endpoints until the server answers 200 or the timeout expires.
+
+    If `proc` is given, a died process fails the wait immediately instead of
+    burning the whole timeout (llama-server aborts on some flag combinations).
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False
         for p in paths:
             try:
                 with urllib.request.urlopen(url.rstrip("/") + p, timeout=2.0) as r:

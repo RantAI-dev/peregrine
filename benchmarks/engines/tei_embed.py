@@ -11,6 +11,9 @@ DEFAULT_IMAGE = "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4"
 PINNED_VERSION = "1.9.4"
 CONTAINER_NAME = "pg-embed-tei"
 
+# TEI's own pooling vocabulary.
+POOLING = {"mean": "mean", "cls": "cls", "last": "last_token", "last_token": "last_token"}
+
 
 class TEIAdapter(EmbedAdapter):
     """Runs the pinned TEI CPU image with the model directory bind-mounted."""
@@ -36,7 +39,11 @@ class TEIAdapter(EmbedAdapter):
 
     def start(self, row: Dict[str, Any], model: Dict[str, Any], port: int) -> Dict[str, Any]:
         model_dir = Path(row["path"]).expanduser().resolve()
-        max_tokens = int(model.get("server_ctx") or 70000)
+        # TEI's candle backend allocates one padded batch; 16k tokens keeps the
+        # activation buffers well under the host's memory budget while still
+        # covering 32 x 512 in one forward pass.
+        max_tokens = int(row.get("tei_batch_tokens") or 16384)
+        pooling = POOLING.get(str(model.get("pooling", "mean")), "mean")
         cmd = [
             self.runtime, "run", "--rm", "--name", CONTAINER_NAME,
             "--network", "host",
@@ -48,7 +55,7 @@ class TEIAdapter(EmbedAdapter):
             "--model-id", "/data",
             "--hostname", "127.0.0.1",
             "--port", str(port),
-            "--pooling", model.get("pooling", "mean"),
+            "--pooling", pooling,
             "--dtype", "float32",
             "--tokenization-workers", "1",
             "--max-client-batch-size", "128",
@@ -66,8 +73,9 @@ class TEIAdapter(EmbedAdapter):
             tail = self.read_log_tail(40)
             self.stop()
             raise RuntimeError(f"TEI failed to start:\n{tail}")
-        return {"cmd": cmd, "pooling": model.get("pooling"), "threads": self.threads,
-                "backend": "candle", "dtype": "float32"}
+        return {"cmd": cmd, "pooling": pooling, "threads": self.threads,
+                "backend": "candle", "dtype": "float32",
+                "max_batch_tokens": max_tokens, "max_batch_requests": 128}
 
     def embed(self, texts: List[str]) -> Dict[str, Any]:
         reply = post_json(self.base_url + "/embed", {"inputs": texts, "truncate": False})

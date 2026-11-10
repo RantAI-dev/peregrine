@@ -35,6 +35,7 @@ from engines.llama_embed import LlamaCppEmbedAdapter
 from engines.tei_embed import TEIAdapter
 from engines.fastembed_embed import FastEmbedAdapter
 from engines.openvino_embed import OpenVINOAdapter
+from engines.peregrine_embed import PeregrineEmbedAdapter
 
 DEFAULT_MODEL_DIR = Path(os.environ.get("EMBED_MODEL_DIR", "~/models/embed")).expanduser()
 REGISTRY = Path(__file__).resolve().parent / "embed_models.json"
@@ -44,6 +45,7 @@ ENGINES = {
     "tei": TEIAdapter,
     "fastembed": FastEmbedAdapter,
     "openvino": OpenVINOAdapter,
+    "peregrine": PeregrineEmbedAdapter,
 }
 
 
@@ -180,6 +182,9 @@ def run_cell(
     try:
         while True:
             elapsed = time.perf_counter() - t_start
+            # At least one wave always runs; later waves only while inside the
+            # time budget and request count.  A wave that overruns the budget
+            # simply ends the cell, so a slow engine is never asked twice.
             if waves > 0 and elapsed >= budget:
                 break
             if waves * clients >= max_requests:
@@ -230,6 +235,13 @@ def cell_name(length: int, batch: int, clients: int) -> str:
     return f"L{length}_b{batch}_c{clients}"
 
 
+def load_skips(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def run_bench(args) -> None:
     reg = load_registry(REGISTRY)
     rows = resolve_rows(reg, args.select)
@@ -254,17 +266,34 @@ def run_bench(args) -> None:
         sha = compute_file_sha256(Path(row["path"])) if Path(row["path"]).is_file() else ""
         size = Path(row["path"]).stat().st_size if Path(row["path"]).is_file() else 0
 
-        adapter = ENGINES[row["engine"]](threads=args.threads)
+        max_cell_s = float(
+            row.get("max_cell_seconds") or model.get("max_cell_seconds") or args.max_cell_seconds
+        )
+        # The skip decision is made once (round 1) and reused by later rounds so
+        # that every round covers exactly the same cells.
+        skips_path = out_dir / f"{model_name}-{row['engine']}-{row['precision']}-skips.json"
+        skipped: Dict[str, Any] = load_skips(skips_path) or {}
+        decide_skips = not skips_path.exists()
+
+        # One server per (model, precision): the port is fixed so a crashed
+        # server cannot leave a stale process on a different port.
+        port = args.port + (hash(f"{model_name}{row['engine']}{row['precision']}") % 50)
+        adapter = make_adapter(row["engine"], args)
         version = adapter.get_version_info()
         print(f"\n== {model_name} / {row['engine']} / {row['precision']} "
               f"(round {args.round}) ==", flush=True)
-        started = adapter.start(row, model, args.port)
+        started = adapter.start(row, model, port)
         try:
-            # Warm-up: one request per length, excluded from the timing.
+            # Warm-up: one request per length, excluded from the timing.  The
+            # second single-text request is timed and used to predict the cost
+            # of the big-batch cells.
+            single_s: Dict[int, float] = {}
             for L in lengths:
                 item = tdata["lengths"][str(L)]
-                warm = min(2, len(item))
-                adapter.embed([t["text"] for t in item[:warm]])
+                adapter.embed([t["text"] for t in item[:2]])
+                t0 = time.perf_counter()
+                adapter.embed([item[0]["text"]])
+                single_s[L] = time.perf_counter() - t0
             state_before = host_state()
             cells: Dict[str, Any] = {}
             for L in lengths:
@@ -276,10 +305,30 @@ def run_bench(args) -> None:
                         if clients > 1 and batch != 1:
                             continue
                         key = cell_name(L, batch, clients)
-                        budget = args.budget * (2.0 if clients > 1 else 1.0)
+                        # Conservative: one text costs what it cost alone, so the
+                        # estimate never under-predicts a serial engine.
+                        est = single_s[L] * batch
+                        if key in skipped:
+                            cells[key] = dict(skipped[key])
+                            continue
+                        if decide_skips and batch > 1 and est > max_cell_s:
+                            reason = (
+                                f"estimated {est:.0f} s for {batch} x {L} tokens on this row "
+                                f"(single text {single_s[L] * 1000:.0f} ms) exceeds the "
+                                f"{max_cell_s:.0f} s per-cell cap; skipped to keep the host "
+                                f"inside its memory and wall-clock budget"
+                            )
+                            skipped[key] = {"skipped": reason, "estimate_s": round(est, 1),
+                                            "single_text_s": round(single_s[L], 4)}
+                            cells[key] = dict(skipped[key])
+                            print(f"  {key:20s} SKIP ({est:.0f}s estimate)", flush=True)
+                            continue
+                        budget = args.budget * (3.0 if clients > 1 else 1.0)
                         max_reqs = (args.max_requests if batch == 1 else args.max_big_requests)
                         if clients > 1:
                             max_reqs = max(clients * 6, clients)
+                        elif batch > 1 and single_s[L] * batch > args.budget:
+                            max_reqs = 1
                         t0 = time.perf_counter()
                         res = run_cell(
                             adapter, all_texts, all_tokens, batch, clients,
@@ -302,6 +351,9 @@ def run_bench(args) -> None:
             state_after = host_state()
         finally:
             adapter.stop()
+
+        if decide_skips:
+            skips_path.write_text(json.dumps(skipped, indent=1), encoding="utf-8")
 
         record = {
             "benchmark": "peregrine-s4.2-embed",
@@ -337,6 +389,7 @@ def run_bench(args) -> None:
                 "budget_s": args.budget,
                 "max_requests": args.max_requests,
                 "max_big_requests": args.max_big_requests,
+                "max_cell_seconds": max_cell_s,
                 "texts_file": str(texts_file),
                 "texts_per_length": tdata["per_length"],
             },
@@ -365,7 +418,14 @@ def run_accuracy(args) -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     texts_dir = Path(args.texts_dir)
-    pre = preflight()
+    # Accuracy runs are not timed, so only the memory half of the preflight
+    # applies; the load average is still recorded.
+    st = host_state()
+    if st["mem_available_gb"] < 5.0:
+        raise SystemExit(
+            f"only {st['mem_available_gb']:.2f} GB available; refusing to load a model"
+        )
+    pre = st
 
     for model_name, model, row in rows:
         ref_file = texts_dir / "ref" / f"{model_name}-{args.ref_label}.json"
@@ -379,7 +439,7 @@ def run_accuracy(args) -> None:
             texts.extend(t["text"] for t in tdata["lengths"][str(L)])
         texts = texts[: len(ref["vectors"])]
 
-        adapter = ENGINES[row["engine"]](threads=args.threads)
+        adapter = make_adapter(row["engine"], args)
         print(f"\n== accuracy {model_name} / {row['engine']} / {row['precision']} ==", flush=True)
         adapter.start(row, model, args.port)
         try:
@@ -432,9 +492,11 @@ def parse_args():
     ap.add_argument("--batches", default="1,8,32,128")
     ap.add_argument("--clients", default="1,10")
     ap.add_argument("--threads", type=int, default=4)
-    ap.add_argument("--budget", type=float, default=1.5, help="seconds of timed requests per cell")
+    ap.add_argument("--budget", type=float, default=2.0, help="seconds of timed requests per cell")
     ap.add_argument("--max-requests", type=int, default=60)
     ap.add_argument("--max-big-requests", type=int, default=3)
+    ap.add_argument("--max-cell-seconds", type=float, default=120.0,
+                    help="skip a batch cell whose predicted single-request time exceeds this")
     ap.add_argument("--request-timeout", type=float, default=900.0)
     ap.add_argument("--port", type=int, default=8401)
     ap.add_argument("--texts-dir", default="/var/tmp/embed-texts")
@@ -442,7 +504,18 @@ def parse_args():
     ap.add_argument("--mode", choices=["bench", "accuracy"], default="bench")
     ap.add_argument("--ref-label", default="torch-fp32")
     ap.add_argument("--acc-batch", type=int, default=16)
+    ap.add_argument("--peregrine-worktree", default=None,
+                    help="worktree whose target/release/peregrine serves /v1/embeddings (S4.1)")
+    ap.add_argument("--peregrine-binary", default=None)
     return ap.parse_args()
+
+
+def make_adapter(engine: str, args):
+    cls = ENGINES[engine]
+    if engine == "peregrine":
+        return cls(threads=args.threads, binary=args.peregrine_binary,
+                   worktree=args.peregrine_worktree)
+    return cls(threads=args.threads)
 
 
 def main():

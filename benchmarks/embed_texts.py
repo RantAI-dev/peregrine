@@ -49,6 +49,13 @@ def build_text(tok, words, start: int, target: int, max_tokens: int):
             lo = mid + 1
         else:
             hi = mid - 1
+    # An exact hit matters most for the short targets, where one token is 6%:
+    # prefer it over the nearest miss, then fall back to the closest window.
+    window = range(max(1, best - 8), min(len(words) - start, best + 8) + 1)
+    exact = [(k, count(tok, words, start, k)) for k in window]
+    for k, n in exact:
+        if n == target:
+            return " ".join(words[start:start + k]), n
     cand = []
     for k in (best - 2, best - 1, best, best + 1, best + 2):
         if 1 <= k <= len(words) - start:
@@ -59,6 +66,10 @@ def build_text(tok, words, start: int, target: int, max_tokens: int):
         k = 1
         return " ".join(words[start:start + k]), count(tok, words, start, k)
     _, k, n = min(cand)
+    # If the closest window is short of the target, start from the next larger
+    # one so the character trim below can cut *down* to the exact count.
+    if n < target and k + 1 <= len(words) - start and count(tok, words, start, k + 1) <= cap:
+        k, n = k + 1, count(tok, words, start, k + 1)
     text = " ".join(words[start:start + k])
     # Word granularity alone can miss a short target (a 15-word prefix is 17
     # tokens, 16 is unreachable); trim the tail by characters to hit it exactly.
