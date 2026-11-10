@@ -14,6 +14,128 @@ Peregrine runs GGUF models on CPUs, in pure Rust with one runtime dependency (`m
 **bytes it moved per token** beside tokens per second, so every number can be checked against the machine's
 own memory-bandwidth ceiling.
 
+## Install
+
+Linux x86-64 and aarch64 are supported. The installer detects the architecture, downloads the matching
+release archive, verifies it against `SHA256SUMS`, and installs `peregrine` to `~/.local/bin`:
+
+```sh
+curl -fsSL https://peregrine.rantai.dev/install.sh | sh
+peregrine tier      # the SIMD tier picked for this CPU: AVX-512, AVX2, NEON, i8mm, or scalar
+```
+
+Pin a release or choose the install directory by passing arguments to `sh`:
+
+```sh
+curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --version v0.1.1
+curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --prefix /usr/local
+peregrine upgrade            # self-update in place to the newest release
+```
+
+The release archives (`peregrine-v0.1.1-linux-x86_64.tar.gz` and
+`peregrine-v0.1.1-linux-aarch64.tar.gz` on the
+[releases page](https://github.com/RantAI-dev/peregrine/releases)) contain portable binaries built for
+the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and i8mm are selected at run time,
+so one binary runs on every CPU of that architecture; `peregrine tier` prints what it picked.
+
+**Docker** builds the server image (see [Docker](docs/docker.md)):
+
+```sh
+docker build -t peregrine .
+docker run --rm -p 8201:8201 -v /path/to/models:/models:ro peregrine
+```
+
+**From source** (Rust 1.96 or newer):
+
+```sh
+cargo build --release
+./target/release/peregrine tier
+```
+
+## Run a model
+
+`peregrine run` sends one prompt and streams the reply to the terminal — no server, no client:
+
+```sh
+peregrine run -m hf:mradermacher/SmolLM2-360M-Instruct-GGUF/SmolLM2-360M-Instruct.Q4_K_M.gguf \
+  "Say hello in one sentence."
+```
+
+With no prompt argument it reads stdin, so pipes and scripts work:
+
+```sh
+echo "Say hello in one sentence." | peregrine run -m model.gguf
+peregrine run -m model.gguf --json "Say hello in one sentence."   # one JSON object with text and timings
+```
+
+Common flags (all are listed by `peregrine run --help`):
+
+| Flag | Meaning |
+|---|---|
+| `-c, --ctx N` | Context length in tokens, clamped to the model's training context (default 8192) |
+| `-t, --threads N` | Worker threads (default: every logical CPU) |
+| `--max-tokens N` | Tokens to generate at most (default 256) |
+| `--temperature T` | Sampling temperature; `0` is greedy and deterministic (default 0) |
+| `--system TEXT` | A system message for the chat template |
+| `--chat-template NAME` | Render a named template when the file declares none |
+| `--kv f16\|f32\|i8` | KV-cache precision (default f16) |
+| `--no-thinking` | Answer without the reasoning block (reasoning models only) |
+| `--speculate` | Lossless prompt-lookup speculation (off by default) |
+| `--json` | Print one JSON object (text, token counts, prefill/decode tok/s, TTFT, wall time) |
+
+### `hf:` models
+
+Any command that takes `-m` — `run`, `serve`, `inspect`, `bench` and `tune` — accepts
+`hf:<namespace>/<repo>/<file>[@<rev>]`. The file is downloaded once into
+`~/.cache/peregrine/models/<repo>/<file>` (or `$PEREGRINE_CACHE_DIR` / `$XDG_CACHE_HOME/peregrine`) and
+reused afterwards. Partial downloads resume from a `.part` file; the repository and optional revision are
+part of the cache path, so two repos that publish the same file name cannot collide.
+
+Before the weights arrive, Peregrine downloads only the first 16 MiB of the GGUF and checks that this
+build can run the file, so an unsupported model is refused early. `HF_TOKEN` is sent as a bearer token for
+gated or private repositories.
+
+## Serve the OpenAI API
+
+Start a foreground server and call it:
+
+```sh
+peregrine serve -m model.gguf --port 8201
+curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+The server speaks `/v1/chat/completions` (streamed or not), plus `/v1/models`, `/health` and `/metrics`.
+
+For a long-lived service, `--background` detaches the server, writes a lifecycle state file and a log,
+and returns once it is listening:
+
+```sh
+peregrine serve -m model.gguf --port 8201 --background
+peregrine status       # pid, version, URL, model, log path
+peregrine stop         # drain in-flight requests, then exit
+```
+
+`peregrine upgrade` replaces the running background server with zero downtime: it starts the new binary
+beside the old one (`SO_REUSEPORT`), waits for it to report ready, then drains and stops the old process.
+`kill -HUP <pid>` does the same handoff for a rebuilt or replaced binary. See
+[Service & upgrades](docs/service.md).
+
+## CLI reference
+
+| Command | What it does |
+|---|---|
+| `peregrine run -m <MODEL> [PROMPT]...` | Run one prompt (or stdin) and stream the reply in the terminal (`--json` for structured output). |
+| `peregrine serve -m <MODEL> [--port 8201] [--background]` | Start the OpenAI-compatible HTTP server (`/v1/chat/completions`, `/v1/models`, `/health`, `/metrics`). |
+| `peregrine status` | Show the running background server (PID, version, URL, model, log path). |
+| `peregrine stop` | Gracefully drain in-flight requests and stop the background server. |
+| `peregrine upgrade [--check] [--version TAG]` | Download, verify (`SHA256SUMS`), and atomically install the newest release with zero-downtime handoff (`SO_REUSEPORT`). |
+| `peregrine inspect <MODEL>` | Inspect GGUF metadata, architecture, quantization formats, and check whether this build can run the file. |
+| `peregrine bench -m <MODEL>` | Measure single-user prefill and greedy decode tok/s and memory bandwidth (bytes/token). |
+| `peregrine tune -m <MODEL>` | Auto-tune thread counts and spin windows for this CPU + model and save a hardware profile. |
+| `peregrine tier` | Print the detected CPU SIMD kernel tier (`x86_64-avx512`, `x86_64-avx2`, `aarch64-neon-i8mm`, etc.) and active engine options. |
+| `peregrine support [--markdown]` | List all compiled-in architectures, weight formats, CPU tiers, tokenizers, and chat templates. |
+
 ## Performance
 
 Against the fastest engine that runs the same file on the same machine and thread count —
@@ -61,33 +183,7 @@ Every supported family is verified against llama.cpp v0.9.0 on real model files 
 rendered chat templates, greedy token streams, KL divergence, and downstream task accuracy
 (GSM8K, MMLU, HumanEval+; see [docs/dev/accuracy.md](docs/dev/accuracy.md)).
 
-## Quick start
-
-See [docs/quickstart.md](docs/quickstart.md) for a complete walkthrough using a one-shot prompt,
-a release binary, Docker, `curl`, or the OpenAI Python client. Any `-m` also accepts
-`hf:<namespace>/<repo>/<file>`, which downloads the file once into the cache.
-
-```sh
-# install the binary (Linux x86-64 or aarch64), then run a model
-curl -fsSL https://peregrine.rantai.dev/install.sh | sh
-peregrine run -m hf:mradermacher/SmolLM2-360M-Instruct-GGUF/SmolLM2-360M-Instruct.Q4_K_M.gguf \
-  "Say hello in one sentence."                    # one prompt, streamed, no server
-peregrine inspect path/to/model.gguf      # what it is, and whether it runs
-peregrine bench -m path/to/model.gguf        # measure prefill & decode tok/s and bytes/token
-peregrine tune -m path/to/model.gguf         # tune execution knobs for host CPU and model
-peregrine serve -m path/to/model.gguf --port 8201
-curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
-  -d '{"messages":[{"role":"user","content":"Hello"}]}'
-```
-
-Or build from source: `cargo build --release`, then use `./target/release/peregrine`.
-
-The server speaks the OpenAI chat API (`/v1/chat/completions`, streamed or not), plus `/v1/models`,
-`/health` and `/metrics`. For a long-lived service, `peregrine serve ... --background` detaches it and
-records lifecycle state; `peregrine status`, `stop` and `upgrade` manage it, and an upgrade replaces
-the running server without refusing a connection (see [docs/service.md](docs/service.md)).
-
-### Building with fewer features
+## Building with fewer features
 
 By default, Peregrine builds with all architectures, quantisation formats, and extras enabled. For embedded applications or smaller binaries, you can disable default features and pick only what you need:
 
@@ -111,6 +207,8 @@ cargo build --release -p peregrine --no-default-features --features cli,arch-qwe
 |---|---|
 | [Product](docs/product.md) | what Peregrine is, who it is for, what it will not do |
 | [Quickstart](docs/quickstart.md) | a release binary or Docker, a model, and the first request |
+| [Service & upgrades](docs/service.md) | background mode, state and log files, zero-downtime upgrades |
+| [Docker](docs/docker.md) | the server image, volumes, ports and container flags |
 | [Targets](docs/targets.md) | the speed, accuracy and support numbers we hold ourselves to |
 | [Benchmarks](docs/benchmark.md) | Peregrine against llama.cpp, wins and losses, with charts |
 | [Roadmap](docs/roadmap.md) | the plan, stage by stage |

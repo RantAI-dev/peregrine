@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-10
+
 ### Added
 - **`peregrine serve --background`**, with `peregrine status` and `peregrine stop`: the server
   detaches into its own process group, logs to `serve-<port>.log` (or `--log-file`), and writes a
