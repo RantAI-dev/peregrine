@@ -61,8 +61,18 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 | Qwen3.5-2B Q4_K_M (`Qwen3.5-2B-Q4_K_M.gguf`) | `~/models/` |
 | Phi-4 14B Q4_K_M (`phi-4-Q4_K_M.gguf`) | `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
+| Bonsai 2 2B PQ2_0 | `models/bonsai2-2b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
 | TheBloke's Mistral 7B Instruct v0.2 and Llama 2 7B Chat Q4_K_M | `~/models/` (see below) |
+
+The Bonsai 2 files come from PrismML's Hugging Face repositories. The two the aarch64
+goldens and the Bonsai benchmark use are:
+
+| File | Download | Bytes | SHA-256 |
+|---|---|---|---|
+| `Ternary-Bonsai-2-2B-PQ2_0.gguf` | <https://huggingface.co/prism-ml/Ternary-Bonsai-2-2B-gguf/resolve/main/Ternary-Bonsai-2-2B-PQ2_0.gguf> | 517312992 | `d5f01a4ecaf49239653308ee732ad1a0c5f802c0ddb997549fc7b694c8b45928` |
+| `Ternary-Bonsai-2-4B-PQ2_0-MTP-Q8_0.gguf` | <https://huggingface.co/prism-ml/Ternary-Bonsai-2-4B-gguf/resolve/main/Ternary-Bonsai-2-4B-PQ2_0-MTP-Q8_0.gguf> | 1274642176 | `0acf517de1dc3d85c403a60df6b8b07a4878ac174f368d4390be98406a4d6c0d` |
+
 
 `models/` is git-ignored. These locations will be unified under one variable as part of S0.1.
 

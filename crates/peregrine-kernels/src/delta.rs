@@ -18,6 +18,8 @@ pub enum DeltaTier {
     Avx2,
     /// AVX-512 vector path.
     Avx512,
+    /// aarch64 NEON vector path.
+    Neon,
 }
 
 /// The delta-rule tier for this process and CPU under `PEREGRINE_ISA`, detected once.
@@ -31,6 +33,12 @@ pub fn tier() -> DeltaTier {
             }
             if crate::simd::have_batched() {
                 return DeltaTier::Avx2;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if crate::cpu::have_neon() {
+                return DeltaTier::Neon;
             }
         }
         DeltaTier::Scalar
@@ -126,7 +134,15 @@ pub fn delta_head(
                     return;
                 }
             }
-            DeltaTier::Scalar => {}
+            DeltaTier::Neon | DeltaTier::Scalar => {}
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if tier() == DeltaTier::Neon && dk % 8 == 0 {
+            // SAFETY: NEON checked by `tier()`; lengths checked above; dk is a multiple of 8.
+            unsafe { delta_head_neon(s, q, k, v, beta, decay, o, dk) };
+            return;
         }
     }
 
@@ -266,6 +282,145 @@ pub unsafe fn delta_head_avx512(
             i += 64;
         }
         o[j] = _mm512_reduce_add_ps(_mm512_add_ps(b0, b1));
+    }
+}
+
+/// NEON implementation of the Gated DeltaNet head update: the same two passes over
+/// each state row the AVX2 kernel makes, four floats at a time.
+///
+/// # Safety
+/// The caller must ensure NEON is supported on this CPU, `dk % 8 == 0`, and all slice
+/// lengths meet the preconditions of [`delta_head`].
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn delta_head_neon(
+    s: &mut [f32],
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    beta: f32,
+    decay: f32,
+    o: &mut [f32],
+    dk: usize,
+) {
+    use std::arch::aarch64::*;
+    let dec = vdupq_n_f32(decay);
+    for j in 0..o.len() {
+        let row = s.as_mut_ptr().add(j * dk);
+        let (mut a0, mut a1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+        let mut i = 0;
+        while i < dk {
+            a0 = vfmaq_f32(a0, vld1q_f32(row.add(i)), vld1q_f32(k.as_ptr().add(i)));
+            a1 = vfmaq_f32(
+                a1,
+                vld1q_f32(row.add(i + 4)),
+                vld1q_f32(k.as_ptr().add(i + 4)),
+            );
+            i += 8;
+        }
+        let sk = hsum_f32x4(vaddq_f32(a0, a1));
+        let delta = vdupq_n_f32((v[j] - decay * sk) * beta);
+        let (mut b0, mut b1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+        let mut i = 0;
+        while i < dk {
+            let r0 = vfmaq_f32(
+                vmulq_f32(vld1q_f32(row.add(i)), dec),
+                delta,
+                vld1q_f32(k.as_ptr().add(i)),
+            );
+            let r1 = vfmaq_f32(
+                vmulq_f32(vld1q_f32(row.add(i + 4)), dec),
+                delta,
+                vld1q_f32(k.as_ptr().add(i + 4)),
+            );
+            vst1q_f32(row.add(i), r0);
+            vst1q_f32(row.add(i + 4), r1);
+            b0 = vfmaq_f32(b0, r0, vld1q_f32(q.as_ptr().add(i)));
+            b1 = vfmaq_f32(b1, r1, vld1q_f32(q.as_ptr().add(i + 4)));
+            i += 8;
+        }
+        o[j] = hsum_f32x4(vaddq_f32(b0, b1));
+    }
+}
+
+/// The four lanes of a vector added in order.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn hsum_f32x4(v: std::arch::aarch64::float32x4_t) -> f32 {
+    #[allow(clippy::incompatible_msrv)]
+    {
+        std::arch::aarch64::vaddvq_f32(v)
+    }
+}
+
+/// The causal conv's inner accumulate for one row of one channel range:
+/// `y[i] = y[i]·wcur[i] + Σ_t hist[t][i]·wt[t][i]`, in the scalar loop's order.
+///
+/// The history and the taps are slices because the ring's plane and the tap row are
+/// chosen per position; `hist[t]` and `wt[t]` are the same channel range. Every
+/// element is one multiply and one add per tap, so the vector path is bit-identical
+/// to the scalar one.
+pub fn causal_conv_row(y: &mut [f32], wcur: &[f32], hist: &[&[f32]], wt: &[&[f32]]) {
+    debug_assert_eq!(y.len(), wcur.len());
+    debug_assert!(hist.len() == wt.len());
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() {
+            // SAFETY: NEON checked; every slice is at least `y.len()` long.
+            unsafe { causal_conv_row_neon(y, wcur, hist, wt) };
+            return;
+        }
+    }
+    for (i, out) in y.iter_mut().enumerate() {
+        let mut acc = *out * wcur[i];
+        for (h, w) in hist.iter().zip(wt) {
+            acc += h[i] * w[i];
+        }
+        *out = acc;
+    }
+}
+
+/// # Safety
+/// The CPU must have NEON; every `hist[t]` and `wt[t]` must be at least `y.len()` long.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn causal_conv_row_neon(y: &mut [f32], wcur: &[f32], hist: &[&[f32]], wt: &[&[f32]]) {
+    use std::arch::aarch64::*;
+    let n = y.len();
+    let p = y.as_mut_ptr();
+    let mut i = 0;
+    while i + 16 <= n {
+        for u in 0..4 {
+            let at = i + 4 * u;
+            let mut acc = vmulq_f32(vld1q_f32(p.add(at)), vld1q_f32(wcur.as_ptr().add(at)));
+            for (h, w) in hist.iter().zip(wt) {
+                acc = vaddq_f32(
+                    acc,
+                    vmulq_f32(vld1q_f32(h.as_ptr().add(at)), vld1q_f32(w.as_ptr().add(at))),
+                );
+            }
+            vst1q_f32(p.add(at), acc);
+        }
+        i += 16;
+    }
+    while i + 4 <= n {
+        let mut acc = vmulq_f32(vld1q_f32(p.add(i)), vld1q_f32(wcur.as_ptr().add(i)));
+        for (h, w) in hist.iter().zip(wt) {
+            acc = vaddq_f32(
+                acc,
+                vmulq_f32(vld1q_f32(h.as_ptr().add(i)), vld1q_f32(w.as_ptr().add(i))),
+            );
+        }
+        vst1q_f32(p.add(i), acc);
+        i += 4;
+    }
+    for j in i..n {
+        let mut acc = *p.add(j) * *wcur.get_unchecked(j);
+        for (h, w) in hist.iter().zip(wt) {
+            acc += *h.get_unchecked(j) * *w.get_unchecked(j);
+        }
+        *p.add(j) = acc;
     }
 }
 
@@ -615,7 +770,13 @@ mod tests {
             );
             delta_head_scalar(&mut s_scalar, &q, &k, &v, beta, decay, &mut o_scalar, dk);
 
-            if dk % 16 != 0 {
+            let vectorized = tier() != DeltaTier::Scalar
+                && if cfg!(target_arch = "aarch64") {
+                    dk % 8 == 0
+                } else {
+                    dk % 16 == 0
+                };
+            if !vectorized {
                 // Must be bit-for-bit identical to scalar when unaligned
                 assert_eq!(s_dispatch, s_scalar, "bit identical s for dk={dk}");
                 assert_eq!(o_dispatch, o_scalar, "bit identical o for dk={dk}");
@@ -644,6 +805,80 @@ mod tests {
             stats_o.max_abs < 1.0e-2,
             "dispatch o max_abs: {}",
             stats_o.max_abs
+        );
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_vs_scalar_reference() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skipping neon_vs_scalar_reference: NEON not available");
+            return;
+        }
+        let mut rng = Rng::new(0x0BAD_F00D_1234_5678);
+        let mut stats_s = DiffStats::default();
+        let mut stats_o = DiffStats::default();
+        for &(dk, dv) in &[(8usize, 1usize), (128, 32), (128, 128), (256, 16)] {
+            // Zero inputs are exact: the vector kernel makes the same adds of zeros.
+            {
+                let mut s_scalar = vec![0.0f32; dv * dk];
+                let mut s_neon = s_scalar.clone();
+                let q = vec![0.0f32; dk];
+                let k = vec![0.0f32; dk];
+                let v = vec![0.0f32; dv];
+                let mut o_scalar = vec![0.0f32; dv];
+                let mut o_neon = vec![0.0f32; dv];
+                delta_head_scalar(&mut s_scalar, &q, &k, &v, 0.5, 0.9, &mut o_scalar, dk);
+                unsafe { delta_head_neon(&mut s_neon, &q, &k, &v, 0.5, 0.9, &mut o_neon, dk) };
+                assert_eq!(s_neon, s_scalar);
+                assert_eq!(o_neon, o_scalar);
+            }
+            for _ in 0..8 {
+                let s_init = rng.vec(dv * dk, -1.0, 1.0);
+                let q = rng.vec(dk, -1.0, 1.0);
+                let k = rng.vec(dk, -1.0, 1.0);
+                let v = rng.vec(dv, -1.0, 1.0);
+                let beta = rng.f32_range(0.01, 0.99);
+                let decay = rng.f32_range(0.01, 0.99);
+                let mut s_scalar = s_init.clone();
+                let mut s_neon = s_init.clone();
+                let mut o_scalar = vec![0.0f32; dv];
+                let mut o_neon = vec![0.0f32; dv];
+                delta_head_scalar(&mut s_scalar, &q, &k, &v, beta, decay, &mut o_scalar, dk);
+                unsafe { delta_head_neon(&mut s_neon, &q, &k, &v, beta, decay, &mut o_neon, dk) };
+                check_diff(&s_neon, &s_scalar, &mut stats_s);
+                check_diff(&o_neon, &o_scalar, &mut stats_o);
+            }
+        }
+        eprintln!("NEON vs scalar stats: S={stats_s:?}, O={stats_o:?}");
+        assert!(stats_s.max_rel < 2.5e-4, "s max_rel: {}", stats_s.max_rel);
+        assert!(stats_o.max_rel < 5.0e-5, "o max_rel: {}", stats_o.max_rel);
+    }
+
+    /// The conv's inner accumulate is one multiply and one add per tap, so the vector
+    /// path must be bit-identical to the scalar loop.
+    #[test]
+    fn causal_conv_row_is_bit_identical() {
+        let n = 8192;
+        let mut rng = Rng::new(0xC0DE_1234_5678_9ABC);
+        let mut y: Vec<f32> = rng.vec(n, -2.0, 2.0);
+        let wcur = rng.vec(n, -2.0, 2.0);
+        let h: Vec<Vec<f32>> = (0..3).map(|_| rng.vec(n, -2.0, 2.0)).collect();
+        let w: Vec<Vec<f32>> = (0..3).map(|_| rng.vec(n, -2.0, 2.0)).collect();
+        let hist: Vec<&[f32]> = h.iter().map(|v| v.as_slice()).collect();
+        let wt: Vec<&[f32]> = w.iter().map(|v| v.as_slice()).collect();
+        let mut scalar = y.clone();
+        for (i, out) in scalar.iter_mut().enumerate() {
+            let mut acc = *out * wcur[i];
+            for (hh, ww) in hist.iter().zip(&wt) {
+                acc += hh[i] * ww[i];
+            }
+            *out = acc;
+        }
+        causal_conv_row(&mut y, &wcur, &hist, &wt);
+        assert_eq!(
+            y.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            scalar.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
         );
     }
 }

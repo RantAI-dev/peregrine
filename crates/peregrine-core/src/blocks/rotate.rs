@@ -13,7 +13,7 @@
 //! path, and they quantise the row as it is.
 
 use crate::blocks::par::{for_row_chunks, for_row_chunks_2, for_row_chunks_3, Sched};
-use crate::hadamard::fwht;
+use crate::hadamard::{fwht, mul_signs};
 use crate::model::StepStats;
 use crate::pool::Pool;
 use crate::quant::QuantAct;
@@ -53,13 +53,10 @@ fn apply_rotation(r: &mut [f32], x: &[f32], ss: &[f32], perm: Option<VPerm>, blk
                 r[d..d + hd].copy_from_slice(&x[s..s + hd]);
             }
         }
-        for (v, s) in r.iter_mut().zip(ss) {
-            *v *= s;
-        }
+        mul_signs(r, ss);
     } else {
-        for ((v, &xi), s) in r.iter_mut().zip(x.iter()).zip(ss) {
-            *v = xi * s;
-        }
+        r.copy_from_slice(x);
+        mul_signs(r, ss);
     }
     for c in r.chunks_exact_mut(blk) {
         fwht(c);
@@ -98,9 +95,7 @@ impl Rotation {
         for ch in row.chunks_exact_mut(self.block) {
             fwht(ch);
         }
-        for (v, s) in row.iter_mut().zip(signs) {
-            *v *= s;
-        }
+        mul_signs(row, signs);
     }
 
     /// `x` (row `b` of `src`, width `w`) → optional tiled→grouped v-head permutation → signs → blockwise FWHT,

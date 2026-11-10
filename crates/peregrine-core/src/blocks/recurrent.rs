@@ -121,12 +121,16 @@ pub fn causal_conv(
 ) {
     let cd = cfg.conv_dim();
     let taps = cfg.d_conv - 1;
+    debug_assert!(taps <= 8, "the conv kernel takes at most eight taps");
     let bigp = crate::blocks::par::Disjoint::new(big);
     let wcur = &conv_w[taps * cd..(taps + 1) * cd];
     const C: usize = 256;
     let next = AtomicUsize::new(0);
     pool.run(|_wk, _nw| {
-        let mut acc = [0.0f32; C];
+        // The row's raw conv input, kept because the history slot this token overwrites
+        // is tap 0's plane: it must be read before it is replaced, and the kernel writes
+        // the conv output over `y`.
+        let mut raw = [0.0f32; C];
         loop {
             let c0 = next.fetch_add(C, AO::Relaxed);
             if c0 >= cd {
@@ -139,23 +143,21 @@ pub fn causal_conv(
                 let pos = positions[b];
                 // SAFETY: channels c0..c1 of row b's big buffer belong to this task.
                 let y = unsafe { bigp.chunk(b * big_w + c0, c1 - c0) };
-                for (i, ch) in (c0..c1).enumerate() {
-                    acc[i] = y[i] * wcur[ch];
-                }
+                // The window's tap planes, oldest first, for this channel range.
+                let mut hist: [&[f32]; 8] = [&[]; 8];
+                let mut wts: [&[f32]; 8] = [&[]; 8];
                 for t in 0..taps {
                     let plane = (pos + t) % taps;
-                    let hist =
+                    hist[t] =
                         unsafe { std::slice::from_raw_parts(hp.add(plane * cd + c0), c1 - c0) };
-                    let wt = &conv_w[t * cd + c0..t * cd + c1];
-                    for i in 0..c1 - c0 {
-                        acc[i] += hist[i] * wt[i];
-                    }
+                    wts[t] = &conv_w[t * cd + c0..t * cd + c1];
                 }
+                raw[..c1 - c0].copy_from_slice(y);
+                crate::delta::causal_conv_row(y, &wcur[c0..c1], &hist[..taps], &wts[..taps]);
                 let slot = pos % taps;
                 let dst =
                     unsafe { std::slice::from_raw_parts_mut(hp.add(slot * cd + c0), c1 - c0) };
-                dst.copy_from_slice(y);
-                y.copy_from_slice(&acc[..c1 - c0]);
+                dst.copy_from_slice(&raw[..c1 - c0]);
                 // A speculative verification's snapshot: this range of the history after its row.
                 if let Some((sp, _, sconv)) = unsafe { spp.at(b) } {
                     if pos == sp {
@@ -349,5 +351,80 @@ pub fn snap_ptrs(
         for slot in &mut out[r0..r0 + len] {
             *slot = p;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The conv's ring: tap 0 of the window ending at `pos` is the plane this token
+    /// overwrites, so the kernel must read the old plane before the history slot is
+    /// replaced by the raw input. This test drives four tokens through the ring (one
+    /// forward each, as decode does) and compares against the same loop longhand.
+    #[test]
+    fn the_causal_conv_reads_the_oldest_tap_before_overwriting_it() {
+        let (cd, d_conv) = (12usize, 4usize);
+        let taps = d_conv - 1;
+        let cfg = RecurrentCfg {
+            n_k_heads: 2,
+            n_v_heads: 2,
+            dk: 2,
+            dv: 2,
+            d_conv,
+        };
+        assert_eq!(cfg.conv_dim(), cd);
+        let nb = 4usize;
+        let conv_w: Vec<f32> = (0..d_conv * cd)
+            .map(|i| ((i * 37 % 19) as f32) * 0.05 - 0.4)
+            .collect();
+        let big: Vec<f32> = (0..nb * cd)
+            .map(|i| ((i * 53 % 23) as f32) * 0.1 - 1.0)
+            .collect();
+        // Non-zero history, so a wrong tap read is visible.
+        let hist0: Vec<f32> = (0..taps * cd).map(|i| 100.0 + i as f32).collect();
+
+        // The reference, longhand.
+        let mut want = big.clone();
+        let mut h = hist0.clone();
+        for b in 0..nb {
+            for ch in 0..cd {
+                let mut acc = big[b * cd + ch] * conv_w[taps * cd + ch];
+                for t in 0..taps {
+                    let plane = (b + t) % taps;
+                    acc += h[plane * cd + ch] * conv_w[t * cd + ch];
+                }
+                want[b * cd + ch] = acc;
+            }
+            for ch in 0..cd {
+                h[(b % taps) * cd + ch] = big[b * cd + ch];
+            }
+        }
+
+        let mut got = big.clone();
+        let mut hist = hist0.clone();
+        let pool = Pool::new(1);
+        let mut stats = StepStats::default();
+        for b in 0..nb {
+            let mut row = [(std::ptr::null_mut::<f32>(), hist.as_mut_ptr())];
+            let rp = RowPtrs(row.as_mut_ptr());
+            let mut snaps = [None];
+            let spp = SnapPtrs(snaps.as_mut_ptr());
+            causal_conv(
+                &mut got[b * cd..(b + 1) * cd],
+                cd,
+                &conv_w,
+                rp,
+                spp,
+                &cfg,
+                1,
+                &[b],
+                &pool,
+                &mut stats,
+            );
+        }
+
+        assert_eq!(got, want, "the conv output moved");
+        assert_eq!(hist, h, "the history ring moved");
     }
 }
