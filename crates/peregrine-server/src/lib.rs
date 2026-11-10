@@ -1125,6 +1125,8 @@ fn engine_thread(
             let admitted = match j.want {
                 Want::Tokens => engine.admit(j.prompt, j.cfg),
                 Want::Pooled(pooling) => engine.admit_pooled(j.prompt, j.cfg, pooling),
+                // The label read-out belongs to the decision endpoint, which S4.3 does not add.
+                Want::Labels => Err((j.prompt, "the labels read-out is not served yet".into())),
             };
             match admitted {
                 Ok(id) => {
@@ -1139,6 +1141,7 @@ fn engine_thread(
                         finish: Some(Finish::Error(why)),
                         cost: None,
                         embedding: None,
+                        label_logits: None,
                     });
                 }
             }

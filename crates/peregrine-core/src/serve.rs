@@ -145,8 +145,8 @@ type AskedDrafter = Option<(Box<dyn crate::draft::Drafter>, usize)>;
 /// samples and never decodes. Both are slots in the same engine, prefilled in the same
 /// chunks and batched in the same weight passes.
 ///
-/// The enum is the design's `Want` (`docs/design/s4-embeddings-decisions.md` §2.1); the
-/// decision variants (`Choice`, `Labels`) arrive with S4.3 and the classifier heads.
+/// The enum is the design's `Want` (`docs/design/s4-embeddings-decisions.md` §2.1); the decision
+/// variants (`Choice`, `Head`) arrive with the classifier heads (S4.13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Want {
     /// Sample and stream tokens (today's request).
@@ -155,6 +155,9 @@ pub enum Want {
     /// Pool the text's final hidden states into one vector and finish when its last prompt
     /// row is computed.
     Pooled(Pooling),
+    /// Read the last prompt row's logits at a list of token ids and finish (S4.3): a decision
+    /// model's raw score per option.
+    Labels,
 }
 
 impl Want {
@@ -162,12 +165,21 @@ impl Want {
     pub fn is_tokens(self) -> bool {
         matches!(self, Want::Tokens)
     }
+    /// Whether this slot is the label read-out.
+    pub fn is_labels(self) -> bool {
+        matches!(self, Want::Labels)
+    }
     /// The pooling this slot asks for, if it is an embedding slot.
     pub fn pooling(self) -> Option<Pooling> {
         match self {
-            Want::Tokens => None,
+            Want::Tokens | Want::Labels => None,
             Want::Pooled(p) => Some(p),
         }
+    }
+    /// Whether the slot forwards its whole prompt (a pooled or labels slot) rather than leaving
+    /// the last token for the first decode step.
+    fn whole_prompt(self) -> bool {
+        !self.is_tokens()
     }
 }
 
@@ -291,6 +303,9 @@ pub struct Emission {
     /// A pooled slot's answer: the vector, in the model's width. `None` for a token slot.
     /// Set once, on the slot's only emission.
     pub embedding: Option<Vec<f32>>,
+    /// A labels slot's answer: the last prompt row's logits at the slot's label token ids, in
+    /// that order. `None` for every other slot. Set once, on the slot's only emission.
+    pub label_logits: Option<Vec<f32>>,
 }
 
 /// A request's handle while it is being served.
@@ -300,8 +315,12 @@ struct Slot {
     id: SlotId,
     kv: KvCache,
     cfg: SlotCfg,
-    /// What the slot does with its last row: sample, or pool one vector (S4.1).
+    /// What the slot does with its last row: sample, or pool one vector (S4.1), or read its
+    /// logits at a list of tokens (S4.3).
     want: Want,
+    /// The token ids a labels slot reads the last prompt row's logits at; empty for every other
+    /// slot, so no request pays for it.
+    labels: Vec<u32>,
     /// The whole prompt. For a token slot everything but its last token is prefilled; the last token is the
     /// first thing decoded. A pooled slot forwards every token, including the last, and never decodes.
     prompt: Vec<u32>,
@@ -359,11 +378,11 @@ impl Slot {
     }
 
     /// The prompt positions this slot forwards in prefill: a token slot leaves its last token for the
-    /// first decode step; a pooled slot forwards all of them.
+    /// first decode step; a pooled or labels slot forwards all of them.
     fn prefill_len(&self) -> usize {
         match self.want {
             Want::Tokens => self.prompt.len() - 1,
-            Want::Pooled(_) => self.prompt.len(),
+            Want::Pooled(_) | Want::Labels => self.prompt.len(),
         }
     }
 
@@ -680,7 +699,7 @@ impl Engine {
 
     /// Take a request, or give it back when every slot is busy or the prompt cannot fit.
     pub fn admit(&mut self, prompt: Vec<u32>, cfg: SlotCfg) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, Want::Tokens, None)
+        self.admit_inner(prompt, cfg, Want::Tokens, None, Vec::new())
     }
 
     /// Admit an embedding request (S4.1): the slot is prefilled like any prompt, beside the
@@ -694,7 +713,23 @@ impl Engine {
         cfg: SlotCfg,
         pooling: Pooling,
     ) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, Want::Pooled(pooling), None)
+        self.admit_inner(prompt, cfg, Want::Pooled(pooling), None, Vec::new())
+    }
+
+    /// Admit a decision model's label read-out (S4.3): the slot is prefilled like a pooled slot
+    /// and finishes when its last prompt row is computed. That emission's `label_logits` holds
+    /// the row's logits at `labels`, in that order; the slot never samples or decodes.
+    ///
+    /// Questions of one request share a prompt prefix, so a labels slot consults the prefix
+    /// store like a token slot does: only its final row is read, and a restored prefix's rows are
+    /// exactly the rows that were computed (the store copies the cache's bytes).
+    pub fn admit_labels(
+        &mut self,
+        prompt: Vec<u32>,
+        cfg: SlotCfg,
+        labels: Vec<u32>,
+    ) -> Result<SlotId, (Vec<u32>, String)> {
+        self.admit_inner(prompt, cfg, Want::Labels, None, labels)
     }
 
     /// Admit a slot that runs on the caller's own cache (ADR 0007).
@@ -714,7 +749,7 @@ impl Engine {
         cfg: SlotCfg,
         kv: KvCache,
     ) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, Want::Tokens, Some(kv))
+        self.admit_inner(prompt, cfg, Want::Tokens, Some(kv), Vec::new())
     }
 
     /// What a conversation's slot left behind when its turn ended: the cache it
@@ -762,6 +797,7 @@ impl Engine {
         cfg: SlotCfg,
         want: Want,
         cache: Option<KvCache>,
+        labels: Vec<u32>,
     ) -> Result<SlotId, (Vec<u32>, String)> {
         if !self.has_room() {
             return self.refuse(prompt, cache, "every slot is busy".into());
@@ -778,10 +814,28 @@ impl Engine {
                 "cls pooling is not implemented for causal models".into(),
             );
         }
-        let pooled = want.pooling();
-        // A token slot needs one position after its prompt for the first decode step; a pooled
-        // slot forwards the prompt itself and needs no more.
-        let extra = usize::from(pooled.is_none());
+        if want.is_labels() {
+            if labels.is_empty() {
+                return self.refuse(prompt, cache, "a labels slot needs a label token".into());
+            }
+            if let Some(&l) = labels
+                .iter()
+                .find(|&&l| l as usize >= self.model.cfg.n_vocab)
+            {
+                return self.refuse(
+                    prompt,
+                    cache,
+                    format!(
+                        "label token {l} is outside the vocabulary of {}",
+                        self.model.cfg.n_vocab
+                    ),
+                );
+            }
+        }
+        let whole = want.whole_prompt();
+        // A token slot needs one position after its prompt for the first decode step; a pooled or
+        // labels slot forwards the prompt itself and needs no more.
+        let extra = usize::from(!whole);
         if prompt.len() + extra > self.max_ctx {
             let n = prompt.len();
             return self.refuse(
@@ -832,14 +886,14 @@ impl Engine {
         };
         let fed = if given {
             kv.filled()
-        } else if asked.is_some() || pooled.is_some() {
+        } else if asked.is_some() || matches!(want, Want::Pooled(_)) {
             // A pooled slot starts at position 0: `Mean` needs every row of the text, and a
             // restored prefix would leave its rows uncomputed.
             //
-            // S4.3: a `Last`-pooled slot (or a choice slot, which samples one row) can reuse a
-            // shared prefix — an instruction the caller repeats — because only the text's final
-            // row matters. `Mean` cannot: it sums every row of the text, and a restored prefix's
-            // rows were never accumulated into this slot.
+            // S4.3: a labels slot does consult the prefix store below. It reads only its final
+            // row, and the store restores the cache's own bytes, so the rows a sibling question
+            // computed are bit-identical to the rows this slot would have computed. (A token
+            // slot has always reused a prefix the same way.)
             0
         } else {
             match self.prefixes.best(&prompt, cap) {
@@ -852,7 +906,7 @@ impl Engine {
         };
         // A restored prefix can leave nothing to prefill, in which case the first decode step must still feed
         // the prompt's last token: `prefill_chunk`, which normally sets it, never runs.
-        let next = if pooled.is_some() {
+        let next = if whole {
             0
         } else if fed + 1 >= prompt.len() {
             prompt[prompt.len() - 1]
@@ -868,7 +922,7 @@ impl Engine {
         // thread each accepted token into the window between the two row draws. Turning speculation off for
         // these slots is the simple, lossless choice (the request asked for penalties explicitly).
         let penalized = !cfg.penalties.is_off();
-        let alone = !penalized && pooled.is_none() && self.slots.is_empty() && fed == 0;
+        let alone = !penalized && want.is_tokens() && self.slots.is_empty() && fed == 0;
         // The engine's own drafter is the MTP block, and only for a slot that
         // did not ask for one of its own.
         let own = if asked.is_none() && alone {
@@ -909,6 +963,7 @@ impl Engine {
                 Vec::new()
             },
             want,
+            labels,
             cfg,
             prompt_tokens: prompt.len(),
             prefilled: 0,
@@ -1178,8 +1233,10 @@ impl Engine {
     /// Keep what a slot computed: the prompt positions that are in its cache, and the tokens it produced.
     fn keep_prefix(&mut self, s: &Slot) {
         // A pooled slot's prompt is a raw text, not a conversation: its cache is of no use to
-        // the next request, and inserting it would evict prefixes that are.
-        if !s.wants_tokens() {
+        // the next request, and inserting it would evict prefixes that are. A labels slot's
+        // prompt is a decision prompt whose prefix the sibling questions of the same request
+        // share, so its cache is kept (S4.3).
+        if s.want.pooling().is_some() {
             return;
         }
         // The cache holds exactly the prompt positions that were prefilled (`fed` of them) followed by the
@@ -1248,6 +1305,7 @@ impl Engine {
                         finish: Some(Finish::Error(e)),
                         cost: None,
                         embedding: None,
+                        label_logits: None,
                     }]
                 }
             };
@@ -1329,7 +1387,18 @@ impl Engine {
                 map.push(n_dec + k);
             }
         }
-        let want: Vec<usize> = (0..n_dec).collect();
+        let mut want: Vec<usize> = (0..n_dec).collect();
+        // A labels slot that completes its prompt in this pass wants its last row's logits. They
+        // are gathered after the pass; the row is the same one the model computes for a
+        // one-row pass, because the head is the same code (`layer::head_rows`).
+        let mut label_rows: Vec<(usize, usize)> = Vec::new();
+        for (k, &(i, take, row0)) in pre.iter().enumerate() {
+            let s = &self.slots[i];
+            if s.want.is_labels() && s.fed + take >= s.prefill_len() {
+                label_rows.push((k, want.len()));
+                want.push(row0 + take - 1);
+            }
+        }
         // A drafter that needs the target's hidden states gets them: the MTP
         // block's rows read the hidden state of the position before them.
         self.state.want_hidden = self.wants_hidden();
@@ -1367,6 +1436,7 @@ impl Engine {
                     finish: Some(Finish::Error(e.clone())),
                     cost: None,
                     embedding: None,
+                    label_logits: None,
                 })
                 .collect();
             self.slots.clear();
@@ -1407,7 +1477,8 @@ impl Engine {
             }
         }
         let mut pooled_out: Vec<Emission> = Vec::new();
-        for &(i, take, row0) in &pre {
+        let n_vocab = self.model.cfg.n_vocab;
+        for (k, &(i, take, row0)) in pre.iter().enumerate() {
             let last = self.slots[i].prefill_len();
             let s = &mut self.slots[i];
             s.fed += take;
@@ -1417,18 +1488,29 @@ impl Engine {
             if s.wants_tokens() && s.ready() {
                 s.next = s.prompt[last];
             }
-            let Some(pooling) = s.want.pooling() else {
-                continue;
-            };
             if s.fed < s.prefill_len() {
                 continue;
             }
-            let base = row0 * d_model;
-            let vector = s.pool_finish(
-                &self.state.hidden[base..base + take * d_model],
-                d_model,
-                pooling,
-            );
+            let vector = s.want.pooling().map(|pooling| {
+                let base = row0 * d_model;
+                s.pool_finish(
+                    &self.state.hidden[base..base + take * d_model],
+                    d_model,
+                    pooling,
+                )
+            });
+            let label_logits = if s.want.is_labels() {
+                let row = label_rows.iter().find(|&&(pk, _)| pk == k).map(|&(_, r)| r);
+                row.map(|r| {
+                    let logits = self.state.logits_row(r, n_vocab);
+                    s.labels.iter().map(|&l| logits[l as usize]).collect()
+                })
+            } else {
+                None
+            };
+            if vector.is_none() && label_logits.is_none() {
+                continue;
+            }
             pooled_out.push(Emission {
                 slot: s.id,
                 token: 0,
@@ -1442,7 +1524,8 @@ impl Engine {
                     prefill_s: s.prefill_s,
                     decode_s: 0.0,
                 }),
-                embedding: Some(vector),
+                embedding: vector,
+                label_logits,
             });
         }
         // The decode slots are reaped by `finish_decode` after it reads them; the pooled ones
@@ -1477,8 +1560,8 @@ impl Engine {
         out
     }
     /// Feed the next chunk of slot `i`'s prompt. A token slot's last token is left for the first decode step,
-    /// which is what produces the logits the first token is sampled from; a pooled slot forwards every token
-    /// and is finished here when this was its last chunk.
+    /// which is what produces the logits the first token is sampled from; a pooled or labels slot forwards
+    /// every token and is finished here when this was its last chunk.
     fn prefill_chunk(&mut self, i: usize) -> Result<Vec<Emission>, String> {
         let t0 = std::time::Instant::now();
         let before = self.stats;
@@ -1487,6 +1570,11 @@ impl Engine {
         let take = self.prefill_chunk.min(last - s.fed);
         let chunk: Vec<u32> = s.prompt[s.fed..s.fed + take].to_vec();
         let start = s.fed;
+        // A labels slot reads its last prompt row: this chunk's last row, when it completes the
+        // prompt. The forward pass writes exactly that row's full logits, which are then gathered
+        // at the label ids (the head has no cheaper path that would be bit-identical).
+        let labels_done = s.want.is_labels() && s.fed + take >= last;
+        let want_logits: &[usize] = if labels_done { &[take - 1] } else { &[] };
         self.state.want_hidden = self.wants_hidden();
         self.model.forward(
             &mut self.state,
@@ -1494,7 +1582,7 @@ impl Engine {
             &self.pool,
             &chunk,
             start,
-            &[],
+            want_logits,
             &mut self.stats,
         )?;
         // The prefilled rows are committed positions too: a drafter is told about them.
@@ -1510,6 +1598,19 @@ impl Engine {
         if pooling == Some(Pooling::Mean) {
             self.slots[i].pool_accumulate(&self.state.hidden[..take * d_model], d_model);
         }
+        let label_logits = if labels_done {
+            let n_vocab = self.model.cfg.n_vocab;
+            let logits = self.state.logits_row(0, n_vocab);
+            Some(
+                self.slots[i]
+                    .labels
+                    .iter()
+                    .map(|&l| logits[l as usize])
+                    .collect(),
+            )
+        } else {
+            None
+        };
         let s = &mut self.slots[i];
         s.fed += take;
         s.prefilled += take;
@@ -1519,9 +1620,11 @@ impl Engine {
             s.next = s.prompt[last];
         }
         let mut out = Vec::new();
-        if let Some(pooling) = pooling {
-            if s.fed >= s.prefill_len() {
-                let vector = s.pool_finish(&self.state.hidden[..take * d_model], d_model, pooling);
+        if s.fed >= s.prefill_len() {
+            let vector = pooling.map(|pooling| {
+                s.pool_finish(&self.state.hidden[..take * d_model], d_model, pooling)
+            });
+            if vector.is_some() || label_logits.is_some() {
                 out.push(Emission {
                     slot: s.id,
                     token: 0,
@@ -1535,7 +1638,8 @@ impl Engine {
                         prefill_s: s.prefill_s,
                         decode_s: 0.0,
                     }),
-                    embedding: Some(vector),
+                    embedding: vector,
+                    label_logits,
                 });
             }
         }
@@ -1603,6 +1707,7 @@ impl Engine {
                     finish: Some(Finish::Error(e.clone())),
                     cost: None,
                     embedding: None,
+                    label_logits: None,
                 })
                 .collect();
             self.slots.clear();
@@ -1762,6 +1867,7 @@ impl Engine {
             finish,
             cost,
             embedding: None,
+            label_logits: None,
         }
     }
 
@@ -2005,6 +2111,7 @@ impl Engine {
                 finish: Some(Finish::Error(e)),
                 cost: None,
                 embedding: None,
+                label_logits: None,
             }];
         }
         // What the pass cost is what the model measures.
