@@ -707,6 +707,7 @@ impl Architecture for Gemma3 {
         }
 
         // ---- output head ----
+        crate::layer::write_hidden(w, cfg, st, &self.out_norm, nb);
         if want_logits.is_empty() {
             stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
             return Ok(());

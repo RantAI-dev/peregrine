@@ -289,6 +289,7 @@ impl GptOss {
         }
 
         // ---- the output head ----
+        crate::layer::write_hidden(w, cfg, st, &self.out_norm, nb);
         if !want_logits.is_empty() {
             crate::layer::head_rows(
                 w,

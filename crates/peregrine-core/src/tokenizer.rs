@@ -1239,7 +1239,13 @@ impl Tokenizer {
     ///   the caller asks for special tokens, which the tools gate on `add_bos`. A
     ///   BERT file whose `add_bos_token` is false therefore gets nothing.
     /// * SentencePiece unigram: `<s>` when `add_bos`, `</s>` when `add_eos`.
-    /// * The two generator tokenizers: [`Self::encode_prompt`]'s BOS rule.
+    /// * SentencePiece BPE and byte-level BPE (the generator tokenizers, which is what
+    ///   a causal embedding model such as Qwen3-Embedding uses): `bos` when `add_bos`,
+    ///   then the text, then `eos` when `add_eos` — llama.cpp's `add_special` prologue
+    ///   and epilogue around the tokenizer itself. The ids are pushed unconditionally,
+    ///   as llama.cpp pushes them: the text's own leading `bos` is a token, not a reason
+    ///   to skip the prologue. (Chat prompts keep [`Self::encode_prompt`], which avoids
+    ///   the duplicate a template-written BOS would otherwise cause.)
     pub fn encode_special(&self, text: &str) -> Vec<u32> {
         let mut out = Vec::new();
         match &self.algo {
@@ -1265,7 +1271,16 @@ impl Tokenizer {
                     out.push(self.eos);
                 }
             }
-            _ => return self.encode_prompt(text),
+            _ => {
+                let mut out = self.encode(text);
+                if self.add_bos && self.bos != u32::MAX {
+                    out.insert(0, self.bos);
+                }
+                if self.add_eos && self.eos != u32::MAX {
+                    out.push(self.eos);
+                }
+                return out;
+            }
         }
         out
     }
@@ -3204,6 +3219,44 @@ abc", 3
                 byte_dec,
             }),
         }
+    }
+
+    #[test]
+    fn generator_special_tokens_are_the_llama_cpp_prologue_and_epilogue() {
+        // A byte-level BPE (Qwen3-Embedding's tokenizer type): `add_special` is BOS
+        // before the text and EOS after it, both from the file's flags.
+        let mut bpe = toy_bpe(PreType::Qwen2);
+        assert!(!bpe.add_bos && !bpe.add_eos);
+        assert_eq!(bpe.encode_special("12"), bpe.encode("12"));
+        bpe.add_eos = true;
+        let mut with_eos = bpe.encode("12");
+        with_eos.push(bpe.eos);
+        assert_eq!(bpe.encode_special("12"), with_eos);
+        bpe.add_bos = true;
+        let mut both = vec![bpe.bos];
+        both.extend(bpe.encode("12"));
+        both.push(bpe.eos);
+        assert_eq!(bpe.encode_special("12"), both);
+        // The chat path still deduplicates a template-written BOS (and never appends EOS).
+        let mut chat = vec![bpe.bos];
+        chat.extend(bpe.encode("12"));
+        assert_eq!(bpe.encode_prompt("12"), chat);
+
+        // A SentencePiece file: `add_bos` is on, `add_eos` only when the file says so.
+        let pieces = vec![
+            "<unk>".to_string(),
+            "<s>".to_string(),
+            "</s>".to_string(),
+            "a".to_string(),
+        ];
+        let scores = vec![0.0, 0.0, 0.0, 1.0];
+        let token_types = vec![2, 3, 3, 1];
+        let mut spm = Tokenizer::from_spm_parts(pieces, scores, token_types, 1, 2, 0, false);
+        assert!(!spm.add_eos);
+        assert_eq!(spm.encode_special("a"), vec![1, 3]);
+        spm.add_eos = true;
+        assert_eq!(spm.encode_special("a"), vec![1, 3, 2]);
+        assert_eq!(spm.encode_prompt("a"), vec![1, 3]);
     }
 
     #[test]

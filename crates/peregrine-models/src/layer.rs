@@ -311,6 +311,41 @@ pub(crate) fn head_rows(
     Ok(())
 }
 
+/// Write every row's final normed hidden state into `State::hidden` when the caller asked for
+/// it (`State::want_hidden`): the input an MTP block reads and the rows an embedding pools.
+///
+/// This is exactly llama.cpp's `result_norm` tensor (`src/models/llama.cpp`: `cur =
+/// build_norm(cur, output_norm, ...)` over every row of the batch), so a vector pooled from
+/// these rows is pooled from the same values llama.cpp pools. The norm is the same call the
+/// output head makes, and it does not change `x` or the logits: asking for hidden states
+/// leaves another slot's bits untouched. No bytes are accounted here, as with the hybrid
+/// family's own write (the head accounts the norm it reads).
+pub(crate) fn write_hidden(
+    w: &Weights,
+    cfg: &Config,
+    st: &mut State,
+    out_norm: &TensorInfo,
+    nb: usize,
+) {
+    if !st.want_hidden {
+        return;
+    }
+    let d = cfg.d_model;
+    if st.hidden.len() < nb * d {
+        st.hidden.resize(nb * d, 0.0);
+    }
+    for b in 0..nb {
+        let (xs, xe) = (b * d, (b + 1) * d);
+        peregrine_core::blocks::norm::rmsnorm_into(
+            w,
+            out_norm,
+            cfg.eps,
+            &st.x[xs..xe],
+            &mut st.hidden[xs..xe],
+        );
+    }
+}
+
 /// Copy the residual stream after layer `li` into the tap buffer, when the caller asked for
 /// that layer (what a DSpark drafter conditions on).
 pub(crate) fn copy_tap(st: &mut State, cfg: &Config, li: usize, nb: usize) {

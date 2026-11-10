@@ -26,6 +26,7 @@ pub mod calib;
 pub mod draft;
 #[cfg(feature = "dspark")]
 pub mod dspark;
+pub mod embed;
 #[cfg(not(feature = "dspark"))]
 pub mod dspark {
     pub struct Drafter {
