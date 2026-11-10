@@ -857,6 +857,10 @@ impl Engine {
             Ok(d) => d,
             Err(e) => return self.refuse(prompt, cache, e),
         };
+        // A labels slot has no token to draft: it reads one row and stops.
+        if want.is_labels() && asked.is_some() {
+            return self.refuse(prompt, cache, "a labels slot does not decode".into());
+        }
         let id = self.next_id;
         self.next_id += 1;
         // The caller's cache is already the one it wants: its rotation, its
