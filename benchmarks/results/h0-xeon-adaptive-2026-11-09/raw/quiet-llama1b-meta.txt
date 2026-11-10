@@ -1,0 +1,16 @@
+condition=quiet model=llama1b rounds=5 refs=2 hogs=0
+start 2026-11-09T12:39:24Z loadavg=9.02 12.42 12.54 5/1982 2708434
+quiet llama1b r1 base secs=13 loadavg=8.59 12.16 12.45 7/1982 2708702
+quiet llama1b r1 branch secs=12 loadavg=9.14 12.15 12.45 9/1988 2708962
+quiet llama1b r2 branch secs=13 loadavg=8.84 11.93 12.37 5/1975 2709222
+quiet llama1b r2 base secs=11 loadavg=9.16 11.90 12.35 10/1981 2709476
+quiet llama1b r3 base secs=12 loadavg=9.40 11.87 12.34 6/1982 2709700
+quiet llama1b r3 branch secs=13 loadavg=9.25 11.70 12.28 5/1973 2709970
+quiet llama1b r4 branch secs=11 loadavg=9.87 11.76 12.29 6/1979 2710235
+quiet llama1b r4 base secs=12 loadavg=9.42 11.60 12.23 7/1973 2710454
+quiet llama1b r5 base secs=11 loadavg=8.93 11.38 12.15 5/1972 2710713
+quiet llama1b r5 branch secs=12 loadavg=8.86 11.28 12.11 5/1981 2710952
+quiet llama1b r1 spin0 secs=12 loadavg=9.61 11.32 12.11 5/1974 2711238
+quiet llama1b r2 spin0 secs=13 loadavg=9.91 11.33 12.10 6/1981 2711516
+quiet llama1b llama secs=32 loadavg=9.75 11.13 12.01 5/1980 2712092
+end 2026-11-09T12:42:21Z loadavg=9.75 11.13 12.01 5/1980 2712094
