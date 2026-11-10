@@ -385,6 +385,14 @@ impl QuantAct {
                 return;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if crate::cpu::have_neon() {
+                // SAFETY: NEON checked above.
+                unsafe { self.fill_neon(x) };
+                return;
+            }
+        }
         self.fill_scalar(x);
     }
 
@@ -430,6 +438,62 @@ impl QuantAct {
             let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
             let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
             crate::simd::quantize32(blk.as_ptr(), inv, codes.as_mut_ptr());
+            self.q.extend_from_slice(&codes);
+            for j in 0..8 {
+                self.lane_sums
+                    .push(codes[4 * j..4 * j + 4].iter().map(|&v| v as i32).sum());
+            }
+            let s_lo: i32 = codes[..16].iter().map(|&v| v as i32).sum();
+            let s_hi: i32 = codes[16..].iter().map(|&v| v as i32).sum();
+            self.d.push(d);
+            self.sums16.push(s_lo);
+            self.sums16.push(s_hi);
+            self.sums.push(s_lo + s_hi);
+        }
+    }
+
+    /// The vector `fill` for aarch64 (S2.8 F6): the scalar scales and the same integer
+    /// sums, the codes four at a time through [`crate::neon::quantize32`]. The rounding
+    /// is the scalar loop's, so the bytes are the same as [`QuantAct::fill_scalar`]'s.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn fill_neon(&mut self, x: &[f32]) {
+        assert_eq!(
+            x.len() % 32,
+            0,
+            "activation length {} is not a multiple of 32",
+            x.len()
+        );
+        self.n = x.len();
+        self.q.clear();
+        self.d.clear();
+        self.sums.clear();
+        self.sums16.clear();
+        self.lane_sums.clear();
+        self.qk.clear();
+        self.dk.clear();
+        self.bsums.clear();
+        let mut codes = [0i8; 32];
+        if x.len().is_multiple_of(256) {
+            for blk in x.chunks_exact(256) {
+                let amax = crate::neon::absmax(blk);
+                let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
+                let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+                for half in blk.chunks_exact(32) {
+                    crate::neon::quantize32(half.as_ptr(), inv, codes.as_mut_ptr());
+                    self.qk.extend_from_slice(&codes);
+                    for run in codes.chunks_exact(16) {
+                        self.bsums.push(run.iter().map(|&q| q as i16).sum());
+                    }
+                }
+                self.dk.push(d);
+            }
+        }
+        for blk in x.chunks_exact(32) {
+            let amax = crate::neon::absmax(blk);
+            let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
+            let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+            crate::neon::quantize32(blk.as_ptr(), inv, codes.as_mut_ptr());
             self.q.extend_from_slice(&codes);
             for j in 0..8 {
                 self.lane_sums
@@ -2089,6 +2153,41 @@ mod tests {
     #[cfg(feature = "fmt-legacy")]
     fn fused_dot_matches_reference_decode_q4_0() {
         fused_equals_reference(Format::Q4_0, 960);
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_fill_matches_the_scalar_fill() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skip: no NEON on this CPU");
+            return;
+        }
+        let mut s = 0x0bad_c0de_2468_1357u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 24) as u8
+        };
+        for n in [128usize, 256, 896, 1024, 4864] {
+            let x: Vec<f32> = (0..n)
+                .map(|_| (next() as f32 / 255.0) * 6.0 - 3.0)
+                .collect();
+            let mut want = QuantAct::with_capacity(n);
+            want.fill_scalar(&x);
+            let mut got = QuantAct::with_capacity(n);
+            // SAFETY: NEON checked above.
+            unsafe { got.fill_neon(&x) };
+            assert_eq!(got.n, want.n, "n={n}");
+            assert_eq!(got.q, want.q, "n={n}: codes");
+            assert_eq!(got.qk, want.qk, "n={n}: 256-block codes");
+            assert_eq!(got.d, want.d, "n={n}: scales");
+            assert_eq!(got.dk, want.dk, "n={n}: 256-block scales");
+            assert_eq!(got.sums, want.sums, "n={n}: sums");
+            assert_eq!(got.sums16, want.sums16, "n={n}: 16-sums");
+            assert_eq!(got.lane_sums, want.lane_sums, "n={n}: lane sums");
+            assert_eq!(got.bsums, want.bsums, "n={n}: run sums");
+        }
     }
 
     #[test]

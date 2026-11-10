@@ -34,15 +34,18 @@ pub enum Tier {
     Neon,
     /// aarch64 `asimd` + `asimddp` (`sdot`): the shipping ARM tier.
     NeonDotprod,
+    /// aarch64 `asimd` + `asimddp` + `i8mm` (`smmla`): the repacked tile GEMM.
+    NeonI8mm,
 }
 
 impl Tier {
     /// The highest rung: the value of "no `PEREGRINE_ISA` cap".
     pub const fn top() -> Tier {
-        Tier::NeonDotprod
+        Tier::NeonI8mm
     }
 
-    /// String name of the kernel tier: `scalar`, `avx2`, `avx512`, `neon`, `neon-dotprod`.
+    /// String name of the kernel tier: `scalar`, `avx2`, `avx512`, `neon`, `neon-dotprod`,
+    /// `neon-i8mm`.
     pub const fn as_str(self) -> &'static str {
         match self {
             Tier::Scalar => "scalar",
@@ -51,6 +54,7 @@ impl Tier {
             Tier::Avx512 => "avx512",
             Tier::Neon => "neon",
             Tier::NeonDotprod => "neon-dotprod",
+            Tier::NeonI8mm => "neon-i8mm",
         }
     }
 }
@@ -94,7 +98,9 @@ pub fn detected() -> Tier {
         #[cfg(target_arch = "aarch64")]
         {
             if std::arch::is_aarch64_feature_detected!("neon") {
-                if std::arch::is_aarch64_feature_detected!("dotprod") {
+                if std::arch::is_aarch64_feature_detected!("i8mm") {
+                    Tier::NeonI8mm
+                } else if std::arch::is_aarch64_feature_detected!("dotprod") {
                     Tier::NeonDotprod
                 } else {
                     Tier::Neon
@@ -131,6 +137,7 @@ pub fn parse_isa(v: Option<&str>) -> Option<Tier> {
         Some("avx512") => Some(Tier::Avx512),
         Some("neon") => Some(Tier::Neon),
         Some("neon-dotprod") => Some(Tier::NeonDotprod),
+        Some("neon-i8mm") => Some(Tier::NeonI8mm),
         _ => None,
     }
 }
@@ -147,6 +154,7 @@ pub fn tier_of(feature: &str) -> Tier {
         | "avx512cd" | "avx512bitalg" | "avx512vpopcntdq" | "gfni" => Tier::Avx512,
         "neon" | "asimd" => Tier::Neon,
         "dotprod" | "asimddp" => Tier::NeonDotprod,
+        "i8mm" => Tier::NeonI8mm,
         _ => Tier::top(),
     }
 }
@@ -201,7 +209,9 @@ pub fn tier_name() -> String {
         if !have_neon() {
             return String::from("aarch64");
         }
-        if have_dotprod() {
+        if have_i8mm() {
+            String::from("aarch64-neon-i8mm")
+        } else if have_dotprod() {
             String::from("aarch64-neon-dotprod")
         } else {
             String::from("aarch64-neon")
@@ -235,6 +245,23 @@ pub fn have_dotprod() -> bool {
         static ON: OnceLock<bool> = OnceLock::new();
         *ON.get_or_init(|| {
             have_neon() && std::arch::is_aarch64_feature_detected!("dotprod") && allowed("dotprod")
+        })
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
+
+/// Cached check for the aarch64 int8 matrix-multiply extension (`i8mm`, `smmla`) under the tier
+/// cap. It implies [`have_dotprod`]: the `i8mm` rung sits above `neon-dotprod`.
+#[inline]
+pub fn have_i8mm() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            have_dotprod() && std::arch::is_aarch64_feature_detected!("i8mm") && allowed("i8mm")
         })
     }
     #[cfg(not(target_arch = "aarch64"))]
@@ -304,12 +331,17 @@ mod tests {
         assert_eq!(tier_of("gfni"), Tier::Avx512);
         assert_eq!(tier_of("neon"), Tier::Neon);
         assert_eq!(tier_of("asimddp"), Tier::NeonDotprod);
+        assert_eq!(tier_of("i8mm"), Tier::NeonI8mm);
         assert_eq!(tier_of("something-new"), Tier::top());
         assert!(
             Tier::Scalar < Tier::Avx2 && Tier::Avx2 < Tier::AvxVnni && Tier::AvxVnni < Tier::Avx512
         );
-        assert!(Tier::Avx512 < Tier::Neon && Tier::Neon < Tier::NeonDotprod);
-        assert_eq!(Tier::top(), Tier::NeonDotprod);
+        assert!(
+            Tier::Avx512 < Tier::Neon
+                && Tier::Neon < Tier::NeonDotprod
+                && Tier::NeonDotprod < Tier::NeonI8mm
+        );
+        assert_eq!(Tier::top(), Tier::NeonI8mm);
     }
 
     /// A cap never lets a feature above it through, on either architecture's rungs.
@@ -347,6 +379,7 @@ mod tests {
         assert_eq!(parse_isa(Some("avx512")), Some(Tier::Avx512));
         assert_eq!(parse_isa(Some("neon")), Some(Tier::Neon));
         assert_eq!(parse_isa(Some("neon-dotprod")), Some(Tier::NeonDotprod));
+        assert_eq!(parse_isa(Some("neon-i8mm")), Some(Tier::NeonI8mm));
         assert_eq!(parse_isa(Some("native")), None);
         assert_eq!(parse_isa(None), None);
     }
