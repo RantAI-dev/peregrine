@@ -17,7 +17,10 @@ fn main() {
 #[cfg(target_arch = "aarch64")]
 fn main() {
     use peregrine_kernels::format::Format;
-    use peregrine_kernels::kq::{dot_q4k8_ref, repack_q4k8, KqActs, Q4K8};
+    use peregrine_kernels::kq::{
+        dot_q4k8_ref, dot_q5_08_ref, dot_q6k8_ref, repack_q4k8, repack_q5_08, repack_q6k8, KqActs,
+        Q4K8, Q5_08, Q6K8,
+    };
     use peregrine_kernels::quant::{dot_scalar, QuantAct};
     use std::hint::black_box;
     use std::time::Instant;
@@ -83,6 +86,48 @@ fn main() {
         let src: Vec<&[u8]> = q4_rows.iter().map(|r| &r[sb * 144..][..144]).collect();
         repack_q4k8(&src, &mut tile[sb * Q4K8::SIZE..]);
     }
+    // Eight Q5_0 rows and their tile, then eight Q6_K rows and theirs.
+    let q5_rows: Vec<Vec<u8>> = (0..8)
+        .map(|_| {
+            let mut w = Vec::with_capacity(n / 32 * 22);
+            for _ in 0..n / 32 {
+                w.extend_from_slice(&0x2c00u16.to_le_bytes());
+                for _ in 0..20 {
+                    w.push(next());
+                }
+            }
+            w
+        })
+        .collect();
+    let n_blk = n / 32;
+    let mut q5_tile = vec![0u8; n_blk * Q5_08::SIZE];
+    for t in 0..n_blk {
+        let src: Vec<&[u8]> = q5_rows.iter().map(|r| &r[t * 22..][..22]).collect();
+        repack_q5_08(&src, &mut q5_tile[t * Q5_08::SIZE..]);
+    }
+    let q6_rows: Vec<Vec<u8>> = (0..8)
+        .map(|_| {
+            let mut w = Vec::with_capacity(n_sb * 210);
+            for _ in 0..n_sb {
+                for _ in 0..192 {
+                    w.push(next());
+                }
+                for _ in 0..16 {
+                    // Small signed scales, so the products stay in the range a real
+                    // model's do.
+                    w.push((next() % 17) as u8);
+                }
+                w.extend_from_slice(&0x2000u16.to_le_bytes());
+            }
+            w
+        })
+        .collect();
+    let mut q6_tile = vec![0u8; n_sb * Q6K8::SIZE];
+    for sb in 0..n_sb {
+        let src: Vec<&[u8]> = q6_rows.iter().map(|r| &r[sb * 210..][..210]).collect();
+        repack_q6k8(&src, &mut q6_tile[sb * Q6K8::SIZE..]);
+    }
+
     let acts: Vec<QuantAct> = (0..16)
         .map(|i| {
             let y: Vec<f32> = (0..n)
@@ -194,4 +239,148 @@ fn main() {
         }
         black_box(out[0]);
     });
+    if peregrine_kernels::cpu::have_i8mm() {
+        bench("Q4_K tile i8mm, GEMM 4", (rows / 8) * 32, &mut || {
+            for _ in 0..rows / 8 {
+                unsafe { peregrine_kernels::neon::q4k8_gemm_i8mm(&tile, n_sb, &kq, 4, &mut out) };
+            }
+            black_box(out[0]);
+        });
+        bench("Q4_K tile i8mm, GEMM 16", (rows / 16) * 128, &mut || {
+            for _ in 0..rows / 16 {
+                unsafe { peregrine_kernels::neon::q4k8_gemm_i8mm(&tile, n_sb, &kq, 16, &mut out) };
+            }
+            black_box(out[0]);
+        });
+    }
+
+    bench("Q5_0 scalar, 1 row", rows, &mut || {
+        let mut acc = 0.0f32;
+        for _ in 0..rows {
+            acc += dot_scalar(Format::Q5_0, &q5_rows[0], &act);
+        }
+        black_box(acc);
+    });
+    bench("Q5_0 sdot, 1 row", rows, &mut || {
+        let mut acc = 0.0f32;
+        for _ in 0..rows {
+            acc += unsafe { peregrine_kernels::neon::dot_q5_0(&q5_rows[0], &act) };
+        }
+        black_box(acc);
+    });
+    bench("Q5_0 sdot rows8 (decode)", (rows / 8) * 8, &mut || {
+        for _ in 0..rows / 8 {
+            unsafe {
+                peregrine_kernels::neon::q5_0_rows8(&q5_rows.concat(), n_blk * 22, &act, &mut out)
+            };
+        }
+        black_box(out[0]);
+    });
+    bench("Q5_0 tile ref, GEMV", (rows / 8) * 8, &mut || {
+        let mut acc = 0.0f32;
+        for _ in 0..rows / 8 {
+            for r in 0..8 {
+                acc += dot_q5_08_ref(&q5_tile, n_blk, r, &act);
+            }
+        }
+        black_box(acc);
+    });
+    bench("Q5_0 tile sdot, GEMV", (rows / 8) * 8, &mut || {
+        for _ in 0..rows / 8 {
+            unsafe {
+                peregrine_kernels::neon::q5_08_gemv(
+                    &q5_tile,
+                    n_blk,
+                    std::slice::from_ref(&act),
+                    1,
+                    &mut out,
+                )
+            };
+        }
+        black_box(out[0]);
+    });
+    bench("Q5_0 tile sdot, GEMM 4", (rows / 8) * 32, &mut || {
+        for _ in 0..rows / 8 {
+            unsafe { peregrine_kernels::neon::q5_08_gemm(&q5_tile, n_blk, &acts, 4, &mut out) };
+        }
+        black_box(out[0]);
+    });
+    if peregrine_kernels::cpu::have_i8mm() {
+        bench("Q5_0 tile i8mm, GEMM 4", (rows / 8) * 32, &mut || {
+            for _ in 0..rows / 8 {
+                unsafe {
+                    peregrine_kernels::neon::q5_08_gemm_i8mm(&q5_tile, n_blk, &acts, 4, &mut out)
+                };
+            }
+            black_box(out[0]);
+        });
+    }
+
+    bench("Q6_K scalar, 1 row", rows, &mut || {
+        let mut acc = 0.0f32;
+        for _ in 0..rows {
+            acc += dot_scalar(Format::Q6_K, &q6_rows[0], &act);
+        }
+        black_box(acc);
+    });
+    bench("Q6_K sdot, 1 row", rows, &mut || {
+        let mut acc = 0.0f32;
+        for _ in 0..rows {
+            acc += unsafe { peregrine_kernels::neon::dot_q6_k(&q6_rows[0], &act) };
+        }
+        black_box(acc);
+    });
+    bench("Q6_K tile ref, GEMV", (rows / 8) * 8, &mut || {
+        let mut acc = 0.0f32;
+        for _ in 0..rows / 8 {
+            for r in 0..8 {
+                acc += dot_q6k8_ref(&q6_tile, n_sb, r, &act);
+            }
+        }
+        black_box(acc);
+    });
+    bench("Q6_K tile sdot, GEMV", (rows / 8) * 8, &mut || {
+        for _ in 0..rows / 8 {
+            unsafe {
+                peregrine_kernels::neon::q6k8_gemv(
+                    &q6_tile,
+                    n_sb,
+                    std::slice::from_ref(&act),
+                    1,
+                    &mut out,
+                )
+            };
+        }
+        black_box(out[0]);
+    });
+    bench("Q6_K tile sdot, GEMM 4", (rows / 8) * 32, &mut || {
+        for _ in 0..rows / 8 {
+            unsafe { peregrine_kernels::neon::q6k8_gemm(&q6_tile, n_sb, &kq, 4, &mut out) };
+        }
+        black_box(out[0]);
+    });
+    bench("Q6_K tile sdot, GEMM 16", (rows / 16) * 128, &mut || {
+        for _ in 0..rows / 16 {
+            unsafe { peregrine_kernels::neon::q6k8_gemm(&q6_tile, n_sb, &kq, 16, &mut out) };
+        }
+        black_box(out[0]);
+    });
+    if peregrine_kernels::cpu::have_i8mm() {
+        bench("Q6_K tile i8mm, GEMM 4", (rows / 8) * 32, &mut || {
+            for _ in 0..rows / 8 {
+                unsafe {
+                    peregrine_kernels::neon::q6k8_gemm_i8mm(&q6_tile, n_sb, &kq, 4, &mut out)
+                };
+            }
+            black_box(out[0]);
+        });
+        bench("Q6_K tile i8mm, GEMM 16", (rows / 16) * 128, &mut || {
+            for _ in 0..rows / 16 {
+                unsafe {
+                    peregrine_kernels::neon::q6k8_gemm_i8mm(&q6_tile, n_sb, &kq, 16, &mut out)
+                };
+            }
+            black_box(out[0]);
+        });
+    }
 }

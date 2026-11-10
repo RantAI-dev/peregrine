@@ -30,6 +30,9 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
 #[cfg(target_arch = "x86_64")]
 #[inline]
 fn vector_ok() -> bool {
@@ -213,6 +216,225 @@ const EXP_P2: f32 = f32::from_bits(0x3e2a_af33);
 const EXP_P3: f32 = f32::from_bits(0x3eff_fedb);
 /// The coefficient of `b`.
 const EXP_P4: f32 = f32::from_bits(0x3f7f_fff6);
+
+/// Four `exp`s at once — [`exp8`]'s constants, operation order and fused multiply-adds,
+/// four lanes wide. The result is [`exp_scalar`]'s bit for bit.
+///
+/// The `|n| > 126` path (underflow, overflow) is rare enough that the four lanes take
+/// the scalar twin instead of carrying the masked sequence: each lane's result depends
+/// on its input alone either way, so a row's bits cannot depend on its neighbours.
+///
+/// # Safety
+/// The CPU must have NEON.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn exp4(x: float32x4_t) -> float32x4_t {
+    let r = vdupq_n_f32(f32::from_bits(0x4b40_0000)); // 0x1.8p23
+    let z = vfmaq_f32(r, x, vdupq_n_f32(EXP_LOG2E));
+    let n = vsubq_f32(z, r);
+    let neg = vnegq_f32(n);
+    let b = vfmaq_f32(
+        vfmaq_f32(x, neg, vdupq_n_f32(EXP_LN2_HI)),
+        neg,
+        vdupq_n_f32(EXP_LN2_LO),
+    );
+    let mut lanes = [0.0f32; 4];
+    vst1q_f32(lanes.as_mut_ptr(), vabsq_f32(n));
+    if lanes[0] > 126.0 || lanes[1] > 126.0 || lanes[2] > 126.0 || lanes[3] > 126.0 {
+        vst1q_f32(lanes.as_mut_ptr(), x);
+        for v in lanes.iter_mut() {
+            *v = exp_scalar(*v);
+        }
+        return vld1q_f32(lanes.as_ptr());
+    }
+    let e = vshlq_n_u32(vreinterpretq_u32_f32(z), 23);
+    let k = vreinterpretq_f32_u32(vaddq_u32(e, vreinterpretq_u32_f32(vdupq_n_f32(1.0))));
+    let u = vmulq_f32(b, b);
+    let d = vfmaq_f32(vdupq_n_f32(EXP_P1), vdupq_n_f32(EXP_P0), b);
+    let c = vfmaq_f32(vdupq_n_f32(EXP_P3), vdupq_n_f32(EXP_P2), b);
+    let d = vfmaq_f32(c, d, u);
+    let j = vfmaq_f32(vmulq_f32(vdupq_n_f32(EXP_P4), b), d, u);
+    vfmaq_f32(k, j, k)
+}
+
+/// [`exp4`] of `−x`: the sigmoid's exponential.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn exp4_neg(x: float32x4_t) -> float32x4_t {
+    exp4(vnegq_f32(x))
+}
+
+/// `x_i = exp(x_i − shift)` in place, in the scalar loop's index order.
+///
+/// # Safety
+/// The CPU must have NEON.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn exp_shift_sum_neon(x: &mut [f32], shift: f32) -> f64 {
+    let s = vdupq_n_f32(shift);
+    let mut sum = 0.0f64;
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        let v = exp4(vsubq_f32(vld1q_f32(x.as_ptr().add(i)), s));
+        vst1q_f32(x.as_mut_ptr().add(i), v);
+        let mut lanes = [0.0f32; 4];
+        vst1q_f32(lanes.as_mut_ptr(), v);
+        for v in lanes {
+            sum += v as f64;
+        }
+        i += 4;
+    }
+    while i < x.len() {
+        x[i] = exp_scalar(x[i] - shift);
+        sum += x[i] as f64;
+        i += 1;
+    }
+    sum
+}
+
+/// `x_i = exp((x_i − shift) · scale)` in place, in the scalar loop's index order.
+///
+/// # Safety
+/// The CPU must have NEON.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn exp_scaled_sum_neon(x: &mut [f32], shift: f32, scale: f32) -> f64 {
+    let s = vdupq_n_f32(shift);
+    let k = vdupq_n_f32(scale);
+    let mut sum = 0.0f64;
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        let v = exp4(vmulq_f32(vsubq_f32(vld1q_f32(x.as_ptr().add(i)), s), k));
+        vst1q_f32(x.as_mut_ptr().add(i), v);
+        let mut lanes = [0.0f32; 4];
+        vst1q_f32(lanes.as_mut_ptr(), v);
+        for v in lanes {
+            sum += v as f64;
+        }
+        i += 4;
+    }
+    while i < x.len() {
+        x[i] = exp_scalar((x[i] - shift) * scale);
+        sum += x[i] as f64;
+        i += 1;
+    }
+    sum
+}
+
+/// [`swiglu`], four lanes at a time on [`exp4`]; the padded tail keeps a split row's
+/// bits the same as an unsplit one.
+///
+/// # Safety
+/// The CPU must have NEON; the slices have equal length.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn swiglu_neon(gate: &mut [f32], up: &[f32]) {
+    let one = vdupq_n_f32(1.0);
+    let mut i = 0;
+    while i + 4 <= gate.len() {
+        let x = vld1q_f32(gate.as_ptr().add(i));
+        let silu = vdivq_f32(x, vaddq_f32(one, exp4_neg(x)));
+        vst1q_f32(
+            gate.as_mut_ptr().add(i),
+            vmulq_f32(silu, vld1q_f32(up.as_ptr().add(i))),
+        );
+        i += 4;
+    }
+    if i < gate.len() {
+        let rem = gate.len() - i;
+        let mut g = [0.0f32; 4];
+        let mut u = [0.0f32; 4];
+        g[..rem].copy_from_slice(&gate[i..]);
+        u[..rem].copy_from_slice(&up[i..]);
+        let x = vld1q_f32(g.as_ptr());
+        let silu = vdivq_f32(x, vaddq_f32(one, exp4_neg(x)));
+        let mut out = [0.0f32; 4];
+        vst1q_f32(out.as_mut_ptr(), vmulq_f32(silu, vld1q_f32(u.as_ptr())));
+        gate[i..].copy_from_slice(&out[..rem]);
+    }
+}
+
+/// [`swiglu_oai`], four lanes at a time on [`exp4`].
+///
+/// # Safety
+/// The CPU must have NEON; the slices have equal length.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn swiglu_oai_neon(gate: &mut [f32], up: &[f32], alpha: f32, limit: f32) {
+    let one = vdupq_n_f32(1.0);
+    let av = vdupq_n_f32(alpha);
+    let lv = vdupq_n_f32(limit);
+    let nlv = vdupq_n_f32(-limit);
+    let mut i = 0;
+    while i + 4 <= gate.len() {
+        let g = vld1q_f32(gate.as_ptr().add(i));
+        let u = vld1q_f32(up.as_ptr().add(i));
+        // `min(gate, limit)`: the limit wins only when it is the smaller one.
+        let x = vbslq_f32(vcltq_f32(lv, g), lv, g);
+        // `clamp(up, -limit, limit)`, in the scalar branches' order.
+        let y = vbslq_f32(vcltq_f32(u, nlv), nlv, vbslq_f32(vcltq_f32(lv, u), lv, u));
+        let glu = vdivq_f32(x, vaddq_f32(one, exp4(vmulq_f32(av, vnegq_f32(x)))));
+        vst1q_f32(gate.as_mut_ptr().add(i), vmulq_f32(glu, vaddq_f32(y, one)));
+        i += 4;
+    }
+    while i < gate.len() {
+        gate[i] = swiglu_oai_one(gate[i], up[i], alpha, limit);
+        i += 1;
+    }
+}
+
+/// [`mul_sigmoid`], four lanes at a time on [`exp4`].
+///
+/// # Safety
+/// The CPU must have NEON; the slices have equal length.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn mul_sigmoid_neon(x: &mut [f32], z: &[f32]) {
+    let one = vdupq_n_f32(1.0);
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        let e = exp4_neg(vld1q_f32(z.as_ptr().add(i)));
+        vst1q_f32(
+            x.as_mut_ptr().add(i),
+            vdivq_f32(vld1q_f32(x.as_ptr().add(i)), vaddq_f32(one, e)),
+        );
+        i += 4;
+    }
+    while i < x.len() {
+        x[i] /= 1.0 + exp_scalar(-z[i]);
+        i += 1;
+    }
+}
+
+/// [`silu`]/[`mul_silu`], four lanes at a time on [`exp4`].
+///
+/// # Safety
+/// The CPU must have NEON; with `z`, the slices have equal length.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn mul_silu_neon(x: &mut [f32], z: Option<&[f32]>) {
+    let one = vdupq_n_f32(1.0);
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        let xv = vld1q_f32(x.as_ptr().add(i));
+        let g = match z {
+            Some(z) => vld1q_f32(z.as_ptr().add(i)),
+            None => xv,
+        };
+        let s = vdivq_f32(g, vaddq_f32(one, exp4_neg(g)));
+        let r = if z.is_some() { vmulq_f32(xv, s) } else { s };
+        vst1q_f32(x.as_mut_ptr().add(i), r);
+        i += 4;
+    }
+    while i < x.len() {
+        let g = z.map_or(x[i], |z| z[i]);
+        let s = g / (1.0 + exp_scalar(-g));
+        x[i] = if z.is_some() { x[i] * s } else { s };
+        i += 1;
+    }
+}
 
 /// The pieces of [`exp8`]'s argument reduction: `n` (the exponent, `round(x·log2 e)`), `j`
 /// (the polynomial, `exp(b) − 1` for `b = x − n·ln 2`) and `e` (the bit pattern `2ⁿ` is
@@ -430,6 +652,13 @@ pub fn exp_shift_sum(x: &mut [f32], shift: f32) -> f64 {
             return unsafe { exp_shift_sum_avx2(x, shift) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() {
+            // SAFETY: NEON checked above.
+            return unsafe { exp_shift_sum_neon(x, shift) };
+        }
+    }
     let mut sum = 0.0f64;
     for v in x.iter_mut() {
         *v = (*v - shift).exp();
@@ -501,6 +730,13 @@ pub fn exp_scaled_sum(x: &mut [f32], shift: f32, scale: f32) -> f64 {
         if vector_ok() {
             // SAFETY: features checked.
             return unsafe { exp_scaled_sum_avx2(x, shift, scale) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() {
+            // SAFETY: NEON checked above.
+            return unsafe { exp_scaled_sum_neon(x, shift, scale) };
         }
     }
     let mut sum = 0.0f64;
@@ -601,6 +837,13 @@ pub fn swiglu(gate: &mut [f32], up: &[f32]) {
             return unsafe { swiglu_avx2(gate, up) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() {
+            // SAFETY: NEON checked above.
+            return unsafe { swiglu_neon(gate, up) };
+        }
+    }
     for (g, &u) in gate.iter_mut().zip(up) {
         *g = (*g / (1.0 + (-*g).exp())) * u;
     }
@@ -663,6 +906,13 @@ pub fn swiglu_oai(gate: &mut [f32], up: &[f32], alpha: f32, limit: f32) {
         if vector_ok() {
             // SAFETY: features checked; lengths equal.
             return unsafe { swiglu_oai_avx2(gate, up, alpha, limit) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() {
+            // SAFETY: NEON checked above.
+            return unsafe { swiglu_oai_neon(gate, up, alpha, limit) };
         }
     }
     for (g, &u) in gate.iter_mut().zip(up) {
@@ -886,6 +1136,13 @@ pub fn mul_sigmoid(x: &mut [f32], z: &[f32]) {
             return unsafe { mul_sigmoid_avx2(x, z) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() {
+            // SAFETY: NEON checked above.
+            return unsafe { mul_sigmoid_neon(x, z) };
+        }
+    }
     for (v, &g) in x.iter_mut().zip(z) {
         *v /= 1.0 + (-g).exp();
     }
@@ -920,6 +1177,13 @@ pub fn silu(x: &mut [f32]) {
             return unsafe { mul_silu_avx2(x, None) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() {
+            // SAFETY: NEON checked above.
+            return unsafe { mul_silu_neon(x, None) };
+        }
+    }
     for v in x.iter_mut() {
         *v /= 1.0 + (-*v).exp();
     }
@@ -932,6 +1196,13 @@ pub fn mul_silu(o: &mut [f32], z: &[f32]) {
         if vector_ok() {
             // SAFETY: features checked; lengths equal.
             return unsafe { mul_silu_avx2(o, Some(z)) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::have_neon() {
+            // SAFETY: NEON checked above.
+            return unsafe { mul_silu_neon(o, Some(z)) };
         }
     }
     for (v, &g) in o.iter_mut().zip(z) {
@@ -1182,6 +1453,115 @@ mod tests {
                 a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
                 "values at n {n}"
             );
+        }
+    }
+
+    /// The aarch64 vector `exp` is the scalar twin's bits, lane for lane.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_exp4_is_exp_scalar_bit_for_bit() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skipped: no NEON");
+            return;
+        }
+        let xs = prng(0xA4, 20_000, -130.0, 130.0);
+        for chunk in xs.chunks(4) {
+            let mut lane = [0.0f32; 4];
+            lane[..chunk.len()].copy_from_slice(chunk);
+            // SAFETY: NEON checked above.
+            let got = unsafe {
+                let mut out = [0.0f32; 4];
+                vst1q_f32(out.as_mut_ptr(), exp4(vld1q_f32(lane.as_ptr())));
+                out
+            };
+            for (i, &x) in chunk.iter().enumerate() {
+                assert_eq!(got[i].to_bits(), exp_scalar(x).to_bits(), "exp({x})");
+            }
+        }
+    }
+
+    /// The NEON activation/softmax vectors against the scalar definition, including
+    /// tails and a row split across calls (a worker's block range must not change a
+    /// row's bits).
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_vmath_matches_the_scalar_definition() {
+        if !crate::cpu::have_neon() {
+            eprintln!("skipped: no NEON");
+            return;
+        }
+        let xs = prng(0xB7, 1001, -20.0, 20.0);
+        for n in [1usize, 2, 3, 4, 5, 7, 8, 15, 16, 17, 64, 1001] {
+            let g = &xs[..n];
+            let u = prng(0xB8 + n as u64, n, -3.0, 3.0);
+
+            let mut a = g.to_vec();
+            // SAFETY: NEON checked above.
+            unsafe { swiglu_neon(&mut a, &u) };
+            for i in 0..n {
+                let want = (g[i] / (1.0 + exp_scalar(-g[i]))) * u[i];
+                assert_eq!(a[i].to_bits(), want.to_bits(), "swiglu n={n} i={i}");
+            }
+            // A split at every offset gives the same row.
+            for cut in 1..n {
+                let mut s = g.to_vec();
+                unsafe {
+                    swiglu_neon(&mut s[..cut], &u[..cut]);
+                    swiglu_neon(&mut s[cut..], &u[cut..]);
+                }
+                assert_eq!(s, a, "swiglu split n={n} cut={cut}");
+            }
+
+            let mut a = g.to_vec();
+            silu(&mut a);
+            for i in 0..n {
+                let want = g[i] / (1.0 + exp_scalar(-g[i]));
+                assert_eq!(a[i].to_bits(), want.to_bits(), "silu n={n} i={i}");
+            }
+
+            let mut a = u.clone();
+            mul_silu(&mut a, g);
+            for i in 0..n {
+                let want = u[i] * (g[i] / (1.0 + exp_scalar(-g[i])));
+                assert_eq!(a[i].to_bits(), want.to_bits(), "mul_silu n={n} i={i}");
+            }
+
+            let mut a = u.clone();
+            mul_sigmoid(&mut a, g);
+            for i in 0..n {
+                let want = u[i] / (1.0 + exp_scalar(-g[i]));
+                assert_eq!(a[i].to_bits(), want.to_bits(), "mul_sigmoid n={n} i={i}");
+            }
+
+            let mut a = g.to_vec();
+            swiglu_oai(&mut a, &u, 1.702, 7.0);
+            for i in 0..n {
+                let want = swiglu_oai_one(g[i], u[i], 1.702, 7.0);
+                assert_eq!(a[i].to_bits(), want.to_bits(), "swiglu_oai n={n} i={i}");
+            }
+
+            let mut a = g.to_vec();
+            let sa = exp_shift_sum(&mut a, 1.25);
+            let mut want = 0.0f64;
+            for i in 0..n {
+                let v = exp_scalar(g[i] - 1.25);
+                assert_eq!(a[i].to_bits(), v.to_bits(), "exp_shift n={n} i={i}");
+                want += v as f64;
+            }
+            assert_eq!(sa.to_bits(), want.to_bits(), "exp_shift sum n={n}");
+
+            let mut a = g.to_vec();
+            let sa = exp_scaled_sum(&mut a, -0.5, 0.37);
+            let mut want = 0.0f64;
+            for i in 0..n {
+                let v = exp_scalar((g[i] + 0.5) * 0.37);
+                assert_eq!(a[i].to_bits(), v.to_bits(), "exp_scaled n={n} i={i}");
+                want += v as f64;
+            }
+            assert_eq!(sa.to_bits(), want.to_bits(), "exp_scaled sum n={n}");
+
+            let want = g.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            assert_eq!(max(g).to_bits(), want.to_bits(), "max n={n}");
         }
     }
 
