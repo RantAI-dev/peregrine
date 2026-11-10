@@ -596,7 +596,7 @@ impl Default for GemmaEmbeddingConfig {
             n_head_kv: 2,
             n_ff: 256,
             dense_width: 256,
-            ctx: 128,
+            ctx: 256,
             sliding_window: 8,
             pooling_type: 1,
         }

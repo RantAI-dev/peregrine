@@ -88,7 +88,12 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    `cargo test -p peregrine --release --test systemone_real -- --ignored` drives the real endpoint
    with the 48 fixture requests and compares every answer with llama.cpp's;
    `cargo test -p peregrine-models --release --test systemone_openjev` does the same through the
-   pieces directly.
+   pieces directly. The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
+   the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
+   the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
+   admission orders), and the tier golden (`tests/golden/synthetic/<tier>/gemma-embedding-Q8_0.golden`,
+   recorded on scalar, AVX2 and AVX-512 under SDE). Its ignored real-file test is EmbeddingGemma
+   300M; `peregrine-tests` cover the server and CLI refusal of chat on an encoder.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.

@@ -476,8 +476,36 @@ fn an_encoders_vector_is_bit_identical_alone_in_batches_and_in_any_order() {
             );
         }
 
+        // Short texts too: a one- or two-row pass can take a different matmul kernel than a
+        // wide batch, and the vector must not notice.
+        for len in [1usize, 2, 3] {
+            let short = encoder_text(31 + len as u32, len);
+            let short_alone = embed_batch(
+                &model,
+                std::slice::from_ref(&short),
+                pooling,
+                1,
+                64,
+                model.cfg.ctx_train,
+                None,
+            )
+            .vectors[0]
+                .clone();
+            let mut texts = vec![short.clone()];
+            for i in 0..7 {
+                texts.push(encoder_text(200 + i, 13 + i as usize));
+            }
+            let run = embed_batch(&model, &texts, pooling, 4, 64, model.cfg.ctx_train, None);
+            assert_eq!(
+                bits(&run.vectors[0]),
+                bits(&short_alone),
+                "{}: a {len}-token text is the same alone and in a batch",
+                fmt.label()
+            );
+        }
+
         // A text long enough to run alone in a whole pass, beside shorts that fit one.
-        let long = encoder_text(77, 100);
+        let long = encoder_text(77, 200);
         let long_alone = embed_batch(
             &model,
             std::slice::from_ref(&long),
