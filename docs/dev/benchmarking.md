@@ -56,7 +56,11 @@ cargo build --release -p peregrine-server     # the profile published numbers us
 ```
 
 The `quick` profile is for daily work only: it rebuilds about 11× faster and decodes about 0.5% slower
-(`benchmarks/results/2026-11-06-h2-quick-profile/`). `dist` (fat LTO) is a candidate under evaluation (S3.9).
+(`benchmarks/results/2026-11-06-h2-quick-profile/`). `dist` (fat LTO, one codegen unit) was measured
+against `release` for S3.9 and is neutral on speed, so published numbers stay on `release`; it is the
+packaging profile because its binaries are 29% smaller. PGO was measured and rejected (decode +1–2%,
+Qwen2.5 prefill −10–20%). The numbers, the method and the PGO recipe are in
+[`build-profiles.md`](build-profiles.md).
 
 ## The four numbers
 

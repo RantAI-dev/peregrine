@@ -112,6 +112,9 @@ pub struct EngineOptions {
     pub adaptive_spin: bool,
     /// `PEREGRINE_DECODE_THREADS`: width of the narrower pool for one-row steps (default: physical cores).
     pub decode_threads: Option<usize>,
+    /// `PEREGRINE_AFFINITY=1`: pin each pool worker to its own physical core (Linux), so a pool as wide as
+    /// the cores never puts two workers on one core's SMT siblings and the scheduler cannot migrate them.
+    pub affinity: bool,
 
     // Kernels.
     /// `PEREGRINE_ISA` (`scalar`, `avx2`, `avx512`; default `native`): the highest kernel tier to use.
@@ -205,6 +208,7 @@ impl Default for EngineOptions {
             yield_us: 0,
             adaptive_spin: true,
             decode_threads: None,
+            affinity: false,
             isa: None,
             zmm: true,
             wide: true,
@@ -331,6 +335,7 @@ impl EngineOptions {
                 .unwrap_or(d.yield_us),
             adaptive_spin: unless("ADAPTIVE_SPIN", "0"),
             decode_threads: num("DECODE_THREADS").filter(|&v| v > 0),
+            affinity: only("AFFINITY", "1"),
             isa,
             zmm: unless("ZMM", "0"),
             wide: unless("NO_WIDE", "1"),
@@ -431,6 +436,7 @@ impl EngineOptions {
             ("yield_us", self.yield_us.to_string()),
             ("adaptive_spin", self.adaptive_spin.to_string()),
             ("decode_threads", opt(self.decode_threads)),
+            ("affinity", self.affinity.to_string()),
             (
                 "isa",
                 match self.isa {
@@ -496,6 +502,7 @@ pub const NAMES: &[&str] = &[
     "YIELD_US",
     "ADAPTIVE_SPIN",
     "DECODE_THREADS",
+    "AFFINITY",
     "ISA",
     "ZMM",
     "NO_WIDE",
