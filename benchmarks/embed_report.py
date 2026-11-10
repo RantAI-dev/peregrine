@@ -129,10 +129,11 @@ def build_summary(runs, accs) -> Dict[str, Any]:
             c = merge_cell(records, cell_key(L, b))
             if c:
                 cells[cell_key(L, b)] = c
-        for c in (1, 10):
-            c10 = merge_cell(records, cell_key(16, 1, c))
-            if c10:
-                cells[cell_key(16, 1, c)] = c10
+        for L, _ in CELL_ORDER:
+            for c in (10,):
+                cell = merge_cell(records, cell_key(L, 1, c))
+                if cell:
+                    cells[cell_key(L, 1, c)] = cell
         entry = {
             "engine": engine,
             "precision": precision,
