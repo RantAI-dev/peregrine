@@ -50,7 +50,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    counts, and beside a decoding chat slot. It also holds an ignored real-file test for
    Qwen3-Embedding 0.6B (looked up in `models/`, `~/models/` and the model cache):
    `cargo test --release -p peregrine-models --test embeddings -- --ignored`.
-   S4.3's groundwork has three tests with no model files. `crates/peregrine-core/tests/systemone_math.rs`
+   S4.3's groundwork is tested without model files. `crates/peregrine-core/tests/systemone_math.rs`
    reads the 45 random cases `scripts/systemone-math.py` writes to `tests/fixtures/systemone-math.jsonl`
    (an independent Python implementation of llama.cpp's answer math) and requires every probability,
    score, confidence, `noul` and legend entry to agree to 1e-12; the module's unit tests pin the

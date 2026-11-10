@@ -22,8 +22,9 @@ All notable changes to this project are documented here. The format follows
   decoded, whose single emission carries its last prompt row's logits at the given token ids. A
   question after another with the same prompt prefix restores the cache from the prefix store and
   is bit-identical on dense models; a hybrid model's cache is not kept there (no recurrent state in
-  a snapshot), so it recomputes. Both read-outs are bit-identical alone, after a sibling and in a
-  batch, at chunks 1/16/64 and 1/2/4 threads on synthetic llama and qwen35 files.
+  a snapshot), so it recomputes. The label logits are bit-identical alone, after a sibling and in a
+  batch, at chunks 1/16/64 and 1/2/4 threads on synthetic llama and qwen35 files, through both
+  scheduling paths.
 - **WordPiece and SentencePiece-unigram tokenizers** (roadmap S4.5), the two vocabularies
   encoder models ship: `tokenizer.ggml.model = "bert"` (all-MiniLM, bge, e5, gte) and
   `"t5"` (T5 and the XLM-R vocabulary: bge-m3, multilingual-e5, bge-reranker). Both are
