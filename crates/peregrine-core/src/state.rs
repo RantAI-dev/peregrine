@@ -130,6 +130,16 @@ pub struct State {
     // MTP block's input) to `hidden`, `[row][d_model]`.
     pub want_hidden: bool,
     pub hidden: Vec<f32>,
+    /// Mean pooling's accumulator for one text, `d_model` f64 sums. Reused by the
+    /// bidirectional pass, which pools text by text inside the forward and must not
+    /// allocate; empty when no encoder is loaded.
+    pub pool_sum: Vec<f64>,
+    /// The head's widest intermediate (`ActLayout::act_width` floats). An encoder's
+    /// `dense_2` output is wider than `d_model` on EmbeddingGemma; sized once with the
+    /// rest of the scratch so the bidirectional pass allocates nothing.
+    pub emb: Vec<f32>,
+    /// The text boundaries of one bidirectional pass, reused (a pass must not allocate).
+    pub spans: Vec<crate::blocks::bidir::TextSpan>,
 }
 
 impl State {
@@ -204,7 +214,12 @@ impl State {
                     // output, the head's input), not as wide as the feed-forward: a mixture of
                     // experts has no dense feed-forward at all, so `n_ff` alone would size this
                     // buffer too small.
-                    let mut a = QuantAct::with_capacity(cfg.n_ff.max(cfg.d_model).max(cfg.q_dim()));
+                    let mut a = QuantAct::with_capacity(
+                        cfg.n_ff
+                            .max(cfg.d_model)
+                            .max(cfg.q_dim())
+                            .max(act_layout.act_width),
+                    );
                     a.ternary = act_layout.ternary;
                     a.ptq1 = act_layout.ptq1;
                     a.tb_span = act_layout.tb_span;
@@ -227,6 +242,9 @@ impl State {
             fam,
             want_hidden: false,
             hidden: Vec::new(),
+            pool_sum: Vec::new(),
+            emb: vec![0.0; b * act_layout.act_width],
+            spans: Vec::new(),
         }
     }
 

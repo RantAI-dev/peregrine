@@ -92,7 +92,8 @@ pub fn run(args: &EmbedArgs) -> Result<(), String> {
             )
         })?,
     };
-    if pooling == Pooling::Cls {
+    let bidirectional = model.causality() == peregrine_core::arch::Causality::Bidirectional;
+    if pooling == Pooling::Cls && !bidirectional {
         return Err("cls pooling is not implemented for causal models".into());
     }
     if let Some(d) = args.dimensions {
@@ -135,12 +136,18 @@ pub fn run(args: &EmbedArgs) -> Result<(), String> {
         .max()
         .unwrap_or(1)
         .clamp(32, max_ctx);
-    let per_slot = model.new_cache(KvPrec::F16, 1).bytes_per_position() as usize * ctx;
-    let slots = tokens
-        .len()
-        .clamp(1, MAX_EMBED_SLOTS)
-        .min(KV_BUDGET_BYTES / per_slot.max(1))
-        .max(1);
+    let slots = if bidirectional {
+        // An encoder's slots hold no cache: one text costs its own rows, not a
+        // `max_ctx`-position cache each.
+        tokens.len().clamp(1, MAX_EMBED_SLOTS)
+    } else {
+        let per_slot = model.new_cache(KvPrec::F16, 1).bytes_per_position() as usize * ctx;
+        tokens
+            .len()
+            .clamp(1, MAX_EMBED_SLOTS)
+            .min(KV_BUDGET_BYTES / per_slot.max(1))
+            .max(1)
+    };
     let mut engine = Engine::new(model.clone(), threads, ctx, slots, KvPrec::F16, 0);
     let mut by_slot: HashMap<u64, usize> = HashMap::new();
     let mut next = 0usize;

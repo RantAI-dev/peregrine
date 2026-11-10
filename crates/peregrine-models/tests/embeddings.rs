@@ -350,6 +350,325 @@ fn a_pooled_slot_that_finishes_in_a_decode_pass_is_reaped() {
     engine.cancel(chat);
 }
 
+// ---------------------------------------------------------------------------
+// S4.4: the bidirectional encoder, `gemma-embedding`
+// ---------------------------------------------------------------------------
+
+fn gemma_embedding(dir: &std::path::Path, fmt: Format, seed: u64) -> Arc<Model> {
+    let path = support::models::write_gemma_embedding(
+        dir,
+        fmt,
+        seed,
+        support::models::GemmaEmbeddingConfig::default(),
+    );
+    load(&path)
+}
+
+/// A text whose length exercises both the sliding window (8 tokens) and the global
+/// layer: the probe is longer than the window so both mask rules run.
+fn encoder_text(seed: u32, n: usize) -> Vec<u32> {
+    (0..n)
+        .map(|i| 7 + (seed.wrapping_mul(53).wrapping_add(i as u32 * 17)) % 280)
+        .collect()
+}
+
+#[test]
+fn a_gemma_embedding_file_reports_itself_as_an_encoder() {
+    let dir = tmpdir("encoder-pooling");
+    let model = gemma_embedding(&dir, Format::F32, 41);
+    assert_eq!(
+        model.causality(),
+        peregrine_core::arch::Causality::Bidirectional
+    );
+    assert_eq!(model.pooling().unwrap(), Some(Pooling::Mean));
+    assert_eq!(model.embedding_width(), model.cfg.d_model);
+}
+
+#[test]
+fn the_pooled_vector_is_the_exact_scalar_reference_forward() {
+    let dir = tmpdir("encoder-reference");
+    let model = gemma_embedding(&dir, Format::F32, 42);
+    for pooling in [Pooling::Mean, Pooling::Cls, Pooling::Last] {
+        for (i, len) in [1usize, 2, 7, 31].into_iter().enumerate() {
+            let text = encoder_text(1 + i as u32, len);
+            let want = support::embed_ref::reference_embedding(&model, &text, pooling);
+            let got = embed_batch(
+                &model,
+                std::slice::from_ref(&text),
+                pooling,
+                1,
+                64,
+                model.cfg.ctx_train,
+                None,
+            )
+            .vectors;
+            assert_eq!(
+                bits(&got[0]),
+                bits(&want),
+                "{pooling:?} len {len}: the engine differs from the reference"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_encoders_vector_is_bit_identical_alone_in_batches_and_in_any_order() {
+    let dir = tmpdir("encoder-invariance");
+    // Both an exact F32 file and the format a real file ships in exercise the same
+    // scheduling: the vector is a function of the text and its own length only.
+    for (fmt, seed) in [(Format::F32, 43u64), (Format::Q8_0, 44)] {
+        let model = gemma_embedding(&dir, fmt, seed);
+        let pooling = Pooling::Mean;
+        let probe = encoder_text(9, 37);
+        let alone = embed_batch(
+            &model,
+            std::slice::from_ref(&probe),
+            pooling,
+            1,
+            64,
+            model.cfg.ctx_train,
+            None,
+        )
+        .vectors[0]
+            .clone();
+        // A Cls-pooled text beside it is a different reduction over the same rows.
+        let _ = embed_batch(
+            &model,
+            std::slice::from_ref(&encoder_text(3, 5)),
+            Pooling::Cls,
+            1,
+            64,
+            model.cfg.ctx_train,
+            None,
+        );
+
+        for (n, threads) in [(2usize, 1usize), (7, 2), (64, 4), (7, 1), (64, 8)] {
+            let mut texts = Vec::with_capacity(n);
+            for i in 0..n {
+                texts.push(if i == n / 2 {
+                    probe.clone()
+                } else {
+                    // Different lengths on both sides of the window, so the ragged
+                    // rows are not a padded rectangle.
+                    encoder_text(100 + i as u32, 1 + (i * 11) % 53)
+                });
+            }
+            // Admit the probe first in one arrangement and last in another: the order
+            // of admission must not matter either.
+            if n % 2 == 0 {
+                texts.swap(0, n / 2);
+            }
+            let run = embed_batch(
+                &model,
+                &texts,
+                pooling,
+                threads,
+                64,
+                model.cfg.ctx_train,
+                None,
+            );
+            let probe_at = texts.iter().position(|t| t == &probe).unwrap();
+            assert_eq!(
+                bits(&run.vectors[probe_at]),
+                bits(&alone),
+                "{}: probe in a batch of {n}, {threads} threads, admitted at {probe_at}",
+                fmt.label()
+            );
+        }
+
+        // A text long enough to run alone in a whole pass, beside shorts that fit one.
+        let long = encoder_text(77, 100);
+        let long_alone = embed_batch(
+            &model,
+            std::slice::from_ref(&long),
+            pooling,
+            2,
+            64,
+            model.cfg.ctx_train,
+            None,
+        )
+        .vectors[0]
+            .clone();
+        let mut mixed = vec![encoder_text(4, 3), encoder_text(5, 5), long.clone()];
+        let run = embed_batch(&model, &mixed, pooling, 4, 64, model.cfg.ctx_train, None);
+        assert_eq!(
+            bits(&run.vectors[2]),
+            bits(&long_alone),
+            "{}: the long text is the same alone and in a mixed pass",
+            fmt.label()
+        );
+        mixed.clear();
+    }
+}
+
+#[test]
+fn a_chat_slot_is_refused_by_an_encoder() {
+    let dir = tmpdir("encoder-chat");
+    let model = gemma_embedding(&dir, Format::F32, 45);
+    let mut engine = Engine::new(model, 1, 64, 1, KvPrec::F16, 0);
+    let err = engine
+        .admit(encoder_text(1, 8), SlotCfg::default())
+        .unwrap_err();
+    assert!(
+        err.1.contains("embedding model") && err.1.contains("cannot generate"),
+        "{err:?}"
+    );
+    // The encoder's slot carries no cache, so an embedding slot is admitted.
+    let id = engine
+        .admit_pooled(encoder_text(2, 8), SlotCfg::default(), Pooling::Mean)
+        .unwrap();
+    engine.cancel(id);
+}
+
+/// The synthetic encoder's golden for the current kernel tier.
+///
+/// The vector is the whole output, so the golden hashes every bit of the two vectors
+/// (mean- and cls-pooled, 384 and 512 dimensions after Matryoshka truncation) instead of
+/// logits. Recorded with `PEREGRINE_GOLDEN=record` on each pinned tier, like the
+/// synthetic goldens.
+#[test]
+fn the_synthetic_encoder_matches_its_golden_for_the_tier() {
+    let dir = tmpdir("encoder-golden");
+    let model = gemma_embedding(&dir, Format::Q8_0, 46);
+    let mut out = String::new();
+    for (pooling, dims) in [(Pooling::Mean, None), (Pooling::Cls, Some(128usize))] {
+        let text = encoder_text(21, 37);
+        let run = embed_batch(
+            &model,
+            std::slice::from_ref(&text),
+            pooling,
+            3,
+            64,
+            model.cfg.ctx_train,
+            None,
+        );
+        let mut v = run.vectors[0].clone();
+        embed::finish(&mut v, dims).unwrap();
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for x in &v {
+            for b in x.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        use std::fmt::Write as _;
+        writeln!(
+            out,
+            "{} {dims:?} len {} fnv {h:016x}",
+            pooling.name(),
+            v.len()
+        )
+        .unwrap();
+    }
+    let tier = peregrine_core::cpu::tier_name();
+    let golden_tier = format!(
+        "{}{}",
+        if tier == "x86_64-avx2-vnni256" {
+            "x86_64-avx2"
+        } else {
+            tier.as_str()
+        },
+        if cfg!(target_os = "macos") {
+            "-macos"
+        } else {
+            ""
+        }
+    );
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/synthetic")
+        .join(golden_tier);
+    let gpath = dir.join("gemma-embedding-Q8_0.golden");
+    let record = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record");
+    let require = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "require");
+    if record && tier != "x86_64-avx2-vnni256" {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&gpath, &out).unwrap();
+        eprintln!("synthetic: recorded gemma-embedding-Q8_0 ({tier})");
+    } else if let Ok(want) = std::fs::read_to_string(&gpath) {
+        assert_eq!(want, out, "{}", gpath.display());
+    } else if require {
+        panic!(
+            "gemma-embedding-Q8_0 has no golden for tier {tier} ({}); record it with PEREGRINE_GOLDEN=record",
+            gpath.display()
+        );
+    }
+}
+
+/// EmbeddingGemma 300M against llama.cpp v0.9.0, when the file is on this machine.
+///
+/// It checks the tokenizer ids, the batch invariance and the two Matryoshka truncations
+/// against the reference forward; the cross-engine cosine table is in the PR body and
+/// `docs/reference/gemma-embedding.md`. `cargo test --release -p peregrine-models
+/// --test embeddings -- --ignored` runs it.
+#[test]
+#[ignore = "needs embeddinggemma-300M-Q8_0.gguf in models/, ~/models/ or the peregrine cache"]
+fn embeddinggemma_real_file_is_batch_invariant() {
+    const FILE: &str = "embeddinggemma-300M-Q8_0.gguf";
+    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../models")
+        .join(FILE)];
+    if let Ok(h) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(&h).join("models").join(FILE));
+        candidates.push(
+            PathBuf::from(&h)
+                .join(".cache/peregrine/models/ggml-org/embeddinggemma-300M-GGUF")
+                .join(FILE),
+        );
+    }
+    let Some(path) = candidates.into_iter().find(|p| p.is_file()) else {
+        eprintln!("{FILE} is not on this machine; skipped");
+        return;
+    };
+    let model = load(&path);
+    assert_eq!(model.pooling().unwrap(), Some(Pooling::Mean));
+    assert!(model.tk.add_bos && model.tk.add_eos);
+    let probe = model
+        .tk
+        .encode_special("task: search result | query: What is the capital of France?");
+    let alone = embed_batch(
+        &model,
+        std::slice::from_ref(&probe),
+        Pooling::Mean,
+        8,
+        512,
+        512,
+        None,
+    );
+    let mut a = alone.vectors[0].clone();
+    embed::finish(&mut a, None).unwrap();
+    assert!((norm(&a) - 1.0).abs() < 1e-5);
+    let texts: Vec<Vec<u32>> = [
+        "Paris.",
+        "The quick brown fox jumps over the lazy dog.",
+        "task: clustering | query: machine learning",
+    ]
+    .iter()
+    .map(|t| model.tk.encode_special(t))
+    .collect();
+    let mut all = vec![probe];
+    all.extend(texts.iter().cloned());
+    let batch = embed_batch(&model, &all, Pooling::Mean, 8, 512, 512, None);
+    let mut b0 = batch.vectors[0].clone();
+    embed::finish(&mut b0, None).unwrap();
+    assert_eq!(bits(&b0), bits(&a), "the probe is batch-invariant");
+    for (i, t) in texts.iter().enumerate() {
+        let one = embed_batch(
+            &model,
+            std::slice::from_ref(t),
+            Pooling::Mean,
+            4,
+            512,
+            512,
+            None,
+        );
+        let mut x = one.vectors[0].clone();
+        let mut y = batch.vectors[i + 1].clone();
+        embed::finish(&mut x, None).unwrap();
+        embed::finish(&mut y, None).unwrap();
+        assert_eq!(bits(&x), bits(&y), "text {i} is batch-invariant");
+    }
+}
+
 /// Qwen3-Embedding 0.6B, the S4.1 real-file check, when the file is on this machine.
 ///
 /// The file is looked up where the real-model goldens look (`models/`, `~/models/`) and in the

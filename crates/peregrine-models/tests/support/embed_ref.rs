@@ -1,0 +1,301 @@
+//! An exact scalar reference forward for `gemma-embedding` (roadmap S4.4).
+//!
+//! Written independently of `peregrine_models::gemma3::Gemma3::forward_texts`: the
+//! transcribed llama.cpp graph is reimplemented here layer by layer, on one text at a
+//! time, with plain loops. It uses the same arithmetic primitives the engine uses —
+//! `dot_f32_ref` for a matrix row, `sumsq_f64` for a norm, `gelu_tanh`, the rotary table
+//! — because the test's claim is that the *forward graph and its order* are right, and
+//! those primitives are what makes an F32 model reproduce bit for bit. The synthetic
+//! reference model is F32; other formats are checked by the invariance and golden tests.
+//!
+//! The mask rule is llama.cpp v0.9.0's symmetric window (`src/llama-hparams.h`,
+//! `is_masked_swa`): `|p1 - p0| > n_swa / 2` is masked. Pooling is `pool_rows`' rule:
+//! f64 over the text's rows in position order, one rounding.
+
+use peregrine_core::embed::Pooling;
+use peregrine_core::gguf::{Format, Gguf};
+use peregrine_core::model::Model;
+use peregrine_kernels::quant::{dequant_row, dot_f32_ref};
+
+struct Mat {
+    bytes: Vec<u8>,
+    d_in: usize,
+    d_out: usize,
+}
+
+impl Mat {
+    fn row(&self, r: usize) -> &[u8] {
+        &self.bytes[r * self.d_in * 4..(r + 1) * self.d_in * 4]
+    }
+    fn apply(&self, x: &[f32], out: &mut [f32]) {
+        for (r, o) in out[..self.d_out].iter_mut().enumerate() {
+            *o = dot_f32_ref(Format::F32, self.row(r), x);
+        }
+    }
+}
+
+fn mat(g: &Gguf, name: &str) -> Mat {
+    let t = g.tensor(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(t.kind, Format::F32, "{name} is not F32");
+    let d_in = t.dims[0] as usize;
+    let d_out = t.dims.get(1).copied().unwrap_or(1) as usize;
+    Mat {
+        bytes: g.bytes(t).to_vec(),
+        d_in,
+        d_out,
+    }
+}
+
+fn vec_f32(g: &Gguf, name: &str) -> Vec<f32> {
+    let t = g.tensor(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let n = t.numel() as usize;
+    let mut v = vec![0.0f32; n];
+    dequant_row(t.kind, g.bytes(t), &mut v);
+    v
+}
+
+fn rmsnorm(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
+    let ss = peregrine_core::vmath::sumsq_f64(x) / x.len() as f64;
+    let inv = (1.0 / (ss + eps as f64).sqrt()) as f32;
+    x.iter().zip(w).map(|(&xi, &wi)| xi * inv * wi).collect()
+}
+
+fn head_rmsnorm(x: &mut [f32], w: &[f32], eps: f32) {
+    let ss = x.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / x.len() as f64;
+    let inv = (1.0 / (ss + eps as f64).sqrt()) as f32;
+    for (v, g) in x.iter_mut().zip(w) {
+        *v = *v * inv * g;
+    }
+}
+
+/// The final normed hidden state of every row (llama.cpp's `result_norm`), in order.
+pub fn hidden_rows(model: &Model, tokens: &[u32]) -> Vec<f32> {
+    let g = model.gguf();
+    let cfg = &model.cfg;
+    let dm = cfg.d_model;
+    let hd = cfg.head_dim;
+    let qd = cfg.q_dim();
+    let kvd = cfg.kv_dim();
+    let n = tokens.len();
+    let arch = "gemma-embedding";
+
+    let tok_embd = mat(g, "token_embd.weight");
+    let out_norm = vec_f32(g, "output_norm.weight");
+    let eps = cfg.eps;
+    let scale = 1.0 / (hd as f32).sqrt();
+    let window = g
+        .u32(&format!("{arch}.attention.sliding_window"))
+        .unwrap_or(0) as usize;
+    let rope_base = g
+        .f32(&format!("{arch}.rope.freq_base"))
+        .unwrap_or(1_000_000.0);
+    let rope_base_swa = g
+        .f32(&format!("{arch}.rope.freq_base_swa"))
+        .unwrap_or(10_000.0);
+    let rope_global =
+        peregrine_core::blocks::rope::build_rope_table(cfg.rope_dim, rope_base, n.max(1), None);
+    let rope_swa =
+        peregrine_core::blocks::rope::build_rope_table(cfg.rope_dim, rope_base_swa, n.max(1), None);
+    let is_swa: Vec<bool> = if window > 0 {
+        match g.u32(&format!("{arch}.attention.sliding_window_pattern")) {
+            Ok(p) if p > 0 => (0..cfg.n_layer)
+                .map(|il| (il % p as usize) < (p as usize - 1))
+                .collect(),
+            _ => (0..cfg.n_layer).map(|il| il % 6 < 5).collect(),
+        }
+    } else {
+        vec![false; cfg.n_layer]
+    };
+
+    let mut x = vec![0.0f32; n * dm];
+    // The embedding lookup scaled by sqrt(d_model).
+    let emb_scale = (dm as f32).sqrt();
+    for (r, &tok) in tokens.iter().enumerate() {
+        let row = tok_embd.row(tok as usize);
+        for d in 0..dm {
+            x[r * dm + d] =
+                f32::from_le_bytes(row[d * 4..d * 4 + 4].try_into().unwrap()) * emb_scale;
+        }
+    }
+
+    for il in 0..cfg.n_layer {
+        let p = |s: &str| format!("blk.{il}.{s}");
+        let attn_norm = vec_f32(g, &p("attn_norm.weight"));
+        let wq = mat(g, &p("attn_q.weight"));
+        let wk = mat(g, &p("attn_k.weight"));
+        let wv = mat(g, &p("attn_v.weight"));
+        let q_norm = vec_f32(g, &p("attn_q_norm.weight"));
+        let k_norm = vec_f32(g, &p("attn_k_norm.weight"));
+        let wo = mat(g, &p("attn_output.weight"));
+        let attn_post_norm = vec_f32(g, &p("post_attention_norm.weight"));
+        let ffn_norm = vec_f32(g, &p("ffn_norm.weight"));
+        let gate = mat(g, &p("ffn_gate.weight"));
+        let up = mat(g, &p("ffn_up.weight"));
+        let down = mat(g, &p("ffn_down.weight"));
+        let ffn_post_norm = vec_f32(g, &p("post_ffw_norm.weight"));
+
+        let table: &[f32] = if is_swa[il] { &rope_swa } else { &rope_global };
+        let half = if is_swa[il] { Some(window / 2) } else { None };
+
+        let mut xnorm = vec![0.0f32; n * dm];
+        for r in 0..n {
+            let row = rmsnorm(&x[r * dm..(r + 1) * dm], &attn_norm, eps);
+            xnorm[r * dm..(r + 1) * dm].copy_from_slice(&row);
+        }
+        let mut q = vec![0.0f32; n * qd];
+        let mut k = vec![0.0f32; n * kvd];
+        let mut v = vec![0.0f32; n * kvd];
+        for r in 0..n {
+            wq.apply(&xnorm[r * dm..(r + 1) * dm], &mut q[r * qd..(r + 1) * qd]);
+            wk.apply(&xnorm[r * dm..(r + 1) * dm], &mut k[r * kvd..(r + 1) * kvd]);
+            wv.apply(&xnorm[r * dm..(r + 1) * dm], &mut v[r * kvd..(r + 1) * kvd]);
+        }
+        for r in 0..n {
+            for h in 0..cfg.n_head {
+                head_rmsnorm(&mut q[r * qd + h * hd..r * qd + (h + 1) * hd], &q_norm, eps);
+            }
+            for h in 0..cfg.n_kv_head {
+                head_rmsnorm(
+                    &mut k[r * kvd + h * hd..r * kvd + (h + 1) * hd],
+                    &k_norm,
+                    eps,
+                );
+            }
+            peregrine_core::blocks::rope::rope(
+                table,
+                &mut q[r * qd..(r + 1) * qd],
+                cfg.n_head,
+                r,
+                hd,
+                cfg.rope_dim,
+                cfg.rope_neox,
+            );
+            peregrine_core::blocks::rope::rope(
+                table,
+                &mut k[r * kvd..(r + 1) * kvd],
+                cfg.n_kv_head,
+                r,
+                hd,
+                cfg.rope_dim,
+                cfg.rope_neox,
+            );
+            for qv in &mut q[r * qd..(r + 1) * qd] {
+                *qv *= scale;
+            }
+        }
+        let gqa = cfg.gqa();
+        let mut attn = vec![0.0f32; n * qd];
+        for r in 0..n {
+            for h in 0..cfg.n_head {
+                let kh = h / gqa;
+                // The reference's score and value loops are the engine's: f32 in key
+                // order, f64 softmax denominator.
+                let mut max = f32::NEG_INFINITY;
+                for j in 0..n {
+                    if half.is_some_and(|w| r.abs_diff(j) > w) {
+                        continue;
+                    }
+                    let mut dot = 0.0f32;
+                    for d in 0..hd {
+                        dot += q[r * qd + h * hd + d] * k[j * kvd + kh * hd + d];
+                    }
+                    max = max.max(dot);
+                }
+                let mut l = 0.0f64;
+                let mut acc = vec![0.0f32; hd];
+                for j in 0..n {
+                    if half.is_some_and(|w| r.abs_diff(j) > w) {
+                        continue;
+                    }
+                    let mut dot = 0.0f32;
+                    for d in 0..hd {
+                        dot += q[r * qd + h * hd + d] * k[j * kvd + kh * hd + d];
+                    }
+                    let e = (dot - max).exp() as f64;
+                    l += e;
+                    let e = e as f32;
+                    for d in 0..hd {
+                        acc[d] += e * v[j * kvd + kh * hd + d];
+                    }
+                }
+                let inv = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
+                for d in 0..hd {
+                    attn[r * qd + h * hd + d] = acc[d] * inv;
+                }
+            }
+        }
+        let mut o = vec![0.0f32; n * dm];
+        for r in 0..n {
+            wo.apply(&attn[r * qd..(r + 1) * qd], &mut o[r * dm..(r + 1) * dm]);
+        }
+        for r in 0..n {
+            let normed = rmsnorm(&o[r * dm..(r + 1) * dm], &attn_post_norm, eps);
+            for d in 0..dm {
+                x[r * dm + d] += normed[d];
+            }
+        }
+
+        let mut xnorm = vec![0.0f32; n * dm];
+        for r in 0..n {
+            let row = rmsnorm(&x[r * dm..(r + 1) * dm], &ffn_norm, eps);
+            xnorm[r * dm..(r + 1) * dm].copy_from_slice(&row);
+        }
+        let mut hb = vec![0.0f32; n * cfg.n_ff];
+        let mut hb2 = vec![0.0f32; n * cfg.n_ff];
+        for r in 0..n {
+            gate.apply(
+                &xnorm[r * dm..(r + 1) * dm],
+                &mut hb[r * cfg.n_ff..(r + 1) * cfg.n_ff],
+            );
+            up.apply(
+                &xnorm[r * dm..(r + 1) * dm],
+                &mut hb2[r * cfg.n_ff..(r + 1) * cfg.n_ff],
+            );
+        }
+        for i in 0..n * cfg.n_ff {
+            hb[i] = peregrine_kernels::vmath::gelu_tanh(hb[i]) * hb2[i];
+        }
+        let mut o = vec![0.0f32; n * dm];
+        for r in 0..n {
+            down.apply(
+                &hb[r * cfg.n_ff..(r + 1) * cfg.n_ff],
+                &mut o[r * dm..(r + 1) * dm],
+            );
+        }
+        for r in 0..n {
+            let normed = rmsnorm(&o[r * dm..(r + 1) * dm], &ffn_post_norm, eps);
+            for d in 0..dm {
+                x[r * dm + d] += normed[d];
+            }
+        }
+    }
+
+    let mut hidden = vec![0.0f32; n * dm];
+    for r in 0..n {
+        let row = rmsnorm(&x[r * dm..(r + 1) * dm], &out_norm, eps);
+        hidden[r * dm..(r + 1) * dm].copy_from_slice(&row);
+    }
+    hidden
+}
+
+/// The pooled vector, then EmbeddingGemma's `dense_2` and `dense_3` — the whole answer
+/// before truncation and normalisation.
+pub fn reference_embedding(model: &Model, tokens: &[u32], pooling: Pooling) -> Vec<f32> {
+    let g = model.gguf();
+    let dm = model.cfg.d_model;
+    let hidden = hidden_rows(model, tokens);
+    let mut sum = vec![0.0f64; dm];
+    let mut v = vec![0.0f32; dm];
+    peregrine_core::embed::pool_rows_into(&hidden, dm, pooling, &mut sum, &mut v);
+
+    if g.tensor("dense_2.weight").is_ok() {
+        let d2 = mat(g, "dense_2.weight");
+        let d3 = mat(g, "dense_3.weight");
+        let mut mid = vec![0.0f32; d2.d_out];
+        d2.apply(&v, &mut mid);
+        let mut out = vec![0.0f32; d3.d_out];
+        d3.apply(&mid, &mut out);
+        return out;
+    }
+    v
+}

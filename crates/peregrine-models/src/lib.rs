@@ -20,7 +20,7 @@
     feature = "arch-phi3"
 ))]
 pub mod dense;
-#[cfg(feature = "arch-gemma3")]
+#[cfg(any(feature = "arch-gemma3", feature = "arch-gemma-embedding"))]
 pub mod gemma3;
 #[cfg(feature = "arch-gpt-oss")]
 pub mod gptoss;
@@ -31,7 +31,8 @@ pub mod gptoss;
     feature = "arch-phi3",
     feature = "arch-gpt-oss",
     // Gemma 3's forward uses `layer::write_hidden` (the embedding path) but nothing else here.
-    feature = "arch-gemma3"
+    feature = "arch-gemma3",
+    feature = "arch-gemma-embedding"
 ))]
 pub(crate) mod layer;
 #[cfg(feature = "arch-qwen35")]
@@ -49,6 +50,8 @@ pub use dense::Phi3Family;
 pub use dense::QwenFamily;
 #[cfg(feature = "arch-gemma3")]
 pub use gemma3::Gemma3Family;
+#[cfg(feature = "arch-gemma-embedding")]
+pub use gemma3::GemmaEmbeddingFamily;
 #[cfg(feature = "arch-gpt-oss")]
 pub use gptoss::GptOssFamily;
 #[cfg(feature = "arch-qwen35")]
@@ -86,6 +89,8 @@ pub const ARCHS: &[&str] = &[
     "qwen35",
     #[cfg(feature = "arch-gemma3")]
     "gemma3",
+    #[cfg(feature = "arch-gemma-embedding")]
+    "gemma-embedding",
     #[cfg(feature = "arch-qwen3moe")]
     "qwen3moe",
     #[cfg(feature = "arch-gpt-oss")]
@@ -104,6 +109,8 @@ pub static FAMILIES: &[&dyn Family] = &[
     &Qwen35Family,
     #[cfg(feature = "arch-gemma3")]
     &Gemma3Family,
+    #[cfg(feature = "arch-gemma-embedding")]
+    &GemmaEmbeddingFamily,
     #[cfg(feature = "arch-qwen3moe")]
     &Qwen3MoeFamily,
     #[cfg(feature = "arch-gpt-oss")]

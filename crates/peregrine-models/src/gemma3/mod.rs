@@ -39,6 +39,61 @@ pub fn attention_scale(n_layer: usize, d_model: usize, n_head: usize, head_dim: 
     }
 }
 
+/// One projection over many rows, split into matmul-sized chunks.
+///
+/// The shared GEMM accepts at most `MAX_BATCH` rows per call (`blocks::linear::MAX_BATCH`);
+/// an encoder forwards a whole text (up to the model's context) at once, so a layer's
+/// projection runs in as many calls as it takes, one weight pass each. Rows of the batch
+/// are contiguous, so the chunk is a plain row range and a row's bits do not depend on
+/// where a chunk boundary fell.
+#[allow(clippy::too_many_arguments)]
+fn linear_rows(
+    w: &Weights,
+    pool: &Pool,
+    stats: &mut StepStats,
+    lin: &Linear,
+    acts: &mut [peregrine_core::quant::QuantAct],
+    lb_x: &mut [f32],
+    lb_t: &mut [f32],
+    input: &[f32],
+    d_in: usize,
+    nb: usize,
+    out: &mut [f32],
+    out_dim: usize,
+    kq: &mut peregrine_kernels::kq::KqActs,
+) {
+    let step = peregrine_core::blocks::linear::MAX_BATCH;
+    let mut r0 = 0;
+    while r0 < nb {
+        let r1 = (r0 + step).min(nb);
+        let take = r1 - r0;
+        for (i, a) in acts[r0..r1].iter_mut().enumerate() {
+            a.fill(&input[(r0 + i) * d_in..(r0 + i + 1) * d_in]);
+        }
+        let lbx = Disjoint::new(lb_x);
+        let lbt = Disjoint::new(lb_t);
+        let jobs = [LinJob {
+            lin,
+            out: Disjoint::new(&mut out[r0 * out_dim..r1 * out_dim]),
+        }];
+        peregrine_core::blocks::linear::linear_group(
+            w,
+            w.lb(),
+            &jobs,
+            &acts[r0..r1],
+            &input[r0 * d_in..r1 * d_in],
+            d_in,
+            take,
+            lbx,
+            lbt,
+            pool,
+            stats,
+            kq,
+        );
+        r0 = r1;
+    }
+}
+
 pub struct Gemma3 {
     pub(crate) tok_embd: TensorInfo,
     pub(crate) out_norm: TensorInfo,
@@ -50,7 +105,18 @@ pub struct Gemma3 {
     pub(crate) rope_base_swa: f32,
     pub(crate) final_logit_softcapping: Option<f32>,
     pub(crate) attn_scale: f32,
+    /// EmbeddingGemma's sentence-transformers dense modules (`dense_2`, `dense_3`), applied
+    /// after pooling and before normalisation. `None` for a `gemma3` generation model.
+    pub(crate) dense_2: Option<Linear>,
+    pub(crate) dense_3: Option<Linear>,
+    /// The width of `dense_2`'s output and `dense_3`'s input (3072 on EmbeddingGemma).
+    pub(crate) dense_width: usize,
+    /// A bidirectional encoder (`gemma-embedding`): no KV cache and no causal mask.
+    pub(crate) embedding: bool,
 }
+
+#[cfg(feature = "arch-gemma-embedding")]
+pub struct GemmaEmbeddingFamily;
 
 #[cfg(feature = "arch-gemma3")]
 pub struct Gemma3Family;
@@ -62,7 +128,27 @@ impl Family for Gemma3Family {
     }
 
     fn load(&self, g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
-        Gemma3::load(g, tk)
+        Gemma3::load_impl(g, tk, false)
+    }
+}
+
+/// EmbeddingGemma 300M: the `gemma-embedding` architecture (roadmap S4.4).
+///
+/// The same Gemma 3 blocks, read through the same loader, plus llama.cpp's
+/// `--sentence-transformers-dense-modules` pair (`dense_2`, `dense_3`) and the
+/// bidirectional forward (design §2.2). The file declares `pooling_type = 1` (mean).
+#[cfg(feature = "arch-gemma-embedding")]
+impl Family for GemmaEmbeddingFamily {
+    fn names(&self) -> &'static [&'static str] {
+        &["gemma-embedding"]
+    }
+
+    fn load(&self, g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
+        Gemma3::load_impl(g, tk, true)
+    }
+
+    fn embedding_only(&self) -> bool {
+        true
     }
 }
 
@@ -88,14 +174,19 @@ impl Gemma3 {
         }
     }
 
-    pub fn load(g: &Gguf, tk: &Tokenizer) -> Result<Loaded, String> {
+    pub(crate) fn load_impl(g: &Gguf, tk: &Tokenizer, embedding: bool) -> Result<Loaded, String> {
+        let want_arch = if embedding {
+            "gemma-embedding"
+        } else {
+            "gemma3"
+        };
         let arch_name = g.str("general.architecture")?;
-        if arch_name != "gemma3" {
+        if arch_name != want_arch {
             return Err(format!(
-                "expected architecture \"gemma3\", found {arch_name:?}"
+                "expected architecture {want_arch:?}, found {arch_name:?}"
             ));
         }
-        let k = |suffix: &str| format!("gemma3.{suffix}");
+        let k = |suffix: &str| format!("{want_arch}.{suffix}");
         let n_layer = g.u32(&k("block_count"))? as usize;
         let d_model = g.u32(&k("embedding_length"))? as usize;
         let n_head = g.u32(&k("attention.head_count"))? as usize;
@@ -195,7 +286,11 @@ impl Gemma3 {
             .filter(|&c| c > 0.0);
 
         let cfg = Config {
-            arch_name: "gemma3",
+            arch_name: if embedding {
+                "gemma-embedding"
+            } else {
+                "gemma3"
+            },
             rope_neox: true,
             n_layer,
             n_kv_layer: n_layer,
@@ -266,6 +361,90 @@ impl Gemma3 {
                 .cloned()
                 .unwrap_or_else(|| tok_embd.clone()),
         );
+
+        // EmbeddingGemma's sentence-transformers dense modules, read exactly as llama.cpp
+        // creates them (`src/models/gemma-embedding.cpp`): `dense_2 {n_embd, feat_out}` and
+        // `dense_3 {feat_in, n_embd}`, both optional and both without a bias tensor. The
+        // metadata keys are `%s.dense_2_feat_in/out` and `%s.dense_3_feat_in/out`; llama.cpp
+        // asserts the two fixed ends (`feat_in` of dense_2 and `feat_out` of dense_3) are
+        // `n_embd`, and this loader refuses anything else by name.
+        let mut dense_2 = None;
+        let mut dense_3 = None;
+        let mut dense_width = 0usize;
+        if embedding {
+            let key =
+                |suffix: &str| -> Option<usize> { g.u32(&k(suffix)).ok().map(|v| v as usize) };
+            let d2_in = key("dense_2_feat_in");
+            let d2_out = key("dense_2_feat_out");
+            match g.tensor("dense_2.weight") {
+                Ok(t) => {
+                    let (d_in, d_out) = (
+                        d2_in.ok_or("dense_2.weight is present but dense_2_feat_in is not")?,
+                        d2_out.ok_or("dense_2.weight is present but dense_2_feat_out is not")?,
+                    );
+                    if d_in != d_model {
+                        return Err(format!(
+                            "dense_2_feat_in is {d_in}, but llama.cpp requires the embedding length {d_model}"
+                        ));
+                    }
+                    let (a, b) = (
+                        t.dims.first().copied().unwrap_or(0) as usize,
+                        t.dims.get(1).copied().unwrap_or(1) as usize,
+                    );
+                    if t.dims.len() > 2 || a != d_in || b != d_out {
+                        return Err(format!(
+                            "dense_2.weight is {:?}, the metadata implies [{d_in}, {d_out}]",
+                            t.dims
+                        ));
+                    }
+                    dense_2 = Some(Linear::Dense(t.clone()));
+                    dense_width = dense_width.max(d_out);
+                }
+                Err(_) if d2_in.is_some() || d2_out.is_some() => {
+                    return Err("dense_2_feat_in/out are set but dense_2.weight is missing".into())
+                }
+                Err(_) => {}
+            }
+            let d3_in = key("dense_3_feat_in");
+            let d3_out = key("dense_3_feat_out");
+            match g.tensor("dense_3.weight") {
+                Ok(t) => {
+                    let (d_in, d_out) = (
+                        d3_in.ok_or("dense_3.weight is present but dense_3_feat_in is not")?,
+                        d3_out.ok_or("dense_3.weight is present but dense_3_feat_out is not")?,
+                    );
+                    if d_out != d_model {
+                        return Err(format!(
+                            "dense_3_feat_out is {d_out}, but llama.cpp requires the embedding length {d_model}"
+                        ));
+                    }
+                    let (a, b) = (
+                        t.dims.first().copied().unwrap_or(0) as usize,
+                        t.dims.get(1).copied().unwrap_or(1) as usize,
+                    );
+                    if t.dims.len() > 2 || a != d_in || b != d_out {
+                        return Err(format!(
+                            "dense_3.weight is {:?}, the metadata implies [{d_in}, {d_out}]",
+                            t.dims
+                        ));
+                    }
+                    dense_3 = Some(Linear::Dense(t.clone()));
+                    dense_width = dense_width.max(d_in);
+                }
+                Err(_) if d3_in.is_some() || d3_out.is_some() => {
+                    return Err("dense_3_feat_in/out are set but dense_3.weight is missing".into())
+                }
+                Err(_) => {}
+            }
+        }
+
+        if dense_2.is_some() != dense_3.is_some() {
+            return Err(
+                "gemma-embedding has only one of dense_2/dense_3; both are applied together \
+                 (llama.cpp's --sentence-transformers-dense-modules writes both)"
+                    .into(),
+            );
+        }
 
         let mut cfg = cfg;
         if cfg.n_vocab == 0 {
@@ -338,6 +517,10 @@ impl Gemma3 {
                 rope_base_swa,
                 final_logit_softcapping,
                 attn_scale,
+                dense_2,
+                dense_3,
+                dense_width,
+                embedding,
             }),
             rope_factors,
             tiles: TileStore::default(),
@@ -372,6 +555,12 @@ impl Architecture for Gemma3 {
                 f(&mut self.head)?;
             }
         }
+        if let Some(d) = &mut self.dense_2 {
+            f(d)?;
+        }
+        if let Some(d) = &mut self.dense_3 {
+            f(d)?;
+        }
         Ok(())
     }
 
@@ -383,6 +572,12 @@ impl Architecture for Gemma3 {
             f(&[&l.down]);
         }
         f(&[&self.head]);
+        if let Some(d) = &self.dense_2 {
+            f(&[d]);
+        }
+        if let Some(d) = &self.dense_3 {
+            f(&[d]);
+        }
     }
 
     fn act_layout(&self) -> ActLayout {
@@ -398,7 +593,16 @@ impl Architecture for Gemma3 {
         });
         ActLayout {
             keep_f32,
+            act_width: self.dense_width,
             ..ActLayout::default()
+        }
+    }
+
+    fn causality(&self) -> peregrine_core::arch::Causality {
+        if self.embedding {
+            peregrine_core::arch::Causality::Bidirectional
+        } else {
+            peregrine_core::arch::Causality::Causal
         }
     }
 
@@ -414,6 +618,12 @@ impl Architecture for Gemma3 {
         want_logits: &[usize],
         stats: &mut StepStats,
     ) -> Result<(), String> {
+        if self.embedding {
+            return Err(
+                "a gemma-embedding model has no causal forward; the engine must use forward_texts"
+                    .into(),
+            );
+        }
         let nb = tokens.len();
         let t_fwd = Instant::now();
 
@@ -771,6 +981,388 @@ impl Architecture for Gemma3 {
             }
         }
 
+        stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
+        Ok(())
+    }
+
+    /// One bidirectional pass over whole texts (design §2.2, roadmap S4.4).
+    ///
+    /// The transcription of llama.cpp v0.9.0's `gemma-embedding` graph
+    /// (`src/models/gemma-embedding.cpp`) with its no-cache attention
+    /// (`llm_graph_input_attn_no_cache::set_input`, `src/llama-graph.cpp`):
+    ///
+    /// - the token embedding is scaled by `sqrt(n_embd)`;
+    /// - every layer is `attn_norm` → q/k/v → per-head q/k RMSNorm → RoPE (the sliding
+    ///   layers use `rope.freq_base_swa`) → `Q · 1/sqrt(head_dim)` → attention →
+    ///   `wo` → `attn_post_norm` → residual → `ffn_norm` → gate/up → GeGLU → down →
+    ///   `ffn_post_norm` → residual;
+    /// - causal attention is off (`hparams.causal_attn = false`), so every row sees the
+    ///   whole text; a sliding-window layer masks `|p1 - p0| > n_swa / 2`
+    ///   (`LLAMA_SWA_TYPE_SYMMETRIC`), a global layer masks nothing;
+    /// - `output_norm` is `result_norm`, which is pooled per text;
+    /// - `dense_2` then `dense_3` are applied after pooling, pure matmuls with no bias
+    ///   and no activation (`llm_graph_context::build_dense_out`).
+    ///
+    /// Pooling and the two dense layers happen here, text by text, before the engine's
+    /// `embed::finish` truncates and normalises.
+    fn forward_texts(
+        &self,
+        w: &Weights,
+        cfg: &Config,
+        st: &mut State,
+        pool: &Pool,
+        texts: &[&[u32]],
+        poolings: &[peregrine_core::embed::Pooling],
+        stats: &mut StepStats,
+    ) -> Result<(), String> {
+        let t_fwd = Instant::now();
+        let dm = cfg.d_model;
+        let qd = cfg.q_dim();
+        let kvd = cfg.kv_dim();
+        let ff = cfg.n_ff;
+        let nb: usize = texts.iter().map(|t| t.len()).sum();
+
+        // The batch's positions: every text starts at 0. Both buffers are taken out of
+        // the state (and put back at the end) so the loop can borrow the rest of `st`
+        // mutably: a bidirectional pass must not allocate.
+        let mut pos_buf = std::mem::take(&mut st.positions);
+        let mut spans = std::mem::take(&mut st.spans);
+        if pos_buf.len() < nb {
+            pos_buf.resize(nb, 0);
+        }
+        spans.clear();
+        let mut row = 0usize;
+        for t in texts {
+            spans.push(peregrine_core::blocks::bidir::TextSpan {
+                row0: row,
+                len: t.len(),
+            });
+            for i in 0..t.len() {
+                pos_buf[row] = i;
+                row += 1;
+            }
+        }
+        let positions = &pos_buf[..nb];
+
+        // The embedding lookup, scaled by sqrt(d_model) like llama.cpp's `build_inp_embd`.
+        let mut row = 0usize;
+        for t in texts {
+            for &tok in t.iter() {
+                peregrine_core::blocks::embed::embed(
+                    &self.tok_embd,
+                    w,
+                    tok,
+                    &mut st.x[row * dm..(row + 1) * dm],
+                    stats,
+                );
+                row += 1;
+            }
+        }
+        let embed_scale = (dm as f32).sqrt();
+        for x in &mut st.x[..nb * dm] {
+            *x *= embed_scale;
+        }
+
+        let max_pos = positions.iter().copied().max().unwrap_or(0);
+        self.ensure_rope_swa_len(cfg, max_pos + 1);
+        let rope_swa_guard = self.rope_swa.read().unwrap();
+        let rope_swa: &[f32] = &rope_swa_guard;
+
+        for (li, l) in self.layers.iter().enumerate() {
+            let is_swa = self.is_swa[li];
+            let rope_table = if is_swa { rope_swa } else { &st.rope };
+            let half_window = if is_swa {
+                Some(self.sliding_window / 2)
+            } else {
+                None
+            };
+
+            // ---- attention pre-norm ----
+            peregrine_core::blocks::norm::norm_rows(
+                w,
+                &l.attn_norm,
+                dm,
+                cfg.eps,
+                &st.x,
+                &mut st.xb,
+                &mut st.acts,
+                nb,
+                pool,
+                stats,
+            );
+
+            // ---- QKV projections, one weight pass per matmul-sized chunk ----
+            linear_rows(
+                w,
+                pool,
+                stats,
+                &l.wq,
+                &mut st.acts,
+                &mut st.lb_x,
+                &mut st.lb_t,
+                &st.xb,
+                dm,
+                nb,
+                &mut st.q,
+                qd,
+                &mut st.kq,
+            );
+            linear_rows(
+                w,
+                pool,
+                stats,
+                &l.wk,
+                &mut st.acts,
+                &mut st.lb_x,
+                &mut st.lb_t,
+                &st.xb,
+                dm,
+                nb,
+                &mut st.k,
+                kvd,
+                &mut st.kq,
+            );
+            linear_rows(
+                w,
+                pool,
+                stats,
+                &l.wv,
+                &mut st.acts,
+                &mut st.lb_x,
+                &mut st.lb_t,
+                &st.xb,
+                dm,
+                nb,
+                &mut st.v,
+                kvd,
+                &mut st.kq,
+            );
+
+            // ---- per-head q/k RMSNorm and RoPE ----
+            peregrine_core::blocks::attn::prepare_rows(
+                cfg,
+                None,
+                None,
+                None,
+                Some(&l.q_norm),
+                Some(&l.k_norm),
+                rope_table,
+                &mut st.q,
+                &mut st.k,
+                &mut st.v,
+                nb,
+                positions,
+                pool,
+                stats,
+            );
+
+            // llama.cpp scales Q by `f_attention_scale` after RoPE and passes kq_scale 1.
+            for q in &mut st.q[..nb * qd] {
+                *q *= self.attn_scale;
+            }
+
+            // ---- attention: one n × n block per text, no cache ----
+            peregrine_core::blocks::bidir::attend_texts(
+                cfg,
+                &st.q,
+                &st.k,
+                &st.v,
+                &mut st.xb,
+                &spans,
+                half_window,
+                1.0,
+                pool,
+                stats,
+            );
+
+            // ---- output projection ----
+            linear_rows(
+                w,
+                pool,
+                stats,
+                &l.wo,
+                &mut st.acts,
+                &mut st.lb_x,
+                &mut st.lb_t,
+                &st.xb,
+                qd,
+                nb,
+                &mut st.xb2,
+                dm,
+                &mut st.kq,
+            );
+            peregrine_core::blocks::norm::norm_rows(
+                w,
+                &l.attn_post_norm,
+                dm,
+                cfg.eps,
+                &st.xb2,
+                &mut st.xb,
+                &mut st.acts,
+                nb,
+                pool,
+                stats,
+            );
+            for i in 0..nb * dm {
+                st.x[i] += st.xb[i];
+            }
+
+            // ---- feed-forward ----
+            peregrine_core::blocks::norm::norm_rows(
+                w,
+                &l.ffn_norm,
+                dm,
+                cfg.eps,
+                &st.x,
+                &mut st.xb,
+                &mut st.acts,
+                nb,
+                pool,
+                stats,
+            );
+            linear_rows(
+                w,
+                pool,
+                stats,
+                &l.gate,
+                &mut st.acts,
+                &mut st.lb_x,
+                &mut st.lb_t,
+                &st.xb,
+                dm,
+                nb,
+                &mut st.hb,
+                ff,
+                &mut st.kq,
+            );
+            linear_rows(
+                w,
+                pool,
+                stats,
+                &l.up,
+                &mut st.acts,
+                &mut st.lb_x,
+                &mut st.lb_t,
+                &st.xb,
+                dm,
+                nb,
+                &mut st.hb2,
+                ff,
+                &mut st.kq,
+            );
+            peregrine_core::blocks::ffn::geglu_rows(
+                ff,
+                &mut st.hb,
+                &st.hb2,
+                &mut st.acts,
+                nb,
+                pool,
+                stats,
+            );
+            linear_rows(
+                w,
+                pool,
+                stats,
+                &l.down,
+                &mut st.acts,
+                &mut st.lb_x,
+                &mut st.lb_t,
+                &st.hb,
+                ff,
+                nb,
+                &mut st.xb2,
+                dm,
+                &mut st.kq,
+            );
+            peregrine_core::blocks::norm::norm_rows(
+                w,
+                &l.ffn_post_norm,
+                dm,
+                cfg.eps,
+                &st.xb2,
+                &mut st.xb,
+                &mut st.acts,
+                nb,
+                pool,
+                stats,
+            );
+            for i in 0..nb * dm {
+                st.x[i] += st.xb[i];
+            }
+        }
+
+        // ---- output_norm: llama.cpp's `result_norm`, the rows pooling reads ----
+        let saved_hidden = st.want_hidden;
+        st.want_hidden = true;
+        crate::layer::write_hidden(w, cfg, st, &self.out_norm, nb);
+        st.want_hidden = saved_hidden;
+
+        // ---- pooling, then dense_2 / dense_3, text by text ----
+        if st.pool_sum.len() < dm {
+            st.pool_sum.resize(dm, 0.0);
+        }
+        for (t, text) in texts.iter().enumerate() {
+            let row0 = spans[t].row0;
+            let n = text.len();
+            peregrine_core::embed::pool_rows_into(
+                &st.hidden[row0 * dm..(row0 + n) * dm],
+                dm,
+                poolings[t],
+                &mut st.pool_sum,
+                &mut st.xb2[..dm],
+            );
+            // The loader requires both dense modules or neither, so the vector is back at
+            // `d_model` width after the second one.
+            if let (Some(d2), Some(d3)) = (&self.dense_2, &self.dense_3) {
+                let d_out = d2
+                    .dense()
+                    .expect("dense_2 is a dense tensor")
+                    .dims
+                    .get(1)
+                    .copied()
+                    .unwrap_or(0) as usize;
+                if st.emb.len() < d_out {
+                    st.emb.resize(d_out, 0.0);
+                }
+                linear_rows(
+                    w,
+                    pool,
+                    stats,
+                    d2,
+                    &mut st.acts,
+                    &mut st.lb_x,
+                    &mut st.lb_t,
+                    &st.xb2[..dm],
+                    dm,
+                    1,
+                    &mut st.emb,
+                    d_out,
+                    &mut st.kq,
+                );
+                linear_rows(
+                    w,
+                    pool,
+                    stats,
+                    d3,
+                    &mut st.acts,
+                    &mut st.lb_x,
+                    &mut st.lb_t,
+                    &st.emb[..d_out],
+                    d_out,
+                    1,
+                    &mut st.xb2,
+                    dm,
+                    &mut st.kq,
+                );
+            }
+            // The vector this text's slot reads: the first row of the text, so the
+            // engine needs no buffer of its own.
+            st.hidden[row0 * dm..row0 * dm + dm].copy_from_slice(&st.xb2[..dm]);
+        }
+
+        // Put the caller's buffers back with the capacity they had.
+        st.positions = pos_buf;
+        st.spans = spans;
         stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
         Ok(())
     }
