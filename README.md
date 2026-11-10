@@ -36,11 +36,13 @@ load, PrismML's llama.cpp fork.
   the 4-user rows to 1.13-1.38×.
 - **Prompt processing ahead on both hosts**: the desktop is 1.03-1.30× after the repacked
   Q4_K/Q5_0 work (#108, #111, #118, #120), up from 0.69-0.74×; on bluefin it is 1.43× and 1.17× on
-  Qwen 2.5 0.5B, 1.39× and 1.05× on SmolLM2 360M, and 1.03-1.04× on Llama 3.2 1B.
-- **Bonsai 2 (ternary): 2.0-2.3× the decode and 2.1-2.5× the prompt speed of PrismML's own
-  llama.cpp fork, 2.6-2.8× with 10 users** (12-core desktop), against the fork's faster
-  flash-attention setting for each row. Upstream llama.cpp cannot load these PQ2_0 files, so the
-  fork is the only comparison that exists for them.
+  Qwen 2.5 0.5B, 1.39× and 1.05× on SmolLM2 360M, and 1.03-1.04× on Llama 3.2 1B, and on ARM
+  Cortex-X925 (NEON i8mm) Llama 3.2 1B is 2.45× prompt and 1.14× decode vs llama.cpp CPU (#129).
+- **Bonsai 2 (ternary): 1.4-2.3× the decode and 1.9-2.6× the prompt speed of PrismML's own
+  llama.cpp fork, 1.8-2.8× with 10 users** (12-core desktop and 4-core bluefin; the AVX2
+  bluefin sits at the bottom of the decode range, and on ARM NEON the 2B/4B reach 2.2-2.5× prompt
+  and 1.6-2.3× decode), against the fork's faster flash-attention setting for each row. Upstream
+  llama.cpp cannot load these PQ2_0 files, so the fork is the only comparison that exists for them.
 
 Losses are in the same report, and there are now very few. **No completed throughput row is below
 1.0×**, on either host. The one remaining loss is time to first token with 10 users on bluefin for
@@ -55,10 +57,10 @@ As of November 2026; the plan with every item is in the [roadmap](docs/roadmap.m
 
 | Stage | Where it stands |
 |---|---|
-| 0. Groundwork | done: the release step and the AVX2-host release gate are written down (`docs/dev/releasing.md`) |
+| 0. Groundwork | done: `EngineOptions`, synthetic test models, forced kernel tiers and Intel SDE CI, `quick` profile, release workflow and AVX2-host release gate (`docs/dev/releasing.md`), sampling penalties |
 | 1. Structure | done: the kernel table, shared layer blocks, one runtime, feature flags, `peregrine tune` |
-| 2. Breadth | done for the architectures, formats and templates in the table below; open: a real gpt-oss file, startup calibration, ARM (not yet decided) |
-| 3. Speed and proof | under way: the benchmark harness, a first desktop baseline against llama.cpp and the KL check per model are in; the first kernel and scheduling speed-ups have landed |
+| 2. Breadth | done for the architectures, formats and templates in the table below, plus the ARM NEON / SDOT / i8mm tier (`aarch64-neon`, `aarch64-neon-dotprod`, `aarch64-neon-i8mm`, and Bonsai 2 on NEON); open: a real gpt-oss file, startup calibration |
+| 3. Speed and proof | done for S3.1–S3.5 and S3.8–S3.10: baselines on desktop (H1), bluefin (H2) and Spark ARM (H3); task-accuracy gate (GSM8K, MMLU, HumanEval+) and 520/520 batch/speculation invariance passed on all three hosts (#142, #144, #145); repacked k-quant/Q5_0/Q8_0 tiles and wide Q5_K/Q6_K kernels (#86, #88, #103–#105, #108, #111, #118, #122, #133); prefill chunk tuning (#87, #92) and batched ternary GEMM (#138); multi-user attention region (#114) and adaptive spin-wait (#125); `dist` build profile and `PEREGRINE_AFFINITY` thread pinning (#139); published benchmark and accuracy report (`docs/benchmark.md`, `docs/dev/accuracy.md`, `benchmarks/results/`) |
 
 Speed-ups that landed in November 2026:
 
@@ -77,8 +79,7 @@ Speed-ups that landed in November 2026:
 - **More attention tasks at short context**: decode is 0.6-2.9% faster, and a row's attention no longer
   depends on the other rows in the batch.
 
-Next: the AVX-512 repacked Q4_K kernel, repacked Q6_K, a real gpt-oss file, a baseline on the third
-host, and the task-accuracy gate.
+Next: a real gpt-oss file, startup calibration (#80), q8 KV cache opt-in (S3.7), and PTQ1_0 for the 27B (S3.6).
 
 ## Why
 

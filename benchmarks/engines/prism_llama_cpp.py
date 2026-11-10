@@ -52,7 +52,7 @@ class PrismLlamaCppAdapter(LlamaCppAdapter):
         self.resolved_commit: Optional[str] = None
         self.commit_fallback = False
         self.repo_dir: Optional[Path] = None
-        self.build_flags = "CMake Release, native CPU (AVX-512 on this host)"
+        self.build_flags = "CMake Release, GGML_NATIVE=ON, explicit AVX2/FMA (host has no AVX-512)"
 
     def _git(self, args: List[str], cwd: Path) -> Optional[str]:
         try:

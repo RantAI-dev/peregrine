@@ -20,7 +20,8 @@ OUT = Path(__file__).resolve().parent.parent / "docs" / "img"
 # benchmarks/results/desktop-zen5-2026-11-09; llama.cpp at its faster flash-attention setting per
 # row, which is the default for most rows and -fa off for SmolLM2 and gemma-3-1b-it at 512 and
 # gemma at 4096).
-# Bonsai 2: the same desktop, against PrismML's fork (benchmarks/results/2026-11-09-bonsai2-prism);
+# Bonsai 2: the same desktop, against PrismML's fork (benchmarks/results/2026-11-09-bonsai2-prism),
+# and the 4-core AVX2 bluefin (benchmarks/results/bluefin-zen2-2026-11-08-bonsai2-prism);
 # upstream llama.cpp cannot load PQ2_0. The fork bar is its faster flash-attention setting per row.
 # Bluefin: Ryzen 3 PRO 4350G, 4 threads (benchmarks/results/bluefin-zen2-2026-11-08-q5).
 # The bluefin llama.cpp bar is the faster flash-attention setting for that row (-fa off for
@@ -76,6 +77,13 @@ BONSAI = [
     ("Bonsai 2 9B · 4096 · decode", 22.69, 10.12),
     ("Bonsai 2 9B · 512 · prompt", 71.65, 28.45),
     ("Bonsai 2 9B · 4096 · prompt", 63.04, 27.85),
+    ("Bluefin · Bonsai 2B · 512 · decode", 46.40, 33.63),
+    ("Bluefin · Bonsai 2B · 4096 · decode", 42.28, 30.79),
+    ("Bluefin · Bonsai 2B · 512 · prompt", 118.67, 56.95),
+    ("Bluefin · Bonsai 2B · 4096 · prompt", 109.04, 58.07),
+    ("Bluefin · Bonsai 4B · 512 · decode", 24.59, 14.95),
+    ("Bluefin · Bonsai 4B · 512 · prompt", 48.05, 18.55),
+    # The bluefin 4B at 4096 is absent: the fork's row is not completed (10-minute cap).
 ]
 # The biggest wins, Peregrine ÷ the competitor that runs the same file on the same machine:
 # llama.cpp for the Q4_K_M rows, PrismML's fork for the Bonsai 2 rows.

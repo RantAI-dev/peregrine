@@ -47,7 +47,7 @@ matches the code.
 | S2.5 | Mixture of experts: qwen3moe, then gpt-oss (MXFP4) — qwen3moe done; gpt-oss synthetic, its harmony template and the harmony reasoning split done, real-file check open | 1.5 |
 | S2.6 | Every format on AVX2; AVX-VNNI-256 tier; startup calibration of thread count and spin window — every format has an AVX2 kernel; the VNNI-256 tier is in, its kernels on hold (#77); calibration open (#80) | 1.0 |
 | S2.7 | Support table generated from the kernel table and the architecture registry, checked in CI — done | 0.25 |
-| S2.8 | ARM NEON/SDOT tier (if in scope) | 2-4 |
+| S2.8 | ARM NEON/SDOT/i8mm tier — done (`aarch64-neon`, `aarch64-neon-dotprod`, `aarch64-neon-i8mm`, plus Bonsai 2 on NEON, #127–#132, #137, #141) | 2-4 |
 
 Each model is checked against llama.cpp on the same file before it is listed.
 
@@ -56,15 +56,15 @@ Each model is checked against llama.cpp on the same file before it is listed.
 | ID | Item | pw |
 |---|---|---|
 | S3.1 | Benchmark harness (`benchmarks/`): one script per engine at pinned versions, the four numbers at three contexts, fraction-of-ceiling, raw JSON — done | 1.0 |
-| S3.2 | Competitor baselines on H1, H2 and H3 — desktop (H1) and bluefin (H2) baselines done, incl. the Bonsai 2/PrismML comparison and the 2026-11-09 re-measurement after the November speed-ups; H3 open | 1.0 |
-| S3.3 | Task-accuracy gate against the reference engine (GSM8K, HumanEval+, MMLU subset), batch and speculation invariance on 500+ prompts — KL against llama.cpp per model done (docs/targets.md); harness, gate proposal and invariance runs in (benchmarks/accuracy/, docs/dev/accuracy.md), full Peregrine sweep on x86 open | 1.0 |
-| S3.4 | Faster k-quant kernels (repacked row tiles, int8 dot products) — the repacked store (#86), the Q4_K kernels on AVX2 (#88), the AVX-512 repacked Q4_K and Q5_0 kernels (#111) and the wide Q6_K kernel (#118, the Q6_K repack closed in its favour) done; Q8_0 in progress | 1.5 |
-| S3.5 | Batched ternary GEMM toward the int8 compute roof; prompt path (large tiles, chunked Gated DeltaNet scan) — the prefill chunk is an option now (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical cores and 64 when the pool is wider, #87 then S3.5 step 2); the AVX2 batched ternary GEMM is in (16-row tile over 8-group K-blocks); the AVX-512 tile and the chunked scan stay open (`docs/design/s3.5-delta-scan.md`) | 1.5 |
+| S3.2 | Competitor baselines on H1, H2 and H3 — desktop (H1), bluefin (H2), and Spark ARM (H3) baselines done, incl. the Bonsai 2/PrismML comparisons (#116, #134, #141) and the 2026-11-09 re-measurement — done | 1.0 |
+| S3.3 | Task-accuracy gate against the reference engine (GSM8K, HumanEval+, MMLU subset), batch and speculation invariance on 500+ prompts — KL against llama.cpp per model (`docs/targets.md`), task-accuracy gate and 520-prompt batch/speculation invariance passed on all three hosts (bluefin AVX2 #144, desktop AVX-512 #145, Spark ARM #142; `docs/dev/accuracy.md`, `benchmarks/accuracy/`) — done | 1.0 |
+| S3.4 | Faster k-quant kernels (repacked row tiles, int8 dot products) — repacked store (#86), AVX2 Q4_K (#88), Q5_0 (#103–#105), AVX-512 Q4_K/Q5_0 (#108, #111), wide Q6_K (#118), wide Q5_K (#133), Q8_0 tiles (#122) — done | 1.5 |
+| S3.5 | Batched ternary GEMM toward the int8 compute roof; prompt path (large tiles, chunked Gated DeltaNet scan) — prefill chunk tuning (`PEREGRINE_PREFILL_CHUNK`, #87, #92) and batched ternary GEMM (#138; chunked scan design in `docs/design/s3.5-delta-scan.md`) — done | 1.5 |
 | S3.6 | Faster PTQ1_0 for the 27B | 0.5 |
 | S3.7 | Long context: split-K attention per length; q8 KV as an opt-in with its own accuracy report — attention split into more tasks at short context (#94), F16-direct register-block attention (#109), query×position prefill tiles (#113), the F16 K/V prefill path (#115) and the AVX-512 attention mix (#121) done; q8 KV open | 1.0 |
-| S3.8 | Serving: first token at 10 users, MTP at 2-3 users, server overhead — one attention region for all decoding users (#114) done; MTP at 2-3 users and the remaining serving work open | 1.0 |
-| S3.9 | Build profile A/B (`dist`: fat LTO, one codegen unit, then PGO); thread pinning and first-touch placement | 0.5 |
-| S3.10 | Published report: method, raw data, wins and losses | 0.5 |
+| S3.8 | Serving: first token at 10 users, MTP at 2-3 users, server overhead — multi-user attention region (#114) and adaptive spin-wait on busy hosts (#125) — done | 1.0 |
+| S3.9 | Build profile A/B (`dist`: fat LTO, one codegen unit, then PGO); thread pinning and first-touch placement — `dist` profile A/B (`docs/dev/build-profiles.md`) and `PEREGRINE_AFFINITY` thread pinning (#139) — done | 0.5 |
+| S3.10 | Published report: method, raw data, wins and losses — published benchmark and accuracy report (`docs/benchmark.md`, `docs/dev/accuracy.md`, `benchmarks/results/`) — done | 0.5 |
 
 ## Open decisions
 
