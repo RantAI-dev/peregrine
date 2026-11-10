@@ -157,31 +157,33 @@ fn the_label_logits_are_the_full_rows_entries_alone_and_in_batches() {
     let dir = tmpdir("invariance");
     let questions: Vec<Vec<u32>> = (0..4).map(question).collect();
     for (arch, model) in models(&dir) {
-        for (threads, chunk) in [(1usize, 1usize), (1, 16), (2, 1), (2, 16), (4, 64)] {
-            let reference: Vec<Vec<f32>> = questions
-                .iter()
-                .map(|p| reference(&model, p, &LABELS, threads))
-                .collect();
+        for threads in [1usize, 2, 4] {
+            for chunk in [1usize, 16, 64] {
+                let reference: Vec<Vec<f32>> = questions
+                    .iter()
+                    .map(|p| reference(&model, p, &LABELS, threads))
+                    .collect();
 
-            // (a) alone, from position 0: one engine per question, no prefix store.
-            for (i, prompt) in questions.iter().enumerate() {
-                let r = run(&model, std::slice::from_ref(prompt), threads, chunk, 0);
-                assert_eq!(
-                    bits(&r.logits[0]),
-                    bits(&reference[i]),
-                    "{arch}: question {i} alone, {threads} threads, chunk {chunk}"
-                );
-                assert_eq!(r.prefilled[0], prompt.len());
-            }
+                // (a) alone, from position 0: one engine per question, no prefix store.
+                for (i, prompt) in questions.iter().enumerate() {
+                    let r = run(&model, std::slice::from_ref(prompt), threads, chunk, 0);
+                    assert_eq!(
+                        bits(&r.logits[0]),
+                        bits(&reference[i]),
+                        "{arch}: question {i} alone, {threads} threads, chunk {chunk}"
+                    );
+                    assert_eq!(r.prefilled[0], prompt.len());
+                }
 
-            // (c) in the same batch as the others.
-            let r = run(&model, &questions, threads, chunk, 0);
-            for (i, want) in reference.iter().enumerate() {
-                assert_eq!(
-                    bits(&r.logits[i]),
-                    bits(want),
-                    "{arch}: question {i} in a batch, {threads} threads, chunk {chunk}"
-                );
+                // (c) in the same batch as the others.
+                let r = run(&model, &questions, threads, chunk, 0);
+                for (i, want) in reference.iter().enumerate() {
+                    assert_eq!(
+                        bits(&r.logits[i]),
+                        bits(want),
+                        "{arch}: question {i} in a batch, {threads} threads, chunk {chunk}"
+                    );
+                }
             }
         }
     }
@@ -192,76 +194,78 @@ fn a_question_after_another_with_the_same_prefix_is_bit_identical() {
     let dir = tmpdir("prefix");
     let questions: Vec<Vec<u32>> = (0..4).map(question).collect();
     for (arch, model) in models(&dir) {
-        for (threads, chunk) in [(1usize, 1usize), (2, 16), (4, 64)] {
-            let reference: Vec<Vec<f32>> = questions
-                .iter()
-                .map(|p| reference(&model, p, &LABELS, threads))
-                .collect();
+        for threads in [1usize, 2, 4] {
+            for chunk in [1usize, 16, 64] {
+                let reference: Vec<Vec<f32>> = questions
+                    .iter()
+                    .map(|p| reference(&model, p, &LABELS, threads))
+                    .collect();
 
-            // The first question fills the store; the others then restore the shared prefix.
-            let mut engine = Engine::new_with_chunk(
-                model.clone(),
-                threads,
-                model.cfg.ctx_train,
-                1,
-                KvPrec::F16,
-                8 << 20,
-                chunk,
-            );
-            let mut hits_before = 0;
-            let mut reused = Vec::new();
-            for (i, prompt) in questions.iter().enumerate() {
-                let id = engine
-                    .admit_labels(prompt.clone(), SlotCfg::default(), LABELS.to_vec())
-                    .expect("admit");
-                let mut got: Option<(Vec<f32>, usize)> = None;
-                let mut steps = 0;
-                while engine.active() > 0 {
-                    for em in engine.step() {
-                        assert_eq!(em.slot, id);
-                        if let Some(Finish::Error(e)) = &em.finish {
-                            panic!("the labels slot failed: {e}");
+                // The first question fills the store; the others then restore the shared prefix.
+                let mut engine = Engine::new_with_chunk(
+                    model.clone(),
+                    threads,
+                    model.cfg.ctx_train,
+                    1,
+                    KvPrec::F16,
+                    8 << 20,
+                    chunk,
+                );
+                let mut hits_before = 0;
+                let mut reused = Vec::new();
+                for (i, prompt) in questions.iter().enumerate() {
+                    let id = engine
+                        .admit_labels(prompt.clone(), SlotCfg::default(), LABELS.to_vec())
+                        .expect("admit");
+                    let mut got: Option<(Vec<f32>, usize)> = None;
+                    let mut steps = 0;
+                    while engine.active() > 0 {
+                        for em in engine.step() {
+                            assert_eq!(em.slot, id);
+                            if let Some(Finish::Error(e)) = &em.finish {
+                                panic!("the labels slot failed: {e}");
+                            }
+                            if em.finish.is_some() {
+                                got = Some((
+                                    em.label_logits.clone().expect("label logits"),
+                                    em.cost.as_ref().expect("cost").prefilled,
+                                ));
+                            }
                         }
-                        if em.finish.is_some() {
-                            got = Some((
-                                em.label_logits.clone().expect("label logits"),
-                                em.cost.as_ref().expect("cost").prefilled,
-                            ));
-                        }
+                        steps += 1;
+                        assert!(steps < 100_000, "the engine made no progress");
                     }
-                    steps += 1;
-                    assert!(steps < 100_000, "the engine made no progress");
-                }
-                let (logits, prefilled) = got.expect("one emission");
-                assert_eq!(
-                    bits(&logits),
-                    bits(&reference[i]),
-                    "{arch}: question {i} after its siblings, {threads} threads, chunk {chunk}"
-                );
-                let (_, _, hits, _) = engine.prefix_stats();
-                reused.push((hits > hits_before, prefilled));
-                hits_before = hits;
-            }
-            // A dense model shares the prefix (the earlier question's cache is in the store); a
-            // hybrid one cannot — its snapshot would carry no recurrent state, which the store
-            // already declines to keep — so it recomputes and is still bit-identical.
-            if arch == "llama" {
-                for (i, (did_reuse, prefilled)) in reused.iter().enumerate().skip(1) {
-                    assert!(
-                        *did_reuse,
-                        "{arch}: question {i} did not restore the prefix"
+                    let (logits, prefilled) = got.expect("one emission");
+                    assert_eq!(
+                        bits(&logits),
+                        bits(&reference[i]),
+                        "{arch}: question {i} after its siblings, {threads} threads, chunk {chunk}"
                     );
+                    let (_, _, hits, _) = engine.prefix_stats();
+                    reused.push((hits > hits_before, prefilled));
+                    hits_before = hits;
+                }
+                // A dense model shares the prefix (the earlier question's cache is in the store); a
+                // hybrid one cannot — its snapshot would carry no recurrent state, which the store
+                // already declines to keep — so it recomputes and is still bit-identical.
+                if arch == "llama" {
+                    for (i, (did_reuse, prefilled)) in reused.iter().enumerate().skip(1) {
+                        assert!(
+                            *did_reuse,
+                            "{arch}: question {i} did not restore the prefix"
+                        );
+                        assert!(
+                            *prefilled < questions[i].len(),
+                            "{arch}: question {i} prefilled {prefilled} of {}",
+                            questions[i].len()
+                        );
+                    }
+                } else {
                     assert!(
-                        *prefilled < questions[i].len(),
-                        "{arch}: question {i} prefilled {prefilled} of {}",
-                        questions[i].len()
+                        reused.iter().all(|&(did_reuse, _)| !did_reuse),
+                        "{arch} is hybrid: its cache is not kept in the prefix store"
                     );
                 }
-            } else {
-                assert!(
-                    reused.iter().all(|&(did_reuse, _)| !did_reuse),
-                    "{arch} is hybrid: its cache is not kept in the prefix store"
-                );
             }
         }
     }
