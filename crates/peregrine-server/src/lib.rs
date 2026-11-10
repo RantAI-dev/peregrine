@@ -24,6 +24,9 @@
 //!   meaning: end-of-generation tokens do not stop generation; it continues until `max_tokens`.
 //! - `n > 1` runs one generation per choice, in its own slot (so n choices share one weight pass);
 //!   with `stream` it is refused. `grammar` is refused (400): the engine has no constrained sampler.
+//! - `stop` (one string or up to four) is matched against the decoded text as it arrives: the reply
+//!   ends before the sequence, streaming holds back a suffix that could still become one, and the
+//!   match is per request, so it cannot affect another user in the same batched pass.
 //!
 //! One session per process (one stream at a time; requests queue): run one process per model, as with llama-server.
 use axum::{
@@ -45,8 +48,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod harmony;
+mod stop;
 
 use harmony::{Channel, Harmony, ReasoningFormat};
+use stop::StopMatcher;
 
 /// The server's command line (also `peregrine serve`).
 #[derive(Parser, Debug)]
@@ -463,6 +468,8 @@ struct Plan {
     n: usize,
     /// Non-standard option: whether to ignore end-of-generation tokens and decode until `max_tokens`.
     ignore_eos: bool,
+    /// Stop sequences: generation ends when the decoded text contains one, and it is not returned.
+    stop: Vec<String>,
 }
 
 /// Most choices one request may ask for.
@@ -557,6 +564,39 @@ fn sampling_penalties(b: &Value) -> Result<Penalties, String> {
     })
 }
 
+/// Most stop sequences one request may ask for, as OpenAI documents.
+const MAX_STOP_SEQUENCES: usize = 4;
+
+/// Read the OpenAI `stop` field: one string or an array of up to four.
+fn stop_sequences(b: &Value) -> Result<Vec<String>, String> {
+    let value = match b.get("stop") {
+        None | Some(Value::Null) => return Ok(vec![]),
+        Some(v) => v,
+    };
+    let mut sequences = match value {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(s) => out.push(s.to_string()),
+                    None => return Err("stop must be a string or an array of strings".into()),
+                }
+            }
+            out
+        }
+        _ => return Err("stop must be a string or an array of strings".into()),
+    };
+    if sequences.len() > MAX_STOP_SEQUENCES {
+        return Err(format!(
+            "stop accepts at most {MAX_STOP_SEQUENCES} sequences, got {}",
+            sequences.len()
+        ));
+    }
+    sequences.shrink_to_fit();
+    Ok(sequences)
+}
+
 fn plan(b: &Value) -> Result<Plan, String> {
     reject_unsupported_sampling(b)?;
     let n = b["n"].as_u64().unwrap_or(1).max(1);
@@ -643,6 +683,7 @@ fn plan(b: &Value) -> Result<Plan, String> {
         logprobs: b["logprobs"].as_bool().unwrap_or(false),
         stream: b["stream"].as_bool().unwrap_or(false),
         ignore_eos: b["ignore_eos"].as_bool().unwrap_or(false),
+        stop: stop_sequences(b)?,
     })
 }
 
@@ -714,6 +755,34 @@ fn send_harmony_delta(
         if tx.send(Msg::Delta(text, false, logprob)).is_err() {
             return false;
         }
+    }
+    true
+}
+
+/// Send one piece of the reply as `content` or `reasoning_content`, mirroring `deepseek-legacy`
+/// reasoning into streaming content. Counting is the caller's: one generated token can be split into
+/// several pieces by the stop matcher, but it is still one token.
+fn push_reply(
+    run: &mut Run,
+    p: &Plan,
+    tx: &tokio::sync::mpsc::UnboundedSender<Msg>,
+    text: String,
+    reasoning: bool,
+    logprob: f32,
+) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    if reasoning {
+        run.reasoning.push_str(&text);
+        if tx.send(Msg::Delta(text.clone(), true, logprob)).is_err() {
+            return false;
+        }
+        if p.stream && p.reasoning_format.reasoning_in_content() {
+            let _ = tx.send(Msg::Delta(text, false, logprob));
+        }
+    } else if tx.send(Msg::Delta(text, false, logprob)).is_err() {
+        return false;
     }
     true
 }
@@ -956,6 +1025,12 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
         }
         let mut replan = false;
         let mut slot = 0;
+        // This pass's stop sequences. A stop string spans token boundaries, so text that might be its
+        // beginning is held back here; a stop found mid-token drops the rest of that token.
+        let mut stops = StopMatcher::new(p.stop.clone());
+        let mut stopped = false;
+        // The field a held-back Harmony piece belongs to, so a flush goes back to the right one.
+        let mut harmony_channel: Option<Channel> = None;
         'emissions: while let Some(em) = erx.recv().await {
             slot = em.slot;
             if let Some(c) = &em.cost {
@@ -982,8 +1057,28 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
                     let mut produced = false;
                     for (channel, text) in h.feed(&em.text) {
                         produced = true;
-                        if !send_harmony_delta(&mut run, p, &tx, em.logprob, channel, text) {
+                        // A stop sequence belongs to one field: flush before the channel changes.
+                        if let Some(prev) = harmony_channel {
+                            if prev != channel {
+                                let held = stops.flush();
+                                if !held.is_empty()
+                                    && !send_harmony_delta(&mut run, p, &tx, em.logprob, prev, held)
+                                {
+                                    break 'emissions;
+                                }
+                            }
+                        }
+                        harmony_channel = Some(channel);
+                        let (text, hit) = stops.feed(&text);
+                        if !text.is_empty()
+                            && !send_harmony_delta(&mut run, p, &tx, em.logprob, channel, text)
+                        {
                             break 'emissions;
+                        }
+                        if hit {
+                            stopped = true;
+                            finish = "stop";
+                            break;
                         }
                     }
                     // A channel header, `<|end|>` or `<|start|>` is a generated token too; it
@@ -992,6 +1087,9 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
                         run.content_tokens += 1;
                     }
                     budget_left = budget_left.saturating_sub(1);
+                    if stopped {
+                        break 'emissions;
+                    }
                 }
                 if em.finish.is_some() {
                     break;
@@ -1005,23 +1103,31 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
                 continue;
             }
             if Some(em.token) == app.think_close {
+                // Do not carry a held reasoning suffix into `content`: a stop sequence never spans
+                // the two fields.
+                if !push_reply(&mut run, p, &tx, stops.flush(), true, em.logprob) {
+                    break;
+                }
                 run.in_think = false;
                 continue;
             }
             if run.in_think && p.reasoning_format.extracts() {
                 run.reasoning_tokens += 1;
-                run.reasoning.push_str(&em.text);
                 budget_left = budget_left.saturating_sub(1);
-                if tx
-                    .send(Msg::Delta(em.text.clone(), true, em.logprob))
-                    .is_err()
-                {
+                let (text, hit) = stops.feed(&em.text);
+                if !push_reply(&mut run, p, &tx, text, true, em.logprob) {
                     break;
                 }
-                if p.stream && p.reasoning_format.reasoning_in_content() {
-                    let _ = tx.send(Msg::Delta(em.text, false, em.logprob));
+                if hit {
+                    stopped = true;
+                    finish = "stop";
+                    break;
                 }
                 if p.budget.is_some_and(|b| run.reasoning_tokens as usize >= b) {
+                    // The continuation repeats what was generated, so the held suffix is part of it.
+                    if !push_reply(&mut run, p, &tx, stops.flush(), true, em.logprob) {
+                        break;
+                    }
                     run.budget_hit = true;
                     replan = true;
                     break;
@@ -1030,7 +1136,13 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
                 // With `reasoning_format: none`, the think span is ordinary content.
                 run.content_tokens += 1;
                 budget_left = budget_left.saturating_sub(1);
-                if tx.send(Msg::Delta(em.text, false, em.logprob)).is_err() {
+                let (text, hit) = stops.feed(&em.text);
+                if !push_reply(&mut run, p, &tx, text, false, em.logprob) {
+                    break;
+                }
+                if hit {
+                    stopped = true;
+                    finish = "stop";
                     break;
                 }
             }
@@ -1041,11 +1153,50 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
         // Flush a reply that ended inside a channel (a `max_tokens` stop, for instance);
         // a half-written control token is dropped rather than leaked into the answer.
         if let Some(h) = harmony.as_mut() {
-            for (channel, text) in h.finish() {
-                if !send_harmony_delta(&mut run, p, &tx, 0.0, channel, text) {
-                    break;
+            if !stopped {
+                for (channel, text) in h.finish() {
+                    if let Some(prev) = harmony_channel {
+                        if prev != channel {
+                            let held = stops.flush();
+                            if !held.is_empty()
+                                && !send_harmony_delta(&mut run, p, &tx, 0.0, prev, held)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    harmony_channel = Some(channel);
+                    let (text, hit) = stops.feed(&text);
+                    if !text.is_empty() && !send_harmony_delta(&mut run, p, &tx, 0.0, channel, text)
+                    {
+                        break;
+                    }
+                    if hit {
+                        stopped = true;
+                        finish = "stop";
+                        break;
+                    }
                 }
             }
+        }
+        // Whatever the matcher held back is not a stop sequence after all: the generation ended
+        // (EOS or the token budget) before it could become one.
+        if !stopped {
+            let held = stops.flush();
+            let reasoning =
+                harmony_channel.is_none() && run.in_think && p.reasoning_format.extracts();
+            if let Some(channel) = harmony_channel {
+                if !held.is_empty() {
+                    let _ = send_harmony_delta(&mut run, p, &tx, 0.0, channel, held);
+                }
+            } else if !push_reply(&mut run, p, &tx, held, reasoning, 0.0) {
+                // The caller has gone; there is nothing left to send it.
+            }
+        }
+        if stopped {
+            // The engine would otherwise decode to EOS; nothing it produced next is part of the reply.
+            let _ = app.jobs.send(EngineMsg::Cancel(slot));
+            break;
         }
         if !replan {
             break;
@@ -1394,6 +1545,35 @@ mod tests {
 
         let p_disabled = plan(&body(json!({"ignore_eos": false}))).unwrap();
         assert!(!p_disabled.ignore_eos);
+    }
+
+    #[test]
+    fn stop_accepts_one_string_or_up_to_four_in_an_array() {
+        assert_eq!(
+            plan(&body(json!({"stop": "\n\n"}))).unwrap().stop,
+            vec!["\n\n".to_string()]
+        );
+        assert_eq!(
+            plan(&body(json!({"stop": ["a", "b", "c", "d"]})))
+                .unwrap()
+                .stop,
+            vec!["a", "b", "c", "d"]
+        );
+        assert!(plan(&body(json!({"stop": []}))).unwrap().stop.is_empty());
+        assert!(plan(&body(json!({"stop": null}))).unwrap().stop.is_empty());
+        assert!(plan(&body(json!({}))).unwrap().stop.is_empty());
+    }
+
+    #[test]
+    fn stop_refuses_more_than_four_or_non_string_sequences() {
+        for bad in [
+            json!({"stop": ["a", "b", "c", "d", "e"]}),
+            json!({"stop": ["a", 1]}),
+            json!({"stop": {"a": true}}),
+            json!({"stop": 3}),
+        ] {
+            assert!(plan(&body(bad.clone())).is_err(), "accepted {bad}");
+        }
     }
 
     #[test]

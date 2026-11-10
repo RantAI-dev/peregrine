@@ -403,20 +403,43 @@ def check_stop_sequences() -> str:
     if len(baseline) < 8:
         raise Skip(f"baseline too short for a stop string ({len(baseline)} chars)")
     stop = baseline[2:6]
-    r = chat(dict(base_body, stop=[stop]))
-    if r.status == 400:
-        raise Deviation(f"stop is refused: {(r.json or {}).get('error', {}).get('message', r.text[:120])}")
+    expected = baseline[: baseline.find(stop)]
+
+    # A single string. The stop itself is not part of the reply and the reply is the
+    # unstoppped one truncated exactly there.
+    r = chat(dict(base_body, stop=stop))
     need(r.status == 200, f"status {r.status}: {r.text[:300]}")
     choice = message_of(r)
     text = content_of(r)
-    if stop in text or text == baseline:
-        raise Deviation(
-            f"the stop field is accepted but ignored: {stop!r} still appears / the reply is not truncated"
-        )
+    need(stop not in text, f"the stop text {stop!r} is in the reply {text!r}")
+    need(text == expected, f"stop did not truncate exactly: {text!r}, expected {expected!r}")
     need(baseline.startswith(text), f"content is not a prefix of the unstoppped reply: {text!r}")
-    need(len(text) < len(baseline), f"stop did not truncate: {text!r}")
     need(choice.get("finish_reason") == "stop", f"finish_reason is {choice.get('finish_reason')!r}")
-    return f"stopped at {stop!r}, {len(text)} chars"
+
+    # An array (up to four), with a sequence that never occurs beside the real one.
+    r2 = chat(dict(base_body, stop=[stop, "\x00-not-generated\x00"]))
+    need(r2.status == 200, f"array status {r2.status}: {r2.text[:300]}")
+    text2 = content_of(r2)
+    need(text2 == text, f"array stop replied {text2!r}, expected {text!r}")
+    need(message_of(r2).get("finish_reason") == "stop", "array stop did not finish with stop")
+
+    # Streaming holds back text that could start a stop string; the streamed content
+    # is exactly the non-streamed reply, and the sequence never appears in a delta.
+    status, chunks, done, raw = stream_chat(dict(base_body, stop=[stop], stream=True))
+    need(status == 200, f"stream status {status}: {''.join(raw)[:300]}")
+    need(done, "stop stream ended without data: [DONE]")
+    streamed, finish = "", None
+    for c in chunks:
+        for ch in c.get("choices") or []:
+            delta = ch.get("delta") or {}
+            if isinstance(delta.get("content"), str):
+                streamed += delta["content"]
+            if ch.get("finish_reason") is not None:
+                finish = ch["finish_reason"]
+    need(stop not in streamed, f"a delta carried stop text: {streamed!r}")
+    need(streamed == text, f"streamed stop output {streamed!r} differs from {text!r}")
+    need(finish == "stop", f"streamed finish_reason is {finish!r}")
+    return f"stopped at {stop!r}, {len(text)} chars; array and stream forms agree"
 
 
 def check_max_tokens() -> str:
