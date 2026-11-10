@@ -1,0 +1,10 @@
+{
+  "group": 8,
+  "items_per_s": 3.5043908793168996,
+  "max_tokens": 48,
+  "phase": "batched",
+  "prompts": 520,
+  "server": "peregrine 9e47bb2 aarch64-neon-i8mm, 10 threads, slots 8",
+  "url": "http://127.0.0.1:8299",
+  "wall_s": 148.38527376300044
+}

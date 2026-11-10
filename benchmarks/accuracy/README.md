@@ -50,10 +50,11 @@ python3 benchmarks/accuracy/run.py report \
     --out results/2026-11-09-dgx-spark/report.md
 ```
 
-Runs are resumable: existing items in `<task>.jsonl` are skipped, so a slow host can run
-one task per invocation. `--limit` takes `task=n` pairs; the selection is a seeded shuffle
-(seed 20261109), so the same limits always yield the same items, and a smaller limit is a
-prefix of a larger one.
+Runs are resumable: `<task>.jsonl` is checkpointed (atomically) as items complete, and
+existing items are skipped, so an invocation that hits a command-time limit on a slow or
+shared host continues where it stopped. `--limit` takes `task=n` pairs; the selection is a
+seeded shuffle (seed 20261109), so the same limits always yield the same items, and a
+smaller limit is a prefix of a larger one.
 
 `run.py selftest` checks the scorers against the datasets' own answers: the canonical
 HumanEval+ solutions must pass the sandbox (163/163) and the GSM8K/MMLU extractors must read
