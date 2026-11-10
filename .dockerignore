@@ -1,0 +1,21 @@
+# The image builds the Rust workspace, so the context needs Cargo.toml,
+# Cargo.lock, rust-toolchain.toml and crates/. Everything else is left out:
+# model files, build output and the repository's own tooling.
+target
+**/target
+.git
+.github
+.gitignore
+.orchestrator
+models
+**/*.gguf
+**/*.safetensors
+**/*.slb
+benchmarks
+docs
+scripts
+tests
+*.md
+!Cargo.toml
+!Cargo.lock
+!crates/**/Cargo.toml
