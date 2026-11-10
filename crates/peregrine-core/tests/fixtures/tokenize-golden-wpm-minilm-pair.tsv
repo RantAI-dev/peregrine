@@ -1,0 +1,15 @@
+# second-state/All-MiniLM-L6-v2-Embedding-GGUF / all-MiniLM-L6-v2-Q2_K.gguf (WordPiece, uncased)
+# sha256 05276e016346f1f72d7581237745758b24df9f7770c4de90d1393494a4485acd
+# goldens from llama.cpp v0.9.0 (commit cd959bae99ff4bed22bef2604f45241c09bbb8c8) -- llama-tokenize --ids and
+# --ids --no-bos for the ids, llama_detokenize for the last column; see
+# columns: query <TAB> document <TAB> ids, as llama.cpp's format_prompt_rerank builds them
+query one	document one	[101, 23032, 2028, 102, 6254, 2028]
+the capital of Indonesia?	Jakarta is the capital of Indonesia.	[101, 1996, 3007, 1997, 6239, 1029, 102, 14426, 2003, 1996, 3007, 1997, 6239, 1012]
+[CLS] literal specials [SEP]	doc with [MASK] and <s> and </s>	[101, 1031, 18856, 2015, 1033, 18204, 19247, 1031, 19802, 1033, 102, 9986, 2007, 1031, 7308, 1033, 1998, 1026, 1055, 1028, 1998, 1026, 1013, 1055, 1028]
+café naïve	Ångström über Straße	[101, 7668, 15743, 102, 17076, 15687, 19169, 2358, 27807]
+中文查询	日本語の文書と한국어	[101, 1746, 1861, 100, 100, 102, 1864, 1876, 1950, 1671, 1861, 1871, 1666, 30005, 29991, 29999]
+it's 2026!	Don't we've I'll you'd	[101, 2009, 1005, 1055, 16798, 2575, 999, 102, 2123, 1005, 1056, 2057, 1005, 2310, 1045, 1005, 2222, 2017, 1005, 1040]
+	only a document	[101, 102, 2069, 1037, 6254]
+only a query		[101, 2069, 1037, 23032, 102]
+what changed in v1.2.3?	line one\nline two\t\n  indented\n	[101, 2054, 2904, 1999, 1058, 2487, 1012, 1016, 1012, 1017, 1029, 102, 2240, 2028, 2240, 2048, 27427, 14088]
+emoji 🙂	👨‍👩‍👧 and 🇮🇩	[101, 7861, 29147, 2072, 100, 102, 100, 1998, 100]

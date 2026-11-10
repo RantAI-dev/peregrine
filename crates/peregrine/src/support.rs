@@ -60,7 +60,9 @@ pub fn support_text() -> String {
         "  GPT-2 byte-level BPE ({})",
         peregrine_core::tokenizer::PRE_TYPES.join(", ")
     );
-    let _ = writeln!(out, "  SentencePiece (llama)");
+    let _ = writeln!(out, "  SentencePiece BPE (llama)");
+    let _ = writeln!(out, "  WordPiece (bert)");
+    let _ = writeln!(out, "  SentencePiece unigram (t5)");
 
     let _ = writeln!(out, "chat templates:");
     let _ = writeln!(out, "  {}", peregrine_core::template::TEMPLATES.join(", "));
@@ -100,7 +102,8 @@ pub fn support_markdown() -> String {
     let cpu_str = "x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code";
 
     // 4. Tokenizers
-    let tok_str = "GPT-2 byte-level BPE, SentencePiece (llama)";
+    let tok_str = "GPT-2 byte-level BPE, SentencePiece BPE (llama), WordPiece (bert), \
+         SentencePiece unigram (t5)";
 
     // 5. Chat templates
     let tmpl_str = "read from the model file and rendered exactly as llama.cpp renders them: \

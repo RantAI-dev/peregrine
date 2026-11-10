@@ -60,6 +60,7 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
 | Qwen3-30B-A3B Q2_K (`Qwen3-30B-A3B-Q2_K.gguf`) | `~/models/` |
 | Qwen3.5-2B Q4_K_M (`Qwen3.5-2B-Q4_K_M.gguf`) | `~/models/` |
 | Phi-4 14B Q4_K_M (`phi-4-Q4_K_M.gguf`) | `~/models/` |
+| `bge-m3-Q2_K.gguf` (encoder-tokenizer XLM-R oracle; optional) | `models/` or `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 2B PQ2_0 | `models/bonsai2-2b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
@@ -179,6 +180,57 @@ enough to carry the models' own templates.
 and reference test vectors (`.inp` and `.out`) from pinned llama.cpp release files into `models/vocab/` (git-ignored),
 validating pinned SHA-256 checksums. `crates/peregrine-core/tests/tokenize_spm.rs` tests these reference vectors
 and skips with an informative message if the files are absent.
+
+### The encoder tokenizers: three run without model files, XLM-R uses one
+
+`tests/tokenize_encoders.rs` checks WordPiece (`tokenizer.ggml.model = "bert"`) and SentencePiece
+unigram (`"t5"`) against llama.cpp v0.9.0 on four real vocabularies. Three need no model file: the
+vocabulary is carried beside the goldens in a compact `.bin` holding exactly what `from_gguf` read out
+of the file (pieces, scores, token types, the precompiled charsmap and the special-token rules), so
+they run in CI on every tier.
+
+| Vocabulary | Model file (not committed) | `.bin` | `.tsv` |
+|---|---|---|---|
+| WordPiece, uncased | `second-state/All-MiniLM-L6-v2-Embedding-GGUF` / `all-MiniLM-L6-v2-Q2_K.gguf` (`05276e01…5acd`) | 291 KB | 20 KB |
+| WordPiece, cased | `lorinet3/kblab-bert-swedish-cased-pos-gguf` / `bert-swedish-pos-q4_0.gguf` (`bddde253…96f3`) | 482 KB | 20 KB |
+| unigram, T5 | `fernandoruiz/flan-t5-small-Q4_0-GGUF` / `flan-t5-small-q4_0.gguf` (`407c1f1c…8058`) | 650 KB | 15 KB |
+| unigram, XLM-R | `gpustack/bge-m3-GGUF` / `bge-m3-Q2_K.gguf` (`8b0dacc2…44d8`) | — (model file only) | 18 KB |
+
+The T5 vocabulary is the standard 32,128-piece SentencePiece unigram vocabulary that
+`t5-small` and `flan-t5-small` ship, with `</s>` as EOS, `<unk>` as unknown and the
+`<extra_id_N>` sentinels. The XLM-R vocabulary is 250,002 pieces; carrying its `.bin`
+would add 4.1 MB, larger than the rest of the repository's fixtures combined, so that
+vocabulary is not committed. The XLM-R test builds its tokenizer from `bge-m3-Q2_K.gguf`
+in `models/` or `~/models/` and skips with a one-line notice when the file is absent —
+including under `PEREGRINE_GOLDEN=require`, which in this repository still skips a
+missing model file (CI has none of these files). With the file present the test runs
+the same 51 strings and 10 pairs as the other three.
+
+Each `.tsv` holds, per string, the ids without special tokens, the ids with them, the escaped input
+and llama.cpp's detokenisation of the bare ids; the `-pair.tsv` beside it holds ten (query, document)
+pairs formatted by llama.cpp's own `format_prompt_rerank`. T5 has no rerank template, so the pair
+file uses that function's generic path (`q </s> d </s>`). For T5, `llama-tokenize --ids` cannot add
+EOS because the model has no BOS, so the generator runs with `--skip-cross-check`: the bare column
+was cross-checked separately against `llama-tokenize --ids --no-bos` and matches on all 50 non-empty
+strings, and the special column comes from `llama_tokenize(add_special=true)`.
+
+To regenerate:
+
+```text
+python3 scripts/gen-tokenizer-golden.py --llama-tokenize .../llama-tokenize \
+    --oracle /tmp/oracle --pair-oracle /tmp/pairoracle --model MODEL.gguf \
+    --name minilm --out crates/peregrine-core/tests/fixtures/tokenize-golden-wpm-minilm.tsv \
+    --provenance "repo / file" --sha256 HASH
+cargo run --release -p peregrine-bench --example vocab_dump -- MODEL.gguf OUT.bin
+```
+
+`/tmp/oracle` and `/tmp/pairoracle` are `scripts/tokenizer-oracle.cpp` and
+`scripts/tokenizer-pair-oracle.cpp` built against the same llama.cpp checkout; the first prints the
+two id columns plus `llama_detokenize`'s output, the second calls `format_prompt_rerank` directly
+rather than re-implementing it. When one of the three model files happens to be present, the test also
+checks that its `.bin` is byte-identical to what the file yields. A 2,400-input differential fuzz
+against `llama-tokenize`/the oracle on the T5 vocabulary (bare ids, ids with specials, and
+detokenisation: 7,200 comparisons) found no divergence.
 
 ### Gemma 3 1B Instruct
 
