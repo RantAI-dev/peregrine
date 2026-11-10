@@ -6,7 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A release pipeline for the first release: `scripts/release/build.sh` builds a stripped, portable
+  archive per target (`peregrine-vX.Y.Z-linux-x86_64.tar.gz` / `-linux-aarch64.tar.gz` with `LICENSE`/`NOTICE` and a SHA256SUMS
+  line), and a `release` workflow on tags `vX.Y.Z` runs the full test suite on both Linux runners,
+  asserts the x86-64 binary keeps the baseline ISA with AVX2/AVX-512 picked at run time (no
+  `-C target-cpu=native`), and uploads the archives and checksums to the GitHub release with notes
+  generated from PR labels. The release step itself — versioning, CHANGELOG conventions, the
+  AVX2-host (H2) full-suite gate on every release candidate (S0.5) — is documented in
+  `docs/dev/releasing.md`.
+
 ### Fixed
+- A request body that is not valid JSON is now rejected with the OpenAI error object instead of
+  axum's plain-text rejection. The status was already 400; a client that parses `error.message` can
+  now read the reason. The compatibility suite checks the body as well as the code.
 - Small-model decode no longer runs a Q5_0 or Q8_0 row at a time. A Q5_0 row is 22 bytes
   per 32 weights and a Q8_0 row 34, so the 32-byte activation block (and, for Q5_0, its
   32-byte lane sums) is more traffic than the weights; the per-row kernel reloaded both
@@ -52,6 +65,23 @@ All notable changes to this project are documented here. The format follows
   by projection, attention, norms, quantisation, RoPE, KV writes, residuals, SwiGLU,
   barrier wait); `=full` adds the attention subtimers. Off by default, no timers in the
   default path.
+- An adaptive spin window (`PEREGRINE_ADAPTIVE_SPIN`, on by default). A pool thread samples its own
+  run-queue delay from `/proc/thread-self/schedstat` every 8 ms; a smoothed reading of that delay is
+  the gate. Below 35 % (quiet, and two runnable threads per core) the configured window is used
+  exactly as before and no A/B runs. Above it the pool tests its own join wait: it holds the current
+  window or parking for a few thousand joins, then measures one window on each and keeps the lower
+  mean (with a 10 % margin, so it does not flap). This is outcome-based because the same run-queue
+  reading maps to different winners on different days and models — a first version mapped the
+  reading to a half-window middle rung, which lost to both the full window and parking and regressed
+  Gemma-3-1B under load. `PEREGRINE_ADAPTIVE_SPIN=0` keeps the window fixed for measurement.
+  `PEREGRINE_ADAPTIVE_LOG=1` prints the rung, the smoothed reading and each trial decision. On H0
+  (Xeon E5-2680 v4, four threads pinned to four cores, shared) the medians of five alternating
+  rounds with four CPU hogs: Llama-3.2-1B prefill/decode 13.2/1.98 with the default window,
+  27.2/6.17 adaptive and 27.4/6.31 at `PEREGRINE_SPIN_US=0`; Gemma-3-1B 11.1/1.41, 28.4/6.07 and
+  28.1/6.11. With eight hogs: Llama 10.3/1.43, 24.4/4.62, 21.6/5.20. Scheduling only: no kernel,
+  quantisation or arithmetic changes.
+- `peregrine bench --threads N` fixes the worker pool width and records it in the JSON `config`, so a
+  run can be pinned to the same core count as a comparison engine. The default is unchanged.
 - A tunable prefill chunk (`PEREGRINE_PREFILL_CHUNK`, default 16 on a pool as wide as the physical
   cores and 64 when the pool is wider; see the fix below): the prompt tokens one weight pass
   carries. The engine prefills a prompt in pieces of this size, and the piece is how the prompt is

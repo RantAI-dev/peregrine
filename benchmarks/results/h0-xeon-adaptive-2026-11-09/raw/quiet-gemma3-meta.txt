@@ -1,0 +1,16 @@
+condition=quiet model=gemma3 rounds=5 refs=2 hogs=0
+start 2026-11-09T12:44:37Z loadavg=6.70 9.73 11.39 4/1962 2714198
+quiet gemma3 r1 base secs=21 loadavg=6.69 9.54 11.29 5/1968 2714336
+quiet gemma3 r1 branch secs=20 loadavg=7.04 9.42 11.21 5/1970 2714551
+quiet gemma3 r2 branch secs=16 loadavg=7.11 9.32 11.15 4/1966 2714841
+quiet gemma3 r2 base secs=20 loadavg=8.35 9.47 11.16 4/1970 2715201
+quiet gemma3 r3 base secs=14 loadavg=8.52 9.47 11.13 2/1955 2715747
+quiet gemma3 r3 branch secs=15 loadavg=8.93 9.51 11.12 2/1961 2716272
+quiet gemma3 r4 branch secs=14 loadavg=8.88 9.47 11.08 3/1955 2716579
+quiet gemma3 r4 base secs=14 loadavg=8.64 9.38 11.02 3/1964 2716703
+quiet gemma3 r5 base secs=15 loadavg=8.75 9.36 10.99 4/1968 2716945
+quiet gemma3 r5 branch secs=17 loadavg=8.43 9.26 10.93 4/1984 2717335
+quiet gemma3 r1 spin0 secs=15 loadavg=8.19 9.17 10.87 3/1959 2717591
+quiet gemma3 r2 spin0 secs=13 loadavg=8.04 9.08 10.82 3/1965 2717684
+quiet gemma3 llama secs=33 loadavg=7.43 8.82 10.67 3/1968 2717878
+end 2026-11-09T12:48:24Z loadavg=7.43 8.82 10.67 3/1968 2717880

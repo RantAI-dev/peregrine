@@ -257,3 +257,13 @@ SDE is free of charge for any type of use under the Intel Simplified Software Li
 live under `tests/golden/synthetic/x86_64-avx2-avx512-vnni-gfni-vbmi/` and are recorded under
 `sde64 -spr`. The real-model goldens under `tests/golden/<tier>/` need the model files, which CI does
 not have, so an AVX-512 host still records those itself.
+
+## OpenAI API compatibility
+
+`tests/compat/compat.py` starts the real server on SmolLM2-360M-Instruct and checks the HTTP contract:
+`/v1/models`, chat completions non-stream and SSE, `stop`, `max_tokens`, `n`, `logprobs`, error
+bodies, eight concurrent requests, and (with `--thinking` and a Qwen 3 file) the reasoning split. It
+is standard-library Python and can point at a running llama-server with `--base-url` for a
+comparison. CI runs the SmolLM2 pass; see `docs/compat.md` for the checks and the recorded
+differences from the OpenAI specification and llama-server, and `tests/compat/README.md` for the
+commands.
