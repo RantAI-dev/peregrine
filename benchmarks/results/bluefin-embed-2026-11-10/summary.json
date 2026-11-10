@@ -3427,6 +3427,542 @@
     }
    }
   ],
+  "bge-m3": [
+   {
+    "engine": "llama_cpp",
+    "precision": "q8_0",
+    "rounds": 3,
+    "row": {
+     "engine": "llama_cpp",
+     "precision": "q8_0",
+     "path": "/var/home/shiro/models/embed/bge-m3-Q8_0.gguf",
+     "sha256": "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167",
+     "size_bytes": 634553760,
+     "fingerprint": {
+      "kind": "file",
+      "sha256": "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167",
+      "size_bytes": 634553760
+     },
+     "notes": "GGUF Q8_0; server context capped at 2048 tokens/slot because this model's KV is 2 GB at 32k"
+    },
+    "model": {
+     "name": "bge-m3",
+     "hf": "BAAI/bge-m3",
+     "pooling": "cls",
+     "max_tokens": 1024,
+     "dim": 1024,
+     "tokenizer_dir": "bge-m3/ref"
+    },
+    "engine_info": {
+     "name": "llama.cpp",
+     "version": "v0.9.0",
+     "commit": "cd959ba",
+     "repo": "https://github.com/ggml-org/llama.cpp",
+     "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+     "flash_attn": "auto",
+     "parallel_slots": 10,
+     "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/llama.cpp/build/bin/llama-server",
+      "-m",
+      "/var/home/shiro/models/embed/bge-m3-Q8_0.gguf",
+      "--embedding",
+      "--pooling",
+      "cls",
+      "-t",
+      "4",
+      "-c",
+      "10320",
+      "-b",
+      "1032",
+      "-ub",
+      "1024",
+      "-np",
+      "10",
+      "-fa",
+      "auto",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8412"
+     ],
+     "pooling": "cls",
+     "threads": 4,
+     "parallel": 10,
+     "ctx": 10320,
+     "batch": 1032,
+     "ubatch": 1024
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/bge-m3.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       0.59130859375,
+       1.1123046875,
+       1.74365234375
+      ],
+      "mem_available_gb": 6.2,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.84
+     },
+     {
+      "loadavg": [
+       0.84130859375,
+       1.60986328125,
+       1.873046875
+      ],
+      "mem_available_gb": 6.26,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.85
+     },
+     {
+      "loadavg": [
+       0.74365234375,
+       1.71533203125,
+       1.9404296875
+      ],
+      "mem_available_gb": 6.27,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.85
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       3.83203125,
+       2.37060546875,
+       2.12841796875
+      ],
+      "mem_available_gb": 6.15,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.85
+     },
+     {
+      "loadavg": [
+       4.0029296875,
+       2.71240234375,
+       2.2578125
+      ],
+      "mem_available_gb": 6.06,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.85
+     },
+     {
+      "loadavg": [
+       3.88720703125,
+       2.72998046875,
+       2.2978515625
+      ],
+      "mem_available_gb": 6.2,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.85
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 20.987,
+      "texts_per_s_spread": [
+       20.735,
+       21.248
+      ],
+      "tokens_per_s": 336.3,
+      "tokens_per_s_spread": [
+       332.2,
+       340.5
+      ],
+      "p50_s": 0.046745,
+      "p50_s_spread": [
+       0.046663,
+       0.046858
+      ],
+      "p99_s": 0.058866,
+      "p99_s_spread": [
+       0.050485,
+       0.064585
+      ],
+      "rounds": 3,
+      "requests": [
+       42,
+       42,
+       43
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 25.266,
+      "texts_per_s_spread": [
+       24.827,
+       25.379
+      ],
+      "tokens_per_s": 405.3,
+      "tokens_per_s_spread": [
+       398.3,
+       407.1
+      ],
+      "p50_s": 0.313085,
+      "p50_s_spread": [
+       0.310411,
+       0.32281
+      ],
+      "p99_s": 0.323996,
+      "p99_s_spread": [
+       0.323756,
+       0.331755
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 25.391,
+      "texts_per_s_spread": [
+       25.163,
+       25.409
+      ],
+      "tokens_per_s": 407.0,
+      "tokens_per_s_spread": [
+       403.4,
+       407.3
+      ],
+      "p50_s": 1.259849,
+      "p50_s_spread": [
+       1.258967,
+       1.271261
+      ],
+      "p99_s": 1.26129,
+      "p99_s_spread": [
+       1.259932,
+       1.287517
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       2,
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 25.412,
+      "texts_per_s_spread": [
+       25.313,
+       25.506
+      ],
+      "tokens_per_s": 408.2,
+      "tokens_per_s_spread": [
+       406.6,
+       409.7
+      ],
+      "p50_s": 5.035453,
+      "p50_s_spread": [
+       5.016771,
+       5.055101
+      ],
+      "p99_s": 5.035453,
+      "p99_s_spread": [
+       5.016771,
+       5.055101
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 3.207,
+      "texts_per_s_spread": [
+       2.975,
+       3.225
+      ],
+      "tokens_per_s": 410.6,
+      "tokens_per_s_spread": [
+       380.8,
+       412.8
+      ],
+      "p50_s": 0.310739,
+      "p50_s_spread": [
+       0.308134,
+       0.32552
+      ],
+      "p99_s": 0.331681,
+      "p99_s_spread": [
+       0.311286,
+       0.395882
+      ],
+      "rounds": 3,
+      "requests": [
+       6,
+       7,
+       7
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 2.716,
+      "texts_per_s_spread": [
+       2.716,
+       2.731
+      ],
+      "tokens_per_s": 347.7,
+      "tokens_per_s_spread": [
+       347.6,
+       349.6
+      ],
+      "p50_s": 2.945097,
+      "p50_s_spread": [
+       2.928543,
+       2.945541
+      ],
+      "p99_s": 2.945097,
+      "p99_s_spread": [
+       2.928543,
+       2.945541
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 2.731,
+      "texts_per_s_spread": [
+       2.721,
+       2.743
+      ],
+      "tokens_per_s": 349.6,
+      "tokens_per_s_spread": [
+       348.4,
+       351.2
+      ],
+      "p50_s": 11.717517,
+      "p50_s_spread": [
+       11.666715,
+       11.758747
+      ],
+      "p99_s": 11.717517,
+      "p99_s_spread": [
+       11.666715,
+       11.758747
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 2.705,
+      "texts_per_s_spread": [
+       2.702,
+       2.72
+      ],
+      "tokens_per_s": 346.3,
+      "tokens_per_s_spread": [
+       345.8,
+       348.2
+      ],
+      "p50_s": 47.31438,
+      "p50_s_spread": [
+       47.060836,
+       47.37475
+      ],
+      "p99_s": 47.31438,
+      "p99_s_spread": [
+       47.060836,
+       47.37475
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 0.697,
+      "texts_per_s_spread": [
+       0.695,
+       0.7
+      ],
+      "tokens_per_s": 354.8,
+      "tokens_per_s_spread": [
+       353.6,
+       356.1
+      ],
+      "p50_s": 1.434358,
+      "p50_s_spread": [
+       1.429084,
+       1.439384
+      ],
+      "p99_s": 1.436186,
+      "p99_s_spread": [
+       1.432938,
+       1.446897
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       2,
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 0.634,
+      "texts_per_s_spread": [
+       0.632,
+       0.635
+      ],
+      "tokens_per_s": 324.1,
+      "tokens_per_s_spread": [
+       323.2,
+       324.9
+      ],
+      "p50_s": 12.620104,
+      "p50_s_spread": [
+       12.590048,
+       12.653474
+      ],
+      "p99_s": 12.620104,
+      "p99_s_spread": [
+       12.590048,
+       12.653474
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 0.634,
+      "texts_per_s_spread": [
+       0.628,
+       0.638
+      ],
+      "tokens_per_s": 324.4,
+      "tokens_per_s_spread": [
+       320.9,
+       326.4
+      ],
+      "p50_s": 50.43986,
+      "p50_s_spread": [
+       50.127362,
+       50.979453
+      ],
+      "p99_s": 50.43986,
+      "p99_s_spread": [
+       50.127362,
+       50.979453
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "skipped": "128 texts x 512 tokens = 65536 tokens per request exceeds this model's 16384-token batch cap; the padded batch's attention buffers would not fit in the host's memory budget",
+      "batch_tokens": 65536,
+      "batch_token_cap": 16384
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 24.805,
+      "texts_per_s_spread": [
+       24.697,
+       24.946
+      ],
+      "tokens_per_s": 397.7,
+      "tokens_per_s_spread": [
+       396.0,
+       400.0
+      ],
+      "p50_s": 0.394672,
+      "p50_s_spread": [
+       0.392858,
+       0.405076
+      ],
+      "p99_s": 0.415491,
+      "p99_s_spread": [
+       0.407218,
+       0.421616
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": null
+   }
+  ],
   "bge-small": [
    {
     "engine": "fastembed",
@@ -6992,6 +7528,555 @@
       "label": "torch-fp32",
       "backend": "torch-fp32",
       "dim": 384,
+      "count": 200
+     }
+    }
+   }
+  ],
+  "embeddinggemma": [
+   {
+    "engine": "llama_cpp",
+    "precision": "q8_0",
+    "rounds": 3,
+    "row": {
+     "engine": "llama_cpp",
+     "precision": "q8_0",
+     "path": "/var/home/shiro/models/embed/embeddinggemma/embeddinggemma-Q8_0.gguf",
+     "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+     "size_bytes": 333590944,
+     "fingerprint": {
+      "kind": "file",
+      "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+      "size_bytes": 333590944
+     },
+     "notes": "GGUF Q8_0 from ggml-org/embeddinggemma-300M-GGUF; the google/ PyTorch repo is licence-gated"
+    },
+    "model": {
+     "name": "embeddinggemma",
+     "hf": "google/embeddinggemma-300m",
+     "pooling": "mean",
+     "max_tokens": 2048,
+     "dim": 768,
+     "tokenizer_dir": "embeddinggemma/ref"
+    },
+    "engine_info": {
+     "name": "llama.cpp",
+     "version": "v0.9.0",
+     "commit": "cd959ba",
+     "repo": "https://github.com/ggml-org/llama.cpp",
+     "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+     "flash_attn": "auto",
+     "parallel_slots": 10,
+     "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/llama.cpp/build/bin/llama-server",
+      "-m",
+      "/var/home/shiro/models/embed/embeddinggemma/embeddinggemma-Q8_0.gguf",
+      "--embedding",
+      "--pooling",
+      "mean",
+      "-t",
+      "4",
+      "-c",
+      "2056",
+      "-b",
+      "2056",
+      "-ub",
+      "1024",
+      "-np",
+      "1",
+      "-fa",
+      "auto",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8425"
+     ],
+     "pooling": "mean",
+     "threads": 4,
+     "parallel": 1,
+     "ctx": 20560,
+     "batch": 2056,
+     "ubatch": 1024
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/embeddinggemma.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       0.4462890625,
+       1.94580078125,
+       2.38623046875
+      ],
+      "mem_available_gb": 6.28,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.88
+     },
+     {
+      "loadavg": [
+       0.71875,
+       1.64501953125,
+       2.21240234375
+      ],
+      "mem_available_gb": 6.27,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.88
+     },
+     {
+      "loadavg": [
+       0.27978515625,
+       1.15625,
+       1.90771484375
+      ],
+      "mem_available_gb": 6.27,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.88
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       2.9853515625,
+       2.40625,
+       2.5146484375
+      ],
+      "mem_available_gb": 6.22,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.88
+     },
+     {
+      "loadavg": [
+       2.98193359375,
+       2.14013671875,
+       2.345703125
+      ],
+      "mem_available_gb": 6.19,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.88
+     },
+     {
+      "loadavg": [
+       3.51123046875,
+       1.92041015625,
+       2.1162109375
+      ],
+      "mem_available_gb": 6.23,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.89
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 52.826,
+      "texts_per_s_spread": [
+       52.226,
+       52.919
+      ],
+      "tokens_per_s": 845.2,
+      "tokens_per_s_spread": [
+       835.6,
+       846.7
+      ],
+      "p50_s": 0.018765,
+      "p50_s_spread": [
+       0.018761,
+       0.018831
+      ],
+      "p99_s": 0.021061,
+      "p99_s_spread": [
+       0.019308,
+       0.024722
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 55.056,
+      "texts_per_s_spread": [
+       50.881,
+       55.088
+      ],
+      "tokens_per_s": 880.9,
+      "tokens_per_s_spread": [
+       814.1,
+       881.4
+      ],
+      "p50_s": 0.145089,
+      "p50_s_spread": [
+       0.144983,
+       0.147269
+      ],
+      "p99_s": 0.145552,
+      "p99_s_spread": [
+       0.145337,
+       0.1774
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 54.77,
+      "texts_per_s_spread": [
+       54.572,
+       55.536
+      ],
+      "tokens_per_s": 876.3,
+      "tokens_per_s_spread": [
+       873.2,
+       888.6
+      ],
+      "p50_s": 0.579119,
+      "p50_s_spread": [
+       0.57591,
+       0.580505
+      ],
+      "p99_s": 0.597064,
+      "p99_s_spread": [
+       0.576708,
+       0.599526
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 55.376,
+      "texts_per_s_spread": [
+       54.301,
+       55.497
+      ],
+      "tokens_per_s": 886.4,
+      "tokens_per_s_spread": [
+       869.2,
+       888.4
+      ],
+      "p50_s": 2.310305,
+      "p50_s_spread": [
+       2.305201,
+       2.356037
+      ],
+      "p99_s": 2.310305,
+      "p99_s_spread": [
+       2.305201,
+       2.356037
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 7.801,
+      "texts_per_s_spread": [
+       7.733,
+       7.82
+      ],
+      "tokens_per_s": 998.5,
+      "tokens_per_s_spread": [
+       989.9,
+       1000.9
+      ],
+      "p50_s": 0.12806,
+      "p50_s_spread": [
+       0.127643,
+       0.128461
+      ],
+      "p99_s": 0.129525,
+      "p99_s_spread": [
+       0.129265,
+       0.134556
+      ],
+      "rounds": 3,
+      "requests": [
+       16,
+       16,
+       16
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 7.831,
+      "texts_per_s_spread": [
+       7.819,
+       7.849
+      ],
+      "tokens_per_s": 1002.4,
+      "tokens_per_s_spread": [
+       1000.9,
+       1004.7
+      ],
+      "p50_s": 1.021387,
+      "p50_s_spread": [
+       1.018998,
+       1.022865
+      ],
+      "p99_s": 1.02406,
+      "p99_s_spread": [
+       1.020125,
+       1.024308
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       2,
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 7.832,
+      "texts_per_s_spread": [
+       7.646,
+       7.855
+      ],
+      "tokens_per_s": 1002.5,
+      "tokens_per_s_spread": [
+       978.7,
+       1005.4
+      ],
+      "p50_s": 4.085169,
+      "p50_s_spread": [
+       4.073573,
+       4.184563
+      ],
+      "p99_s": 4.085169,
+      "p99_s_spread": [
+       4.073573,
+       4.184563
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 7.814,
+      "texts_per_s_spread": [
+       7.756,
+       7.829
+      ],
+      "tokens_per_s": 1000.2,
+      "tokens_per_s_spread": [
+       992.8,
+       1002.1
+      ],
+      "p50_s": 16.378447,
+      "p50_s_spread": [
+       16.348875,
+       16.501508
+      ],
+      "p99_s": 16.378447,
+      "p99_s_spread": [
+       16.348875,
+       16.501508
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 1.833,
+      "texts_per_s_spread": [
+       1.813,
+       1.834
+      ],
+      "tokens_per_s": 937.7,
+      "tokens_per_s_spread": [
+       927.4,
+       937.9
+      ],
+      "p50_s": 0.544984,
+      "p50_s_spread": [
+       0.544928,
+       0.551383
+      ],
+      "p99_s": 0.548603,
+      "p99_s_spread": [
+       0.547323,
+       0.561639
+      ],
+      "rounds": 3,
+      "requests": [
+       4,
+       4,
+       4
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 1.832,
+      "texts_per_s_spread": [
+       1.829,
+       1.842
+      ],
+      "tokens_per_s": 937.3,
+      "tokens_per_s_spread": [
+       936.2,
+       942.7
+      ],
+      "p50_s": 4.367345,
+      "p50_s_spread": [
+       4.342473,
+       4.372831
+      ],
+      "p99_s": 4.367345,
+      "p99_s_spread": [
+       4.342473,
+       4.372831
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 1.828,
+      "texts_per_s_spread": [
+       1.822,
+       1.837
+      ],
+      "tokens_per_s": 935.7,
+      "tokens_per_s_spread": [
+       932.3,
+       939.9
+      ],
+      "p50_s": 17.501648,
+      "p50_s_spread": [
+       17.422218,
+       17.565389
+      ],
+      "p99_s": 17.501648,
+      "p99_s_spread": [
+       17.422218,
+       17.565389
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "skipped": "128 texts x 512 tokens = 65536 tokens per request exceeds this model's 32768-token batch cap; the padded batch's attention buffers would not fit in the host's memory budget",
+      "batch_tokens": 65536,
+      "batch_token_cap": 32768
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 56.017,
+      "texts_per_s_spread": [
+       53.973,
+       56.137
+      ],
+      "tokens_per_s": 896.3,
+      "tokens_per_s_spread": [
+       863.6,
+       898.2
+      ],
+      "p50_s": 0.098841,
+      "p50_s_spread": [
+       0.098229,
+       0.107167
+      ],
+      "p99_s": 0.178491,
+      "p99_s_spread": [
+       0.17822,
+       0.196861
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.998751,
+     "cosine_min": 0.991447,
+     "cosine_p1": 0.992341,
+     "norm_mean": 1.0,
+     "dim": 768,
+     "n": 200,
+     "reference": {
+      "label": "onnx-fp32",
+      "backend": "onnx-fp32",
+      "dim": 768,
       "count": 200
      }
     }
@@ -11084,6 +12169,541 @@
      "cosine_mean": 0.999319,
      "cosine_min": 0.998576,
      "cosine_p1": 0.999021,
+     "norm_mean": 1.0,
+     "dim": 1024,
+     "n": 200,
+     "reference": {
+      "label": "torch-fp32",
+      "backend": "torch-fp32",
+      "dim": 1024,
+      "count": 200
+     }
+    }
+   },
+   {
+    "engine": "peregrine",
+    "precision": "q8_0",
+    "rounds": 3,
+    "row": {
+     "engine": "peregrine",
+     "precision": "q8_0",
+     "path": "/var/home/shiro/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+     "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+     "size_bytes": 639150592,
+     "fingerprint": {
+      "kind": "file",
+      "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+      "size_bytes": 639150592
+     },
+     "notes": "pre-merge branch build of origin/s4.1-embeddings (63288ec), PR #158; not on main yet"
+    },
+    "model": {
+     "name": "qwen3-embed-0.6b",
+     "hf": "Qwen/Qwen3-Embedding-0.6B",
+     "pooling": "last",
+     "max_tokens": 512,
+     "dim": 1024,
+     "tokenizer_dir": "qwen3-embed-0.6b"
+    },
+    "engine_info": {
+     "name": "peregrine",
+     "binary": "/var/tmp/wt-s41/target/release/peregrine",
+     "worktree": "/var/tmp/wt-s41",
+     "commit": "63288ecf88ade3248107f95cc943b98c91d499d8",
+     "branch": "HEAD",
+     "server_version": "peregrine 0.1.2"
+    },
+    "start": {
+     "cmd": [
+      "/var/tmp/wt-s41/target/release/peregrine",
+      "serve",
+      "-m",
+      "/var/home/shiro/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8405",
+      "-t",
+      "4",
+      "-c",
+      "512",
+      "--slots",
+      "10",
+      "--no-profile"
+     ],
+     "threads": 4,
+     "slots": 10,
+     "pooling": "last"
+    },
+    "settings": {
+     "lengths": [
+      16,
+      128,
+      512
+     ],
+     "batches": [
+      1,
+      8,
+      32,
+      128
+     ],
+     "clients": [
+      1,
+      10
+     ],
+     "threads": 4,
+     "budget_s": 2.0,
+     "max_requests": 60,
+     "max_big_requests": 3,
+     "max_cell_seconds": 120.0,
+     "texts_file": "/var/tmp/embed-texts/qwen3-embed-0.6b.json",
+     "texts_per_length": 128
+    },
+    "host_before": [
+     {
+      "loadavg": [
+       0.5,
+       1.5185546875,
+       1.96142578125
+      ],
+      "mem_available_gb": 5.54,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.82
+     },
+     {
+      "loadavg": [
+       0.634765625,
+       1.66552734375,
+       2.0029296875
+      ],
+      "mem_available_gb": 5.49,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.94
+     },
+     {
+      "loadavg": [
+       0.4287109375,
+       0.75146484375,
+       1.509765625
+      ],
+      "mem_available_gb": 5.46,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.95
+     }
+    ],
+    "host_after": [
+     {
+      "loadavg": [
+       4.36865234375,
+       2.77294921875,
+       2.37109375
+      ],
+      "mem_available_gb": 5.07,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.85
+     },
+     {
+      "loadavg": [
+       4.02783203125,
+       2.83154296875,
+       2.40625
+      ],
+      "mem_available_gb": 5.09,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.94
+     },
+     {
+      "loadavg": [
+       3.90380859375,
+       2.23876953125,
+       1.96044921875
+      ],
+      "mem_available_gb": 5.21,
+      "mem_total_gb": 13.52,
+      "swap_total_gb": 8.0,
+      "swap_free_gb": 0.95
+     }
+    ],
+    "machine": {
+     "hostname": "bluefin",
+     "os": "Linux",
+     "kernel": "7.2.7-200.fc44.x86_64",
+     "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+     "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+     "cpu_features": [
+      "fma",
+      "avx",
+      "avx2"
+     ],
+     "cores_logical": 8,
+     "threads_tested": 4,
+     "governor": "powersave",
+     "python": "3.14.8"
+    },
+    "cells": {
+     "L16_b1_c1": {
+      "texts_per_s": 20.781,
+      "texts_per_s_spread": [
+       20.708,
+       21.203
+      ],
+      "tokens_per_s": 332.5,
+      "tokens_per_s_spread": [
+       331.3,
+       339.2
+      ],
+      "p50_s": 0.046783,
+      "p50_s_spread": [
+       0.046656,
+       0.047578
+      ],
+      "p99_s": 0.055844,
+      "p99_s_spread": [
+       0.054009,
+       0.080988
+      ],
+      "rounds": 3,
+      "requests": [
+       43,
+       42,
+       42
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b8_c1": {
+      "texts_per_s": 21.664,
+      "texts_per_s_spread": [
+       19.71,
+       21.728
+      ],
+      "tokens_per_s": 346.6,
+      "tokens_per_s_spread": [
+       315.4,
+       347.7
+      ],
+      "p50_s": 0.369168,
+      "p50_s_spread": [
+       0.36729,
+       0.406675
+      ],
+      "p99_s": 0.371032,
+      "p99_s_spread": [
+       0.369566,
+       0.407089
+      ],
+      "rounds": 3,
+      "requests": [
+       3,
+       3,
+       3
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b32_c1": {
+      "texts_per_s": 20.446,
+      "texts_per_s_spread": [
+       19.597,
+       20.713
+      ],
+      "tokens_per_s": 327.1,
+      "tokens_per_s_spread": [
+       313.5,
+       331.4
+      ],
+      "p50_s": 1.564568,
+      "p50_s_spread": [
+       1.544502,
+       1.632451
+      ],
+      "p99_s": 1.565383,
+      "p99_s_spread": [
+       1.549308,
+       1.632501
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       2,
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L16_b128_c1": {
+      "texts_per_s": 20.853,
+      "texts_per_s_spread": [
+       20.393,
+       20.947
+      ],
+      "tokens_per_s": 333.8,
+      "tokens_per_s_spread": [
+       326.4,
+       335.3
+      ],
+      "p50_s": 6.136681,
+      "p50_s_spread": [
+       6.10899,
+       6.275258
+      ],
+      "p99_s": 6.136681,
+      "p99_s_spread": [
+       6.10899,
+       6.275258
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b1_c1": {
+      "texts_per_s": 2.733,
+      "texts_per_s_spread": [
+       2.71,
+       2.75
+      ],
+      "tokens_per_s": 349.9,
+      "tokens_per_s_spread": [
+       346.9,
+       352.0
+      ],
+      "p50_s": 0.364966,
+      "p50_s_spread": [
+       0.363224,
+       0.369091
+      ],
+      "p99_s": 0.369594,
+      "p99_s_spread": [
+       0.36528,
+       0.371307
+      ],
+      "rounds": 3,
+      "requests": [
+       6,
+       6,
+       6
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b8_c1": {
+      "texts_per_s": 2.73,
+      "texts_per_s_spread": [
+       2.67,
+       2.745
+      ],
+      "tokens_per_s": 349.5,
+      "tokens_per_s_spread": [
+       341.8,
+       351.3
+      ],
+      "p50_s": 2.929812,
+      "p50_s_spread": [
+       2.914236,
+       2.995833
+      ],
+      "p99_s": 2.929812,
+      "p99_s_spread": [
+       2.914236,
+       2.995833
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b32_c1": {
+      "texts_per_s": 2.717,
+      "texts_per_s_spread": [
+       2.638,
+       2.726
+      ],
+      "tokens_per_s": 347.8,
+      "tokens_per_s_spread": [
+       337.6,
+       348.9
+      ],
+      "p50_s": 11.777524,
+      "p50_s_spread": [
+       11.738494,
+       12.130877
+      ],
+      "p99_s": 11.777524,
+      "p99_s_spread": [
+       11.738494,
+       12.130877
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L128_b128_c1": {
+      "texts_per_s": 2.686,
+      "texts_per_s_spread": [
+       2.653,
+       2.707
+      ],
+      "tokens_per_s": 343.9,
+      "tokens_per_s_spread": [
+       339.6,
+       346.5
+      ],
+      "p50_s": 47.645257,
+      "p50_s_spread": [
+       47.280918,
+       48.243454
+      ],
+      "p99_s": 47.645257,
+      "p99_s_spread": [
+       47.280918,
+       48.243454
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b1_c1": {
+      "texts_per_s": 0.617,
+      "texts_per_s_spread": [
+       0.616,
+       0.62
+      ],
+      "tokens_per_s": 315.9,
+      "tokens_per_s_spread": [
+       315.3,
+       317.6
+      ],
+      "p50_s": 1.620725,
+      "p50_s_spread": [
+       1.611852,
+       1.623796
+      ],
+      "p99_s": 1.627074,
+      "p99_s_spread": [
+       1.621028,
+       1.632958
+      ],
+      "rounds": 3,
+      "requests": [
+       2,
+       2,
+       2
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b8_c1": {
+      "texts_per_s": 0.618,
+      "texts_per_s_spread": [
+       0.61,
+       0.624
+      ],
+      "tokens_per_s": 316.3,
+      "tokens_per_s_spread": [
+       312.5,
+       319.5
+      ],
+      "p50_s": 12.949142,
+      "p50_s_spread": [
+       12.820732,
+       13.10553
+      ],
+      "p99_s": 12.949142,
+      "p99_s_spread": [
+       12.820732,
+       13.10553
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b32_c1": {
+      "texts_per_s": 0.619,
+      "texts_per_s_spread": [
+       0.613,
+       0.619
+      ],
+      "tokens_per_s": 316.7,
+      "tokens_per_s_spread": [
+       313.6,
+       316.8
+      ],
+      "p50_s": 51.72158,
+      "p50_s_spread": [
+       51.689986,
+       52.217056
+      ],
+      "p99_s": 51.72158,
+      "p99_s_spread": [
+       51.689986,
+       52.217056
+      ],
+      "rounds": 3,
+      "requests": [
+       1,
+       1,
+       1
+      ],
+      "tokens_source": "engine"
+     },
+     "L512_b128_c1": {
+      "skipped": "128 texts x 512 tokens = 65536 tokens per request exceeds this model's 32768-token batch cap; the padded batch's attention buffers would not fit in the host's memory budget",
+      "batch_tokens": 65536,
+      "batch_token_cap": 32768
+     },
+     "L16_b1_c10": {
+      "texts_per_s": 18.503,
+      "texts_per_s_spread": [
+       17.718,
+       18.618
+      ],
+      "tokens_per_s": 296.0,
+      "tokens_per_s_spread": [
+       283.5,
+       297.9
+      ],
+      "p50_s": 0.328046,
+      "p50_s_spread": [
+       0.323957,
+       0.337589
+      ],
+      "p99_s": 0.591759,
+      "p99_s_spread": [
+       0.58103,
+       0.607403
+      ],
+      "rounds": 3,
+      "requests": [
+       60,
+       60,
+       60
+      ],
+      "tokens_source": "engine"
+     }
+    },
+    "accuracy": {
+     "cosine_mean": 0.999313,
+     "cosine_min": 0.998573,
+     "cosine_p1": 0.998966,
      "norm_mean": 1.0,
      "dim": 1024,
      "n": 200,

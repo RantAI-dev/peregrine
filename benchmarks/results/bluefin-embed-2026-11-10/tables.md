@@ -12,6 +12,12 @@
 | OpenVINO fp32 | 1.0000 | 60.08 | 111 | 117 | 116 | 14.45 | 13.69 | 15.21 | 14.76 | 3.35 | 3.55 | 3.54 | skip |
 | TEI fp32 | 1.0000 | 26.44 | 27.97 | 29.14 | 29.10 | 5.80 | 5.67 | 5.86 | 5.80 | 1.08 | 1.03 | 1.00 | skip |
 
+**bge-m3** — texts per s
+
+| engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| llama.cpp q8_0 | — | 20.99 | 25.27 | 25.39 | 25.41 | 3.21 | 2.72 | 2.73 | 2.71 | 0.70 | 0.63 | 0.63 | skip |
+
 **bge-small** — texts per s
 
 | engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
@@ -22,6 +28,12 @@
 | llama.cpp q8_0 | 0.9999 | 166 | 257 | 264 | 271 | 34.75 | 31.92 | 32.29 | 32.16 | 7.47 | 6.81 | 6.71 | 6.75 |
 | OpenVINO fp32 | 1.0000 | 142 | 344 | 400 | 385 | 45.47 | 53.22 | 50.86 | 50.87 | 11.11 | 10.79 | 10.98 | 10.78 |
 | TEI fp32 | 1.0000 | 88.58 | 102 | 127 | 127 | 18.16 | 18.04 | 18.84 | 19.39 | 2.19 | 2.18 | 2.12 | 2.04 |
+
+**embeddinggemma** — texts per s
+
+| engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| llama.cpp q8_0 | 0.9988 | 52.83 | 55.06 | 54.77 | 55.38 | 7.80 | 7.83 | 7.83 | 7.81 | 1.83 | 1.83 | 1.83 | skip |
 
 **minilm** — texts per s
 
@@ -39,6 +51,7 @@
 | engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | llama.cpp q8_0 | 0.9993 | 15.71 | 15.87 | 15.97 | 15.82 | 2.19 | 2.22 | 2.20 | 2.19 | 0.50 | 0.50 | 0.49 | skip |
+| Peregrine q8_0 | 0.9993 | 20.78 | 21.66 | 20.45 | 20.85 | 2.73 | 2.73 | 2.72 | 2.69 | 0.62 | 0.62 | 0.62 | skip |
 
 
 **bge-base** — tokens per s
@@ -52,6 +65,12 @@
 | OpenVINO fp32 | 1.0000 | 961 | 1,780 | 1,872 | 1,852 | 1,849 | 1,753 | 1,948 | 1,890 | 1,710 | 1,814 | 1,813 | skip |
 | TEI fp32 | 1.0000 | 423 | 448 | 466 | 466 | 743 | 725 | 750 | 743 | 550 | 527 | 514 | skip |
 
+**bge-m3** — tokens per s
+
+| engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| llama.cpp q8_0 | — | 336 | 405 | 407 | 408 | 411 | 348 | 350 | 346 | 355 | 324 | 324 | skip |
+
 **bge-small** — tokens per s
 
 | engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
@@ -62,6 +81,12 @@
 | llama.cpp q8_0 | 0.9999 | 2,659 | 4,106 | 4,231 | 4,335 | 4,448 | 4,085 | 4,133 | 4,117 | 3,822 | 3,484 | 3,431 | 3,454 |
 | OpenVINO fp32 | 1.0000 | 2,275 | 5,508 | 6,398 | 6,155 | 5,820 | 6,812 | 6,510 | 6,511 | 5,681 | 5,519 | 5,616 | 5,517 |
 | TEI fp32 | 1.0000 | 1,417 | 1,636 | 2,026 | 2,028 | 2,325 | 2,309 | 2,412 | 2,481 | 1,120 | 1,116 | 1,084 | 1,043 |
+
+**embeddinggemma** — tokens per s
+
+| engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| llama.cpp q8_0 | 0.9988 | 845 | 881 | 876 | 886 | 998 | 1,002 | 1,002 | 1,000 | 938 | 937 | 936 | skip |
 
 **minilm** — tokens per s
 
@@ -79,6 +104,7 @@
 | engine · precision | cos | L16 b1 | L16 b8 | L16 b32 | L16 b128 | L128 b1 | L128 b8 | L128 b32 | L128 b128 | L512 b1 | L512 b8 | L512 b32 | L512 b128 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | llama.cpp q8_0 | 0.9993 | 251 | 254 | 256 | 253 | 281 | 284 | 281 | 281 | 255 | 254 | 252 | skip |
+| Peregrine q8_0 | 0.9993 | 332 | 347 | 327 | 334 | 350 | 350 | 348 | 344 | 316 | 316 | 317 | skip |
 
 
 ## single-text latency (batch 1)
@@ -92,12 +118,14 @@
 | bge-base | llama.cpp q8_0 | 15.4 | 22.1 | 133.8 | 153.2 |
 | bge-base | OpenVINO fp32 | 16.5 | 18.1 | 87.9 | 159.3 |
 | bge-base | TEI fp32 | 36.0 | 44.7 | 241.6 | 397.4 |
+| bge-m3 | llama.cpp q8_0 | 46.7 | 58.9 | 394.7 | 415.5 |
 | bge-small | fastembed fp32 | 5.6 | 6.1 | 33.0 | 63.4 |
 | bge-small | fastembed int8 | 4.5 | 6.3 | 28.5 | 55.4 |
 | bge-small | llama.cpp f32 | 6.5 | 7.9 | 32.7 | 42.0 |
 | bge-small | llama.cpp q8_0 | 5.8 | 8.5 | 38.2 | 55.5 |
 | bge-small | OpenVINO fp32 | 7.0 | 7.2 | 35.4 | 63.6 |
 | bge-small | TEI fp32 | 10.8 | 13.5 | 60.5 | 99.1 |
+| embeddinggemma | llama.cpp q8_0 | 18.8 | 21.1 | 98.8 | 178.5 |
 | minilm | fastembed fp32 | 3.9 | 4.7 | 20.5 | 39.4 |
 | minilm | fastembed int8 | 3.3 | 4.4 | 19.3 | 36.4 |
 | minilm | llama.cpp f16 | 3.9 | 4.3 | 19.8 | 39.7 |
@@ -105,6 +133,7 @@
 | minilm | OpenVINO fp32 | 4.9 | 5.3 | 23.5 | 42.6 |
 | minilm | TEI fp32 | 6.1 | 7.6 | 34.8 | 54.3 |
 | qwen3-embed-0.6b | llama.cpp q8_0 | 63.1 | 65.2 | 622.4 | 648.8 |
+| qwen3-embed-0.6b | Peregrine q8_0 | 46.8 | 55.8 | 328.0 | 591.8 |
 
 
 ## fastest competitor per cell
@@ -123,6 +152,17 @@
 | bge-base | L512 b1 | fastembed int8 | 3.5 | 1,804 | 3 rounds |
 | bge-base | L512 b8 | OpenVINO fp32 | 3.5 | 1,814 | 3 rounds |
 | bge-base | L512 b32 | OpenVINO fp32 | 3.5 | 1,813 | 3 rounds |
+| bge-m3 | L16 b1 | llama.cpp q8_0 | 21.0 | 336 | 3 rounds |
+| bge-m3 | L16 b8 | llama.cpp q8_0 | 25.3 | 405 | 3 rounds |
+| bge-m3 | L16 b32 | llama.cpp q8_0 | 25.4 | 407 | 3 rounds |
+| bge-m3 | L16 b128 | llama.cpp q8_0 | 25.4 | 408 | 3 rounds |
+| bge-m3 | L128 b1 | llama.cpp q8_0 | 3.2 | 411 | 3 rounds |
+| bge-m3 | L128 b8 | llama.cpp q8_0 | 2.7 | 348 | 3 rounds |
+| bge-m3 | L128 b32 | llama.cpp q8_0 | 2.7 | 350 | 3 rounds |
+| bge-m3 | L128 b128 | llama.cpp q8_0 | 2.7 | 346 | 3 rounds |
+| bge-m3 | L512 b1 | llama.cpp q8_0 | 0.7 | 355 | 3 rounds |
+| bge-m3 | L512 b8 | llama.cpp q8_0 | 0.6 | 324 | 3 rounds |
+| bge-m3 | L512 b32 | llama.cpp q8_0 | 0.6 | 324 | 3 rounds |
 | bge-small | L16 b1 | fastembed int8 | 206 | 3,296 | 3 rounds |
 | bge-small | L16 b8 | OpenVINO fp32 | 344 | 5,508 | 3 rounds |
 | bge-small | L16 b32 | OpenVINO fp32 | 400 | 6,398 | 3 rounds |
@@ -135,6 +175,17 @@
 | bge-small | L512 b8 | OpenVINO fp32 | 10.8 | 5,519 | 3 rounds |
 | bge-small | L512 b32 | OpenVINO fp32 | 11.0 | 5,616 | 3 rounds |
 | bge-small | L512 b128 | OpenVINO fp32 | 10.8 | 5,517 | 3 rounds |
+| embeddinggemma | L16 b1 | llama.cpp q8_0 | 52.8 | 845 | 3 rounds |
+| embeddinggemma | L16 b8 | llama.cpp q8_0 | 55.1 | 881 | 3 rounds |
+| embeddinggemma | L16 b32 | llama.cpp q8_0 | 54.8 | 876 | 3 rounds |
+| embeddinggemma | L16 b128 | llama.cpp q8_0 | 55.4 | 886 | 3 rounds |
+| embeddinggemma | L128 b1 | llama.cpp q8_0 | 7.8 | 998 | 3 rounds |
+| embeddinggemma | L128 b8 | llama.cpp q8_0 | 7.8 | 1,002 | 3 rounds |
+| embeddinggemma | L128 b32 | llama.cpp q8_0 | 7.8 | 1,002 | 3 rounds |
+| embeddinggemma | L128 b128 | llama.cpp q8_0 | 7.8 | 1,000 | 3 rounds |
+| embeddinggemma | L512 b1 | llama.cpp q8_0 | 1.8 | 938 | 3 rounds |
+| embeddinggemma | L512 b8 | llama.cpp q8_0 | 1.8 | 937 | 3 rounds |
+| embeddinggemma | L512 b32 | llama.cpp q8_0 | 1.8 | 936 | 3 rounds |
 | minilm | L16 b1 | fastembed int8 | 267 | 4,276 | 3 rounds |
 | minilm | L16 b8 | OpenVINO fp32 | 537 | 8,586 | 3 rounds |
 | minilm | L16 b32 | OpenVINO fp32 | 655 | 10,484 | 3 rounds |

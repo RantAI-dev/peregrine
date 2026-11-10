@@ -73,6 +73,18 @@
      "notes": "sentence-transformers, OpenVINO backend (exported IR)"}
    ]
   },
+  "bge-m3": {
+   "max_batch_tokens": 16384,
+   "hf": "BAAI/bge-m3",
+   "pooling": "cls",
+   "max_tokens": 1024,
+   "dim": 1024,
+   "tokenizer_dir": "bge-m3/ref",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "q8_0", "path": "bge-m3-Q8_0.gguf",
+     "notes": "GGUF Q8_0; server context capped at 2048 tokens/slot because this model's KV is 2 GB at 32k"}
+   ]
+  },
   "qwen3-embed-0.6b": {
    "max_batch_tokens": 32768,
    "hf": "Qwen/Qwen3-Embedding-0.6B",
@@ -82,7 +94,10 @@
    "tokenizer_dir": "qwen3-embed-0.6b",
    "rows": [
     {"engine": "llama_cpp", "precision": "q8_0", "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
-     "notes": "GGUF Q8_0 from Qwen/Qwen3-Embedding-0.6B-GGUF"}
+     "notes": "GGUF Q8_0 from Qwen/Qwen3-Embedding-0.6B-GGUF"},
+    {"engine": "peregrine", "precision": "q8_0",
+     "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+     "notes": "pre-merge branch build of origin/s4.1-embeddings (63288ec), PR #158; not on main yet"}
    ]
   },
   "embeddinggemma": {
