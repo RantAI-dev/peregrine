@@ -158,8 +158,49 @@ requests, (c) alone against a server started with `--speculate` (prompt-lookup).
 that batching does not change the tokens: the same 520 prompts were answered concurrently
 in one weight pass without a single differing byte.
 
-**What this run does not cover.** Peregrine's side is the ARM host, with the smaller subsets
-above; the full 250/500/163 Peregrine sweep on the x86 reference hosts (H2/H3) is the
-release run and uses the same harness (`--limit` omitted). Qwen3-1.7B is measured with
-thinking disabled for all engines, which is the chat default the server exposes; a
-thinking-enabled run is a separate configuration.
+**Full ARM sweep, 2026-11-10.** The aarch64 NEON i8mm tier (`9e47bb2`, the #129 tip) was
+built once and run on the full sets (250/500/163, no `--limit`) on the same DGX Spark,
+pinned to the 10 Cortex-X925 cores, `--slots 8`. All four gate models pass all twelve
+checks:
+
+| Model | Engine | GSM8K | MMLU | HumanEval+ |
+|---|---|---|---|---|
+| Qwen2.5-0.5B-Instruct | BF16 (vLLM) | 42.8 | 36.2 | 25.2 |
+| | llama.cpp Q4_K_M | 40.4 | 33.6 | 32.5 |
+| | Peregrine i8mm Q4_K_M | 40.0 | 35.0 | 34.4 |
+| | Δ vs llama.cpp, paired | -0.4 | +1.4 | +1.8 |
+| Llama-3.2-1B-Instruct | BF16 (vLLM) | 48.8 | 30.4 | 33.1 |
+| | llama.cpp Q4_K_M | 48.8 | 29.6 | 30.7 |
+| | Peregrine i8mm Q4_K_M | 48.0 | 28.8 | 31.9 |
+| | Δ vs llama.cpp, paired | -0.8 | -0.8 | +1.2 |
+| gemma-3-1b-it | BF16 (vLLM) | 54.0 | 39.0 | 38.7 |
+| | llama.cpp Q4_K_M | 49.2 | 40.0 | 31.9 |
+| | Peregrine i8mm Q4_K_M | 45.6 | 40.4 | 32.5 |
+| | Δ vs llama.cpp, paired | -3.6 | +0.4 | +0.6 |
+| Qwen3-1.7B | BF16 (vLLM) | 80.4 | 47.0 | 62.6 |
+| | llama.cpp Q4_K_M | 78.0 | 45.4 | 56.4 |
+| | Peregrine i8mm Q4_K_M | 77.6 | 45.4 | 55.8 |
+| | Δ vs llama.cpp, paired | -0.4 | 0.0 | -0.6 |
+
+The largest paired difference is -3.6 points (gemma-3-1b GSM8K, exact McNemar p = 0.12) and
+every other cell is within 1.8 points; the full table with CIs and p-values is
+`benchmarks/accuracy/results/2026-11-10-dgx-spark-arm/report.md`. The earlier 40-item
+Qwen3-1.7B HumanEval+ subset (47.5 %) was sampling noise, not a regression: the full set is
+55.8 % against llama.cpp's 56.4 % (Δ -0.6, p = 1.0), and on the same 40 shuffled items the
+full run scores 52.5 %. The two items that move are different code generations (both
+engines return a fenced Python block throughout), so this is numeric near-ties at the token
+level, not tokenizer, template or stop-sequence handling.
+
+**Invariance on the NEON build, 2026-11-10.** The same 520-prompt set was replayed on the
+i8mm build for Qwen2.5-0.5B and Llama-3.2-1B, alone, in groups of eight, and against a
+server started with `--speculate`: **520/520 replies are byte-identical** for both models
+(`benchmarks/accuracy/results/2026-11-10-dgx-spark-arm/invariance/qwen25-05b/compare.md`,
+`.../invariance/llama32-1b/compare.md`). Speculation is much slower than plain decoding on
+this build (0.4-1.6 prompts/s against 0.6-2 prompts/s plain), so the phase was run in
+chunks; the committed `speculation.jsonl` is the full 520-prompt sequence.
+
+**What this run does not cover.** The full 250/500/163 sweep on the x86 reference hosts
+(H2/H3) is still the release run and uses the same harness (`--limit` omitted); the numbers
+above are the aarch64 half. Qwen3-1.7B is measured with thinking disabled for all engines,
+which is the chat default the server exposes; a thinking-enabled run is a separate
+configuration.
