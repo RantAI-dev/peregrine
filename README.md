@@ -141,6 +141,9 @@ llama.cpp's `llama-tokenize` (22/22 strings), greedy decoding matches bit for bi
 
 ## Quick start
 
+New here? [docs/quickstart.md](docs/quickstart.md) walks a first request end to end: a release
+binary (or Docker), a small model, `curl` and the OpenAI Python client.
+
 ```sh
 git clone https://github.com/RantAI-dev/peregrine && cd peregrine
 cargo build --release
@@ -178,6 +181,7 @@ cargo build --release -p peregrine --no-default-features --features cli,arch-qwe
 | | |
 |---|---|
 | [Product](docs/product.md) | what Peregrine is, who it is for, what it will not do |
+| [Quickstart](docs/quickstart.md) | a release binary or Docker, a model, and the first request |
 | [Targets](docs/targets.md) | the speed, accuracy and support numbers we hold ourselves to |
 | [Benchmarks](docs/benchmark.md) | Peregrine against llama.cpp, wins and losses, with charts |
 | [Roadmap](docs/roadmap.md) | the plan, stage by stage |
