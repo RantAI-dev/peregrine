@@ -49,7 +49,10 @@ pub fn support_text() -> String {
     }
 
     let _ = writeln!(out, "CPU tiers:");
-    let _ = writeln!(out, "  scalar, avx2, avx-vnni, avx512");
+    let _ = writeln!(
+        out,
+        "  scalar, avx2, avx-vnni, avx512, neon, neon-dotprod, neon-i8mm"
+    );
 
     let _ = writeln!(out, "tokenizers:");
     let _ = writeln!(
@@ -81,7 +84,7 @@ pub fn support_markdown() -> String {
                 "gemma3" => "Gemma 3",
                 "phi3" => "Phi-3 / Phi-4",
                 "qwen3moe" => "Qwen 3 MoE",
-                "gpt-oss" => "gpt-oss (synthetic check; real file pending)",
+                "gpt-oss" => "gpt-oss",
                 other => other,
             };
             arch_items.push(label);
@@ -94,8 +97,7 @@ pub fn support_markdown() -> String {
     let fmt_str = fmt_labels.join(", ");
 
     // 3. CPUs
-    let cpu_str =
-        "x86-64 AVX2, AVX-VNNI (256-bit), AVX-512 (VNNI, GFNI, VBMI); others through scalar code";
+    let cpu_str = "x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code";
 
     // 4. Tokenizers
     let tok_str = "GPT-2 byte-level BPE, SentencePiece (llama)";
