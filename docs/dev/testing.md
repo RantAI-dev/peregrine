@@ -48,6 +48,16 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.
 
+## The server's lifetime
+
+`crates/peregrine/tests/serve_lifetime.rs` starts the built `peregrine serve` binary on a synthetic
+model and checks that it is still serving (and answering a chat completion) after a drain timeout has
+elapsed with no signal, then that `SIGTERM` stops it cleanly. `PEREGRINE_DRAIN_TIMEOUT_MS` overrides
+the 30 s drain timeout for that test; it is for tests only and is not part of the user-facing CLI.
+The unit tests around `serve_with_drain` in `crates/peregrine-server/src/lib.rs` cover the three
+shutdown paths directly: no shutdown request (the server keeps serving), an idle drain (prompt exit),
+and a drain with a streaming client holding the connection open (it ends at the timeout, not before).
+
 ## Where tests look for model files
 
 | File | Location |

@@ -32,6 +32,10 @@ required-features = ["cli"]
 name = "hf_cold_cache"
 required-features = ["cli"]
 
+[[test]]
+name = "serve_lifetime"
+required-features = ["cli", "server"]
+
 [features]
 default = [
     "cli",

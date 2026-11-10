@@ -41,6 +41,11 @@ All notable changes to this project are documented here. The format follows
 ## [0.1.2] - 2026-11-10
 
 ### Fixed
+- **The server no longer exits 30 seconds after it starts.** The drain timeout in `peregrine serve`
+  wrapped the whole serving future instead of the shutdown, so a server nobody had asked to stop
+  exited 30 s after it began listening. The timeout now starts only when a shutdown signal
+  (`SIGTERM`, Ctrl-C, or a `SIGHUP`/`upgrade` handover) begins the drain; `serve`,
+  `serve --background`, `status`, `stop` and `upgrade` otherwise behave as before.
 - **The first `hf:` download no longer breaks the command that made it.** On a cold model cache,
   the download pre-flight opened the partial file through the normal GGUF reader, which read the
   engine options and latched them before the command could set its own: `peregrine run` exited with
