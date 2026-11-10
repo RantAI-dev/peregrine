@@ -182,7 +182,7 @@ fn scalar_width(t: u32) -> Option<usize> {
 
 impl Gguf {
     pub fn open(path: &Path) -> Result<Gguf, String> {
-        Self::open_inner(path, true)
+        Self::open_inner(path, true, true)
     }
 
     /// Open a file whose header is complete but whose tensor data may still be downloading.
@@ -192,10 +192,24 @@ impl Gguf {
     /// skipped. Used for the pre-flight check on a partially downloaded `hf:` model, so a build
     /// can refuse a file before the remaining gigabytes are fetched.
     pub fn open_header(path: &Path) -> Result<Gguf, String> {
-        Self::open_inner(path, false)
+        Self::open_inner(path, false, true)
     }
 
-    fn open_inner(path: &Path, require_full: bool) -> Result<Gguf, String> {
+    /// [`Self::open`] without the engine options: a plain read-only map.
+    ///
+    /// The download pre-flight runs before the command line has set the process options, so it
+    /// must not read them — the first read latches them for the rest of the process. Huge pages are
+    /// a load-time choice and irrelevant to a check, so this mapping never copies the file.
+    pub fn open_plain(path: &Path) -> Result<Gguf, String> {
+        Self::open_inner(path, true, false)
+    }
+
+    /// [`Self::open_header`] without the engine options, for the same pre-flight use.
+    pub fn open_header_plain(path: &Path) -> Result<Gguf, String> {
+        Self::open_inner(path, false, false)
+    }
+
+    fn open_inner(path: &Path, require_full: bool, read_options: bool) -> Result<Gguf, String> {
         let file = File::open(path).map_err(|e| format!("gguf: cannot open {path:?}: {e}"))?;
         // SAFETY: the mapping is read-only and the engine treats its contents as
         // untrusted input (every access is bounds-checked against `TensorInfo`).
@@ -205,8 +219,10 @@ impl Gguf {
         // `PEREGRINE_HUGEPAGES=1` copies the file into anonymous memory backed by transparent huge
         // pages. A decode step streams every weight once; with 4 KB page-cache pages that is a TLB miss per 4 KB,
         // with 2 MB pages one per 2 MB. Costs one copy at load and the page cache's copy can then be dropped.
+        #[cfg(not(target_os = "linux"))]
+        let _ = read_options;
         #[cfg(target_os = "linux")]
-        let (map, file) = if crate::options::get().hugepages {
+        let (map, file) = if read_options && crate::options::get().hugepages {
             let mut anon = memmap2::MmapMut::map_anon(map.len())
                 .map_err(|e| format!("gguf: anon map: {e}"))?;
             let _ = anon.advise(memmap2::Advice::HugePage);

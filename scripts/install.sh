@@ -14,7 +14,7 @@
 #
 # Options:
 #   --prefix DIR      install to DIR/bin (default: $PEREGRINE_PREFIX, else ~/.local)
-#   --version TAG     a release tag such as v0.1.0 (default: $PEREGRINE_VERSION, else the newest)
+#   --version TAG     a release tag such as v0.1.2 (default: $PEREGRINE_VERSION, else the newest)
 #   -h, --help        print this help
 #
 # Environment:
@@ -40,7 +40,7 @@ architecture and pick their AVX2 / AVX-512 / NEON kernels at run time (`peregrin
 
 Options:
   --prefix DIR      install to DIR/bin (default: $PEREGRINE_PREFIX, else ~/.local)
-  --version TAG     a release tag such as v0.1.0 (default: $PEREGRINE_VERSION, else the newest)
+  --version TAG     a release tag such as v0.1.2 (default: $PEREGRINE_VERSION, else the newest)
   -h, --help        print this help
 
 Environment:

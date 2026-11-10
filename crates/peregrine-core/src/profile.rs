@@ -82,9 +82,15 @@ pub fn cpu_model_name() -> String {
     std::env::consts::ARCH.to_string()
 }
 
-/// The CPU feature string the tier detection uses (`crate::cpu::tier_name()`).
+/// The CPU feature string the tier detection uses, under `PEREGRINE_ISA` (`crate::cpu::tier_name`).
+///
+/// This reads the environment directly rather than the process options: a profile is resolved
+/// *before* the engine options are initialised (the profile itself is an input to them), so the
+/// check must not be the first read of `options::get()`. The kernel tier cap is never set by a
+/// profile, so the environment is the only input that matters here.
 pub fn cpu_features_string() -> String {
-    crate::cpu::tier_name()
+    let isa = crate::cpu::parse_isa(std::env::var("PEREGRINE_ISA").ok().as_deref());
+    crate::cpu::tier_name_under(isa)
 }
 
 /// A parsed tuning profile.

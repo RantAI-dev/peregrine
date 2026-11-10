@@ -41,7 +41,9 @@ pub mod tune;
 /// A description of a model file: what it is, what it holds, and whether this build can run it.
 pub fn inspect(path: &std::path::Path) -> Result<String, String> {
     use std::fmt::Write as _;
-    let g = Gguf::open(path)?;
+    // `inspect` is a header reading, not a model load: it must not latch the process options or
+    // copy the file into huge-page memory.
+    let g = Gguf::open_plain(path)?;
     let mut out = String::new();
     let arch = g.str("general.architecture").unwrap_or("unknown");
     let _ = writeln!(out, "file          {}", path.display());

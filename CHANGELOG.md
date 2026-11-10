@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-10
+
+### Fixed
+- **The first `hf:` download no longer breaks the command that made it.** On a cold model cache,
+  the download pre-flight opened the partial file through the normal GGUF reader, which read the
+  engine options and latched them before the command could set its own: `peregrine run` exited with
+  "engine options were already set or read", `peregrine serve` panicked on the same line, and
+  `peregrine bench` silently measured with environment-default options instead of its tuning
+  profile. The pre-flight now opens the file with a plain read-only map and runs only the
+  metadata/build compatibility check, so it reads no process options; `run`, `serve`, `bench` and
+  `tune` now fail loudly if their options cannot be initialised. A warm cache was unaffected.
+
 ## [0.1.1] - 2026-11-10
 
 ### Added

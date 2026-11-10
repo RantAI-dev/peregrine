@@ -1,6 +1,7 @@
 //! `peregrine tune`: coordinate search over engine tuning knobs (roadmap S1.7).
 
 use clap::Args;
+use peregrine_core::options::EngineOptions;
 use peregrine_core::profile::{self, Profile};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -86,6 +87,12 @@ fn run_candidate_bench(
 
 /// Run `peregrine tune`.
 pub fn run(args: &TuneArgs) -> Result<(), String> {
+    // Tune's own process never loads a model, but it does read the CPU tier (for the profile) and
+    // spawns `bench` children. Set the options first so nothing latches an environment-derived set:
+    // the same contract `bench`, `run` and `serve` keep.
+    let opts = EngineOptions::from_env_and_profile(None);
+    peregrine_core::options::init(opts).map_err(|e| format!("engine options: {e}"))?;
+
     let out_path = match &args.out {
         Some(p) => p.clone(),
         None => profile::default_path(&args.model)?,
