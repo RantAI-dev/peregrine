@@ -125,6 +125,14 @@ impl GgufWriter {
         });
     }
 
+    /// Adds an entry whose value was built by the caller (a fixture's own keys).
+    pub fn add_meta(&mut self, key: &str, val: MetaValue) {
+        self.meta.push(MetaEntry {
+            key: key.to_string(),
+            val,
+        });
+    }
+
     /// Adds a tensor to the model.
     pub fn add_tensor(&mut self, name: &str, dims: &[u64], kind: Format, data: Vec<u8>) {
         let numel: u64 = dims.iter().product();

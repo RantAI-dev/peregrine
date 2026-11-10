@@ -3,7 +3,7 @@
 
 use super::vocab::{self, TemplateKind, VOCAB_SIZE};
 use super::weights::{generate_norm, generate_weights, Rng};
-use super::writer::GgufWriter;
+use super::writer::{GgufWriter, MetaValue};
 use peregrine_core::gguf::Format;
 use std::path::{Path, PathBuf};
 
@@ -46,7 +46,7 @@ pub enum Rope {
 /// Write a dense `arch` model ("llama", "qwen2" or "qwen3") whose matrices are all `fmt`, seeded by
 /// `seed`. `qwen2` carries the attention biases and NeoX rotary pairing its loader requires.
 pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None)
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None, &[])
 }
 
 /// A dense `arch` file that declares the pooling type an embedder was trained with
@@ -59,7 +59,17 @@ pub fn write_dense_pooled(
     s: Dense,
     pooling: u32,
 ) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, Some(pooling))
+    write_dense_impl(
+        dir,
+        arch,
+        fmt,
+        seed,
+        s,
+        Rope::None,
+        false,
+        Some(pooling),
+        &[],
+    )
 }
 
 /// The dense model whose drafts are accepted: every output-head row is identical, so all logits tie and
@@ -67,7 +77,79 @@ pub fn write_dense_pooled(
 /// zeros is what the suffix index needs to find a match in (the same n-gram twice), and what makes the
 /// draft it proposes the token the target draws.
 pub fn write_dense_accepting(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true, None)
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true, None, &[])
+}
+
+/// A dense model carrying extra GGUF metadata (the decision keys of S4.3, or one deliberately
+/// invalid entry for a validation test).
+pub fn write_dense_extra(
+    dir: &Path,
+    arch: &str,
+    fmt: Format,
+    seed: u64,
+    s: Dense,
+    extra: &[(String, MetaValue)],
+) -> PathBuf {
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None, extra)
+}
+
+/// The decision metadata a synthetic decision model carries: `<arch>.decision.type`, the
+/// temperatures, the score biases, the labels and the `systemone` template's bytes.
+///
+/// The template here is opaque fixture text, not a real prompt template: this stage only records
+/// its presence and length.
+#[derive(Clone, Default, Debug)]
+pub struct DecisionSpec {
+    pub type_name: Option<String>,
+    pub temperatures: Vec<(String, f32)>,
+    pub score_bias: Vec<((usize, usize), f32)>,
+    pub labels: Option<Vec<String>>,
+    /// The bytes stored under `tokenizer.chat_template.systemone`.
+    pub template: Option<String>,
+}
+
+impl DecisionSpec {
+    /// A spec for `type_name` with a short opaque template.
+    pub fn new(type_name: &str) -> DecisionSpec {
+        DecisionSpec {
+            type_name: Some(type_name.to_string()),
+            template: Some("State: {state}. Question: {question}".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// The GGUF entries this spec writes for architecture `arch`.
+    pub fn keys(&self, arch: &str) -> Vec<(String, MetaValue)> {
+        let mut out = Vec::new();
+        if let Some(t) = &self.type_name {
+            out.push((format!("{arch}.decision.type"), MetaValue::Str(t.clone())));
+        }
+        for (name, value) in &self.temperatures {
+            out.push((
+                format!("{arch}.decision.temperature.{name}"),
+                MetaValue::F32(*value),
+            ));
+        }
+        for ((n, level), value) in &self.score_bias {
+            out.push((
+                format!("{arch}.decision.score_bias.{n}.{level}"),
+                MetaValue::F32(*value),
+            ));
+        }
+        if let Some(labels) = &self.labels {
+            out.push((
+                format!("{arch}.decision.labels"),
+                MetaValue::ArrStr(labels.clone()),
+            ));
+        }
+        if let Some(template) = &self.template {
+            out.push((
+                "tokenizer.chat_template.systemone".to_string(),
+                MetaValue::Str(template.clone()),
+            ));
+        }
+        out
+    }
 }
 
 /// A llama file in F16 with the requested rotary-frequency treatment, for the rope-scaling loaders.
@@ -81,6 +163,7 @@ pub fn write_rope_dense(dir: &Path, rope: Rope, seed: u64) -> PathBuf {
         rope,
         false,
         None,
+        &[],
     )
 }
 
@@ -94,6 +177,7 @@ fn write_dense_impl(
     rope: Rope,
     accept: bool,
     pooling: Option<u32>,
+    extra: &[(String, MetaValue)],
 ) -> PathBuf {
     let mut rng = Rng::new(seed);
     let mut w = GgufWriter::new();
@@ -118,6 +202,10 @@ fn write_dense_impl(
         w.f32(&k("rope.scaling.factor"), factor);
     }
     w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
+    // Extra metadata (the decision keys of S4.3, or a deliberately invalid one).
+    for (key, value) in extra {
+        w.add_meta(key, value.clone());
+    }
     if arch == "qwen3" {
         w.u32(&k("attention.key_length"), head_dim as u32);
         w.u32(&k("attention.value_length"), head_dim as u32);
