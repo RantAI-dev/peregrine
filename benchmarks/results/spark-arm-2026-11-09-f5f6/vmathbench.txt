@@ -1,0 +1,20 @@
+== PEREGRINE_ISA=scalar
+n=8192 reps=300 tier=aarch64 isa=Some("scalar")
+swiglu                        14763.8 ns      4.4 GB/s
+silu                          13855.0 ns      2.4 GB/s
+mul_silu                      14422.0 ns      4.5 GB/s
+mul_sigmoid                   14174.0 ns      4.6 GB/s
+exp_shift_sum                 14569.8 ns      2.2 GB/s
+exp_scaled_sum                14841.5 ns      2.2 GB/s
+max                             525.2 ns     62.4 GB/s
+quantise fill                 29417.5 ns      1.1 GB/s
+== PEREGRINE_ISA=native
+n=8192 reps=300 tier=aarch64-neon-dotprod isa=Some("native")
+swiglu                         6417.8 ns     10.2 GB/s
+silu                           6265.9 ns      5.2 GB/s
+mul_silu                       6245.4 ns     10.5 GB/s
+mul_sigmoid                    6281.2 ns     10.4 GB/s
+exp_shift_sum                  6285.9 ns      5.2 GB/s
+exp_scaled_sum                 6549.9 ns      5.0 GB/s
+max                             529.8 ns     61.9 GB/s
+quantise fill                 12439.7 ns      2.6 GB/s

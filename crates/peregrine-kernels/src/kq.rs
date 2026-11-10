@@ -282,6 +282,22 @@ pub const fn q8_qs() -> usize {
 pub const Q8_QS_ROW: usize = 8;
 /// The bytes one window of a Q8_0 tile takes.
 pub const Q8_WINDOW: usize = 64;
+/// The byte offset of the eight rows' super-block scales in a Q6_K tile.
+pub const fn q6_d() -> usize {
+    Q6_D
+}
+/// The byte offset of the eight rows' eight-bit scales in a Q6_K tile.
+pub const fn q6_sc() -> usize {
+    Q6_SC
+}
+/// The byte offset of the eight rows' low nibbles in a Q6_K tile.
+pub const fn q6_ql() -> usize {
+    Q6_QL
+}
+/// The byte offset of the eight rows' high bits in a Q6_K tile.
+pub const fn q6_qh() -> usize {
+    Q6_QH
+}
 
 /// The six-bit scale of row `row` for sub-block `sub` of a repacked Q4_K tile.
 pub fn tile_q4k_scale(t: &[u8], sub: usize, row: usize) -> u8 {
@@ -600,6 +616,12 @@ pub struct KqActs {
     /// of it is an integer below 2^24 (63 · 4064 · 8 = 2 048 256), so it is
     /// exact in either domain and the kernel folds it in int32 lanes.
     pub bs: Vec<i32>,
+    /// The per-16-weight sum of every row: `groups · super_blocks · 4 · 16`.
+    ///
+    /// Q6_K changes its scale every sixteen weights, and its offset is applied
+    /// once per run, so the tile kernel needs the finer partition that
+    /// [`QuantAct::bsums`] already holds. The Q4_K kernels keep using `bs`.
+    pub bs16: Vec<i32>,
     /// The rows filled.
     pub rows: usize,
     /// The activation width.
@@ -648,6 +670,8 @@ impl KqActs {
         self.d.resize(groups * n_sb * ACT_GROUP, 0.0);
         self.bs.clear();
         self.bs.resize(groups * n_sb * ACT_GROUP * 8, 0);
+        self.bs16.clear();
+        self.bs16.resize(groups * n_sb * ACT_GROUP * 16, 0);
         for g in 0..groups {
             for sb in 0..n_sb {
                 let base = (g * n_sb + sb) * 1024;
@@ -664,6 +688,7 @@ impl KqActs {
                 }
                 let dbase = (g * n_sb + sb) * ACT_GROUP;
                 let bbase = (g * n_sb + sb) * ACT_GROUP * 8;
+                let bbase16 = (g * n_sb + sb) * ACT_GROUP * 16;
                 for t in 0..ACT_GROUP {
                     let b = g * ACT_GROUP + t;
                     if b >= acts.len() {
@@ -674,6 +699,10 @@ impl KqActs {
                     let rs = &acts[b].bsums[sb * 16..sb * 16 + 16];
                     for j in 0..8 {
                         self.bs[bbase + t * 8 + j] = rs[2 * j] as i32 + rs[2 * j + 1] as i32;
+                    }
+                    // The per-16 run sums themselves, for Q6_K's offset and scale.
+                    for (j, &s) in rs.iter().enumerate() {
+                        self.bs16[bbase16 + t * 16 + j] = s as i32;
                     }
                 }
             }
@@ -857,10 +886,67 @@ pub fn dot_q8_08_ref(tile: &[u8], n_blk: usize, row: usize, act: &QuantAct) -> f
     acc
 }
 
+/// The value of one row of a repacked Q6_K tile against one activation row.
+///
+/// This is the specification the NEON tile kernel is checked against, and it is exactly
+/// [`crate::quant::dot_scalar`]'s Q6_K expression: the six-bit codes are unscaled
+/// integers, the run's unsigned offset is applied once per sixteen weights against the
+/// activation's run sum, the eight-bit scales and the super-block scale are applied in
+/// the reference's order, and the integer sums are exact.
+///
+/// # Panics
+///
+/// If the tile is shorter than `n_sb` tiles, or the activation does not carry the per-256
+/// layout.
+pub fn dot_q6k8_ref(tile: &[u8], n_sb: usize, row: usize, act: &QuantAct) -> f32 {
+    assert!(row < 8, "a tile holds eight rows");
+    assert!(
+        tile.len() >= n_sb * Q6K8::SIZE,
+        "the tile is shorter than its super-blocks"
+    );
+    assert!(
+        !act.qk.is_empty(),
+        "a k-quant row needs the per-256 activation"
+    );
+    let mut acc = 0.0f32;
+    for sb in 0..n_sb {
+        let t = &tile[sb * Q6K8::SIZE..(sb + 1) * Q6K8::SIZE];
+        let d = f16(u16::from_le_bytes([
+            t[Q6_D + row * 2],
+            t[Q6_D + row * 2 + 1],
+        ]));
+        let mut sumi = 0i32;
+        for c in 0..2 {
+            let obase = sb * 256 + c * 128;
+            for g in 0..4 {
+                let nib_at = if g % 2 == 0 { 0 } else { 32 };
+                let high = g >= 2;
+                for hf in 0..2 {
+                    let o = obase + g * 32 + hf * 16;
+                    let mut s = 0i32;
+                    for l in 0..16 {
+                        let li = hf * 16 + l;
+                        let ql =
+                            Q6_QL + (c * 8 + (nib_at + li) / 8) * 64 + row * 8 + (nib_at + li) % 8;
+                        let qh = Q6_QH + (c * 4 + li / 8) * 64 + row * 8 + li % 8;
+                        let nib = if high { t[ql] >> 4 } else { t[ql] & 0x0F };
+                        let code = (nib | (((t[qh] >> (2 * g)) & 3) << 4)) as i32;
+                        s += code * act.qk[o + l] as i32;
+                    }
+                    let scale = t[Q6_SC + (c * 8 + 2 * g + hf) * 8 + row] as i8 as i32;
+                    let bias = 32 * act.bsums[o / 16] as i32;
+                    sumi += scale * (s - bias);
+                }
+            }
+        }
+        acc += d * act.dk[sb] * sumi as f32;
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// A seeded generator, so a failure is reproducible.
     struct Rng(u64);
 
