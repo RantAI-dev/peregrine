@@ -5,6 +5,7 @@
 | [product.md](product.md) | what Peregrine is, who it is for, scope |
 | [targets.md](targets.md) | speed, accuracy, support and engineering targets, and how they are measured |
 | [benchmark.md](benchmark.md) | measured engine-to-engine comparisons |
+| [docker.md](docker.md) | the server container image: build, run, flags, volumes |
 | [roadmap.md](roadmap.md) | the plan, stage by stage, with issue IDs |
 | [../ARCHITECTURE.md](../ARCHITECTURE.md) | a map of the code and its invariants |
 
