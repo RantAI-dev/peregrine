@@ -64,8 +64,9 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    entries of the full logits row a reference forward computes for that position, alone, after a
    sibling question with the same prompt prefix (which the prefix store restores on dense `llama`
    files, while a hybrid `qwen35` recomputes because a snapshot carries no recurrent state) and in a
-   batch of questions, at prefill chunks 1/16/64 and 1/2/4 threads. The read-out computes the full
-   row and gathers: the output head has no cheaper path that would stay bit-identical.
+   batch of questions, at prefill chunks 1/16/64 and 1/2/4 threads, through both scheduling paths
+   (the mixed engine and a `PEREGRINE_MIX=0` child). The read-out computes the full row and gathers:
+   the output head has no cheaper path that would stay bit-identical.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.

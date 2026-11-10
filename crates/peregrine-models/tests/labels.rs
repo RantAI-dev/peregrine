@@ -326,6 +326,55 @@ fn a_labels_slot_beside_a_chat_slot_still_reads_its_own_row() {
     assert_eq!(bits(&got.expect("label logits")), bits(&want));
 }
 
+/// The unmixed scheduler (`PEREGRINE_MIX=0`) prefills through `prefill_chunk` and reads a labels
+/// slot's row there. The switch is process-wide, so the child process runs the check.
+#[test]
+fn labels_through_the_unmixed_scheduler() {
+    if std::env::var_os("PEREGRINE_LABELS_CHILD").is_none() {
+        let exe = std::env::current_exe().expect("the test binary's path");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "labels_through_the_unmixed_scheduler",
+                "--nocapture",
+            ])
+            .env("PEREGRINE_MIX", "0")
+            .env("PEREGRINE_LABELS_CHILD", "1")
+            .status()
+            .expect("spawn the unmixed child");
+        assert!(status.success(), "the PEREGRINE_MIX=0 child failed");
+        return;
+    }
+    let dir = tmpdir("unmixed");
+    let prompts: Vec<Vec<u32>> = (0..3).map(question).collect();
+    for (arch, model) in models(&dir) {
+        for threads in [1usize, 2] {
+            for chunk in [1usize, 16] {
+                let reference: Vec<Vec<f32>> = prompts
+                    .iter()
+                    .map(|p| reference(&model, p, &LABELS, threads))
+                    .collect();
+                for (i, prompt) in prompts.iter().enumerate() {
+                    let r = run(&model, std::slice::from_ref(prompt), threads, chunk, 0);
+                    assert_eq!(
+                        bits(&r.logits[0]),
+                        bits(&reference[i]),
+                        "{arch}: question {i} alone (unmixed), {threads} threads, chunk {chunk}"
+                    );
+                }
+                let r = run(&model, &prompts, threads, chunk, 0);
+                for (i, want) in reference.iter().enumerate() {
+                    assert_eq!(
+                        bits(&r.logits[i]),
+                        bits(want),
+                        "{arch}: question {i} in a batch (unmixed), {threads} threads, chunk {chunk}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_pooled_emission_has_no_label_logits() {
     // The two read-outs do not leak into each other.
