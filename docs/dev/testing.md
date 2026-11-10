@@ -44,6 +44,12 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    while the first one speculates, and the prefix store, which is off while a drafter is attached. The
    drafter it uses is written in the test (`tests/support/dspark.rs`: a `config.json` and a safetensors
    file), so it needs no model files either.
+   `tests/embeddings.rs` covers S4.1: a pooled slot's vector must equal the pooling of the exact
+   reference forward's final hidden states (synthetic llama and qwen3 files, `last` and `mean`), and
+   must be bit-identical alone, in batches of 2/7/64 of mixed lengths, at different chunks and thread
+   counts, and beside a decoding chat slot. It also holds an ignored real-file test for
+   Qwen3-Embedding 0.6B (looked up in `models/`, `~/models/` and the model cache):
+   `cargo test --release -p peregrine-models --test embeddings -- --ignored`.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.

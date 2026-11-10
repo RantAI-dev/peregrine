@@ -117,7 +117,8 @@ You should see the model, the detected kernel tier, the chat template and the li
 the log. When no tuning profile exists (`peregrine tune`) and no thread count or spin window is
 pinned, the server also calibrates those two for this host in under 200 ms and prints what it chose;
 `PEREGRINE_CALIBRATE=0` turns that off. The server speaks the OpenAI chat API (`/v1/chat/completions`,
-streamed or not) plus `/v1/models`, `/health` and `/metrics`. One process serves one model, as with
+streamed or not) plus `/v1/models`, `/health` and `/metrics`, and `/v1/embeddings` when the file is an
+embedding model. One process serves one model, as with
 llama-server; `-t` caps the threads, `-c` the context, and `--slots` the number of users served in one
 weight pass.
 
@@ -167,7 +168,50 @@ split their thinking into `reasoning_content`, per `--reasoning-format` and the 
 `reasoning_format`. Fields the engine does not implement are refused with a 400 rather than
 silently ignored.
 
-## 6. Keep it running
+## 6. Embeddings
+
+A causal model trained as an embedder — Qwen3-Embedding, for example — serves a vector per text from
+the same server and the same engine:
+
+```sh
+peregrine serve -m hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf --port 8201
+curl -s http://127.0.0.1:8201/v1/embeddings -H 'content-type: application/json' \
+  -d '{"input":["What is the capital of France?","Paris is the capital of France."],"model":"peregrine"}'
+```
+
+The response is the OpenAI shape: `{object:"list", data:[{object:"embedding", index, embedding}],
+model, usage}`. `input` may be a string, an array of strings, an array of token ids or an array of
+token-id arrays; `dimensions` truncates before normalising; `encoding_format` is `float` or `base64`.
+The pooling type (`last` or `mean`) and the EOS token come from the file, and `peregrine inspect`
+prints them. Vectors are L2-normalised and bit-identical whatever else is in the batch.
+
+The route accepts exactly these fields, and refuses any other key with a 400 that names it (so an
+option the server would otherwise ignore cannot change the vector silently):
+
+| Field | Value |
+|---|---|
+| `input` | a string, an array of strings, an array of token ids, or an array of token-id arrays |
+| `model` | any string; echoed back in the response |
+| `dimensions` | an integer from 1 to the model's width; truncates (Matryoshka) before normalising |
+| `encoding_format` | `"float"` (the default) or `"base64"` (little-endian `f32`) |
+| `truncate` | a boolean, default `false`: truncate an over-length text instead of refusing it |
+| `user` | any string; accepted for compatibility, unused |
+
+A request with more texts than free slots queues the extra texts in the engine: they are admitted as
+slots free up and the response still lists the vectors in input order.
+
+Without a server, one process embeds every text it is given:
+
+```sh
+peregrine embed -m hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf \
+  "What is the capital of France?"
+peregrine embed -m model.gguf --json --dimensions 256 < texts.txt
+```
+
+A text longer than the context is an error naming the limit rather than a silent truncation; pass
+`truncate: true` (API) or `--truncate` (CLI) to opt in.
+
+## 7. Keep it running
 
 For a long-lived server, `--background` detaches it, logs to a file and records state:
 
