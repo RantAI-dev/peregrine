@@ -1363,14 +1363,14 @@ fn tql2(nk: usize, d: &mut [f64], e: &mut [f64], z: &mut [f64]) -> Result<(), St
                 return Err("slb: eigensolver failed to converge".into());
             }
             let mut g = (d[l + 1] - d[l]) / (2.0 * e[l]);
-            let mut r = g.hypot(1.0);
+            let mut r = crate::vmath::det_hypot(g, 1.0);
             g = d[m] - d[l] + e[l] / (g + if g >= 0.0 { r.abs() } else { -r.abs() });
             let (mut s, mut c) = (1.0f64, 1.0f64);
             let mut p = 0.0f64;
             for i in (l..m).rev() {
                 let mut f = s * e[i];
                 let b = c * e[i];
-                r = f.hypot(g);
+                r = crate::vmath::det_hypot(f, g);
                 e[i + 1] = r;
                 if r == 0.0 {
                     d[i + 1] -= p;

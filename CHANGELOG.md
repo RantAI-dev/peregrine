@@ -26,6 +26,17 @@ All notable changes to this project are documented here. The format follows
 - A request body that is not valid JSON is now rejected with the OpenAI error object instead of
   axum's plain-text rejection. The status was already 400; a client that parses `error.message` can
   now read the reason. The compatibility suite checks the body as well as the code.
+- The aarch64 numeric path no longer depends on the host's libm. `sin`, `cos`, `pow`, `log`,
+  `exp` and `tanh` are now the engine's own (`vmath::det_*`) in the RoPE/YaRN table builder,
+  attention's running-max rescale and row merge, MoE routing, the recurrent (Bonsai) gates,
+  GeGLU/softcapping, sampling, and the sidecar builder's `hypot`; `exp_scalar` also replaces the
+  remaining `expf` calls in the scalar softmax/SwiGLU fallbacks. glibc and Apple's libm round
+  these differently, which is why the Linux-recorded aarch64 goldens did not reproduce on the
+  macOS runner (#140); with the engine's implementations the aarch64 bits are fixed by the
+  definition, not the C library. The `det_*` dispatchers call libm off aarch64, so no x86 golden
+  moved. The aarch64 goldens were re-recorded: the `aarch64` scalar tier's move because its
+  softmax/SwiGLU fallbacks were the last libm calls on that path, and the Qwen3-MoE and
+  Qwen3.5 (Bonsai) entries of the `aarch64-neon*` tiers move in the last bits.
 - Small-model decode no longer runs a Q5_0 or Q8_0 row at a time. A Q5_0 row is 22 bytes
   per 32 weights and a Q8_0 row 34, so the 32-byte activation block (and, for Q5_0, its
   32-byte lane sums) is more traffic than the weights; the per-row kernel reloaded both
