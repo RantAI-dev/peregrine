@@ -24,28 +24,30 @@ load, PrismML's llama.cpp fork.
 
 ![Where Peregrine is fastest](docs/img/bench-wins.svg)
 
-- **Single-user decode up to 1.39× faster** (Llama 3.2 1B at a 4096-token context, 12-core desktop),
-  and ahead in 9 of 10 confirmed cases. Against llama.cpp's faster flash-attention setting the 1B is
-  1.21× ahead at 512 tokens and 1.39× at 4096 on the desktop. On the 4-core Ryzen 3 all three models
-  are ahead: Llama 3.2 1B 1.10× and 1.26×, Qwen 2.5 0.5B 1.07× and 1.26×, SmolLM2 360M 1.15× and
-  1.34×. The only decode loss is the 0.5B at 512 on the desktop (0.92×). The lead grows with
-  context: attention reads each cached key and value once per group of heads.
+- **Single-user decode up to 1.69× faster** (SmolLM2 360M at a 4096-token context, 12-core desktop),
+  and ahead on every completed decode row. Against llama.cpp's faster flash-attention setting the
+  desktop is 1.31× and 1.60× on Llama 3.2 1B, 1.37× and 1.57× on Qwen 2.5 0.5B, 1.34× and 1.69× on
+  SmolLM2 360M, and 1.35× and 1.13× on gemma-3-1b-it. On the 4-core Ryzen 3 all three models are
+  ahead: Llama 3.2 1B 1.10× and 1.26×, Qwen 2.5 0.5B 1.07× and 1.26×, SmolLM2 360M 1.15× and 1.34×.
+  The lead grows with context: attention reads each cached key and value once per group of heads.
 - **Up to 1.80× the throughput with 10 users at once** on a 4-core Ryzen 3 (SmolLM2 360M at 4096;
   1.73× at 512), and 1.47× on Llama 3.2 1B at 512 (1.52× at 4096), against llama.cpp's faster
-  setting.
-- **Prompt processing ahead on Q5_0-heavy files and level on the 1B** on bluefin: 1.43× and 1.17× on
-  Qwen 2.5 0.5B, 1.39× and 1.05× on SmolLM2 360M, 1.03-1.04× on Llama 3.2 1B, after the Q5_0
-  kernels (#103-#105). The desktop is at 0.69-0.74×.
-- **Bonsai 2 (ternary): 2.0-2.3× the decode and 1.9-2.6× the prompt speed of PrismML's own
-  llama.cpp fork, 2.7× with 10 users** (12-core desktop), against the fork's faster
+  setting. On the desktop the 10-user rows moved from 0.87-0.89× on 2026-11-08 to 1.28-1.43×, and
+  the 4-user rows to 1.13-1.38×.
+- **Prompt processing ahead on both hosts**: the desktop is 1.03-1.30× after the repacked
+  Q4_K/Q5_0 work (#108, #111, #118, #120), up from 0.69-0.74×; on bluefin it is 1.43× and 1.17× on
+  Qwen 2.5 0.5B, 1.39× and 1.05× on SmolLM2 360M, and 1.03-1.04× on Llama 3.2 1B.
+- **Bonsai 2 (ternary): 2.0-2.3× the decode and 2.1-2.5× the prompt speed of PrismML's own
+  llama.cpp fork, 2.6-2.8× with 10 users** (12-core desktop), against the fork's faster
   flash-attention setting for each row. Upstream llama.cpp cannot load these PQ2_0 files, so the
   fork is the only comparison that exists for them.
 
-Losses are in the same report: on the desktop, the 0.5B at 512 tokens (0.92× decode), prompt
-processing (0.69-0.74×) and multi-user throughput (0.87× at 10 users, 0.95× at 4); and on bluefin,
-time to first token with 10 users for the 1B at 4096 (1.04×). At 512 Peregrine is faster on all three
-TTFT rows, and at 4096 on the two small models. No bluefin throughput row is below 1.0×. Every
-number, chart and machine record is in [docs/benchmark.md](docs/benchmark.md).
+Losses are in the same report, and there are now very few. **No completed throughput row is below
+1.0×**, on either host. The one remaining loss is time to first token with 10 users on bluefin for
+the 1B at 4096 (1.04×, Peregrine slower); at 512 Peregrine is faster on every TTFT row, on both
+hosts. The desktop's 4096-token multi-user rows do not finish inside the 10-minute command cap and
+are recorded as not completed. Every number, chart and machine record is in
+[docs/benchmark.md](docs/benchmark.md).
 
 ## Progress
 
@@ -106,9 +108,11 @@ host, and the task-accuracy gate.
 - **CPUs**: AVX-VNNI-256, ARM NEON/SDOT
 - **Chat templates**: more of llama.cpp's built-ins
 
-Measured on a Ryzen AI 9 HX 370 (WSL2), Bonsai 2 9B: **23.5 tok/s single user, 28.7 with lossless MTP
-speculation**, about 75 tok/s total at 10 users. The full table, method and competitors are in
-[docs/targets.md](docs/targets.md).
+Measured on a Ryzen AI 9 HX 370 (WSL2), 2026-11-09: Bonsai 2 9B does **25.5 tok/s for a single
+user at a 512-token context (22.7 at 4096), 28.8 with lossless MTP speculation, and 21.7 tok/s in
+total at 10 users**; the 2B does 75.1 tok/s single user at 512 and 75.8 tok/s at 10 users. The full
+table, method and competitors are in [docs/targets.md](docs/targets.md) and
+[docs/benchmark.md](docs/benchmark.md).
 
 Checked against llama.cpp v0.9.0 on the same file, for **Llama 3.2 1B Instruct** and **Qwen 2.5 0.5B
 Instruct** (Q4_K_M): the tokenizer produces the same token ids, greedy decoding produces the same token
@@ -140,6 +144,9 @@ llama.cpp's `llama-tokenize` (22/22 strings), greedy decoding matches bit for bi
 (32/32 steps each), and the chat path answers the same question the same way.
 
 ## Quick start
+
+New here? [docs/quickstart.md](docs/quickstart.md) walks a first request end to end: a release
+binary (or Docker), a small model, `curl` and the OpenAI Python client.
 
 ```sh
 git clone https://github.com/RantAI-dev/peregrine && cd peregrine
@@ -178,6 +185,7 @@ cargo build --release -p peregrine --no-default-features --features cli,arch-qwe
 | | |
 |---|---|
 | [Product](docs/product.md) | what Peregrine is, who it is for, what it will not do |
+| [Quickstart](docs/quickstart.md) | a release binary or Docker, a model, and the first request |
 | [Targets](docs/targets.md) | the speed, accuracy and support numbers we hold ourselves to |
 | [Benchmarks](docs/benchmark.md) | Peregrine against llama.cpp, wins and losses, with charts |
 | [Roadmap](docs/roadmap.md) | the plan, stage by stage |
