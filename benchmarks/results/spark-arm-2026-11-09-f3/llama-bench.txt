@@ -1,0 +1,24 @@
+### /var/tmp/pg/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf affinity=all threads=20 -fa 0
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CUDA       |   0 |   0 |           pp512 |        339.34 ± 0.81 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CUDA       |   0 |   0 |           tg128 |         94.88 ± 3.84 |
+### /var/tmp/pg/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf affinity=all threads=20 -fa auto
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CUDA       |   0 |           pp512 |        363.92 ± 1.02 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CUDA       |   0 |           tg128 |         99.71 ± 4.57 |
+### /var/tmp/pg/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf affinity=x925 threads=10 -fa 0
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CUDA       |   0 |      10 |   0 |           pp512 |        264.48 ± 0.41 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CUDA       |   0 |      10 |   0 |           tg128 |        106.71 ± 0.21 |
+### /var/tmp/pg/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf affinity=x925 threads=10 -fa auto
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CUDA       |   0 |      10 |           pp512 |        282.47 ± 0.52 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CUDA       |   0 |      10 |           tg128 |        112.40 ± 0.37 |
+### /var/tmp/pg/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf affinity=all threads=20 -fa 0
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CUDA       |   0 |   0 |           pp512 |        643.36 ± 2.06 |
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CUDA       |   0 |   0 |           tg128 |       140.12 ± 24.37 |
+### /var/tmp/pg/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf affinity=all threads=20 -fa auto
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CUDA       |   0 |           pp512 |        706.28 ± 1.80 |
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CUDA       |   0 |           tg128 |        155.30 ± 7.59 |
+### /var/tmp/pg/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf affinity=x925 threads=10 -fa 0
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CUDA       |   0 |      10 |   0 |           pp512 |        513.26 ± 0.61 |
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CUDA       |   0 |      10 |   0 |           tg128 |        191.90 ± 0.04 |
+### /var/tmp/pg/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf affinity=x925 threads=10 -fa auto
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CUDA       |   0 |      10 |           pp512 |        561.19 ± 0.50 |
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CUDA       |   0 |      10 |           tg128 |        206.63 ± 1.04 |

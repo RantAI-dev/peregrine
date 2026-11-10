@@ -1,0 +1,23 @@
+n=2048 rows=256 reps=200 tier=aarch64-neon-dotprod
+Q8_0 scalar, 1 row                    88393.4 ns       5.9 GMAC/s
+Q8_0 sdot, 1 row                      23486.8 ns      22.3 GMAC/s
+Q8_0 sdot rows8 (decode)              11803.2 ns      44.4 GMAC/s
+Q8_0 sdot batch-4                     12531.5 ns      41.8 GMAC/s
+Q4_K scalar, 1 row                    39179.7 ns      13.4 GMAC/s
+Q4_K sdot, 1 row                      12828.3 ns      40.9 GMAC/s
+Q4_K tile ref, GEMV                  206405.9 ns       2.5 GMAC/s
+Q4_K tile sdot, GEMV                  10710.0 ns      49.0 GMAC/s
+Q4_K tile sdot, GEMM 4                27335.5 ns      76.7 GMAC/s
+Q4_K tile sdot, GEMM 16               54590.7 ns      76.8 GMAC/s
+Q5_0 scalar, 1 row                    48238.6 ns      10.9 GMAC/s
+Q5_0 sdot, 1 row                      28024.8 ns      18.7 GMAC/s
+Q5_0 sdot rows8 (decode)              23183.0 ns      22.6 GMAC/s
+Q5_0 tile ref, GEMV                  216616.3 ns       2.4 GMAC/s
+Q5_0 tile sdot, GEMV                  24034.1 ns      21.8 GMAC/s
+Q5_0 tile sdot, GEMM 4                60659.2 ns      34.6 GMAC/s
+Q6_K scalar, 1 row                    90369.2 ns       5.8 GMAC/s
+Q6_K sdot, 1 row                      18381.3 ns      28.5 GMAC/s
+Q6_K tile ref, GEMV                  505250.5 ns       1.0 GMAC/s
+Q6_K tile sdot, GEMV                  15024.4 ns      34.9 GMAC/s
+Q6_K tile sdot, GEMM 4                39683.4 ns      52.8 GMAC/s
+Q6_K tile sdot, GEMM 16               79373.0 ns      52.8 GMAC/s
