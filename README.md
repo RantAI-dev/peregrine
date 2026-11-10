@@ -53,7 +53,7 @@ As of November 2026; the plan with every item is in the [roadmap](docs/roadmap.m
 
 | Stage | Where it stands |
 |---|---|
-| 0. Groundwork | done, except writing down the release step on the AVX2-only host |
+| 0. Groundwork | done: the release step and the AVX2-host release gate are written down (`docs/dev/releasing.md`) |
 | 1. Structure | done: the kernel table, shared layer blocks, one runtime, feature flags, `peregrine tune` |
 | 2. Breadth | done for the architectures, formats and templates in the table below; open: a real gpt-oss file, startup calibration, ARM (not yet decided) |
 | 3. Speed and proof | under way: the benchmark harness, a first desktop baseline against llama.cpp and the KL check per model are in; the first kernel and scheduling speed-ups have landed |
