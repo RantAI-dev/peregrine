@@ -180,6 +180,48 @@ fn pq2_rows_entry_matches_per_row() {
     }
 }
 
+#[test]
+fn pq2_gemm_matches_gemv_bit_for_bit_at_every_width() {
+    if !peregrine_core::simd::have_batched() {
+        return;
+    }
+    let mut r = Rng(0xC0FFEE);
+    // Widths that are not whole groups, row counts that are not whole 16-row tiles, and a
+    // K that is not a whole K-block: every tail the prompt chunker can hand the kernel.
+    for n in [384usize, 2048, 4224] {
+        let rb = n / 128 * 34;
+        for rows in [1usize, 2, 7, 15, 16, 17, 31] {
+            let w: Vec<u8> = (0..rows).flat_map(|_| pq2_row(&mut r, n)).collect();
+            for k in 1..=32usize {
+                let a = acts(&mut r, n, k);
+                let mut got = vec![0.0f32; rows * k];
+                // SAFETY: AVX2/FMA/F16C checked above; the lengths are the kernel's.
+                unsafe { peregrine_core::tern::dot_rows_pq2_gemm_avx2(&w, rb, rows, &a, &mut got) };
+                for row in 0..rows {
+                    for b in 0..k {
+                        let mut want = [0.0f32; 1];
+                        // SAFETY: as above; one row against one activation is the GEMV.
+                        unsafe {
+                            peregrine_core::tern::dot_batch_pq2_avx2(
+                                &w[row * rb..(row + 1) * rb],
+                                std::slice::from_ref(&a[b]),
+                                &mut want,
+                            )
+                        };
+                        assert_eq!(
+                            got[row * k + b].to_bits(),
+                            want[0].to_bits(),
+                            "n={n} rows={rows} k={k} row={row} act={b}: {} vs {}",
+                            got[row * k + b],
+                            want[0]
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The multi-row decode GEMV against the one-row kernel, bit for bit, at every row count
 /// (including the ones that leave a shorter tail). A row's bits must not depend on how
 /// many rows shared the pass — the batch-invariance rule the MTP verify path relies on.
