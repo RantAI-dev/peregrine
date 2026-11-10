@@ -35,6 +35,7 @@ pub struct MatKernels {
     pq2_rows: bool,
     ptq1_rows: bool,
     kq_tiles: bool,
+    kq_i8mm: bool,
     kq_zmm: bool,
     exact: bool,
 }
@@ -59,12 +60,19 @@ impl MatKernels {
         // sets, and the repack switch.
         #[cfg(target_arch = "x86_64")]
         let kq_tiles = crate::simd::have_batched() && crate::options::get().kq_repack;
-        // On aarch64 the repacked Q4_K tile runs on `sdot` (S2.8); Q5_0 has no
-        // NEON tile yet, and `path` keeps it on the per-row kernel.
+        // On aarch64 the repacked tiles run on `sdot` (S2.8); Q5_0 and Q6_K have
+        // tiles too, and `path` keeps every other format on the per-row kernel.
         #[cfg(target_arch = "aarch64")]
         let kq_tiles = crate::cpu::have_dotprod() && crate::options::get().kq_repack;
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let kq_tiles = false;
+        // The i8mm rung runs the tile GEMM on `smmla` (S2.8 F2). The GEMV stays on
+        // `sdot` — the integer sums and the fold are the same, and the test pins the
+        // per-row bits — and a CPU without `i8mm` is the dotprod tier.
+        #[cfg(target_arch = "aarch64")]
+        let kq_i8mm = kq_tiles && crate::cpu::have_i8mm();
+        #[cfg(not(target_arch = "aarch64"))]
+        let kq_i8mm = false;
         // The AVX-512 variant of the same kernels (S3.4 follow-up): the same
         // tiles, 64 bytes at a time. `cpu_has!` honours `PEREGRINE_ISA`, so an
         // `avx2` cap keeps the AVX2 kernel.
@@ -77,6 +85,7 @@ impl MatKernels {
             pq2_rows,
             ptq1_rows,
             kq_tiles,
+            kq_i8mm,
             kq_zmm,
             exact: crate::quant::exact_ternary(),
         }
@@ -105,8 +114,8 @@ impl MatKernels {
     /// Whether `fmt` has a repacked tile kernel on this CPU.
     ///
     /// The tile store holds a Q4_K, Q5_0 and Q8_0 tile on every tier with a repacked kernel:
-    /// Q4_K on both architectures, Q5_0 and Q8_0 on x86 and (S2.8) on aarch64. The aarch64
-    /// tier has Q4_K and Q8_0 in this PR; Q5_0 and Q6_K follow. A format without a kernel keeps
+    /// Q4_K on both architectures, Q5_0 and Q8_0 on x86 and (S2.8 F1) on aarch64. The aarch64
+    /// tier has Q4_K, Q5_0 and Q8_0 here; Q6_K follows (F3). A format without a kernel keeps
     /// the per-row path even when the store holds its tiles.
     #[inline]
     pub fn kq_tiles_for(&self, fmt: Format) -> bool {
@@ -116,13 +125,21 @@ impl MatKernels {
         match fmt {
             #[cfg(feature = "fmt-kquant")]
             Format::Q4_K => true,
-            #[cfg(all(target_arch = "x86_64", feature = "fmt-legacy"))]
+            // Q5_0 has a repacked tile on both kernel architectures (S3.4 on x86, S2.8 F1
+            // on NEON); Q6_K has one on aarch64 (S2.8 F3). Every other format keeps the
+            // per-row path even when the store holds its tiles.
+            #[cfg(all(
+                any(target_arch = "x86_64", target_arch = "aarch64"),
+                feature = "fmt-legacy"
+            ))]
             Format::Q5_0 => true,
             #[cfg(all(
                 feature = "fmt-legacy",
                 any(target_arch = "x86_64", target_arch = "aarch64")
             ))]
             Format::Q8_0 => true,
+            #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
+            Format::Q6_K => true,
             _ => false,
         }
     }
@@ -189,10 +206,15 @@ impl MatKernels {
             }
         }
         #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
-        // SAFETY: `kq_tiles` is `have_dotprod()`; the tile holds `n_sb` super-blocks
-        // and the interleaved buffer the rows the caller says.
+        // SAFETY: `kq_tiles` is `have_dotprod()`; `kq_i8mm` is `have_i8mm()`, and
+        // both kernels take the same tile and activation layouts. The tile holds
+        // `n_sb` super-blocks and the interleaved buffer the rows the caller says.
         unsafe {
-            crate::neon::q4k8_gemm(tile, n_sb, acts, nb, out)
+            if self.kq_i8mm {
+                crate::neon::q4k8_gemm_i8mm(tile, n_sb, acts, nb, out)
+            } else {
+                crate::neon::q4k8_gemm(tile, n_sb, acts, nb, out)
+            }
         }
         #[cfg(not(any(
             all(target_arch = "x86_64", feature = "fmt-kquant"),
@@ -254,6 +276,86 @@ impl MatKernels {
         }
     }
 
+    /// Eight rows of a repacked Q6_K tile against a batch of four or more
+    /// activations, through the interleaved layout.
+    ///
+    /// `tile` holds `n_sb` tiles of eight rows; `out` receives `out[b · 8 + r]`.
+    pub fn kq_tiles_q6k(
+        &self,
+        tile: &[u8],
+        n_sb: usize,
+        acts: &KqActs,
+        nb: usize,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.kq_tiles,
+            "the repacked k-quant kernel used where it cannot run"
+        );
+        assert!(
+            nb >= 4,
+            "the batched k-quant kernel takes four rows or more"
+        );
+        assert!(
+            acts.rows >= nb,
+            "the interleaved activation holds fewer rows"
+        );
+        assert!(
+            out.len() >= nb * 8,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
+        // SAFETY: `kq_tiles` is `have_dotprod()`; `kq_i8mm` is `have_i8mm()`. The
+        // tile holds `n_sb` super-blocks and the interleaved buffer the rows the
+        // caller says.
+        unsafe {
+            if self.kq_i8mm {
+                crate::neon::q6k8_gemm_i8mm(tile, n_sb, acts, nb, out)
+            } else {
+                crate::neon::q6k8_gemm(tile, n_sb, acts, nb, out)
+            }
+        }
+        #[cfg(not(all(target_arch = "aarch64", feature = "fmt-kquant")))]
+        {
+            let _ = (tile, n_sb, acts, nb, out);
+            unreachable!("no repacked Q6_K kernel on this architecture")
+        }
+    }
+
+    /// Eight rows of a repacked Q6_K tile against one to three plain activations.
+    pub fn kq_tiles_q6k_gemv(
+        &self,
+        tile: &[u8],
+        n_sb: usize,
+        acts: &[QuantAct],
+        nb: usize,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.kq_tiles,
+            "the repacked k-quant kernel used where it cannot run"
+        );
+        assert!(
+            (1..=3).contains(&nb),
+            "the Q6_K GEMV takes one to three rows"
+        );
+        assert!(
+            out.len() >= nb * 8,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
+        // SAFETY: `kq_tiles` is `have_dotprod()`; the tile holds `n_sb` super-blocks
+        // and the plain activation rows the caller says.
+        unsafe {
+            crate::neon::q6k8_gemv(tile, n_sb, acts, nb, out)
+        }
+        #[cfg(not(all(target_arch = "aarch64", feature = "fmt-kquant")))]
+        {
+            let _ = (tile, n_sb, acts, nb, out);
+            unreachable!("no repacked Q6_K kernel on this architecture")
+        }
+    }
+
     /// Eight rows of a repacked Q5_0 tile against a batch of activations.
     ///
     /// Q5_0's activation is the ordinary per-32 layout, so the batched and the
@@ -289,7 +391,20 @@ impl MatKernels {
                 crate::kqsimd::q5_08_gemm(tile, n_blk, acts, nb, out)
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-legacy"))]
+        // SAFETY: `kq_tiles` is `have_dotprod()`; `kq_i8mm` is `have_i8mm()`. The
+        // tile holds `n_blk` blocks and the activation rows the caller says.
+        unsafe {
+            if self.kq_i8mm {
+                crate::neon::q5_08_gemm_i8mm(tile, n_blk, acts, nb, out)
+            } else {
+                crate::neon::q5_08_gemm(tile, n_blk, acts, nb, out)
+            }
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", feature = "fmt-legacy"),
+            all(target_arch = "aarch64", feature = "fmt-legacy")
+        )))]
         {
             let _ = (tile, n_blk, acts, nb, out);
             unreachable!("no repacked Q5_0 kernel on this architecture")
@@ -326,7 +441,15 @@ impl MatKernels {
                 crate::kqsimd::q5_08_gemv(tile, n_blk, acts, nb, out)
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-legacy")))]
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-legacy"))]
+        // SAFETY: as above.
+        unsafe {
+            crate::neon::q5_08_gemv(tile, n_blk, acts, nb, out)
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", feature = "fmt-legacy"),
+            all(target_arch = "aarch64", feature = "fmt-legacy")
+        )))]
         {
             let _ = (tile, n_blk, acts, nb, out);
             unreachable!("no repacked Q5_0 kernel on this architecture")
@@ -505,7 +628,7 @@ impl MatKernels {
             return crate::simd::have_batched();
         }
         #[cfg(all(target_arch = "aarch64", feature = "fmt-legacy"))]
-        if fmt == Format::Q8_0 {
+        if matches!(fmt, Format::Q5_0 | Format::Q8_0) {
             return crate::cpu::have_dotprod();
         }
         let _ = fmt;
@@ -534,6 +657,7 @@ impl MatKernels {
         // the kernel.
         unsafe {
             match fmt {
+                Format::Q5_0 => crate::neon::q5_0_rows8(w, rb, a, out),
                 Format::Q8_0 => crate::neon::q8_0_rows8(w, rb, a, out),
                 _ => unreachable!("rows8 advertised a format without a kernel"),
             }
@@ -559,14 +683,20 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
     if !fmt.is_supported() {
         return &[];
     }
-    // aarch64 has Q8_0 and Q4_K kernels (S2.8) and the scalar reference for everything else;
-    // the x86 tiers are not compiled in there, so they are not listed.
+    // aarch64 has the NEON per-row kernels and repacked tiles (S2.8) and the scalar reference
+    // for everything else; the x86 tiers are not compiled in there, so they are not listed.
+    // `neon-i8mm` is the same kernels with the tile GEMM on `smmla` (F2); Q8_0 has no tile, so
+    // it stays on the `sdot` batch kernel and is not listed there.
     #[cfg(target_arch = "aarch64")]
     let tiers: &[Tier] = match fmt {
         #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => &[Tier::Scalar, Tier::NeonDotprod],
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q5_0 => &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm],
         #[cfg(feature = "fmt-kquant")]
-        Format::Q4_K => &[Tier::Scalar, Tier::NeonDotprod],
+        Format::Q4_K => &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm],
+        #[cfg(feature = "fmt-kquant")]
+        Format::Q6_K => &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm],
         _ => &[Tier::Scalar],
     };
     #[cfg(not(target_arch = "aarch64"))]
@@ -659,16 +789,23 @@ mod tests {
                 kernels_for(Format::Q8_0),
                 &[Tier::Scalar, Tier::NeonDotprod]
             );
-            // Q5_0 has no NEON tile yet: it keeps the scalar reference.
-            assert_eq!(kernels_for(Format::Q5_0), &[Tier::Scalar]);
+            // Q5_0 has a NEON tile and per-row kernel, and the tile GEMM on i8mm (S2.8 F1/F2).
+            assert_eq!(
+                kernels_for(Format::Q5_0),
+                &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm]
+            );
         }
         #[cfg(feature = "fmt-kquant")]
         {
             assert_eq!(
                 kernels_for(Format::Q4_K),
-                &[Tier::Scalar, Tier::NeonDotprod]
+                &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm]
             );
-            assert_eq!(kernels_for(Format::Q6_K), &[Tier::Scalar]);
+            // Q6_K has the per-row and tile kernels, and the tile GEMM on i8mm (S2.8 F3/F2).
+            assert_eq!(
+                kernels_for(Format::Q6_K),
+                &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm]
+            );
         }
         assert_eq!(kernels_for(Format::F16), &[Tier::Scalar]);
     }
@@ -680,6 +817,7 @@ mod tests {
             pq2_rows: true,
             ptq1_rows: true,
             kq_tiles: true,
+            kq_i8mm: true,
             kq_zmm: true,
             exact: true,
         };
@@ -695,6 +833,7 @@ mod tests {
             pq2_rows: true,
             ptq1_rows: true,
             kq_tiles: true,
+            kq_i8mm: true,
             kq_zmm: true,
             exact: false,
         };
@@ -716,23 +855,23 @@ mod tests {
         // repacked goes the old way.
         assert_eq!(all.path(Format::Q4_K, false, true, false), MatPath::KqTiles);
         assert_eq!(all.path(Format::Q4_K, false, false, false), MatPath::PerRow);
-        // Q5_0 has its own repacked tile (the small-model prefill fix) on x86;
-        // aarch64 has no Q5_0 tile kernel yet.
-        #[cfg(not(target_arch = "aarch64"))]
+        // Q5_0 and Q6_K have their own repacked tiles on aarch64 too (S2.8 F1/F3).
         assert_eq!(all.path(Format::Q5_0, false, true, false), MatPath::KqTiles);
-        #[cfg(target_arch = "aarch64")]
-        assert_eq!(all.path(Format::Q5_0, false, true, false), MatPath::PerRow);
         assert_eq!(all.path(Format::Q5_0, false, false, false), MatPath::PerRow);
         // Q8_0's repacked tile: the tied output head and the other Q8_0 matrices.
         assert_eq!(all.path(Format::Q8_0, false, true, false), MatPath::KqTiles);
         assert_eq!(all.path(Format::Q8_0, false, false, false), MatPath::PerRow);
-        // The other k-quants are not repacked yet (S3.4 PR 3 and PR 4).
+        // Q6_K's tile is NEON-only for now: x86 keeps the per-row kernel (S3.4 PR 4).
+        #[cfg(not(target_arch = "aarch64"))]
         assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::PerRow);
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::KqTiles);
         let avx2 = MatKernels {
             tiles: false,
             pq2_rows: true,
             ptq1_rows: false,
             kq_tiles: true,
+            kq_i8mm: false,
             kq_zmm: false,
             exact: false,
         };
@@ -750,6 +889,7 @@ mod tests {
             pq2_rows: false,
             ptq1_rows: false,
             kq_tiles: false,
+            kq_i8mm: false,
             kq_zmm: false,
             exact: false,
         };

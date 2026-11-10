@@ -1,0 +1,26 @@
+=== /var/tmp/pg/work/neon-4-target
+peregrine profile: 32 decode steps, 32 tokens, mean µs/step (wall 7949.0)
+  matmul qkv           654.3
+  matmul wo            621.9
+  matmul gate/up      1845.6
+  matmul down         1343.6
+  attention           1356.8
+  norms                 40.4
+  quantise             172.4
+  swiglu               355.6
+  barrier wait        2546.5
+prefill tok/s   60.8
+decode tok/s    125.8
+=== /var/tmp/pg/work/neon-5-target
+peregrine profile: 32 decode steps, 32 tokens, mean µs/step (wall 6590.0)
+  matmul qkv           387.1
+  matmul wo            422.9
+  matmul gate/up      1572.7
+  matmul down         1135.7
+  attention           1285.0
+  norms                 37.5
+  quantise              75.7
+  swiglu               180.9
+  barrier wait        1292.3
+prefill tok/s   55.2
+decode tok/s    151.7
