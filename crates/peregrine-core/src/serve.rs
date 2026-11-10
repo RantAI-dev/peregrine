@@ -28,6 +28,7 @@
 // speculation while batching: verifying a draft multiplies the rows per pass, which past the ridge above is
 // exactly where there are no spare FLOPs (measured elsewhere: 2.7x at one row falling to 1.6x at eight).
 
+use crate::embed::Pooling;
 use crate::kv::{KvCache, KvPrec};
 use crate::model::{Caches, Model, State, StepStats};
 use crate::pool::Pool;
@@ -136,6 +137,39 @@ impl DrafterChoice {
 
 /// The drafter a slot asked for, and how deep it may draft.
 type AskedDrafter = Option<(Box<dyn crate::draft::Drafter>, usize)>;
+
+/// What a slot's last row is for (ADR 0007: one runtime; roadmap S4.1).
+///
+/// A chat request samples from its last row and streams tokens. An embedding request pools
+/// its text's final hidden states into one vector, and that is the whole answer: it never
+/// samples and never decodes. Both are slots in the same engine, prefilled in the same
+/// chunks and batched in the same weight passes.
+///
+/// The enum is the design's `Want` (`docs/design/s4-embeddings-decisions.md` §2.1); the
+/// decision variants (`Choice`, `Labels`) arrive with S4.3 and the classifier heads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Want {
+    /// Sample and stream tokens (today's request).
+    #[default]
+    Tokens,
+    /// Pool the text's final hidden states into one vector and finish when its last prompt
+    /// row is computed.
+    Pooled(Pooling),
+}
+
+impl Want {
+    /// Whether this slot decodes and samples.
+    pub fn is_tokens(self) -> bool {
+        matches!(self, Want::Tokens)
+    }
+    /// The pooling this slot asks for, if it is an embedding slot.
+    pub fn pooling(self) -> Option<Pooling> {
+        match self {
+            Want::Tokens => None,
+            Want::Pooled(p) => Some(p),
+        }
+    }
+}
 
 /// What one request asks of the sampler and when it should stop.
 #[derive(Debug, Clone)]
@@ -254,6 +288,9 @@ pub struct Emission {
     pub finish: Option<Finish>,
     /// Set with `finish`: what the request cost.
     pub cost: Option<SlotCost>,
+    /// A pooled slot's answer: the vector, in the model's width. `None` for a token slot.
+    /// Set once, on the slot's only emission.
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// A request's handle while it is being served.
@@ -263,8 +300,14 @@ struct Slot {
     id: SlotId,
     kv: KvCache,
     cfg: SlotCfg,
-    /// The whole prompt. Everything but its last token is prefilled; the last token is the first thing decoded.
+    /// What the slot does with its last row: sample, or pool one vector (S4.1).
+    want: Want,
+    /// The whole prompt. For a token slot everything but its last token is prefilled; the last token is the
+    /// first thing decoded. A pooled slot forwards every token, including the last, and never decodes.
     prompt: Vec<u32>,
+    /// Mean pooling's accumulator: `d_model` f64 sums of the text's rows, in position order. Empty for
+    /// `Last` and for token slots, so an ordinary request pays nothing for it.
+    pool_sum: Vec<f64>,
     /// Prompt tokens already written to the cache.
     fed: usize,
     /// Position the next token will take.
@@ -310,9 +353,56 @@ fn mtp_enabled() -> bool {
 }
 
 impl Slot {
-    /// The prompt is in the cache and the slot is ready to decode.
+    /// Whether this slot samples tokens.
+    fn wants_tokens(&self) -> bool {
+        self.want.is_tokens()
+    }
+
+    /// The prompt positions this slot forwards in prefill: a token slot leaves its last token for the
+    /// first decode step; a pooled slot forwards all of them.
+    fn prefill_len(&self) -> usize {
+        match self.want {
+            Want::Tokens => self.prompt.len() - 1,
+            Want::Pooled(_) => self.prompt.len(),
+        }
+    }
+
+    /// The prompt is in the cache (`fed` covers everything the slot forwards).
+    fn prefill_done(&self) -> bool {
+        self.fed >= self.prefill_len()
+    }
+
+    /// The slot can decode now: it is a token slot whose prompt is in the cache.
     fn ready(&self) -> bool {
-        self.fed + 1 >= self.prompt.len()
+        self.wants_tokens() && self.prefill_done()
+    }
+
+    /// Add this step's rows (`rows` is `take × d_model`, in position order) to the mean accumulator.
+    fn pool_accumulate(&mut self, hidden: &[f32], d_model: usize) {
+        for row in hidden.chunks_exact(d_model) {
+            for (s, &x) in self.pool_sum.iter_mut().zip(row) {
+                *s += x as f64;
+            }
+        }
+    }
+
+    /// The pooled vector of the whole text. `Last` reads the final row of `last_chunk` (the rows the
+    /// completing step computed), `Mean` divides the f64 accumulator once and rounds once.
+    ///
+    /// `last_chunk` is the completing step's hidden rows for this slot; it is used by `Last` only.
+    fn pool_finish(&self, last_chunk: &[f32], d_model: usize, pooling: Pooling) -> Vec<f32> {
+        match pooling {
+            Pooling::Last => {
+                let start = (last_chunk.len() / d_model - 1) * d_model;
+                last_chunk[start..start + d_model].to_vec()
+            }
+            Pooling::Mean => {
+                let inv = 1.0 / self.prompt.len().max(1) as f64;
+                self.pool_sum.iter().map(|s| (s * inv) as f32).collect()
+            }
+            // Refused at admission; a causal decoder's row 0 sees one token and is not a text's vector.
+            Pooling::Cls => Vec::new(),
+        }
     }
 
     /// Rebuild this slot's penalty window before its next token is sampled. A no-op for
@@ -492,7 +582,11 @@ impl Engine {
         // An MTP verification pass wants logits for two rows, whatever the slot count.
         let use_mtp = model.has_mtp() && mtp_enabled() && mixed();
         let max_logit_rows = if use_mtp { max_slots.max(2) } else { max_slots };
-        let state = model.new_state(max_batch, max_logit_rows, max_ctx, threads);
+        let mut state = model.new_state(max_batch, max_logit_rows, max_ctx, threads);
+        // A pooled slot asks for every row's final hidden state, and a decode step must not allocate:
+        // the buffer is sized once, here. (The hybrid family resizes it per forward, which keeps
+        // the capacity.)
+        state.hidden.resize(max_batch * c.d_model, 0.0);
         Engine {
             spec_drafts: 0,
             spec_hits: 0,
@@ -586,7 +680,21 @@ impl Engine {
 
     /// Take a request, or give it back when every slot is busy or the prompt cannot fit.
     pub fn admit(&mut self, prompt: Vec<u32>, cfg: SlotCfg) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, None)
+        self.admit_inner(prompt, cfg, Want::Tokens, None)
+    }
+
+    /// Admit an embedding request (S4.1): the slot is prefilled like any prompt, beside the
+    /// others, and finishes when its last prompt row is computed. It never samples or decodes.
+    ///
+    /// `pooling` is the reduction the vector is read with; the file's own type is the default
+    /// (`Model::pooling`), and the caller passes the type the request asked for.
+    pub fn admit_pooled(
+        &mut self,
+        prompt: Vec<u32>,
+        cfg: SlotCfg,
+        pooling: Pooling,
+    ) -> Result<SlotId, (Vec<u32>, String)> {
+        self.admit_inner(prompt, cfg, Want::Pooled(pooling), None)
     }
 
     /// Admit a slot that runs on the caller's own cache (ADR 0007).
@@ -606,7 +714,7 @@ impl Engine {
         cfg: SlotCfg,
         kv: KvCache,
     ) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, Some(kv))
+        self.admit_inner(prompt, cfg, Want::Tokens, Some(kv))
     }
 
     /// What a conversation's slot left behind when its turn ended: the cache it
@@ -652,6 +760,7 @@ impl Engine {
         &mut self,
         prompt: Vec<u32>,
         cfg: SlotCfg,
+        want: Want,
         cache: Option<KvCache>,
     ) -> Result<SlotId, (Vec<u32>, String)> {
         if !self.has_room() {
@@ -660,7 +769,20 @@ impl Engine {
         if prompt.is_empty() {
             return self.refuse(prompt, cache, "the prompt is empty".into());
         }
-        if prompt.len() + 1 > self.max_ctx {
+        // A pooled slot pools the rows the model computed; `Cls` needs an encoder (S4.4 onward),
+        // and a causal decoder's row 0 is one token's view, not a text's vector.
+        if let Want::Pooled(Pooling::Cls) = want {
+            return self.refuse(
+                prompt,
+                cache,
+                "cls pooling is not implemented for causal models".into(),
+            );
+        }
+        let pooled = want.pooling();
+        // A token slot needs one position after its prompt for the first decode step; a pooled
+        // slot forwards the prompt itself and needs no more.
+        let extra = usize::from(pooled.is_none());
+        if prompt.len() + extra > self.max_ctx {
             let n = prompt.len();
             return self.refuse(
                 prompt,
@@ -710,7 +832,14 @@ impl Engine {
         };
         let fed = if given {
             kv.filled()
-        } else if asked.is_some() {
+        } else if asked.is_some() || pooled.is_some() {
+            // A pooled slot starts at position 0: `Mean` needs every row of the text, and a
+            // restored prefix would leave its rows uncomputed.
+            //
+            // S4.3: a `Last`-pooled slot (or a choice slot, which samples one row) can reuse a
+            // shared prefix — an instruction the caller repeats — because only the text's final
+            // row matters. `Mean` cannot: it sums every row of the text, and a restored prefix's
+            // rows were never accumulated into this slot.
             0
         } else {
             match self.prefixes.best(&prompt, cap) {
@@ -723,7 +852,9 @@ impl Engine {
         };
         // A restored prefix can leave nothing to prefill, in which case the first decode step must still feed
         // the prompt's last token: `prefill_chunk`, which normally sets it, never runs.
-        let next = if fed + 1 >= prompt.len() {
+        let next = if pooled.is_some() {
+            0
+        } else if fed + 1 >= prompt.len() {
             prompt[prompt.len() - 1]
         } else {
             0
@@ -737,7 +868,7 @@ impl Engine {
         // thread each accepted token into the window between the two row draws. Turning speculation off for
         // these slots is the simple, lossless choice (the request asked for penalties explicitly).
         let penalized = !cfg.penalties.is_off();
-        let alone = !penalized && self.slots.is_empty() && fed == 0;
+        let alone = !penalized && pooled.is_none() && self.slots.is_empty() && fed == 0;
         // The engine's own drafter is the MTP block, and only for a slot that
         // did not ask for one of its own.
         let own = if asked.is_none() && alone {
@@ -772,6 +903,12 @@ impl Engine {
             kv,
             // The draw is keyed by (seed, position), so a user's tokens do not depend on who else is being served.
             seed: cfg.seed.max(1),
+            pool_sum: if matches!(want, Want::Pooled(Pooling::Mean)) {
+                vec![0.0; self.model.cfg.d_model]
+            } else {
+                Vec::new()
+            },
+            want,
             cfg,
             prompt_tokens: prompt.len(),
             prefilled: 0,
@@ -960,12 +1097,13 @@ impl Engine {
         }
     }
 
-    /// Whether any attached drafter needs the target's hidden states.
+    /// Whether any attached drafter needs the target's hidden states, or any slot pools them.
     fn wants_hidden(&self) -> bool {
         self.slots.iter().any(|s| {
-            s.drafter
-                .as_ref()
-                .is_some_and(|d| d.lock().expect("drafter").needs().hidden)
+            s.want.pooling().is_some()
+                || s.drafter
+                    .as_ref()
+                    .is_some_and(|d| d.lock().expect("drafter").needs().hidden)
         })
     }
 
@@ -1039,6 +1177,11 @@ impl Engine {
 
     /// Keep what a slot computed: the prompt positions that are in its cache, and the tokens it produced.
     fn keep_prefix(&mut self, s: &Slot) {
+        // A pooled slot's prompt is a raw text, not a conversation: its cache is of no use to
+        // the next request, and inserting it would evict prefixes that are.
+        if !s.wants_tokens() {
+            return;
+        }
         // The cache holds exactly the prompt positions that were prefilled (`fed` of them) followed by the
         // tokens fed back during decode, in that order. Describing it any other way stores a snapshot under
         // the wrong tokens, and a later request restores a cache that does not match its prompt.
@@ -1086,20 +1229,28 @@ impl Engine {
         }
         // A prompt that is not yet in the cache comes first, oldest slot first: a user waiting for their first
         // token is the one most sensitive to delay, and one chunk is a bounded interruption for the others.
-        if let Some(i) = self.slots.iter().position(|s| !s.ready()) {
-            if let Err(e) = self.prefill_chunk(i) {
-                let id = self.slots[i].id;
-                self.slots.remove(i);
-                return vec![Emission {
-                    slot: id,
-                    token: 0,
-                    text: String::new(),
-                    logprob: 0.0,
-                    finish: Some(Finish::Error(e)),
-                    cost: None,
-                }];
-            }
-            return vec![];
+        if let Some(i) = self.slots.iter().position(|s| !s.prefill_done()) {
+            return match self.prefill_chunk(i) {
+                Ok(emitted) => {
+                    // A pooled slot that finished in this chunk is reaped here; the token
+                    // slots' emissions never carry a `finish`.
+                    self.reap(&emitted);
+                    emitted
+                }
+                Err(e) => {
+                    let id = self.slots[i].id;
+                    self.slots.remove(i);
+                    vec![Emission {
+                        slot: id,
+                        token: 0,
+                        text: String::new(),
+                        logprob: 0.0,
+                        finish: Some(Finish::Error(e)),
+                        cost: None,
+                        embedding: None,
+                    }]
+                }
+            };
         }
         self.decode()
     }
@@ -1135,23 +1286,26 @@ impl Engine {
         let long_waiting = self
             .slots
             .iter()
-            .any(|s| !s.ready() && s.prompt.len() > LONG_PROMPT);
+            .any(|s| !s.prefill_done() && s.prompt.len() > LONG_PROMPT);
         let chunk = if long_waiting {
             LONG_PROMPT_CHUNK.max(self.prefill_chunk)
         } else {
             self.prefill_chunk
         };
         let mut budget = chunk.min(self.state.max_batch.saturating_sub(dec.len()));
-        let mut pre: Vec<(usize, usize)> = Vec::new(); // (slot index, tokens taken)
+        // (slot index, tokens taken, first batch row): the rows of one prefilled slot are
+        // contiguous in the pass, so a slot's start is not its index.
+        let mut pre: Vec<(usize, usize, usize)> = Vec::new();
+        let mut pre_rows = dec.len();
         for (i, s) in self.slots.iter().enumerate() {
             if budget == 0 {
                 break;
             }
-            if !s.ready() {
-                let last = s.prompt.len() - 1;
-                let take = budget.min(last - s.fed);
+            if !s.prefill_done() {
+                let take = budget.min(s.prefill_len() - s.fed);
                 if take > 0 {
-                    pre.push((i, take));
+                    pre.push((i, take, pre_rows));
+                    pre_rows += take;
                     budget -= take;
                 }
             }
@@ -1167,7 +1321,7 @@ impl Engine {
             positions.push(self.slots[i].pos);
             map.push(ci);
         }
-        for (k, &(i, take)) in pre.iter().enumerate() {
+        for (k, &(i, take, _)) in pre.iter().enumerate() {
             let s = &self.slots[i];
             for t in 0..take {
                 tokens.push(s.prompt[s.fed + t]);
@@ -1212,6 +1366,7 @@ impl Engine {
                     logprob: 0.0,
                     finish: Some(Finish::Error(e.clone())),
                     cost: None,
+                    embedding: None,
                 })
                 .collect();
             self.slots.clear();
@@ -1228,28 +1383,73 @@ impl Engine {
         }
         // The prefilled rows are committed positions too: a drafter is told about them, with the
         // target's taps and hidden state for the row.
-        for (k, &(i, take)) in pre.iter().enumerate() {
+        for &(i, take, row0) in &pre {
             if self.slots[i].drafter.is_none() {
                 continue;
             }
             let fed = self.slots[i].fed;
             for t in 0..take {
-                let row = n_dec + k + t;
-                self.commit_row(i, row, fed + t, tokens[row]);
+                self.commit_row(i, row0 + t, fed + t, tokens[row0 + t]);
             }
         }
-        for &(i, take) in &pre {
+        // A pooled slot's rows are its text so far. Mean adds them to the f64 accumulator in
+        // position order here, inside the completing chunk as well; Last reads the completing
+        // chunk's final row once the slot is done.
+        let d_model = self.model.cfg.d_model;
+        for &(i, take, row0) in &pre {
+            let Some(pooling) = self.slots[i].want.pooling() else {
+                continue;
+            };
+            if pooling == Pooling::Mean {
+                let base = row0 * d_model;
+                self.slots[i]
+                    .pool_accumulate(&self.state.hidden[base..base + take * d_model], d_model);
+            }
+        }
+        let mut pooled_out: Vec<Emission> = Vec::new();
+        for &(i, take, row0) in &pre {
+            let last = self.slots[i].prefill_len();
             let s = &mut self.slots[i];
-            let last = s.prompt.len() - 1;
             s.fed += take;
             s.prefilled += take;
             s.pos = s.fed;
             s.prefill_s += elapsed * take as f64 / rows;
-            if s.ready() {
+            if s.wants_tokens() && s.ready() {
                 s.next = s.prompt[last];
             }
+            let Some(pooling) = s.want.pooling() else {
+                continue;
+            };
+            if s.fed < s.prefill_len() {
+                continue;
+            }
+            let base = row0 * d_model;
+            let vector = s.pool_finish(
+                &self.state.hidden[base..base + take * d_model],
+                d_model,
+                pooling,
+            );
+            pooled_out.push(Emission {
+                slot: s.id,
+                token: 0,
+                text: String::new(),
+                logprob: 0.0,
+                finish: Some(Finish::Stop),
+                cost: Some(SlotCost {
+                    prompt_tokens: s.prompt_tokens,
+                    prefilled: s.prefilled,
+                    produced: 0,
+                    prefill_s: s.prefill_s,
+                    decode_s: 0.0,
+                }),
+                embedding: Some(vector),
+            });
         }
+        // The decode slots are reaped by `finish_decode` after it reads them; the pooled ones
+        // are reaped here, after `finish_decode` has used its slot indices (`reap` compacts
+        // the slot list, so it must not run while an index into it is still live).
         if n_dec == 0 {
+            self.reap(&pooled_out);
             // A prompt chunk: what it cost is the prompt's own time.
             self.last_step = StepReport {
                 stats: self.stats.since(&before),
@@ -1259,9 +1459,13 @@ impl Engine {
                 drafted: 0,
                 accepted: 0,
             };
-            return vec![];
+            return pooled_out;
         }
-        let out = self.finish_decode(&dec, &tokens[..n_dec], elapsed * n_dec as f64 / rows);
+        let mut out = self.finish_decode(&dec, &tokens[..n_dec], elapsed * n_dec as f64 / rows);
+        // `reap` reads the emissions, so it must run before they move into `out`; the decode
+        // slots were already reaped by `finish_decode`, and their ids are no longer in `slots`.
+        self.reap(&pooled_out);
+        out.append(&mut pooled_out);
         self.last_step = StepReport {
             stats: self.stats.since(&before),
             secs: t0.elapsed().as_secs_f64(),
@@ -1272,13 +1476,14 @@ impl Engine {
         };
         out
     }
-    /// Feed the next chunk of slot `i`'s prompt. Its last token is left for the first decode step, which is
-    /// what produces the logits the first token is sampled from.
-    fn prefill_chunk(&mut self, i: usize) -> Result<(), String> {
+    /// Feed the next chunk of slot `i`'s prompt. A token slot's last token is left for the first decode step,
+    /// which is what produces the logits the first token is sampled from; a pooled slot forwards every token
+    /// and is finished here when this was its last chunk.
+    fn prefill_chunk(&mut self, i: usize) -> Result<Vec<Emission>, String> {
         let t0 = std::time::Instant::now();
         let before = self.stats;
         let s = &mut self.slots[i];
-        let last = s.prompt.len() - 1;
+        let last = s.prefill_len();
         let take = self.prefill_chunk.min(last - s.fed);
         let chunk: Vec<u32> = s.prompt[s.fed..s.fed + take].to_vec();
         let start = s.fed;
@@ -1300,13 +1505,39 @@ impl Engine {
         }
         self.state.want_hidden = false;
         let secs = t0.elapsed().as_secs_f64();
+        let d_model = self.model.cfg.d_model;
+        let pooling = self.slots[i].want.pooling();
+        if pooling == Some(Pooling::Mean) {
+            self.slots[i].pool_accumulate(&self.state.hidden[..take * d_model], d_model);
+        }
         let s = &mut self.slots[i];
         s.fed += take;
         s.prefilled += take;
         s.pos = s.fed;
         s.prefill_s += secs;
-        if s.ready() {
+        if s.wants_tokens() && s.ready() {
             s.next = s.prompt[last];
+        }
+        let mut out = Vec::new();
+        if let Some(pooling) = pooling {
+            if s.fed >= s.prefill_len() {
+                let vector = s.pool_finish(&self.state.hidden[..take * d_model], d_model, pooling);
+                out.push(Emission {
+                    slot: s.id,
+                    token: 0,
+                    text: String::new(),
+                    logprob: 0.0,
+                    finish: Some(Finish::Stop),
+                    cost: Some(SlotCost {
+                        prompt_tokens: s.prompt_tokens,
+                        prefilled: s.prefilled,
+                        produced: 0,
+                        prefill_s: s.prefill_s,
+                        decode_s: 0.0,
+                    }),
+                    embedding: Some(vector),
+                });
+            }
         }
         // What the chunk cost: a conversation reports the prompt's own time
         // apart from the decode steps'.
@@ -1318,19 +1549,31 @@ impl Engine {
             drafted: 0,
             accepted: 0,
         };
-        Ok(())
+        Ok(out)
     }
 
     /// One token for every ready slot, in one pass over the weights.
     fn decode(&mut self) -> Vec<Emission> {
         let t0 = std::time::Instant::now();
         let before = self.stats;
-        let n = self.slots.len();
-        let tokens: Vec<u32> = self.slots.iter().map(|s| s.next).collect();
-        let positions: Vec<usize> = self.slots.iter().map(|s| s.pos).collect();
+        let dec: Vec<usize> = (0..self.slots.len())
+            .filter(|&i| self.slots[i].ready())
+            .collect();
+        let n = dec.len();
+        if n == 0 {
+            return vec![];
+        }
+        let tokens: Vec<u32> = dec.iter().map(|&i| self.slots[i].next).collect();
+        let positions: Vec<usize> = dec.iter().map(|&i| self.slots[i].pos).collect();
         let want: Vec<usize> = (0..n).collect();
         let hidden = self.wants_hidden();
-        let mut caches: Vec<&mut KvCache> = self.slots.iter_mut().map(|s| &mut s.kv).collect();
+        let mut caches: Vec<&mut KvCache> = {
+            let mut refs: Vec<Option<&mut KvCache>> =
+                self.slots.iter_mut().map(|s| Some(&mut s.kv)).collect();
+            dec.iter()
+                .map(|&i| refs[i].take().expect("a slot appears once"))
+                .collect()
+        };
         let p = if n == 1 {
             self.pool1.as_ref().unwrap_or(&self.pool)
         } else {
@@ -1359,19 +1602,19 @@ impl Engine {
                     logprob: 0.0,
                     finish: Some(Finish::Error(e.clone())),
                     cost: None,
+                    embedding: None,
                 })
                 .collect();
             self.slots.clear();
             return out;
         }
-        let all: Vec<usize> = (0..n).collect();
         let secs = t0.elapsed().as_secs_f64();
         // A lone slot's plain step is a verification pass of width one: the cost
         // model prices the drafts against it.
         if n == 1 {
             self.vcost.observe(1, secs);
         }
-        let out = self.finish_decode(&all, &tokens, secs);
+        let out = self.finish_decode(&dec, &tokens, secs);
         self.last_step = StepReport {
             stats: self.stats.since(&before),
             secs: t0.elapsed().as_secs_f64(),
@@ -1518,6 +1761,7 @@ impl Engine {
             logprob,
             finish,
             cost,
+            embedding: None,
         }
     }
 
@@ -1760,6 +2004,7 @@ impl Engine {
                 logprob: 0.0,
                 finish: Some(Finish::Error(e)),
                 cost: None,
+                embedding: None,
             }];
         }
         // What the pass cost is what the model measures.

@@ -26,6 +26,8 @@ enum Cmd {
         /// The GGUF file, or `hf:<namespace>/<repo>/<file>[@<rev>]` (downloaded once into the cache).
         model: std::path::PathBuf,
     },
+    /// Embed texts: one vector per text, from a causal model (an embedding model).
+    Embed(peregrine::embed::EmbedArgs),
     /// Benchmark single-user prefill and greedy decode throughput.
     Bench(peregrine::bench::BenchArgs),
     /// Search engine tuning knobs and write a machine- and model-specific profile.
@@ -142,6 +144,13 @@ fn main() {
                     eprintln!("peregrine: {e}");
                     std::process::exit(1);
                 }
+            }
+        }
+        Cmd::Embed(mut args) => {
+            args.model = resolved(args.model, "peregrine embed");
+            if let Err(e) = peregrine::embed::run(&args) {
+                eprintln!("peregrine embed: {e}");
+                std::process::exit(1);
             }
         }
         Cmd::Bench(mut args) => {

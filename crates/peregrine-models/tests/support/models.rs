@@ -46,7 +46,20 @@ pub enum Rope {
 /// Write a dense `arch` model ("llama", "qwen2" or "qwen3") whose matrices are all `fmt`, seeded by
 /// `seed`. `qwen2` carries the attention biases and NeoX rotary pairing its loader requires.
 pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false)
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None)
+}
+
+/// A dense `arch` file that declares the pooling type an embedder was trained with
+/// (`<arch>.pooling_type`: 1 mean, 3 last). The weights are the same as [`write_dense`]'s.
+pub fn write_dense_pooled(
+    dir: &Path,
+    arch: &str,
+    fmt: Format,
+    seed: u64,
+    s: Dense,
+    pooling: u32,
+) -> PathBuf {
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, Some(pooling))
 }
 
 /// The dense model whose drafts are accepted: every output-head row is identical, so all logits tie and
@@ -54,7 +67,7 @@ pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> 
 /// zeros is what the suffix index needs to find a match in (the same n-gram twice), and what makes the
 /// draft it proposes the token the target draws.
 pub fn write_dense_accepting(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true)
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true, None)
 }
 
 /// A llama file in F16 with the requested rotary-frequency treatment, for the rope-scaling loaders.
@@ -67,9 +80,11 @@ pub fn write_rope_dense(dir: &Path, rope: Rope, seed: u64) -> PathBuf {
         Dense::default(),
         rope,
         false,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_dense_impl(
     dir: &Path,
     arch: &str,
@@ -78,6 +93,7 @@ fn write_dense_impl(
     s: Dense,
     rope: Rope,
     accept: bool,
+    pooling: Option<u32>,
 ) -> PathBuf {
     let mut rng = Rng::new(seed);
     let mut w = GgufWriter::new();
@@ -93,6 +109,9 @@ fn write_dense_impl(
     w.u32(&k("context_length"), s.ctx as u32);
     w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
     w.u32(&k("rope.dimension_count"), head_dim as u32);
+    if let Some(p) = pooling {
+        w.u32(&k("pooling_type"), p);
+    }
     w.f32(&k("rope.freq_base"), 10000.0);
     if let Rope::Linear { factor } = rope {
         w.str(&k("rope.scaling.type"), "linear");
@@ -245,7 +264,13 @@ fn write_dense_impl(
     }
     let name = match (accept, rope) {
         (true, _) => format!("{arch}-{}-accept", fmt.label()),
-        (false, Rope::None) => format!("{arch}-{}", fmt.label()),
+        (false, Rope::None) => format!(
+            "{arch}-{}",
+            match pooling {
+                Some(p) => format!("{}-pool{p}", fmt.label()),
+                None => fmt.label().to_string(),
+            }
+        ),
         (false, Rope::Freqs) => format!("{arch}-rope-freqs-{}", fmt.label()),
         (false, Rope::Linear { .. }) => format!("{arch}-rope-linear-{}", fmt.label()),
     };

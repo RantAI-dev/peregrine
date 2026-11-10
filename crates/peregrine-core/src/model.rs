@@ -490,6 +490,29 @@ impl Model {
         &self.w.g
     }
 
+    /// The pooling type the file declares (`<arch>.pooling_type`), read as llama.cpp reads it.
+    ///
+    /// `Ok(None)` when the key is absent or is `0` (`none`: per-token rows, not one vector) or
+    /// `4` (`rank`: a classifier head). `Err` names an integer llama.cpp has no pooling type
+    /// for, which it would abort on.
+    pub fn pooling(&self) -> Result<Option<crate::embed::Pooling>, String> {
+        let key = format!("{}.pooling_type", self.cfg.arch_name);
+        let Ok(v) = self.w.g.u32(&key) else {
+            return Ok(None);
+        };
+        match crate::embed::Pooling::from_gguf(v) {
+            Some(p) => Ok(Some(p)),
+            None if v == 0 => Ok(None),
+            None if v == 4 => Ok(None),
+            None => Err(format!("{key} = {v} is not a pooling type llama.cpp knows")),
+        }
+    }
+
+    /// The width of one embedding: the final hidden state's width.
+    pub fn embedding_width(&self) -> usize {
+        self.cfg.d_model
+    }
+
     /// The repacked k-quant store: the Q4_K and Q6_K matrices, and Q5_0, rewritten
     /// into eight-row tiles at load (S3.4). Empty when the repack is off, and empty
     /// where the kernel table has no kernel to read it.

@@ -32,6 +32,8 @@ pub use support::support;
 #[cfg(feature = "cli")]
 pub mod bench;
 #[cfg(feature = "cli")]
+pub mod embed;
+#[cfg(feature = "cli")]
 pub mod run;
 #[cfg(all(feature = "cli", feature = "server"))]
 pub mod service;
@@ -73,6 +75,24 @@ pub fn inspect(path: &std::path::Path) -> Result<String, String> {
         other => other,
     };
     let _ = writeln!(out, "tokenizer     {tok_display}");
+    // What the file is for, when it says: `<arch>.pooling_type`, read as llama.cpp reads it
+    // (0 none, 1 mean, 2 cls, 3 last, 4 rank).
+    if let Ok(v) = g.u32(&format!("{arch}.pooling_type")) {
+        let name = match v {
+            0 => "none",
+            1 => "mean",
+            2 => "cls",
+            3 => "last",
+            4 => "rank",
+            _ => "unknown",
+        };
+        let use_for = match v {
+            1..=3 => " (embedding model)",
+            4 => " (reranker/classifier)",
+            _ => "",
+        };
+        let _ = writeln!(out, "pooling       {name} ({v}){use_for}");
+    }
     let mut by_fmt: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
     for t in g.tensors.values() {
         let e = by_fmt.entry(t.kind.label()).or_default();

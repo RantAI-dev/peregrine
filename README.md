@@ -85,7 +85,7 @@ Common flags (all are listed by `peregrine run --help`):
 
 ### `hf:` models
 
-Any command that takes `-m` — `run`, `serve`, `inspect`, `bench` and `tune` — accepts
+Any command that takes `-m` — `run`, `serve`, `embed`, `inspect`, `bench` and `tune` — accepts
 `hf:<namespace>/<repo>/<file>[@<rev>]`. The file is downloaded once into
 `~/.cache/peregrine/models/<repo>/<file>` (or `$PEREGRINE_CACHE_DIR` / `$XDG_CACHE_HOME/peregrine`) and
 reused afterwards. Partial downloads resume from a `.part` file; the repository and optional revision are
@@ -121,6 +121,35 @@ beside the old one (`SO_REUSEPORT`), waits for it to report ready, then drains a
 `kill -HUP <pid>` does the same handoff for a rebuilt or replaced binary. See
 [Service & upgrades](docs/service.md).
 
+## Embeddings
+
+A causal model that was trained as an embedder (it declares `<arch>.pooling_type` in its GGUF)
+serves `POST /v1/embeddings` beside chat, on the same engine and the same weight passes:
+
+```sh
+peregrine serve -m hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf --port 8201
+curl -s localhost:8201/v1/embeddings -H 'content-type: application/json' \
+  -d '{"input":["What is the capital of France?","Paris is the capital of France."],"model":"peregrine"}'
+```
+
+The body follows OpenAI: `input` is a string, an array of strings, an array of token ids or an array of
+token-id arrays; `dimensions` truncates the vector (Matryoshka, then L2 normalisation); and
+`encoding_format` is `float` (default) or `base64` (little-endian f32). The pooling type is the file's
+own — `last` for Qwen3-Embedding, `mean` for the models trained that way — and vectors come back in
+input order, bit-identical alone or in any batch. A text longer than `-c` is a 400 that names the
+limit, unless the request sets `truncate: true`.
+
+Without a server:
+
+```sh
+peregrine embed -m model.gguf "What is the capital of France?"   # one line of floats per text
+echo "one text per line" | peregrine embed -m model.gguf          # stdin
+peregrine embed -m model.gguf --json --dimensions 256 "..."       # the API's JSON shape
+```
+
+Only causal decoders are embedders in this build (S4.1); bidirectional encoder families and their
+classifier heads arrive in later S4 steps. `peregrine inspect` prints the pooling type a file declares.
+
 ## CLI reference
 
 | Command | What it does |
@@ -130,7 +159,8 @@ beside the old one (`SO_REUSEPORT`), waits for it to report ready, then drains a
 | `peregrine status` | Show the running background server (PID, version, URL, model, log path). |
 | `peregrine stop` | Gracefully drain in-flight requests and stop the background server. |
 | `peregrine upgrade [--check] [--version TAG]` | Download, verify (`SHA256SUMS`), and atomically install the newest release with zero-downtime handoff (`SO_REUSEPORT`). |
-| `peregrine inspect <MODEL>` | Inspect GGUF metadata, architecture, quantization formats, and check whether this build can run the file. |
+| `peregrine embed -m <MODEL> [TEXT]...` | Embed texts (or stdin lines): one L2-normalised vector per text, the file's own pooling type (`--dimensions`, `--json`). |
+| `peregrine inspect <MODEL>` | Inspect GGUF metadata, architecture, quantization formats, pooling type, and check whether this build can run the file. |
 | `peregrine bench -m <MODEL>` | Measure single-user prefill and greedy decode tok/s and memory bandwidth (bytes/token). |
 | `peregrine tune -m <MODEL>` | Auto-tune thread counts and spin windows for this CPU + model and save a hardware profile. |
 | `peregrine tier` | Print the detected CPU SIMD kernel tier (`x86_64-avx512`, `x86_64-avx2`, `aarch64-neon-i8mm`, etc.) and active engine options. |
@@ -177,6 +207,7 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 | CPUs | x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE, SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
+| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), `POST /v1/embeddings`, `peregrine embed` |
 <!-- support:end -->
 
 Every supported family is verified against llama.cpp v0.9.0 on real model files for tokenizer parity,

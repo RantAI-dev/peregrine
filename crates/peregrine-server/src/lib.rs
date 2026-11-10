@@ -37,9 +37,10 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
+use peregrine_core::embed::Pooling;
 use peregrine_core::model::Model;
 use peregrine_core::sample::Penalties;
-use peregrine_core::serve::{Emission, Engine, Finish, SlotCfg, SlotId};
+use peregrine_core::serve::{Emission, Engine, Finish, SlotCfg, SlotId, Want};
 use peregrine_core::template::Template;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -149,6 +150,11 @@ struct App {
     max_ctx: usize,
     max_slots: usize,
     alias: String,
+    /// The file's pooling type (`<arch>.pooling_type`, read as llama.cpp reads it). `None`
+    /// means the file declares none, and `/v1/embeddings` refuses it by name.
+    pooling: Option<Pooling>,
+    /// The width of one embedding vector (the final hidden state's width).
+    embedding_width: usize,
     think_open: Option<u32>,
     think_close: Option<u32>,
     /// The server's default reasoning format, overridden by a request's `reasoning_format`.
@@ -310,8 +316,18 @@ pub async fn run(a: Args) {
             .spawn(move || engine_thread(engine, rx, shared))
             .expect("spawn the engine thread");
     }
+    let pooling = match model.pooling() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("peregrine-server: {e}");
+            std::process::exit(2);
+        }
+    };
+    let embedding_width = model.embedding_width();
     let app = Arc::new(App {
         option_metrics,
+        pooling,
+        embedding_width,
         think_open: model.tk.id_of("<think>"),
         think_close: model.tk.id_of("</think>"),
         reasoning_format,
@@ -359,6 +375,7 @@ pub async fn run(a: Args) {
         .route("/v1/models", get(models))
         .route("/metrics", get(metrics))
         .route("/v1/chat/completions", post(chat))
+        .route("/v1/embeddings", post(embeddings))
         .with_state(app);
     let addr = format!("{}:{}", a.host, a.port);
     let listener = match bind(&a.host, a.port, a.reuse_port).await {
@@ -1051,6 +1068,8 @@ fn push_reply(
 struct Job {
     prompt: Vec<u32>,
     cfg: SlotCfg,
+    /// Tokens sample and stream; `Pooled` pools one vector (S4.1).
+    want: Want,
     out: tokio::sync::mpsc::UnboundedSender<Emission>,
 }
 
@@ -1103,7 +1122,11 @@ fn engine_thread(
             if j.out.is_closed() {
                 continue;
             }
-            match engine.admit(j.prompt, j.cfg) {
+            let admitted = match j.want {
+                Want::Tokens => engine.admit(j.prompt, j.cfg),
+                Want::Pooled(pooling) => engine.admit_pooled(j.prompt, j.cfg, pooling),
+            };
+            match admitted {
                 Ok(id) => {
                     routes.insert(id, j.out);
                 }
@@ -1115,6 +1138,7 @@ fn engine_thread(
                         logprob: 0.0,
                         finish: Some(Finish::Error(why)),
                         cost: None,
+                        embedding: None,
                     });
                 }
             }
@@ -1276,6 +1300,7 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
             .send(EngineMsg::Run(Box::new(Job {
                 prompt,
                 cfg,
+                want: Want::Tokens,
                 out: etx,
             })))
             .is_err()
@@ -1529,6 +1554,311 @@ impl Drop for BusyGuard {
     }
 }
 
+/// One input of an embedding request: text to tokenize, or token ids the caller already has.
+#[derive(Debug, Clone, PartialEq)]
+enum EmbedInput {
+    Text(String),
+    Tokens(Vec<u32>),
+}
+
+/// What `/v1/embeddings` asks for, read from the OpenAI-shaped body.
+#[derive(Debug, Clone, PartialEq)]
+struct EmbedSpec {
+    inputs: Vec<EmbedInput>,
+    /// Matryoshka truncation, applied before the L2 normalisation.
+    dimensions: Option<usize>,
+    /// `encoding_format`: `false` is `float` (the default), `true` is `base64` (little-endian f32).
+    base64: bool,
+    /// The non-standard opt-in to truncate an over-length text instead of refusing it.
+    truncate: bool,
+    /// The request's `model` (echoed); any value is accepted, as on the chat route.
+    model: String,
+}
+
+/// The fields `/v1/embeddings` accepts. Anything else is refused by name: an embedding
+/// endpoint that silently ignores an option returns a vector the caller did not ask for.
+const EMBED_FIELDS: &[&str] = &[
+    "input",
+    "model",
+    "dimensions",
+    "encoding_format",
+    "truncate",
+    "user",
+];
+
+/// Read `/v1/embeddings` (`docs/design/s4-embeddings-decisions.md` §3).
+///
+/// `input` is a string, an array of strings, an array of token ids, or an array of token-id
+/// arrays. `dimensions` truncates the vector (and must fit the model), `encoding_format` is
+/// `float` or `base64`, and `truncate` is the opt-in for a text longer than the context.
+fn parse_embedding_request(b: &Value, width: usize) -> Result<EmbedSpec, String> {
+    if let Some(obj) = b.as_object() {
+        for k in obj.keys() {
+            if !EMBED_FIELDS.contains(&k.as_str()) {
+                return Err(format!("{k} is not supported by /v1/embeddings"));
+            }
+        }
+    } else {
+        return Err("the request body must be a JSON object".into());
+    }
+    let input = b
+        .get("input")
+        .ok_or_else(|| "input must be provided".to_string())?;
+    let ids = |v: &Value| -> Result<Vec<u32>, String> {
+        let arr = v
+            .as_array()
+            .ok_or_else(|| "an input must be a string or an array of token ids".to_string())?;
+        let mut out = Vec::with_capacity(arr.len());
+        for x in arr {
+            let id = x
+                .as_u64()
+                .filter(|&id| id <= u32::MAX as u64)
+                .ok_or_else(|| "token ids must be non-negative integers".to_string())?;
+            out.push(id as u32);
+        }
+        Ok(out)
+    };
+    let inputs = match input {
+        Value::String(text) => vec![EmbedInput::Text(text.clone())],
+        Value::Array(items) => {
+            if items.is_empty() {
+                return Err("input must not be an empty array".into());
+            }
+            let strings = items.iter().all(|v| v.is_string());
+            let numbers = items.iter().all(|v| v.is_u64());
+            if strings {
+                items
+                    .iter()
+                    .map(|v| EmbedInput::Text(v.as_str().unwrap_or_default().to_string()))
+                    .collect()
+            } else if numbers {
+                vec![EmbedInput::Tokens(ids(input)?)]
+            } else if items.iter().all(|v| v.as_array().is_some()) {
+                let mut out = Vec::with_capacity(items.len());
+                for (i, v) in items.iter().enumerate() {
+                    let t = ids(v)?;
+                    if t.is_empty() {
+                        return Err(format!("input {i} is an empty token-id array"));
+                    }
+                    out.push(EmbedInput::Tokens(t));
+                }
+                out
+            } else {
+                return Err(
+                    "input must be a string, an array of strings, an array of token ids, or an array of token-id arrays"
+                        .into(),
+                );
+            }
+        }
+        _ => return Err("input must be a string or an array".into()),
+    };
+    let dimensions = match b.get("dimensions") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let d = v
+                .as_u64()
+                .filter(|&d| d > 0 && d <= width as u64)
+                .ok_or_else(|| format!("dimensions must be an integer from 1 to {width}"))?;
+            Some(d as usize)
+        }
+    };
+    let base64 = match b.get("encoding_format") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) if s == "float" => false,
+        Some(Value::String(s)) if s == "base64" => true,
+        Some(other) => {
+            return Err(format!(
+                "encoding_format {other} is not supported: use \"float\" or \"base64\""
+            ))
+        }
+    };
+    let truncate = match b.get("truncate") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "truncate must be a boolean".to_string())?,
+    };
+    Ok(EmbedSpec {
+        inputs,
+        dimensions,
+        base64,
+        truncate,
+        model: b
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// Refuse a text longer than the served context, or truncate it when the request opted in.
+///
+/// An embedding is one vector for one text, so a silent truncation would be a different
+/// vector than the caller asked for; the error names the limit, as the design requires.
+fn fit_tokens(
+    i: usize,
+    tokens: &mut Vec<u32>,
+    max_ctx: usize,
+    truncate: bool,
+) -> Result<(), String> {
+    if tokens.is_empty() {
+        return Err(format!("input {i} produced no tokens"));
+    }
+    if tokens.len() > max_ctx {
+        if truncate {
+            tokens.truncate(max_ctx);
+        } else {
+            return Err(format!(
+                "input {i} is {} tokens; this model is served with {max_ctx} positions (set \"truncate\": true to truncate)",
+                tokens.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Base64 of the vector's little-endian f32 bytes (OpenAI's `encoding_format: "base64"`).
+fn base64_f32(v: &[f32]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// `POST /v1/embeddings` (OpenAI shape; S4.1, causal models).
+///
+/// Every input of one request becomes a slot, so the texts share weight passes; the results
+/// come back in input order.
+async fn embeddings(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Response {
+    let Some(pooling) = app.pooling else {
+        return bad(format!(
+            "this model file declares no {}.pooling_type (pooling \"none\"), so /v1/embeddings has no vector to return",
+            app.model.cfg.arch_name
+        ));
+    };
+    let spec = match parse_embedding_request(&body, app.embedding_width) {
+        Ok(s) => s,
+        Err(e) => return bad(e),
+    };
+    // Tokenize before reserving a place: an over-length text is the caller's error, and it
+    // must not hold the engine.
+    let mut texts: Vec<Vec<u32>> = Vec::with_capacity(spec.inputs.len());
+    for (i, input) in spec.inputs.iter().enumerate() {
+        let mut tokens = match input {
+            EmbedInput::Text(t) => app.model.tk.encode_special(t),
+            EmbedInput::Tokens(t) => t.clone(),
+        };
+        if let Err(e) = fit_tokens(i, &mut tokens, app.max_ctx, spec.truncate) {
+            return bad(e);
+        }
+        texts.push(tokens);
+    }
+    // One place for the whole request, not one per text: a batch larger than the slot count is
+    // normal (32 texts on a 4-slot server), and the texts beyond the free slots wait in the
+    // engine's queue — they are admitted as slots free up, in order, and never refused or
+    // dropped here. Counting the request once is what keeps a 32-text batch from a 16-place cap.
+    if !try_reserve_n(&app.busy, 1, MIN_WAITING.max(2 * app.max_slots)) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "too many requests are waiting for this model", "type": "overloaded_error", "code": 503}})),
+        )
+            .into_response();
+    }
+    let _busy = BusyGuard(app.clone());
+    app.requests.fetch_add(1, Ordering::SeqCst);
+    let mut rxs = Vec::with_capacity(texts.len());
+    for tokens in texts {
+        let (etx, erx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
+        if app
+            .jobs
+            .send(EngineMsg::Run(Box::new(Job {
+                prompt: tokens,
+                // A pooled slot samples nothing; the rest of the config is the engine's default.
+                cfg: SlotCfg::default(),
+                want: Want::Pooled(pooling),
+                out: etx,
+            })))
+            .is_err()
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "the engine is not running", "type": "server_error", "code": 500}})),
+            )
+                .into_response();
+        }
+        rxs.push(erx);
+    }
+    let mut vectors = Vec::with_capacity(rxs.len());
+    let mut prompt_tokens = 0u64;
+    for mut rx in rxs {
+        let Some(em) = rx.recv().await else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "the engine ended without a result", "type": "server_error", "code": 500}})),
+            )
+                .into_response();
+        };
+        if let Some(Finish::Error(e)) = &em.finish {
+            return bad(e.clone());
+        }
+        prompt_tokens += em.cost.as_ref().map_or(0, |c| c.prompt_tokens as u64);
+        let Some(mut v) = em.embedding else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "the engine returned no embedding", "type": "server_error", "code": 500}})),
+            )
+                .into_response();
+        };
+        if let Err(e) = peregrine_core::embed::finish(&mut v, spec.dimensions) {
+            return bad(e);
+        }
+        vectors.push(v);
+    }
+    let data: Vec<Value> = vectors
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            json!({
+                "object": "embedding",
+                "index": i,
+                "embedding": if spec.base64 { Value::String(base64_f32(v)) } else { json!(v) },
+            })
+        })
+        .collect();
+    let model = if spec.model.is_empty() {
+        app.alias.clone()
+    } else {
+        spec.model.clone()
+    };
+    Json(json!({
+        "object": "list",
+        "data": data,
+        "model": model,
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+    }))
+    .into_response()
+}
+
 async fn chat(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Response {
     let mut p = match plan(&body) {
         Ok(p) => p,
@@ -1678,7 +2008,10 @@ pub fn init_logging() {
 
 #[cfg(test)]
 mod tests {
-    use super::{continuation_prefix, plan, Penalties, ReasoningFormat};
+    use super::{
+        base64_f32, continuation_prefix, fit_tokens, parse_embedding_request, plan, EmbedInput,
+        Penalties, ReasoningFormat,
+    };
     use axum::Json;
     use serde_json::{json, Value};
     use std::time::{Duration, Instant};
@@ -2186,5 +2519,109 @@ mod tests {
             "peregrine: shutdown took longer than 30 s; exiting with requests still open"
         );
         drop(stream);
+    }
+
+    #[test]
+    fn embedding_input_shapes_are_the_openai_ones() {
+        let one = parse_embedding_request(&json!({"input": "hello"}), 8).unwrap();
+        assert_eq!(one.inputs, vec![EmbedInput::Text("hello".into())]);
+
+        let many = parse_embedding_request(&json!({"input": ["a", "b"]}), 8).unwrap();
+        assert_eq!(
+            many.inputs,
+            vec![EmbedInput::Text("a".into()), EmbedInput::Text("b".into())]
+        );
+
+        let ids = parse_embedding_request(&json!({"input": [11, 12, 13]}), 8).unwrap();
+        assert_eq!(ids.inputs, vec![EmbedInput::Tokens(vec![11, 12, 13])]);
+
+        let arrays = parse_embedding_request(&json!({"input": [[11], [12, 13]]}), 8).unwrap();
+        assert_eq!(
+            arrays.inputs,
+            vec![
+                EmbedInput::Tokens(vec![11]),
+                EmbedInput::Tokens(vec![12, 13])
+            ]
+        );
+    }
+
+    #[test]
+    fn embedding_fields_are_validated_and_unknown_ones_refused() {
+        assert!(parse_embedding_request(&json!({}), 8).is_err());
+        assert!(parse_embedding_request(&json!({"input": []}), 8).is_err());
+        assert!(parse_embedding_request(&json!({"input": [1, -2]}), 8).is_err());
+        assert!(parse_embedding_request(&json!({"input": [1.5]}), 8).is_err());
+        assert!(parse_embedding_request(&json!({"input": ["a", 3]}), 8).is_err());
+        assert!(parse_embedding_request(&json!({"input": [[]]}), 8).is_err());
+        // `dimensions` must be a positive integer that fits the model.
+        assert_eq!(
+            parse_embedding_request(&json!({"input": "a", "dimensions": 4}), 8)
+                .unwrap()
+                .dimensions,
+            Some(4)
+        );
+        assert!(parse_embedding_request(&json!({"input": "a", "dimensions": 0}), 8).is_err());
+        assert!(parse_embedding_request(&json!({"input": "a", "dimensions": 9}), 8).is_err());
+        assert!(parse_embedding_request(&json!({"input": "a", "dimensions": "4"}), 8).is_err());
+        // `encoding_format` is `float` or `base64`.
+        assert!(
+            !parse_embedding_request(&json!({"input": "a"}), 8)
+                .unwrap()
+                .base64
+        );
+        assert!(
+            !parse_embedding_request(&json!({"input": "a", "encoding_format": "float"}), 8)
+                .unwrap()
+                .base64
+        );
+        assert!(
+            parse_embedding_request(&json!({"input": "a", "encoding_format": "base64"}), 8)
+                .unwrap()
+                .base64
+        );
+        assert!(
+            parse_embedding_request(&json!({"input": "a", "encoding_format": "int8"}), 8).is_err()
+        );
+        assert!(
+            parse_embedding_request(&json!({"input": "a", "encoding_format": 1}), 8).is_err(),
+            "a non-string format is refused, not read as float"
+        );
+        // The truncation opt-in is a boolean.
+        assert!(
+            parse_embedding_request(&json!({"input": "a", "truncate": true}), 8)
+                .unwrap()
+                .truncate
+        );
+        assert!(parse_embedding_request(&json!({"input": "a", "truncate": 1}), 8).is_err());
+        // Unknown fields are refused by name, as chat refuses unsupported sampling fields.
+        let err = parse_embedding_request(&json!({"input": "a", "pooling": "mean"}), 8)
+            .err()
+            .unwrap_or_default();
+        assert!(err.contains("pooling"), "{err:?}");
+        assert!(parse_embedding_request(&json!({"input": "a", "user": "u"}), 8).is_ok());
+    }
+
+    #[test]
+    fn over_length_names_the_limit_unless_truncation_is_asked_for() {
+        let mut t: Vec<u32> = (0..9).collect();
+        let err = fit_tokens(0, &mut t, 8, false).err().unwrap_or_default();
+        assert!(err.contains("9 tokens"), "{err:?}");
+        assert!(err.contains("8 positions"), "{err:?}");
+        fit_tokens(0, &mut t, 8, true).unwrap();
+        assert_eq!(t.len(), 8);
+        assert!(t == (0..8).collect::<Vec<u32>>());
+        // A text that tokenizes to nothing is refused too.
+        assert!(fit_tokens(2, &mut vec![], 8, false).is_err());
+    }
+
+    #[test]
+    fn base64_is_little_endian_f32() {
+        // 1.0f32 is 00 00 80 3f, whose base64 is AACAPw==.
+        assert_eq!(base64_f32(&[1.0]), "AACAPw==");
+        assert_eq!(base64_f32(&[0.0]), "AAAAAA==");
+        // Eight bytes are three chunks: the last has two bytes and one `=` of padding.
+        assert_eq!(base64_f32(&[1.0, 1.0]).len(), 12);
+        assert!(base64_f32(&[1.0, 1.0]).ends_with('='));
+        assert!(!base64_f32(&[1.0, 1.0]).ends_with("=="));
     }
 }
