@@ -50,7 +50,8 @@ Work down the list; do not cut the tag until every line holds.
   (the build script refuses `RUSTFLAGS`, and the workflow asserts the baseline binary still picks the
   AVX2 tier on an AVX2-only runner). AVX2, AVX-VNNI-256 and AVX-512 are chosen at run time by the
   kernel table; aarch64 ships the same way. One binary per architecture, portable down the ISA ladder.
-- Binaries are built natively per target on the release runners (no cross-compilation); `dist`/PGO
-  profiles are not used until S3.9's A/B adopts them.
+- Binaries are built natively per target on the release runners (no cross-compilation). Build them
+  with `--profile dist` (fat LTO, one codegen unit): same speed as `release` on the S3.9 A/B, 29%
+  smaller. Published benchmark numbers stay on `release` (see [`build-profiles.md`](build-profiles.md)).
 - macOS archives and container images are not in the first release; both are follow-ups
   (the Dockerfile ships first, an image publish comes with it).
