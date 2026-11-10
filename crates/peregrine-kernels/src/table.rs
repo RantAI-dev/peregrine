@@ -54,7 +54,14 @@ impl MatKernels {
             crate::simd::have_batched(),
             crate::tern::have_ptq1_zmm(),
         );
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-ternary")))]
+        // The NEON tier has the per-row PQ2_0 kernels (`sdot`); PTQ1_0 stays on
+        // the scalar reference until it has one.
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-ternary"))]
+        let (tiles, pq2_rows, ptq1_rows) = (false, crate::cpu::have_dotprod(), false);
+        #[cfg(not(any(
+            all(target_arch = "x86_64", feature = "fmt-ternary"),
+            all(target_arch = "aarch64", feature = "fmt-ternary")
+        )))]
         let (tiles, pq2_rows, ptq1_rows) = (false, false, false);
         // The repacked k-quant kernels need the batched kernels' instruction
         // sets, and the repack switch.
@@ -588,7 +595,16 @@ impl MatKernels {
         unsafe {
             crate::tern::dot_rows_pq2(w, rb, rows, acts, out)
         }
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-ternary")))]
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-ternary"))]
+        // SAFETY: `pq2_rows` is `have_dotprod()` (NEON + `sdot`); the activations are in the ternary layout and
+        // match the row width; lengths checked above.
+        unsafe {
+            crate::neon::dot_rows_pq2(w, rb, rows, acts, out)
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", feature = "fmt-ternary"),
+            all(target_arch = "aarch64", feature = "fmt-ternary")
+        )))]
         unreachable!("no PQ2_0 row kernel on this architecture")
     }
 
@@ -697,6 +713,8 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
         Format::Q4_K => &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm],
         #[cfg(feature = "fmt-kquant")]
         Format::Q6_K => &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm],
+        #[cfg(feature = "fmt-ternary")]
+        Format::PQ2_0 => &[Tier::Scalar, Tier::NeonDotprod],
         _ => &[Tier::Scalar],
     };
     #[cfg(not(target_arch = "aarch64"))]
