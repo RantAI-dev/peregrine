@@ -1,0 +1,252 @@
+{
+  "benchmark": "peregrine-s3.1",
+  "timestamp": "2026-11-09T12:14:43.932972+00:00",
+  "model": {
+    "path": "/home/uaa/models-ab/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "filename": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "size_bytes": 491400032,
+    "bytes_per_token_telemetry": 392357992.0
+  },
+  "machine": {
+    "hostname": "DESKTOP-4TS2NH4",
+    "os": "Linux",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "cpu_model": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+    "cpu_features": [
+      "fma",
+      "avx",
+      "avx2",
+      "avx512f",
+      "avx_vnni",
+      "avx512_bf16"
+    ],
+    "threads_tested": 12,
+    "governor": "unknown (VM or fixed frequency)",
+    "bandwidth_ceiling_bytes_per_s": 41998197632.8912,
+    "bandwidth_ceiling_gb_s": 41.998,
+    "flops_ceiling": 306965887349.9144,
+    "gflops_ceiling": 306.966,
+    "simd_tier": "x86_64-avx2-avx512-vnni-gfni-vbmi",
+    "ridge_point": 7.309
+  },
+  "engine": {
+    "name": "llama.cpp",
+    "version": "v0.9.0",
+    "commit": "cd959ba",
+    "repo": "https://github.com/ggml-org/llama.cpp.git",
+    "build_type": "CMake Release AVX2/FMA CPU",
+    "server_binary": "/home/uaa/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server",
+    "flash_attn": "off"
+  },
+  "settings": {
+    "contexts": [
+      512
+    ],
+    "runs": 3,
+    "decode_tokens": 256,
+    "threads": 12,
+    "mode": "server",
+    "user_counts": [
+      1,
+      10
+    ],
+    "engine_args": {},
+    "chat_template_kwargs": null,
+    "token_tolerance": 0,
+    "interleaved": true,
+    "llama_flash_attn": "off"
+  },
+  "results": {
+    "512": {
+      "single_user": {
+        "decode_tok_s": [
+          68.1154866146417,
+          63.80041634756074,
+          64.24362789789579
+        ],
+        "prefill_tok_s": [
+          415.9206433832149,
+          390.4332513045493,
+          389.86730846060294
+        ],
+        "ttft_s": [
+          1.16884183883667,
+          1.2467570304870605,
+          1.2550435066223145
+        ],
+        "prompt_tokens": [
+          508,
+          506,
+          509
+        ]
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": [],
+        "decode_aggregate_tok_s": [],
+        "ttft_s": [],
+        "prompt_tokens": []
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": [
+          54.373661717269485,
+          54.13100386470331,
+          57.74575909630359
+        ],
+        "decode_aggregate_tok_s": [
+          94.64630230671595,
+          94.98352102468732,
+          95.80461606709346
+        ],
+        "ttft_s": [
+          10.297305345535278,
+          15.379179954528809,
+          12.649575233459473
+        ],
+        "prompt_tokens": [
+          511.0,
+          510.0,
+          510.0
+        ]
+      }
+    }
+  },
+  "summary": {
+    "512": {
+      "context": 512,
+      "actual_prompt_tokens": 508,
+      "single_user": {
+        "decode_tok_s": {
+          "median": 64.24,
+          "spread": 2.16,
+          "min": 63.8,
+          "max": 68.12
+        },
+        "prefill_tok_s": {
+          "median": 390.43,
+          "spread": 13.03,
+          "min": 389.87,
+          "max": 415.92
+        },
+        "ttft_s": {
+          "median": 1.25,
+          "spread": 0.04,
+          "min": 1.17,
+          "max": 1.26
+        },
+        "prompt_tokens": {
+          "median": 508,
+          "spread": 1.5,
+          "min": 506,
+          "max": 509
+        },
+        "bytes_per_token": 392357992.0,
+        "fraction_of_ceiling": 0.6001,
+        "percent_of_ceiling": 60.01,
+        "raw_samples": {
+          "decode_tok_s": [
+            68.1154866146417,
+            63.80041634756074,
+            64.24362789789579
+          ],
+          "prefill_tok_s": [
+            415.9206433832149,
+            390.4332513045493,
+            389.86730846060294
+          ],
+          "ttft_s": [
+            1.16884183883667,
+            1.2467570304870605,
+            1.2550435066223145
+          ],
+          "prompt_tokens": [
+            508,
+            506,
+            509
+          ]
+        }
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "decode_aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "ttft_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "prompt_tokens": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [],
+          "decode_aggregate_tok_s": [],
+          "ttft_s": [],
+          "prompt_tokens": []
+        }
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": {
+          "median": 54.37,
+          "spread": 1.81,
+          "min": 54.13,
+          "max": 57.75
+        },
+        "decode_aggregate_tok_s": {
+          "median": 94.98,
+          "spread": 0.58,
+          "min": 94.65,
+          "max": 95.8
+        },
+        "first_token_time_s": {
+          "median": 12.65,
+          "spread": 2.54,
+          "min": 10.3,
+          "max": 15.38
+        },
+        "prompt_tokens": {
+          "median": 510.0,
+          "spread": 0.5,
+          "min": 510.0,
+          "max": 511.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [
+            54.373661717269485,
+            54.13100386470331,
+            57.74575909630359
+          ],
+          "decode_aggregate_tok_s": [
+            94.64630230671595,
+            94.98352102468732,
+            95.80461606709346
+          ],
+          "ttft_s": [
+            10.297305345535278,
+            15.379179954528809,
+            12.649575233459473
+          ],
+          "prompt_tokens": [
+            511.0,
+            510.0,
+            510.0
+          ]
+        }
+      }
+    }
+  }
+}
