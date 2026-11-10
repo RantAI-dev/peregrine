@@ -66,6 +66,28 @@ Each model is checked against llama.cpp on the same file before it is listed.
 | S3.9 | Build profile A/B (`dist`: fat LTO, one codegen unit, then PGO); thread pinning and first-touch placement — `dist` profile A/B (`docs/dev/build-profiles.md`) and `PEREGRINE_AFFINITY` thread pinning (#139) — done | 0.5 |
 | S3.10 | Published report: method, raw data, wins and losses — published benchmark and accuracy report (`docs/benchmark.md`, `docs/dev/accuracy.md`, `benchmarks/results/`) — done | 0.5 |
 
+## Stage 4: embeddings and decision models
+
+Design: [`docs/design/s4-embeddings-decisions.md`](design/s4-embeddings-decisions.md). Embedding
+models (`/v1/embeddings`) and "system one" decision models: rerank, classify, and a closed-choice
+decision from any generative model, each one forward pass with no decode.
+
+| ID | Item | pw |
+|---|---|---|
+| S4.1 | Pooled outputs on causal models; `/v1/embeddings`, `peregrine embed`; Qwen3-Embedding against llama.cpp | 0.5 |
+| S4.2 | Benchmark harness modes for embeddings, rerank and decide; competitor baselines (llama.cpp, text-embeddings-inference, fastembed, OpenVINO) on H1 and H2 | 1.0 |
+| S4.3 | Choice scoring: `/v1/decide`, `/v1/rerank` on generative rerankers and guards | 1.0 |
+| S4.4 | Bidirectional forward; `gemma-embedding` (EmbeddingGemma) | 1.0 |
+| S4.5 | WordPiece and SentencePiece-unigram tokenizers | 0.5 |
+| S4.6 | `bert` family and the classifier head: MiniLM, bge, e5, bge-m3, bge-reranker; `/v1/classify` | 1.5 |
+| S4.7 | `modern-bert` and labelled classifier heads (guards, routers) | 1.0 |
+| S4.8 | `nomic-bert`, `jina-bert-v2/v3` | 1.0 |
+| S4.9 | Speed: F32/F16 GEMM blocking, `n × n` attention tiles, small-model thread choice, duplicate cache; targets met on x86, then NEON | 2.0 |
+| S4.10 | Several models in one server | 1.0 |
+
+Each model is checked against llama.cpp on the same file before it is listed; a text's output is
+bit-identical alone and in any batch.
+
 ## Open decisions
 
 1. ARM in Stage 2, or x86 only for now.
