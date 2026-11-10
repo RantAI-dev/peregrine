@@ -39,8 +39,11 @@ Work down the list; do not cut the tag until every line holds.
    generated from PR labels. Nothing else publishes.
 6. **Check the release.** Download both archives, `sha256sum -c SHA256SUMS`, run `./peregrine tier`
    (x86-64: an `x86_64-avx2*` tier from the baseline binary; aarch64: `aarch64`), then
-   `peregrine inspect` a model and a one-request smoke test against `peregrine serve`
-   (`docs/quickstart.md`).
+   `peregrine inspect` a model and smoke-test `serve` (`docs/quickstart.md`):
+   (a) run the first `hf:` command with a cold cache (an empty `PEREGRINE_CACHE_DIR`), so the
+   download path is exercised; (b) leave `peregrine serve` up for at least 60 s and answer a chat
+   request after that, so a lifetime tied to the drain timeout cannot ship again; (c) exercise
+   `serve --background`, `status`, `stop`, then `status` again (it must report no managed server).
 
 ## What ships
 

@@ -45,7 +45,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod harmony;
 pub mod lifecycle;
@@ -385,17 +385,92 @@ pub async fn run(a: Args) {
         }
     }
     tracing::info!("listening on http://{addr}");
-    let server = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal(a.state_file.clone(), a.log_file.clone()));
-    // A drain must end: a client that holds a stream open cannot keep the process from exiting.
-    if tokio::time::timeout(std::time::Duration::from_secs(30), server)
-        .await
-        .is_err()
+    let drain = drain_timeout();
+    match serve_with_drain(
+        listener,
+        router,
+        shutdown_signal(a.state_file.clone(), a.log_file.clone()),
+        drain,
+    )
+    .await
     {
-        eprintln!("peregrine: shutdown took longer than 30 s; exiting with requests still open");
+        Ok(Drain::Finished) => {}
+        Ok(Drain::TimedOut) => eprintln!("{}", drain_timeout_notice(drain)),
+        Err(e) => tracing::error!("serve: {e}"),
     }
     if let Some(path) = &a.state_file {
         lifecycle::remove_if_ours(path, std::process::id());
+    }
+}
+
+/// How long a drain may take before the process exits with requests still open.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The drain timeout: [`DRAIN_TIMEOUT`], or `PEREGRINE_DRAIN_TIMEOUT_MS` when a test needs a
+/// shorter one (`docs/dev/testing.md`). A zero or unparsable value is ignored.
+fn drain_timeout() -> Duration {
+    std::env::var("PEREGRINE_DRAIN_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .map_or(DRAIN_TIMEOUT, Duration::from_millis)
+}
+
+/// The line printed when a drain outlives its timeout.
+fn drain_timeout_notice(timeout: Duration) -> String {
+    let limit = if timeout.as_secs() > 0 {
+        format!("{} s", timeout.as_secs())
+    } else {
+        format!("{} ms", timeout.as_millis())
+    };
+    format!("peregrine: shutdown took longer than {limit}; exiting with requests still open")
+}
+
+/// How a served [`Router`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drain {
+    /// Every in-flight request finished (or there was none).
+    Finished,
+    /// The drain outlived its timeout, so the process exits with requests still open.
+    TimedOut,
+}
+
+/// Serve `router` on `listener` until `shutdown` resolves, then drain for at most `drain`.
+///
+/// The timeout bounds the *shutdown*, not the server's lifetime: it starts when `shutdown`
+/// resolves, so a server that nobody has asked to stop keeps serving. This used to be a
+/// `timeout` around the whole serving future, which made every server exit 30 s after it started
+/// (the bug in v0.1.1).
+async fn serve_with_drain<F>(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    shutdown: F,
+    drain: Duration,
+) -> std::io::Result<Drain>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    // The signal future notifies this task when a drain begins; only then does the clock start.
+    let (draining_tx, draining_rx) = tokio::sync::oneshot::channel::<()>();
+    let signal = async move {
+        shutdown.await;
+        let _ = draining_tx.send(());
+    };
+    let server = axum::serve(listener, router).with_graceful_shutdown(signal);
+    let mut server = Box::pin(std::future::IntoFuture::into_future(server));
+    tokio::select! {
+        served = &mut server => {
+            served?;
+            Ok(Drain::Finished)
+        }
+        _ = draining_rx => {
+            // A drain must end: a client that holds a stream open cannot keep the process from exiting.
+            match tokio::time::timeout(drain, &mut server).await {
+                Ok(Ok(())) => Ok(Drain::Finished),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Ok(Drain::TimedOut),
+            }
+        }
     }
 }
 
@@ -1002,7 +1077,7 @@ fn engine_thread(
     let mut prof_last = peregrine_core::prof::snapshot();
     let mut prof_steps = 0u64;
     let mut prof_rows = 0u64;
-    let mut prof_wall = std::time::Duration::ZERO;
+    let mut prof_wall = Duration::ZERO;
     let mut prof_at = Instant::now();
     let take = |msg,
                 waiting: &mut VecDeque<Job>,
@@ -1083,7 +1158,7 @@ fn engine_thread(
             prof_last = now;
             prof_steps = 0;
             prof_rows = 0;
-            prof_wall = std::time::Duration::ZERO;
+            prof_wall = Duration::ZERO;
             prof_at = Instant::now();
         }
         for em in emitted {
@@ -1606,6 +1681,7 @@ mod tests {
     use super::{continuation_prefix, plan, Penalties, ReasoningFormat};
     use axum::Json;
     use serde_json::{json, Value};
+    use std::time::{Duration, Instant};
 
     fn body(extra: Value) -> Value {
         let mut b = json!({"messages": [{"role": "user", "content": "hi"}]});
@@ -1928,5 +2004,187 @@ mod tests {
         assert!(calibrated.calibrate);
         assert!(calibrated.decode_threads.is_some());
         assert!((50..=2000).contains(&calibrated.spin_us));
+    }
+
+    /// One HTTP/1.1 GET, read to the end of the body (`Connection: close`).
+    async fn http_get(port: u16, path: &str) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect to the test server");
+            stream
+                .write_all(
+                    format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut out = Vec::new();
+            stream.read_to_end(&mut out).await.unwrap();
+            String::from_utf8_lossy(&out).into_owned()
+        })
+        .await
+        .expect("the test server did not answer")
+    }
+
+    async fn wait_for_health(port: u16) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let attempt = tokio::time::timeout(Duration::from_secs(2), async {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .ok()?;
+                stream
+                    .write_all(
+                        b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .ok()?;
+                let mut out = Vec::new();
+                stream.read_to_end(&mut out).await.ok()?;
+                Some(String::from_utf8_lossy(&out).into_owned())
+            })
+            .await;
+            if matches!(attempt, Ok(Some(ref response)) if response.starts_with("HTTP/1.1 200")) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the test server never answered /health");
+    }
+
+    /// The v0.1.1 bug: a `timeout` around the whole serving future made the server exit after
+    /// the drain timeout even though nothing had asked it to stop. This test fails on that logic.
+    #[tokio::test]
+    async fn the_server_outlives_the_drain_timeout_when_nothing_asked_it_to_stop() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }));
+        let task = tokio::spawn(super::serve_with_drain(
+            listener,
+            router,
+            std::future::pending::<()>(),
+            Duration::from_millis(300),
+        ));
+        wait_for_health(port).await;
+        // Well past the 300 ms drain timeout, with no shutdown request.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let response = http_get(port, "/health").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
+        assert!(
+            !task.is_finished(),
+            "the server exited without a shutdown request"
+        );
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_with_no_open_connection_finishes_promptly() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let router = axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }));
+        let task = tokio::spawn(super::serve_with_drain(
+            listener,
+            router,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            Duration::from_secs(5),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = Instant::now();
+        shutdown_tx.send(()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("a shutdown with no connections hung")
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome, super::Drain::Finished);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "an idle drain took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A client that holds a stream open keeps the drain alive until the timeout, and no longer.
+    #[tokio::test]
+    async fn an_open_stream_holds_the_drain_until_the_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let started_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let router = axum::Router::new().route(
+            "/stream",
+            axum::routing::get(move || {
+                let started = started_tx.clone();
+                async move {
+                    if let Some(tx) = started.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                    // A body that never finishes, like a token stream whose client stays connected.
+                    let body = axum::body::Body::from_stream(futures::stream::pending::<
+                        Result<axum::body::Bytes, std::convert::Infallible>,
+                    >());
+                    axum::response::Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(body)
+                        .unwrap()
+                }
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(super::serve_with_drain(
+            listener,
+            router,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            Duration::from_millis(300),
+        ));
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        started_rx.await.expect("the stream handler ran");
+        let mut head = [0u8; 1024];
+        let n = stream.read(&mut head).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&head[..n]).starts_with("HTTP/1.1 200"),
+            "{:?}",
+            String::from_utf8_lossy(&head[..n])
+        );
+
+        let started = Instant::now();
+        shutdown_tx.send(()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the drain never ended with a stream open")
+            .unwrap()
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(outcome, super::Drain::TimedOut);
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "the in-flight request was cut off before its drain window: {elapsed:?}"
+        );
+        let notice = super::drain_timeout_notice(Duration::from_millis(300));
+        assert!(
+            notice.starts_with("peregrine: shutdown took longer than"),
+            "{notice:?}"
+        );
+        assert_eq!(
+            super::drain_timeout_notice(Duration::from_secs(30)),
+            "peregrine: shutdown took longer than 30 s; exiting with requests still open"
+        );
+        drop(stream);
     }
 }
