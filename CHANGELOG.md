@@ -214,6 +214,27 @@ All notable changes to this project are documented here. The format follows
   governance, security policy, product, targets, roadmap, architecture, coding and structure rules, ADRs.
 
 ### Changed
+- Batched ternary GEMM for prompts (S3.5). The AVX2 PQ2_0 prefill path ran one output row at a
+  time through the whole K, so every row streamed the shared activation set from L2 again; only the
+  groups inside one 8-activation window shared a decode. `dot_rows_pq2` now walks a 16-row tile over
+  an 8-group K-block before the next block, so that block's activation window (8 activation rows ×
+  8 groups × 192 B ≈ 12 KiB) stays in L1 across the tile, while the per-row order — ascending
+  groups, the same four-plane 16-bit sum, the same integer offset, the same `d·td` scale and the
+  same lane-wise fused multiply-add — is untouched. Eight activation accumulators are still held in
+  registers per row, and the GEMV path is unchanged; batches smaller than a prefill chunk (the MTP
+  verify batch) keep the per-row kernel, where all accumulators stay in registers and the tile's
+  stack accumulators cost more than they save. A new test compares the GEMM against the GEMV
+  bit for bit at widths 1..32, row counts 1..31 and K that is not a whole K-block. On bluefin, five
+  alternating rounds against the parent tree (medians): Bonsai 2 2B prefill 130.6 → 154.0 tok/s at
+  512 (+17.9 %) and 121.7 → 142.4 at 4096 (+17.0 %); Bonsai 2 4B 52.4 → 60.1 (+14.7 %) and
+  48.6 → 57.7 (+18.8 %). Decode is flat (2B 61.0 → 60.8 tok/s, 4B 26.50 → 26.56, medians of five
+  decode-only rounds), and the 4B MTP decode is flat (29.2 tok/s on both). The matmul bucket runs 230–254 GMAC/s, against 188–211 before, on four
+  cores; a register-resident loop of the same 16-bit plane sum measures 606 GMAC/s and the same
+  loop with the float fold 453, so the kernel is at 38–42 % of the raw int8 madd roof and ~55 % of
+  the fold's arithmetic-only ceiling. PrismML's fork, same host and four threads: 53.6/52.9 tok/s
+  (2B, 512/4096) and 17.8/17.5 (4B), i.e. Peregrine is 2.9×/2.7× and 3.4×/3.3×.
+  The Gated DeltaNet scan was measured first: it is 3.0–3.4 % of the prefill wall on both Bonsai
+  sizes (`docs/design/s3.5-delta-scan.md`), so a chunked scan is not in this PR.
 - Q5_K prefill keeps eight activation accumulators in registers. `wide_q5_k` decoded a
   super-block once and then ran it against four activations at a time, folding each row
   into a `MAX_WIDE`-long stack array; it now walks eight at a time with the accumulators
