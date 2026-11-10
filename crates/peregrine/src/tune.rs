@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 /// Arguments for `peregrine tune`.
 #[derive(Args, Debug, Clone)]
 pub struct TuneArgs {
-    /// The GGUF model file to tune.
+    /// The GGUF model file to tune, or `hf:<namespace>/<repo>/<file>[@<rev>]`.
     #[arg(short = 'm', long)]
     pub model: PathBuf,
     /// Time budget for tuning in seconds (default: 60).

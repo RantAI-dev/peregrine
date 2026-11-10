@@ -12,3 +12,4 @@ Format: [`0000-template.md`](0000-template.md). Numbered in order; a superseded 
 | [0005](0005-modular-structure.md) | Modular structure by layer, features for optional parts, runtime CPU dispatch | Accepted (planning) |
 | [0006](0006-architecture-interface.md) | The `Architecture` interface and shared layer blocks (S1.2) | Accepted |
 | [0007](0007-one-runtime.md) | One runtime (`Engine`) and one drafter interface (S1.4) | Implemented |
+| [0008](0008-lifecycle-and-upgrade.md) | Background server, lifecycle state file, `SO_REUSEPORT` zero-downtime upgrade | Implemented |

@@ -187,7 +187,9 @@ pub struct EngineOptions {
     pub trace: bool,
 
     // Calibration (S2.6 PR 3/4).
-    /// `PEREGRINE_CALIBRATE=1`: run the startup calibration. Off by default (S2.6 decision 6).
+    /// Run the startup calibration: on for `peregrine serve` when nothing else pins the knobs,
+    /// off for library construction, `bench` and `tune` unless `PEREGRINE_CALIBRATE` asks for it.
+    /// `PEREGRINE_CALIBRATE=0` (`off`, `false`) turns it off everywhere (S2.6 decision 6).
     pub calibrate: bool,
     /// Source of active tuning parameters (0=default, 1=startup, 2=profile, 3=env).
     pub tuning_source: crate::calib::TuningSource,
@@ -264,17 +266,50 @@ impl EngineOptions {
 
     /// The options from the environment and an optional tuning profile:
     /// environment variables win over the profile, the profile wins over defaults.
+    ///
+    /// Startup calibration stays off here: a library or benchmark caller gets the settings the
+    /// environment and profile name, never a measurement. See
+    /// [`EngineOptions::from_env_and_profile_calibrating`] for the server's variant.
     pub fn from_env_and_profile(profile: Option<&crate::profile::Profile>) -> Self {
-        Self::from_chained(|k| std::env::var(k).ok(), profile)
+        Self::from_chained_mode(|k| std::env::var(k).ok(), profile, false)
+    }
+
+    /// The options a long-lived server starts with: like [`Self::from_env_and_profile`], but the
+    /// startup calibration runs when no profile exists, neither `decode_threads` nor `spin_us` is
+    /// pinned, and `PEREGRINE_CALIBRATE` is not `0`.
+    ///
+    /// `bench` and `tune` keep [`Self::from_env_and_profile`]: a published number must record the
+    /// settings it ran with, not a measurement taken before it started.
+    pub fn from_env_and_profile_calibrating(profile: Option<&crate::profile::Profile>) -> Self {
+        Self::from_chained_mode(|k| std::env::var(k).ok(), profile, true)
     }
 
     /// Build options from a custom key-lookup (e.g. environment) and a profile:
     /// `get` wins over the profile, the profile wins over calibration, calibration wins over
-    /// defaults. The calibration runs only when it is asked for (`PEREGRINE_CALIBRATE=1`) and
-    /// nothing pins the values it would set.
+    /// defaults. The calibration runs only when `PEREGRINE_CALIBRATE=1` and nothing pins the
+    /// values it would set.
     pub fn from_chained(
         get: impl Fn(&str) -> Option<String>,
         profile: Option<&crate::profile::Profile>,
+    ) -> Self {
+        Self::from_chained_mode(get, profile, false)
+    }
+
+    /// [`Self::from_chained`], with the server's default: the calibration runs when
+    /// `PEREGRINE_CALIBRATE` says nothing and nothing pins the knobs it would set.
+    pub fn from_chained_calibrating(
+        get: impl Fn(&str) -> Option<String>,
+        profile: Option<&crate::profile::Profile>,
+    ) -> Self {
+        Self::from_chained_mode(get, profile, true)
+    }
+
+    /// [`Self::from_chained`], with the calibration's default chosen by the caller:
+    /// `calibrate_when_unset` makes it run when `PEREGRINE_CALIBRATE` says nothing.
+    fn from_chained_mode(
+        get: impl Fn(&str) -> Option<String>,
+        profile: Option<&crate::profile::Profile>,
+        calibrate_when_unset: bool,
     ) -> Self {
         // Only settings that cannot change a token are read from a profile (ADR 0003, ADR 0005):
         // the ones `TUNABLE` lists. Anything else in the file is ignored, and `get` wins over it.
@@ -289,6 +324,9 @@ impl EngineOptions {
                 .map(|(_, key)| *key)?;
             prof.get(key_name).map(str::to_string)
         });
+        if calibrate_when_unset && get("PEREGRINE_CALIBRATE").is_none() {
+            opts.calibrate = true;
+        }
 
         let env_spin = get("PEREGRINE_SPIN_US").is_some();
         let env_dec = get("PEREGRINE_DECODE_THREADS").is_some();
@@ -381,7 +419,11 @@ impl EngineOptions {
             lb_i8: unless("LB_I8", "0"),
             prof: only("PROF", "1"),
             trace: s("TRACE").is_some(),
-            calibrate: only("CALIBRATE", "1"),
+            calibrate: match s("CALIBRATE").as_deref() {
+                Some("0") | Some("off") | Some("false") => false,
+                Some(_) => true,
+                None => d.calibrate,
+            },
             tuning_source: crate::calib::TuningSource::Default,
             calibration_us: 0,
         }
@@ -858,5 +900,56 @@ mod tests {
         assert!(o.decode_threads.is_some());
         assert!(o.spin_us >= 50 && o.spin_us <= 2000);
         assert_eq!(o.tuning_source, crate::calib::TuningSource::Startup);
+    }
+
+    #[test]
+    fn the_server_calibrates_when_nothing_pins_the_knobs() {
+        let o = EngineOptions::from_chained_calibrating(|_| None, None);
+        assert!(o.calibrate);
+        assert!(o.decode_threads.is_some());
+        assert!(o.spin_us >= 50 && o.spin_us <= 2000);
+        assert_eq!(o.tuning_source, crate::calib::TuningSource::Startup);
+    }
+
+    #[test]
+    fn a_pin_or_calibrate_zero_keeps_the_server_off_the_probe() {
+        let off = EngineOptions::from_chained_calibrating(
+            |k| (k == "PEREGRINE_CALIBRATE").then(|| "0".to_string()),
+            None,
+        );
+        assert!(!off.calibrate);
+        assert_eq!(off.decode_threads, None);
+        assert_eq!(off.spin_us, SPIN_DEFAULT_US);
+        assert_eq!(off.tuning_source, crate::calib::TuningSource::Default);
+
+        let pinned = EngineOptions::from_chained_calibrating(
+            |k| match k {
+                "PEREGRINE_DECODE_THREADS" => Some("3".into()),
+                "PEREGRINE_SPIN_US" => Some("123".into()),
+                _ => None,
+            },
+            None,
+        );
+        assert_eq!((pinned.decode_threads, pinned.spin_us), (Some(3), 123));
+        assert_eq!(pinned.tuning_source, crate::calib::TuningSource::Env);
+    }
+
+    #[test]
+    fn a_profile_wins_over_the_server_calibration_default() {
+        let prof = crate::profile::Profile {
+            peregrine_version: "x".into(),
+            cpu: "x".into(),
+            cpu_features: "x".into(),
+            model_size: 0,
+            model_fnv: 0,
+            created: 0,
+            options: vec![
+                ("decode_threads".into(), "4".into()),
+                ("spin_us".into(), "500".into()),
+            ],
+        };
+        let o = EngineOptions::from_chained_calibrating(|_| None, Some(&prof));
+        assert_eq!((o.decode_threads, o.spin_us), (Some(4), 500));
+        assert_eq!(o.tuning_source, crate::calib::TuningSource::Profile);
     }
 }

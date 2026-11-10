@@ -102,9 +102,11 @@ elsewhere the configured window is used unchanged.
 
 ## Startup calibration
 
-With `PEREGRINE_CALIBRATE=1`, and when no tuning profile exists (`peregrine tune`) and no parameter is
-pinned, Peregrine calibrates `decode_threads` and `spin_us` at startup (< 200 ms budget). It is off by
-default (S2.6 decision 6): explicit settings and profiles keep winning when it is on.
+`peregrine serve` calibrates `decode_threads` and `spin_us` at startup (< 200 ms budget) when no
+tuning profile exists (`peregrine tune`) and neither value is pinned. `PEREGRINE_CALIBRATE=0` (or
+`off`/`false`) turns it off, any other value forces it on. `bench` and `tune` never calibrate unless
+asked: a published number records the settings it ran with, not a measurement taken before it
+started. Explicit settings and profiles keep winning when it is on.
 - Measures every candidate decode thread count (the powers of two up to the physical cores, plus the
   physical cores and their halves) for memory bandwidth saturation, with no early exit.
 - Keeps the default (the physical cores) unless a smaller count is at least as good: its median

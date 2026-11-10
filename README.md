@@ -63,22 +63,29 @@ rendered chat templates, greedy token streams, KL divergence, and downstream tas
 
 ## Quick start
 
-See [docs/quickstart.md](docs/quickstart.md) for a complete walkthrough using a release binary, Docker,
-`curl`, or the OpenAI Python client.
+See [docs/quickstart.md](docs/quickstart.md) for a complete walkthrough using a one-shot prompt,
+a release binary, Docker, `curl`, or the OpenAI Python client. Any `-m` also accepts
+`hf:<namespace>/<repo>/<file>`, which downloads the file once into the cache.
 
 ```sh
-git clone https://github.com/RantAI-dev/peregrine && cd peregrine
-cargo build --release
-./target/release/peregrine inspect path/to/model.gguf      # what it is, and whether it runs
-./target/release/peregrine bench -m path/to/model.gguf        # measure prefill & decode tok/s and bytes/token
-./target/release/peregrine tune -m path/to/model.gguf         # tune execution knobs for host CPU and model
-./target/release/peregrine serve -m path/to/model.gguf --port 8201
+# install the binary (Linux x86-64 or aarch64), then run a model
+curl -fsSL https://peregrine.rantai.dev/install.sh | sh
+peregrine run -m hf:mradermacher/SmolLM2-360M-Instruct-GGUF/SmolLM2-360M-Instruct.Q4_K_M.gguf \
+  "Say hello in one sentence."                    # one prompt, streamed, no server
+peregrine inspect path/to/model.gguf      # what it is, and whether it runs
+peregrine bench -m path/to/model.gguf        # measure prefill & decode tok/s and bytes/token
+peregrine tune -m path/to/model.gguf         # tune execution knobs for host CPU and model
+peregrine serve -m path/to/model.gguf --port 8201
 curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
   -d '{"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
+Or build from source: `cargo build --release`, then use `./target/release/peregrine`.
+
 The server speaks the OpenAI chat API (`/v1/chat/completions`, streamed or not), plus `/v1/models`,
-`/health` and `/metrics`.
+`/health` and `/metrics`. For a long-lived service, `peregrine serve ... --background` detaches it and
+records lifecycle state; `peregrine status`, `stop` and `upgrade` manage it, and an upgrade replaces
+the running server without refusing a connection (see [docs/service.md](docs/service.md)).
 
 ### Building with fewer features
 

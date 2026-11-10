@@ -65,13 +65,16 @@ jobs:
           if-no-files-found: error
 
   # Creates the GitHub release with the notes generated from PR labels (.github/release.yml)
-  # and uploads both archives and the combined SHA256SUMS.
+  # and uploads both archives, the combined SHA256SUMS and install.sh. The installer is an asset
+  # so get.peregrine.rantai.dev/install.sh can redirect to
+  # releases/latest/download/install.sh, the lakehouse pattern.
   release:
     needs: [build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artefacts
@@ -82,10 +85,11 @@ jobs:
           mkdir staging
           cp artefacts/dist-*/*.tar.gz staging/
           cat artefacts/dist-*/SHA256SUMS > staging/SHA256SUMS
+          cp scripts/install.sh staging/install.sh
           (cd staging && sha256sum --check --strict SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --generate-notes \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
-            staging/SHA256SUMS staging/*.tar.gz
+            staging/SHA256SUMS staging/*.tar.gz staging/install.sh

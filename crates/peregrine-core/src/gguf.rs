@@ -182,6 +182,20 @@ fn scalar_width(t: u32) -> Option<usize> {
 
 impl Gguf {
     pub fn open(path: &Path) -> Result<Gguf, String> {
+        Self::open_inner(path, true)
+    }
+
+    /// Open a file whose header is complete but whose tensor data may still be downloading.
+    ///
+    /// Everything the loader reads up front — the metadata and the tensor directory — must be
+    /// present; the per-tensor "runs past the end of the file" check that [`Self::open`] makes is
+    /// skipped. Used for the pre-flight check on a partially downloaded `hf:` model, so a build
+    /// can refuse a file before the remaining gigabytes are fetched.
+    pub fn open_header(path: &Path) -> Result<Gguf, String> {
+        Self::open_inner(path, false)
+    }
+
+    fn open_inner(path: &Path, require_full: bool) -> Result<Gguf, String> {
         let file = File::open(path).map_err(|e| format!("gguf: cannot open {path:?}: {e}"))?;
         // SAFETY: the mapping is read-only and the engine treats its contents as
         // untrusted input (every access is bounds-checked against `TensorInfo`).
@@ -319,18 +333,20 @@ impl Gguf {
         };
         // Fail at load rather than at the first dot product: a tensor whose bytes run
         // past the end of the map would otherwise surface as a panic mid-generation.
-        for t in g.tensors.values() {
-            let end = (g.data_start as u64)
-                .checked_add(t.offset)
-                .and_then(|e| e.checked_add(t.bytes()))
-                .unwrap_or(u64::MAX);
-            if end > g.map.len() as u64 {
-                return Err(format!(
-                    "gguf: tensor {} runs to {} but the file is {} bytes — truncated download?",
-                    t.name,
-                    end,
-                    g.map.len()
-                ));
+        if require_full {
+            for t in g.tensors.values() {
+                let end = (g.data_start as u64)
+                    .checked_add(t.offset)
+                    .and_then(|e| e.checked_add(t.bytes()))
+                    .unwrap_or(u64::MAX);
+                if end > g.map.len() as u64 {
+                    return Err(format!(
+                        "gguf: tensor {} runs to {} but the file is {} bytes — truncated download?",
+                        t.name,
+                        end,
+                        g.map.len()
+                    ));
+                }
             }
         }
         Ok(g)
@@ -661,6 +677,39 @@ mod tests {
         match Gguf::open(&p) {
             Err(e) => assert!(e.contains("bad magic"), "{e}"),
             Ok(_) => panic!("accepted a file that is not GGUF"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn open_header_accepts_a_file_whose_tensor_data_is_still_downloading() {
+        let p = std::env::temp_dir().join(format!(
+            "peregrine-core-header-only-{}.gguf",
+            std::process::id()
+        ));
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes()); // one tensor
+        b.extend_from_slice(&0u64.to_le_bytes()); // no metadata
+        b.extend_from_slice(&4u64.to_le_bytes());
+        b.extend_from_slice(b"test");
+        b.extend_from_slice(&1u32.to_le_bytes()); // one dimension
+        b.extend_from_slice(&16u64.to_le_bytes()); // 16 values
+        b.extend_from_slice(&1u32.to_le_bytes()); // ggml type 1 = F16 (32 bytes)
+        b.extend_from_slice(&0u64.to_le_bytes()); // offset in the data section
+        while !b.len().is_multiple_of(32) {
+            b.push(0);
+        }
+        b.extend_from_slice(&[0u8; 8]); // only the first 8 of the tensor's 32 bytes
+        std::fs::write(&p, &b).unwrap();
+
+        let header =
+            Gguf::open_header(&p).expect("a complete header parses before the data arrives");
+        assert_eq!(header.tensors.len(), 1);
+        match Gguf::open(&p) {
+            Err(e) => assert!(e.contains("truncated"), "{e}"),
+            Ok(_) => panic!("accepted a file whose tensor runs past the end"),
         }
         let _ = std::fs::remove_file(&p);
     }

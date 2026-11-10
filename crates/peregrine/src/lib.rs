@@ -25,11 +25,16 @@ pub use peregrine_core::options::EngineOptions;
 pub use peregrine_core::profile::Profile;
 pub use peregrine_core::serve::Engine;
 
+pub mod fetch;
 pub mod support;
 pub use support::support;
 
 #[cfg(feature = "cli")]
 pub mod bench;
+#[cfg(feature = "cli")]
+pub mod run;
+#[cfg(all(feature = "cli", feature = "server"))]
+pub mod service;
 #[cfg(feature = "cli")]
 pub mod tune;
 
