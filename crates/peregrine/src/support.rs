@@ -67,6 +67,12 @@ pub fn support_text() -> String {
     let _ = writeln!(out, "chat templates:");
     let _ = writeln!(out, "  {}", peregrine_core::template::TEMPLATES.join(", "));
 
+    let _ = writeln!(out, "embeddings:");
+    let _ = writeln!(
+        out,
+        "  causal decoders (last / mean pooling), POST /v1/embeddings, peregrine embed"
+    );
+
     out
 }
 
@@ -110,6 +116,10 @@ pub fn support_markdown() -> String {
 ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) \
 — or named with `--chat-template` for a file that declares none";
 
+    // 6. Embeddings
+    let embd_str = "causal decoders as embedders (`<arch>.pooling_type`: last or mean), \
+`POST /v1/embeddings`, `peregrine embed`";
+
     let _ = writeln!(out, "| | Supported now |");
     let _ = writeln!(out, "|---|---|");
     let _ = writeln!(out, "| Architectures | {arch_str} |");
@@ -117,6 +127,7 @@ ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Har
     let _ = writeln!(out, "| CPUs | {cpu_str} |");
     let _ = writeln!(out, "| Tokenizers | {tok_str} |");
     let _ = writeln!(out, "| Chat templates | {tmpl_str} |");
+    let _ = writeln!(out, "| Embeddings | {embd_str} |");
 
     out
 }
@@ -133,6 +144,7 @@ mod tests {
         assert!(text.contains("CPU tiers:"));
         assert!(text.contains("tokenizers:"));
         assert!(text.contains("chat templates:"));
+        assert!(text.contains("embeddings:"));
 
         #[cfg(feature = "arch-llama")]
         assert!(text.contains("llama"));
@@ -149,6 +161,7 @@ mod tests {
         assert!(md.contains("| CPUs |"));
         assert!(md.contains("| Tokenizers |"));
         assert!(md.contains("| Chat templates |"));
+        assert!(md.contains("| Embeddings |"));
 
         #[cfg(feature = "arch-llama")]
         assert!(md.contains("Llama"));
