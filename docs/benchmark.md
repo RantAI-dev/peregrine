@@ -23,10 +23,11 @@ count. Wins and losses are both here. The raw data, method and machine records a
 - **Prompt processing is ahead on both hosts.** The desktop moved from 0.69-0.74× on 2026-11-08 to
   1.03-1.30× after the repacked Q4_K/Q5_0 work (#108, #111, #118, #120); on bluefin it is 1.03-1.04×
   on Llama 3.2 1B, 1.43× and 1.17× on Qwen 2.5 0.5B, and 1.39× and 1.05× on SmolLM2 360M.
-- **Bonsai 2 (ternary): 2.0-2.3× the decode and 2.1-2.5× the prompt speed of PrismML's own
-  llama.cpp fork, 2.6-2.8× with 10 users** (12-core desktop), against the fork's faster
-  flash-attention setting for each row. Upstream llama.cpp cannot load these PQ2_0 files, so the
-  fork is the only comparison that exists for them.
+- **Bonsai 2 (ternary): 1.4-2.3× the decode and 1.9-2.6× the prompt speed of PrismML's own
+  llama.cpp fork, 1.8-2.8× with 10 users** (12-core desktop and 4-core bluefin; the AVX2
+  bluefin sits at the bottom of the decode range, and on ARM NEON the 2B/4B reach 2.2-2.5× prompt
+  and 1.6-2.3× decode), against the fork's faster flash-attention setting for each row. Upstream
+  llama.cpp cannot load these PQ2_0 files, so the fork is the only comparison that exists for them.
 
 Losses are in the same report, and there are now very few. **No completed throughput row is below
 1.0×**, on either host. The one remaining loss is time to first token with 10 users on bluefin for
@@ -259,20 +260,25 @@ result folders; update its tables when a new result lands, then rerun it.
 
 Bonsai 2's ternary files (PQ2_0, ggml type 142) do not load in upstream llama.cpp, so the
 llama.cpp comparison above cannot cover them. [PrismML's
-fork](https://github.com/PrismML-Eng/llama.cpp) is the other engine that reads them. Measured
-2026-11-09 on the Ryzen AI 9 HX 370 desktop (12 threads, WSL2), 3 interleaved rounds, 256
-greedy tokens, prompt lengths calibrated per engine. Peregrine at `b88fcd7`; fork at
-`62c418ccd7aefee37997e94c2d9fac1eed7fc89b` (branch `prism`). Full method and raw manifests:
-[`benchmarks/results/2026-11-09-bonsai2-prism/`](../benchmarks/results/2026-11-09-bonsai2-prism/).
+fork](https://github.com/PrismML-Eng/llama.cpp) is the other engine that reads them. Measured on
+two x86 hosts: the Ryzen AI 9 HX 370 desktop (12 threads, WSL2, AVX-512, 2026-11-09) and the
+Ryzen 3 PRO 4350G bluefin (4 threads, bare metal, AVX2, 2026-11-08), 3 interleaved rounds, 256
+greedy tokens, prompt lengths calibrated per engine. Desktop: Peregrine at `b88fcd7`; bluefin:
+`cf9e81d`. The fork is `62c418ccd7aefee37997e94c2d9fac1eed7fc89b` (branch `prism`) on both.
+Full method, raw manifests and the greedy-text check:
+[desktop (2026-11-09)](../benchmarks/results/2026-11-09-bonsai2-prism/),
+[desktop (2026-11-08)](../benchmarks/results/2026-11-08-bonsai2-prism/) and
+[bluefin](../benchmarks/results/bluefin-zen2-2026-11-08-bonsai2-prism/).
 
 ![Bonsai 2: Peregrine against PrismML's fork](img/bench-bonsai.svg)
 
-Medians. "Fork best" is the faster of the fork's effective `-fa on` and `-fa off` server
-settings for that row (lower for TTFT); the fork's default `-fa auto` resolves to on here, and
-explicit-on runs on the 512-token rows confirm it (2B decode 34.77 vs 34.45, 9B 10.35 vs
-10.75). "Ratio" is Peregrine ÷ fork best, so above 1 means Peregrine is faster and, for TTFT,
-below 1 means Peregrine's first token arrives sooner. The fork's own default is the secondary
-column.
+Medians. "Fork best" is the faster of the fork's flash-attention settings for that row
+(explicit `-fa on`/`-fa off` on the desktop; `-fa auto`, which resolves to on, and `-fa off`
+on the bluefin; lower for TTFT); "ratio" is Peregrine ÷ fork best, so above 1 means Peregrine
+is faster and, for TTFT, below 1 means Peregrine's first token arrives sooner. The fork's own
+default (`-fa auto`, which resolves to on here) is the secondary column.
+
+### Desktop (12 cores, AVX-512)
 
 | Model | Context | Users | Metric | Peregrine | Fork best | Ratio | Fork default |
 |---|---|---|---|---|---|---|---|
@@ -289,21 +295,104 @@ column.
 | Bonsai 2 9B PQ2_0 | 4096 | 1 | Decode tok/s | 22.69 | 10.12 (`-fa on`) | 2.24x | 10.12 |
 | Bonsai 2 9B PQ2_0 | 4096 | 1 | Prompt tok/s | 63.04 | 27.85 (`-fa off`) | 2.26x | 27.48 |
 
-MTP speculation on the 9B `-MTP-Q8_0` file (512 tokens, 1 user): Peregrine decodes 28.80
-tok/s with MTP and 25.14 without (1.15x). The fork's `--spec-type draft-mtp` did not beat its
+### Bluefin (4 cores, AVX2)
+
+This is the AVX2-vs-AVX2 point: the host has no AVX-512, so Peregrine runs the rows-path
+PQ2_0 kernel and the fork its AVX2 path, instead of the AVX-512 tile kernels both used on the
+desktop. The 4B file is the `-MTP-Q8_0` one (no plain 4B PQ2_0 exists on this host), measured
+with Peregrine's default MTP on; the fork's 4B rows are non-speculative.
+
+| Model | Context | Users | Metric | Peregrine | Fork best | Ratio | Fork default |
+|---|---|---|---|---|---|---|---|
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Decode tok/s | 46.40 | 33.63 (`-fa off`) | 1.38x | 33.46 |
+| Bonsai 2 2B PQ2_0 | 512 | 1 | Prompt tok/s | 118.67 | 56.95 (`-fa off`) | 2.08x | 55.15 |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | Aggregate tok/s | 33.69 | 19.08 (`-fa auto`) | 1.77x | 19.08 |
+| Bonsai 2 2B PQ2_0 | 512 | 10 | TTFT (s) | 32.82 | 82.05 (`-fa auto`) | 0.40x | 82.05 |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Decode tok/s | 42.28 | 30.79 (`-fa off`) | 1.37x | 25.80 |
+| Bonsai 2 2B PQ2_0 | 4096 | 1 | Prompt tok/s | 109.04 | 58.07 (`-fa auto`) | 1.88x | 58.07 |
+| Bonsai 2 4B PQ2_0 | 512 | 1 | Decode tok/s | 24.59 | 14.95 (`-fa off`) | 1.64x | 14.82 |
+| Bonsai 2 4B PQ2_0 | 512 | 1 | Prompt tok/s | 48.05 | 18.55 (`-fa off`) | 2.59x | 18.07 |
+| Bonsai 2 4B PQ2_0 | 512 | 10 | Aggregate tok/s | 14.12 | 6.37 (`-fa auto`) | 2.22x | 6.37 |
+| Bonsai 2 4B PQ2_0 | 512 | 10 | TTFT (s) | 78.84 | 279.73 (`-fa auto`) | 0.28x | 279.73 |
+| Bonsai 2 4B PQ2_0 | 4096 | 1 | Decode tok/s | 21.28 | not completed | — | — |
+| Bonsai 2 4B PQ2_0 | 4096 | 1 | Prompt tok/s | 43.91 | not completed | — | — |
+
+The bluefin 4B row at 4096 is not completed: the fork's calibration-plus-measurement phase was
+stopped at the 10-minute command cap, so no estimate is substituted. Peregrine's own 4B 4096
+row completed (43.91 tok/s prompt, 21.28 tok/s decode).
+
+**What the 4-core point says.** Peregrine's lead is smaller on AVX2. The same 2B file, measured
+the same way, is 2.15x decode and 2.26x prompt at 512 on the desktop, against 1.38x and 2.08x
+here; at 4096 it is 1.98x/2.13x on the desktop, against 1.37x/1.88x; 10-user aggregate falls
+from 2.56x to 1.77x. Prompt processing keeps most of the gap, because the fork's AVX2 prefill
+is relatively weak; decode narrows most, which is what a rows-path PQ2_0 kernel against a
+mature AVX2 fork looks like. The 4B, absent on the desktop, is at 1.64x decode, 2.59x prompt
+and 2.22x at 10 users.
+
+MTP speculation on the 9B `-MTP-Q8_0` file on the desktop (512 tokens, 1 user): Peregrine decodes
+28.80 tok/s with MTP and 25.14 without (1.15x). The fork's `--spec-type draft-mtp` did not beat its
 own non-speculative decode (9.33 vs 10.62); against it the ratios are 3.09x (MTP on) and 2.37x
 (MTP off).
 
-Flash attention: explicit `-fa on` and `-fa off` land within 6% of each other on every
-server row. The large depth penalty upstream llama.cpp's default showed on the bluefin 1B
-(13.0 vs 29.1 tok/s at 4096) does not reproduce on these hybrid-architecture Bonsai 2 files;
-turning flash attention off is not a win here, and the default is the faster or equal
-setting. The full on/off tables are in the results folder.
+On the bluefin's 4B `-MTP-Q8_0` file, MTP adds 1.18x single-user decode at 512 (24.59 vs
+20.79 tok/s) and 1.13x at 4096 (21.28 vs 18.77), and nothing at 10 users (14.12 vs 14.07,
+1.00x), where prefill and batching dominate. The fork never enables the MTP head in these
+rows, so its on/off is parity by construction. Against the fork's faster setting the
+Peregrine MTP-off row is 1.39x and the MTP-on row 1.64x at 512/1u.
 
-The manifests record `machine.simd_tier: x86_64-avx2-avx512-vnni-gfni-vbmi`, and `peregrine
+Flash attention: on the desktop, explicit `-fa on` and `-fa off` land within 6% of each
+other on every server row; the large depth penalty upstream llama.cpp's default showed on the
+bluefin 1B (13.0 vs 29.1 tok/s at 4096) did not reproduce on the desktop's hybrid-architecture
+Bonsai 2 files. On the bluefin it partly does: on/off stay within 3–5% at 512 and for prompt
+processing, but the 2B at 4096 decodes 19% faster with `-fa off` (30.79 vs 25.80 tok/s), so
+that row's ratio uses off. The default is still faster for the 2B 4096 prompt and for both
+10-user rows. The full on/off tables are in the result folders.
+
+The desktop manifests record `machine.simd_tier: x86_64-avx2-avx512-vnni-gfni-vbmi`, and `peregrine
 tier` prints the same kernel tier, so Bonsai 2 ran the AVX-512 tier: PQ2_0's fastest kernel is
 the 16-row repacked-tile path built on AVX-512 VNNI and GFNI (`MatPath::Tiles` in
 `peregrine-kernels/src/table.rs`), selected with `zmm=true`, `tiles=true` and `isa=native`. The
 fork was built with `-march=native`, so both engines use AVX-512 here. (The earlier
-`avx2+fma` label in the 2026-11-07 manifests was a probe bug, fixed by #107; it never meant
+`avx2+fma` label in the 2026-11-07/08 manifests was a probe bug, fixed by #107; it never meant
 the AVX-512 tier was skipped.)
+
+The bluefin has no stale label: `peregrine tier` prints `kernel tier x86_64-avx2`, every
+manifest records `machine.simd_tier: x86_64-avx2`, and the fork was built with
+`GGML_NATIVE=ON` (which resolves to `-march=native = znver2`, AVX2/FMA) plus explicit
+`-DGGML_AVX2/AVX/FMA=ON`. PQ2_0 therefore runs `MatPath::RowsPq2` there, not the AVX-512
+`MatPath::Tiles` path, which is why the bluefin is the AVX2-vs-AVX2 data point and why its
+ratios sit below the desktop's.
+
+## ARM NEON and i8mm (DGX Spark, Cortex-X925 / A725)
+
+Measured on the 20-core DGX Spark (10 × Cortex-X925 + 10 × Cortex-A725, 121 GB unified memory,
+`aarch64-neon-dotprod` and `aarch64-neon-i8mm`):
+
+- **K-quant and legacy models (#128, #129):** with the `smmla` tile GEMMs (`aarch64-neon-i8mm`),
+  `sdot` GEMVs, NEON attention and `vmath`, Llama 3.2 1B Q4_K_M on the 10 Cortex-X925 cores reaches
+  **573.8 tok/s prompt and 112.9 tok/s decode** at 512 tokens — **2.45× prompt and 1.14× decode** vs
+  llama.cpp CPU on the same cores (and 6.86× prompt / 2.09× decode over Peregrine's scalar tier; at
+  20 threads across both clusters: 629.8 vs 322.0 prompt, 1.96×, and 111.6 vs 86.4 decode, 1.29×).
+  Qwen 2.5 0.5B Q4_K_M reaches 935.3 vs 524.5 tok/s prompt (**1.78×**) and 199.9 vs 194.2 decode
+  (**1.03×**) on 10 threads (1.62× prompt and 1.55× decode on 20 threads). Full tables and per-step
+  progression: [`spark-arm-2026-11-09`](../benchmarks/results/spark-arm-2026-11-09/README.md) through
+  [`spark-arm-2026-11-09-i8mm`](../benchmarks/results/spark-arm-2026-11-09-i8mm/README.md).
+- **Bonsai 2 on ARM NEON (#141):** with the NEON `PQ2_0`/`PTQ1_0` kernels, Hadamard rotation and
+  Gated DeltaNet recurrent step, Bonsai 2 2B and 4B-MTP at 512 tokens reach **2.2–2.5× prompt** and
+  **1.6–2.3× decode** against PrismML's fork on ARM (2B on 10 X925 threads: 404.0 vs 167.7 prompt,
+  2.41×, and 140.4 vs 88.7 decode, 1.58×; on 20 threads: 433.1 vs 200.5, 2.16×, and 146.8 vs 64.5,
+  2.28×; 4B-MTP on 20 threads: 185.2 vs 80.9, 2.29×, and 67.7 vs 32.5, 2.08×; MTP speculation lifts
+  10-thread 4B decode from 64.8 to 80.7 tok/s, +24.5%).
+
+## Task accuracy and decoding invariance (S3.3)
+
+Speed numbers only count alongside the task-accuracy gate and decoding-invariance check in
+[`docs/dev/accuracy.md`](dev/accuracy.md) and [`benchmarks/accuracy/`](../benchmarks/accuracy/):
+
+- **Task accuracy (GSM8K 250, MMLU 500, HumanEval+ 163):** all four gate models
+  (Qwen 2.5 0.5B Instruct, Llama 3.2 1B Instruct, gemma-3-1b-it, Qwen 3 1.7B, Q4_K_M) pass every
+  paired check against same-host llama.cpp (`|Δ| ≤ 4` points, exact McNemar `p ≥ 0.12`) and the
+  BF16 vLLM floor across all three hosts — bluefin AVX2 (#144), desktop AVX-512 (#145), and DGX
+  Spark ARM i8mm (#142).
+- **Batch and speculation invariance:** 520 prompts decoded alone, in concurrent batches of 8, and
+  with `--speculate` produce **520/520 byte-identical replies** on every host and tier tested.
