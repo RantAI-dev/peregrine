@@ -32,7 +32,7 @@ uploads and the llama-server comparison command.
 | streaming | `chat.completion.chunk` objects, one id, deltas, one `finish_reason`, `usage` (with `stream_options.include_usage`), `data: [DONE]` |
 | `POST /v1/completions` | called; reported as a deviation when absent |
 | sampling | `temperature: 0` reproducible; same `temperature`/`top_p`/`seed` reproducible from the first request |
-| `stop` | a stop string taken from the model's own output must truncate the reply and yield `finish_reason: "stop"` |
+| `stop` | a string or up to four strings: the reply must end at the sequence, the sequence must not be returned, `finish_reason` is `"stop"`, and streaming must hold back partial matches (the string, array and SSE forms must agree) |
 | `max_tokens` | exactly that many tokens with `ignore_eos`, `finish_reason: "length"` |
 | `n > 1` | three choices indexed 0..2; `n` with `stream` is either supported or refused cleanly |
 | `logprobs` | one entry per content token, numeric log-probability ≤ 0 |
@@ -52,7 +52,6 @@ Verified with the suite on SmolLM2-360M-Instruct Q4_K_M and Qwen3-1.7B Q4_K_M (t
 | Difference | Effect |
 |---|---|
 | `POST /v1/completions` is not implemented | 404. OpenAI and llama-server serve it. Use `/v1/chat/completions` |
-| **The `stop` request field is accepted but ignored** | Generation runs to EOS or `max_tokens`. This is the largest functional gap: a client that relies on stop sequences gets longer replies. `stop` is not read by the request plan at all |
 | `n > 1` with `stream: true` | 400. OpenAI and llama-server stream n choices |
 | `n > 16` | 400. OpenAI documents no maximum |
 | `logprobs` entries carry only `token` and `logprob` | OpenAI also returns `bytes` and `top_logprobs`; the request's `top_logprobs` is ignored |
@@ -75,15 +74,15 @@ JSON), and eight-way concurrency.
 Run on the same files on the same aarch64 host (llama.cpp 0.9.0-dev, commit `0c6dca2`,
 `llama-server -m MODEL --jinja --metrics`):
 
-- **Peregrine** on SmolLM2: 10 passed, 4 deviations, 1 skipped (the reasoning check needs a thinking
-  model). On Qwen3-1.7B with `--thinking`: 11 passed, 4 deviations.
+- **Peregrine** on SmolLM2: 11 passed, 3 deviations, 1 skipped (the reasoning check needs a thinking
+  model). On Qwen3-1.7B with `--thinking`: 12 passed, 3 deviations.
 - **llama-server** on SmolLM2: 12 passed, 2 deviations. On Qwen3-1.7B with `--thinking`: 12 passed,
   3 deviations.
 
 The differences the suite found in llama-server's favour:
 
 - `/v1/completions` works there.
-- `stop` works there (Peregrine ignores it).
+- `stop` works on both.
 - `n > 1` streams there.
 - `logprobs` entries carry `bytes` and `top_logprobs`.
 - Its SSE stream follows OpenAI's two-chunk ending (finish, then a usage-only chunk).

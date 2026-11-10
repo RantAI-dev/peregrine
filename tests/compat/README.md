@@ -64,8 +64,8 @@ python3 tests/compat/compat.py --base-url http://127.0.0.1:8311 --engine llama-s
 Use `-np` at least as large as the `n` in the tests (3, and 8 for the concurrency check queues
 requests; `-np 4` is enough). The observed differences are recorded in
 [`docs/compat.md`](../../docs/compat.md#against-llama-server); the short version is that Peregrine
-ignores `stop` and has no `/v1/completions`, while llama-server does not reproduce a `seed` on its
-first request after start and its `reasoning_format: "none"` leaves `<think>` in the content.
+has no `/v1/completions`, while llama-server does not reproduce a `seed` on its first request after
+start and its `reasoning_format: "none"` leaves `<think>` in the content.
 
 ## Adding a check
 

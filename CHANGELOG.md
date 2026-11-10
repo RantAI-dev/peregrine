@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format follows
   `docs/dev/releasing.md`.
 
 ### Fixed
+- `stop` sequences are honoured by `/v1/chat/completions`. A request may send one string or up to
+  four: generation ends when the decoded text contains one, the sequence itself is not returned, and
+  `finish_reason` is `"stop"`. Streaming holds back the longest suffix that could still become a stop
+  sequence, so a sequence split across tokens never leaks into a delta, and the match is per request,
+  so one user's stop cannot truncate another's reply. Multi-byte UTF-8 is matched on character
+  boundaries. Previously the field was accepted and ignored.
 - A request body that is not valid JSON is now rejected with the OpenAI error object instead of
   axum's plain-text rejection. The status was already 400; a client that parses `error.message` can
   now read the reason. The compatibility suite checks the body as well as the code.
