@@ -1,6 +1,6 @@
 # S4 Design: embeddings and decision models
 
-- Status: Proposed
+- Status: Accepted; revised 2026-11-10 (the decision part now follows the System One API, see §2.5)
 - Date: 2026-11-10
 - Target: a new roadmap stage, S4 (items S4.1 to S4.10)
 - Inputs: `ARCHITECTURE.md` (the invariants), ADR 0003 (lossless by default), ADR 0006 (the
@@ -10,6 +10,8 @@
   `eurobert`, `gemma-embedding` and the keys `%s.pooling_type`, `%s.classifier.output_labels`,
   `%s.dense_2_feat_in/out`, `cls`, `cls.output`. Every model detail below marked *(transcribe)*
   must be read from llama.cpp at that tag by the implementing PR, not taken from this note.
+  The decision models are specified in [`docs/reference/systemone.md`](../reference/systemone.md),
+  a reading of llama.cpp's `tools/server/server-decision.cpp` with the code quoted.
 
 ## 0. Summary
 
@@ -17,13 +19,18 @@ Peregrine serves text generation. This stage adds the two other things a CPU box
 next to a chat model:
 
 1. **Embedding models**: a text goes in, one vector comes out (`POST /v1/embeddings`).
-2. **Decision models** ("system one": one fast forward pass, an answer instead of prose):
+2. **Decision models** ("System One": one fast forward pass, an answer instead of prose):
+   - **System One** (`POST /v1/systemone`, the TypeSafe-compatible API llama.cpp serves): typed
+     questions about a `state` (`choice` among options, `score` on an ordered scale, `noul` for
+     yes/no), answered by a **native decision model**: OpenJev, Lev, Kev, Nimble, Laya, vLLM D3,
+     H2O Lightning and the others in §1. These are files that carry `<arch>.decision.type` and a
+     `systemone` prompt template; most of them are Qwen 3.5 models, which Peregrine already runs.
    - **rerank**: a query and N documents, a relevance score per document (`POST /v1/rerank`);
    - **classify**: a text, a score per label from a classifier head (`POST /v1/classify`), which is
-     how guard, router and intent models ship;
-   - **decide**: a prompt and a closed list of choices, the probability of each, from any
-     generative model Peregrine already runs (`POST /v1/decide`). This covers generative guards
-     (Llama Guard, Qwen3Guard), generative rerankers (Qwen3-Reranker) and yes/no or A/B/C routing.
+     how encoder guard and router models ship.
+
+   A chat model that classifies through a prompt is not a decision model (llama.cpp draws the same
+   line); an earlier draft of this note had a `/v1/decide` endpoint for that, which is dropped.
 
 The speed claim is the same one the rest of the project makes: on the same machine and the same
 file, at least llama.cpp's throughput, and against the engines people actually deploy for this
@@ -37,26 +44,32 @@ Why Peregrine should win here, and where the work is:
 - **A ragged batch costs nothing.** The engine's batch is a list of rows, not a padded rectangle.
   Thirty-two texts of different lengths are one weight pass over exactly their tokens; engines that
   pad to the longest text in the batch pay for the padding in every matmul.
-- **Decisions share their prompt.** A reranker scores N documents against one instruction and one
-  query; a guard or router runs one fixed system prompt on every request. The prefix store already
-  reuses a shared beginning across slots, so the fixed part is computed once.
-- A decision needs **one row of logits and no sampling**: the last prefill row's logits, restricted
-  to the choice tokens, are the answer. No decode step runs.
+- **Decisions share their prompt.** The questions of one System One request are asked about the
+  same `state`, and a reranker scores N documents against one instruction and one query. For the
+  causal decision models the shared beginning is computed once and the questions fork from it.
+- A decision needs **one row of outputs and no sampling**: the last prompt row's logits at a few
+  label tokens (or a small head on its hidden state) are the answer. No decode step runs.
 
 ## 1. Models in scope, in order
 
 | Step | Family | Files it opens | New code |
 |---|---|---|---|
 | S4.1 | decoders already supported, as embedders | Qwen3-Embedding 0.6B / 4B / 8B (`qwen3`, last-token pooling) | pooling, the endpoint; no model code |
-| S4.3 | decoders already supported, as deciders | Qwen3-Reranker, Llama Guard 3 1B, Qwen3Guard-Gen, any chat model | choice scoring, the endpoints |
+| S4.3 | System One, label-logit types on `qwen35` | OpenJev (and its 46 MB test file), Lev 4B, Nimble 9B, pplx-decider, H2O Lightning 4B | `/v1/systemone`, the prompt renderers, the answer math; no model code |
+| S4.11 | System One, small heads on `qwen35` | Kev 0.8B / 4B / 9B (`cls.output` pointer head); vLLM D3 edge / lite / nano / mini (non-causal attention blocks) | the head; the bidirectional mask on Qwen 3.5's attention blocks |
+| S4.12 | System One on `modern-bert` | Laya (421M), Julia-1 (144M) | the two decision head blocks and the scorer, after S4.7 |
+| S4.13 | generative rerankers | Qwen3-Reranker 0.6B / 4B (`pooling_type = rank`, a 2-row `cls.output` in place of the output head) | the rank read-out on a causal model, `/v1/rerank` |
 | S4.4 | `gemma-embedding` | EmbeddingGemma 300M | bidirectional attention on the Gemma 3 family, mean pooling, the two dense layers |
 | S4.5 | tokenizers | WordPiece (`bert`), SentencePiece unigram (`t5`, the XLM-R vocabulary) | two tokenizers |
 | S4.6 | `bert` | all-MiniLM-L6/L12, bge-small/base/large-en-v1.5, e5, gte, bge-m3, multilingual-e5; bge-reranker-v2-m3 with its `cls` head | post-norm encoder, absolute positions, the classifier head |
 | S4.7 | `modern-bert` | ModernBERT, gte-modernbert, mmBERT, Granite Embedding R2, and their fine-tuned classifiers (`classifier.output_labels`) | alternating local and global attention, the labelled head |
 | S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand |
 
-`neo-bert`, `eurobert`, DeBERTa (Prompt Guard 2; llama.cpp does not read it either) and the ColBERT
-multi-vector output are out of scope for this stage.
+Out of scope for this stage: `neo-bert`, `eurobert`, DeBERTa (Prompt Guard 2; llama.cpp does not
+read it either), the ColBERT multi-vector output; and of the decision types, the ones that need a
+model family Peregrine does not have (`lfm2-d1`, `lfm3-d1`, `granite-switch`), the large joint head
+(`clef`), vision (`minicpm-ocr-jev`, and image input for every type), and `vllm-decision2`, for
+which no file in llama.cpp's format is published (`docs/reference/systemone.md` §5).
 
 ## 2. The runtime
 
@@ -69,8 +82,8 @@ what it asks for at the end:
 pub enum Want {
     Tokens,                         // today: sample and stream
     Pooled(Pooling),                // an embedding: Last | Mean | Cls, then the model's own head
-    Choice { ids: Vec<Vec<u32>> },  // a decision: log-probability of each choice
-    Labels,                         // a classifier head's logits
+    Labels { ids: Vec<u32> },       // a decision: the last row's logits at these label tokens
+    Head,                           // a classifier or decision head's outputs
 }
 ```
 
@@ -117,20 +130,57 @@ mean, one f32 rounding at the end).
   logit (a reranker; the score is the sigmoid) or one per label (`classifier.output_labels`; the
   scores are the softmax, or sigmoids when the file says multi-label).
 
-### 2.5 Choice scoring (decide, generative rerank)
+### 2.5 System One decisions
 
-Input: a rendered prompt and `k` choices, each a token sequence.
+Everything here is transcribed from llama.cpp v0.9.0 and written down, with the code, in
+`docs/reference/systemone.md`; the section numbers below are that note's.
 
-- All choices one token long (yes/no, safe/unsafe, A/B/C): one prefill, read `k` logits from the
-  last row, log-softmax over the **full vocabulary**, report each choice's probability and also
-  the probabilities renormalised over the choices. No extra pass.
-- Longer choices: the choices are `k` slots sharing the prompt through the prefix store; each scores
-  its own continuation by teacher forcing (sum of token log-probabilities). One more batched pass
-  of the continuation rows; the prompt is computed once.
-- Generative rerankers: the prompt is the model's rerank template (`tokenizer.chat_template.rerank`
-  when the file has one; Qwen3-Reranker's documented template otherwise *(transcribe)*), the score is
-  `p(yes) / (p(yes) + p(no))`. Instruction and query come before the document in that template, so
-  the prefix store shares them across the N documents.
+**What a decision model is.** A GGUF with `<arch>.decision.type` (one of sixteen type names) and a
+Jinja template `tokenizer.chat_template.systemone`, plus per-type extras: `decision.labels`,
+`decision.temperature.<name>`, `decision.score_bias.<n>.<i>`, and for some types head tensors
+(`cls.output`, `decision.*`). `peregrine inspect` and `/v1/models` report it
+(`architecture.output_modalities` contains `"decisions"`).
+
+**A request** is a `state` and a map of questions; each question has a type (`choice`, `score`,
+`noul`), `instructions` and `criteria`. Questions are answered independently.
+
+**One question, one pass** (two for a Lev `choice`, which is asked in both option orders):
+
+1. *Render* the prompt from the type's template with the state, the instructions and the options.
+   Peregrine has no Jinja engine and does not gain one: each supported type gets a renderer written
+   in Rust, as the chat templates are, **checked byte for byte against llama.cpp's rendering** on a
+   fixture set that covers strings, objects and arrays as state, null and empty descriptions, every
+   question type and the option-count limits. The renderer is selected by `decision.type`; if the
+   file's template text is not the one the renderer was transcribed from (compared by hash), the
+   file is refused with a message naming the type, never rendered approximately.
+2. *Tokenise* with no BOS added and special tokens parsed, as llama.cpp does, including its choice
+   per type of whether text from the user is escaped (§3 of the note).
+3. *Forward* the prompt. For the causal types the pass is a normal prefill.
+4. *Read* one raw score per option:
+   - label-logit types (openjev, lev, nimble, pplx-decider, h2o-lightning, vllm-d3): the last row's
+     logit at option i's label token. Only those rows of the output head are needed, not the
+     whole vocabulary: the head is evaluated for the label tokens alone.
+   - kev: the dot product of the projected hidden state of the last token with that of each
+     option's end token (`cls.output`).
+   - laya: the scorer head's output at each option's marker token.
+5. *Answer* (§2 of the note): `p = softmax((score + score_bias) / T)` over the options only, in
+   f64, with `T` looked up by question type and option-count bucket; then `choice` and its
+   confidence, the expected `score` level, or the `noul` probability, each by llama.cpp's formula.
+
+**Sharing the state.** The questions of a request (and both variants of a Lev question) begin with
+the same tokens up to the point where the question text starts. For causal types the engine
+computes that prefix once and forks the cache for each question; for non-causal types (vllm-d3,
+laya) nothing can be shared and each question is one whole pass. Whether a fork is bit-identical
+to computing the question alone is part of §2.3 and is tested; if the cache's f16 rounding makes it
+differ, the fork is made at f32 or not at all.
+
+**The slot** asks for `Want::Labels { ids }` (or `Want::Head` for kev and laya) and finishes when
+its last prompt row is computed, like a pooled slot.
+
+**Generative rerankers** (S4.13) are the same mechanism with a fixed prompt: llama.cpp's converter
+gives Qwen3-Reranker `pooling_type = rank`, labels `["yes", "no"]`, a `rerank` template, and a
+2-row `cls.output` holding the output head's rows for the two tokens (the file may have no output
+head at all). The score is the softmax of those two logits at the last row.
 
 ## 3. API
 
@@ -143,11 +193,17 @@ Shapes follow what clients already speak; unknown fields are rejected, as in cha
 - `POST /v1/rerank` (Jina / Cohere shape, also served at `/rerank`): `query`, `documents`, `top_n`,
   `return_documents`; `results: [{index, relevance_score}]` sorted by score.
 - `POST /v1/classify`: `input` (string or array); `results: [{label, score, scores: {label: p}}]`.
-- `POST /v1/decide`: `messages` (or `prompt`), `choices: [string]`;
-  `{choice, index, probabilities: [..], logprobs: [..]}`.
-- CLI: `peregrine embed`, `peregrine rerank`, `peregrine classify`, `peregrine decide`, each with
+- `POST /v1/systemone` (TypeSafe / llama.cpp shape): `state` (string, object or array; a
+  non-string is given to the model as JSON text), `questions` (id → `{type, instructions,
+  criteria}`); response `{model, answers: {id: {...}}, usage: {input_tokens, output_tokens: 0}}`
+  with `choice` + `probabilities` + `confidence`, `score` + `legend` + `probabilities` +
+  `confidence`, or `noul`. Errors as llama.cpp gives them: 400 for an invalid request, 501 when the
+  model is not a decision model or when `files` / `images` are sent (image input is not supported
+  in this stage). The exact schema, limits and messages are in `docs/reference/systemone.md` §1.
+- CLI: `peregrine embed`, `peregrine rerank`, `peregrine classify`, `peregrine decide` (a System
+  One request: `--state`, and questions from flags or a JSON file), each with
   `-m` (and `hf:`), reading stdin when no text is given, `--json` for machine output.
-  `peregrine inspect` says what a file is for (generate, embed, rerank, classify).
+  `peregrine inspect` says what a file is for (generate, embed, rerank, classify, decide).
 - `serve` on an encoder file exposes only the endpoints the file supports; chat on an embedding
   model is a 400 that says so.
 
@@ -159,7 +215,8 @@ Shapes follow what clients already speak; unknown fields are rejected, as in cha
 time and for batches (1, 8, 32, 128), at token lengths 16, 128 and 512 (and 2048 where the model
 allows), single client and 10 clients; p50 and p99 latency for one short text (the guard and
 router case). Rerank: documents per second for 1 query × 32 documents of 128 and 512 tokens.
-Decide: decisions per second and p50 latency with a 300-token fixed system prompt.
+System One: questions per second and p50 latency for a 300-token state with 1, 3 and 10 questions
+(choice with 3 and 20 options, score, noul), against `llama-server` on the same file.
 
 Competitors, pinned: llama.cpp v0.9.0 (`llama-server --embedding`, `--reranking`),
 text-embeddings-inference (CPU image, ONNX Runtime backend), fastembed (ONNX Runtime), and
@@ -174,7 +231,8 @@ is what makes the row comparable.
 | Throughput, any batch, vs llama.cpp on the same GGUF | ≥ 1.0× on every row, ≥ 1.5× on batches |
 | Throughput vs the best of ONNX Runtime / OpenVINO at equal accuracy | ≥ 1.0× |
 | p50 latency, one 16-token text, MiniLM-class model | ≤ the best competitor |
-| Rerank and decide with a shared prompt | ≥ 2× llama.cpp (the prefix is computed once) |
+| System One on the same file, vs llama.cpp | ≥ 1.0× per question; ≥ 1.5× for a request with several questions (the state is computed once) |
+| Rerank with a shared instruction and query | ≥ 1.5× llama.cpp |
 
 ### 4.3 Where the time will be, and the work it implies
 
@@ -203,8 +261,11 @@ A model is listed when, on the same file:
    way KL is today), and ≥ 0.9999 against Peregrine's own exact scalar path.
 3. **Task**: an MTEB subset (retrieval: NFCorpus, SciFact; STS: STSBenchmark; one classification
    and one reranking set) within 0.5 point of llama.cpp and of the model's published F32 number.
-4. **Decisions**: rerank scores and choice probabilities within 1e-3 of llama.cpp's; label argmax
-   identical on the fixture set except at near-ties.
+4. **Decisions**: the rendered prompt and its token ids identical to llama.cpp's on the fixture
+   set; System One probabilities, scores, noul values and confidences within 1e-3 of
+   `llama-server`'s on the same file (first on `ggml-org/tinyopenjev-for-testing-gguf`, the file
+   llama.cpp's own tests use, then on each real model listed); the chosen option identical except
+   at near-ties; rerank scores within 1e-3; classifier label argmax identical except at near-ties.
 5. **Invariance** (§2.3): bit-identical alone and batched, on every kernel tier, with goldens.
 
 Synthetic encoders (tiny random `bert`, `modern-bert`, `gemma-embedding` files with every head)
@@ -217,26 +278,33 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | ID | Item | Needs |
 |---|---|---|
 | S4.1 | `Want::Pooled` on causal models: last / mean pooling, normalisation, `dimensions`; `/v1/embeddings`; `peregrine embed`; Qwen3-Embedding 0.6B against llama.cpp | |
-| S4.2 | Benchmark harness embedding / rerank / decide modes and competitor baselines on bluefin and the desktop (llama.cpp, TEI, fastembed, OpenVINO); the targets in §4.2 confirmed or corrected | |
-| S4.3 | `Want::Choice`: `/v1/decide`, `/v1/rerank` on generative rerankers; `peregrine decide`, `peregrine rerank`; Qwen3-Reranker 0.6B and Llama Guard 3 1B against llama.cpp | S4.1 |
+| S4.2 | Benchmark harness embedding / rerank / System One modes and competitor baselines on bluefin and the desktop (llama.cpp, TEI, fastembed, OpenVINO); the targets in §4.2 confirmed or corrected | |
+| S4.3 | System One, part 1: decision metadata, `/v1/systemone`, the answer math, `Want::Labels`, the state fork, the **openjev** renderer; parity with `llama-server` on the tinyopenjev test file. Then the other label-logit types, one renderer each: **lev** (two-variant choice, 9-point noul), **nimble**, **pplx-decider**, **h2o-lightning** | S4.1 |
 | S4.4 | Bidirectional forward (§2.2) and `gemma-embedding`: EmbeddingGemma 300M | S4.1 |
 | S4.5 | WordPiece and unigram tokenizers against `llama-tokenize` | |
 | S4.6 | `bert` family and the `cls` head: MiniLM, bge, e5, bge-m3; bge-reranker-v2-m3 on `/v1/rerank`; `/v1/classify` | S4.4, S4.5 |
 | S4.7 | `modern-bert` and labelled classifier heads | S4.6 |
 | S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3` | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
-| S4.10 | Several models in one server (`serve -m a -m b`, routed by `model`): a chat model, an embedder and a guard in one process sharing one pool | S4.3 |
+| S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |
+| S4.12 | System One, part 3: **laya** and Julia-1 on `modern-bert` with the decision head | S4.7 |
+| S4.13 | Generative rerankers: the rank read-out (`cls.output` on the last row), `/v1/rerank` and `peregrine rerank` with Qwen3-Reranker | S4.3 |
+| S4.10 | Several models in one server (`serve -m a -m b`, routed by `model`): a chat model, an embedder and a decision model in one process sharing one pool | S4.3 |
 
 ## 7. Decisions
 
-1. **"Decision model" means the four shapes in §0** (rerank, classify, decide, plus embeddings
-   beside them). Token-level outputs (NER, ColBERT) are not in this stage.
+1. **"Decision model" means a native System One model** (§2.5), served on `/v1/systemone` with
+   llama.cpp's request and response shapes; rerank and classify are the two related shapes beside
+   it. A chat model prompted to classify is not one. Token-level outputs (NER, ColBERT) and image
+   input are not in this stage.
 2. **No lossy shortcut by default** (ADR 0003): a file runs in its own format; Peregrine does not
    re-quantise an F32 encoder to int8 at load unless an option asks for it and an accuracy report
    backs it.
 3. **Encoders bypass the KV cache**; causal embedders and deciders keep it, because the prefix
    store is their main speed-up.
-4. **Probabilities are over the full vocabulary**, with the choice-renormalised values beside
-   them, so a caller can tell "confidently B" from "none of these".
+4. **Probabilities are over the options only**, scaled by the file's temperatures, exactly as
+   llama.cpp computes them, so a client gets the same numbers from either engine.
+6. **No Jinja engine.** A decision type is supported when its renderer is written and matches
+   llama.cpp byte for byte on the fixtures; an unknown type or an unrecognised template is refused.
 5. **Multi-model serving is last** (S4.10): every earlier step is useful with one model per
    process, and it needs a decision on how models share the thread pool.

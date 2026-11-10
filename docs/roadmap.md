@@ -68,22 +68,27 @@ Each model is checked against llama.cpp on the same file before it is listed.
 
 ## Stage 4: embeddings and decision models
 
-Design: [`docs/design/s4-embeddings-decisions.md`](design/s4-embeddings-decisions.md). Embedding
-models (`/v1/embeddings`) and "system one" decision models: rerank, classify, and a closed-choice
-decision from any generative model, each one forward pass with no decode.
+Design: [`docs/design/s4-embeddings-decisions.md`](design/s4-embeddings-decisions.md); the decision
+models are specified in [`docs/reference/systemone.md`](reference/systemone.md). Embedding models
+(`/v1/embeddings`) and decision models: native System One models on `/v1/systemone` (typed `choice`,
+`score` and `noul` questions about a state), rerankers and classifier heads, each one forward pass
+with no decode.
 
 | ID | Item | pw |
 |---|---|---|
-| S4.1 | Pooled outputs on causal models; `/v1/embeddings`, `peregrine embed`; Qwen3-Embedding against llama.cpp | 0.5 |
-| S4.2 | Benchmark harness modes for embeddings, rerank and decide; competitor baselines (llama.cpp, text-embeddings-inference, fastembed, OpenVINO) on H1 and H2 | 1.0 |
-| S4.3 | Choice scoring: `/v1/decide`, `/v1/rerank` on generative rerankers and guards | 1.0 |
+| S4.1 | Pooled outputs on causal models; `/v1/embeddings`, `peregrine embed`; Qwen3-Embedding against llama.cpp — done (#158) | 0.5 |
+| S4.2 | Benchmark harness modes for embeddings, rerank and System One; competitor baselines (llama.cpp, text-embeddings-inference, fastembed, OpenVINO) on H1 and H2 | 1.0 |
+| S4.3 | System One, part 1: `/v1/systemone`, the answer math, the label-logit types on Qwen 3.5 (OpenJev, Lev, Nimble, pplx-decider, H2O Lightning) | 1.5 |
 | S4.4 | Bidirectional forward; `gemma-embedding` (EmbeddingGemma) | 1.0 |
-| S4.5 | WordPiece and SentencePiece-unigram tokenizers | 0.5 |
+| S4.5 | WordPiece and SentencePiece-unigram tokenizers — done (#157) | 0.5 |
 | S4.6 | `bert` family and the classifier head: MiniLM, bge, e5, bge-m3, bge-reranker; `/v1/classify` | 1.5 |
 | S4.7 | `modern-bert` and labelled classifier heads (guards, routers) | 1.0 |
 | S4.8 | `nomic-bert`, `jina-bert-v2/v3` | 1.0 |
-| S4.9 | Speed: F32/F16 GEMM blocking, `n × n` attention tiles, small-model thread choice, duplicate cache; targets met on x86, then NEON | 2.0 |
+| S4.9 | Speed: F32/F16 GEMM blocking, `n × n` attention tiles, small-model thread choice, prompt-sized caches for pooled and decision slots, duplicate cache; targets met on x86, then NEON | 2.0 |
 | S4.10 | Several models in one server | 1.0 |
+| S4.11 | System One, part 2: Kev (pointer head) and vLLM D3 (non-causal Qwen 3.5) | 1.0 |
+| S4.12 | System One, part 3: Laya and Julia-1 on `modern-bert` | 0.5 |
+| S4.13 | Generative rerankers (Qwen3-Reranker) on `/v1/rerank` | 0.5 |
 
 Each model is checked against llama.cpp on the same file before it is listed; a text's output is
 bit-identical alone and in any batch.
