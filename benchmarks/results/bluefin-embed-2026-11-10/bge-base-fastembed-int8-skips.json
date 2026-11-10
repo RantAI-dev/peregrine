@@ -1,0 +1,7 @@
+{
+ "L512_b128_c1": {
+  "skipped": "128 texts x 512 tokens = 65536 tokens per request exceeds this model's 32768-token batch cap; the padded batch's attention buffers would not fit in the host's memory budget",
+  "batch_tokens": 65536,
+  "batch_token_cap": 32768
+ }
+}

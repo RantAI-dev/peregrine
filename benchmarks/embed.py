@@ -330,6 +330,24 @@ def run_bench(args) -> None:
                         if key in skipped:
                             cells[key] = dict(skipped[key])
                             continue
+                        cap_tokens = (row.get("max_batch_tokens")
+                                      or model.get("max_batch_tokens"))
+                        if cap_tokens and batch * L > cap_tokens:
+                            reason = (
+                                f"{batch} texts x {L} tokens = {batch * L} tokens per "
+                                f"request exceeds this model's {cap_tokens}-token batch "
+                                f"cap; the padded batch's attention buffers would not fit "
+                                f"in the host's memory budget"
+                            )
+                            skipped[key] = {"skipped": reason,
+                                            "batch_tokens": batch * L,
+                                            "batch_token_cap": cap_tokens}
+                            cells[key] = dict(skipped[key])
+                            if decide_skips:
+                                pass
+                            print(f"  {key:20s} SKIP ({batch * L} > {cap_tokens} tokens)",
+                                  flush=True)
+                            continue
                         if decide_skips and batch > 1 and est > max_cell_s:
                             reason = (
                                 f"estimated {est:.0f} s for {batch} x {L} tokens on this row "
