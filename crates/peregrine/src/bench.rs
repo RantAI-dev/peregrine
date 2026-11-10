@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// Arguments for `peregrine bench`.
 #[derive(Args, Debug, Clone)]
 pub struct BenchArgs {
-    /// The GGUF model file to benchmark.
+    /// The GGUF model file to benchmark, or `hf:<namespace>/<repo>/<file>[@<rev>]`.
     #[arg(short = 'm', long)]
     pub model: PathBuf,
     /// Number of greedy decode tokens to generate.

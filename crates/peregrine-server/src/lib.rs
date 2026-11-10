@@ -43,11 +43,12 @@ use peregrine_core::serve::{Emission, Engine, Finish, SlotCfg, SlotId};
 use peregrine_core::template::Template;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod harmony;
+pub mod lifecycle;
 mod stop;
 
 use harmony::{Channel, Harmony, ReasoningFormat};
@@ -57,7 +58,8 @@ use stop::StopMatcher;
 #[derive(Parser, Debug)]
 #[command(about = "Serve a GGUF model with Peregrine behind the OpenAI chat API")]
 pub struct Args {
-    /// The GGUF file (llama, qwen2 or qwen3; F32/F16/Q8_0/Q5_0/Q4_K/Q6_K tensors).
+    /// The GGUF file (llama, qwen2 or qwen3; F32/F16/Q8_0/Q5_0/Q4_K/Q6_K tensors), or
+    /// `hf:<namespace>/<repo>/<file>[@<rev>]` to download it into the cache once.
     #[arg(short = 'm', long)]
     pub model: std::path::PathBuf,
     /// An engine option, as `NAME=VALUE` with the name of its `PEREGRINE_<NAME>` variable (for example
@@ -121,6 +123,16 @@ pub struct Args {
     /// Ignore tuning profiles and use defaults or environment variables.
     #[arg(long, default_value_t = false)]
     pub no_profile: bool,
+    /// Let a replacement process bind the same port while this one drains (`peregrine upgrade`).
+    /// Off by default so a typo cannot quietly start a second server on an occupied port.
+    #[arg(long, default_value_t = false)]
+    pub reuse_port: bool,
+    /// Write the lifecycle state file here (set by `peregrine serve --background`).
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub state_file: Option<std::path::PathBuf>,
+    /// The log a background server writes (recorded for `status` and `upgrade`).
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub log_file: Option<std::path::PathBuf>,
 }
 
 struct App {
@@ -349,9 +361,180 @@ pub async fn run(a: Args) {
         .route("/v1/chat/completions", post(chat))
         .with_state(app);
     let addr = format!("{}:{}", a.host, a.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
+    let listener = match bind(&a.host, a.port, a.reuse_port).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("cannot listen on {addr}: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(path) = &a.state_file {
+        let state = lifecycle::State {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            host: a.host.clone(),
+            port: a.port,
+            model: a.model.display().to_string(),
+            log: a.log_file.clone(),
+            args: lifecycle::forwarded_args(std::env::args().skip(1)),
+            started: lifecycle::now(),
+        };
+        if let Err(e) = lifecycle::write(path, &state) {
+            eprintln!("cannot write {}: {e}", path.display());
+            std::process::exit(2);
+        }
+    }
     tracing::info!("listening on http://{addr}");
-    axum::serve(listener, router).await.expect("serve");
+    let server = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal(a.state_file.clone(), a.log_file.clone()));
+    // A drain must end: a client that holds a stream open cannot keep the process from exiting.
+    if tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .is_err()
+    {
+        eprintln!("peregrine: shutdown took longer than 30 s; exiting with requests still open");
+    }
+    if let Some(path) = &a.state_file {
+        lifecycle::remove_if_ours(path, std::process::id());
+    }
+}
+
+/// Bind the listening socket. With `reuse_port` every process sharing the port must set
+/// `SO_REUSEPORT`: that is what lets `peregrine upgrade` start the new server before the old one
+/// has stopped, so no connection is refused during a replacement.
+async fn bind(host: &str, port: u16, reuse_port: bool) -> std::io::Result<tokio::net::TcpListener> {
+    let addr = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => std::net::SocketAddr::new(ip, port),
+        Err(_) => tokio::net::lookup_host((host, port))
+            .await?
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    format!("{host} has no address"),
+                )
+            })?,
+    };
+    if !reuse_port {
+        return tokio::net::TcpListener::bind(addr).await;
+    }
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    #[cfg(all(
+        unix,
+        not(target_os = "solaris"),
+        not(target_os = "illumos"),
+        not(target_os = "cygwin"),
+        not(target_os = "nuttx"),
+    ))]
+    socket.set_reuseport(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
+/// Resolve on `Ctrl-C` or `SIGTERM`; on `SIGHUP`, re-exec the binary on disk beside this process
+/// with `SO_REUSEPORT` and drain once the replacement is listening. A handoff that fails leaves
+/// this process serving.
+async fn shutdown_signal(
+    state_file: Option<std::path::PathBuf>,
+    log_file: Option<std::path::PathBuf>,
+) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("cannot listen for SIGTERM: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("shutdown requested; draining in-flight requests");
+                return;
+            }
+        };
+        let mut hup = signal(SignalKind::hangup()).ok();
+        // A `SIGHUP` handoff can wait up to 300 s for the replacement to load a large model, so it
+        // runs in a blocking task instead of inside the loop: `SIGTERM` and Ctrl-C stay responsive,
+        // and their arrival flips `cancel` so the in-flight replacement is killed, not orphaned.
+        let mut in_flight: Option<tokio::task::JoinHandle<Result<lifecycle::Handoff, String>>> =
+            None;
+        let mut cancel: Option<Arc<AtomicBool>> = None;
+        loop {
+            let hangup = async {
+                match hup.as_mut() {
+                    Some(signal) => {
+                        signal.recv().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            let handoff_done = async {
+                match in_flight.as_mut() {
+                    Some(task) => Some(task.await),
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    if let Some(flag) = cancel.as_ref() {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    tracing::info!("shutdown requested; draining in-flight requests");
+                    return;
+                }
+                _ = term.recv() => {
+                    if let Some(flag) = cancel.as_ref() {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    tracing::info!("shutdown requested; draining in-flight requests");
+                    return;
+                }
+                result = handoff_done => {
+                    in_flight = None;
+                    cancel = None;
+                    // `handoff_done` only resolves while a task is in flight.
+                    match result.expect("handoff_done resolves only with a task") {
+                        Ok(Ok(lifecycle::Handoff::Restarted(pid))) => {
+                            tracing::info!("SIGHUP: replacement pid {pid} is listening; draining");
+                            return;
+                        }
+                        Ok(Ok(lifecycle::Handoff::Unchanged)) => {
+                            tracing::info!("SIGHUP: the binary on disk is unchanged; still serving");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!("SIGHUP: handoff failed; still serving: {e}");
+                        }
+                        Err(e) => {
+                            tracing::error!("SIGHUP: handoff task failed; still serving: {e}");
+                        }
+                    }
+                }
+                _ = hangup => {
+                    if in_flight.is_some() {
+                        tracing::info!("SIGHUP: a handoff is already in progress; ignoring");
+                        continue;
+                    }
+                    let flag = Arc::new(AtomicBool::new(false));
+                    let state = state_file.clone();
+                    let log = log_file.clone();
+                    let child_cancel = Arc::clone(&flag);
+                    in_flight = Some(tokio::task::spawn_blocking(move || {
+                        lifecycle::handoff(state.as_deref(), log.as_deref(), Some(&child_cancel))
+                    }));
+                    cancel = Some(flag);
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (state_file, log_file);
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutdown requested; draining in-flight requests");
+    }
 }
 
 async fn health() -> Json<Value> {
@@ -404,10 +587,12 @@ fn engine_options(
         }
         over.insert(format!("PEREGRINE_{k}"), v.to_string());
     }
-    Ok(peregrine_core::options::EngineOptions::from_chained(
-        |k| over.get(k).cloned().or_else(|| std::env::var(k).ok()),
-        profile,
-    ))
+    Ok(
+        peregrine_core::options::EngineOptions::from_chained_calibrating(
+            |k| over.get(k).cloned().or_else(|| std::env::var(k).ok()),
+            profile,
+        ),
+    )
 }
 
 fn bad(msg: impl Into<String>) -> Response {
@@ -1736,5 +1921,12 @@ mod tests {
             super::engine_options(&["CALIBRATE=0".into(), "SPIN_US=200".into()], None).unwrap();
         assert_eq!(opts.spin_us, 200);
         assert!(!opts.calibrate);
+
+        // With nothing pinned, `serve` calibrates: the options carry a measured thread count and
+        // a spin window inside the calibration's clamp, and the source says where they came from.
+        let calibrated = super::engine_options(&[], None).unwrap();
+        assert!(calibrated.calibrate);
+        assert!(calibrated.decode_threads.is_some());
+        assert!((50..=2000).contains(&calibrated.spin_us));
     }
 }

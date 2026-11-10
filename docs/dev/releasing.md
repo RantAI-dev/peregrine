@@ -44,6 +44,8 @@ Work down the list; do not cut the tag until every line holds.
 
 ## What ships
 
+- `install.sh`, the `curl | sh` installer, as a release asset: `releases/latest/download/install.sh`
+  is what the vanity host redirects to.
 - `peregrine-vX.Y.Z-linux-x86_64.tar.gz` and `peregrine-vX.Y.Z-linux-aarch64.tar.gz`: the stripped
   `peregrine` binary, `LICENSE` and `NOTICE`, with a `SHA256SUMS` covering both archives.
 - The x86-64 binary is built for the plain x86-64 baseline: no `RUSTFLAGS`, no `-C target-cpu=native`
@@ -55,3 +57,34 @@ Work down the list; do not cut the tag until every line holds.
   smaller. Published benchmark numbers stay on `release` (see [`build-profiles.md`](build-profiles.md)).
 - macOS archives and container images are not in the first release; both are follow-ups
   (the Dockerfile ships first, an image publish comes with it).
+
+## The vanity download host
+
+The public front door is **`peregrine.rantai.dev`**, using the same Cloudflare pattern as
+`get.rantai.dev/lakehouse`: the domain is a redirect with no origin, and the files stay on GitHub.
+The release workflow uploads `install.sh` as an asset, so the newest script is always at
+`releases/latest/download/install.sh`.
+
+Configured once in the `rantai.dev` zone (public DNS, outside this repository):
+
+1. a proxied `AAAA` record `peregrine` → `100::` (no origin);
+2. in the `http_request_dynamic_redirect` phase, rules scoped to `http.host eq "peregrine.rantai.dev"`:
+   - path `eq "/install.sh"` → `https://github.com/RantAI-dev/peregrine/releases/latest/download/install.sh`;
+   - path `starts_with "/releases/"` → a **dynamic** target (`target_url.expression`, not
+     `target_url.value`) =
+     `concat("https://github.com/RantAI-dev/peregrine/releases/download/", substring(http.request.uri.path, 10))`;
+   - path `eq "/latest"` → `https://api.github.com/repos/RantAI-dev/peregrine/releases/latest`.
+
+**Not `get.peregrine.rantai.dev`.** The zone's certificate is `rantai.dev, *.rantai.dev` (Universal
+SSL), which covers one label: `peregrine.rantai.dev` is covered, but `get.peregrine.rantai.dev` is not.
+That nested host needs Total TLS / Advanced Certificate Manager first, or a path on the existing
+covered host (`get.rantai.dev/peregrine`) instead. `peregrine upgrade` accepts either through
+`PEREGRINE_RELEASE_BASE` / `PEREGRINE_RELEASE_LATEST`.
+
+The installer asset is cached briefly at the edge; after replacing an `install.sh` on an **existing**
+release, the clean URL can serve the old copy for a few minutes. New releases have no older copy.
+
+`peregrine upgrade` prefers `https://peregrine.rantai.dev/releases/download` and falls back to the
+GitHub base, so the domain can be added (or be down) without breaking updates. `PEREGRINE_RELEASE_BASE`
+and `PEREGRINE_RELEASE_LATEST` override both, for a mirror or a test fixture. Until the DNS record and
+rules exist, the GitHub URLs work unchanged.

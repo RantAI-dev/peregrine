@@ -6,6 +6,76 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`peregrine serve --background`**, with `peregrine status` and `peregrine stop`: the server
+  detaches into its own process group, logs to `serve-<port>.log` (or `--log-file`), and writes a
+  lifecycle state file under `$PEREGRINE_STATE_DIR`, `$XDG_STATE_HOME/peregrine` or
+  `~/.local/state/peregrine`. The command returns only after the server is listening (bounded by
+  `--startup-timeout`, default 300 s), and a second background server is refused while one runs.
+- **`peregrine upgrade`**: resolves the newest GitHub release (or `--version TAG`), downloads the
+  `linux-x86_64`/`linux-aarch64` archive, verifies it against `SHA256SUMS`, runs the extracted
+  binary's `--version` **before** replacing anything, and installs it with a copy-beside + atomic
+  rename. `--check` reports without installing; `--base-url`/`PEREGRINE_RELEASE_BASE` point at a
+  mirror; `--exe` chooses the target; `--no-restart` installs without touching the running server;
+  cargo builds under `target/` are refused without `--force`.
+- `scripts/install.sh` is POSIX `sh` (no `pipefail`, `#!/bin/sh`), so `curl ... | sh` works on hosts
+  where `sh` is dash; it previously needed `bash`.
+- **Vanity download host**: the public one-liner is now
+  `https://peregrine.rantai.dev/install.sh`, a Cloudflare redirect to
+  `releases/latest/download/install.sh` (the `get.rantai.dev/lakehouse` pattern); the files stay on
+  GitHub. The release workflow uploads `install.sh` as a release asset, `peregrine upgrade` tries
+  `peregrine.rantai.dev/releases/download` first and falls back to GitHub, and
+  `PEREGRINE_RELEASE_BASE` / `PEREGRINE_RELEASE_LATEST` override both for mirrors and tests.
+- **Zero-downtime replacement**: a background server binds with `SO_REUSEPORT` (also exposed as
+  `--reuse-port`), so `upgrade` starts the new binary with the same `serve` arguments beside the old
+  one, waits for the new lifecycle state, then sends the old pid `SIGTERM`. The old process stops
+  accepting, drains in-flight requests (30 s cap) and exits, while the new one serves; nothing is
+  refused during the handoff. Verified with 300 requests across the swap: zero failures.
+- **`SIGHUP` self-handoff**: `kill -HUP <pid>` re-executes the binary on disk with the same `serve`
+  arguments and `SO_REUSEPORT`, waits for the replacement to report ready, then drains — so a local
+  rebuild, a new tuning profile or a replaced binary is picked up without refusing a connection. The
+  inode guard makes a SIGHUP on an unchanged binary a no-op (no restart loop), and a failed
+  replacement leaves the old server serving. A foreground server needs `--reuse-port`; background
+  servers already have it. Verified with 200 requests across a SIGHUP swap: zero failures.
+- **Graceful shutdown** on `SIGTERM` and `Ctrl-C`: stop accepting, drain, remove the state file, exit
+  0. `peregrine stop` waits for the drain (40 s cap) and cleans a stale state file.
+- `docs/service.md`: background mode, state/log locations, upgrade semantics, the `SO_REUSEPORT`
+  requirement, and a systemd unit for boot-time start.
+- **`peregrine run`**: one prompt in, one reply out, streamed to stdout, with no server and no
+  client. It reuses the same session, chat template and sampling path as `serve`; `--json` prints a
+  single object with the text, prompt/completion token counts, prefill and decode tokens per second,
+  time to first token and wall time. With no prompt argument it reads stdin, so
+  `echo "..." | peregrine run -m model.gguf` works. `--max-tokens`, `--temperature`, `--top-p`,
+  `--top-k`, `--min-p`, `--seed`, `-c`, `-t`, `--system`, `--chat-template`, `--kv`, `--opt`,
+  `--profile` and `--no-profile` mirror the server's knobs.
+- **`hf:` model references**, accepted by every command that takes `-m` (`run`, `serve`, `inspect`,
+  `bench`, `tune`): `hf:<namespace>/<repo>/<file>[@<rev>]` downloads the file once into
+  `$PEREGRINE_CACHE_DIR`, `$XDG_CACHE_HOME/peregrine/models/<repo>/<file>` or
+  `~/.cache/peregrine/models/<repo>/<file>` and reuses it afterwards. The repository (and a pinned
+  revision) is part of the cache path, so two repos that both publish `model-Q4_K_M.gguf` cannot
+  collide. Downloads resume from a `.part` file, and only the first 16 MiB are fetched
+  before `Gguf::open_header` (new) runs the build's compatibility check — a model this build cannot
+  run is refused before the weights arrive, and the partial file is removed. `PEREGRINE_HF_BASE`
+  points the resolver at a mirror, and `HF_TOKEN` is sent as a bearer token for gated or private
+  repositories.
+- `scripts/install.sh`, the `curl | sh` installer: it detects `linux-x86_64` or `linux-aarch64`,
+  downloads the release archive and its `SHA256SUMS`, verifies the checksum before writing anything,
+  and installs to `~/.local/bin` (or `--prefix DIR`). The binary is renamed into place, so upgrading a
+  running server never hits `ETXTBSY`. `--version TAG` pins a release. The quickstart's first step is
+  now one command instead of "download this URL with `curl -fLO` and `mv` the binary yourself".
+- `PEREGRINE_BASE_URL` overrides the download base for the installer, for mirrors and for testing the
+  installer against a local release directory.
+
+### Changed
+- **The startup calibration now runs by default in `peregrine serve`**, when no tuning profile exists
+  and neither `decode_threads` nor `spin_us` is pinned. It measures the host in under 200 ms, prints
+  what it chose, and reports it through the existing `/metrics` gauges; `PEREGRINE_CALIBRATE=0` turns
+  it off. `PEREGRINE_CALIBRATE` now accepts `0`/`off`/`false` and `1`/`on`/`true`, and any value
+  other than the off-words turns it on. `peregrine bench` and `peregrine tune` still do not calibrate
+  unless asked, so a published number keeps recording the settings it was handed (S2.6 decision 6).
+- `docs/dev/benchmarking.md`, `docs/quickstart.md`, `docs/design/s2.6.md` and the README's quick
+  start describe the installer and the new calibration default.
+
 ## [0.1.0] - 2026-11-10
 
 ### Added

@@ -94,9 +94,16 @@ peregrine-bench --example <name>`); most are x86-64 only. Nothing depends on it.
 ### `crates/peregrine`: the facade and the `peregrine` command
 
 What applications depend on: re-exports the engine (`peregrine::engine`), the kernels (`peregrine::kernels`), the models (`peregrine::models`), and with the default
-`server` feature, the server. The `peregrine` binary (`cli` feature) has `serve`, `inspect` (a model file's
-architecture, formats and whether this build runs it), `bench` (single-user throughput and bytes/token
-measurement), `tune` (coordinate search over tuning knobs) and `tier` (the kernel tier and every option).
+`server` feature, the server. The `peregrine` binary (`cli` feature) has `run` (one prompt, streamed to
+stdout, no server), `serve`, `inspect` (a model file's architecture, formats and whether this build runs
+it), `bench` (single-user throughput and bytes/token measurement), `tune` (coordinate search over tuning
+knobs) and `tier` (the kernel tier and every option). Every command that takes `-m` also accepts
+`hf:<namespace>/<repo>/<file>[@<rev>]`: `fetch.rs` reads the GGUF header before downloading the weights,
+checks it against the build, and caches the file under `~/.cache/peregrine/models`.
+`serve --background` detaches with `SO_REUSEPORT` and writes a lifecycle state file
+(`crates/peregrine-server/src/lifecycle.rs`); `service.rs` starts it, `status`/`stop` read that file,
+and `upgrade` installs a release and hands the port from the old process to the new one while both
+listen, so in-flight requests drain instead of failing.
 
 ### `crates/peregrine-server`: HTTP
 
