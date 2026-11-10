@@ -118,7 +118,7 @@ pub fn hidden_rows(model: &Model, tokens: &[u32]) -> Vec<f32> {
         }
     }
 
-    for il in 0..cfg.n_layer {
+    for (il, &swa) in is_swa.iter().enumerate().take(cfg.n_layer) {
         let p = |s: &str| format!("blk.{il}.{s}");
         let attn_norm = vec_f32(g, &p("attn_norm.weight"));
         let wq = mat(g, &p("attn_q.weight"));
@@ -134,8 +134,8 @@ pub fn hidden_rows(model: &Model, tokens: &[u32]) -> Vec<f32> {
         let down = mat(g, &p("ffn_down.weight"));
         let ffn_post_norm = vec_f32(g, &p("post_ffw_norm.weight"));
 
-        let table: &[f32] = if is_swa[il] { &rope_swa } else { &rope_global };
-        let half = if is_swa[il] { Some(window / 2) } else { None };
+        let table: &[f32] = if swa { &rope_swa } else { &rope_global };
+        let half = if swa { Some(window / 2) } else { None };
 
         let mut xnorm = vec![0.0f32; n * dm];
         for r in 0..n {

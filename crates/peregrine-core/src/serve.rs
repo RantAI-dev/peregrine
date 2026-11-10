@@ -624,6 +624,8 @@ impl Engine {
             // No cache is ever written, so the attention scratch is not needed. The
             // pooling accumulator is the family's, per text.
             state.attn = crate::blocks::attn::AttnScratch::new(&c, 1, threads);
+            // One score row per worker, long enough for the longest text of a pass.
+            state.attn.bidir_scores = vec![0.0; threads.max(1) * max_batch];
             state.pool_sum = vec![0.0; c.d_model];
         }
         Engine {
@@ -1392,12 +1394,13 @@ impl Engine {
         // (slot index, first row, length)
         let mut chosen: Vec<(usize, usize, usize)> = Vec::new();
         let mut rows = 0usize;
-        for (i, s) in self.slots.iter().enumerate() {
-            let n = s.prompt.len();
+        for i in 0..self.slots.len() {
+            let n = self.slots[i].prompt.len();
             if chosen.is_empty() {
                 if n > budget {
+                    let id = self.slots.remove(i).id;
                     return vec![Emission {
-                        slot: s.id,
+                        slot: id,
                         token: 0,
                         text: String::new(),
                         logprob: 0.0,
@@ -1445,11 +1448,10 @@ impl Engine {
         let secs = t0.elapsed().as_secs_f64();
         if let Err(e) = r {
             let ids: Vec<SlotId> = chosen.iter().map(|&(i, _, _)| self.slots[i].id).collect();
-            self.slots.retain(|s| !ids.contains(&s.id));
-            return chosen
+            let out: Vec<Emission> = ids
                 .iter()
-                .map(|_| Emission {
-                    slot: 0,
+                .map(|&slot| Emission {
+                    slot,
                     token: 0,
                     text: String::new(),
                     logprob: 0.0,
@@ -1457,14 +1459,9 @@ impl Engine {
                     cost: None,
                     embedding: None,
                 })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .zip(ids)
-                .map(|(mut em, id)| {
-                    em.slot = id;
-                    em
-                })
                 .collect();
+            self.slots.retain(|s| !ids.contains(&s.id));
+            return out;
         }
         let dm = self.model.cfg.d_model;
         let mut out = Vec::with_capacity(chosen.len());

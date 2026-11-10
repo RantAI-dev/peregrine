@@ -24,7 +24,10 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use support::models::{write_dense, write_hybrid, write_moe, Dense, MoeShape};
+use support::models::{
+    write_dense, write_gemma_embedding, write_hybrid, write_moe, Dense, GemmaEmbeddingConfig,
+    MoeShape,
+};
 
 /// Allocations counted while `COUNTING` was set.
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -115,6 +118,35 @@ fn check_decode(model: &Model, threads: usize, prec: KvPrec) -> usize {
     allocations_steady(|| {
         for _ in 0..3 {
             decode(&mut pos);
+        }
+    })
+}
+
+/// A bidirectional pass over whole texts (roadmap S4.4): the projections, the per-text
+/// attention and the pooled dense head allocate nothing once the state's scratch is warm.
+fn check_forward_texts(model: &Model, threads: usize) -> usize {
+    let c = model.cfg;
+    let pool = Pool::new(threads);
+    let mut st = model.new_state(c.ctx_train.max(8), 1, c.ctx_train.max(8), threads);
+    st.hidden.resize(st.max_batch * c.d_model, 0.0);
+    st.pool_sum = vec![0.0; c.d_model];
+    let a: Vec<u32> = (11..48).collect();
+    let b: Vec<u32> = (20..35).collect();
+    let c3: Vec<u32> = (13..22).collect();
+    let texts: [&[u32]; 3] = [&a, &b, &c3];
+    let poolings = [peregrine_core::embed::Pooling::Mean; 3];
+    let mut stats = StepStats::default();
+    let mut run = |st: &mut State| {
+        model
+            .forward_texts(st, &pool, &texts, &poolings, &mut stats)
+            .unwrap();
+    };
+    for _ in 0..4 {
+        run(&mut st);
+    }
+    allocations_steady(|| {
+        for _ in 0..3 {
+            run(&mut st);
         }
     })
 }
@@ -276,6 +308,22 @@ fn a_decode_step_allocates_nothing() {
                     ));
                 }
             }
+        }
+    }
+
+    // A bidirectional encoder: the whole-text pass and its pooled dense head.
+    let encoder = load(&write_gemma_embedding(
+        &dir,
+        Format::Q8_0,
+        7007,
+        GemmaEmbeddingConfig::default(),
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&encoder, threads);
+        if n != 0 {
+            failures.push(format!(
+                "gemma-embedding whole-text pass, {threads} threads: {n} allocations per pass"
+            ));
         }
     }
 

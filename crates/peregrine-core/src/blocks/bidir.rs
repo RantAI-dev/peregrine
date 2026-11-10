@@ -12,7 +12,7 @@
 //! (symmetric window, integer division); a global layer masks nothing. `n_swa` is the
 //! file's `attention.sliding_window`.
 
-use crate::blocks::par::{for_row_chunks, Sched};
+use crate::blocks::par::{for_row_chunks, Disjoint, Sched};
 use crate::blocks::ROW_PARALLEL;
 use crate::model::{Config, StepStats};
 use crate::pool::Pool;
@@ -46,6 +46,8 @@ pub fn attend_texts(
     spans: &[TextSpan],
     half_window: Option<usize>,
     scale: f32,
+    // One score row per worker (`AttnScratch::bidir_scores`).
+    scores: &mut [f32],
     pool: &Pool,
     stats: &mut StepStats,
 ) {
@@ -59,7 +61,71 @@ pub fn attend_texts(
         return;
     }
     let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    let max_len = spans.iter().map(|s| s.len).max().unwrap_or(0);
     let t0 = std::time::Instant::now();
+    let score_buf = Disjoint::new(scores);
+    let body = |wk: usize, rows: std::ops::Range<usize>, out_chunk: &mut [f32]| {
+        // The spans are in order and contiguous, and `rows` is one contiguous range:
+        // advance a cursor instead of building a row -> text table per layer.
+        let first = rows.start;
+        let mut si = spans
+            .iter()
+            .position(|s| first >= s.row0 && first < s.row0 + s.len)
+            .expect("every batch row belongs to a text");
+        let mut span = spans[si];
+        // SAFETY: worker `wk` alone uses score row `wk` (the pool has as many workers as
+        // `AttnScratch` has score rows).
+        let scores = unsafe { score_buf.chunk(wk * max_len, max_len) };
+        for (i, gr) in rows.enumerate() {
+            while gr >= span.row0 + span.len {
+                si += 1;
+                span = spans[si];
+            }
+            let local = gr - span.row0;
+            let o_row = &mut out_chunk[i * qd..(i + 1) * qd];
+            for h in 0..c.n_head {
+                let kh = h / gqa;
+                let q_head = &q[gr * qd + h * hd..gr * qd + (h + 1) * hd];
+                let base = span.row0 * kvd + kh * hd;
+                let mut max = f32::NEG_INFINITY;
+                for j in 0..span.len {
+                    let s = if half_window.is_some_and(|half| local.abs_diff(j) > half) {
+                        f32::NEG_INFINITY
+                    } else {
+                        let k_head = &k[base + j * kvd..base + j * kvd + hd];
+                        let mut dot = 0.0f32;
+                        for d in 0..hd {
+                            dot += q_head[d] * k_head[d];
+                        }
+                        dot * scale
+                    };
+                    scores[j] = s;
+                    if s > max {
+                        max = s;
+                    }
+                }
+                let mut l = 0.0f64;
+                let o_head = &mut o_row[h * hd..(h + 1) * hd];
+                o_head.fill(0.0);
+                for (j, &s) in scores[..span.len].iter().enumerate() {
+                    if s == f32::NEG_INFINITY {
+                        continue;
+                    }
+                    let e = (s - max).exp() as f64;
+                    l += e;
+                    let v_head = &v[base + j * kvd..base + j * kvd + hd];
+                    let e = e as f32;
+                    for d in 0..hd {
+                        o_head[d] += e * v_head[d];
+                    }
+                }
+                let inv = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
+                for x in o_head.iter_mut() {
+                    *x *= inv;
+                }
+            }
+        }
+    };
     for_row_chunks(
         pool,
         parallel,
@@ -67,72 +133,7 @@ pub fn attend_texts(
         qd,
         nb,
         Sched::Static,
-        |_wk, rows, out_chunk| {
-            // The spans are in order and contiguous, and `rows` is one contiguous range:
-            // advance a cursor instead of building a row -> text table per layer.
-            let first = rows.start;
-            let mut si = spans
-                .iter()
-                .position(|s| first >= s.row0 && first < s.row0 + s.len)
-                .expect("every batch row belongs to a text");
-            let mut span = spans[si];
-            for (i, gr) in rows.enumerate() {
-                while gr >= span.row0 + span.len {
-                    si += 1;
-                    span = spans[si];
-                }
-                let local = gr - span.row0;
-                let o_row = &mut out_chunk[i * qd..(i + 1) * qd];
-                for h in 0..c.n_head {
-                    let kh = h / gqa;
-                    let q_head = &q[gr * qd + h * hd..gr * qd + (h + 1) * hd];
-                    let base = span.row0 * kvd + kh * hd;
-                    let mut max = f32::NEG_INFINITY;
-                    for j in 0..span.len {
-                        if let Some(half) = half_window {
-                            if local.abs_diff(j) > half {
-                                continue;
-                            }
-                        }
-                        let k_head = &k[base + j * kvd..base + j * kvd + hd];
-                        let mut dot = 0.0f32;
-                        for d in 0..hd {
-                            dot += q_head[d] * k_head[d];
-                        }
-                        let s = dot * scale;
-                        if s > max {
-                            max = s;
-                        }
-                    }
-                    let mut l = 0.0f64;
-                    let o_head = &mut o_row[h * hd..(h + 1) * hd];
-                    o_head.fill(0.0);
-                    for j in 0..span.len {
-                        if let Some(half) = half_window {
-                            if local.abs_diff(j) > half {
-                                continue;
-                            }
-                        }
-                        let k_head = &k[base + j * kvd..base + j * kvd + hd];
-                        let mut dot = 0.0f32;
-                        for d in 0..hd {
-                            dot += q_head[d] * k_head[d];
-                        }
-                        let e = (dot * scale - max).exp() as f64;
-                        l += e;
-                        let v_head = &v[base + j * kvd..base + j * kvd + hd];
-                        let e = e as f32;
-                        for d in 0..hd {
-                            o_head[d] += e * v_head[d];
-                        }
-                    }
-                    let inv = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
-                    for x in o_head.iter_mut() {
-                        *x *= inv;
-                    }
-                }
-            }
-        },
+        |wk, rows, out_chunk| body(wk, rows, out_chunk),
     );
     if parallel {
         stats.barriers += 1;

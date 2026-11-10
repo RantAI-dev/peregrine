@@ -35,6 +35,18 @@ bound by compute. That split drives most design choices.
 There is one runtime (ADR 0007). A conversation is the same engine with one slot: `Session` renders the
 prompt, keeps the chat history and lends the slot the cache the conversation has filled so far.
 
+### Two kinds of forward pass
+
+Every decoder forwards rows causally and writes a KV cache: a prompt is read in chunks, a decode step is
+one row per user, and the cache is what makes the next token cheap. A **bidirectional encoder** (today
+`gemma-embedding`, EmbeddingGemma) is the other shape. `Architecture::causality` says which a family is.
+For an encoder the engine schedules **whole texts**, never chunks: `Architecture::forward_texts` takes
+the batch's ragged texts, sends every row of every text through the layer projections in the same weight
+passes, and computes attention as one `n × n` block per text. Keys and values stay f32 in the pass, no KV
+cache is written, and a text's arithmetic depends only on its own length. Pooling, the model's dense head
+and normalisation happen after the final `output_norm`; chat is refused with a 400. The encoder's slots
+allocate no cache.
+
 ## Code map
 
 ### `crates/peregrine-kernels`: CPU kernels (no dependencies)
@@ -63,7 +75,7 @@ prompt, keeps the chat history and lends the slot the cache the conversation has
 | `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, LittleBit accounting, and parameterized loading via family table. |
 | `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
 | `model/mtp.rs` | Re-exports for the multi-token-prediction head traits. |
-| `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU, GeGLU, OpenAI's `swiglu_oai`), `moe` (the router, the expert feed-forward, the expert biases), `rope` (the plain and the YaRN tables), `attn` (attention scratch, row prep, KV write, attention, the attention sinks), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
+| `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU, GeGLU, OpenAI's `swiglu_oai`), `moe` (the router, the expert feed-forward, the expert biases), `rope` (the plain and the YaRN tables), `attn` (attention scratch, row prep, KV write, attention, the attention sinks), `bidir` (the encoder's per-text `n × n` attention and its symmetric sliding window), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
 | `attn.rs` | Grouped online-softmax attention with optional sliding-window restriction. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state, snapshots for speculation, and the prefix store that reuses a shared prompt beginning. |
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
@@ -81,7 +93,7 @@ prompt, keeps the chat history and lends the slot the cache the conversation has
 | Module | Role |
 |---|---|
 | `dense/` | Dense transformer architectures: Llama, Qwen2, Qwen3, Phi-3, Phi-4 (fused tensors split at load). `dense/layer.rs` holds the attention path and the output head the dense and the MoE families share. |
-| `gemma3/` | Gemma 3 architectures: interleaved sliding-window/global attention, 4 norms per layer, per-head q/k RMSNorm, GeGLU activation, tied output head. |
+| `gemma3/` | Gemma 3 and `gemma-embedding`: interleaved sliding-window/global attention, 4 norms per layer, per-head q/k RMSNorm, GeGLU activation, tied output head; the encoder is the same blocks bidirectional, with mean/cls pooling and the `dense_2`/`dense_3` head. |
 | `qwen35/` | Hybrid architectures: Gated DeltaNet linear attention + softmax attention, Hadamard rotation, MTP head. |
 | `qwen3moe/` | Mixture of experts: Qwen3's attention and a bank of experts (the router and the expert feed-forward), over the shared `blocks::moe`. |
 | `gptoss/` | OpenAI's mixture of experts: attention sinks, alternating sliding-window and full attention, YaRN rope scaling, biases on every projection, and the `swiglu_oai` activation, over the shared `blocks::moe`. |
@@ -124,8 +136,11 @@ The engine provides fine-grained Cargo features across its layers so embedders c
 | **Architectures** | `arch-llama` | `peregrine-models` | Dense Llama models (`llama`) |
 | | `arch-qwen` | `peregrine-models` | Dense Qwen models (`qwen2`, `qwen3`) |
 | | `arch-qwen35` | `peregrine-models` | Hybrid Gated DeltaNet + softmax attention (`qwen35`, `qwen25`) |
+| | `arch-gemma3` | `peregrine-models` | Gemma 3 (`gemma3`) |
+| | `arch-gemma-embedding` | `peregrine-models` | Gemma 3 bidirectional encoder (`gemma-embedding`, EmbeddingGemma) |
 | | `arch-qwen3moe` | `peregrine-models` | Mixture of experts (`qwen3moe`) |
 | | `arch-gpt-oss` | `peregrine-models` | OpenAI's mixture of experts (`gpt-oss`) |
+| | `arch-phi3` | `peregrine-models` | Phi-3 and Phi-4 (`phi3`) |
 | **Formats** | `fmt-kquant` | `peregrine-kernels` | K-quants: Q2_K through Q6_K |
 | | `fmt-ternary` | `peregrine-kernels` | Ternary formats: PQ2_0, PTQ1_0 |
 | | `fmt-iq` | `peregrine-kernels` | Importance-matrix quants: IQ4_NL, IQ4_XS |

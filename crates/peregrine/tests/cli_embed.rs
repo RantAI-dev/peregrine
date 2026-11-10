@@ -11,7 +11,7 @@ use peregrine_core::gguf::Format;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use support::models::{write_dense_pooled, Dense};
+use support::models::{write_dense_pooled, write_gemma_embedding, Dense, GemmaEmbeddingConfig};
 
 fn tmpdir(test: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("peregrine-cli-embed-{}-{test}", std::process::id()));
@@ -193,4 +193,54 @@ fn inspect_names_the_pooling_type_and_a_model_without_one_is_refused() {
     let out = embed(&plain, &["--pooling", "cls", "hello"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("cls"));
+}
+
+/// A bidirectional encoder (roadmap S4.4): `embed` works on it, `inspect` says what it is, and
+/// `run` refuses to generate from it.
+#[test]
+fn an_encoder_embeds_and_refuses_to_generate() {
+    let dir = tmpdir("encoder");
+    let model = write_gemma_embedding(&dir, Format::F16, 27, GemmaEmbeddingConfig::default());
+    let out = embed(&model, &["hello", "a longer second text"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        let v = floats(line);
+        assert_eq!(v.len(), 128);
+        assert!((norm(&v) - 1.0).abs() < 1e-5);
+    }
+    // `cls` is legal for an encoder.
+    let out = embed(&model, &["--pooling", "cls", "hello"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = Command::new(bin())
+        .arg("inspect")
+        .arg(&model)
+        .output()
+        .expect("run inspect");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("pooling       mean (1) (embedding model)"),
+        "{text}"
+    );
+
+    let out = Command::new(bin())
+        .args(["run", "-m"])
+        .arg(&model)
+        .args(["--no-profile", "-t", "2", "hello"])
+        .output()
+        .expect("run peregrine run");
+    assert!(!out.status.success(), "a chat run on an encoder must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("embedding model"), "stderr: {err}");
 }
