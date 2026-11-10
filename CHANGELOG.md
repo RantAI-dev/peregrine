@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-10
+
 ### Added
 - A release pipeline for the first release: `scripts/release/build.sh` builds a stripped, portable
   archive per target (`peregrine-vX.Y.Z-linux-x86_64.tar.gz` / `-linux-aarch64.tar.gz` with `LICENSE`/`NOTICE` and a SHA256SUMS
@@ -15,56 +17,6 @@ All notable changes to this project are documented here. The format follows
   generated from PR labels. The release step itself — versioning, CHANGELOG conventions, the
   AVX2-host (H2) full-suite gate on every release candidate (S0.5) — is documented in
   `docs/dev/releasing.md`.
-
-### Fixed
-- `stop` sequences are honoured by `/v1/chat/completions`. A request may send one string or up to
-  four: generation ends when the decoded text contains one, the sequence itself is not returned, and
-  `finish_reason` is `"stop"`. Streaming holds back the longest suffix that could still become a stop
-  sequence, so a sequence split across tokens never leaks into a delta, and the match is per request,
-  so one user's stop cannot truncate another's reply. Multi-byte UTF-8 is matched on character
-  boundaries. Previously the field was accepted and ignored.
-- A request body that is not valid JSON is now rejected with the OpenAI error object instead of
-  axum's plain-text rejection. The status was already 400; a client that parses `error.message` can
-  now read the reason. The compatibility suite checks the body as well as the code.
-- The aarch64 numeric path no longer depends on the host's libm. `sin`, `cos`, `pow`, `log`,
-  `exp` and `tanh` are now the engine's own (`vmath::det_*`) in the RoPE/YaRN table builder,
-  attention's running-max rescale and row merge, MoE routing, the recurrent (Bonsai) gates,
-  GeGLU/softcapping, sampling, and the sidecar builder's `hypot`; `exp_scalar` also replaces the
-  remaining `expf` calls in the scalar softmax/SwiGLU fallbacks. glibc and Apple's libm round
-  these differently, which is why the Linux-recorded aarch64 goldens did not reproduce on the
-  macOS runner (#140); with the engine's implementations the aarch64 bits are fixed by the
-  definition, not the C library. The `det_*` dispatchers call libm off aarch64, so no x86 golden
-  moved. The aarch64 goldens were re-recorded: the `aarch64` scalar tier's move because its
-  softmax/SwiGLU fallbacks were the last libm calls on that path, and the Qwen3-MoE and
-  Qwen3.5 (Bonsai) entries of the `aarch64-neon*` tiers move in the last bits.
-- Small-model decode no longer runs a Q5_0 or Q8_0 row at a time. A Q5_0 row is 22 bytes
-  per 32 weights and a Q8_0 row 34, so the 32-byte activation block (and, for Q5_0, its
-  32-byte lane sums) is more traffic than the weights; the per-row kernel reloaded both
-  for every output row. The new eight-row kernel loads them once per block for eight
-  rows, and each row still runs the per-row kernel's operations block by block, so the
-  bits are unchanged (a row's result does not depend on the batch, tested bit for bit).
-  On the 4-core Xeon (Qwen2.5-0.5B Q4_K_M) decode went 32.1 → 37.8 tok/s at 512 context
-  and 27.1 → 29.0 at 4096 (medians of 5 and 3 alternating rounds). The eight-row kernels
-  also prefetch one page ahead per row stream (`PEREGRINE_PF=0` still turns it off).
-- The SwiGLU activation's quantisation now runs in the workers' SwiGLU pass instead of
-  serially on the calling thread afterwards. A block's scale comes from that block's 32
-  values alone, so a worker's contiguous block range writes exactly the bytes one call
-  would; `QuantAct::prepare`/`fill_range` are tested against `fill` for any split. The
-  decode quantise on the 0.5B fell from 0.73 ms to 0.17 ms per token.
-- The prefill chunk's default now follows the worker pool. 16 is right on a pool as wide as the physical
-  cores, but the engine builds `available_parallelism()` workers, which on an SMT machine is twice the
-  core count. A 16-row pass is only 16 rows deep: its row-deep blocks (the rotation) give one row to 16
-  workers and leave the other 8 spinning on the siblings of the cores doing the work, and every parallel
-  region is short enough that its slowest worker is a large share of it. Measured on the reference
-  machine at 24 workers, a forward pass carries about 20 ms that does not scale with rows, on both Bonsai
-  sizes (2B and 9B), so a 512-token prompt pays it 32 times instead of 8. The default is now 64 when the
-  pool is wider than the physical cores and stays 16 otherwise (`options::prefill_chunk_default_for`).
-  At 24 workers, medians of four rounds: Bonsai-2B 304 prompt tok/s against 212 (+43 %), Bonsai-9B 90.7
-  against 79.4 (+14 %), Llama-3.2-1B 225 against 189 (+19 %); decode is unchanged on all three. At 12
-  workers 16 keeps winning (257 against 248, 69.0 against 64.9, 180 against 168), and the default stays
-  16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
-
-### Added
 - **Bonsai 2 on the aarch64 NEON tier** (S2.8 F4): the `PQ2_0` ternary kernels, the block
   Hadamard transform, the Gated DeltaNet recurrent step and the causal conv. `PQ2_0` is 128
   ternary weights in 34 bytes; the kernel extracts the four code planes with shifts and masks
@@ -432,6 +384,52 @@ All notable changes to this project are documented here. The format follows
   `DrafterChoice::None`) and `Needs::history` (the engine never read it). The interfaces are unstable until 1.0.
 
 ### Fixed
+- `stop` sequences are honoured by `/v1/chat/completions`. A request may send one string or up to
+  four: generation ends when the decoded text contains one, the sequence itself is not returned, and
+  `finish_reason` is `"stop"`. Streaming holds back the longest suffix that could still become a stop
+  sequence, so a sequence split across tokens never leaks into a delta, and the match is per request,
+  so one user's stop cannot truncate another's reply. Multi-byte UTF-8 is matched on character
+  boundaries. Previously the field was accepted and ignored.
+- A request body that is not valid JSON is now rejected with the OpenAI error object instead of
+  axum's plain-text rejection. The status was already 400; a client that parses `error.message` can
+  now read the reason. The compatibility suite checks the body as well as the code.
+- The aarch64 numeric path no longer depends on the host's libm. `sin`, `cos`, `pow`, `log`,
+  `exp` and `tanh` are now the engine's own (`vmath::det_*`) in the RoPE/YaRN table builder,
+  attention's running-max rescale and row merge, MoE routing, the recurrent (Bonsai) gates,
+  GeGLU/softcapping, sampling, and the sidecar builder's `hypot`; `exp_scalar` also replaces the
+  remaining `expf` calls in the scalar softmax/SwiGLU fallbacks. glibc and Apple's libm round
+  these differently, which is why the Linux-recorded aarch64 goldens did not reproduce on the
+  macOS runner (#140); with the engine's implementations the aarch64 bits are fixed by the
+  definition, not the C library. The `det_*` dispatchers call libm off aarch64, so no x86 golden
+  moved. The aarch64 goldens were re-recorded: the `aarch64` scalar tier's move because its
+  softmax/SwiGLU fallbacks were the last libm calls on that path, and the Qwen3-MoE and
+  Qwen3.5 (Bonsai) entries of the `aarch64-neon*` tiers move in the last bits.
+- Small-model decode no longer runs a Q5_0 or Q8_0 row at a time. A Q5_0 row is 22 bytes
+  per 32 weights and a Q8_0 row 34, so the 32-byte activation block (and, for Q5_0, its
+  32-byte lane sums) is more traffic than the weights; the per-row kernel reloaded both
+  for every output row. The new eight-row kernel loads them once per block for eight
+  rows, and each row still runs the per-row kernel's operations block by block, so the
+  bits are unchanged (a row's result does not depend on the batch, tested bit for bit).
+  On the 4-core Xeon (Qwen2.5-0.5B Q4_K_M) decode went 32.1 → 37.8 tok/s at 512 context
+  and 27.1 → 29.0 at 4096 (medians of 5 and 3 alternating rounds). The eight-row kernels
+  also prefetch one page ahead per row stream (`PEREGRINE_PF=0` still turns it off).
+- The SwiGLU activation's quantisation now runs in the workers' SwiGLU pass instead of
+  serially on the calling thread afterwards. A block's scale comes from that block's 32
+  values alone, so a worker's contiguous block range writes exactly the bytes one call
+  would; `QuantAct::prepare`/`fill_range` are tested against `fill` for any split. The
+  decode quantise on the 0.5B fell from 0.73 ms to 0.17 ms per token.
+- The prefill chunk's default now follows the worker pool. 16 is right on a pool as wide as the physical
+  cores, but the engine builds `available_parallelism()` workers, which on an SMT machine is twice the
+  core count. A 16-row pass is only 16 rows deep: its row-deep blocks (the rotation) give one row to 16
+  workers and leave the other 8 spinning on the siblings of the cores doing the work, and every parallel
+  region is short enough that its slowest worker is a large share of it. Measured on the reference
+  machine at 24 workers, a forward pass carries about 20 ms that does not scale with rows, on both Bonsai
+  sizes (2B and 9B), so a 512-token prompt pays it 32 times instead of 8. The default is now 64 when the
+  pool is wider than the physical cores and stays 16 otherwise (`options::prefill_chunk_default_for`).
+  At 24 workers, medians of four rounds: Bonsai-2B 304 prompt tok/s against 212 (+43 %), Bonsai-9B 90.7
+  against 79.4 (+14 %), Llama-3.2-1B 225 against 189 (+19 %); decode is unchanged on all three. At 12
+  workers 16 keeps winning (257 against 248, 69.0 against 64.9, 180 against 168), and the default stays
+  16 there. `PEREGRINE_PREFILL_CHUNK` still overrides either.
 - The startup calibration no longer stops its decode-thread sweep at the first candidate that fails to beat
   the previous best by 5%: one noisy high early sample froze it at one or two threads and the 9B decoded
   at 5.6 tok/s instead of 23.6. Every candidate is measured now, the default (the physical cores) stands
