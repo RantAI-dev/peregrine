@@ -130,6 +130,36 @@ fn vector_path() -> bool {
     crate::cpu_has!("avx2") && crate::cpu_has!("fma") && crate::cpu_has!("f16c")
 }
 
+/// The recurrent half of a snapshot: a hybrid model's per-layer delta-rule state and
+/// convolution history, after exactly `len` positions (S4.9j).
+///
+/// A position index cannot rewind this: it describes the whole sequence up to `len`, so a
+/// snapshot that carries it can only be put back at that exact length. What it can do — and
+/// what the fork needs — is be copied into another cache at the length it was taken at.
+#[derive(Debug, Clone)]
+pub struct RecSnapshot {
+    n: usize,
+    state_floats: usize,
+    conv_floats: usize,
+    len: usize,
+    state: Vec<f32>,
+    conv: Vec<f32>,
+}
+
+impl RecSnapshot {
+    /// The position this state is after.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0 && self.state.is_empty()
+    }
+    /// Bytes held, the same figure a cache's recurrent state occupies.
+    pub fn bytes(&self) -> usize {
+        (self.state.len() + self.conv.len()) * 4
+    }
+}
+
 // the first `len` positions of a cache, packed (no gaps between the per-head regions).
 pub struct KvSnapshot {
     prec: KvPrec,
@@ -142,6 +172,8 @@ pub struct KvSnapshot {
     v: Vec<u8>,
     ks: Vec<f32>,
     vs: Vec<f32>,
+    /// The recurrent state after `len` positions, for a hybrid model (`None` for a dense one).
+    rec: Option<RecSnapshot>,
 }
 
 impl KvSnapshot {
@@ -154,7 +186,14 @@ impl KvSnapshot {
     }
     /// Bytes this snapshot occupies in memory.
     pub fn bytes(&self) -> usize {
-        self.k.len() + self.v.len() + (self.ks.len() + self.vs.len()) * 4
+        self.k.len()
+            + self.v.len()
+            + (self.ks.len() + self.vs.len()) * 4
+            + self.rec.as_ref().map_or(0, RecSnapshot::bytes)
+    }
+    /// Whether this snapshot carries a hybrid model's recurrent state (S4.9j).
+    pub fn has_recurrent(&self) -> bool {
+        self.rec.is_some()
     }
 }
 
@@ -323,22 +362,80 @@ impl KvCache {
     }
 
     // a copy of the first `len` positions, to be put back later (the session's prefix store).
+    //
+    // with recurrent layers the state describes exactly the filled length, so it is carried only when `len`
+    // is that length; a snapshot of a shorter prefix of a hybrid cache holds K/V alone and cannot be
+    // restored into one (see `restore`).
     pub fn snapshot(&self, len: usize) -> KvSnapshot {
-        let len = len.min(self.len);
+        let mut snap = self.snapshot_reserve(len);
+        self.snapshot_into(&mut snap, len);
+        snap
+    }
+
+    /// An empty snapshot with room for the first `len` positions (and the recurrent state, when this cache
+    /// has one), so that [`KvCache::snapshot_into`] can fill it later without allocating (S4.9j: the engine
+    /// reserves a decision group's shared-prefix snapshot at admission and fills it at the fork).
+    pub fn snapshot_reserve(&self, len: usize) -> KvSnapshot {
+        let len = len.min(self.max_ctx);
         let vectors = self.n_layer * self.n_kv_head;
-        let elem = self.head_dim * self.prec.elem();
-        let mut snap = KvSnapshot {
+        let elems = vectors * len * self.head_dim;
+        let scales = if self.prec == KvPrec::I8 {
+            vectors * len
+        } else {
+            0
+        };
+        let rec = self.rec.as_ref().map(|r| RecSnapshot {
+            n: r.n,
+            state_floats: r.state_floats,
+            conv_floats: r.conv_floats,
+            len,
+            state: Vec::with_capacity(r.state.len()),
+            conv: Vec::with_capacity(r.conv.len()),
+        });
+        KvSnapshot {
             prec: self.prec,
             rotated: self.rotated,
             n_layer: self.n_layer,
             n_kv_head: self.n_kv_head,
             head_dim: self.head_dim,
-            len,
-            k: Vec::with_capacity(vectors * len * elem),
-            v: Vec::with_capacity(vectors * len * elem),
-            ks: Vec::new(),
-            vs: Vec::new(),
-        };
+            len: 0,
+            k: Vec::with_capacity(elems * self.prec.elem()),
+            v: Vec::with_capacity(elems * self.prec.elem()),
+            ks: Vec::with_capacity(scales),
+            vs: Vec::with_capacity(scales),
+            rec,
+        }
+    }
+
+    /// Bytes [`KvCache::snapshot`] would occupy for the first `len` positions, recurrent state included.
+    pub fn snapshot_bytes(&self, len: usize) -> usize {
+        let len = len.min(self.max_ctx);
+        let vectors = self.n_layer * self.n_kv_head;
+        let per_vec =
+            self.head_dim * self.prec.elem() * 2 + if self.prec == KvPrec::I8 { 8 } else { 0 };
+        vectors * len * per_vec
+            + self
+                .rec
+                .as_ref()
+                .map_or(0, |r| (r.state.len() + r.conv.len()) * 4)
+    }
+
+    /// Fill `snap` (from [`KvCache::snapshot_reserve`], or any snapshot of the same shape) with the first
+    /// `len` positions. The buffers keep their capacity, so a reserved snapshot fills without allocating.
+    pub fn snapshot_into(&self, snap: &mut KvSnapshot, len: usize) {
+        let len = len.min(self.len);
+        let vectors = self.n_layer * self.n_kv_head;
+        let elem = self.head_dim * self.prec.elem();
+        snap.prec = self.prec;
+        snap.rotated = self.rotated;
+        snap.n_layer = self.n_layer;
+        snap.n_kv_head = self.n_kv_head;
+        snap.head_dim = self.head_dim;
+        snap.len = len;
+        snap.k.clear();
+        snap.v.clear();
+        snap.ks.clear();
+        snap.vs.clear();
         for vec in 0..vectors {
             let at = vec * self.max_ctx * elem;
             snap.k.extend_from_slice(&self.k[at..at + len * elem]);
@@ -349,16 +446,41 @@ impl KvCache {
                 snap.vs.extend_from_slice(&self.vs[sc..sc + len]);
             }
         }
-        snap
+        snap.rec = match &self.rec {
+            // The state describes exactly `filled()` positions; a shorter prefix has none to carry.
+            Some(r) if len == self.len => {
+                let mut out = match snap.rec.take() {
+                    Some(s)
+                        if s.n == r.n
+                            && s.state_floats == r.state_floats
+                            && s.conv_floats == r.conv_floats =>
+                    {
+                        s
+                    }
+                    _ => RecSnapshot {
+                        n: r.n,
+                        state_floats: r.state_floats,
+                        conv_floats: r.conv_floats,
+                        len,
+                        state: Vec::new(),
+                        conv: Vec::new(),
+                    },
+                };
+                out.len = len;
+                out.state.clear();
+                out.state.extend_from_slice(&r.state);
+                out.conv.clear();
+                out.conv.extend_from_slice(&r.conv);
+                Some(out)
+            }
+            _ => None,
+        };
     }
 
-    // put the first `len` positions of `snap` back and make them the filled length. False, and no
-    // change, when the snapshot comes from a cache of another shape or holds fewer than `len` positions.
-    pub fn restore(&mut self, snap: &KvSnapshot, len: usize) -> bool {
-        // a snapshot holds no recurrent state, so it cannot restore a hybrid model's cache.
-        if self.rec.is_some() {
-            return false;
-        }
+    /// Whether [`KvCache::restore`] would accept `snap` at `len` (a shape check, no copy). The prefix store
+    /// asks it to pick an entry this cache can actually use: a hybrid snapshot is only restorable at the
+    /// length it was taken at.
+    pub fn can_restore(&self, snap: &KvSnapshot, len: usize) -> bool {
         if snap.prec != self.prec
             || snap.rotated != self.rotated
             || snap.n_layer != self.n_layer
@@ -367,6 +489,27 @@ impl KvCache {
             || len > snap.len
             || len > self.max_ctx
         {
+            return false;
+        }
+        match (&self.rec, &snap.rec) {
+            (None, None) => true,
+            // The recurrent state is the state after `snap.len` positions: it can only go back at that
+            // length, and only into a cache of the same shape.
+            (Some(r), Some(s)) => {
+                len == snap.len
+                    && s.n == r.n
+                    && s.state_floats == r.state_floats
+                    && s.conv_floats == r.conv_floats
+            }
+            _ => false,
+        }
+    }
+
+    // put the first `len` positions of `snap` back and make them the filled length. False, and no
+    // change, when the snapshot comes from a cache of another shape or holds fewer than `len` positions
+    // (a hybrid snapshot also holds the recurrent state, so it restores only at its own length).
+    pub fn restore(&mut self, snap: &KvSnapshot, len: usize) -> bool {
+        if !self.can_restore(snap, len) {
             return false;
         }
         let vectors = self.n_layer * self.n_kv_head;
@@ -381,6 +524,68 @@ impl KvCache {
                 self.ks[d..d + len].copy_from_slice(&snap.ks[sc..sc + len]);
                 self.vs[d..d + len].copy_from_slice(&snap.vs[sc..sc + len]);
             }
+        }
+        if let (Some(r), Some(s)) = (self.rec.as_mut(), snap.rec.as_ref()) {
+            r.state.copy_from_slice(&s.state);
+            r.conv.copy_from_slice(&s.conv);
+            // The snapshot describes another conversation's turn: it is a starting point, not a rollback.
+            r.ckpt = None;
+            r.snap_pos = None;
+            r.snap_valid = false;
+        }
+        self.len = len;
+        true
+    }
+
+    /// Copy `parent`'s state at position `len` into this cache: attention K/V rows `0..len` and, for a
+    /// hybrid model, every recurrent layer's state after row `len−1` and the convolution history (S4.9j).
+    ///
+    /// This is what a fork is: bytes are copied, no arithmetic is done, so a row computed in the fork reads
+    /// exactly the stored keys, values and f32 recurrent state a row computed by the parent itself would
+    /// read. (Whether that is bit-identical to computing the row in one pass is the engine's chunk
+    /// invariance, which the fork relies on: a fork at `len` behaves like a chunk boundary there.)
+    ///
+    /// Both caches must have the same geometry and precision. A hybrid parent's recurrent state describes
+    /// exactly its filled length, so `len` must be that length. False, and no change, otherwise.
+    pub fn fork_from(&mut self, parent: &KvCache, len: usize) -> bool {
+        if parent.prec != self.prec
+            || parent.rotated != self.rotated
+            || parent.n_layer != self.n_layer
+            || parent.n_kv_head != self.n_kv_head
+            || parent.head_dim != self.head_dim
+            || len > parent.len
+            || len > self.max_ctx
+        {
+            return false;
+        }
+        match (&self.rec, &parent.rec) {
+            (None, None) => {}
+            (Some(d), Some(s))
+                if d.n == s.n
+                    && d.state_floats == s.state_floats
+                    && d.conv_floats == s.conv_floats
+                    && len == parent.len => {}
+            _ => return false,
+        }
+        let vectors = self.n_layer * self.n_kv_head;
+        let elem = self.head_dim * self.prec.elem();
+        for vec in 0..vectors {
+            let dst = vec * self.max_ctx * elem;
+            let src = vec * parent.max_ctx * elem;
+            self.k[dst..dst + len * elem].copy_from_slice(&parent.k[src..src + len * elem]);
+            self.v[dst..dst + len * elem].copy_from_slice(&parent.v[src..src + len * elem]);
+            if self.prec == KvPrec::I8 {
+                let (d, s) = (vec * self.max_ctx, vec * parent.max_ctx);
+                self.ks[d..d + len].copy_from_slice(&parent.ks[s..s + len]);
+                self.vs[d..d + len].copy_from_slice(&parent.vs[s..s + len]);
+            }
+        }
+        if let (Some(d), Some(s)) = (self.rec.as_mut(), parent.rec.as_ref()) {
+            d.state.copy_from_slice(&s.state);
+            d.conv.copy_from_slice(&s.conv);
+            d.ckpt = None;
+            d.snap_pos = None;
+            d.snap_valid = false;
         }
         self.len = len;
         true
@@ -826,6 +1031,124 @@ mod tests {
             assert_eq!(b.len, 3);
             let mut other = KvCache::new(prec, 3, 4, hd, 16);
             assert!(!other.restore(&snap, 2));
+        }
+    }
+
+    /// A hybrid snapshot carries the recurrent state and the convolution history, so restoring it at its own
+    /// length gives a cache that continues exactly; at any other length it is refused (the state is a
+    /// function of the whole prefix, not a position index).
+    #[test]
+    fn a_hybrid_snapshot_carries_its_recurrent_state_at_its_own_length() {
+        for prec in [KvPrec::F16, KvPrec::F32, KvPrec::I8] {
+            let hd = 16;
+            let mut a = KvCache::new(prec, 2, 2, hd, 16).with_recurrent(2, 4, 3);
+            for pos in 0..6 {
+                for layer in 0..2 {
+                    for head in 0..2 {
+                        let k = ramp(hd, 1.0 + (layer + pos) as f32);
+                        a.put(layer, head, pos, &k, &k);
+                    }
+                }
+            }
+            a.advance(6);
+            a.recurrent(0).0.copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+            a.recurrent(1).1.copy_from_slice(&[5.0, 6.0, 7.0]);
+            assert_eq!(a.snapshot_bytes(6), a.snapshot(6).bytes());
+            let snap = a.snapshot(6);
+            assert!(snap.has_recurrent());
+            let mut b = KvCache::new(prec, 2, 2, hd, 16).with_recurrent(2, 4, 3);
+            assert!(b.can_restore(&snap, 6));
+            assert!(b.restore(&snap, 6), "{prec:?}");
+            assert_eq!(b.filled(), 6);
+            assert_eq!(b.recurrent(0).0, &[1.0, 2.0, 3.0, 4.0]);
+            assert_eq!(b.recurrent(1).1, &[5.0, 6.0, 7.0]);
+            for layer in 0..2 {
+                for head in 0..2 {
+                    for pos in 0..6 {
+                        assert_eq!(
+                            decoded(&a, true, layer, head, pos),
+                            decoded(&b, true, layer, head, pos),
+                            "{prec:?} l{layer} h{head} p{pos}"
+                        );
+                    }
+                }
+            }
+            // A shorter prefix carries K/V but no state; it cannot restore a hybrid cache either.
+            let short = a.snapshot(4);
+            assert!(!short.has_recurrent());
+            assert!(!b.restore(&short, 4));
+            assert_eq!(b.filled(), 6, "a refused restore changes nothing");
+            // A shorter `len` of the same snapshot is refused too.
+            assert!(!b.can_restore(&snap, 4));
+            // A dense cache cannot take a hybrid snapshot, and a hybrid one cannot take a dense snapshot.
+            let mut dense = KvCache::new(prec, 2, 2, hd, 16);
+            assert!(!dense.restore(&snap, 6));
+            let dense_snap = dense.snapshot(0);
+            assert!(!b.restore(&dense_snap, 0));
+        }
+    }
+
+    /// A fork at a position is a byte-for-byte copy of everything a later row reads: the stored K/V rows and,
+    /// for a hybrid cache, the f32 recurrent state and the convolution ring. Both caches then hold the same
+    /// state at `len`, and differ only in the positions after it.
+    #[test]
+    fn a_fork_copies_the_state_a_later_row_reads() {
+        for prec in [KvPrec::F16, KvPrec::F32, KvPrec::I8] {
+            let hd = 16;
+            for hybrid in [false, true] {
+                let make = || {
+                    let c = KvCache::new(prec, 2, 2, hd, 16);
+                    if hybrid {
+                        c.with_recurrent(2, 4, 3)
+                    } else {
+                        c
+                    }
+                };
+                let mut a = make();
+                let p = 5;
+                for pos in 0..p {
+                    for layer in 0..2 {
+                        for head in 0..2 {
+                            let k = ramp(hd, 1.0 + (layer * 3 + head + pos) as f32);
+                            let v = ramp(hd, 0.5 + pos as f32);
+                            a.put(layer, head, pos, &k, &v);
+                        }
+                    }
+                }
+                a.advance(p);
+                if hybrid {
+                    a.recurrent(0).0.copy_from_slice(&[0.25, -0.5, 1.5, 2.0]);
+                    a.recurrent(1).1.copy_from_slice(&[3.0, 4.0, 5.0]);
+                }
+                let mut b = make();
+                assert!(b.fork_from(&a, p), "{prec:?} hybrid={hybrid}");
+                assert_eq!(b.filled(), p);
+                assert_eq!(b.snapshot(p).bytes(), a.snapshot(p).bytes());
+                for layer in 0..2 {
+                    for head in 0..2 {
+                        for pos in 0..p {
+                            assert_eq!(
+                                decoded(&a, true, layer, head, pos),
+                                decoded(&b, true, layer, head, pos),
+                                "{prec:?} hybrid={hybrid} k l{layer} h{head} p{pos}"
+                            );
+                            assert_eq!(
+                                decoded(&a, false, layer, head, pos),
+                                decoded(&b, false, layer, head, pos),
+                                "{prec:?} hybrid={hybrid} v l{layer} h{head} p{pos}"
+                            );
+                        }
+                    }
+                }
+                if hybrid {
+                    assert_eq!(b.recurrent(0).0, a.recurrent(0).0);
+                    assert_eq!(b.recurrent(1).1, a.recurrent(1).1);
+                }
+                // A fork at a position the parent does not hold, or of another shape, is refused.
+                assert!(!b.fork_from(&a, p + 1));
+                let mut other = KvCache::new(prec, 2, 4, hd, 16);
+                assert!(!other.fork_from(&a, p));
+            }
         }
     }
 
