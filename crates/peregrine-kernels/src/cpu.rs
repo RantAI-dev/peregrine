@@ -153,6 +153,7 @@ pub fn tier_of(feature: &str) -> Tier {
         "avx512vnni" | "avx512bw" | "avx512vl" | "avx512vbmi" | "avx512f" | "avx512dq"
         | "avx512cd" | "avx512bitalg" | "avx512vpopcntdq" | "gfni" => Tier::Avx512,
         "neon" | "asimd" => Tier::Neon,
+        "fp16" | "asimdhp" => Tier::NeonDotprod,
         "dotprod" | "asimddp" => Tier::NeonDotprod,
         "i8mm" => Tier::NeonI8mm,
         _ => Tier::top(),
@@ -249,6 +250,24 @@ pub fn have_neon() -> bool {
     {
         static ON: OnceLock<bool> = OnceLock::new();
         *ON.get_or_init(|| std::arch::is_aarch64_feature_detected!("neon") && allowed("neon"))
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
+
+/// Cached check for the aarch64 half-precision widening/arithmetic extension (`fp16`,
+/// `asimdhp`) under the tier cap: the packed float kernel uses `fcvtl` to widen f16
+/// weights exactly, and falls back to the scalar chain where it is absent.
+#[inline]
+pub fn have_fp16() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            have_neon() && std::arch::is_aarch64_feature_detected!("fp16") && allowed("fp16")
+        })
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
