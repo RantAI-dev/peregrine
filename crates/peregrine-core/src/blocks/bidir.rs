@@ -123,12 +123,11 @@ pub fn attend_texts(
         // ---- the head's keys, once, for every query head that reads them ----
         if panel_par {
             pool.run(|wk, nw| {
-                let (rlo, rhi) = crate::pool::share(nb, wk, nw);
-                build_panels(spans, rlo..rhi, k, kvd, kh * hd, hd, &panel);
+                build_panel_head(spans, wk, nw, k, kvd, kh * hd, hd, &panel);
             });
             stats.barriers += 1;
         } else {
-            build_panels(spans, 0..nb, k, kvd, kh * hd, hd, &panel);
+            build_panel_head(spans, 0, 1, k, kvd, kh * hd, hd, &panel);
         }
 
         // ---- strips of query rows ----
@@ -241,47 +240,72 @@ pub fn attend_texts(
     }
 }
 
-/// Transpose the keys of every text whose rows fall in `rows` into its panel region.
+/// Transpose the keys of the head's texts into the panel, split across the workers.
 ///
-/// `panel[row0 * hd + d * len + j] = k[(row0 + j) * kvd + base + d]`. Tiles of 16
-/// keys × 16 head dimensions: each source line then serves sixteen head dimensions and
-/// each destination line is written whole.
-fn build_panels(
+/// On x86_64 the panel is key-major (S4.9g part 3): a text's panel is a list of
+/// [`k::PANEL_TILE`]-key tiles, each `head_dim × 16` floats, followed by one row-major
+/// tile for the `len % 16` keys that do not fill one. The fork-join splits each text's
+/// *tiles*, so every tile is written by one worker and the copy needs no other lock.
+/// Elsewhere the lane panel of part 2 is built in 16×16 tiles, split by key rows.
+#[allow(clippy::too_many_arguments)]
+fn build_panel_head(
     spans: &[TextSpan],
-    rows: std::ops::Range<usize>,
-    k: &[f32],
+    wk: usize,
+    nw: usize,
+    keys: &[f32],
     kvd: usize,
     base: usize,
     hd: usize,
     panel: &Disjoint<'_, f32>,
 ) {
-    const T: usize = 16;
-    for span in spans {
-        let j0 = rows.start.max(span.row0);
-        let j1 = rows.end.min(span.row0 + span.len);
-        if j0 >= j1 {
-            continue;
-        }
-        let n = span.len;
-        let mut ja = j0 - span.row0;
-        let jb_end = j1 - span.row0;
-        while ja < jb_end {
-            let jb = (ja + T).min(jb_end);
-            let mut ka = 0;
-            while ka < hd {
-                let kb = (ka + T).min(hd);
-                for d in ka..kb {
-                    let off = span.row0 * hd + d * n + ja;
-                    // SAFETY: `off..off + (jb - ja)` is this worker's own slice of the
-                    // panel: rows `rows` are its disjoint share and `d` is unique.
-                    let dst = unsafe { panel.chunk(off, jb - ja) };
-                    for (t, o) in dst.iter_mut().enumerate() {
-                        *o = k[(span.row0 + ja + t) * kvd + base + d];
-                    }
-                }
-                ka = kb;
+    #[cfg(target_arch = "x86_64")]
+    {
+        for span in spans {
+            let n = span.len;
+            let nt = k::panel_tiles(n);
+            let (t0, t1) = crate::pool::share(nt, wk, nw);
+            for t in t0..t1 {
+                let (off, len) = k::panel_tile_span(n, hd, t);
+                // SAFETY: tile `t` of this text is this worker's own share of the panel:
+                // rows are `span.row0 * hd` and the tiles of a text do not overlap.
+                let dst = unsafe { panel.chunk(span.row0 * hd + off, len) };
+                k::key_panel_tile(&keys[span.row0 * kvd..], kvd, base, hd, n, t, dst);
             }
-            ja = jb;
+        }
+        let _ = (panel, kvd);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        const T: usize = 16;
+        let nb: usize = spans.iter().map(|s| s.len).sum();
+        let (rlo, rhi) = crate::pool::share(nb, wk, nw);
+        for span in spans {
+            let j0 = rlo.max(span.row0);
+            let j1 = rhi.min(span.row0 + span.len);
+            if j0 >= j1 {
+                continue;
+            }
+            let n = span.len;
+            let mut ja = j0 - span.row0;
+            let jb_end = j1 - span.row0;
+            while ja < jb_end {
+                let jb = (ja + T).min(jb_end);
+                let mut ka = 0;
+                while ka < hd {
+                    let kb = (ka + T).min(hd);
+                    for d in ka..kb {
+                        let off = span.row0 * hd + d * n + ja;
+                        // SAFETY: `off..off + (jb - ja)` is this worker's own slice of
+                        // the panel: rows are its disjoint share and `d` is unique.
+                        let dst = unsafe { panel.chunk(off, jb - ja) };
+                        for (t, o) in dst.iter_mut().enumerate() {
+                            *o = keys[(span.row0 + ja + t) * kvd + base + d];
+                        }
+                    }
+                    ka = kb;
+                }
+                ja = jb;
+            }
         }
     }
 }
