@@ -89,6 +89,7 @@ with no decode.
 | S4.11 | System One, part 2: Kev (pointer head) and vLLM D3 (non-causal Qwen 3.5) | 1.0 |
 | S4.12 | System One, part 3: Laya and Julia-1 on `modern-bert` | 0.5 |
 | S4.13 | Generative rerankers (Qwen3-Reranker) on `/v1/rerank` | 0.5 |
+| S4.14 | `mistral3` embedders: Nemotron 3.5 Embed 1B and Nemotron 3 Embed 1B (text input), with the Tekken tokenizer | 1.0 |
 
 Each model is checked against llama.cpp on the same file before it is listed; a text's output is
 bit-identical alone and in any batch.
