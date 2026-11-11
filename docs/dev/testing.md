@@ -384,7 +384,10 @@ The fixtures come from llama.cpp itself: `scripts/tool-fixtures.py` sends each c
 the prompt that came back. `--template <file>` renders with a template file in place of the model's
 own, so a template can be exercised with any small chat model loaded. The Qwen 2.5 fixture was made
 with `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf` (the pinned bartowski upload) and its own template, which
-is the file `crates/peregrine-core/src/tools/qwen25.jinja`.
+is the file `crates/peregrine-core/src/tools/qwen25.jinja`. The Qwen 3.5 fixture was made with the
+same model loaded and `--template crates/peregrine-core/src/tools/qwen35.jinja --set qwen35`: that
+file is the template of `Ternary-Bonsai-2-2B-PQ2_0.gguf`, which llama.cpp cannot load itself, and
+the set adds the cases that only this family has (thinking on and off, thinking in the history).
 
 ### System One prompts: fixtures rendered by llama.cpp
 

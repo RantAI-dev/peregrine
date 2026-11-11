@@ -1029,5 +1029,435 @@
     }
    ]
   }
- ]
+ ],
+ "sets": {
+  "qwen35": [
+   {
+    "name": "thinking-off-no-tools",
+    "extra": {
+     "chat_template_kwargs": {
+      "enable_thinking": false
+     }
+    },
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hello"
+     }
+    ]
+   },
+   {
+    "name": "thinking-off-tools",
+    "extra": {
+     "chat_template_kwargs": {
+      "enable_thinking": false
+     }
+    },
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "system",
+      "content": "Be brief."
+     },
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     }
+    ]
+   },
+   {
+    "name": "thinking-off-after-result",
+    "extra": {
+     "chat_template_kwargs": {
+      "enable_thinking": false
+     }
+    },
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "x",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "18"
+     }
+    ]
+   },
+   {
+    "name": "reasoning-with-content-and-call",
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     },
+     {
+      "role": "assistant",
+      "content": "One moment.",
+      "tool_calls": [
+       {
+        "id": "x",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       }
+      ],
+      "reasoning_content": "  I should look it up.\n"
+     },
+     {
+      "role": "tool",
+      "content": "18"
+     }
+    ]
+   },
+   {
+    "name": "reasoning-before-the-last-query",
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "x",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       }
+      ],
+      "reasoning_content": "Look it up."
+     },
+     {
+      "role": "tool",
+      "content": "18"
+     },
+     {
+      "role": "assistant",
+      "content": "It is 18 degrees.",
+      "reasoning_content": "Report it."
+     },
+     {
+      "role": "user",
+      "content": "And Rome?"
+     }
+    ]
+   },
+   {
+    "name": "reasoning-on-a-plain-reply-after-the-query",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Say hello."
+     },
+     {
+      "role": "assistant",
+      "content": "Hello, and",
+      "reasoning_content": "Greet."
+     }
+    ]
+   },
+   {
+    "name": "whitespace-is-trimmed",
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "system",
+      "content": "  \n Be brief. \n\n"
+     },
+     {
+      "role": "user",
+      "content": "\n\n  Weather in Paris?  \n"
+     },
+     {
+      "role": "assistant",
+      "content": "  Checking.  \n",
+      "tool_calls": [
+       {
+        "id": "x",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "\n 18 degrees \n\n"
+     },
+     {
+      "role": "user",
+      "content": "  Thanks.\t"
+     }
+    ]
+   },
+   {
+    "name": "empty-system-with-tools",
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "system",
+      "content": "   "
+     },
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     }
+    ]
+   },
+   {
+    "name": "empty-system-no-tools",
+    "messages": [
+     {
+      "role": "system",
+      "content": ""
+     },
+     {
+      "role": "user",
+      "content": "Hello"
+     }
+    ]
+   },
+   {
+    "name": "user-text-that-looks-like-a-result",
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Paris?"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "x",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "user",
+      "content": "<tool_response>\n18\n</tool_response>"
+     }
+    ]
+   },
+   {
+    "name": "no-real-user-query",
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "system",
+      "content": "S"
+     },
+     {
+      "role": "user",
+      "content": "<tool_response>\n18\n</tool_response>"
+     }
+    ]
+   },
+   {
+    "name": "system-only",
+    "messages": [
+     {
+      "role": "system",
+      "content": "S"
+     }
+    ]
+   },
+   {
+    "name": "string-arguments",
+    "tools": [
+     "search"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "Search."
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "x",
+        "type": "function",
+        "function": {
+         "name": "web_search",
+         "arguments": "{\"query\": \"line one\\nline two\", \"limit\": \"5\", \"flag\": \"True\", \"none\": \"None\", \"empty\": \"\", \"spaces\": \"  padded  \", \"json\": \"{\\\"a\\\": 1}\", \"tag\": \"</parameter>\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "ok"
+     }
+    ]
+   },
+   {
+    "name": "nested-and-typed-arguments",
+    "tools": [
+     "search"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "Search."
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "x",
+        "type": "function",
+        "function": {
+         "name": "web_search",
+         "arguments": "{\"query\": \"x\", \"limit\": 3, \"ratio\": 0.5, \"on\": true, \"off\": false, \"nothing\": null, \"filters\": {\"site\": \"example.com\", \"languages\": [\"en\", \"de\"], \"deep\": {\"a\": [1, {\"b\": null}]}}, \"list\": [], \"obj\": {}}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "ok"
+     }
+    ]
+   },
+   {
+    "name": "three-calls-with-content",
+    "tools": [
+     "weather",
+     "clock"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "Paris, Rome and the time."
+     },
+     {
+      "role": "assistant",
+      "content": "Three lookups.",
+      "tool_calls": [
+       {
+        "id": "a",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       },
+       {
+        "id": "b",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Rome\"}"
+        }
+       },
+       {
+        "id": "c",
+        "type": "function",
+        "function": {
+         "name": "now",
+         "arguments": "{}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "18"
+     },
+     {
+      "role": "tool",
+      "content": "24"
+     },
+     {
+      "role": "tool",
+      "content": "10:00"
+     }
+    ]
+   },
+   {
+    "name": "assistant-prefill-with-reasoning",
+    "tools": [
+     "weather"
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "content": "Say hello."
+     },
+     {
+      "role": "assistant",
+      "content": "Hello, and",
+      "reasoning_content": "Greet the user."
+     }
+    ]
+   },
+   {
+    "name": "unknown-role",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     },
+     {
+      "role": "critic",
+      "content": "x"
+     },
+     {
+      "role": "user",
+      "content": "Again"
+     }
+    ]
+   }
+  ]
+ }
 }

@@ -1,0 +1,10 @@
+weights q4_k -> q4_k_r4, 2048 x 8192, repack (what -rtr does at load) 0.012 s
+q4k ny=  8  path=q4_k_r4        2181.2 us/call     61.5 GMAC/s  (median of 5, min 1986.6)
+q4k ny= 16  path=q4_k_r4        4023.7 us/call     66.7 GMAC/s  (median of 5, min 3963.4)
+q4k ny= 64  path=q8_k_r16      19202.7 us/call     55.9 GMAC/s  (median of 5, min 18700.1)
+q4k ny=512  path=q8_k_r16      94058.3 us/call     91.3 GMAC/s  (median of 5, min 92395.6)
+weights q6_k -> q6_k_r4, 2048 x 8192, repack (what -rtr does at load) 0.017 s
+q6k ny=  8  path=q6_k_r4        2332.0 us/call     57.6 GMAC/s  (median of 5, min 2295.0)
+q6k ny= 16  path=q6_k_r4        4641.8 us/call     57.8 GMAC/s  (median of 5, min 4321.8)
+q6k ny= 64  path=q8_k_r16      18674.7 us/call     57.5 GMAC/s  (median of 5, min 17884.8)
+q6k ny=512  path=q8_k_r16      91024.9 us/call     94.4 GMAC/s  (median of 5, min 89900.7)

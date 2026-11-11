@@ -1,0 +1,320 @@
+{
+ "benchmark": "peregrine-s4.2-embed",
+ "timestamp": "2026-11-11T17:24:13.433062+00:00",
+ "round": 1,
+ "model": {
+  "name": "nemotron-3.5-embed-1b",
+  "hf": "W4D/Nemotron-3.5-Embed-1B-GGUF",
+  "pooling": "mean",
+  "max_tokens": 2048,
+  "dim": 2048,
+  "tokenizer_dir": "nemotron/ref"
+ },
+ "row": {
+  "engine": "llama_cpp",
+  "precision": "q8_0",
+  "path": "~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
+  "sha256": "27c8e82c48828017c29f16fa87eb8958b19d3e35d8f25d73bf51b61efb2ec298",
+  "size_bytes": 1220296800,
+  "fingerprint": {
+   "kind": "file",
+   "sha256": "27c8e82c48828017c29f16fa87eb8958b19d3e35d8f25d73bf51b61efb2ec298",
+   "size_bytes": 1220296800
+  },
+  "notes": "GGUF Q8_0 from W4D/Nemotron-3.5-Embed-1B-GGUF"
+ },
+ "machine": {
+  "hostname": "thinkstationpgx-0010",
+  "os": "Linux",
+  "kernel": "6.17.0-1008-nvidia",
+  "platform": "Linux-6.17.0-1008-nvidia-aarch64-with-glibc2.39",
+  "cpu_model": "unknown",
+  "cpu_features": [],
+  "cores_logical": 20,
+  "threads_tested": 10,
+  "governor": "performance",
+  "python": "3.13.18"
+ },
+ "engine": {
+  "name": "llama.cpp",
+  "version": "v0.9.0",
+  "commit": "cd959ba",
+  "repo": "https://github.com/ggml-org/llama.cpp",
+  "binary": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server",
+  "flash_attn": "auto",
+  "parallel_slots": 32,
+  "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+ },
+ "start": {
+  "cmd": [
+   "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server",
+   "-m",
+   "~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
+   "--embedding",
+   "--pooling",
+   "mean",
+   "-t",
+   "10",
+   "-c",
+   "65792",
+   "-b",
+   "2048",
+   "-ub",
+   "2048",
+   "-np",
+   "32",
+   "-fa",
+   "auto",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8427"
+  ],
+  "pooling": "mean",
+  "threads": 10,
+  "parallel": 32,
+  "ctx": 65792,
+  "batch": 2048,
+  "ubatch": 2048
+ },
+ "host_before": {
+  "loadavg": [
+   9.60302734375,
+   9.05810546875,
+   7.28173828125
+  ],
+  "mem_available_gb": 30.56,
+  "mem_total_gb": 121.63,
+  "swap_total_gb": 16.25,
+  "swap_free_gb": 1.53
+ },
+ "host_after": {
+  "loadavg": [
+   10.0,
+   9.52978515625,
+   7.8017578125
+  ],
+  "mem_available_gb": 30.53,
+  "mem_total_gb": 121.63,
+  "swap_total_gb": 16.25,
+  "swap_free_gb": 1.53
+ },
+ "preflight": {
+  "loadavg": [
+   9.08642578125,
+   8.904296875,
+   7.16455078125
+  ],
+  "mem_available_gb": 35.25,
+  "mem_total_gb": 121.63,
+  "swap_total_gb": 16.25,
+  "swap_free_gb": 1.53
+ },
+ "settings": {
+  "lengths": [
+   16,
+   128,
+   512,
+   2000
+  ],
+  "batches": [
+   1,
+   32
+  ],
+  "clients": [
+   1
+  ],
+  "threads": 10,
+  "budget_s": 60.0,
+  "max_requests": 20,
+  "max_big_requests": 1,
+  "max_cell_seconds": 600.0,
+  "texts_file": "/var/tmp/embed-texts/nemotron-3.5-embed-1b.json",
+  "texts_per_length": 32
+ },
+ "cells": {
+  "L16_b1_c1": {
+   "texts_per_s": 17.142,
+   "tokens_per_s": 272.6,
+   "wall_s": 1.1667,
+   "requests": 20,
+   "texts": 20,
+   "tokens_calibrated": 318,
+   "tokens_reported": 318,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.058225,
+    "p99": 0.058753,
+    "min": 0.05461,
+    "max": 0.058759,
+    "n": 20
+   },
+   "length": 16,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 1.17,
+   "tokens_per_text_median": 16
+  },
+  "L16_b32_c1": {
+   "texts_per_s": 17.816,
+   "tokens_per_s": 283.4,
+   "wall_s": 1.7961,
+   "requests": 1,
+   "texts": 32,
+   "tokens_calibrated": 509,
+   "tokens_reported": 509,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 1.794973,
+    "p99": 1.794973,
+    "min": 1.794973,
+    "max": 1.794973,
+    "n": 1
+   },
+   "length": 16,
+   "batch": 32,
+   "clients": 1,
+   "elapsed_s": 1.8,
+   "tokens_per_text_median": 16
+  },
+  "L128_b1_c1": {
+   "texts_per_s": 2.363,
+   "tokens_per_s": 302.2,
+   "wall_s": 8.4639,
+   "requests": 20,
+   "texts": 20,
+   "tokens_calibrated": 2558,
+   "tokens_reported": 2558,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.422982,
+    "p99": 0.426774,
+    "min": 0.420192,
+    "max": 0.427144,
+    "n": 20
+   },
+   "length": 128,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 8.46,
+   "tokens_per_text_median": 128
+  },
+  "L128_b32_c1": {
+   "texts_per_s": 2.382,
+   "tokens_per_s": 304.8,
+   "wall_s": 13.4338,
+   "requests": 1,
+   "texts": 32,
+   "tokens_calibrated": 4094,
+   "tokens_reported": 4094,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 13.432468,
+    "p99": 13.432468,
+    "min": 13.432468,
+    "max": 13.432468,
+    "n": 1
+   },
+   "length": 128,
+   "batch": 32,
+   "clients": 1,
+   "elapsed_s": 13.43,
+   "tokens_per_text_median": 128
+  },
+  "L512_b1_c1": {
+   "texts_per_s": 0.555,
+   "tokens_per_s": 292.9,
+   "wall_s": 36.012,
+   "requests": 20,
+   "texts": 20,
+   "tokens_calibrated": 10549,
+   "tokens_reported": 10549,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 1.80144,
+    "p99": 1.807367,
+    "min": 1.78679,
+    "max": 1.807933,
+    "n": 20
+   },
+   "length": 512,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 36.01,
+   "tokens_per_text_median": 527
+  },
+  "L512_b32_c1": {
+   "texts_per_s": 0.556,
+   "tokens_per_s": 293.0,
+   "wall_s": 57.5902,
+   "requests": 1,
+   "texts": 32,
+   "tokens_calibrated": 16874,
+   "tokens_reported": 16874,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 57.589025,
+    "p99": 57.589025,
+    "min": 57.589025,
+    "max": 57.589025,
+    "n": 1
+   },
+   "length": 512,
+   "batch": 32,
+   "clients": 1,
+   "elapsed_s": 57.59,
+   "tokens_per_text_median": 527
+  },
+  "L2000_b1_c1": {
+   "texts_per_s": 0.126,
+   "tokens_per_s": 251.5,
+   "wall_s": 63.6227,
+   "requests": 8,
+   "texts": 8,
+   "tokens_calibrated": 16000,
+   "tokens_reported": 16000,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 7.946054,
+    "p99": 7.999888,
+    "min": 7.932201,
+    "max": 8.002269,
+    "n": 8
+   },
+   "length": 2000,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 63.62,
+   "tokens_per_text_median": 2000
+  },
+  "L2000_b32_c1": {
+   "skipped": "32 texts x 2000 tokens = 64000 tokens per request exceeds this model's 32768-token batch cap; the padded batch's attention buffers would not fit in the host's memory budget",
+   "batch_tokens": 64000,
+   "batch_token_cap": 32768
+  },
+  "mixed_b32_c1": {
+   "texts_per_s": 2.66,
+   "tokens_per_s": 296.3,
+   "wall_s": 12.0293,
+   "requests": 1,
+   "texts": 32,
+   "tokens_calibrated": 3564,
+   "tokens_reported": 3564,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 12.027474,
+    "p99": 12.027474,
+    "min": 12.027474,
+    "max": 12.027474,
+    "n": 1
+   },
+   "length": "mixed",
+   "batch": 32,
+   "clients": 1,
+   "elapsed_s": 12.03,
+   "tokens_per_text_median": 40,
+   "tokens_per_text_sum": 3564,
+   "seed": 20261111
+  }
+ }
+}

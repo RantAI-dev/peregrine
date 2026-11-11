@@ -21,6 +21,12 @@
 //!   inside `<tools>` in the system message; a call is `{"name": ..., "arguments": {...}}`
 //!   inside `<tool_call>`; results come back inside `<tool_response>` in a user turn,
 //!   consecutive results sharing one turn.
+//! * [`ToolFormat::QwenXml`]: Qwen 3.5's template, which Bonsai 2 files carry. The same
+//!   `<tools>` list, but a call is `<function=name>` with one `<parameter=key>` block per
+//!   argument inside `<tool_call>`, values written bare (a string as it is, `True`, `None`,
+//!   JSON for lists and objects). The assistant's turns after the last user question carry
+//!   their thinking block, and the prompt ends inside one, or after an empty one when
+//!   thinking is off.
 
 use crate::json::Value;
 
@@ -35,11 +41,24 @@ const QWEN25_DEFAULT_SYSTEM: &str =
 /// Qwen 2.5's chat template, as its GGUF files carry it (`tokenizer.chat_template`).
 pub const QWEN25_TEMPLATE: &str = include_str!("tools/qwen25.jinja");
 
+/// Qwen 3.5's chat template, as Bonsai 2's GGUF files carry it.
+pub const QWEN35_TEMPLATE: &str = include_str!("tools/qwen35.jinja");
+
+/// The thinking block's tags in the Qwen 3 and 3.5 templates.
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// What Qwen 3.5's template writes after the tool list (`tools/qwen35.jinja`).
+const QWEN35_INSTRUCTIONS: &str = "\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>";
+
 /// A family of templates that writes tools and calls the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolFormat {
     /// Qwen 2.5: JSON calls inside `<tool_call>` (the "Hermes" convention).
     Hermes,
+    /// Qwen 3.5 and Bonsai 2: `<function=name>` and `<parameter=key>` blocks inside
+    /// `<tool_call>`.
+    QwenXml,
 }
 
 impl ToolFormat {
@@ -50,12 +69,16 @@ impl ToolFormat {
         if template.trim_end() == QWEN25_TEMPLATE.trim_end() {
             return Some(ToolFormat::Hermes);
         }
+        if template.trim_end() == QWEN35_TEMPLATE.trim_end() {
+            return Some(ToolFormat::QwenXml);
+        }
         None
     }
 
     pub fn name(self) -> &'static str {
         match self {
             ToolFormat::Hermes => "hermes",
+            ToolFormat::QwenXml => "qwen-xml",
         }
     }
 }
@@ -72,9 +95,11 @@ pub struct ToolCall {
 pub enum Msg {
     System(String),
     User(String),
-    /// What the assistant wrote: text, calls, or both.
+    /// What the assistant wrote: text, calls, or both, and its thinking when the client
+    /// sends it back (`reasoning_content`).
     Assistant {
         content: String,
+        reasoning: Option<String>,
         tool_calls: Vec<ToolCall>,
     },
     /// A tool's result, sent back by the client.
@@ -84,8 +109,10 @@ pub enum Msg {
 }
 
 /// A message's text: a string, `null` (an assistant message that only calls tools), or a
-/// list of text parts, which llama.cpp joins with a newline for these templates.
-fn content_of(m: &Value, i: usize) -> Result<String, String> {
+/// list of text parts joined by `sep`. llama.cpp joins the parts with a newline for a
+/// template that reads content as a string (Qwen 2.5); Qwen 3.5's template reads the parts
+/// itself and writes them one after another.
+fn content_of(m: &Value, i: usize, sep: &str) -> Result<String, String> {
     match m.get("content") {
         None | Some(Value::Null) => Ok(String::new()),
         Some(Value::Str(s)) => Ok(s.clone()),
@@ -101,7 +128,7 @@ fn content_of(m: &Value, i: usize) -> Result<String, String> {
                     }
                 }
             }
-            Ok(texts.join("\n"))
+            Ok(texts.join(sep))
         }
         Some(_) => Err(format!(
             "messages[{i}].content must be a string or a list of text parts"
@@ -208,6 +235,16 @@ pub fn tool_names(tools: &[Value]) -> Vec<String> {
 /// Anything else is refused by name, so a conversation is never rendered with a message
 /// silently dropped.
 pub fn messages_from_json(messages: &Value) -> Result<Vec<Msg>, String> {
+    messages_from_json_for(ToolFormat::Hermes, messages)
+}
+
+/// [`messages_from_json`] for a given format: the formats differ in how a list of text
+/// parts becomes one text.
+pub fn messages_from_json_for(format: ToolFormat, messages: &Value) -> Result<Vec<Msg>, String> {
+    let sep = match format {
+        ToolFormat::Hermes => "\n",
+        ToolFormat::QwenXml => "",
+    };
     let list = messages.as_array().ok_or("messages must be an array")?;
     let mut out = Vec::with_capacity(list.len());
     for (i, m) in list.iter().enumerate() {
@@ -216,10 +253,10 @@ pub fn messages_from_json(messages: &Value) -> Result<Vec<Msg>, String> {
             .and_then(Value::as_str)
             .ok_or_else(|| format!("messages[{i}].role must be a string"))?;
         match role {
-            "system" => out.push(Msg::System(content_of(m, i)?)),
-            "user" => out.push(Msg::User(content_of(m, i)?)),
+            "system" => out.push(Msg::System(content_of(m, i, sep)?)),
+            "user" => out.push(Msg::User(content_of(m, i, sep)?)),
             "tool" => out.push(Msg::Tool {
-                content: content_of(m, i)?,
+                content: content_of(m, i, sep)?,
             }),
             "assistant" => {
                 let mut tool_calls = Vec::new();
@@ -237,8 +274,13 @@ pub fn messages_from_json(messages: &Value) -> Result<Vec<Msg>, String> {
                         }
                     }
                 }
+                let reasoning = match m.get("reasoning_content") {
+                    Some(Value::Str(r)) => Some(r.clone()),
+                    _ => None,
+                };
                 out.push(Msg::Assistant {
-                    content: content_of(m, i)?,
+                    content: content_of(m, i, sep)?,
+                    reasoning,
                     tool_calls,
                 });
             }
@@ -281,8 +323,33 @@ fn call_from_json(c: &Value) -> Result<ToolCall, String> {
 /// conversation that ends with an assistant message of text is a continuation, as in
 /// llama.cpp: that text is left open for the model to go on from.
 pub fn render(format: ToolFormat, tools: &[Value], messages: &[Msg]) -> Result<String, String> {
+    render_with(format, tools, messages, RenderOptions::default())
+}
+
+/// What a request may choose about its prompt besides the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderOptions {
+    /// Whether the model may think before it answers (`enable_thinking`). Formats without
+    /// a thinking block ignore it.
+    pub thinking: bool,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        RenderOptions { thinking: true }
+    }
+}
+
+/// [`render`] with options.
+pub fn render_with(
+    format: ToolFormat,
+    tools: &[Value],
+    messages: &[Msg],
+    options: RenderOptions,
+) -> Result<String, String> {
     match format {
         ToolFormat::Hermes => render_qwen25(tools, messages),
+        ToolFormat::QwenXml => render_qwen35(tools, messages, options.thinking),
     }
 }
 
@@ -331,6 +398,7 @@ fn render_qwen25(tools: &[Value], messages: &[Msg]) -> Result<String, String> {
             Msg::Assistant {
                 content,
                 tool_calls,
+                ..
             },
             rest,
         )) if tool_calls.is_empty() => (rest, Some(content.as_str())),
@@ -353,6 +421,7 @@ fn render_qwen25(tools: &[Value], messages: &[Msg]) -> Result<String, String> {
             Msg::Assistant {
                 content,
                 tool_calls,
+                ..
             } => {
                 if tool_calls.is_empty() {
                     turn(&mut s, "assistant", content);
@@ -396,6 +465,185 @@ fn render_qwen25(tools: &[Value], messages: &[Msg]) -> Result<String, String> {
     s.push_str("assistant\n");
     if let Some(text) = prefill {
         s.push_str(text);
+    }
+    Ok(s)
+}
+
+/// Jinja's `trim`: the whitespace C's `isspace` knows, from both ends.
+fn jinja_trim(text: &str) -> &str {
+    text.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'))
+}
+
+/// One argument's value as Qwen 3.5's template writes it: a list or an object as JSON,
+/// anything else through Jinja's `string` (a string as it is, `True`, `False`, `None`,
+/// a number in Python's spelling).
+fn qwen35_value(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Null => "None".into(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => crate::json::float_repr(*f),
+        Value::Arr(_) | Value::Obj(_) => v.to_jinja_json(),
+    }
+}
+
+/// Qwen 3.5's template, branch for branch (`tools/qwen35.jinja`).
+fn render_qwen35(tools: &[Value], messages: &[Msg], thinking: bool) -> Result<String, String> {
+    if messages.is_empty() {
+        return Err("No messages provided.".into());
+    }
+    let mut s = String::new();
+    let system = match &messages[0] {
+        Msg::System(text) => Some(jinja_trim(text)),
+        _ => None,
+    };
+    if !tools.is_empty() {
+        s.push_str(IM_START);
+        s.push_str("system\n# Tools\n\nYou have access to the following functions:\n\n<tools>");
+        for t in tools {
+            s.push('\n');
+            s.push_str(&t.to_jinja_json());
+        }
+        s.push_str("\n</tools>");
+        s.push_str(QWEN35_INSTRUCTIONS);
+        if let Some(text) = system.filter(|t| !t.is_empty()) {
+            s.push_str("\n\n");
+            s.push_str(text);
+        }
+        s.push_str(IM_END);
+        s.push('\n');
+    } else if let Some(text) = system {
+        s.push_str(IM_START);
+        s.push_str("system\n");
+        s.push_str(text);
+        s.push_str(IM_END);
+        s.push('\n');
+    }
+
+    // The last real question: the last user message that is not a tool's result written
+    // as a user turn. Assistant turns after it keep their thinking block.
+    let last_query = messages.iter().rposition(|m| match m {
+        Msg::User(text) => {
+            let t = jinja_trim(text);
+            !(t.starts_with("<tool_response>") && t.ends_with("</tool_response>"))
+        }
+        _ => false,
+    });
+    let Some(last_query) = last_query else {
+        return Err("No user query found in messages.".into());
+    };
+
+    // A last assistant message of text is a continuation: it is written like any other and
+    // left open, and no new assistant turn follows it.
+    let continued = match messages.last() {
+        Some(Msg::Assistant { tool_calls, .. }) if tool_calls.is_empty() => true,
+        Some(Msg::Assistant { .. }) => {
+            return Err(
+                "the conversation ends with an assistant tool call; send the tool's result".into(),
+            )
+        }
+        _ => false,
+    };
+    let last = messages.len() - 1;
+    for (i, m) in messages.iter().enumerate() {
+        match m {
+            Msg::System(_) => {
+                if i > 0 {
+                    return Err("System message must be at the beginning.".into());
+                }
+            }
+            Msg::User(text) => {
+                s.push_str(IM_START);
+                s.push_str("user\n");
+                s.push_str(jinja_trim(text));
+                s.push_str(IM_END);
+                s.push('\n');
+            }
+            Msg::Assistant {
+                content,
+                reasoning,
+                tool_calls,
+            } => {
+                let mut content = jinja_trim(content);
+                // The thinking the client sent back, or the block still inside the text.
+                let reasoning = match reasoning {
+                    Some(r) => r.as_str(),
+                    None => match content.find(THINK_CLOSE) {
+                        Some(_) => {
+                            let before = content.split(THINK_CLOSE).next().unwrap_or("");
+                            let before = before.trim_end_matches('\n');
+                            let inner = before.rsplit(THINK_OPEN).next().unwrap_or("");
+                            let after = content.rsplit(THINK_CLOSE).next().unwrap_or("");
+                            content = after.trim_start_matches('\n');
+                            inner.trim_start_matches('\n')
+                        }
+                        None => "",
+                    },
+                };
+                let reasoning = jinja_trim(reasoning);
+                s.push_str(IM_START);
+                s.push_str("assistant\n");
+                if i > last_query {
+                    s.push_str(THINK_OPEN);
+                    s.push('\n');
+                    s.push_str(reasoning);
+                    s.push('\n');
+                    s.push_str(THINK_CLOSE);
+                    s.push_str("\n\n");
+                }
+                s.push_str(content);
+                for (j, c) in tool_calls.iter().enumerate() {
+                    if j > 0 {
+                        s.push('\n');
+                    } else if !jinja_trim(content).is_empty() {
+                        s.push_str("\n\n");
+                    }
+                    s.push_str("<tool_call>\n<function=");
+                    s.push_str(&c.name);
+                    s.push_str(">\n");
+                    for (key, value) in c.arguments.as_object().unwrap_or(&[]) {
+                        s.push_str("<parameter=");
+                        s.push_str(key);
+                        s.push_str(">\n");
+                        s.push_str(&qwen35_value(value));
+                        s.push_str("\n</parameter>\n");
+                    }
+                    s.push_str("</function>\n</tool_call>");
+                }
+                if !(continued && i == last) {
+                    s.push_str(IM_END);
+                    s.push('\n');
+                }
+            }
+            // Consecutive results share one user turn. A result that is the first message
+            // has no turn opening: the template writes none, and neither does this.
+            Msg::Tool { content } => {
+                if i > 0 && !matches!(messages[i - 1], Msg::Tool { .. }) {
+                    s.push_str(IM_START);
+                    s.push_str("user");
+                }
+                s.push_str("\n<tool_response>\n");
+                s.push_str(jinja_trim(content));
+                s.push_str("\n</tool_response>");
+                if i == last || !matches!(messages[i + 1], Msg::Tool { .. }) {
+                    s.push_str(IM_END);
+                    s.push('\n');
+                }
+            }
+        }
+    }
+    if !continued {
+        s.push_str(IM_START);
+        s.push_str("assistant\n");
+        s.push_str(THINK_OPEN);
+        s.push('\n');
+        if !thinking {
+            s.push('\n');
+            s.push_str(THINK_CLOSE);
+            s.push_str("\n\n");
+        }
     }
     Ok(s)
 }
@@ -446,6 +694,10 @@ pub struct CallParser {
     /// The whitespace that stood before the call being read, given back with the call's
     /// text if it turns out not to be a call.
     ws_before_call: String,
+    /// Per tool, the parameters its schema declares as strings (only [`CallParser::with_tools`]
+    /// knows them). The XML format writes values bare, so the schema says whether `5` is
+    /// the number or the text.
+    string_params: Vec<(String, Vec<String>)>,
 }
 
 impl CallParser {
@@ -460,7 +712,36 @@ impl CallParser {
             calls: 0,
             after_call: false,
             ws_before_call: String::new(),
+            string_params: Vec::new(),
         }
+    }
+
+    /// A parser that knows the request's tools (as [`tools_from_json`] returns them): their
+    /// names, and which parameters are strings. Formats that write values bare need the
+    /// second; without it a value that reads as JSON is taken as JSON.
+    pub fn with_tools(format: ToolFormat, tools: &[Value]) -> CallParser {
+        let mut parser = CallParser::new(format, tool_names(tools));
+        for t in tools {
+            let Some(f) = t.get("function") else { continue };
+            let Some(name) = f.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let mut strings = Vec::new();
+            let properties = f.get("parameters").and_then(|p| p.get("properties"));
+            for (key, schema) in properties.and_then(Value::as_object).unwrap_or(&[]) {
+                let is_string = match schema.get("type") {
+                    Some(Value::Str(t)) => t == "string",
+                    // A union such as ["string", "null"]: text unless it reads as null.
+                    Some(Value::Arr(ts)) => ts.iter().any(|t| t.as_str() == Some("string")),
+                    _ => false,
+                };
+                if is_string {
+                    strings.push(key.clone());
+                }
+            }
+            parser.string_params.push((name.to_string(), strings));
+        }
+        parser
     }
 
     /// How many calls have been found so far.
@@ -472,14 +753,15 @@ impl CallParser {
     pub fn push(&mut self, text: &str, out: &mut Vec<Event>) {
         self.pending.push_str(text);
         match self.format {
-            ToolFormat::Hermes => self.step_hermes(false, out),
+            // Both formats frame a call the same way; they differ in its body.
+            ToolFormat::Hermes | ToolFormat::QwenXml => self.step_hermes(false, out),
         }
     }
 
     /// The output has ended: decide everything that was held back.
     pub fn finish(&mut self, out: &mut Vec<Event>) {
         match self.format {
-            ToolFormat::Hermes => self.step_hermes(true, out),
+            ToolFormat::Hermes | ToolFormat::QwenXml => self.step_hermes(true, out),
         }
     }
 
@@ -561,7 +843,11 @@ impl CallParser {
     /// whitespace that stood before it.
     fn call_or_text(&mut self, body: &str, raw: String, out: &mut Vec<Event>) {
         let ws = std::mem::take(&mut self.ws_before_call);
-        match self.hermes_call(body) {
+        let call = match self.format {
+            ToolFormat::Hermes => self.hermes_call(body),
+            ToolFormat::QwenXml => self.xml_call(body),
+        };
+        match call {
             Some(ev) => {
                 out.push(ev);
                 self.after_call = true;
@@ -600,6 +886,70 @@ impl CallParser {
     }
 }
 
+impl CallParser {
+    /// The call inside one `<tool_call>` body of the XML format, if it is one:
+    /// `<function=name>`, then `<parameter=key>` blocks, then `</function>`.
+    fn xml_call(&mut self, body: &str) -> Option<Event> {
+        let body = body.trim();
+        let rest = body.strip_prefix("<function=")?;
+        let (name, rest) = rest.split_once('>')?;
+        let name = name.trim();
+        if !self.names.iter().any(|n| n == name) {
+            return None;
+        }
+        // The closing tag may be missing when the output was cut off after the last
+        // parameter; what is there must still be whole parameters.
+        let mut rest = rest.strip_suffix("</function>").unwrap_or(rest);
+        let strings: &[String] = self
+            .string_params
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(&[], |(_, s)| s.as_slice());
+        let typed = self.string_params.iter().any(|(n, _)| n == name);
+        let mut arguments: Vec<(String, Value)> = Vec::new();
+        loop {
+            rest = rest.trim_start();
+            if rest.is_empty() {
+                break;
+            }
+            let after = rest.strip_prefix("<parameter=")?;
+            let (key, after) = after.split_once('>')?;
+            let (raw, after) = after.split_once("</parameter>")?;
+            // The template puts one newline on each side of a value.
+            let raw = raw.strip_prefix('\n').unwrap_or(raw);
+            let raw = raw.strip_suffix('\n').unwrap_or(raw);
+            let is_string = typed && strings.iter().any(|s| s == key);
+            let value = if is_string {
+                Value::Str(raw.to_string())
+            } else {
+                match raw.trim() {
+                    // The template writes Python's spellings; a model trained on it does too.
+                    "True" | "true" => Value::Bool(true),
+                    "False" | "false" => Value::Bool(false),
+                    "None" | "null" => Value::Null,
+                    other => match Value::parse(other) {
+                        Ok(v) if !matches!(v, Value::Str(_)) => v,
+                        _ => Value::Str(raw.to_string()),
+                    },
+                }
+            };
+            // A repeated parameter keeps its first place and its last value, as JSON does.
+            match arguments.iter_mut().find(|(k, _)| k == key) {
+                Some(slot) => slot.1 = value,
+                None => arguments.push((key.to_string(), value)),
+            }
+            rest = after;
+        }
+        let index = self.calls;
+        self.calls += 1;
+        Some(Event::Call {
+            index,
+            name: name.to_string(),
+            arguments: Value::Obj(arguments).to_jinja_json(),
+        })
+    }
+}
+
 /// The length of the longest tail of `text` that is a proper prefix of `tag`.
 fn longest_tag_prefix(text: &str, tag: &str) -> usize {
     let max = tag.len().saturating_sub(1).min(text.len());
@@ -622,14 +972,18 @@ mod tests {
     /// Parse `text` whole, and again in pieces of every size: the events must not depend
     /// on how the text was cut.
     fn parse(text: &str) -> Vec<Event> {
+        parse_with(text, || CallParser::new(ToolFormat::Hermes, names()))
+    }
+
+    fn parse_with(text: &str, parser: impl Fn() -> CallParser) -> Vec<Event> {
         let mut whole = Vec::new();
-        let mut p = CallParser::new(ToolFormat::Hermes, names());
+        let mut p = parser();
         p.push(text, &mut whole);
         p.finish(&mut whole);
         let chars: Vec<char> = text.chars().collect();
         for size in 1..=chars.len().clamp(1, 24) {
             let mut got = Vec::new();
-            let mut p = CallParser::new(ToolFormat::Hermes, names());
+            let mut p = parser();
             for piece in chars.chunks(size) {
                 let piece: String = piece.iter().collect();
                 p.push(&piece, &mut got);
@@ -796,5 +1150,150 @@ mod tests {
         )
         .contains("twice"));
         assert!(tools_from_json(None).unwrap().is_empty());
+    }
+    // --- the XML format (Qwen 3.5, Bonsai 2) ------------------------------------------
+
+    fn xml_tools() -> Vec<Value> {
+        let json = r#"[
+            {"type": "function", "function": {"name": "web_search", "parameters": {"type": "object",
+              "properties": {"query": {"type": "string"}, "limit": {"type": "integer"},
+                             "safe": {"type": "boolean"}, "site": {"type": ["string", "null"]},
+                             "filters": {"type": "object"}}}}},
+            {"type": "function", "function": {"name": "now"}}
+        ]"#;
+        tools_from_json(Some(&Value::parse(json).unwrap())).unwrap()
+    }
+
+    fn xml(text: &str) -> Vec<Event> {
+        parse_with(text, || {
+            CallParser::with_tools(ToolFormat::QwenXml, &xml_tools())
+        })
+    }
+
+    #[test]
+    fn an_xml_call_takes_its_types_from_the_schema() {
+        let out = xml(
+            "<tool_call>\n<function=web_search>\n<parameter=query>\n5\n</parameter>\n<parameter=limit>\n5\n</parameter>\n<parameter=safe>\nTrue\n</parameter>\n<parameter=site>\nexample.com\n</parameter>\n<parameter=filters>\n{\"lang\": [\"en\", \"de\"]}\n</parameter>\n</function>\n</tool_call>",
+        );
+        assert_eq!(
+            out,
+            vec![call(
+                0,
+                "web_search",
+                "{\"query\": \"5\", \"limit\": 5, \"safe\": true, \"site\": \"example.com\", \"filters\": {\"lang\": [\"en\", \"de\"]}}"
+            )]
+        );
+    }
+
+    #[test]
+    fn an_xml_string_keeps_its_lines_and_its_spaces() {
+        let out = xml(
+            "<tool_call>\n<function=web_search>\n<parameter=query>\nline one\n  line two  \n</parameter>\n</function>\n</tool_call>",
+        );
+        assert_eq!(
+            out,
+            vec![call(
+                0,
+                "web_search",
+                "{\"query\": \"line one\\n  line two  \"}"
+            )]
+        );
+    }
+
+    #[test]
+    fn xml_text_then_two_calls_and_a_call_without_parameters() {
+        let out = xml(
+            "I will search, then check the time.\n\n<tool_call>\n<function=web_search>\n<parameter=query>\nrust\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=now>\n</function>\n</tool_call>",
+        );
+        assert_eq!(
+            out,
+            vec![
+                text("I will search, then check the time."),
+                call(0, "web_search", "{\"query\": \"rust\"}"),
+                call(1, "now", "{}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_xml_value_with_no_schema_is_json_when_it_reads_as_json() {
+        // `now` declares no parameters: numbers, booleans and `None` are taken as such,
+        // anything else is text.
+        let out = xml(
+            "<tool_call>\n<function=now>\n<parameter=zone>\nUTC\n</parameter>\n<parameter=offset>\n-3\n</parameter>\n<parameter=dst>\nNone\n</parameter>\n</function>\n</tool_call>",
+        );
+        assert_eq!(
+            out,
+            vec![call(
+                0,
+                "now",
+                "{\"zone\": \"UTC\", \"offset\": -3, \"dst\": null}"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_broken_xml_call_is_text() {
+        // No function tag.
+        let raw = "<tool_call>\n{\"name\": \"now\", \"arguments\": {}}\n</tool_call>";
+        assert_eq!(xml(raw), vec![text(raw)]);
+        // A tool the request did not offer.
+        let raw = "<tool_call>\n<function=rm_rf>\n</function>\n</tool_call>";
+        assert_eq!(xml(raw), vec![text(raw)]);
+        // Text between the parameters.
+        let raw = "<tool_call>\n<function=now>\nplease\n</function>\n</tool_call>";
+        assert_eq!(xml(raw), vec![text(raw)]);
+        // A parameter that is never closed.
+        let raw = "<tool_call>\n<function=now>\n<parameter=zone>\nUTC\n</function>\n</tool_call>";
+        assert_eq!(xml(raw), vec![text(raw)]);
+    }
+
+    #[test]
+    fn an_xml_call_cut_off_by_the_end_of_the_output() {
+        // Every parameter is whole: a call.
+        assert_eq!(
+            xml("<tool_call>\n<function=web_search>\n<parameter=query>\nrust\n</parameter>\n"),
+            vec![call(0, "web_search", "{\"query\": \"rust\"}")]
+        );
+        // Cut inside a parameter: text, as written.
+        let raw = "Searching.\n<tool_call>\n<function=web_search>\n<parameter=query>\nru";
+        assert_eq!(xml(raw), vec![text(raw)]);
+    }
+
+    #[test]
+    fn both_templates_are_recognised() {
+        assert_eq!(
+            ToolFormat::for_template(QWEN35_TEMPLATE),
+            Some(ToolFormat::QwenXml)
+        );
+        assert_eq!(ToolFormat::QwenXml.name(), "qwen-xml");
+        assert_ne!(QWEN25_TEMPLATE, QWEN35_TEMPLATE);
+    }
+
+    #[test]
+    fn thinking_left_inside_an_assistant_text_is_moved_into_its_block() {
+        // A client that sends the model's whole output back, thinking block included, and
+        // no `reasoning_content`: the template splits it, and so does the renderer.
+        let whole = format!("{THINK_OPEN}\nCheck the time.\n{THINK_CLOSE}\n\nIt is noon.");
+        let split = vec![
+            Msg::User("What time is it?".into()),
+            Msg::Assistant {
+                content: "It is noon.".into(),
+                reasoning: Some("Check the time.".into()),
+                tool_calls: vec![],
+            },
+        ];
+        let inline = vec![
+            Msg::User("What time is it?".into()),
+            Msg::Assistant {
+                content: whole,
+                reasoning: None,
+                tool_calls: vec![],
+            },
+        ];
+        let a = render(ToolFormat::QwenXml, &[], &split).unwrap();
+        let b = render(ToolFormat::QwenXml, &[], &inline).unwrap();
+        assert_eq!(a, b);
+        assert!(a.ends_with("It is noon."), "a continuation is left open");
     }
 }

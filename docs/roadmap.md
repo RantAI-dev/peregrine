@@ -105,6 +105,8 @@ The ik_llama.cpp fork processes prompts about twice as fast as Peregrine on the 
 | ID | Item | pw |
 |---|---|---|
 | S5.1 | The k-quant prefill kernels on AVX-512: the Q4_K and Q5_0 epilogue per group of rows, a 512-bit Q6_K tile, a write-out that makes a wide pass pay | 2.0 |
+| S5.1a | A wide prefill pass when no slot is decoding: the chunk is chosen per pass, 64 wide on both measured tiers | 0.3 |
+| S5.1b | The Q4_K and Q6_K kernels at ik_llama.cpp's instruction mix: measured, both are at the core's byte-dot roof (77–81 and 58–61 of 106–117 GMAC/s) and the fork is not ahead | 1.0 |
 | S5.2 | A 512-bit attention score kernel; thread scaling past 12 threads | 1.5 |
 | S5.3 | The same questions on AVX2 and NEON; ik_llama.cpp measured on bluefin and ARM | 1.0 |
 
@@ -117,7 +119,7 @@ prompt is the one llama.cpp builds from the model's template, byte for byte. Des
 | ID | Item | pw |
 |---|---|---|
 | S6.1 | Design | 0.2 |
-| S6.2 | The tool module: the `hermes` format (Qwen 2.5, Qwen 3, Qwen 3.5 / Bonsai 2), renderer and parser, fixtures from llama.cpp | 1.0 |
+| S6.2 | The tool module: the `hermes` format (Qwen 2.5) and the `qwen-xml` format (Qwen 3.5 / Bonsai 2), renderers and parsers, fixtures from llama.cpp — done for both in the module; Qwen 3 is next | 1.0 |
 | S6.3 | The endpoint: `tools`, `tool_choice`, `tool_calls` in requests and responses, streaming — done for the `hermes` format (Qwen 2.5): 15 of 16 replies identical to llama.cpp's on the same file | 1.0 |
 | S6.4 | The `llama3` format (Llama 3.1 / 3.2) | 0.5 |
 | S6.5 | The `harmony` format (gpt-oss) | 0.5 |

@@ -1,0 +1,5 @@
+MONOTONIC 40.000  RAW 37.190  CPU 37.162  TSC/Gticks 74.240  tsc_ghz_if_cpu_accurate 1.998  cpu_over_wall 0.929
+host Date   38 s (+-2, 1 s resolution)
+MONOTONIC   40.02 s
+CPU time    37.18 s   (one thread, so this is the real elapsed time)
+MONOTONIC / host = 1.053   CPU / host = 0.978

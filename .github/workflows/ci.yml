@@ -83,6 +83,19 @@ jobs:
       - name: test (non-x86, lib + bins + tests)
         if: runner.arch != 'X64'
         run: cargo test --workspace --lib --bins --tests --release --locked
+      # The synthetic goldens are per tier and the native tier above already compares its own.
+      # Compare the lower aarch64 tiers too, so a stale golden fails here instead of on the next
+      # re-record (the aarch64-neon-dotprod goldens were stale for months). A golden that is
+      # missing is skipped, not required: a pull request written on an x86 machine cannot record
+      # the aarch64 ones, and they are added from the ARM host afterwards.
+      - name: aarch64 synthetic goldens (every tier)
+        if: matrix.name == 'linux-aarch64'
+        run: |
+          for isa in scalar neon neon-dotprod; do
+            echo "=== $isa"
+            PEREGRINE_ISA=$isa \
+              cargo test -p peregrine-models --release --locked --test synthetic --test embeddings
+          done
 
   # Every kernel tier below the runner's own, forced with PEREGRINE_ISA (S0.3). The native tier runs in
   # `test`; the CPU's features are printed so the log shows which tiers were real.
