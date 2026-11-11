@@ -10,10 +10,11 @@
 //! This module is that loop, restructured so the arithmetic is the same for every
 //! kernel tier:
 //!
-//! 1. [`key_panel`] transposes one head's keys into `[head_dim][n]` — keys along the
-//!    vector lanes, so a lane is one score and the chain over the head dimension
-//!    stays sequential *inside* the lane. It is built once per `(text, KV head)` and
-//!    serves every query head of that KV head.
+//! 1. [`key_panel`] transposes one head's keys into a key-major panel — on x86_64
+//!    tiles of [`PANEL_TILE`] keys, each head dimension's sixteen keys contiguous — so
+//!    a score tile walks the panel front to back instead of one 64-byte run every
+//!    `n × 4` bytes (S4.9g part 3). It is built once per `(text, KV head)` and serves
+//!    every query head of that KV head.
 //! 2. [`scores_tile`] scores a strip of query rows against a block of keys. A lane
 //!    holds one key and the head dimension is folded with
 //!    `acc = fma(q[k], key[k], acc)`, so the scalar twin (the reference) and AVX2
@@ -25,9 +26,12 @@
 //!    (`vmath::exp8`) and its scalar twin (`vmath::exp_scalar`), which are
 //!    bit-identical, and returns the denominator as an `f64` sum in ascending key
 //!    order — the order the reference forward (`tests/support/embed_ref.rs`) uses.
-//! 4. [`mix_rows`] accumulates `P · V` for a block of up to six rows that share one
-//!    value head and one value load, ascending key order inside each row,
-//!    `fma(p[j], v[j][d], acc[d])`.
+//! 4. [`mix_rows`] accumulates `P · V` for a strip of query rows, ascending key order
+//!    inside each row, `fma(p[j], v[j][d], acc[d])`. At long texts it walks the keys
+//!    in blocks of [`MIX_KEY_BLOCK`] for every row block of the strip before moving
+//!    on, so a text's value rows are read from L3 once per strip rather than once per
+//!    row block (S4.9g part 3); the accumulator lives in the output rows between
+//!    blocks, and the fold is still ascending.
 //!
 //! The three are the same shape: `scores_tile` is `Q · Kᵀ` and `mix_rows` is `P · V`,
 //! both broadcast-form products whose lanes are independent outputs and whose folded
@@ -49,7 +53,7 @@
 //! layer), never on the strip it fell in, the thread that ran it, the other texts of
 //! the pass or the kernel tier. The strip's `n × n` scores are never materialised for
 //! the whole text: a caller holds `strip × n` of them, and the head's keys are read
-//! once per strip into L1-sized blocks ([`SCORE_BLOCK`] keys).
+//! once per strip in key blocks ([`SCORE_BLOCK`] keys).
 //!
 //! # aarch64
 //!
@@ -58,6 +62,13 @@
 //! `vmaxq_f32` for the soft-max's exact maximum, `vmath::exp4` for the weights
 //! (bit-identical to `exp_scalar`), and a six-row value mix with two `float32x4_t`
 //! per row. Every result is bit-identical to the scalar twins.
+//!
+//! The long-text layout and the key-blocked mix of S4.9g part 3 are x86_64 work: on
+//! aarch64 the lane panel, the 4×16 NEON tile and the six-row `mix_block_neon` are
+//! exactly part 2's, so that tier neither gains nor loses anything here. A NEON twin
+//! of the key-major panel would be a mechanical transliteration of the AVX2 tile and
+//! is the next step there; it could not be measured on the machine this part was
+//! written on, so it was not written. `// S4.9g:` the aarch64 path is unchanged.
 
 use crate::vmath::exp_scalar;
 
@@ -71,29 +82,35 @@ use std::arch::aarch64::*;
 use std::arch::x86_64::*;
 
 /// Keys per strip block: what bounds the panel slice one row of a strip walks, so a
-/// strip of 32 rows re-walks an L2-sized slice instead of the whole panel.
-/// `head_dim × SCORE_BLOCK × 4` bytes is 128 KiB at the widest head this engine
-/// supports (256) — a quarter of this machine's 256 KiB L2 — and 32 KiB at a 64-wide
-/// head, which is L1. A block is a whole number of 32-key groups, so an interior block
-/// of a band costs no overlap.
-///
-/// Measured on H0 at 512 and 2 048 tokens with the S4.9g strip, the block changed the
-/// score rate by under 1 %: what limits the score kernel is the *stride* of the panel
-/// read (one 64-byte run per head dimension, `n × 4` bytes apart), not the slice's
-/// residency. With the tile (S4.9g part 2) 64 and 128 keys measure the same to within
-/// the machine's noise at every length, so the block stays at 128: it bounds the
-/// working set on smaller caches, and a key-major tiled panel remains the one change
-/// that would make the traversal sequential.
+/// strip re-walks an L2-sized slice instead of the whole panel.
+/// With the key-tiled panel (S4.9g part 3) the traversal is sequential, so the block is
+/// only a call-granularity choice; 128 keys keeps a block's panel slice at 32-128 KiB
+/// on every head the engine supports.
 pub const SCORE_BLOCK: usize = 128;
 
-/// Query rows per strip, at most. A strip's scores are `strip × n` f32 — 64 KiB at a
-/// 512-token text and 128 KiB at 2 000 — and the strip is what makes the mix read the
-/// value rows once for [`MIX_BLOCK`] query rows at a time.
-pub const STRIP_MAX: usize = 32;
+/// Query rows per strip, at most (S4.9g part 3). A strip's scores are `strip × n` f32 —
+/// 128 KiB at 512 tokens and 512 KiB at 2 000 with the 64-row cap — and the strip is
+/// what makes the panel and the value rows be read once for all of its rows.
+pub const STRIP_MAX: usize = 64;
 
 /// The score floats one worker's strip buffer holds. The strip is sized so
-/// `strip × n` stays inside it: 32 rows at 1 024 tokens, 16 at 2 048, 1 at 32 768.
-pub const STRIP_AREA: usize = 32 * 1024;
+/// `strip × n` stays inside it: 64 rows at 4 096 tokens, 32 at 8 192, 8 at 32 768
+/// (1 MiB per worker). Part 2's 32 Ki (128 KiB) left a 2 048-token text at 16 rows,
+/// which re-read the panel and the values 128 times per head.
+pub const STRIP_AREA: usize = 256 * 1024;
+
+/// Keys per key-major panel tile on x86_64 (S4.9g part 3): the score tile's sixteen
+/// keys are contiguous for every head dimension, so a strip walks the panel front to
+/// back instead of one 64-byte run every `n × 4` bytes. The last `n % 16` keys of a
+/// text are stored row-major (one `[head_dim][rem]` region) so no key is padded.
+#[cfg(target_arch = "x86_64")]
+pub const PANEL_TILE: usize = 16;
+
+/// Keys per value-mix key block (S4.9g part 3): one block's value rows —
+/// `128 × head_dim × 4` bytes, 32 KiB at a 64-wide head and 128 KiB at 256 — stay in
+/// L1/L2 while every row block of a strip walks them, so the text's values are read
+/// from L3 once per strip instead of once per row block.
+pub const MIX_KEY_BLOCK: usize = 128;
 
 /// Floats one worker owns: its strip's scores and, after them,
 /// [`STRIP_MAX`] softmax denominators (the `1/l` of each row of the strip).
@@ -176,20 +193,35 @@ pub fn band(i: usize, n: usize, half: Option<usize>) -> (usize, usize) {
     }
 }
 
-/// One head's keys of one text as `[head_dim][n]`: `panel[k * n + j] = keys[j * stride + base + k]`.
+/// One head's keys of one text, key-major on x86_64 (S4.9g part 3).
 ///
 /// `keys` is the text's key rows (`n` rows of `stride` floats), `base` the KV head's
-/// offset inside a row. Only [`key_panel_scalar`] exists: the copy is a transpose, not
-/// arithmetic, and its layout is all the score kernel needs. It is written in tiles of
-/// 16×16 so each source cache line serves sixteen head dimensions and each destination
-/// line is written whole; `// S4.9g:` an eight-wide register transpose is the next
-/// step here if the panel build ever shows in a profile (it is ~2 % of the score work
-/// at 512 tokens).
+/// offset inside a row. On x86_64 the destination is tiled: the first `n - n % 16`
+/// keys are stored in tiles of [`PANEL_TILE`] keys,
+/// `panel[(j / 16) · head_dim · 16 + k · 16 + j % 16] = keys[j][k]`, so the sixteen keys
+/// of a score tile are contiguous for every head dimension; the last `n % 16` keys are
+/// row-major (`panel[(n - rem) · head_dim + k · rem + (j - n0)]`), so a text is never
+/// padded. On aarch64 the layout stays the lane panel of S4.9g part 2
+/// (`panel[k · n + j]`).
+///
+/// [`key_panel_tile`] builds one tile, which is what the driver's per-head fork-join
+/// hands to each worker; [`key_panel`] is every tile in order.
 pub fn key_panel(keys: &[f32], stride: usize, base: usize, hd: usize, n: usize, panel: &mut [f32]) {
-    key_panel_scalar(keys, stride, base, hd, n, panel)
+    debug_assert!(panel.len() >= hd * n);
+    debug_assert!(keys.len() >= n * stride);
+    #[cfg(target_arch = "x86_64")]
+    {
+        for t in 0..panel_tiles(n) {
+            let (off, len) = panel_tile_span(n, hd, t);
+            key_panel_tile(keys, stride, base, hd, n, t, &mut panel[off..off + len]);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    key_panel_rows(keys, stride, base, hd, n, 0, n, panel);
 }
 
-/// [`key_panel`]'s scalar twin.
+/// [`key_panel`]'s twin: the same layout, scalar on every tier (the build is a copy,
+/// not arithmetic).
 pub fn key_panel_scalar(
     keys: &[f32],
     stride: usize,
@@ -198,12 +230,28 @@ pub fn key_panel_scalar(
     n: usize,
     panel: &mut [f32],
 ) {
-    debug_assert!(panel.len() >= hd * n);
+    key_panel(keys, stride, base, hd, n, panel);
+}
+
+/// The key-major lane panel of S4.9g part 2: `panel[k · n + j] = keys[j · stride + base + k]`,
+/// keys `ja..jb`. What aarch64 still uses, and the reference layout [`scores_row`] reads.
+#[allow(clippy::too_many_arguments)]
+pub fn key_panel_rows(
+    keys: &[f32],
+    stride: usize,
+    base: usize,
+    hd: usize,
+    n: usize,
+    ja: usize,
+    jb: usize,
+    panel: &mut [f32],
+) {
+    debug_assert!(jb <= n && panel.len() >= hd * n);
     debug_assert!(keys.len() >= n * stride);
     const T: usize = 16;
-    let mut j0 = 0;
-    while j0 < n {
-        let j1 = (j0 + T).min(n);
+    let mut j0 = ja;
+    while j0 < jb {
+        let j1 = (j0 + T).min(jb);
         let mut k0 = 0;
         while k0 < hd {
             let k1 = (k0 + T).min(hd);
@@ -219,11 +267,78 @@ pub fn key_panel_scalar(
     }
 }
 
+/// The number of panel tiles of a text of `n` keys: `n / 16` full tiles plus, when
+/// `n % 16 != 0`, one row-major tail tile. One on aarch64's lane panel.
+#[cfg(target_arch = "x86_64")]
+pub fn panel_tiles(n: usize) -> usize {
+    n / PANEL_TILE + usize::from(n % PANEL_TILE != 0)
+}
+
+/// The `(offset, length)` of tile `t` in a text's panel of `n` keys. Full tiles are
+/// `head_dim × 16` floats; the last one, when `n % 16 != 0`, is the row-major tail of
+/// `head_dim × (n % 16)` floats.
+#[cfg(target_arch = "x86_64")]
+pub fn panel_tile_span(n: usize, hd: usize, t: usize) -> (usize, usize) {
+    let n0 = n - n % PANEL_TILE;
+    if t * PANEL_TILE < n0 {
+        (t * PANEL_TILE * hd, PANEL_TILE * hd)
+    } else {
+        (n0 * hd, (n - n0) * hd)
+    }
+}
+
+/// Fill tile `t` of a text's key-major panel (`dst` is [`panel_tile_span`]'s slice).
+#[cfg(target_arch = "x86_64")]
+pub fn key_panel_tile(
+    keys: &[f32],
+    stride: usize,
+    base: usize,
+    hd: usize,
+    n: usize,
+    t: usize,
+    dst: &mut [f32],
+) {
+    let n0 = n - n % PANEL_TILE;
+    let tile_start = t * PANEL_TILE;
+    if tile_start < n0 {
+        debug_assert!(dst.len() >= hd * PANEL_TILE);
+        for k in 0..hd {
+            let o = k * PANEL_TILE;
+            for jj in 0..PANEL_TILE {
+                dst[o + jj] = keys[(tile_start + jj) * stride + base + k];
+            }
+        }
+    } else {
+        let rem = n - n0;
+        debug_assert!(dst.len() >= hd * rem);
+        for k in 0..hd {
+            let o = k * rem;
+            for jj in 0..rem {
+                dst[o + jj] = keys[(n0 + jj) * stride + base + k];
+            }
+        }
+    }
+}
+
+/// Where key `j` of a text of `n` keys lives in the panel, for head dimension `k`
+/// (x86_64's key-major layout; the tests use it to read a key back).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn panel_index(n: usize, hd: usize, j: usize, k: usize) -> usize {
+    let n0 = n - n % PANEL_TILE;
+    if j < n0 {
+        (j / PANEL_TILE) * hd * PANEL_TILE + k * PANEL_TILE + j % PANEL_TILE
+    } else {
+        n0 * hd + k * (n - n0) + (j - n0)
+    }
+}
+
 /// `out[j] = scale · Σ_k q[k]·panel[k][j]` for `j` in `lo..hi`, one sequential FMA
 /// chain per key.
 ///
-/// `panel` is [`key_panel`]'s layout with `n` keys; `q` holds one row's head (at least
-/// `hd` floats); `out` is that row's `n` scores.
+/// `panel` is the lane panel ([`key_panel_rows`]) with `n` keys, the layout the scalar
+/// twin and aarch64 use; x86_64's strip uses it for a text's `< 16`-key tail. `q` holds
+/// one row's head (at least `hd` floats); `out` is that row's `n` scores.
 #[allow(clippy::too_many_arguments)]
 pub fn scores_row(
     q: &[f32],
@@ -449,7 +564,8 @@ unsafe fn scores_row_neon(
 /// sliding layer has overlapping windows, and the tile computes the union, leaving
 /// the keys outside a particular row's band in that row's buffer unread (the soft-max
 /// and the mix read only the row's own `band`). On a global layer the union is the
-/// text.
+/// text. On x86_64 the union is widened to whole [`PANEL_TILE`] tiles, which is the
+/// same scheduling choice.
 #[allow(clippy::too_many_arguments)]
 pub fn scores_tile(
     q: &[f32],
@@ -469,10 +585,10 @@ pub fn scores_tile(
     )
 }
 
-/// [`scores_tile`] at an explicit tile shape, for the tests and the bench that hold
-/// every shape to the same scores. A shape wider than the strip or the key range is
-/// narrowed to it; unsupported shapes fall back to the scalar twin (never used by the
-/// engine).
+/// [`scores_tile`] at an explicit row block, for the tests and the bench that hold
+/// every shape to the same scores. A shape wider than the strip is narrowed to it.
+/// On x86_64 the key tile is the panel's own [`PANEL_TILE`], so `keys_tile` is not a
+/// knob there; on aarch64 it picks the NEON tile's width.
 #[allow(clippy::too_many_arguments)]
 pub fn scores_tile_shaped(
     rows_tile: usize,
@@ -508,6 +624,8 @@ pub fn scores_tile_shaped(
     assert!(panel.len() >= hd * n, "key panel shorter than hd * n");
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let _ = (rows_tile, keys_tile);
+    #[cfg(target_arch = "x86_64")]
+    let _ = keys_tile;
     #[cfg(target_arch = "aarch64")]
     {
         let len = j1 - j0;
@@ -542,21 +660,7 @@ pub fn scores_tile_shaped(
     }
     #[cfg(target_arch = "x86_64")]
     {
-        let len = j1 - j0;
-        // A key tile needs a whole tile's worth of keys to run on: below sixteen the
-        // tile halves to eight, and below eight the range is a scalar tail (the edge
-        // of a sliding window is at most seven keys wide, and the scalar chain *is*
-        // the reference).
-        let kt = if len >= keys_tile {
-            keys_tile
-        } else if keys_tile > 16 && len >= 16 {
-            16
-        } else if len >= VEC {
-            8
-        } else {
-            0
-        };
-        if kt != 0 && vector_ok() {
+        if vector_ok() {
             let rt = match rows_tile.min(rows) {
                 1 => 1,
                 2 | 3 => 2,
@@ -564,11 +668,11 @@ pub fn scores_tile_shaped(
                 6 | 7 => 6,
                 _ => 8,
             };
-            // SAFETY: AVX2 + FMA checked; the shape is at most the strip and the key
-            // range holds a whole key tile.
+            // SAFETY: AVX2 + FMA checked; the shape is at most the strip, and the
+            // kernel reads the tiled panel within `hd * n` and writes `j0..j1`.
             unsafe {
-                scores_tile_avx2(
-                    rt, kt, q, q_stride, panel, n, hd, rows, j0, j1, scale, out, out_stride,
+                scores_tile_tiled_avx2(
+                    rt, q, q_stride, panel, n, hd, rows, j0, j1, scale, out, out_stride,
                 )
             };
             return;
@@ -580,8 +684,40 @@ pub fn scores_tile_shaped(
 }
 
 /// [`scores_tile`]'s scalar twin: the reference, and the only path on a scalar tier.
+///
+/// On x86_64 it reads the key-major panel [`key_panel`] builds; elsewhere the lane panel.
 #[allow(clippy::too_many_arguments)]
 pub fn scores_tile_scalar(
+    q: &[f32],
+    q_stride: usize,
+    panel: &[f32],
+    n: usize,
+    hd: usize,
+    rows: usize,
+    j0: usize,
+    j1: usize,
+    scale: f32,
+    out: &mut [f32],
+    out_stride: usize,
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        scores_tile_tiled_scalar(
+            q, q_stride, panel, n, hd, rows, j0, j1, scale, out, out_stride,
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        scores_tile_rows_scalar(
+            q, q_stride, panel, n, hd, rows, j0, j1, scale, out, out_stride,
+        );
+    }
+}
+
+/// The lane-panel (`[head_dim][n]`) scalar reference: aarch64's scalar twin and x86's
+/// fallback for a range too short for a vector key tile.
+#[allow(clippy::too_many_arguments)]
+pub fn scores_tile_rows_scalar(
     q: &[f32],
     q_stride: usize,
     panel: &[f32],
@@ -607,7 +743,39 @@ pub fn scores_tile_scalar(
     }
 }
 
-/// The tile dispatcher: one monomorphisation per measured shape.
+/// [`scores_tile_scalar`] on the key-major panel: one sequential head-dimension chain
+/// per `(row, key)`, the reference every x86 tile shape is held to.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+pub fn scores_tile_tiled_scalar(
+    q: &[f32],
+    q_stride: usize,
+    panel: &[f32],
+    n: usize,
+    hd: usize,
+    rows: usize,
+    j0: usize,
+    j1: usize,
+    scale: f32,
+    out: &mut [f32],
+    out_stride: usize,
+) {
+    for r in 0..rows {
+        let qr = &q[r * q_stride..];
+        let s = &mut out[r * out_stride..];
+        for j in j0..j1 {
+            let mut acc = 0.0f32;
+            for k in 0..hd {
+                acc = qr[k].mul_add(panel[panel_index(n, hd, j, k)], acc);
+            }
+            s[j] = acc * scale;
+        }
+    }
+}
+
+/// The row-major score-tile dispatcher: one monomorphisation per measured shape. x86_64
+/// uses it for a text's `n % 16`-key tail, which the key-major panel stores row-major;
+/// the tests also sweep its shapes.
 ///
 /// # Safety
 /// AVX2 and FMA must be available; the bounds are those of [`scores_tile`], and callers
@@ -656,7 +824,7 @@ unsafe fn scores_tile_avx2(
         (6, 32) => run!(6, 32),
         (8, 8) => run!(8, 8),
         (8, 16) => run!(8, 16),
-        _ => scores_tile_scalar(
+        _ => scores_tile_rows_scalar(
             q, q_stride, panel, n, hd, rows, j0, j1, scale, out, out_stride,
         ),
     }
@@ -799,6 +967,195 @@ unsafe fn score_block<const R: usize, const NV: usize>(
             // One overlapping tile to the end of the range.
             j = j1 - NV * VEC;
         }
+    }
+}
+
+/// Score a strip against the key-major panel of S4.9g part 3.
+///
+/// The full tiles of the text are scored by [`score_tile_tiled`], whose sixteen keys per
+/// tile are contiguous for every head dimension; the last `n % 16` keys are a row-major
+/// region and run the row-major kernel. Both write the same `acc * scale`, so a key's
+/// bits never depend on which region it is in. The range is widened to whole tiles, as
+/// the caller's union already is: keys outside a row's band are written and never read.
+///
+/// # Safety
+/// AVX2 and FMA must be available; the bounds are those of [`scores_tile`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn scores_tile_tiled_avx2(
+    rows_tile: usize,
+    q: &[f32],
+    q_stride: usize,
+    panel: &[f32],
+    n: usize,
+    hd: usize,
+    rows: usize,
+    j0: usize,
+    j1: usize,
+    scale: f32,
+    out: &mut [f32],
+    out_stride: usize,
+) {
+    let n0 = n - n % PANEL_TILE;
+    let full_hi = j1.min(n0);
+    if j0 < full_hi {
+        let a0 = j0 - j0 % PANEL_TILE;
+        let a1 = full_hi.div_ceil(PANEL_TILE) * PANEL_TILE;
+        let rt = rows_tile.min(rows).clamp(1, 8);
+        macro_rules! run {
+            ($r:literal) => {
+                score_tile_tiled::<$r>(q, q_stride, panel, hd, rows, a0, a1, scale, out, out_stride)
+            };
+        }
+        match rt {
+            1 => run!(1),
+            2 | 3 => run!(2),
+            4 | 5 => run!(4),
+            6 | 7 => run!(6),
+            _ => run!(8),
+        }
+    }
+    if j1 > n0 {
+        let rem = n - n0;
+        let lo = j0.saturating_sub(n0);
+        let hi = j1 - n0;
+        let tp = &panel[n0 * hd..];
+        let to = &mut out[n0..];
+        let rt = rows_tile.min(rows);
+        let len = hi - lo;
+        let kt = if len >= 16 {
+            16
+        } else if len >= VEC {
+            8
+        } else {
+            0
+        };
+        if kt != 0 {
+            scores_tile_avx2(
+                rt, kt, q, q_stride, tp, rem, hd, rows, lo, hi, scale, to, out_stride,
+            );
+        } else {
+            // Fewer than eight keys: the scalar chain, exactly as the row kernel's tail.
+            for r in 0..rows {
+                let qr = &q[r * q_stride..];
+                let s = &mut to[r * out_stride..];
+                for j in lo..hi {
+                    let mut acc = 0.0f32;
+                    for k in 0..hd {
+                        acc = qr[k].mul_add(tp[k * rem + j], acc);
+                    }
+                    s[j] = acc * scale;
+                }
+            }
+        }
+    }
+}
+
+/// One [`scores_tile`] shape over the key-major panel: `R` rows × one tile of sixteen
+/// keys, `R × 2` accumulators. `j0..j1` must be tile-aligned and a whole number of
+/// tiles. The row tail narrows to four, two and one row, as the row-major kernel's does.
+///
+/// # Safety
+/// AVX2 and FMA must be available; `j1 - j0 >= PANEL_TILE`, `j0 % PANEL_TILE == 0`,
+/// `j1 <= n - n % PANEL_TILE`, `rows > 0`, and the buffers are those of
+/// [`scores_tile`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn score_tile_tiled<const R: usize>(
+    q: &[f32],
+    q_stride: usize,
+    panel: &[f32],
+    hd: usize,
+    rows: usize,
+    j0: usize,
+    j1: usize,
+    scale: f32,
+    out: &mut [f32],
+    out_stride: usize,
+) {
+    debug_assert!(j1 - j0 >= PANEL_TILE && rows > 0);
+    let s = _mm256_set1_ps(scale);
+    let pp = panel.as_ptr();
+    let mut r0 = 0;
+    while r0 + R <= rows {
+        score_block_tiled::<R>(
+            q.as_ptr().add(r0 * q_stride),
+            q_stride,
+            pp,
+            hd,
+            j0,
+            j1,
+            s,
+            out.as_mut_ptr().add(r0 * out_stride),
+            out_stride,
+        );
+        r0 += R;
+    }
+    let rn = rows - r0;
+    if rn > 0 {
+        let qs = &q[r0 * q_stride..];
+        let os = &mut out[r0 * out_stride..];
+        if rn >= 4 && R > 4 {
+            score_tile_tiled::<4>(qs, q_stride, panel, hd, rn, j0, j1, scale, os, out_stride);
+        } else if rn >= 2 && R > 2 {
+            score_tile_tiled::<2>(qs, q_stride, panel, hd, rn, j0, j1, scale, os, out_stride);
+        } else {
+            score_tile_tiled::<1>(qs, q_stride, panel, hd, rn, j0, j1, scale, os, out_stride);
+        }
+    }
+}
+
+/// One register-blocked step of [`score_tile_tiled`]: `R` rows × sixteen keys, every
+/// `(row, key)` its own head-dimension chain. A head-dimension step reads one
+/// sixty-four-byte run of the tile, so a strip's panel traversal is sequential.
+///
+/// # Safety
+/// AVX2 and FMA must be available; pointers and ranges are those of [`score_tile_tiled`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn score_block_tiled<const R: usize>(
+    q: *const f32,
+    q_stride: usize,
+    panel: *const f32,
+    hd: usize,
+    j0: usize,
+    j1: usize,
+    scale: __m256,
+    out: *mut f32,
+    out_stride: usize,
+) {
+    const NV: usize = PANEL_TILE / VEC;
+    let mut qp = [q; R];
+    for (r, p) in qp.iter_mut().enumerate() {
+        *p = q.add(r * q_stride);
+    }
+    let mut j = j0;
+    while j < j1 {
+        let base = (j / PANEL_TILE) * hd * PANEL_TILE;
+        let mut acc = [[_mm256_setzero_ps(); NV]; R];
+        for k in 0..hd {
+            let p = panel.add(base + k * PANEL_TILE);
+            let mut w = [_mm256_setzero_ps(); NV];
+            for (v, wv) in w.iter_mut().enumerate() {
+                *wv = _mm256_loadu_ps(p.add(v * VEC));
+            }
+            for (r, qr) in qp.iter().enumerate() {
+                let qk = _mm256_broadcast_ss(&*qr.add(k));
+                for (v, wv) in w.iter().enumerate() {
+                    acc[r][v] = _mm256_fmadd_ps(qk, *wv, acc[r][v]);
+                }
+            }
+        }
+        for (r, a) in acc.iter().enumerate() {
+            let o = out.add(r * out_stride + j);
+            for (v, av) in a.iter().enumerate() {
+                _mm256_storeu_ps(o.add(v * VEC), _mm256_mul_ps(*av, scale));
+            }
+        }
+        j += PANEL_TILE;
     }
 }
 
@@ -1149,6 +1506,20 @@ unsafe fn exp_row_neon(x: &mut [f32], lo: usize, hi: usize, max: f32) {
     }
 }
 
+/// The number of keys the rows of a strip share at most: the union of their bands.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn mix_band_len(i0: usize, rows: usize, n: usize, half: Option<usize>) -> usize {
+    let mut lo = usize::MAX;
+    let mut hi = 0;
+    for r in 0..rows {
+        let (a, b) = band(i0 + r, n, half);
+        lo = lo.min(a);
+        hi = hi.max(b);
+    }
+    hi.saturating_sub(lo)
+}
+
 /// `out[r][d] = (Σ_j e[r][j]·v[j][d]) · inv[r]`, `j` ascending, for `rows` query rows
 /// that start at text-local index `i0` and share one value head.
 ///
@@ -1156,6 +1527,11 @@ unsafe fn exp_row_neon(x: &mut [f32], lo: usize, hi: usize, max: f32) {
 /// (`v_stride` floats each) with the head at `base`, `out` the strip's rows of the
 /// attention output at `out_stride` with the head at `obase`. Each row's window comes
 /// from [`band`].
+///
+/// On x86_64 a band longer than [`MIX_KEY_BLOCK`] takes the key-blocked kernel of
+/// S4.9g part 3; a shorter one keeps part 2's row-block
+/// kernel, whose whole band is register-resident. Both accumulate each `(row, d)` over
+/// ascending `j`, so they are the same fold and a bit-identical result.
 #[allow(clippy::too_many_arguments)]
 pub fn mix_rows(
     e: &[f32],
@@ -1200,10 +1576,17 @@ pub fn mix_rows(
             // inside `n`, and the value loads stay inside one row of `v` because
             // `d0 + 16 <= hd <= v_stride - base`.
             unsafe {
-                mix_rows_blocks_avx2(
-                    MIX_BLOCK, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out,
-                    out_stride, obase,
-                )
+                if mix_band_len(i0, rows, n, half) > MIX_KEY_BLOCK {
+                    mix_rows_keyblocked_avx2(
+                        MIX_BLOCK, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out,
+                        out_stride, obase,
+                    )
+                } else {
+                    mix_rows_blocks_avx2(
+                        MIX_BLOCK, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out,
+                        out_stride, obase,
+                    )
+                }
             };
             return;
         }
@@ -1309,10 +1692,17 @@ pub fn mix_rows_shaped(
             // SAFETY: AVX2 + FMA checked; the bounds asserted above cover every row,
             // key and head dimension the block's clamped tails read.
             unsafe {
-                mix_rows_blocks_avx2(
-                    rows_block, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out,
-                    out_stride, obase,
-                )
+                if mix_band_len(i0, rows, n, half) > MIX_KEY_BLOCK {
+                    mix_rows_keyblocked_avx2(
+                        rows_block, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv,
+                        out, out_stride, obase,
+                    )
+                } else {
+                    mix_rows_blocks_avx2(
+                        rows_block, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv,
+                        out, out_stride, obase,
+                    )
+                }
             };
             return;
         }
@@ -1334,6 +1724,252 @@ pub fn mix_rows_shaped(
     mix_rows_scalar(
         e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out, out_stride, obase,
     );
+}
+
+/// The value mix over key blocks (S4.9g part 3). The strip's rows accumulate into
+/// `out` itself, and the keys are walked in blocks of [`MIX_KEY_BLOCK`]: every row block
+/// of the strip visits a block before the walk moves on, so the text's value rows are
+/// read from L3 once per strip instead of once per row block. Within a row the keys are
+/// still visited in ascending order — blocks ascend, and inside a block the low edge,
+/// the shared core and the high edge ascend — so this is the same fold as
+/// [`mix_rows_scalar`], not a reassociation.
+///
+/// # Safety
+/// AVX2 and FMA must be available, and every row/key/head index must be in bounds.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_rows_keyblocked_avx2(
+    rows_block: usize,
+    e: &[f32],
+    e_stride: usize,
+    i0: usize,
+    rows: usize,
+    n: usize,
+    half: Option<usize>,
+    v: &[f32],
+    v_stride: usize,
+    base: usize,
+    hd: usize,
+    inv: &[f32],
+    out: &mut [f32],
+    out_stride: usize,
+    obase: usize,
+) {
+    if rows == 0 {
+        return;
+    }
+    let op = out.as_mut_ptr();
+    let ep = e.as_ptr();
+    let vp = v.as_ptr();
+    // The accumulator lives in the output rows themselves; start every one of them at
+    // zero so a block can be loaded and stored without a separate strip buffer.
+    for r in 0..rows {
+        let o = op.add(r * out_stride + obase);
+        let mut d = 0;
+        while d + VEC <= hd {
+            _mm256_storeu_ps(o.add(d), _mm256_setzero_ps());
+            d += VEC;
+        }
+        while d < hd {
+            *o.add(d) = 0.0;
+            d += 1;
+        }
+    }
+    let rb = rows_block.clamp(1, 8);
+    let mut lo_all = n;
+    let mut hi_all = 0;
+    for r in 0..rows {
+        let (a, b) = band(i0 + r, n, half);
+        lo_all = lo_all.min(a);
+        hi_all = hi_all.max(b);
+    }
+    let step = 2 * VEC;
+    let mut jb = lo_all;
+    while jb < hi_all {
+        let be = (jb + MIX_KEY_BLOCK).min(hi_all);
+        // Head dimensions outside the loop, row blocks inside: the block's value slice
+        // for one accumulator pair (`MIX_KEY_BLOCK × 16 × 4` bytes) stays in L1 while
+        // every row block of the strip walks it.
+        let mut d0 = 0;
+        while d0 + step <= hd {
+            let mut r0 = 0;
+            while r0 < rows {
+                let rn = (rows - r0).min(rb);
+                macro_rules! run {
+                    ($r:literal) => {
+                        mix_block_chunk::<$r, 2>(
+                            ep, e_stride, i0, n, half, vp, v_stride, base, hd, op, out_stride,
+                            obase, r0, rn, jb, be, d0,
+                        )
+                    };
+                }
+                match rb {
+                    1 => run!(1),
+                    2 => run!(2),
+                    4 => run!(4),
+                    6 => run!(6),
+                    _ => run!(8),
+                }
+                r0 += rn;
+            }
+            d0 += step;
+        }
+        if d0 < hd {
+            // Head dimensions narrower than one accumulator pair: scalar, the same
+            // ascending order as the reference.
+            for r in 0..rows {
+                let (a, b) = band(i0 + r, n, half);
+                let lo = a.max(jb);
+                let hi = b.min(be);
+                let er = ep.add(r * e_stride);
+                let o = op.add(r * out_stride + obase);
+                for d in d0..hd {
+                    let mut acc = *o.add(d);
+                    for j in lo..hi {
+                        acc = (*er.add(j)).mul_add(*vp.add(j * v_stride + base + d), acc);
+                    }
+                    *o.add(d) = acc;
+                }
+            }
+        }
+        jb = be;
+    }
+    // The denominator, once per row, after the whole ascending chain.
+    for r in 0..rows {
+        let k = _mm256_set1_ps(*inv.get_unchecked(r));
+        let o = op.add(r * out_stride + obase);
+        let mut d = 0;
+        while d + VEC <= hd {
+            _mm256_storeu_ps(o.add(d), _mm256_mul_ps(_mm256_loadu_ps(o.add(d)), k));
+            d += VEC;
+        }
+        while d < hd {
+            *o.add(d) = *o.add(d) * *inv.get_unchecked(r);
+            d += 1;
+        }
+    }
+}
+
+/// One row block × one key block × one head-dimension pair of
+/// [`mix_rows_keyblocked_avx2`]: the accumulator is loaded from `out`, walked over the
+/// block's keys in ascending order, and stored back unscaled. `rn` rows are real; the
+/// rest of the `R` lanes duplicate the last one and are discarded. The key range is the
+/// block clipped by every row's own band.
+///
+/// # Safety
+/// AVX2 and FMA must be available, and every row/key/head index must be in bounds.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_block_chunk<const R: usize, const V: usize>(
+    ep: *const f32,
+    e_stride: usize,
+    i0: usize,
+    n: usize,
+    half: Option<usize>,
+    vp: *const f32,
+    v_stride: usize,
+    base: usize,
+    hd: usize,
+    op: *mut f32,
+    out_stride: usize,
+    obase: usize,
+    r0: usize,
+    rn: usize,
+    jb: usize,
+    je: usize,
+    d0: usize,
+) {
+    debug_assert!(rn > 0 && rn <= R && d0 + V * VEC <= hd);
+    if jb >= je {
+        return;
+    }
+    let mut bands = [(0usize, 0usize); R];
+    for (r, b) in bands.iter_mut().enumerate() {
+        let (a, c) = band(i0 + r0 + r.min(rn - 1), n, half);
+        *b = (a.max(jb), c.min(je));
+    }
+    let core_lo = bands.iter().map(|b| b.0).max().unwrap_or(0);
+    let core_hi = bands.iter().map(|b| b.1).min().unwrap_or(0);
+    if core_lo > core_hi {
+        // The block's windows share no key (a window narrower than the row block, or a
+        // row whose band is outside this block): one row at a time, in ascending order.
+        if R == 1 {
+            return;
+        }
+        for r in 0..rn {
+            mix_block_chunk::<1, V>(
+                ep,
+                e_stride,
+                i0,
+                n,
+                half,
+                vp,
+                v_stride,
+                base,
+                hd,
+                op,
+                out_stride,
+                obase,
+                r0 + r,
+                1,
+                jb,
+                je,
+                d0,
+            );
+        }
+        return;
+    }
+    let mut acc = [[_mm256_setzero_ps(); V]; R];
+    for (r, a) in acc.iter_mut().enumerate() {
+        let o = op.add((r0 + r.min(rn - 1)) * out_stride + obase + d0);
+        for (v, av) in a.iter_mut().enumerate() {
+            *av = _mm256_loadu_ps(o.add(v * VEC));
+        }
+    }
+    // The keys only the earliest-windowed rows see, ascending.
+    for (r, a) in acc.iter_mut().enumerate() {
+        let er = ep.add((r0 + r.min(rn - 1)) * e_stride);
+        for j in bands[r].0..core_lo {
+            let ev = _mm256_broadcast_ss(&*er.add(j));
+            let p = vp.add(j * v_stride + base + d0);
+            for (v, av) in a.iter_mut().enumerate() {
+                *av = _mm256_fmadd_ps(ev, _mm256_loadu_ps(p.add(v * VEC)), *av);
+            }
+        }
+    }
+    // The core: every row sees these keys, so one value load feeds them all.
+    for j in core_lo..core_hi {
+        let p = vp.add(j * v_stride + base + d0);
+        let mut val = [_mm256_setzero_ps(); V];
+        for (v, w) in val.iter_mut().enumerate() {
+            *w = _mm256_loadu_ps(p.add(v * VEC));
+        }
+        for (r, a) in acc.iter_mut().enumerate() {
+            let ev = _mm256_broadcast_ss(&*ep.add((r0 + r.min(rn - 1)) * e_stride + j));
+            for (v, w) in val.iter().enumerate() {
+                a[v] = _mm256_fmadd_ps(ev, *w, a[v]);
+            }
+        }
+    }
+    // And the keys only the latest-windowed rows see, ascending.
+    for (r, a) in acc.iter_mut().enumerate() {
+        let er = ep.add((r0 + r.min(rn - 1)) * e_stride);
+        for j in core_hi..bands[r].1 {
+            let ev = _mm256_broadcast_ss(&*er.add(j));
+            let p = vp.add(j * v_stride + base + d0);
+            for (v, av) in a.iter_mut().enumerate() {
+                *av = _mm256_fmadd_ps(ev, _mm256_loadu_ps(p.add(v * VEC)), *av);
+            }
+        }
+    }
+    for r in 0..rn {
+        let o = op.add((r0 + r) * out_stride + obase + d0);
+        for (v, av) in acc[r].iter().enumerate() {
+            _mm256_storeu_ps(o.add(v * VEC), *av);
+        }
+    }
 }
 
 /// # Safety
@@ -1882,15 +2518,20 @@ mod tests {
                             let i = r0 + r;
                             let (lo, hi) = band(i, n, half);
                             let s = &mut scores[r * n..(r + 1) * n];
-                            scores_row_scalar(
+                            // The arch's reference layout: the key-major panel's scalar
+                            // twin on x86_64, the lane panel's elsewhere.
+                            scores_tile_scalar(
                                 &q[i * qd + h * hd..],
+                                qd,
                                 &panel,
                                 n,
                                 hd,
+                                1,
                                 lo,
                                 hi,
                                 scale,
                                 s,
+                                n,
                             );
                             let max = max_row_scalar(s, lo, hi);
                             exp_row_scalar(s, lo, hi, max);
@@ -1985,7 +2626,7 @@ mod tests {
                     let q = prng(seed ^ (n as u64), n * hd, -1.0, 1.0);
                     let k = prng(seed ^ 7, n * hd, -1.0, 1.0);
                     let v = prng(seed ^ 11, n * hd, -1.0, 1.0);
-                    for strip in [1usize, 7, 16, 32, n.max(1)] {
+                    for strip in [1usize, 7, 16, 32, 64, n.max(1)] {
                         let want = attend(
                             n,
                             hd,
@@ -2047,7 +2688,7 @@ mod tests {
                         &v,
                         false,
                     );
-                    for strip in [1usize, 2, 5, 16, 32] {
+                    for strip in [1usize, 2, 5, 16, 32, 64] {
                         let got = attend(
                             n,
                             hd,
@@ -2192,13 +2833,25 @@ mod tests {
 
     #[test]
     fn the_panel_is_the_heads_keys_with_keys_along_the_lanes() {
-        let (n, hd, kvd, base) = (5usize, 8usize, 24usize, 8usize);
-        let k = prng(0xfeed, n * kvd, -1.0, 1.0);
-        let mut panel = vec![0.0f32; hd * n];
-        key_panel(&k, kvd, base, hd, n, &mut panel);
-        for j in 0..n {
-            for d in 0..hd {
-                assert_eq!(panel[d * n + j], k[j * kvd + base + d], "{d},{j}");
+        for &(n, hd, kvd, base) in &[
+            (5usize, 8usize, 24usize, 8usize),
+            (33, 8, 24, 8),
+            (32, 16, 16, 0),
+        ] {
+            let k = prng(0xfeed ^ n as u64, n * kvd, -1.0, 1.0);
+            let mut panel = vec![0.0f32; hd * n];
+            key_panel(&k, kvd, base, hd, n, &mut panel);
+            for j in 0..n {
+                for d in 0..hd {
+                    #[cfg(target_arch = "x86_64")]
+                    assert_eq!(
+                        panel[panel_index(n, hd, j, d)],
+                        k[j * kvd + base + d],
+                        "{d},{j}"
+                    );
+                    #[cfg(not(target_arch = "x86_64"))]
+                    assert_eq!(panel[d * n + j], k[j * kvd + base + d], "{d},{j}");
+                }
             }
         }
     }
@@ -2233,7 +2886,7 @@ mod tests {
                     let q = prng(0x7a11 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
                     let k = prng(0x7a12 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
                     let v = prng(0x7a13 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
-                    for strip in [7usize, 16, 32] {
+                    for strip in [7usize, 16, 32, 64] {
                         let want = attend(
                             n,
                             hd,
@@ -2346,19 +2999,42 @@ mod tests {
     #[test]
     fn the_tile_runs_the_rows_own_chain() {
         // A tile of one row over the row's band is exactly `scores_row`, and the tile's
-        // scalar twin is `scores_row_scalar`: the tile is a scheduling change.
+        // scalar twin is the same chain: the tile is a scheduling change. The row kernel
+        // reads the lane panel (`key_panel_rows`); the tile reads whichever panel
+        // `key_panel` builds on this architecture.
         for &hd in &HDS {
             for &n in &[16usize, 33, 129] {
                 let q = prng(0x1a11 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
                 let k = prng(0x1a12 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
+                let mut rows_panel = vec![0.0f32; hd * n];
+                key_panel_rows(&k, hd, 0, hd, n, 0, n, &mut rows_panel);
                 let mut panel = vec![0.0f32; hd * n];
                 key_panel(&k, hd, 0, hd, n, &mut panel);
                 let mut a = vec![0.0f32; n];
+                let mut a2 = vec![0.0f32; n];
                 let mut b = vec![0.0f32; n];
                 let mut c = vec![0.0f32; n];
                 for i in [0usize, 1, n / 2, n - 1] {
                     let (lo, hi) = band(i, n, Some(3));
-                    scores_row(&q[i * hd..], &panel, n, hd, lo, hi, 0.5, &mut a);
+                    scores_row(&q[i * hd..], &rows_panel, n, hd, lo, hi, 0.5, &mut a);
+                    scores_tile_rows_scalar(
+                        &q[i * hd..],
+                        hd,
+                        &rows_panel,
+                        n,
+                        hd,
+                        1,
+                        lo,
+                        hi,
+                        0.5,
+                        &mut a2,
+                        n,
+                    );
+                    same(
+                        &a2[lo..hi],
+                        &a[lo..hi],
+                        &format!("rows scalar hd {hd} n {n} row {i}"),
+                    );
                     scores_tile_shaped(
                         1,
                         8,
@@ -2401,6 +3077,114 @@ mod tests {
                         max_row(&x, lo, hi).to_bits(),
                         want.to_bits(),
                         "n {n} lo {lo} hi {hi}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_key_block_edge_is_the_same_fold() {
+        // Bands wider than `MIX_KEY_BLOCK` take the key-blocked value mix, and their
+        // edges fall inside blocks: every strip size and window must still be the
+        // scalar fold, key ascending.
+        let n = 300;
+        for &hd in &[16usize, 64] {
+            let q = prng(0x8c01 ^ hd as u64, n * hd, -1.0, 1.0);
+            let k = prng(0x8c02 ^ hd as u64, n * hd, -1.0, 1.0);
+            let v = prng(0x8c03 ^ hd as u64, n * hd, -1.0, 1.0);
+            for &half in &[
+                None,
+                Some(0),
+                Some(1),
+                Some(8),
+                Some(64),
+                Some(128),
+                Some(256),
+            ] {
+                let want = attend(
+                    n,
+                    hd,
+                    1,
+                    1,
+                    half,
+                    64,
+                    ENGINE_TILE,
+                    ENGINE_MIX,
+                    &q,
+                    &k,
+                    &v,
+                    true,
+                );
+                for &strip in &[1usize, 7, 16, 32, 64, n] {
+                    for &mix in &[1usize, 6, 12] {
+                        let got = attend(
+                            n,
+                            hd,
+                            1,
+                            1,
+                            half,
+                            strip,
+                            ENGINE_TILE,
+                            mix,
+                            &q,
+                            &k,
+                            &v,
+                            false,
+                        );
+                        same(
+                            &got,
+                            &want,
+                            &format!("hd {hd} half {half:?} strip {strip} mix {mix}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_text_matches_the_scalar_twin() {
+        // Long enough for every panel tile and every mix key block to be visited many
+        // times: 1 024 to 4 096 keys, strips of 1 to 64 rows, global and sliding.
+        for &(n, hd) in &[(4096usize, 16usize), (2048, 32), (1024, 64), (1024, 128)] {
+            for &half in &[None, Some(64)] {
+                let q = prng(0x9d01 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
+                let k = prng(0x9d02 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
+                let v = prng(0x9d03 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
+                let want = attend(
+                    n,
+                    hd,
+                    1,
+                    1,
+                    half,
+                    64,
+                    ENGINE_TILE,
+                    ENGINE_MIX,
+                    &q,
+                    &k,
+                    &v,
+                    true,
+                );
+                for &strip in &[1usize, 7, 16, 32, 64, n] {
+                    let got = attend(
+                        n,
+                        hd,
+                        1,
+                        1,
+                        half,
+                        strip,
+                        ENGINE_TILE,
+                        ENGINE_MIX,
+                        &q,
+                        &k,
+                        &v,
+                        false,
+                    );
+                    same(
+                        &got,
+                        &want,
+                        &format!("hd {hd} n {n} half {half:?} strip {strip}"),
                     );
                 }
             }
