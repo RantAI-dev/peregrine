@@ -190,11 +190,11 @@ fn every_input_shape_returns_normalised_vectors_in_input_order() {
     let (status, one) = post(
         port,
         "/v1/embeddings",
-        json!({"input": "hello", "model": "my-alias"}),
+        json!({"input": "hello", "model": "peregrine"}),
     );
     assert_eq!(status, 200);
     assert_eq!(one["object"], "list");
-    assert_eq!(one["model"], "my-alias");
+    assert_eq!(one["model"], "peregrine");
     assert_eq!(one["data"].as_array().unwrap().len(), 1);
     assert_eq!(one["data"][0]["object"], "embedding");
     assert_eq!(one["data"][0]["index"], 0);

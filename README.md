@@ -107,6 +107,27 @@ curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
 
 The server speaks `/v1/chat/completions` (streamed or not), plus `/v1/models`, `/health` and `/metrics`.
 
+`-m` may be repeated: every file is a model in the same process, and a request's `model` field
+selects one. The first `-m` is the default for a request that names no model. With one `-m` the id is
+`peregrine`, as before; with several, each file is named by its stem unless `--alias` says otherwise
+(one `--alias` per `-m`, in order):
+
+```sh
+peregrine serve \
+  -m chat.gguf --alias chat \
+  -m embed.gguf --alias embed \
+  -m decide.gguf --alias decide \
+  --port 8201
+curl -s localhost:8201/v1/embeddings -H 'content-type: application/json' \
+  -d '{"model":"embed","input":"What is the capital of France?"}'
+```
+
+Each model has its own engine, slots and admission, and `/v1/models` lists what each can do. The
+models take weight passes in turn — one pass at a time for the whole process, first come first
+served — so they share the cores instead of competing for them, and a request's output does not
+change because another model is busy. An unknown `model` is a 404. Every model loads at start; there
+is no unloading of idle models.
+
 For a long-lived service, `--background` detaches the server, writes a lifecycle state file and a log,
 and returns once it is listening:
 

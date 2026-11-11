@@ -24,7 +24,8 @@ roadmap changes it, says so. If this file and the code disagree, the code wins a
   quant/vmath                        prefix.rs
      │
      ▼
-  pool.rs: one persistent thread pool, spin-then-park barrier
+  pool.rs: one persistent thread pool, spin-then-park barrier; a server with
+           several models shares it, and a PassTurn runs one engine step at a time
 ```
 
 A request becomes a **slot** in `serve::Engine`. Each engine step builds one batch of rows, from running

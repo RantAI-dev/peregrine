@@ -964,6 +964,204 @@ impl Drop for Pool {
     }
 }
 
+/// One process-wide turn at a time, shared by the engines of a multi-model server.
+///
+/// A server with several models gives each model its own `Engine` but one process-wide
+/// thread pool, so only one pass may run at a time: two passes at once would put twice
+/// the threads on the same cores. Each engine thread takes a turn around one
+/// `Engine::step`, so the models interleave pass by pass.
+///
+/// The next turn goes to the busy engine that has had the least pass time, with arrival
+/// order breaking ties. A model whose passes are cheap (a tiny decision model computes
+/// one in under a millisecond) therefore takes several turns in a row until it has had
+/// its share of the machine, instead of receiving one pass for every long pass of a
+/// chat model. Every turn is still exactly one pass, and a model that asks waits at
+/// most about one pass of the other models. A model that stops having work calls
+/// [`PassTurn::leave`], so the turn never rests on an idle engine.
+pub struct PassTurn {
+    n: usize,
+    inner: Mutex<TurnState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct TurnState {
+    /// Nanoseconds of pass time each participant has received.
+    served: Vec<u64>,
+    /// The participants with work (an active slot or a queued job).
+    busy: Vec<bool>,
+    /// Who is inside `acquire`, waiting for its turn.
+    wanting: Vec<bool>,
+    /// The arrival ticket of each waiter.
+    ticket: Vec<u64>,
+    next_ticket: u64,
+    /// The participant whose turn it is next.
+    turn: usize,
+    holders: usize,
+    max_holders: usize,
+    passes: u64,
+}
+
+impl PassTurn {
+    /// A turn for `participants` engines, indexed `0..participants`.
+    pub fn new(participants: usize) -> PassTurn {
+        assert!(participants >= 1, "a turn needs a participant");
+        PassTurn {
+            n: participants,
+            inner: Mutex::new(TurnState {
+                served: vec![0; participants],
+                busy: vec![false; participants],
+                wanting: vec![false; participants],
+                ticket: vec![0; participants],
+                ..TurnState::default()
+            }),
+            wake: Condvar::new(),
+        }
+    }
+
+    /// Mark participant `who` as having work; it stays in the rotation until
+    /// [`PassTurn::leave`].
+    pub fn enter(&self, who: usize) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.busy[who] {
+            // No credit for a long idle spell, but a bounded one: a model that returns
+            // may catch up by at most [`MAX_CREDIT_NS`] of service, so it can take a few
+            // cheap passes in a row without holding the others for long.
+            if let Some(front) = (0..self.n)
+                .filter(|&j| j != who && g.busy[j])
+                .map(|j| g.served[j])
+                .max()
+            {
+                g.served[who] = g.served[who].max(front.saturating_sub(MAX_CREDIT_NS));
+            }
+        }
+        g.busy[who] = true;
+        if g.holders == 0 && g.turn == who {
+            drop(g);
+            self.wake.notify_all();
+        }
+    }
+
+    /// Mark participant `who` as having no work. If the turn was resting on it, the next
+    /// busy (or next asking) participant takes over.
+    pub fn leave(&self, who: usize) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.busy[who] = false;
+        if g.holders == 0 && g.turn == who {
+            g.turn = next_participant(&g, who);
+        }
+        drop(g);
+        self.wake.notify_all();
+    }
+
+    /// Wait for participant `who`'s turn and hold it until the guard is dropped.
+    pub fn acquire(&self, who: usize) -> TurnGuard<'_> {
+        assert!(who < self.n, "participant {who} is out of range");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.ticket[who] = g.next_ticket;
+        g.next_ticket += 1;
+        g.wanting[who] = true;
+        loop {
+            // Run when no one holds the turn and either it is my turn, or the
+            // participant scheduled now has stopped asking and has no work.
+            if g.holders == 0 && (g.turn == who || (!g.busy[g.turn] && !g.wanting[g.turn])) {
+                break;
+            }
+            g = self.wake.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        g.turn = who;
+        g.holders = 1;
+        g.max_holders = g.max_holders.max(g.holders);
+        g.passes += 1;
+        let started = Instant::now();
+        drop(g);
+        TurnGuard {
+            turn: self,
+            who,
+            started,
+        }
+    }
+
+    /// Participants that want the turn but do not hold it: the callers waiting.
+    pub fn waiting(&self) -> usize {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.wanting.iter().filter(|w| **w).count() - g.holders
+    }
+
+    /// The most callers that ever held the turn at once. One means the turns did
+    /// their job; a larger value is a bug.
+    pub fn max_holders(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_holders
+    }
+
+    /// Passes run under this turn, for `/metrics` and tests.
+    pub fn passes(&self) -> u64 {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).passes
+    }
+}
+
+impl Default for PassTurn {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+/// How far behind an idle model may fall and still catch up in one burst.
+///
+/// About one long pass: a returning model takes a few cheap passes at most before the
+/// rotation is even again, and no other model waits longer than that.
+const MAX_CREDIT_NS: u64 = 50_000_000;
+
+/// The busy participant after `who` with the least service; ties go to the earlier
+/// ticket, then to the lower index. When none is busy, the next participant that is
+/// asking, and failing that the next index, keeps the rotation moving.
+fn next_participant(g: &TurnState, who: usize) -> usize {
+    let n = g.served.len();
+    let mut best: Option<usize> = None;
+    for j in 0..n {
+        if !g.busy[j] {
+            continue;
+        }
+        best = Some(match best {
+            None => j,
+            Some(b) if (g.served[j], g.ticket[j], j) < (g.served[b], g.ticket[b], b) => j,
+            Some(b) => b,
+        });
+    }
+    if best.is_some() {
+        return best.unwrap_or(who);
+    }
+    for step in 1..=n {
+        let j = (who + step) % n;
+        if g.wanting[j] {
+            return j;
+        }
+    }
+    (who + 1) % n
+}
+
+/// A held turn, released on drop.
+pub struct TurnGuard<'a> {
+    turn: &'a PassTurn,
+    who: usize,
+    started: Instant,
+}
+
+impl Drop for TurnGuard<'_> {
+    fn drop(&mut self) {
+        let mut g = self.turn.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.served[self.who] += self.started.elapsed().as_nanos() as u64;
+        g.wanting[self.who] = false;
+        g.holders = 0;
+        g.turn = next_participant(&g, self.who);
+        drop(g);
+        self.turn.wake.notify_all();
+    }
+}
+
 /// Contiguous share of `total` items belonging to worker `w` of `n`.
 ///
 /// Balanced to within one item, and every index belongs to exactly one worker —
@@ -1360,5 +1558,93 @@ mod tests {
             crate::options::get().adaptive_spin
         );
         assert!(us < 100.0, "{us} us/join is not a fork–join");
+    }
+
+    /// The turn is first come, first served: a caller that asked first runs first, even
+    /// when a later caller is ready, and two callers never hold it at once.
+    #[test]
+    fn passes_take_turns_in_the_order_they_asked() {
+        let turn = Arc::new(PassTurn::new(3));
+        turn.enter(0);
+        turn.enter(1);
+        turn.enter(2);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let held = turn.acquire(0);
+        let spawn = |n: usize| {
+            let turn = turn.clone();
+            let order = order.clone();
+            std::thread::spawn(move || {
+                let _guard = turn.acquire(n);
+                order.lock().unwrap_or_else(|e| e.into_inner()).push(n);
+            })
+        };
+        let first = spawn(1);
+        wait_until(|| turn.waiting() == 1);
+        let second = spawn(2);
+        wait_until(|| turn.waiting() == 2);
+        assert_eq!(
+            turn.waiting(),
+            2,
+            "the second caller did not queue behind the first"
+        );
+        drop(held);
+        first.join().unwrap();
+        second.join().unwrap();
+        assert_eq!(
+            *order.lock().unwrap_or_else(|e| e.into_inner()),
+            vec![1, 2],
+            "the turns were not served in arrival order"
+        );
+        assert_eq!(turn.max_holders(), 1, "two passes held the turn at once");
+        assert_eq!(turn.passes(), 3);
+        assert_eq!(turn.waiting(), 0);
+        turn.leave(0);
+        turn.leave(1);
+        turn.leave(2);
+    }
+
+    /// A participant that keeps asking cannot starve one that asks once: the waiting
+    /// caller is served after at most the pass in flight.
+    #[test]
+    fn a_busy_participant_does_not_starve_another() {
+        let turn = Arc::new(PassTurn::new(2));
+        turn.enter(0);
+        let hot = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let t = turn.clone();
+        let h = hot.clone();
+        let s = stop.clone();
+        let worker = std::thread::spawn(move || {
+            while !s.load(Ordering::SeqCst) {
+                let _guard = t.acquire(0);
+                h.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        // Let the busy side take many turns, then ask once.
+        wait_until(|| hot.load(Ordering::SeqCst) >= 100);
+        let before = hot.load(Ordering::SeqCst);
+        turn.enter(1);
+        let _guard = turn.acquire(1);
+        let after = hot.load(Ordering::SeqCst);
+        assert!(
+            after.saturating_sub(before) <= 4,
+            "the waiting participant was passed over {} times",
+            after - before
+        );
+        drop(_guard);
+        turn.leave(1);
+        stop.store(true, Ordering::SeqCst);
+        worker.join().unwrap();
+        turn.leave(0);
+        assert_eq!(turn.max_holders(), 1);
+    }
+
+    /// Poll a condition from a test thread, with a deadline so a bug fails instead of hanging.
+    fn wait_until(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "the condition never became true");
+            std::thread::yield_now();
+        }
     }
 }

@@ -361,5 +361,59 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
    llama.cpp computes them, so a client gets the same numbers from either engine.
 6. **No Jinja engine.** A decision type is supported when its renderer is written and matches
    llama.cpp byte for byte on the fixtures; an unknown type or an unrecognised template is refused.
-5. **Multi-model serving is last** (S4.10): every earlier step is useful with one model per
-   process, and it needs a decision on how models share the thread pool.
+5. **Multi-model serving: one engine per model, one pass at a time for the process** (S4.10).
+   `serve -m a -m b` keeps one `Engine` per file — its own slots, scheduler, admission and
+   prefix store — because ADR 0007 makes the engine the only runtime and a model's state must
+   not be shared with another's. The thread pool *is* shared: `Pool` becomes an `Arc` that every
+   engine runs, because `Pool::run` publishes one job at a time and is not meant for two
+   callers anyway, and one pool keeps its workers hot when the turn moves between models
+   instead of parking a pool per switch. A process-wide `PassTurn` is still needed, both to
+   serialise the one pool and to decide who runs: it is held for exactly one `Engine::step`,
+   and the next turn goes to the busy engine that has had the least pass time, with arrival
+   order breaking ties. Passes are tens of milliseconds for the models this is for, so the
+   models interleave pass by pass; on a tiny model whose pass is under a millisecond, the
+   model takes a few passes in a row until it has had its share, rather than one pass per long
+   chat pass. A model waits at most about one pass of the others, so none starves. The cost
+   is one engine thread per model, mostly parked.
+
+## 8. S4.10 as built
+
+`serve -m a.gguf -m b.gguf` loads every file at start, each as its own `Engine` on its own
+engine thread. The engine options are process-wide (thread count, pass rows, kernel switches,
+KV precision), and so is the tuning profile lookup, which uses the first `-m`.
+
+**Routing.** A request's `model` field is looked up in the ids `/v1/models` lists. The id of a
+one-model server is still `peregrine`, so `serve -m one.gguf` behaves exactly as before. With
+several `-m`, a file without `--alias` is named by its stem, and `--alias` may be repeated (one
+per `-m`, in order); two equal ids are refused at startup. A request with no `model` (or an
+empty one) goes to the first `-m`, so single-model clients keep working. An unknown id is a 404
+in the OpenAI error shape (`type: invalid_request_error`, `code: model_not_found`). The route
+is chosen before the request is parsed, so each endpoint keeps its existing messages for a
+model that cannot do what is asked: chat on an encoder is a 400 naming it, embeddings on a file
+with no pooling type is a 400 naming the key, and `/v1/systemone` on a model without decision
+metadata is a 501.
+
+**Passes and fairness.** Every engine shares one process-wide pool, and its engine thread takes
+the process-wide `PassTurn` around one `Engine::step`. The next turn goes to the busy engine
+that has had the least pass time, ties in arrival order: an embedding that arrives beside a long
+chat prefill runs after at most the chat pass in flight, not after the whole prefill, and a model
+whose passes are cheap (the tiny decision file's are under a millisecond) still gets about half
+the machine instead of one pass per long chat pass. A model that has been idle may catch up by
+at most about one long pass. `/metrics` reports `peregrine_pass_turns_total` and `peregrine_pass_holders_max`; the
+latter is 1 when the turn is doing its job. The models' outputs do not change: which model runs
+when is timing only, and the tests compare greedy chat tokens, embedding vectors and decision
+answers bit for bit against one-model servers while all models are busy.
+
+**Capabilities and metrics.** `/v1/models` lists every model with the same entry a one-model
+server gives that file. `/metrics` keeps its unlabelled lines for the first model and adds
+`peregrine_model_*{model="<id>"}` lines for every model (slots, requests, passes, decode steps,
+rows, MTP drafts and accepts, and the embedding cache's entries and bytes).
+
+**Memory and the embedding cache.** Every model loads at start; unloading idle models is not
+in this step. The duplicate-text embedding cache (`embed_cache.rs`, keyed by token ids, pooling
+and dimensions) is one cache per model, so one model's vector can never be returned for
+another's; the tests serve two causal embedders with identical tokenizers and different weights
+and compare each one's vector with its one-model server.
+
+**Shutdown.** The drain timeout is the process's: SIGTERM stops accepting, lets the requests
+in flight on every engine finish, then exits. `peregrine stop` and `--background` are unchanged.

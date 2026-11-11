@@ -127,13 +127,23 @@ the log. When no tuning profile exists (`peregrine tune`) and no thread count or
 pinned, the server also calibrates those two for this host in under 200 ms and prints what it chose;
 `PEREGRINE_CALIBRATE=0` turns that off. The server speaks the OpenAI chat API (`/v1/chat/completions`,
 streamed or not) plus `/v1/models`, `/health` and `/metrics`, and `/v1/embeddings` when the file is an
-embedding model. One process serves one model, as with
-llama-server; `-t` caps the threads, `-c` the context, and `--slots` the number of users served in one
-weight pass.
+embedding model. `-t` caps the threads, `-c` the context, and `--slots` the number of users served in
+one weight pass.
+
+`-m` may be repeated to serve several models from one process: a chat model, an embedder and a
+decision model, each with its own engine and its own id on `/v1/models`. A request's `model` field
+selects one, and a request without it goes to the first `-m`. With one `-m` the id is `peregrine`;
+with several, a file is named by its stem unless `--alias` names it (repeat `--alias` once per `-m`,
+in order). The models take weight passes in turn, one pass at a time, so they share the cores:
+
+```sh
+peregrine serve -m chat.gguf --alias chat -m embed.gguf --alias embed --port 8201
+```
 
 ## 5. Call it
 
-With `curl` (the `model` field is accepted but ignored — one process is one model):
+With `curl` (the `model` field selects a model when the server was started with several; with one
+`-m` it may be omitted):
 
 ```sh
 curl -s http://127.0.0.1:8201/v1/chat/completions -H 'content-type: application/json' \

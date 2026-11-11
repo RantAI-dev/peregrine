@@ -107,7 +107,11 @@ fn main() {
                 log_file,
                 startup_timeout,
             } = cmd;
-            args.model = resolved(args.model, "peregrine serve");
+            args.model = args
+                .model
+                .into_iter()
+                .map(|m| resolved(m, "peregrine serve"))
+                .collect();
             if background {
                 match peregrine::service::start_background(
                     args.port,
