@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Repacked Q5_K tiles on x86 (S4.9i)**: a Q5_K matrix is now rewritten at load into the
+  eight-row tile (`Q5K8`, 1408 bytes, size-neutral), with the fifth bits transposed once and
+  the nibbles, scales and mins in the Q4_K tile's layout. An AVX2 GEMM for four or more
+  activation rows and a raw-layout GEMV for one to three, both bit-identical to a new scalar
+  reference (`dot_q5k8_ref`) and to each other. The int16 stage widens after every two windows:
+  eight products per lane, 8·31·127 = 31 496 < 32 767. On bluefin, Qwen3.5-2B Q4_K_M at four
+  threads: prompt 132.6 → 141.9 tok/s at 100 tokens (+7.0 %) and 136.9 → 143.8 at 400 (+5.0 %),
+  decode flat (29.0 → 29.1 and 29.1 → 29.1); the Q6_K-only models are unchanged. The Q6_K
+  tile's x86 GEMM and GEMV are implemented and tested too (four products per int16 lane,
+  32 004 < 32 767), but its GEMV loses 21 % to the row kernel at one row on AVX2, so decision 9
+  keeps Q6_K on the row path there; the kernels are ready for a tier whose GEMV wins. Goldens:
+  the synthetic Q5_K files (AVX2 and AVX-512) and Qwen3.5-2B's real-model golden (both tiers)
+  move; nothing without a Q5_K matmul changes.
 - **The `bert` family: MiniLM, BGE, E5, GTE and bge-m3 embeddings (roadmap S4.6, part a)**:
   `architecture = "bert"` is the post-norm encoder every encoder-only embedding file in
   llama.cpp's format ships as — token + token-type + learned absolute-position embeddings and one
@@ -92,6 +105,21 @@ All notable changes to this project are documented here. The format follows
   credential-shaped string in a tracked text file, and (when `HYGIENE_BANNED_PATTERN` is set) a banned
   name, on the tree and on every commit a pull request adds; `scripts/hygiene-selftest.sh` proves each
   check and `ci-ok` now requires the job.
+
+- **The packed weights are cached on disk and mapped at load (S4.9e)**: after the load-time
+  repack (the Q4_K/Q6_K/Q5_0/Q8_0 eight-row tiles and the S4.9f F32/F16/BF16 sixteen-row panels),
+  the two stores are written to one file under `~/.cache/peregrine/packs/`
+  (`$XDG_CACHE_HOME/peregrine/packs`, `$PEREGRINE_CACHE_DIR/packs`; `PEREGRINE_PACK_CACHE=<dir>`
+  overrides it and `PEREGRINE_PACK_CACHE=0` turns it off). The next load of the same model and the
+  same layout maps that file read-only instead of packing: the pages are the page cache's, shared
+  by every process, and no copy is made. The key is the model's size, mtime and GGUF header/tensor
+  directory hash, a layout version, the packed tensors with their shapes and formats, the repack
+  switches and the kernel tier; a mismatch rebuilds. Files are written to a temporary name and
+  renamed, so concurrent loads and crashes are safe, a read-only or full directory falls back to
+  in-memory packing with one line, and a size cap (`PEREGRINE_PACK_CACHE_MB`, 4 GiB by default)
+  evicts least-recently-used packs. Measured load on this host: 0.30 s → 0.06 s (SmolLM2-360M
+  Q4_K_M), 0.76 s → 0.21 s (Qwen3-Embedding-0.6B Q8_0), 2.50 s → 0.22 s (the 1.2 GB f16 file);
+  `peregrine inspect` and `peregrine tier -m` report a model's cache and its size.
 
 - **Decision questions fork one evaluation of their shared state (S4.9j, part 1)**: a cache snapshot
   now carries a hybrid model's per-layer Gated DeltaNet state and convolution history
@@ -266,6 +294,30 @@ All notable changes to this project are documented here. The format follows
   Q8_0 min against llama.cpp's Q8_0 improved from 0.99817 to 0.99910); its worst-text slack is
   widened from 1e-4 to 1.5e-3 because an int8-activation encoder path re-rolls a few texts by up to
   ~1.2e-3 when any arithmetic changes — the mean bound (1e-4) is the accuracy statement.
+- **The encoder's score kernel is a register-blocked tile of six query rows (S4.9g, part 2).**
+  The strip scored one query row at a time — four `ymm` of keys, one broadcast, one panel run per
+  twelve fused multiply-adds at best — which held it at 8-22 % of the FMA peak. A score is a
+  matrix-product element with its own head-dimension chain, so the float GEMM's broadcast form
+  applies unchanged: `peregrine_kernels::bidir::scores_tile` takes 6 query rows × 16 keys (two
+  `ymm`, twelve accumulators), loads `panel[k][j..j+16]` once per head dimension and broadcasts six
+  query values into their rows, every lane still one `(row, key)` folded in order. It is a
+  scheduling change only: the tile is bit-identical to the row kernel and to the scalar twin, no
+  golden moved, and the tests pin tile shapes 1×8/1×16/2×16/4×16/6×16/8×16/6×24/4×32, strips of
+  1/7/16/32/n, every band size from 0 to n, head dims 16-256, GQA 1/2/4 and mix blocks of 1/2/4/6/12
+  to the reference. A strip's rows have overlapping windows, so the caller passes the *union* of
+  its bands per key block and keys outside a row's own band are never read. The soft-max's maximum
+  is a vector fold now (exact, so not a change of arithmetic) and the value mix shares one value
+  load between six rows instead of four. Measured on H0 (Xeon E5-2680 v4 VM, 8 vCPU, AVX2; load
+  average 3.9-7), one thread, median of 3 `bidirbench` runs at the 44.7 GMAC/s the core reaches
+  with twelve independent chains: the score kernel at head_dim 256 goes 17.5/38.0/16.8/13.4 →
+  107.0/95.1/50.8/46.9 M score-pairs/s at n = 16/128/512/2 048 (10/22/10/8 % → 61/55/29/27 % of the
+  peak), and the whole attention stage 2.8×/1.7×/1.9×/2.0× faster. EmbeddingGemma 300M Q8_0, one
+  text, 4 threads, medians of five interleaved runs of the old and new trees: 512 tokens
+  1.40 → 1.05 s (attention 408 → 194 ms, 29 % → 19 % of the pass), 2 000 5.23 → 4.58 s
+  (1.70 → 1.24 s, 33 % → 27 %); 128 tokens is matmul-bound (attention 17.7 → 10.8 ms). The mix is
+  the largest stage left at long texts (51 % of the attention stage at 2 048) and the one place a
+  key-major tiled panel would still help; shapes and the full breakdown are in §9 of
+  `docs/design/s4.9-sota.md`.
 - **The encoder quantises each input once, and only the layouts its kernels read (S4.9a).**
   A Gemma 3 encoder layer filled the int8 activation of every projection separately, serially,
   while the matmuls ran in parallel: q/k/v read the same normed rows and gate/up read the same

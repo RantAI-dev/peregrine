@@ -51,6 +51,7 @@ const EMBEDDING: &str = "token_embd.weight";
 pub fn tile_size(kind: Format) -> Option<usize> {
     match kind {
         Format::Q4_K => Some(peregrine_kernels::kq::Q4K8::SIZE),
+        Format::Q5_K => Some(peregrine_kernels::kq::Q5K8::SIZE),
         Format::Q6_K => Some(peregrine_kernels::kq::Q6K8::SIZE),
         Format::Q5_0 => Some(peregrine_kernels::kq::Q5_08::SIZE),
         Format::Q8_0 => Some(peregrine_kernels::kq::Q8_08::SIZE),
@@ -187,6 +188,7 @@ fn repack_matrix(file: &Gguf, e: &KqEntry, t: &TensorInfo, dst: &mut [u8]) {
             let out = &mut dst[at..at + tile];
             match e.kind {
                 Format::Q4_K => peregrine_kernels::kq::repack_q4k8(&blocks, out),
+                Format::Q5_K => peregrine_kernels::kq::repack_q5k8(&blocks, out),
                 Format::Q5_0 => peregrine_kernels::kq::repack_q5_08(&blocks, out),
                 Format::Q8_0 => peregrine_kernels::kq::repack_q8_08(&blocks, out),
                 _ => peregrine_kernels::kq::repack_q6k8(&blocks, out),

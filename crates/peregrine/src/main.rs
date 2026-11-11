@@ -44,7 +44,11 @@ enum Cmd {
     #[cfg(feature = "server")]
     Stop,
     /// The CPU kernel tier and every engine option in effect.
-    Tier,
+    Tier {
+        /// Also report the pack cache for this model (`-m`), if it has one.
+        #[arg(short = 'm', long)]
+        model: Option<std::path::PathBuf>,
+    },
     /// Describe supported architectures, formats, tokenizers, templates, and CPU tiers.
     Support {
         /// Format as Markdown table for README.md.
@@ -210,7 +214,15 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        Cmd::Tier => print!("{}", peregrine::describe_runtime()),
+        Cmd::Tier { model } => {
+            print!("{}", peregrine::describe_runtime());
+            if let Some(model) = model {
+                let model = resolved(model, "peregrine tier");
+                let r =
+                    peregrine_core::packcache::model_status(&model, peregrine_core::options::get());
+                println!("pack cache    {}", r.describe());
+            }
+        }
         Cmd::Support { markdown } => print!("{}", peregrine::support(markdown)),
     }
 }

@@ -58,6 +58,8 @@ the stage profile of 2026-11-11 that `docs/design/s4.9-sota.md` is built on.
 | **Output quantisation** | `encoding_format: int8` and `binary` with the model's documented calibration, as the hosted APIs offer: 4× and 32× less storage for the caller, about 99% and 96% of retrieval quality with rescoring (reported). Costs the engine nothing. | S |
 | **Offline embedding jobs** | `peregrine embed --input texts.jsonl --output vectors.npy`: no HTTP, token-budget passes, resumable. The throughput case in its purest form. | S |
 | **`logprobs` and `top_logprobs` on chat** | The label read-out is most of the machinery. Asked for by evaluation tools and by people who classify with a chat model. | S |
+| **Image input for Nemotron 3.5 Embed** | The model embeds page images as well as text, through a Pixtral vision encoder and projector shipped as an `mmproj` file. llama.cpp loads that file but does not accept images on its embedding endpoint for this model yet, so serving them would be a first for a GGUF engine. Needs the vision encoder, image preprocessing and an input shape on `/v1/embeddings`. | L |
+| **`input_type` on `/v1/embeddings`** | Embedders are trained with a prefix per role (`query: ` and `passage: ` for Nemotron and e5, a task sentence for Qwen3-Embedding and EmbeddingGemma). Today the client writes it. An `input_type: query | document` field that applies the model's own format, as the hosted APIs offer, removes a common source of silently worse retrieval. | S |
 | **Sleeping and loading models on demand** | With several models in one server (S4.10): unload idle ones, advertise them in `/v1/models` while asleep (llama.cpp's router does), reload on first use from the packed-weight cache. | M |
 
 ## 5. Proof and trust
