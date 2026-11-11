@@ -21,8 +21,13 @@
     feature = "arch-mistral3"
 ))]
 pub mod dense;
-/// The scheduling the two bidirectional encoder families share (S4.4, S4.14).
-#[cfg(any(feature = "arch-gemma-embedding", feature = "arch-mistral3"))]
+/// The scheduling the two bidirectional encoder families share (S4.4, S4.14). The Gemma 3
+/// module holds both the causal model and the encoder, so it needs this whenever it is built.
+#[cfg(any(
+    feature = "arch-gemma3",
+    feature = "arch-gemma-embedding",
+    feature = "arch-mistral3"
+))]
 pub(crate) mod encoder;
 #[cfg(any(feature = "arch-gemma3", feature = "arch-gemma-embedding"))]
 pub mod gemma3;
