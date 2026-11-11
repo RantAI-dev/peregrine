@@ -28,6 +28,8 @@ enum Cmd {
     },
     /// Embed texts: one vector per text, from a causal model (an embedding model).
     Embed(peregrine::embed::EmbedArgs),
+    /// Answer questions about a state with a native decision model (System One).
+    Decide(peregrine::decide::DecideArgs),
     /// Benchmark single-user prefill and greedy decode throughput.
     Bench(peregrine::bench::BenchArgs),
     /// Search engine tuning knobs and write a machine- and model-specific profile.
@@ -150,6 +152,13 @@ fn main() {
             args.model = resolved(args.model, "peregrine embed");
             if let Err(e) = peregrine::embed::run(&args) {
                 eprintln!("peregrine embed: {e}");
+                std::process::exit(1);
+            }
+        }
+        Cmd::Decide(mut args) => {
+            args.model = resolved(args.model, "peregrine decide");
+            if let Err(e) = peregrine::decide::run(&args) {
+                eprintln!("peregrine decide: {e}");
                 std::process::exit(1);
             }
         }

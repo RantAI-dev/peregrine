@@ -211,7 +211,59 @@ peregrine embed -m model.gguf --json --dimensions 256 < texts.txt
 A text longer than the context is an error naming the limit rather than a silent truncation; pass
 `truncate: true` (API) or `--truncate` (CLI) to opt in.
 
-## 7. Keep it running
+## 7. Decisions (System One)
+
+A native decision model answers questions about a state without generating text: each option is a
+token whose logit the answer is read from. The `openjev` type is supported in this build, and the
+endpoint shares the engine and weight passes with chat and embeddings:
+
+```sh
+peregrine serve -m hf:ggml-org/tinyopenjev-for-testing-gguf/tinyopenjev-for-testing-Q8_0.gguf --port 8201
+curl -s http://127.0.0.1:8201/v1/systemone -H 'content-type: application/json' -d '{
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "questions": {
+    "route":   {"type": "choice", "instructions": "Which team should handle this?",
+                "criteria": {"billing": null, "shipping": null, "technical": null}},
+    "angry":   {"type": "noul", "instructions": "Is the customer angry?"},
+    "urgency": {"type": "score", "instructions": "How urgent is this?",
+                "criteria": ["can wait", "this week", "today", "right now"]}
+  }
+}'
+```
+
+That model file is a 46 MB test-size model published for trying the endpoint. The body takes:
+
+| Field | Value |
+|---|---|
+| `state` | the text, object or array the questions are about (required) |
+| `questions` | a non-empty object of id → question, in request order (required) |
+| `questions.<id>.type` | `"choice"`, `"score"` or `"noul"` |
+| `questions.<id>.instructions` | the question's text, object or array (required) |
+| `questions.<id>.criteria` | choice: a non-empty object of key → description, options in request order; score: 2–10 level descriptions, lowest first, keys `"0"`…; noul: an optional object describing `"false"`/`"true"` |
+| `files`, `images` | a 501: image input is not supported yet |
+| `videos` | a 400, as in llama.cpp |
+
+The answer for each question is one of `{"type":"choice","choice":...,"probabilities":{...},
+"confidence":...}`, `{"type":"score","score":...,"legend":{...},"probabilities":{...},
+"confidence":...}` or `{"type":"noul","noul":...}`, in request order. `usage.input_tokens` is the
+sum of the prompts' token counts and `output_tokens` is 0. A bad request is a 400 with llama.cpp's
+message and the question it is about (`questions.<id>: ...`); a model that is not a decision model
+is a 501. `GET /v1/models` reports `architecture.output_modalities` as `["decisions"]` for a
+decision model and `["text"]` otherwise. More questions than free slots queue and still answer in
+order.
+
+Without a server:
+
+```sh
+peregrine decide -m model.gguf --state @message.txt --questions @questions.json
+peregrine decide -m model.gguf --request @request.json --json
+```
+
+`--state` and `--questions` accept the value itself, `@file` or `-` (stdin); a state that is valid
+JSON is that value, anything else a string. A file whose decision type or `systemone` template this
+build does not render is refused at load, naming the type.
+
+## 8. Keep it running
 
 For a long-lived server, `--background` detaches it, logs to a file and records state:
 

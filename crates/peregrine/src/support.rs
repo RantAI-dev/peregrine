@@ -73,6 +73,12 @@ pub fn support_text() -> String {
         "  causal decoders (last / mean pooling), POST /v1/embeddings, peregrine embed"
     );
 
+    let _ = writeln!(out, "decisions:");
+    let _ = writeln!(
+        out,
+        "  native decision models (openjev), POST /v1/systemone, peregrine decide"
+    );
+
     out
 }
 
@@ -120,6 +126,10 @@ ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Har
     let embd_str = "causal decoders as embedders (`<arch>.pooling_type`: last or mean), \
 `POST /v1/embeddings`, `peregrine embed`";
 
+    // 7. Decision models
+    let dec_str = "native decision models with a `systemone` template: the `openjev` type, \
+`POST /v1/systemone`, `peregrine decide`";
+
     let _ = writeln!(out, "| | Supported now |");
     let _ = writeln!(out, "|---|---|");
     let _ = writeln!(out, "| Architectures | {arch_str} |");
@@ -128,6 +138,7 @@ ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Har
     let _ = writeln!(out, "| Tokenizers | {tok_str} |");
     let _ = writeln!(out, "| Chat templates | {tmpl_str} |");
     let _ = writeln!(out, "| Embeddings | {embd_str} |");
+    let _ = writeln!(out, "| Decision models | {dec_str} |");
 
     out
 }
@@ -145,6 +156,7 @@ mod tests {
         assert!(text.contains("tokenizers:"));
         assert!(text.contains("chat templates:"));
         assert!(text.contains("embeddings:"));
+        assert!(text.contains("decisions:"));
 
         #[cfg(feature = "arch-llama")]
         assert!(text.contains("llama"));
@@ -162,6 +174,7 @@ mod tests {
         assert!(md.contains("| Tokenizers |"));
         assert!(md.contains("| Chat templates |"));
         assert!(md.contains("| Embeddings |"));
+        assert!(md.contains("| Decision models |"));
 
         #[cfg(feature = "arch-llama")]
         assert!(md.contains("Llama"));

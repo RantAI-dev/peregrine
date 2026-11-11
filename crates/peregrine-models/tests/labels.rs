@@ -291,7 +291,9 @@ fn label_ids_are_validated_at_admission() {
 #[test]
 fn a_labels_slot_beside_a_chat_slot_still_reads_its_own_row() {
     // A decode row and a labels row share one weight pass; the label logits must not depend on it.
-    let dir = tmpdir("mixed");
+    // Each test writes into a directory of its own: the tests run in parallel threads, and a
+    // second writer would truncate the file another test has memory-mapped (a SIGBUS on macOS).
+    let dir = tmpdir("beside-chat");
     let path = write_dense(&dir, "llama", Format::F16, 32, Dense::default());
     let model = load(&path);
     let prompt = question(9);
@@ -372,6 +374,57 @@ fn labels_through_the_unmixed_scheduler() {
                 }
             }
         }
+    }
+}
+
+/// The label logits of a question are the same bits when the same weight passes also serve an
+/// embedding and a chat slot (S4.3c): a decision request runs beside the other endpoints on one
+/// server, and its answer must not depend on what else is in the batch.
+#[test]
+fn a_question_beside_an_embedding_and_a_chat_slot_is_bit_identical() {
+    let dir = tmpdir("beside-endpoints");
+    for (arch, model) in models(&dir) {
+        let alone = run(&model, &[question(0)], 2, 64, 1 << 20).logits[0].clone();
+        let ctx = model.cfg.ctx_train;
+        let mut engine = Engine::new(model.clone(), 2, ctx, 4, KvPrec::F16, 1 << 20);
+        let id = engine
+            .admit_labels(question(0), SlotCfg::default(), LABELS.to_vec())
+            .expect("admit the labels slot");
+        engine
+            .admit_pooled(
+                vec![70, 71, 72, 73, 74, 75],
+                SlotCfg::default(),
+                peregrine_core::embed::Pooling::Last,
+            )
+            .expect("admit an embedding slot");
+        let chat = SlotCfg {
+            max_tokens: 4,
+            ..SlotCfg::default()
+        };
+        engine
+            .admit(vec![80, 81, 82, 83, 84, 85], chat)
+            .expect("admit a chat slot");
+        let mut got: Option<Vec<f32>> = None;
+        let mut steps = 0;
+        while engine.active() > 0 {
+            for em in engine.step() {
+                if let Some(Finish::Error(e)) = &em.finish {
+                    panic!("{arch}: a slot failed: {e}");
+                }
+                if em.slot == id {
+                    if let Some(v) = &em.label_logits {
+                        got = Some(v.clone());
+                    }
+                }
+            }
+            steps += 1;
+            assert!(steps < 100_000, "{arch}: the engine made no progress");
+        }
+        assert_eq!(
+            bits(&got.expect("the labels slot emitted")),
+            bits(&alone),
+            "{arch}: the logits changed beside an embedding and a chat slot"
+        );
     }
 }
 

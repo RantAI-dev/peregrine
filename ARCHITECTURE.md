@@ -58,6 +58,7 @@ prompt, keeps the chat history and lends the slot the cache the conversation has
 | `gguf.rs`, `safetensors.rs` | Read model files by memory map. `gguf::Format` lists every weight format the engine knows. |
 | `tokenizer.rs`, `template.rs` | Byte-level BPE with the pre-tokenizers transcribed from llama.cpp; chat templates rendered in Rust so the token stream equals llama.cpp's `--jinja` output. |
 | `systemone.rs`, `json.rs` | System One prompts: one renderer per decision type, written from the type's `systemone` template and checked byte for byte against prompts llama.cpp rendered (`openjev` so far); and the order-keeping JSON value whose text is the one llama.cpp's Jinja `tojson` writes. |
+| `decision.rs` | The decision front end and answer math: `DecisionInfo` reads a file's decision metadata; `Decider` refuses a type or `systemone` template this build does not render, checks the option letters are single tokens, and turns a request into prompt questions (llama.cpp's `parse_questions` and its messages); `format_answer` turns one score vector per question into a choice, score or noul answer. |
 | `arch.rs` | The `Architecture`, `MtpHead` and `Family` traits (ADR 0006). |
 | `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, LittleBit accounting, and parameterized loading via family table. |
 | `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
@@ -109,7 +110,10 @@ listen, so in-flight requests drain instead of failing.
 ### `crates/peregrine-server`: HTTP
 
 A library (`run`, `Args`) and a thin binary. Maps the OpenAI chat request onto `Engine` slots, streams with SSE,
-and exposes `/metrics`.
+and exposes `/metrics`. `/v1/embeddings` and `/v1/systemone` submit one pooled or labels slot per input or
+question through the same queue, so they share the weight pass with chat; the decision route's body is
+parsed with `peregrine_core::json` to keep the request's order, and its answers are engine label logits
+through `decision::format_answer`.
 
 ## Cargo Features (ADR 0005)
 
