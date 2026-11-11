@@ -247,7 +247,7 @@ the text and 2048 dimensions. It was trained with a role prefix, so a question s
 `query: ` and a document with `passage: `:
 
 ```sh
-peregrine embed -m Nemotron-3.5-Embed-1B-Q8_0.gguf \
+peregrine embed -m hf:W4D/Nemotron-3.5-Embed-1B-GGUF/Nemotron-3.5-Embed-1B-Q8_0.gguf \
   "query: What is the capital of France?" \
   "passage: Paris is the capital of France."
 ```
