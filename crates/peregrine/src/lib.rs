@@ -135,6 +135,11 @@ pub fn inspect(path: &std::path::Path) -> Result<String, String> {
         Ok(()) => writeln!(out, "supported     yes"),
         Err(e) => writeln!(out, "supported     no: {e}"),
     };
+    // The pack cache (S4.9e): whether a load would map the packed weights instead
+    // of packing them. `from_env` does not latch the process options.
+    let opts = EngineOptions::from_env();
+    let cache = peregrine_core::packcache::model_status(path, &opts);
+    let _ = writeln!(out, "pack cache    {}", cache.describe());
     Ok(out)
 }
 
@@ -148,11 +153,12 @@ pub fn describe_runtime() -> String {
         .prefill_chunk
         .unwrap_or_else(|| peregrine_core::options::prefill_chunk_default_for(threads));
     format!(
-        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\nprefill chunk {chunk} (for {threads} workers)\noptions:\n{}",
+        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\npack cache    {}\nprefill chunk {chunk} (for {threads} workers)\noptions:\n{}",
         peregrine_kernels::cpu::tier_name(),
         peregrine_core::simd_name(),
         o.kq_repack_note(),
         o.fpack_note(),
+        o.pack_cache_note(),
         o.describe()
             .lines()
             .map(|l| format!("  {l}\n"))

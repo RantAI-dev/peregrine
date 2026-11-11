@@ -96,6 +96,19 @@ pub fn prefill_chunk_default_for(threads: usize) -> usize {
 /// other users need the room.
 pub const MAX_PREFILL_CHUNK: usize = crate::blocks::linear::MAX_BATCH;
 
+/// Where the packed-weight cache lives (`PEREGRINE_PACK_CACHE`, S4.9e).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum PackCacheSetting {
+    /// `$PEREGRINE_CACHE_DIR`/`packs`, `$XDG_CACHE_HOME/peregrine/packs`, or
+    /// `~/.cache/peregrine/packs`.
+    #[default]
+    Default,
+    /// `PEREGRINE_PACK_CACHE=0`: pack in memory on every load, as before S4.9e.
+    Off,
+    /// `PEREGRINE_PACK_CACHE=<dir>`: the packs of every model go in this directory.
+    Path(PathBuf),
+}
+
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 /// The k-quant repack is on by default on every tier, the AVX-512 tier included
 /// ([`EngineOptions::kq_repack_note`] says whether the switch overrode it).
@@ -154,6 +167,13 @@ pub struct EngineOptions {
     pub hugepages: bool,
     /// `PEREGRINE_TILE_HUGEPAGES=0`: keep the repacked tiles in ordinary pages.
     pub tile_hugepages: bool,
+    /// `PEREGRINE_PACK_CACHE`: where the load-time packed stores are cached on disk
+    /// (`~/.cache/peregrine/packs` by default; `0` turns the cache off, a path
+    /// overrides the directory). S4.9e.
+    pub pack_cache: PackCacheSetting,
+    /// `PEREGRINE_PACK_CACHE_MB`: the cache directory's size cap in MiB (default 4096;
+    /// `0` disables eviction). Least-recently-used pack files are removed to stay under it.
+    pub pack_cache_mb: usize,
     /// `PEREGRINE_KV_ROTATE=0`: plain int8 KV cache instead of the Hadamard-rotated one.
     pub kv_rotate: bool,
     /// `PEREGRINE_KV` (`f16`, `f32`, `i8`): the precision of the KV cache. The
@@ -234,6 +254,8 @@ impl Default for EngineOptions {
             exact: false,
             hugepages: false,
             tile_hugepages: true,
+            pack_cache: PackCacheSetting::Default,
+            pack_cache_mb: 4096,
             kv_rotate: true,
             kv_prec: crate::kv::KvPrec::F16,
             mix: true,
@@ -403,6 +425,12 @@ impl EngineOptions {
             exact: only("EXACT", "1"),
             hugepages: only("HUGEPAGES", "1"),
             tile_hugepages: unless("TILE_HUGEPAGES", "0"),
+            pack_cache: match s("PACK_CACHE").as_deref() {
+                Some("0") | Some("off") | Some("false") => PackCacheSetting::Off,
+                Some(p) if !p.is_empty() && p != "1" => PackCacheSetting::Path(PathBuf::from(p)),
+                _ => PackCacheSetting::Default,
+            },
+            pack_cache_mb: num("PACK_CACHE_MB").unwrap_or(d.pack_cache_mb),
             kv_rotate: unless("KV_ROTATE", "0"),
             kv_prec: s("KV")
                 .and_then(|v| crate::kv::KvPrec::parse(&v))
@@ -480,6 +508,20 @@ impl EngineOptions {
         format!("{state} ({why})")
     }
 
+    /// The pack cache setting and its directory, for `peregrine tier`: the directory,
+    /// `off (PEREGRINE_PACK_CACHE)`, or the default directory with `(default)`.
+    pub fn pack_cache_note(&self) -> String {
+        match &self.pack_cache {
+            PackCacheSetting::Off => "off (PEREGRINE_PACK_CACHE)".into(),
+            PackCacheSetting::Path(p) => format!("{} (PEREGRINE_PACK_CACHE)", p.display()),
+            PackCacheSetting::Default => format!(
+                "{} (default, cap {} MiB)",
+                crate::packcache::default_dir().display(),
+                self.pack_cache_mb
+            ),
+        }
+    }
+
     /// The options that differ from the defaults, as `name=value` pairs.
     pub fn non_default(&self) -> Vec<(&'static str, String)> {
         let d = EngineOptions::default().pairs();
@@ -519,6 +561,15 @@ impl EngineOptions {
             ("exact", self.exact.to_string()),
             ("hugepages", self.hugepages.to_string()),
             ("tile_hugepages", self.tile_hugepages.to_string()),
+            (
+                "pack_cache",
+                match &self.pack_cache {
+                    PackCacheSetting::Default => "default".into(),
+                    PackCacheSetting::Off => "off".into(),
+                    PackCacheSetting::Path(p) => p.display().to_string(),
+                },
+            ),
+            ("pack_cache_mb", self.pack_cache_mb.to_string()),
             ("kv_rotate", self.kv_rotate.to_string()),
             ("kv_prec", self.kv_prec.name().to_string()),
             ("mix", self.mix.to_string()),
@@ -580,6 +631,8 @@ pub const NAMES: &[&str] = &[
     "EXACT",
     "HUGEPAGES",
     "TILE_HUGEPAGES",
+    "PACK_CACHE",
+    "PACK_CACHE_MB",
     "KV_ROTATE",
     "KV",
     "MIX",

@@ -138,6 +138,8 @@ pub struct Gguf {
     /// anonymous memory, and a second mapping of the file would be of the
     /// wrong thing.
     file: Option<File>,
+    /// Where the file came from (the pack cache's identity uses its size and mtime).
+    path: std::path::PathBuf,
     data_start: usize,
     pub meta: HashMap<String, Value>,
     pub tensors: HashMap<String, TensorInfo>,
@@ -357,6 +359,7 @@ impl Gguf {
         let g = Gguf {
             map,
             file,
+            path: path.to_path_buf(),
             data_start,
             meta,
             tensors,
@@ -380,6 +383,24 @@ impl Gguf {
             }
         }
         Ok(g)
+    }
+
+    /// The file this model was opened from.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// FNV-1a 64 of the header and tensor directory (the bytes before the data
+    /// section). This is the pack cache's cheap identity for the model: it covers
+    /// every tensor name, shape, format and offset, and the tokenizer metadata,
+    /// without hashing the weight data.
+    pub fn header_fnv(&self) -> u64 {
+        crate::profile::fnv1a64(&self.map[..self.data_start])
+    }
+
+    /// Where the tensor data section starts.
+    pub fn data_start(&self) -> usize {
+        self.data_start
     }
 
     /// Read a range of the file's data section into `buf`.
