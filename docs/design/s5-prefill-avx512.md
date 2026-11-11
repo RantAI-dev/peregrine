@@ -24,8 +24,8 @@ Qwen 2.5 0.5B and 1.9× slower for Llama 3.2 1B** (measured). The gap is not one
 two, and they multiply:
 
 1. **The k-quant matrix-multiply kernel moves 1.7–3.2× fewer multiply-accumulates per second
-   per core** depending on the weight format (measured, one core, same eight/two weight rows,
-   at the widths the engines use). That is the whole gap at one thread.
+   per core**, depending on the weight format (measured, one core, the same weights, at the
+   widths the engines use). That is the whole gap at one thread.
 2. **Peregrine's thread scaling is worse**: 6.0× going from 1 to 12 threads on the 1B against
    ik's 6.7× (measured). That adds the remaining 1.1× at 12 threads.
 
@@ -35,11 +35,11 @@ buckets are 19–27 % of a step, not the 50 % the factor of two would need.
 
 The single most useful number in the study: the machine's byte-dot roof is
 **455 GMAC/s per core** (`vpdpbusd zmm`, measured, 453–463 across cores), Peregrine's Q4_K
-kernel reaches **76–79** (17 %), and ik's Q4_K kernel reaches **134–148 GMAC/s** — 60–66 % of
-the 256-bit roof it uses, 227 GMAC/s, because it runs the repacked Q4_K kernel with `__m256i`
-even on an AVX-512 build — `ggml/src/iqk/iqk_gemm_kquants.cpp:3169`). So the gap is not "VNNI versus no VNNI": both use
-`vpdpbusd` into int32 with an exact per-sub-block scale. The gap is how many of those
-instructions each loop keeps in flight.
+kernel reaches **76–79** (17 %), and ik's Q4_K kernel reaches **134–148 GMAC/s**. ik's number is
+60–66 % of the 256-bit roof it uses (227 GMAC/s), because it runs the repacked Q4_K kernel with
+`__m256i` even on an AVX-512 build (`ggml/src/iqk/iqk_gemm_kquants.cpp:3169`). So the gap is
+not "VNNI versus no VNNI": both use `vpdpbusd` into int32 with an exact per-sub-block scale.
+The gap is how many of those instructions each loop keeps in flight.
 
 ---
 
@@ -94,8 +94,9 @@ measurements are of the same thing.
 
 ### 1.4 Peregrine's prefill, by phase (measured)
 
-`PEREGRINE_PROF2=full`, 12 threads, chunk 16, means of 3 runs. `wall` is the engine's own
-`prefill_s / chunks`; the phase buckets sum to it.
+`PEREGRINE_PROF2=full`, 12 threads, chunk 16, medians of 3 runs. `wall` is the engine's own
+`prefill_s / chunks`; the listed buckets account for 90 % (Qwen) and 94 % (1B) of it, the rest
+being the forward's untimed tail.
 
 **Qwen 2.5 0.5B Q4_K_M — 475.8 tok/s, 33.6 ms per 16-token pass**
 
@@ -114,7 +115,7 @@ measurements are of the same thing.
 | norms | 84.9 | 0.3 % |
 | barrier wait (inside the matmul wall) | 7 805.7 | 23.3 % |
 
-by weight format: Q5_0 14 356.7 µs (42.8 %), Q6_K 3 234.9 (9.6 %), Q4_K 2 924.8 (8.7 %),
+by weight format, share of the pass: Q5_0 14 356.7 µs (42.8 %), Q6_K 3 234.9 (9.6 %), Q4_K 2 924.8 (8.7 %),
 Q8_0 92.8 (0.3 %). The Qwen file is mostly Q5_0: `peregrine inspect` lists 133 Q5_0 tensors
 (254.4 MiB), 13 Q8_0, 12 Q6_K, 12 Q4_K.
 
@@ -135,7 +136,7 @@ Q8_0 92.8 (0.3 %). The Qwen file is mostly Q5_0: `peregrine inspect` lists 133 Q
 | norms | 190.2 | 0.3 % |
 | barrier wait | 7 860.6 | 14.1 % |
 
-by format: Q4_K 31 264.8 µs (56.1 %), Q6_K 8 566.5 (15.4 %). `peregrine inspect` on this file:
+by format, share of the pass: Q4_K 31 264.8 µs (56.1 %), Q6_K 8 566.5 (15.4 %). `peregrine inspect` on this file:
 96 Q4_K tensors (445.5 MiB), 17 Q6_K (317.1 MiB — the output head is most of it, and the head
 is not computed during a prompt pass).
 
@@ -194,8 +195,10 @@ matrix (4.7 MB, so the weights stream from L3 rather than L1 — this flatters P
 | Q5_0_R4 (`-rtr` on) | 47.3 | 108.0 | 167.3 | 170.2 |
 | Q8_0_R8 (`-rtr` on) | 89.3 | 165.0 | 168.1 | 170.5 |
 
-Ratios at the widths the engines actually use (Peregrine chunk 16, ik ub 512 ≈ 128 in this
-table): **Q4_K 1.7–1.9×**, **Q6_K 3.1–3.2×**, **Q5_0 2.1–3.5×**.
+Ratios at the widths the engines actually use. Peregrine's chunk is 16 activation rows; ik's
+ub is 512, but its kernel walks activation rows in blocks of at most 8, so the closest column
+is 64–128 (the two differ by under 10 %). Taking 16 and 128: **Q4_K 1.7–1.9×**, **Q6_K 3.1×**,
+**Q5_0 2.1–3.5×**.
 
 Against the roof: Peregrine's Q4_K ZMM kernel runs at **17–18 % of 455 GMAC/s**; ik's ymm
 kernel at **60–66 % of 227 GMAC/s**. Peregrine's Q6_K (9 % of 455) is the worst placed of all.
@@ -270,10 +273,10 @@ thread count is even high. Pinning is not a lever here.
 | `-rtr 1 -fa 0` | 1031.2 | 511.5 |
 | **`-rtr 1 -fa 1`** (its defaults) | **1166.2** | **553.7** |
 
-So `-rtr` is +9 % (Qwen) and +29 % (1B), `-fa` is +13 % / +8 %, and both together are +23 % /
-+38 % over the plain path. These are close to the numbers in the 2026-11-11 ik README
-(+9 % / +12 % there for Qwen at a slightly different host state), so the setting is not
-cherry-picked.
+So `-rtr` is +9 % (Qwen) and +29 % (1B), `-fa` is +13 % / +7 %, and both together are +23 % /
++38 % over the plain path. The same Qwen file in the 2026-11-11 ik README measured 967.5 →
+1056.4 tok/s for `-rtr`, also +9 %, so the setting is not cherry-picked. (The 1166.2 here and
+the 1158.3 in §1.3 are the same setting measured in two invocations, 0.7 % apart.)
 
 ---
 
@@ -309,7 +312,7 @@ Peregrine uses. There is no four-row interleaved activation buffer in this path.
 ### 2.3 The kernel: `mul_mat_q4_k_r4_q8_k`
 
 `ggml/src/iqk/iqk_gemm_kquants.cpp:1497-1562`, selected for `Q4_K_R4` at
-`iqk_gemm_kquants.cpp:3222-3224`. It is templated on `nrc_y` = the number of **activation rows**
+`iqk_gemm_kquants.cpp:3219-3221`. It is templated on `nrc_y` = the number of **activation rows**
 it handles at once, and instantiated for 1..8 (`IQK_MAX_NY`, `iqk_common.h:144`;
 `IQK_SET_MUL_MAT_FUNCTIONS`, `iqk_common.h:166-175`). One call:
 
@@ -330,9 +333,9 @@ for ix in 0..nrc_x step 4            # 4 output rows per block_q4_k_r4
     acc[iy] += fma(d4 * act_scale, cvtepi32_ps(isum))  # one float fold per super-block
 ```
 
-Line by line: the four `vpdpbusd` are at `iqk_gemm_kquants.cpp:1528-1531` (`HAVE_VNNI256`
-branch), the int32 scale multiply at `:1532`, the float fold at `:1553-1555`, the min term at
-`:1464-1495` and its call at `:1512`.
+Line by line: the four `vpdpbusd` are at `iqk_gemm_kquants.cpp:1537-1540` (`HAVE_VNNI256`
+branch), the int32 scale multiply at `:1541`, the float fold at `:1552`, the activation load at
+`:1534`, the min term at `:1464-1496` and its call at `:1518`.
 
 Facts that matter for speed:
 
@@ -344,7 +347,7 @@ Facts that matter for speed:
   × 256 weights per super-block. Four `vpdpbusd` and one `vpmulld` + `vpaddd` per
   (sub-block, activation row).
 - **Activation format**: int8 `q8_K`, read once per (sub-block, activation row) as one 32-byte
-  load and broadcast four times with `vpshufd` (`iqk_gemm_kquants.cpp:1527`); the weight bytes
+  load and broadcast four times with `vpshufd` (`iqk_gemm_kquants.cpp:1534-1540`); the weight bytes
   are loaded once per (sub-block, 4 rows) and reused across all `nrc_y` activation rows.
 - **Accumulators per load**: the weight load's 32 bytes feed four `vpdpbusd` (2 nibble halves ×
   2 halves of the sub-block) and are then reused by the other `nrc_y - 1` rows from registers.
@@ -363,7 +366,7 @@ tiles** and hands them to threads round-robin: `for (itile = ith; itile < ntile;
 (`:712`). Inside a tile, `mul_mat_NxM` (`:63-100`) walks the activation rows in blocks of at
 most 8 (`ny = funcs.size()`, `:83-100`) and the output rows in steps of 64 (`k_x_step`, `:67`).
 There is a second split when threads outnumber tiles (`npt <= 16 && nth even && Ny >= 16`,
-`:750-780`): half the threads take the first half of the activation rows and half the second,
+`:764-780`): half the threads take the first half of the activation rows and half the second,
 so that 12 threads still get 32-row activation tiles rather than 8-row ones. Every thread also
 waits at one barrier while the activations are quantised (`ggml.c:18852-18876`).
 
@@ -372,14 +375,16 @@ waits at one barrier while the activations are quantised (`ggml.c:18852-18876`).
 `iqk_flash_attn_noalibi` (`ggml/src/iqk/iqk_flash_attn.cpp:744`) splits a *prompt* pass over
 (query-row block, KV head) pairs (`:755-770`): each thread handles one head and a slice of the
 query rows (`neq1g = neq1/ntg`, `:757`), and calls `iqk_flash_attn_impl` once for that slice.
-For decode it instead splits the **KV positions** into blocks of 32 (`nk = 32*nm`), each thread
+For decode it instead splits the **KV positions** into blocks of 32 (`nk = 32*nm`, `:640`), each thread
 leaves a partial (max, sum, output) in a work buffer, a barrier follows, and a second pass
 merges them with `accumulate_qkv` (`:620-700`).
 
 The kernel itself (`ggml/src/iqk/fa/iqk_fa_templates.h`) is templated on `(Dk, Dv, q_step,
 k_step)`; for a 128-wide head it uses `k_step` 128/64/32 by divisibility
-(`ggml/src/iqk/fa/iqk_fa_128_128.cpp:38-48`) and `q_step = 8` (or 1), keeps the whole
-`q_step × k_step` score block in registers (`FlashMS::cache`, `iqk_fa_templates.h:964`), and
+(`ggml/src/iqk/fa/iqk_fa_128_128.cpp:38-48`) and picks `q_step` 16/32/64 from the query-row
+count, or 8 for a few rows (`iqk_fa_templates.h:2064-2103`) — 64 for a 512-token prompt. It
+keeps the whole `q_step × k_step` score block in registers (`FlashMS::cache`,
+`iqk_fa_templates.h:964`), and
 does the QK product as 512-bit FMA over f16 halves widened with `_mm512_cvtph_ps` (the bf16
 variant uses `vdpbf16ps`, `:1678-1685`). So ik's attention is 512-bit on this host.
 
@@ -408,21 +413,21 @@ family as ik's.
 `q4k8_gemm_zmm` (`:1665-1690`) in groups of four activation rows. Per super-block and
 activation row:
 
-- 16 windows of 64 bytes (`q4_qs()`), each loaded once, split into low/high nibbles with
-  `vpand`/`vpsrlw`+`vpand`: 16 loads and 32 unpack ops per super-block, shared by the four
-  activation rows;
+- 16 windows of 64 bytes (`q4_qs()`), each loaded once and split into low/high nibbles with one
+  `vpand` for the low half and a `vpsrlw` + `vpand` for the high: 16 loads and 48 ops per
+  super-block, shared by the four activation rows;
 - 2 `vpdpbusd` per (window, activation row) → **32 `vpdpbusd zmm` per (super-block, activation
   row)** = 2048 MACs (8 rows × 256 weights); 64 byte-MACs each, all useful;
-- the scale: one `vpmulld` + `vpaddd` per (4-window group, activation row) = 8 + 8 per
-  super-block — exact int32, on the same "different port" argument as ik's;
+- the scale: one `vpmulld` + `vpaddd` per (4-window group, activation row, half) = 8 + 8 per
+  (super-block, activation row) — exact int32, on the same "different port" argument as ik's;
 - the min term: 8 sub-blocks × (a scalar `vpbroadcastd` from `src.min_sum(..)` + `vpmulld` +
   `vpaddd`) per activation row — 24 instructions, and the broadcast comes from memory each
   time (`kqsimd.rs:1645-1652`);
-- the fold: `fold()` (`kqsimd.rs:~1500`) once per (super-block, activation row).
+- the fold: `fold()` (`kqsimd.rs:373`) once per (super-block, activation row).
 
 Two things follow from the code and are visible in the measurement. First, the kernel's
 byte-dot share of instructions is high — 32 `vpdpbusd` against roughly 90 other instructions
-per (super-block, activation row) — so if it issued at the roof it would be a ~130 GMAC/s
+per (super-block, activation row) — so if it issued at the roof it would be a ~120 GMAC/s
 kernel. Second, the epilogue is **per activation row**, not per group: the min-term broadcasts,
 the mullo/add pairs and the fold all repeat for each of the four rows. Measured, it reaches 76–
 79 GMAC/s (17–18 % of the roof) and is flat from 16 to 128 activation rows (79.2 / 77.1 /
@@ -430,7 +435,7 @@ the mullo/add pairs and the fold all repeat for each of the four rows. Measured,
 
 ### 3.3 Q6_K and Q5_K have no 512-bit kernel
 
-`q6k8_gemm` (`kqsimd.rs:933-…`) is the AVX2 kernel: `vpmaddubsw` + `vpaddw`, widened to int32
+`q6k8_gemm` (`kqsimd.rs:933-1294`) is the AVX2 kernel: `vpmaddubsw` + `vpaddw`, widened to int32
 every two `vpmaddubsw` because four products per int16 lane are the bound (`docs/design/s3.4.md`
 §13.2). It reaches 37–39 GMAC/s — 9 % of the byte-dot roof — and ik's Q6_K_R4 reaches 123–153.
 Q6_K is 15.4 % of the 1B's prefill time. This is the largest single kernel gap in the engine.
@@ -538,7 +543,24 @@ situ, and the 1.97× engine ratio is the 2.1× kernel ratio at the widths the en
 Ranked by the gain divided by the size. Nothing here makes a result depend on batch width,
 thread count or pass size; item 3 removes such a dependence in *speed*, not in results.
 
-### 1. A 512-bit Q6_K tile kernel (biggest single number, smallest risk)
+### 1. Cut the per-activation epilogue in the Q4_K/Q5_0 ZMM kernels (biggest)
+
+- **What**: make the min term and the fold run once per *group of four activation rows* instead
+  of once per row: keep the 8 sub-block min-sum broadcasts in registers across the group, and
+  replace the eight scalar `min_sum(..)` broadcasts per (super-block, activation row) with one
+  loaded vector per group. Also stop re-decoding the tile's scales per activation row.
+- **Evidence**: the kernel is at 17–18 % of the 455 GMAC/s roof while its instruction mix says
+  ~26 %; the flat 79/77/76 GMAC/s at 16/64/128 activation rows says the cost is per row, not per
+  weight. ik's equivalent loop reaches 60–66 % of its roof with less amortisation opportunity
+  (4 rows, one activation row at a time). Target 76 → 120 GMAC/s (1.6×). Q4_K is 56 % of the
+  1B's pass, so that would be **+20–25 %** on the 1B (31.3 ms → 19.9 ms of a 55.8 ms pass); on
+  Qwen, Q5_0 (43 %) and Q4_K (9 %) together give **+15–20 %**. Scale the estimate by the
+  fraction of the 1.6× that the built kernel actually reaches.
+- **Bits**: bit-identical, because the integer sums and the f32 fold can be kept exactly as
+  they are (the same argument `s3.4.md` §4.4 makes for the existing ZMM kernel).
+- **Size**: 1–2 weeks, the most delicate item here (register pressure is the whole point).
+
+### 2. A 512-bit Q6_K tile kernel (the simplest of the two kernel jobs)
 
 - **What**: `q6k8_gemm_zmm` beside `q6k8_gemm`, the same eight-row `Q6K8` tile, ZMM registers,
   `vpdpbusd` into int32 with the run's `16·Σq` offset subtracted in int32 (as `q6k8_gemm` does),
@@ -547,26 +569,11 @@ thread count or pass size; item 3 removes such a dependence in *speed*, not in r
 - **Evidence**: Q6_K is 15.4 % of the 1B's prefill time (measured) and its kernel runs at 37–39
   GMAC/s against ik's 123–153 (measured). Bringing it to Q4_K-ZMM's 76 GMAC/s (= 2×) removes
   8.6 ms × (1 − 1/2) = 4.3 ms of a 55.8 ms pass: **+8 % on the 1B, +2 % on Qwen**. If it reaches
-  ik's 120 GMAC/s (3.2×) it is **+12 % on the 1B**.
+  ik's 120 GMAC/s (3.2×) it is **+11 % on the 1B**.
 - **Bits**: bit-identical if the integer sums and the fold order are the ones `q6k8_gemm` uses
   (that is what `q4k8_gemm_zmm` does against `q4k8_gemm`); goldens do not move. If the fold has
   to change, the goldens move and are re-recorded per tier.
 - **Size**: ~1 week (one kernel + GEMV, plus the `kq_zmm` dispatch and the bit-identity test).
-
-### 2. Cut the per-activation epilogue in the Q4_K/Q5_0 ZMM kernels
-
-- **What**: make the min term and the fold run once per *group of four activation rows* instead
-  of once per row: keep the 8 sub-block min-sum broadcasts in registers across the group, and
-  replace the eight scalar `min_sum(..)` broadcasts per (super-block, activation row) with one
-  loaded vector per group. Also stop re-decoding the tile's scales per activation row.
-- **Evidence**: the kernel is at 17–18 % of the 455 GMAC/s roof while its instruction mix says
-  ~29 %; the flat 79/77/76 GMAC/s at 16/64/128 activation rows says the cost is per row, not per
-  weight. ik's equivalent loop reaches 60–66 % of its roof with less amortisation opportunity
-  (4 rows, one activation row at a time). Target 76 → 120 GMAC/s (1.6×); on the 1B Q4_K is 56 %
-  of the pass, so **+15 %**; on Qwen (Q5_0 43 % + Q4_K 9 %) **+10–12 %**.
-- **Bits**: bit-identical, because the integer sums and the f32 fold can be kept exactly as
-  they are (the same argument `s3.4.md` §4.4 makes for the existing ZMM kernel).
-- **Size**: 1–2 weeks, the most delicate item here (register pressure is the whole point).
 
 ### 3. Make the wide pass pay: write the output in the tile's order
 
@@ -597,8 +604,8 @@ thread count or pass size; item 3 removes such a dependence in *speed*, not in r
 ### 5. Thread scaling past 12 (SMT and 24 threads)
 
 - **What**: find why 24 workers add nothing (barrier count per layer, tile granularity of eight
-  rows, chunk default). ik gains +40–50 % at 24 threads on this host (measured); Peregrine gains
-  2–6 %.
+  rows, chunk default). ik gains +40–51 % at 24 threads on this host (measured); Peregrine gains
+  0–6 %.
 - **Evidence**: §1.7. Worth **+20–40 % at 24 threads only**; it does not touch the 12-thread
   headline, which is why it is last.
 - **Bits**: bit-identical (thread count already does not change results).
@@ -630,7 +637,7 @@ quantiser, because that is the accuracy gate.
 - **24-thread rows** for Peregrine are confounded with its chunk default (64), which is why
   both numbers are reported.
 - **Nothing was measured at 4096 tokens** in this study; the 2026-11-11 ik README has those
-  rows (P ÷ ik 0.57–0.58), and the note says where the picture is expected to shift
+  rows (P ÷ ik 0.49–0.58), and the note says where the picture is expected to shift
   (attention, not the matmul).
 - **No accuracy run was made**: no engine code changed. The KL gate (`docs/targets.md` §1) has
   to be re-run for whichever kernel of §6 is built, on the reference hosts, as `s3.4.md` §10
