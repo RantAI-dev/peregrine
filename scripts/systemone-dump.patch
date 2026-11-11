@@ -1,0 +1,28 @@
+diff --git a/tools/server/server-decision.cpp b/tools/server/server-decision.cpp
+index a48786c80..c224c2e89 100644
+--- a/tools/server/server-decision.cpp
++++ b/tools/server/server-decision.cpp
+@@ -3,6 +3,8 @@
+ #include "../../src/llama-ext.h" // staging API: llama_decision_order
+ 
+ #include <algorithm>
++#include <cstdio>
++#include <cstdlib>
+ #include <cctype>
+ #include <cmath>
+ #include <stdexcept>
+@@ -1248,6 +1250,14 @@ void server_decision_context::fill_task(
+     }
+ 
+     llama_tokens tokens = common_tokenize(vocab, prompt, false, true);
++    // fixture dump (Peregrine scripts/systemone-fixtures.py): the rendered prompt and its tokens
++    if (const char * dump_path = std::getenv("SYSTEMONE_DUMP")) {
++        if (FILE * f = std::fopen(dump_path, "a")) {
++            const json line = {{"id", question.id}, {"variant", variant}, {"prompt", prompt}, {"tokens", tokens}};
++            std::fprintf(f, "%s\n", line.dump().c_str());
++            std::fclose(f);
++        }
++    }
+     if (type == COMMON_DECISION_TYPE_LAYA) {
+         fill_task_laya(tokens, question, task);
+     }

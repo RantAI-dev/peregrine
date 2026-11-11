@@ -56,6 +56,7 @@ pub mod dspark {
     }
 }
 pub mod gguf;
+pub mod json;
 pub mod kq;
 pub mod kv;
 #[cfg(feature = "littlebit")]
@@ -75,6 +76,7 @@ pub mod serve;
 pub mod session;
 pub mod state;
 pub mod suffix;
+pub mod systemone;
 pub mod telem;
 pub mod template;
 pub mod tokenizer;
