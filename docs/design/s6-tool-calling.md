@@ -38,13 +38,16 @@ A **tool format** is a renderer and a parser for one family of templates:
 
 | Format | Models | What the template does |
 |---|---|---|
-| `hermes` | Qwen 2.5, Qwen 3, Qwen 3.5 and Bonsai 2 (ChatML with a tools section) | Tool signatures as JSON lines inside `<tools>` in the system message; a call is `{"name": ..., "arguments": {...}}` inside `<tool_call>`; a result is sent back inside `<tool_response>` in a user turn |
+| `hermes` | Qwen 2.5 (and Qwen 3, with its thinking block) | Tool signatures as JSON lines inside `<tools>` in the system message; a call is `{"name": ..., "arguments": {...}}` inside `<tool_call>`; a result is sent back inside `<tool_response>` in a user turn |
+| `qwen-xml` | Qwen 3.5 and Bonsai 2 | The same `<tools>` list with its own instructions; a call is `<function=name>` with one `<parameter=key>` block per argument inside `<tool_call>`, values written bare (`True`, `None`, JSON for lists and objects); assistant turns after the last question keep their thinking block; the prompt ends inside one, or after an empty one when thinking is off |
 | `llama3` | Llama 3.1 / 3.2 | Tool definitions in the first user message; a call is one JSON object `{"name": ..., "parameters": {...}}`; a result is an `ipython` turn |
 | `harmony` | gpt-oss | Tools as a TypeScript-like namespace in the developer message; a call is a message to `functions.<name>` on the commentary channel |
 | `generic` | templates with no tool section (Gemma 3, Phi-4, Llama 2, Mistral v0.2) | A system instruction that describes the tools and asks for a JSON answer, as llama.cpp's fallback does |
 
-The `hermes` row is taken from llama.cpp's rendering of Qwen 2.5; the other rows describe the
-templates as read and are confirmed against llama.cpp when their step is built.
+The `hermes` and `qwen-xml` rows are taken from llama.cpp's renderings (Qwen 2.5's template and
+the template Bonsai 2 files carry); the other rows describe the templates as read and are confirmed
+against llama.cpp when their step is built. The first version of this table put Qwen 3.5 and
+Bonsai 2 under `hermes`: their template writes calls differently, so they are a format of their own.
 
 A file whose template is not one Peregrine recognises with tools is refused when a request carries
 `tools`, by name, the way an unknown chat template is refused today. `generic` comes last because
@@ -112,7 +115,7 @@ Peregrine's form:
 | ID | Item | Needs |
 |---|---|---|
 | S6.1 | This design and the roadmap rows | |
-| S6.2 | The tool module in `peregrine-core`: tool and call types, the `hermes` renderer over a message list (system, user, assistant with calls, tool results) and its parser (whole text and streaming), fixtures from llama.cpp on Qwen 2.5 0.5B; then Qwen 3 and Qwen 3.5 / Bonsai 2 with their thinking blocks | |
+| S6.2 | The tool module in `peregrine-core`: tool and call types, the `hermes` renderer over a message list (system, user, assistant with calls, tool results) and its parser (whole text and streaming), fixtures from llama.cpp on Qwen 2.5 0.5B; then `qwen-xml` for Qwen 3.5 / Bonsai 2 with its thinking blocks (S6.2b), and Qwen 3 | |
 | S6.3 | The endpoint: request and response shapes of §3, streaming, the refusals, usage; `peregrine run` stays text only | S6.2 |
 | S6.4 | `llama3`: renderer, parser, fixtures on Llama 3.2 1B | S6.3 |
 | S6.5 | `harmony` for gpt-oss | S6.3 |

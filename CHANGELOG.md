@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The tool format of Qwen 3.5 and Bonsai 2 (S6.2b)**: `peregrine_core::tools` gains
+  `ToolFormat::QwenXml`, the format of the chat template Bonsai 2 files carry. Its renderer writes
+  the tool list, calls as `<function=name>` with `<parameter=key>` blocks, tool results, the
+  thinking blocks of the assistant turns after the last question, and the prompt's ending for
+  thinking on and off; it agrees with llama.cpp v0.9.0's `/apply-template` on 51 conversations
+  (45 identical prompts, and the six llama.cpp refuses are refused). Its parser reads such calls
+  from a model's output and takes each value's type from the tool's schema, since the format
+  writes values bare. New in the module's interface: `messages_from_json_for`, `render_with` and
+  `RenderOptions` (thinking), `CallParser::with_tools`, and `reasoning` on an assistant message.
+  The chat endpoint does not use this format yet.
 - **Tool calling, first part: the tool module and the `hermes` format for Qwen 2.5 (S6.2)**:
   `peregrine_core::tools` holds what tool calling needs outside the forward pass. The renderer
   writes a conversation with tools (tool definitions, earlier calls, tool results) into the prompt

@@ -13,7 +13,8 @@ renderer must produce the same bytes (`crates/peregrine-core/tests/tools_render.
 
 `--template` renders with that template file in place of the model's own
 (`--chat-template-file`), so a template can be exercised without its model: the
-template, not the weights, decides the prompt.
+template, not the weights, decides the prompt. `--set <name>` adds the cases that
+only make sense for one template family (thinking, for one).
 
 The request body is stored as the exact text that was sent, so the test parses
 the same bytes llama.cpp parsed (number spellings and key order included).
@@ -55,6 +56,7 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--template")
     ap.add_argument("--cases", default="scripts/tool-cases.json")
+    ap.add_argument("--set", help="also run the cases of this named set (for one template family)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
@@ -79,10 +81,15 @@ def main():
             sys.exit("llama-server did not become ready")
 
         lines = []
-        for case in spec["cases"]:
+        cases = list(spec["cases"])
+        if a.set:
+            cases += spec["sets"][a.set]
+        for case in cases:
             req = {"messages": case["messages"]}
             if case.get("tools"):
                 req["tools"] = [spec["tools"][t] for t in case["tools"]]
+            # Extra request fields, such as chat_template_kwargs to turn thinking off.
+            req.update(case.get("extra", {}))
             body = json.dumps(req, ensure_ascii=False)
             status, text = post(port, "/apply-template", body)
             rec = {"name": case["name"], "request": body}
