@@ -79,6 +79,12 @@ So the core issues **two 512-bit vector instructions per cycle** at ~3.5 GHz, an
 `vpdpbusd zmm` is 64 byte-MACs. The roof for the instruction the k-quant kernels use is
 **455 GMAC/s per core**, and the same instruction rate on 256-bit registers is 227 GMAC/s.
 
+> **Corrected in §10 — strike this paragraph.** The table above is not reproducible. The core
+> runs at **1.90 GHz**, one `vpdpbusd zmm` per cycle and two 256-bit ones, so the roof is
+> **121-122 GMAC/s**, externally checked at 113.8 GMAC/s with a clock outside the VM. That
+> session's time base ran ~1.8× fast, and the two widths were given the same instruction rate
+> but different MAC counts: that is the 2× that is not there. See §10.0 and §10.4.
+
 ### 1.3 Engine level, 512 tokens, 12 threads
 
 Median of 3 interleaved rounds (ik: median of 5 samples in one invocation).
@@ -202,6 +208,12 @@ is 64–128 (the two differ by under 10 %). Taking 16 and 128: **Q4_K 1.7–1.9�
 
 Against the roof: Peregrine's Q4_K ZMM kernel runs at **17–18 % of 455 GMAC/s**; ik's ymm
 kernel at **60–66 % of 227 GMAC/s**. Peregrine's Q6_K (9 % of 455) is the worst placed of all.
+
+> **Corrected in §10 — strike the two rows above and the ik columns of this table.** ik's
+> Q4_K_R4 kernel measures 57-67 GMAC/s through the same library at a real layer's shape
+> (2048 × 8192), not 134-148; Peregrine's is 72-75 on the same shape, so at equal width the
+> two kernels are level to Peregrine's advantage. Against the corrected 121 GMAC/s roof,
+> Peregrine's Q4_K is at 61 % and the path ik actually runs at ub 512 is at 75 %.
 
 ### 1.7 Threads (measured)
 
@@ -536,6 +548,14 @@ own Q5_0 kernels — ik 108 GMAC/s at 16 activation rows, Peregrine's ZMM tile 4
 60 % and 68 % of the micro-benchmark rate, i.e. the two engines lose a similar fraction in
 situ, and the 1.97× engine ratio is the 2.1× kernel ratio at the widths the engines use.
 
+> **Corrected in §10 — the whole account above is superseded.** The kernel ratios it is built
+> on (1.69-1.95× for Q4_K, 3.1-4.1× for Q6_K) do not reproduce: at equal pass width the two
+> engines are level (P ÷ ik 0.93-1.03 at 16 and 64 activation rows) and Peregrine's own
+> kernel is 1.2-1.4× the fork's in isolation. The "thread scaling 6.0× against 6.7×" row also
+> does not reproduce: today 6.50× against 6.43×. What the gap really is: the fork's pass is
+> 512 rows wide, where it requantises 32 rows of weights to 8 bits once and runs a different
+> kernel at 91 GMAC/s, and Peregrine's ceiling is a 128-row pass. See §10.5 and §10.6.
+
 ---
 
 ## 6. What to build
@@ -866,6 +886,13 @@ activation rows against 4 000-token-equivalent work; its Q6_K kernel measures **
 
 Peregrine's own Q6_K ZMM kernel, on the same L1 tile, is 58–61 GMAC/s — the same wall.
 
+> **Corrected in §10 — the roof stands, the conclusion does not.** Today's roof is 121-122
+> GMAC/s (113.8 by a clock outside the VM), so the 106-117 measured here is the one number this
+> section got right, and "near the wall" is true of the 4-bit kernel. But the fork's engine does
+> not run that kernel at ub 512: at 32 activation rows or more its dispatcher requantises 32 rows
+> of weights to 8 bits and runs an 8-bit kernel, which measures **91.3 GMAC/s** at 512 rows —
+> 75 % of the corrected roof, not 55 %. That is the check this section was missing. See §10.3.
+
 ### 9.4 What was tried
 
 Three kernels were built and measured in `kqbench`, and none is shipped:
@@ -894,9 +921,409 @@ splits a prompt over 32-row tiles and its own flash attention (§2.4, §2.5), an
 where Peregrine's default pass is 16 (64 wide). The next step for prompt speed is §6 item 4 and
 item 5, not the Q4_K kernel.
 
+> **Corrected in §10 — strike the conclusion of this paragraph.** The end-to-end numbers stand
+> (today 0.65 and 0.55 at 512 tokens, twelve threads, on this branch). "The gap has to be outside
+> the Q4_K kernel" is wrong: the gap is a kernel, just not the one this section measured — the
+> fork requantises weights to 8 bits per 32-row block when the pass is wide, which is why its
+> 4-bit kernel's rate says nothing about its engine. The pass size is the *enabler* of that
+> kernel rather than a gain of its own: at equal pass width the two engines are level today
+> (§10.5, §10.6).
+
 ### 9.6 Bits
 
 No kernel changed, so no golden could move; the only code change is one line in
 `kqbench` (`out` sized for 128 activation rows, which the width sweep already asked for and
 which used to panic before the Q6_K rows). Goldens pass unchanged on the avx512, avx2 and
 scalar tiers.
+
+---
+
+## 10. Round 3: the measurements reconciled
+
+- Status: the record corrected; **no engine change**
+- Date: 2026-11-12 (03:40–05:10 local, UTC+7)
+- Host: AMD Ryzen AI 9 HX 370 (Zen 5, 12 cores / 24 threads, AVX-512 F/BW/VL/VNNI/VBMI/BF16),
+  WSL2, 11.7 GiB
+- Peregrine: this branch (`s5.1-reconcile` = `s5.1-adaptive-chunk` + §9's write-up),
+  `cargo build --release -p peregrine`; ik_llama.cpp: `479074c`, the build PR #177 measured
+  (not rebuilt: `isa.txt` shows its runtime instruction sets, `ldd`, its CMake flags and its
+  26,526 `vpdpbusd`)
+- Raw measurements, the harness, the two probes, the clock calibration and the table
+  generators: `benchmarks/results/desktop-zen5-2026-11-12-s5.1-reconcile/`; the fork-side
+  probe is `benchmarks/ik_kernel_probe.cpp` (it links the fork's library; no fork source is
+  copied into this repository)
+- Every ratio below is **Peregrine ÷ the fork**. Every rate is converted with the model's own
+  multiply-accumulate count per prompt token, read from its tensor shapes: **0.9731 GMAC** for
+  Llama 3.2 1B (16 layers: q 4.19 + k 1.05 + v 1.05 + o 4.19 + gate 16.78 + up 16.78 +
+  down 16.78 MMAC per layer) and **0.3579 GMAC** for Qwen 2.5 0.5B (24 layers: 0.80 + 0.115 +
+  0.115 + 0.80 + 4.36 × 3). The output head runs for the last token only and is excluded; it
+  is 0.136 GMAC on Qwen, +0.07 % of a 512-token pass.
+
+§1 and §9 disagreed about the fork by a factor of two and about the roof by a factor of four,
+and only one side of each could be right. Both were wrong, for three separate reasons, and the
+one check neither session made — that an engine's per-core GMAC/s times its matmul share must
+be at or below its isolated kernel's rate — is what settles it.
+
+### 10.0 What was wrong, and what is struck
+
+**1. The clock this host gives a process moves, and both sessions timed with it.** §1.2's
+455 GMAC/s needs 7.1 G `vpdpbusd` instructions/s; §9.3's 106-117 needs 1.7 G. Today, at the
+same absolute wall-clock rate checked from outside the VM, the number is **113.8 GMAC/s**. A
+3 s burn loop on one core reads CLOCK_MONOTONIC 3.000 s against 2.78 s of CPU time and 2.78 s
+of CLOCK_MONOTONIC_RAW; 40 s of the same loop bracketed by two remote HTTP `Date` headers
+reads MONOTONIC 40.02 s against a host 38 ± 2 s and 37.18 s of CPU time. **MONOTONIC ran 5-8 %
+fast in this session.** Earlier in the *same* session it ran 1.6-1.8× fast (MONOTONIC 1.76 s
+for 1.00 s of CPU time), which is the size of the error that separates §1.2's table from
+today's, and it is exactly the hazard §1.1 named: a rate timed on a fast clock is understated,
+a rate timed on a slow one inflated, and neither session recorded which it had.
+
+**2. The 512-bit byte dot is one per cycle, not two.** §1.2 measured the same *instruction
+rate* for ymm and zmm (7.1 G/s) and then multiplied one by 32 MACs and the other by 64. Today,
+with sixteen named accumulators in inline asm: `vpdpbusd zmm` 1.89-1.91 G/s = **1.00 per
+cycle**, `vpdpbusd ymm` 3.83-3.84 G/s = **2.01 per cycle** — the same GMAC/s, 121-123. The
+"455" is 2 × the ymm figure from the same run, and the factor of two is that error.
+
+**3. Probe and engine were different code paths.** §9's `58-67 GMAC/s` is a fair measurement
+of the fork's **4-bit** kernel on 4.5-bit weights. At `-ub 512` the fork does not run it: with
+32 activation rows or more, its dispatcher (`iqk_dequant_type`, which the probe now prints)
+requantises 32 rows of weights to 8 bits once and runs an 8-bit kernel, and *that* is the code
+the 78-80 GMAC/s engine number comes from. Measuring the 4-bit kernel and comparing it with an
+engine running the 8-bit one is the error the review suspected.
+
+Struck, in place, above: §1.2's roof table and its 3.55 GHz (corrected note under it), §1.6's
+ik columns and the "17-18 % / 60-66 %" sentences, all of §5's account, §9.3's "both kernels
+are at the wall", and §9.5's conclusion. What stands: §9.1's instruction table (it is a
+disassembly, and the counts are right), §9.2, §8's and §9's end-to-end numbers to within 3 %,
+and §9's finding that nothing correct was faster than Peregrine's Q4_K kernel — that part was
+measured correctly and is confirmed in §10.3.
+
+### 10.1 Method, and which core
+
+One harness (`sweep.py`) for both engines: every point is one process, points are interleaved
+one per round, five rounds, and then the whole series is measured again 70 minutes later.
+Every row records the invocation's wall time *and* its CPU time (the two clocks of §10.0) and
+the host's load average. Medians of five; the two runs are both printed and they agree within
+1-4 % everywhere except the fork's `-ub 32` row (see §10.2).
+
+One-thread rows are pinned with `taskset -c 4`. `lscpu -e` says CPUs 0-7 are cores 0-3 (the
+four full cores) and CPUs 8-23 are cores 4-11 (the compact ones), with two SMT threads each.
+The same fixed-work loop timed on each of the 24 CPUs reads the same CPU time on all of them
+(1.0006 s on every one), which is consistent with §1.9's finding that the two clusters are
+indistinguishable for this workload and with the alternative that this host's CPU accounting is
+too coarse to separate them. Either way there is no evidence of a core worth pinning to, so
+**CPU 4 (core 2, a full core) is used throughout** and no result here depends on the choice
+(§1.9 measured 4 threads on cores 0-3 against 4 on the compact cores at 244.5 and 264.3
+tok/s — 8 % in the compact cores' favour, the opposite direction).
+
+Probes are timed with the minimum over 5-7 passes of `min(CLOCK_MONOTONIC_RAW, CPU time)`,
+which is the least-descheduled pass in real seconds; the absolute value is checked once against
+the host clock (`roof_abs.sh`, §10.4).
+
+### 10.2 The ground truth
+
+512 prompt tokens, `-p 512 -n 0` for the fork (`-rtr 1`, `-fa` default) and
+`peregrine bench --prompt-tokens 512 --tokens 1` with `PEREGRINE_PREFILL_CHUNK` set. Two runs,
+70 minutes apart, medians of five interleaved rounds each.
+
+**Llama 3.2 1B Q4_K_M — one thread** (pk = pass width: the fork's `-ub`, Peregrine's chunk)
+
+| pk | fork tok/s | fork run 2 | fork GMAC/s | Peregrine tok/s | run 2 | Peregrine GMAC/s | P ÷ fork |
+|---|---|---|---|---|---|---|---|
+| 8 | 53.0 | 53.4 | 51.6 | 50.8 | 50.7 | 49.4 | 0.96 |
+| 16 | 55.5 | 55.5 | 54.0 | 51.5 | 51.1 | 50.1 | 0.93 |
+| 32 | 34.6 | 40.5 | 33.6 | 52.0 | 51.6 | 50.6 | 1.50 |
+| 64 | 51.2 | 50.4 | 49.8 | 51.9 | 51.3 | 50.5 | 1.01 |
+| 128 | 65.1 | 64.9 | 63.3 | 49.6 | 49.8 | 48.2 | 0.76 |
+| 256 | 74.8 | 76.6 | 72.8 | — (cap 128) | — | — | — |
+| 512 | **80.4** | 79.3 | **78.3** | — | — | — | — |
+
+**Qwen 2.5 0.5B Q4_K_M — one thread**
+
+| pk | fork tok/s | fork run 2 | fork GMAC/s | Peregrine tok/s | run 2 | Peregrine GMAC/s | P ÷ fork |
+|---|---|---|---|---|---|---|---|
+| 8 | 109.9 | 108.2 | 39.3 | 101.0 | 100.6 | 36.1 | 0.92 |
+| 16 | 116.4 | 117.4 | 41.7 | 100.7 | 100.8 | 36.0 | 0.86 |
+| 32 | 130.3 | 127.4 | 46.7 | 101.7 | 102.5 | 36.4 | 0.78 |
+| 64 | 153.1 | 155.1 | 54.8 | 102.9 | 101.9 | 36.8 | 0.67 |
+| 128 | 175.1 | 172.4 | 62.7 | 100.8 | 100.5 | 36.1 | 0.58 |
+| 256 | 184.1 | 181.8 | 65.9 | — | — | — | — |
+| 512 | **180.1** | 173.5 | **64.5** | — | — | — | — |
+
+**Llama 3.2 1B Q4_K_M — twelve threads**
+
+| pk | fork tok/s | fork run 2 | fork GMAC/s | Peregrine tok/s | run 2 | Peregrine GMAC/s | P ÷ fork |
+|---|---|---|---|---|---|---|---|
+| 8 | 278.2 | 273.0 | 270.7 | 275.2 | 278.9 | 267.8 | 0.99 |
+| 16 | 307.4 | 302.6 | 299.2 | 307.0 | 297.8 | 298.7 | 1.00 |
+| 32 | 230.0 | 231.6 | 223.8 | 331.4 | 317.6 | 322.5 | 1.44 |
+| 64 | 326.9 | 333.1 | 318.1 | **337.5** | 335.1 | **328.4** | 1.03 |
+| 128 | 431.0 | 428.8 | 419.4 | 318.9 | 321.5 | 310.3 | 0.74 |
+| 256 | 488.7 | 473.1 | 475.6 | — | — | — | — |
+| 512 | **517.6** | 520.3 | **503.6** | — | — | — | 0.62¹ |
+
+**Qwen 2.5 0.5B Q4_K_M — twelve threads**
+
+| pk | fork tok/s | fork run 2 | fork GMAC/s | Peregrine tok/s | run 2 | Peregrine GMAC/s | P ÷ fork |
+|---|---|---|---|---|---|---|---|
+| 8 | 459.7 | 470.1 | 164.5 | 430.9 | 419.1 | 154.2 | 0.94 |
+| 16 | 558.4 | 549.7 | 199.8 | 494.9 | 483.4 | 177.1 | 0.89 |
+| 32 | 665.5 | 652.9 | 238.2 | 564.7 | 540.2 | 202.1 | 0.85 |
+| 64 | 845.8 | 867.7 | 302.7 | 593.4 | 579.2 | 212.4 | 0.70 |
+| 128 | 968.9 | 1003.3 | 346.8 | **620.3** | 596.0 | **222.0** | 0.64 |
+| 256 | 1071.4 | 1059.0 | 383.5 | — | — | — | — |
+| 512 | **1072.7** | 1061.9 | **383.9** | — | — | — | 0.58¹ |
+
+¹ the fork's 512-row row against Peregrine's widest pass (128), which is the comparison a user
+sees: 0.62 for the 1B and 0.56 for Qwen at one thread, 0.62 and 0.57 at twelve.
+
+Two things in these tables are worth their own line. The **`-ub 32` cliff** in the fork: 34.6
+and 40.5 tok/s, half of what `-ub 64` gives, on both models and both runs. That is the width at
+which its dispatcher switches from the 4-bit kernel to the requantising one and the 32-row
+blocks stop being amortised; `-ub 16` (the 4-bit kernel) is 1.4-1.6× faster than `-ub 32`. And
+**Peregrine's chunk 128 is slower than its chunk 64** on the 1B at both thread counts (48.2
+against 50.5 at one thread, 310.3 against 328.4 at twelve), which is §6 item 3 still standing.
+
+At equal pass width the two engines are **level**: 0.93-1.03 at 16 and 64 rows, 0.96-0.99 at 8.
+Everything the fork gains is at 128 rows and above.
+
+### 10.3 The kernels in isolation, and the check against 10.2
+
+**The fork.** `benchmarks/ik_kernel_probe.cpp` links `libggml.so` from the build PR #177
+measured, quantises one real layer's weights (K = 2048, 8192 output rows — a gate or up matrix)
+with ggml's own quantiser, repacks them with the fork's own `iqk_repack_tensor` (the call `-rtr`
+makes at load, 11-17 ms for 9.4 MB), hands the activations in as F32 and runs the graph's
+mul_mat node the way the engine does. **One call is 2048 × 8192 × ny multiply-accumulates** =
+134.2 MMAC at ny 8, 1.074 GMAC at 64, 8.59 GMAC at 512. It also asks `iqk_dequant_type` which
+of the fork's code paths that shape selects, and prints it:
+
+| weights | ny | path the library takes | run 1 GMAC/s | run 2 |
+|---|---|---|---|---|
+| Q4_K_R4 | 8 | `q4_k_r4` (the 4-bit kernel) | 57.0 | 61.5 |
+| Q4_K_R4 | 16 | `q4_k_r4` | 65.0 | 66.7 |
+| Q4_K_R4 | 64 | `q8_k_r16` (32 weight rows requantised to 8 bits, 8-bit kernel) | 52.2 | 55.9 |
+| Q4_K_R4 | **512** | `q8_k_r16` | **91.3** | **91.3** |
+| Q6_K_R4 | 8 | `q6_k_r4` | 57.3 | 57.6 |
+| Q6_K_R4 | 16 | `q6_k_r4` | 60.4 | 57.8 |
+| Q6_K_R4 | 64 | `q8_k_r16` | 54.8 | 57.5 |
+| Q6_K_R4 | 512 | `q8_k_r16` | 95.6 | 94.4 |
+
+**Peregrine.** `kqbench`'s new layer mode (this branch, `KQBENCH_LAYER=1`) builds the same
+matrix as 1024 eight-row tiles (9.4 MB, so it streams the way a whole model's layer does) and
+calls the engine's own kernels once per tile: **one pass is the same 2048 × 8192 × ny MACs.**
+
+| weights | 8 acts | 64 acts | 512 acts |
+|---|---|---|---|
+| Q4_K, `q4k8_gemm_zmm` | 74.3-75.5 | 74.2-75.0 | 71.8-72.7 |
+| Q6_K, `q6k8_gemm_zmm` | 50.1-51.2 | 53.8-54.2 | 53.6-53.9 |
+| Q5_0, `q5_08_gemm_zmm` | 49.0-51.5 | 50.8-51.8 | 48.8-49.3 |
+
+(The same kernels on a single L1 tile, which is what `kqbench` always reported, read 81.1 / 60.4
+/ 55.0 at 16-128 acts; the 8-10 % difference is the 9.4 MB stream, and that is the number to
+compare with the fork, whose probe streams the same 9.4 MB.)
+
+**The check.** An engine's end-to-end GMAC/s must not exceed its kernel's isolated rate times
+the matmul share, and the share cannot exceed 1. Today, at one thread:
+
+| engine, 1B, 1 thread | end to end | matmul share | required kernel ≥ | probe says | pass? |
+|---|---|---|---|---|---|
+| fork, ub 512 | 77.7 GMAC/s | 85.1 % (implied by the probe) | 89.8 at share 86.5 % | **91.3** | yes, by 1.7 % |
+| Peregrine, chunk 64 | 50.3 | 86.5 % (measured, `PEREGRINE_PROF2`) | 58.2 | **74.2** | yes, by 27 % |
+| Peregrine, Qwen chunk 64 | 36.5 | 82.7 % (measured) | 44.1 | **53.5** weighted | yes, by 21 % |
+
+The fork's row is tight on purpose: its matmul share must be at least 85.1 % for its own kernel
+to cover its own engine, and Peregrine's measured share is 86.5 %, so the two agree. If the
+fork's share were 80 %, its kernel would have to be 97 GMAC/s, above what the probe and the
+roof allow — so the probe is neither too low nor a different path from the engine's.
+
+The §9 probe **fails** the same check: 58-67 against a required 89.8. That is the signature of
+a probe measuring something else, and it was: it ran the 4-bit kernel for every width and
+compared it with an engine that runs the requantising one.
+
+### 10.4 The roof, counted by hand
+
+`peak.c`, one core, minimum of seven timed passes per probe, and every probe's instruction
+count per iteration is one instruction per *named* accumulator (an indexed array makes GCC
+spill the accumulators, and the first version of this probe measured store-forwarding latency
+until that was fixed — the previous sessions' `peak.c` used named accumulators, so this is not
+their error).
+
+The clock, three ways, all agreeing: a dependent `add` chain runs at **1.904 and 1.898 G add/s**
+(unroll 8 and 16, so it is not a loop-overhead artefact) = 1.90 GHz at one cycle per add; a
+dependent `imul` chain runs at 0.627-0.637 G/s = **2.96-3.01 cycles per imul**, the ratio the
+architecture has; the TSC reads 1.997 GHz. So the core runs at **1.90 GHz**, 5 % under its TSC
+nominal, and does not boost above it on this host.
+
+| probe | instructions/iter | instr/s | MACs/instr | GMAC/s | per cycle |
+|---|---|---|---|---|---|
+| `vpdpbusd zmm`, 1 accumulator | 1 | 0.48 G | 64 | 30.8 | 0.25 (latency-bound: 4-cycle latency) |
+| `vpdpbusd zmm`, 4 | 4 | 1.88 G | 64 | 120.0 | 0.99 |
+| `vpdpbusd zmm`, 8 | 8 | 1.90 G | 64 | 121.4 | 1.00 |
+| `vpdpbusd zmm`, 16 | 16 | 1.89-1.91 G | 64 | 121-122 | 1.00 |
+| `vpdpbusd ymm`, 16 | 16 | 3.83-3.84 G | 32 | 122-123 | 2.01 |
+| `vpdpbusd zmm`, 4, operand from an L1 buffer | 4 | 1.93-1.94 G | 64 | 124 | 1.01 |
+| `vfmadd512`, 8 | 8 | 3.85-3.89 G | 16 | 62 | 2.02 |
+
+By hand: 1.90 G instructions/s × 64 MACs = **121.6 GMAC/s**; 1 zmm byte dot per cycle, 2 ymm
+ones per cycle, 2 zmm FMAs per cycle. **The byte-dot roof is 121-122 GMAC/s per core**, and an
+L1 operand costs nothing.
+
+Checked outside the VM: `roof_abs.c` executes a fixed 2.048 × 10¹² MACs (32 G `vpdpbusd`) with
+`roof_abs.sh` reading the remote `Date` header before and after: **113.8 GMAC/s, twice**, over
+an 18 s window whose ±2 s puts it at 102-128; the guest's own clocks read 111-120 for the same
+run. So the roof is 121-122 GMAC/s and nothing on this host reaches 455 with any width.
+
+Both kernels' placement against it: Peregrine's Q4_K is at **61 %** (74.2 of 122), the fork's
+4-bit kernel at **47-55 %** (57-67), and the path the fork's engine actually runs at ub 512 at
+**75 %** (91.3). §9.3's "both are near the wall" was true of two kernels, one of which the
+engine does not use.
+
+### 10.5 The account, again
+
+**One thread, Llama 3.2 1B.** Measured: fork 79.9 tok/s = 77.7 GMAC/s, Peregrine 51.7 tok/s =
+50.3 GMAC/s, P ÷ fork 0.65.
+
+| part | fork | Peregrine | P ÷ fork | how |
+|---|---|---|---|---|
+| weight mix in the matmul | Q4_K 71.8 %, Q6_K 27.7 % | same tensors | — | `PEREGRINE_PROF2` by format |
+| kernel, isolated, at each engine's own width | 91.3 (ub 512, `q8_k_r16`) | 74.2 (chunk 64, Q4_K) | 0.81 | §10.3 |
+| kernel, isolated, weighted by the format mix | 91.3 | 68.3 (0.718 × 74.2 + 0.277 × 54.2) | 0.75 | §10.3 |
+| matmul share of a pass | 85.1 % (the least that covers 77.7) | 86.5 % (measured) | ~1.0 | `PERF2` / arithmetic |
+| in-situ kernel rate (end to end ÷ share) | 91.3 | 58.2 | 0.64 | — |
+| in-situ efficiency (in situ ÷ isolated) | 100 % | 85 % | 0.85 | — |
+| non-matmul: attention / quantise / rest | not measured | 7.7 % / 2.0 % / 3.8 % | — | `PERF2` |
+| **end to end** | **77.7** | **50.3** | **0.65** | measured |
+
+So the one-thread gap is **0.75 × 0.85 = 0.64**, and only the second factor is a Peregrine
+inefficiency: its kernel runs 15 % slower inside the engine than on the same matrix in
+isolation (the 9.4 MB layer probe already pays for the stream, so the remaining loss is the
+per-tile output write and the per-layer cold start). The first factor is that the fork's kernel
+is a different kernel at a different width.
+
+**Twelve threads, Llama 3.2 1B.** Measured: fork 519 tok/s = 505 GMAC/s, Peregrine 336 tok/s =
+327 GMAC/s, P ÷ fork 0.65. Per core: 42.1 against 27.3.
+
+| part | fork | Peregrine | P ÷ fork |
+|---|---|---|---|
+| matmul share of a pass | 85.1 % (implied) | 82.1 % (measured; barrier wait 10.3 %, attention 7.7 %) | ~1.0 |
+| in-situ kernel rate, per core | 49.5 | 33.2 | 0.67 |
+| against the single-core isolated kernel | 54 % | 49 % | — |
+| thread scaling, 1 → 12 | 6.49× | 6.50× | 1.00 |
+| **end to end, GMAC/s** | **505** | **327** | **0.65** |
+
+The 12-thread picture is the one-thread picture: both engines lose about half of their
+single-core isolated kernel rate to memory when twelve cores share it, so the ratio stays at
+0.65 and **thread scaling is not part of the gap** (6.49× against 6.50×; §1.7's "6.0× against
+6.7×" does not reproduce on this branch).
+
+**Is the fork's advantage the pass size?** Partly, and the numbers say which part:
+
+| pk | 1B, 1 thread, P ÷ fork | 1B, 12 threads, P ÷ fork |
+|---|---|---|
+| 8 | 0.96 | 0.99 |
+| 16 | 0.93 | 1.00 |
+| 32 | 1.50 | 1.44 |
+| 64 | 1.01 | 1.03 |
+| 128 | 0.76 | 0.74 |
+
+At 8, 16 and 64 rows the engines are **level**, and Peregrine's kernel on that same matrix is
+1.2-1.4× the fork's in isolation (74.2 against 55.9 at 64 rows) — so the kernels are level in
+situ and Peregrine's isolated advantage is spent on its in-situ loss. From 128 rows the fork
+pulls away, and at 512 it is 0.62. Between 128 and 512 the fork's kernel changes: 55.9 at 64
+rows (the 4-bit kernel, its requantise not yet amortised) to 91.3 at 512, while Peregrine's
+goes 74.2 → 72.7 (flat, because its kernel already decodes each weight block once per eight
+activation rows). **So the fork's 512-row pass is worth nothing by itself to Peregrine; it is
+the *licence* for a kernel that requantises weights and is 27 % faster once the requantise is
+spread over 512 rows.** Peregrine's own wide pass, at today's kernel, is flat at best and at
+chunk 128 actually loses 4 % (one thread) and 5 % (twelve).
+
+**Qwen 2.5 0.5B**, for completeness: one thread 36.5 against 63.3 GMAC/s (0.58), twelve 210 at
+chunk 64 against 382 (0.55), and 218 at its widest against the same 382 (0.57). Its matmul at
+one thread is 69.3 % Q5_0, 20.4 % Q6_K and 9.5 % Q4_K, and Peregrine's Q5_0 kernel is its
+weakest (50.8 isolated against Q4_K's 74.2). Weighted isolated: 53.5 GMAC/s;
+in situ 44.1, i.e. 83 % efficiency — the same story as the 1B with a weaker first term. The
+fork's Q5_0 path was not probed, so its Qwen kernel rate is **unreconciled** (§10.8).
+
+### 10.6 What to build, again
+
+Ranked by gain over size, against the corrected record. Items 1 and 2 are one job and should be
+judged together.
+
+**1. A wide pass that requantises weights: the fork's actual trick (biggest, and the only one
+that changes the kernel gap).**
+
+- **What**: at a pass of 128-512 rows, convert each block of 32 weight rows from the 4-bit
+  format to an 8-bit one *once*, into a scratch buffer of 64 KiB, and run an int8 tile kernel
+  against the whole pass; for narrow passes keep the 4-bit kernel that is already better.
+- **Evidence**: the fork's own dispatcher does exactly this above 32 activation rows
+  (`iqk_dequant_type` → `q8_k_r16`), and it takes the fork from 55.9 GMAC/s at 64 rows to
+  **91.3 at 512** (§10.3), while its 4-bit kernel stays at 57-67. Peregrine's kernel at the same
+  shape is 71.8-74.2 and flat. Peregrine at one thread delivers 50.3 GMAC/s and the fork 77.7;
+  with a kernel at the fork's 91.3 and Peregrine's measured 85 % in-situ efficiency the same
+  engine would deliver 77.6 GMAC/s per core = 79.7 tok/s, **+54 % at one thread**. At twelve
+  threads the ceiling is what the fork itself does with that kernel (505 GMAC/s), so the honest
+  target is 519 tok/s from 336 today, **+55 %**, P ÷ fork 1.00.
+- **Bits**: bit-identical is achievable and is the requirement: a 4-bit code with its per-32
+  scale widened to an int8 code with the same per-32 scale is exact (Q4_K's codes are 0-15,
+  Q6_K's -32…31, both exact in int8), and the min term must stay the integer term it already is
+  (`s3.4.md` §4.4's argument). If the widening rounds, the goldens move and are re-recorded —
+  so the kernel has to be written to widen, not to requantise.
+- **Size**: 2-3 weeks (a conversion pass, an int8 tile kernel with the same fold order, the
+  dispatch at a measured break-even, the bit-identity test).
+
+**2. Make the wide pass pay, and raise the cap (needed for 1; no gain on its own).**
+
+- **What**: `MAX_PREFILL_CHUNK` is 128 (`options.rs:95-98`); the fork's pass is 512. Fix the
+  reason chunk 128 loses 4-5 % on the 1B (§6 item 3's scattered write-out), then raise the cap.
+- **Evidence**: Peregrine's chunk 128 is 48.2 against 50.5 tok/s at one thread and 310.3
+  against 328.4 at twelve, measured twice; its *kernel* is flat to 512 rows (74.2 → 71.8), so
+  the loss is in the engine, not the kernel. Item 1 needs a 128-512-row pass to amortise the
+  requantise (at 64 rows the fork's requantising path is 25 % *slower* than its 4-bit kernel).
+- **Bits**: bit-identical (the chunk is scheduling; `crates/peregrine-models/tests/prefill_chunk.rs`).
+- **Size**: 3-5 days on top of §6 item 3.
+
+**3. The Q5_0 kernel (Qwen only).**
+
+- **What**: bring `q5_08_gemm_zmm` (50.8 GMAC/s isolated) to Q4_K's rate (74.2).
+- **Evidence**: Q5_0 is 69.3 % of Qwen's matmul time at one thread and 59.2 % at twelve, where
+  it is 44.7 % of the whole pass; Q6_K is 12.2 % of the pass at 54.2 GMAC/s, Q4_K 9.7 % at
+  74.2. A 1.45× Q5_0 kernel (50.8 → 74.2) takes 44.7 % of the pass down to 30.8 %:
+  **+16 % on Qwen's prompt at twelve threads**, which is where its worst ratio is (0.55).
+- **Bits**: bit-identical by the same argument; goldens do not move.
+
+**4. Nothing in the Q4_K or Q6_K 4-bit kernels.** Reconfirmed, not merely repeated: Q4_K is
+74.2 GMAC/s against the fork's 55.9-66.7, Q6_K 54.2 against 57.5-60.4, at every width either
+engine can reach without the requantise. §9's "nothing correct was faster" stands for those
+kernels. What was wrong was the conclusion drawn from it: the fork's engine is not running them.
+
+**Not re-measured here**: §6 item 4 (a 512-bit attention score kernel; attention is 7.7 % of
+the 1B's pass and 8.8 % of Qwen's at 512 tokens, unchanged) and item 5 (24 threads). Both stand
+as written; neither is touched by the correction above.
+
+### 10.7 Bits
+
+No engine code changed in this round. The one source change is a measurement: `kqbench` gains
+the `KQBENCH_LAYER` mode (off by default, so its existing output is unchanged) and the probe
+`benchmarks/ik_kernel_probe.cpp` is new and links the fork's library. No golden can move, and
+none was run; items 1-3 of §10.6 each carry the standard KL gate.
+
+### 10.8 What is not reconciled
+
+- **The fork's own wall-clock rates carry the host's clock error.** Both engines are timed with
+  CLOCK_MONOTONIC, which ran 5-8 % fast in this session, so every tok/s above is 5-8 %
+  *conservative* in real seconds and every GMAC/s with it. The correction is common to both
+  engines, so every ratio stands; the absolute GMAC/s are 5-8 % low. Probes I timed use CPU
+  time and MONOTONIC_RAW, and the roof is checked against the host clock.
+- **The fork's Q5_0 path** (which is most of Qwen) was not probed, so the fork's Qwen kernel
+  rate is inferred from its engine and Peregrine's measured share: 63.3 GMAC/s end to end ÷
+  82.7 % = 76.5 GMAC/s per core in situ at one thread. That is below the 91.3 the same build
+  gets on a Q4_K matrix at ub 512, which is consistent with a Q5_0 requantise being more work
+  than a Q4_K one, but it is an inference and is marked as one.
+- **The fork's matmul share inside its own pass** is still not directly measurable (no `perf`
+  under WSL2); §10.3's lower bound of 85.1 % and Peregrine's measured 86.5 % are what make the
+  one-thread account close.
+- **The fork's `-ub 32` cliff** (34.6 against 51.2 tok/s at `-ub 64`, twice) is real but its
+  cause is not pinned to a line of its code; it is at the boundary of the two paths.
+- **Why the guest's clock scales** (1.6-1.8× early in this session, 1.05-1.08× later, both
+  measured against the host and against CPU time) is not something a process inside WSL2 can
+  see. It is reported as the hazard it is: absolute rates from different sessions are not
+  comparable unless the clock was checked in each.
