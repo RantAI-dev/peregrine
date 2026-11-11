@@ -21,7 +21,7 @@ pub struct RecurrentShape {
 }
 
 /// Activation layout expected by the model's kernels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActLayout {
     pub ternary: bool,
     pub ptq1: bool,
@@ -30,6 +30,24 @@ pub struct ActLayout {
     /// Wider than `n_ff`, `d_model` and `q_dim`: the rows an embedding head's dense
     /// projections read (`dense_2` in EmbeddingGemma is `dense_2_feat_out` wide).
     pub act_width: usize,
+    /// Whether an activation row is read in a quantised form. It is off only when
+    /// every matrix of the model is F32/F16/BF16: a pure float file never reads the
+    /// int8 layouts, so [`peregrine_kernels::quant::QuantAct::fill`] only keeps the
+    /// `f32` copy (S4.9h).
+    pub quantize: bool,
+}
+
+impl Default for ActLayout {
+    fn default() -> Self {
+        Self {
+            ternary: false,
+            ptq1: false,
+            tb_span: 0,
+            keep_f32: false,
+            act_width: 0,
+            quantize: true,
+        }
+    }
 }
 
 /// Whether a row attends to the positions after it (design §2.2).

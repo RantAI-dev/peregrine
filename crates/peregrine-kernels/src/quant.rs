@@ -116,6 +116,10 @@ pub struct QuantAct {
     pub xf: Vec<f32>,
     /// Keep unquantised f32 activations in `xf` during `fill`.
     pub keep_f32: bool,
+    /// Build the int8/ternary layouts in `fill`. False for a model whose every matrix
+    /// reads the f32 rows (a pure F32/F16/BF16 file), where the codes would be
+    /// produced and never read (S4.9h).
+    pub quantize: bool,
     /// Build the per-256 layout (`qk`, `dk`, `bsums`) in `fill`. Set from the model's
     /// weight formats ([`Format::reads_k_layout`]): a model whose matmuls are all
     /// 32- or 128-weight formats never reads it, and the fill is a second, serial
@@ -177,6 +181,7 @@ impl QuantAct {
             t1init: Vec::new(),
             t1sc: Vec::new(),
             keep_f32: false,
+            quantize: true,
             k_layout: true,
         }
     }
@@ -393,6 +398,13 @@ impl QuantAct {
         if self.keep_f32 {
             self.xf.clear();
             self.xf.extend_from_slice(x);
+        }
+        if !self.quantize {
+            // No matrix of this model reads a quantised row (S4.9h): the f32 copy
+            // above is the whole activation. `n` is still the row width, which the
+            // float kernels read.
+            self.n = x.len();
+            return;
         }
         if self.ternary {
             self.fill_ternary(x);
