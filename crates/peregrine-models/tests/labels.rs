@@ -425,6 +425,23 @@ fn labels_through_the_unmixed_scheduler() {
                         "{arch}: question {i} in a batch (unmixed), {threads} threads, chunk {chunk}"
                     );
                 }
+                // S4.9j: the fork is taken in `prefill_chunk` on this path.
+                let r = run_prec(
+                    &model,
+                    &prompts,
+                    threads,
+                    chunk,
+                    1 << 20,
+                    KvPrec::F16,
+                    Some(1),
+                );
+                for (i, want) in reference.iter().enumerate() {
+                    assert_eq!(
+                        bits(&r.logits[i]),
+                        bits(want),
+                        "{arch}: forked question {i} (unmixed), {threads} threads, chunk {chunk}"
+                    );
+                }
             }
         }
     }

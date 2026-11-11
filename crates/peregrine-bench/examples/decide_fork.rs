@@ -94,8 +94,11 @@ fn run(
     let mut rows = 0usize;
     let mut prefilled = vec![0usize; prompts.len()];
     while engine.active() > 0 {
-        for em in engine.step() {
-            rows += engine.last_step.rows;
+        let emitted = engine.step();
+        // A step's rows are the batch rows the weight pass forwarded, whether or not it emitted
+        // anything (a prompt chunk emits only when it completes a slot).
+        rows += engine.last_step.rows;
+        for em in emitted {
             let Some(&i) = by_slot.get(&em.slot) else {
                 continue;
             };

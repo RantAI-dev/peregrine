@@ -130,6 +130,12 @@ impl PrefixStore {
         self.budget
     }
 
+    /// Make room for `n` more entries, so that a later [`PrefixStore::insert`] does not allocate (the
+    /// engine reserves its group fork's entry when the group is admitted; S4.9j).
+    pub fn reserve(&mut self, n: usize) {
+        self.entries.reserve(n);
+    }
+
     /// Book a restore that skipped `positions` positions of prefill.
     pub fn note_hit(&mut self, positions: usize) {
         self.hits += 1;

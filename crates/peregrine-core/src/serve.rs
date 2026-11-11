@@ -909,6 +909,9 @@ impl Engine {
             let tokens = self.slots[leader_idx].prompt[..at].to_vec();
             self.slots[leader_idx].fork_snap = Some(snap);
             self.slots[leader_idx].fork_tokens = tokens;
+            // Both the snapshot's buffers and the store's next entry are made here, so the fork
+            // itself (in a step) allocates nothing.
+            self.prefixes.reserve(1);
         }
         self.slots[leader_idx].fork_to = ids[1..].to_vec();
         // A leader that restored the whole beginning from the store is already at the fork position.
