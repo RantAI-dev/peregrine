@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The
+  kernels hand back a tile as row-major (`blk[i · nb + b]`) and the output is transposed
+  (`out[(b0 + b) · rows + row]`), so the write-out used to be `8 · nb` single-float stores per
+  tile with a stride of `rows` floats (32 KiB on the 1B at chunk 128): every store its own cache
+  line, and a wider pass paid for it. Turned around, one activation's tile is eight consecutive
+  floats in both places, so `untile` copies each activation's rows as one slice — `nb` copies
+  instead of `8 · nb` scattered stores, and the tile block stays in L1. The packed-float and
+  per-row paths keep their scatter: their blocks are row-major, so their output would need a real
+  transpose. Nothing allocates and no result moves (`prefill_chunk.rs` passes unchanged). At twelve threads the 1B's
+  prefill at chunk 128 goes 266.2 → 347.7 tok/s against 294.5 → 324.6 at 16, so a wide pass is now
+  the fastest pass where before it was the slowest for the 1B; at one thread chunk 64 goes 35.7 →
+  56.1 (+57 %). The default chunk stays 16: chunk 64 is
+  the best for throughput at twelve threads for both models, but the default also sets how long a
+  decoding user waits behind another user's prompt pass, and that trade was not measured here. See
+  `docs/design/s5.1-wide-pass.md`.
+
 - **A 512-bit Q6_K tile kernel (S5.1).** Q6_K's codes split out of a 64-byte window exactly as
   Q4_K's nibbles do, so the tile kernel now loads eight rows' eight bytes at a time, builds the
   six-bit codes from `ql`'s nibble and `qh`'s two bits, and accumulates them with `vpdpbusd`
