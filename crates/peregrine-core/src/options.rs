@@ -184,13 +184,37 @@ pub const ROWS_PER_WEIGHT_BYTE: f64 = 10.8;
 /// The sweep on bluefin (4 threads, 512 KiB L2 per core) pinned it: Q8_0 (1.06 bytes per weight)
 /// is best at 16 rows and 7-16% slower at 32 and above; F16 (2 bytes per weight) gains 5-15% at
 /// 32; the 300M encoder is flat from 32 and 12-14% ahead of 16. A bidirectional model packs whole
-/// texts, so its floor is 32. `PEREGRINE_PASS_ROWS` overrides the result.
-pub fn pass_rows_default_for(d_model: usize, bytes_per_param: f64, bidirectional: bool) -> usize {
+/// texts, so its floor is 32.
+///
+/// A **small float encoder** — every matrix F32/F16/BF16, and at most
+/// [`SMALL_FLOAT_ENCODER_BYTES`] of packed float weights — is the exception: one pass of 128
+/// rows (eight whole 16-token texts, one 128-token text) is 14-24% faster than 32 rows on
+/// bluefin (measured on all-MiniLM-L6-v2 F16, 44 MiB, and bge-small-en-v1.5 F32, 132 MiB),
+/// because the pass streams the whole model's weights and 128 rows amortise that stream while
+/// the packed float kernel's activation block is still capped at 128 rows anyway. A quantised
+/// (Q8_0) encoder keeps 32: its tile kernels' activation working set grows past L2 above 32,
+/// and bge-m3 Q8_0 measured 3% slower at 128 (S4.9m). `PEREGRINE_PASS_ROWS` overrides the
+/// result.
+pub const SMALL_FLOAT_ENCODER_BYTES: u64 = 256 << 20;
+
+/// [`pass_rows_default_for`] with the model's weight bytes, for the small-float-encoder rule.
+pub fn pass_rows_default_for(
+    d_model: usize,
+    bytes_per_param: f64,
+    bidirectional: bool,
+    weight_bytes: u64,
+    float_only: bool,
+) -> usize {
     let l2_rows = (l2_bytes() / 2) / (4 * d_model.max(1));
     let ridge = (bytes_per_param.max(0.1) * ROWS_PER_WEIGHT_BYTE) as usize;
     let rows = l2_rows.min(ridge);
     if bidirectional {
-        rows.max(PASS_ROWS_DEFAULT / 8).clamp(16, 128)
+        let floor = if float_only && weight_bytes <= SMALL_FLOAT_ENCODER_BYTES {
+            PASS_ROWS_DEFAULT / 2
+        } else {
+            PASS_ROWS_DEFAULT / 8
+        };
+        rows.max(floor).clamp(16, 128)
     } else {
         rows.clamp(16, 64)
     }
@@ -933,13 +957,20 @@ mod tests {
     fn the_pass_budget_default_follows_the_machine_and_the_model() {
         // 16 rows is the floor and the ceiling is a format's measured ridge: Q8_0 (1.06 bytes per
         // weight) sits at the ridge at 16, F16 (2) fits more, and an encoder starts at 32.
-        assert!(pass_rows_default_for(1024, 1.06, false) >= 16);
-        assert!(pass_rows_default_for(1024, 2.0, false) >= 16);
-        assert!(pass_rows_default_for(4096, 4.0, false) <= 64);
-        assert!(pass_rows_default_for(1024, 1.06, true) >= 32);
+        assert!(pass_rows_default_for(1024, 1.06, false, 0, false) >= 16);
+        assert!(pass_rows_default_for(1024, 2.0, false, 0, true) >= 16);
+        assert!(pass_rows_default_for(4096, 4.0, false, 0, true) <= 64);
+        assert!(pass_rows_default_for(1024, 1.06, true, 0, false) >= 32);
+        // A small float encoder takes whole 128-row blocks; a Q8_0 one or a large float
+        // model keeps the 32-row floor.
+        assert_eq!(pass_rows_default_for(384, 2.0, true, 22 << 20, true), 128);
+        assert_eq!(pass_rows_default_for(384, 4.0, true, 132 << 20, true), 128);
+        assert!(pass_rows_default_for(384, 1.06, true, 34 << 20, false) <= 32);
+        assert!(pass_rows_default_for(384, 2.0, true, 600 << 20, true) <= 32);
         if l2_bytes() >= 64 << 10 {
             assert!(
-                pass_rows_default_for(1024, 4.0, false) >= pass_rows_default_for(8192, 4.0, false),
+                pass_rows_default_for(1024, 4.0, false, 0, true)
+                    >= pass_rows_default_for(8192, 4.0, false, 0, true),
                 "a narrower model fits more activation rows in the same caches"
             );
         }
