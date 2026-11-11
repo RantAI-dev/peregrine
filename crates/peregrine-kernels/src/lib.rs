@@ -16,6 +16,7 @@
 pub mod cpu;
 pub mod delta;
 pub mod format;
+pub mod fpack;
 pub mod hadamard;
 pub mod kq;
 #[cfg(target_arch = "x86_64")]
