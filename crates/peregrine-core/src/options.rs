@@ -680,6 +680,17 @@ mod tests {
         assert!(!with(&[("KREPACK", "0")]).kq_repack);
         assert!(with(&[("KREPACK", "yes")]).kq_repack);
         assert!(with(&[("KREPACK", "1")]).kq_repack);
+        // The float pack (S4.9f) is the same rule, and its note says which it was.
+        assert!(with(&[]).fpack);
+        assert!(!with(&[("FPACK", "0")]).fpack);
+        assert!(with(&[("FPACK", "1")]).fpack);
+        assert!(!with(&[]).fpack_switch);
+        assert!(with(&[("FPACK", "0")]).fpack_switch);
+        assert_eq!(with(&[]).fpack_note(), "on (default)");
+        assert_eq!(
+            with(&[("FPACK", "0")]).fpack_note(),
+            "off (PEREGRINE_FPACK)"
+        );
         // Off only with "1".
         assert!(with(&[("EXACT", "1")]).exact);
         assert!(!with(&[("EXACT", "yes")]).exact);

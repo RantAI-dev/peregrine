@@ -129,6 +129,19 @@ All notable changes to this project are documented here. The format follows
   file as llama.cpp reads them. `peregrine embed` prints one line of floats per text (or `--json`),
   reads stdin lines, and `peregrine inspect` reports the file's pooling type.
 - `peregrine support` lists embeddings in the support table.
+- **The float GEMM (roadmap S4.9f).** F32, F16 and BF16 matrices are packed at load into panels of
+  sixteen output rows (`TensorInfo::fp_off`, a store of its own built by reading the file, so the
+  matrix's mapped pages are never faulted in), and `MatPath::FloatPanels` multiplies them with a
+  broadcast-form FMA kernel: 6×16 on AVX2 and 2×6×16 on the AVX-512 tier's extra registers, with a
+  single-row GEMV for decode. Every output element is one sequential FMA chain over the input index,
+  so a row's bits do not depend on the tile, the tail, the row block, the thread split or the vector
+  width: AVX2, AVX-512 and the scalar `mul_add` reference agree bit for bit, and a float model gives
+  the same tokens on the AVX2 and AVX-512 tiers. Measured on the Ryzen AI 9 HX 370, one thread: 25-27
+  GMAC/s against the old float tile's 11-15 and the repacked Q8_0 tile's 29-36 (the FMA peak is 28).
+  On Qwen3-Embedding 0.6B f16 (12 threads): prefill 159 → 237 tok/s, embedding throughput 1.5× at
+  109 and 437 tokens and +55 % for 32-text batches; decode is unchanged. `PEREGRINE_FPACK=0` is the
+  A/B switch back to the old tile. The load-time pack costs about 2 s for the 1.2 GB f16 file and
+  +18 % resident memory until the store is cached (S4.9e); aarch64 keeps the old float path for now.
 
 ## [0.1.2] - 2026-11-10
 

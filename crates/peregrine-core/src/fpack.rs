@@ -123,19 +123,37 @@ pub fn repack(g: &mut Gguf) -> FpStore {
     store
 }
 
-/// Write one matrix's panels, reading the file a panel's rows at a time.
+/// Write one matrix's panels, reading the file in large sequential chunks.
+///
+/// One `read_at` per panel is a syscall every 32 KB; a chunk of up to 64 MiB keeps
+/// the reads sequential and the syscall count small, and the pack then works on
+/// memory already in cache. The chunk is whole panels, so a panel never straddles one.
 fn pack_matrix(file: &Gguf, e: &FpEntry, t: &TensorInfo, dst: &mut [u8]) {
+    const CHUNK_BYTES: usize = 64 << 20;
     let pb = peregrine_kernels::fpack::panel_bytes(e.kind, e.cols);
     let rb = e.cols * peregrine_kernels::fpack::elem_bytes(e.kind);
-    let mut rows = vec![0u8; PANEL * rb];
-    for p in 0..e.panels() {
-        let first = p * PANEL;
-        let n = (e.rows - first).min(PANEL);
+    let per_chunk = (CHUNK_BYTES / rb.max(1)).max(PANEL).div_ceil(PANEL) * PANEL;
+    let mut buf = vec![0u8; per_chunk.min(e.rows) * rb];
+    let mut first = 0usize;
+    while first < e.rows {
+        let n = (e.rows - first).min(per_chunk);
         let at = t.offset as usize + first * rb;
-        file.read_data(at, &mut rows[..n * rb])
+        file.read_data(at, &mut buf[..n * rb])
             .expect("the matrix's bytes are in the file");
-        let refs: Vec<&[u8]> = (0..n).map(|r| &rows[r * rb..(r + 1) * rb]).collect();
-        peregrine_kernels::fpack::pack_panel(e.kind, &refs, e.cols, &mut dst[p * pb..(p + 1) * pb]);
+        for local in (0..n).step_by(PANEL) {
+            let p = (first + local) / PANEL;
+            let k = (n - local).min(PANEL);
+            let refs: Vec<&[u8]> = (0..k)
+                .map(|r| &buf[(local + r) * rb..(local + r + 1) * rb])
+                .collect();
+            peregrine_kernels::fpack::pack_panel(
+                e.kind,
+                &refs,
+                e.cols,
+                &mut dst[p * pb..(p + 1) * pb],
+            );
+        }
+        first += n;
     }
 }
 

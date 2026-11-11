@@ -178,29 +178,30 @@ fn main() {
     for (n_in, n_out) in SHAPES {
         println!("\n== n_in {n_in}, n_out {n_out}");
         println!(
-            "{:>4}  {:>9} {:>9} {:>9} {:>9}  {:>9}",
-            "rows", "old f32", "new f32", "old f16", "new f16", "int8 q8_0"
+            "{:>4}  {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}  {:>8}",
+            "rows", "f32 old", "f32 new", "f16 old", "f16 new", "bf16 old", "bf16 new", "int8 q8_0"
         );
         for nb in ROWS {
             let xs = acts(nb, n_in, 0xabc ^ nb as u64);
-            let out = format_row(n_in, n_out, nb, &xs, q8);
-            let _ = &out;
+            let o = format_row(n_in, n_out, nb, &xs, q8);
             println!(
-                "{:>4}  {:>9.1} {:>9.1} {:>9.1} {:>9.1}  {:>9.1}",
-                nb, out[0], out[1], out[2], out[3], out[4]
+                "{:>4}  {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1}  {:>8.1}",
+                nb, o[0], o[1], o[2], o[3], o[4], o[5], o[6]
             );
         }
     }
     let _ = Tier::Avx2;
 }
 
-/// `[old f32, new f32, old f16, new f16, int8]` GMAC/s.
-fn format_row(n_in: usize, n_out: usize, nb: usize, xs: &[QuantAct], q8: bool) -> [f64; 5] {
+/// `[old f32, new f32, old f16, new f16, old bf16, new bf16, int8]` GMAC/s.
+fn format_row(n_in: usize, n_out: usize, nb: usize, xs: &[QuantAct], q8: bool) -> [f64; 7] {
     let macs = (n_out as u128) * (n_in as u128) * (nb as u128);
     let w32 = weights(Format::F32, n_out, n_in, 11);
     let w16 = weights(Format::F16, n_out, n_in, 12);
+    let wbf = weights(Format::BF16, n_out, n_in, 14);
     let p32 = packed(Format::F32, &w32, n_out, n_in);
     let p16 = packed(Format::F16, &w16, n_out, n_in);
+    let pbf = packed(Format::BF16, &wbf, n_out, n_in);
     let panels = n_out.div_ceil(fpack::PANEL);
     let mut out = vec![0.0f32; panels * fpack::PANEL * nb];
 
@@ -239,6 +240,22 @@ fn format_row(n_in: usize, n_out: usize, nb: usize, xs: &[QuantAct], q8: bool) -
         fpack::gemm(Format::F16, &p16, n_in, panels, xs, None, &mut out);
         std::hint::black_box(&out);
     });
+    let oldbf = run(macs, || {
+        let rb = n_in * 2;
+        for r in 0..n_out {
+            peregrine_kernels::quant::dot_batch(
+                Format::BF16,
+                &wbf[r * rb..(r + 1) * rb],
+                xs,
+                &mut old,
+            );
+        }
+        std::hint::black_box(&old);
+    });
+    let newbf = run(macs, || {
+        fpack::gemm(Format::BF16, &pbf, n_in, panels, xs, None, &mut out);
+        std::hint::black_box(&out);
+    });
     let int8 = if q8 && n_in.is_multiple_of(32) && n_out.is_multiple_of(8) {
         let wq = q8_weights(n_out, n_in, 13);
         let nblk = n_in / 32;
@@ -256,5 +273,5 @@ fn format_row(n_in: usize, n_out: usize, nb: usize, xs: &[QuantAct], q8: bool) -
         0.0
     };
     let _ = row_bytes(Format::F32, n_in);
-    [old32, new32, old16, new16, int8]
+    [old32, new32, old16, new16, oldbf, newbf, int8]
 }

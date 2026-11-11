@@ -103,11 +103,22 @@ pub fn pack_panel(fmt: Format, rows: &[&[u8]], n_in: usize, dst: &mut [u8]) {
     assert!(dst.len() >= pb, "the destination is smaller than a panel");
     let dst = &mut dst[..pb];
     dst.fill(0);
-    for (r, row) in rows.iter().enumerate() {
-        assert!(row.len() >= n_in * eb, "a weight row is shorter than n_in");
+    // One element a step, unrolled over the panel's rows: `dst[k · 16 + lane]`
+    // receives `rows[lane][k]`. The copies are raw because every bound is checked
+    // above, and the element size is a compile-time constant per arm so the copy is
+    // one 2- or 4-byte move rather than a slice call.
+    let stride = PANEL * eb;
+    unsafe {
+        let d = dst.as_mut_ptr();
+        for row in rows {
+            assert!(row.len() >= n_in * eb, "a weight row is shorter than n_in");
+        }
         for k in 0..n_in {
-            let at = (k * PANEL + r) * eb;
-            dst[at..at + eb].copy_from_slice(&row[k * eb..(k + 1) * eb]);
+            let mut at = k * stride;
+            for row in rows {
+                std::ptr::copy_nonoverlapping(row.as_ptr().add(k * eb), d.add(at), eb);
+                at += eb;
+            }
         }
     }
 }
@@ -252,6 +263,10 @@ pub fn gemm(
     assert!(packed.len() >= panels * panel_bytes(fmt, n_in));
     assert!(out.len() >= panels * PANEL * acts.len());
     assert!(bias.is_none_or(|b| b.len() >= panels * PANEL));
+    assert!(
+        acts.iter().all(|a| a.keep_f32 && a.xf.len() >= n_in),
+        "float matrix matmul reached with keep_f32 off on QuantAct"
+    );
     if panels == 0 || acts.is_empty() {
         return;
     }
@@ -1016,6 +1031,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "keep_f32 off on QuantAct")]
+    fn the_packed_kernel_insists_on_the_f32_activation() {
+        let w = matrix(Format::F16, 16, 32, 1);
+        let packed = pack(Format::F16, &w, 16, 32);
+        let acts = vec![QuantAct::with_capacity(32)];
+        let mut out = vec![0.0f32; 16];
+        gemm(Format::F16, &packed, 32, 1, &acts, None, &mut out);
     }
 
     #[test]
