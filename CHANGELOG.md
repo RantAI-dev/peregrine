@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The `modern-bert` family: ModernBERT, gte-modernbert and Granite Embedding R2 (roadmap
+  S4.7)**: `architecture = "modern-bert"` is the 2024 encoder those files ship as. Its blocks are
+  pre-norm and use two LayerNorms with a weight and no bias (layer 0's attention norm is the
+  identity); attention is RoPE with a separate base for the local and the global layers, and every
+  third layer from the first sees the whole text while the two between see a symmetric
+  `attention.sliding_window / 2` either side (64 tokens for the 128-token files); q, k and v come
+  from one fused matrix; the feed-forward is a gated pair whose `ffn_up` is `2·n_ff` wide, with the
+  first half activated (the exact erf GELU for ModernBERT and Granite R2, SiLU for a file that says
+  so) and multiplied by the second; the final `output_norm` feeds the file's `cls` or `mean`
+  pooling. The graph, the tensors, the mask and the tokenizer are transcribed from llama.cpp v0.9.0
+  in `docs/reference/modern-bert.md`. New defined kernels in `peregrine-kernels::vmath`:
+  `layer_norm_rows_nobias` (the f64 two-pass norm without the final `+ 0`, so a `-0.0` product stays
+  negative) and `geglu_erf` (the exact GELU times the second half); both are **scalar** in this
+  step, with tests, and a vector body may only be added if it is `to_bits` equal. The tokenizer
+  gains the GPT-2 `modern-bert` pre-type (the plain GPT-2 alternation: `smollm` with digit runs
+  kept together), so a text is `<bos> … <eos>` as the converter writes it. On 200 texts of 16 to
+  6976 tokens, the ids are identical to llama.cpp's on all 200 for both reference models; cosine
+  against llama.cpp is min/mean 0.9999936/0.9999997 on gte-modernbert-base F16 and
+  0.9999997/0.9999999 on Granite R2 F16. Q8_0, against llama.cpp's F16 conversion, is
+  0.9963540/0.9996125 on gte (llama.cpp's own Q8_0: 0.9981270/0.9996284) and
+  0.9998753/0.9999246 on Granite (llama.cpp: 0.9998838/0.9999252): 1.6e-5 and 6.5e-7 below
+  llama.cpp's mean distance, inside the design's 1e-4 band. A file with a classifier head
+  (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`) loads, shape-checks and ignores
+  the head with one line of output, and still serves embeddings when it declares a pooling type;
+  `classify`/`rerank` wait for the BERT family's head (S4.6b). A synthetic four-layer file (a
+  window of 8, two different RoPE bases, F32 and Q8_0, the three activations and a classifier
+  variant) is checked bit for bit against an independent scalar reference, is batch- and
+  thread-invariant, allocates nothing in a pass, and has a golden on each pinned x86 tier (the
+  aarch64 ones are not recorded on this host). Speed on a shared 8-core AVX2 Xeon, 4 threads,
+  medians of three, texts/s against llama.cpp on the same F16 file: 30.8 vs 21.7 at 16 tokens,
+  4.59 vs 3.55 at 128, 1.29 vs 0.892 at 512, 0.255 vs 0.180 at 2000; batch 32 is 37.3 vs 29.4 at
+  16 and 5.20 vs 3.76 at 128. The matrices take 69 % of a 512-token pass and 56 % of a 2000-token
+  one; attention grows from 11 % to 27 %. The fixtures are under
+  `crates/peregrine-models/tests/fixtures/modern-bert/`.
+
 ### Changed
 
 - **The Q4_K kernel is at the machine's byte-dot roof, and the fork's is not faster (S5.1b).** This
@@ -39,6 +76,16 @@ All notable changes to this project are documented here. The format follows
   and no result moves; `prefill_chunk.rs` gains a mid-prompt width switch and an engine test
   that the pass widens with no decoder, narrows beside one, and widens again. See
   `docs/design/s5-prefill-avx512.md` §8.
+- **NEON twins for long-text attention and the bert family's element-wise work (S4.9g/S4.9h).**
+  The key-major 16-key panel, its tiled score kernel and the 128-key-blocked value mix now run on
+  aarch64 too, as a four-row × sixteen-key `vfmaq_f32` tile and a six-row × two-vector mix. The
+  bert family's `gelu_erf_rows` and `layer_norm_rows` get NEON bodies: eight elements per step
+  with two `f64` lanes per `erf`, and eight rows per step with one `f64` lane pair per two rows.
+  Both are bit-identical to the scalar twins, on every input and at every width the tests pin,
+  so no golden changed on any tier. One thread at head_dim 64/128 and 512-8 192 keys the score
+  kernel goes from 50-67 % to 77-78 % of the core's FMA peak; Nemotron 3.5 Embed 1B Q8_0 at
+  8 192 tokens goes 75.4 → 47.3 s at 10 threads (attention 98.3 → 42.4 s). The strided float
+  GEMM was already on its NEON store path. See `docs/design/s4.9-sota.md` §9 and §12.
 
 - **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The
   kernels hand back a tile as row-major (`blk[i · nb + b]`) and the output is transposed

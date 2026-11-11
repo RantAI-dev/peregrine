@@ -15,12 +15,12 @@
 //! # The strip (S4.9g)
 //!
 //! The kernels are `peregrine_kernels::bidir`; this file is the schedule around them.
-//! Per KV head and per text the head's keys are transposed once into a panel
-//! (`[head_dim][n]`, keys along the lanes — a query head of a GQA group shares it),
-//! and then the text's query rows are taken in strips: a strip's scores are
-//! `strip × n` floats, kept in the worker's own buffer, and the value mix reads the
-//! pass's values in place. A strip is scored, soft-maxed and mixed while it is hot;
-//! no `n × n` matrix exists for a whole text.
+//! Per KV head and per text the head's keys are transposed once into a panel (16-key
+//! key-major tiles on x86_64 and aarch64, keys along the lanes elsewhere — a query head
+//! of a GQA group shares it), and then the text's query rows are taken in strips: a
+//! strip's scores are `strip × n` floats, kept in the worker's own buffer, and the
+//! value mix reads the pass's values in place. A strip is scored, soft-maxed and mixed
+//! while it is hot; no `n × n` matrix exists for a whole text.
 //!
 //! Parallelism is over `(text, strip)` units, one worker at a time per unit; the panel
 //! build is a fork-join of its own per KV head. A unit's rows are its own output rows,
@@ -242,11 +242,12 @@ pub fn attend_texts(
 
 /// Transpose the keys of the head's texts into the panel, split across the workers.
 ///
-/// On x86_64 the panel is key-major (S4.9g part 3): a text's panel is a list of
-/// [`k::PANEL_TILE`]-key tiles, each `head_dim × 16` floats, followed by one row-major
-/// tile for the `len % 16` keys that do not fill one. The fork-join splits each text's
-/// *tiles*, so every tile is written by one worker and the copy needs no other lock.
-/// Elsewhere the lane panel of part 2 is built in 16×16 tiles, split by key rows.
+/// On x86_64 and aarch64 the panel is key-major (S4.9g part 3): a text's panel is a
+/// list of [`k::PANEL_TILE`]-key tiles, each `head_dim × 16` floats, followed by one
+/// row-major tile for the `len % 16` keys that do not fill one. The fork-join splits
+/// each text's *tiles*, so every tile is written by one worker and the copy needs no
+/// other lock. Elsewhere the lane panel of part 2 is built in 16×16 tiles, split by key
+/// rows.
 #[allow(clippy::too_many_arguments)]
 fn build_panel_head(
     spans: &[TextSpan],
@@ -258,7 +259,7 @@ fn build_panel_head(
     hd: usize,
     panel: &Disjoint<'_, f32>,
 ) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         for span in spans {
             let n = span.len;
@@ -272,9 +273,8 @@ fn build_panel_head(
                 k::key_panel_tile(&keys[span.row0 * kvd..], kvd, base, hd, n, t, dst);
             }
         }
-        let _ = (panel, kvd);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         const T: usize = 16;
         let nb: usize = spans.iter().map(|s| s.len).sum();

@@ -70,7 +70,7 @@ pub fn support_text() -> String {
     let _ = writeln!(out, "embeddings:");
     let _ = writeln!(
         out,
-        "  causal decoders (last / mean pooling) and bidirectional encoders (mean / cls; EmbeddingGemma, and Mistral 3 / Nemotron 3.5 Embed), POST /v1/embeddings, peregrine embed"
+        "  causal decoders (last / mean pooling) and bidirectional encoders (mean / cls; BERT, ModernBERT, EmbeddingGemma, and Mistral 3 / Nemotron 3.5 Embed), POST /v1/embeddings, peregrine embed"
     );
 
     let _ = writeln!(out, "decisions:");
@@ -98,6 +98,9 @@ pub fn support_markdown() -> String {
                 "gemma3" => "Gemma 3",
                 "gemma-embedding" => "Gemma 3 embedding (EmbeddingGemma)",
                 "bert" => "BERT encoder (MiniLM, BGE, E5, GTE, bge-m3)",
+                "modern-bert" => {
+                    "ModernBERT encoder (ModernBERT, gte-modernbert, Granite Embedding R2)"
+                }
                 "mistral3" => "Mistral 3 embedding (Nemotron 3.5 Embed)",
                 "phi3" => "Phi-3 / Phi-4",
                 "qwen3moe" => "Qwen 3 MoE",
@@ -117,9 +120,9 @@ pub fn support_markdown() -> String {
     let cpu_str = "x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code";
 
     // 4. Tokenizers
-    let tok_str = "GPT-2 byte-level BPE (smollm, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, \
-         tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), \
-         WordPiece (bert), SentencePiece unigram (t5)";
+    let tok_str = "GPT-2 byte-level BPE (smollm, gpt2 / modern-bert, llama-bpe, qwen2, qwen35, \
+         gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE \
+         (llama), WordPiece (bert), SentencePiece unigram (t5)";
 
     // 5. Chat templates
     let tmpl_str = "read from the model file and rendered exactly as llama.cpp renders them: \
@@ -128,8 +131,9 @@ ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Har
 
     // 6. Embeddings
     let embd_str = "causal decoders as embedders (`<arch>.pooling_type`: last or mean), and \
-bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), Gemma 3 (EmbeddingGemma: \
-mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); \
+bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, \
+gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Gemma 3 \
+(EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); \
 `POST /v1/embeddings`, `peregrine embed`";
 
     // 7. Tool calling

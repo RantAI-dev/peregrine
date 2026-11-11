@@ -66,7 +66,43 @@ fn fma_peak() -> f64 {
         }
         macs / best / 1e9
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[target_feature(enable = "neon")]
+        unsafe fn peak(rounds: usize) -> f32 {
+            use std::arch::aarch64::*;
+            // Twenty-four chains: on this core twelve are latency-bound, and a
+            // different start per chain stops the compiler merging identical ones.
+            let mut a = [vdupq_n_f32(0.0); 24];
+            for (i, x) in a.iter_mut().enumerate() {
+                *x = vdupq_n_f32(1.000_001 + i as f32 * 1.0e-7);
+            }
+            let b = std::hint::black_box(vdupq_n_f32(0.999_999));
+            let c = vdupq_n_f32(1.0e-7);
+            for _ in 0..rounds {
+                for x in a.iter_mut() {
+                    *x = vfmaq_f32(*x, b, c);
+                }
+            }
+            let mut s = vdupq_n_f32(0.0);
+            for x in a {
+                s = vaddq_f32(s, x);
+            }
+            let mut l = [0.0f32; 4];
+            vst1q_f32(l.as_mut_ptr(), s);
+            l.iter().sum()
+        }
+        const ROUNDS: usize = 20_000;
+        let macs = (24 * 4 * ROUNDS) as f64;
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let t = Instant::now();
+            std::hint::black_box(unsafe { peak(ROUNDS) });
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        macs / best / 1e9
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     0.0
 }
 
@@ -388,7 +424,9 @@ fn main() {
     let reps: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(3);
     let score_only = args.iter().any(|a| a == "score");
     let peak = fma_peak();
-    println!("one thread, minimum-of-{reps}; FMA peak (12 ymm chains) {peak:.1} GMAC/s");
+    println!(
+        "one thread, minimum-of-{reps}; FMA peak (independent vector chains) {peak:.1} GMAC/s"
+    );
     println!(
         "one score pair = head_dim MACs; % peak = pairs*head_dim / time / peak. {N_HEAD} query heads on one KV head (GQA {GQA}:1)."
     );

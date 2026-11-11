@@ -25,8 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use support::models::{
-    write_bert, write_dense, write_gemma_embedding, write_hybrid, write_mistral3, write_moe,
-    BertConfig, Dense, GemmaEmbeddingConfig, Mistral3Config, MoeShape,
+    write_bert, write_dense, write_gemma_embedding, write_hybrid, write_mistral3,
+    write_modern_bert, write_moe, BertConfig, Dense, GemmaEmbeddingConfig, Mistral3Config,
+    ModernBertConfig, MoeShape,
 };
 
 /// Allocations counted while `COUNTING` was set.
@@ -352,6 +353,23 @@ fn a_decode_step_allocates_nothing() {
         if n != 0 {
             failures.push(format!(
                 "bert whole-text pass, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
+    // ModernBERT (S4.7): the same whole-text pass with the fused q/k/v scratch,
+    // the two LayerNorm-without-bias calls and the gated feed-forward.
+    let modern = load(&write_modern_bert(
+        &dir,
+        Format::Q8_0,
+        7009,
+        ModernBertConfig::default(),
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&modern, threads);
+        if n != 0 {
+            failures.push(format!(
+                "modern-bert whole-text pass, {threads} threads: {n} allocations per pass"
             ));
         }
     }
