@@ -191,6 +191,20 @@ pub trait ActSrc {
     /// The `(low, high)` displacements of window `w`'s code groups from
     /// [`ActSrc::codes_at`]. Both are read as eight bytes.
     fn window_step(&self, w: usize) -> (usize, usize);
+
+    /// The `(first, second)` eight-code displacements of Q6_K's run `run`
+    /// (`0..16`, in the order `c·8 + 2·g + hf`) from [`ActSrc::codes_at`].
+    ///
+    /// Both are read as eight bytes; together they are the run's sixteen codes.
+    fn run_step(&self, run: usize) -> (usize, usize);
+
+    /// The row's sixteen per-16-weight sums of super-block `sb`, as eight
+    /// `(2p, 2p+1)` int32 pairs — the Q6_K offset term's operands.
+    ///
+    /// `pairs[p]` holds `Σq[2p]` in its low 16 bits and `Σq[2p+1]` in its high,
+    /// both int16. `Σq` is at most 2 032 in magnitude and the run's scale at most
+    /// 127, so a `vpdpwssd` of the paired scales against a paired sum is exact.
+    fn sum16_pairs(&self, row: usize, sb: usize) -> [i32; 8];
 }
 
 /// The interleaved activation: four rows side by side.
@@ -296,6 +310,29 @@ impl ActSrc for Interleaved<'_> {
         let lo = ((w / 4) * 8 + (w % 4)) * 32;
         (lo, lo + 4 * 32)
     }
+
+    #[inline(always)]
+    fn run_step(&self, run: usize) -> (usize, usize) {
+        let c = run / 8;
+        let r = run % 8;
+        let j0 = c * 16 + (r / 2) * 4 + (r % 2) * 2;
+        (j0 * 32, (j0 + 1) * 32)
+    }
+
+    #[inline(always)]
+    fn sum16_pairs(&self, row: usize, sb: usize) -> [i32; 8] {
+        let g = row / ACT_GROUP;
+        let t = row % ACT_GROUP;
+        let n_sb = self.acts.super_blocks();
+        let at = (g * n_sb + sb) * ACT_GROUP * 16 + t * 16;
+        let mut out = [0i32; 8];
+        unsafe {
+            let v = _mm512_loadu_si512(self.acts.bs16.as_ptr().add(at) as *const __m512i);
+            // Sixteen int32 in, sixteen int16 out: eight `(2p, 2p+1)` pairs.
+            _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, _mm512_cvtepi32_epi16(v));
+        }
+        out
+    }
 }
 
 /// The plain per-row activation: one row at a time.
@@ -381,6 +418,25 @@ impl ActSrc for Plain<'_> {
     fn window_step(&self, w: usize) -> (usize, usize) {
         let lo = (w / 4) * 64 + (w % 4) * 8;
         (lo, lo + 32)
+    }
+
+    #[inline(always)]
+    fn run_step(&self, run: usize) -> (usize, usize) {
+        let o = (run / 8) * 128 + ((run % 8) / 2) * 32 + (run % 2) * 16;
+        (o, o + 8)
+    }
+
+    #[inline(always)]
+    fn sum16_pairs(&self, row: usize, sb: usize) -> [i32; 8] {
+        // The per-16 run sums *are* the pairs: a plain load of sixteen int16.
+        let mut out = [0i32; 8];
+        unsafe {
+            _mm256_storeu_si256(
+                out.as_mut_ptr() as *mut __m256i,
+                _mm256_loadu_si256(self.acts[row].bsums.as_ptr().add(sb * 16) as *const __m256i),
+            );
+        }
+        out
     }
 }
 
@@ -1173,6 +1229,195 @@ unsafe fn q6k8_gemv_raw<const N: usize>(
     }
     for u in 0..N {
         _mm256_storeu_ps(out.as_mut_ptr().add(u * ROWS), facc[u]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The repacked Q6_K ZMM kernel (S5.1 follow-up): the same tiles, 64 bytes at a time
+// ---------------------------------------------------------------------------
+//
+// Q6_K's six-bit codes split the same way Q4_K's nibbles do — one 64-byte load is
+// eight rows' eight bytes — but its scale changes every sixteen weights, so the
+// run is the unit: two `vpdpbusd` (the run's two windows, 128 products) are added
+// and scaled once. The `-32` offset the format carries is applied as the AVX2
+// kernel applies it, `Σ scale · Σq` against the activation's per-16 sums, shifted
+// by five once per super-block. `Σq` (2032) and the scale (127) are both int16,
+// so the offset is eight `vpdpwssd` of paired scale sums against paired `Σq`.
+
+/// The run's six-bit codes, eight per row: the ql bytes' nibble half `high` of
+/// the nibble OR'd with the two high bits `2g` of qh, moved into bits 4..6.
+#[inline(always)]
+unsafe fn q6k_codes_zmm(
+    ql: __m512i,
+    qh: __m512i,
+    high: bool,
+    g: usize,
+    lownib: __m512i,
+    three: __m512i,
+) -> __m512i {
+    let nib = if high {
+        _mm512_and_si512(_mm512_srli_epi16(ql, 4), lownib)
+    } else {
+        _mm512_and_si512(ql, lownib)
+    };
+    // The shift is an immediate: `_mm512_srli_epi16` takes a constant.
+    let bits = match g {
+        0 => _mm512_srli_epi16(qh, 0),
+        1 => _mm512_srli_epi16(qh, 2),
+        2 => _mm512_srli_epi16(qh, 4),
+        _ => _mm512_srli_epi16(qh, 6),
+    };
+    let bits = _mm512_slli_epi16(_mm512_and_si512(bits, three), 4);
+    _mm512_or_si512(nib, bits)
+}
+
+/// The eight rows' scale of run `run`, twice per row as int32: the operand of
+/// the run's int32 scale multiply, two lanes per row.
+#[inline(always)]
+unsafe fn q6k8_scale_zmm(t: *const u8, run: usize) -> __m512i {
+    let raw = _mm_loadl_epi64(t.add(crate::kq::q6_sc() + run * 8) as *const __m128i);
+    let v = _mm256_cvtepi8_epi32(raw);
+    _mm512_permutexvar_epi32(
+        _mm512_loadu_si512(DUP2.as_ptr() as *const __m512i),
+        _mm512_zextsi256_si512(v),
+    )
+}
+
+/// Runs `2p` and `2p+1`'s scales as int16 pairs, one 32-bit lane per row: the
+/// a-operand of the offset term's `vpdpwssd`.
+#[inline(always)]
+unsafe fn q6k8_scale_pair(t: *const u8, p: usize) -> __m256i {
+    let a = _mm_loadl_epi64(t.add(crate::kq::q6_sc() + 2 * p * 8) as *const __m128i);
+    let b = _mm_loadl_epi64(t.add(crate::kq::q6_sc() + (2 * p + 1) * 8) as *const __m128i);
+    _mm256_cvtepi8_epi16(_mm_unpacklo_epi8(a, b))
+}
+
+/// Eight output rows of a repacked Q6_K tile against `N` activation rows, on the
+/// AVX-512 tier.
+///
+/// The group is eight activation rows, as in [`q4k8_group_zmm`], and the run has
+/// this kernel's scale granularity, so the run loop is outside the row loop: two
+/// `vpdpbusd` per row per run, then one exact int32 scale multiply.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`]. The tile must hold `n_sb`
+/// tiles, and the activation must carry the per-256 layout.
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+unsafe fn q6k8_group_zmm<S: ActSrc, const N: usize>(
+    tile: &[u8],
+    n_sb: usize,
+    src: &S,
+    row0: usize,
+    out: &mut [f32],
+) {
+    assert!((1..=8).contains(&N), "one to eight activation rows");
+    assert!(
+        out.len() >= (row0 + N) * ROWS,
+        "the output holds eight rows per row"
+    );
+    let lownib = _mm512_set1_epi8(0x0F);
+    let three = _mm512_set1_epi8(0x03);
+    let mut facc = [_mm256_setzero_ps(); N];
+    let mut codes = [std::ptr::null::<u8>(); N];
+    for (u, c) in codes.iter_mut().enumerate() {
+        *c = src.codes_at(row0 + u);
+    }
+    let cstride = src.codes_stride();
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q6K8::SIZE);
+        // The tile's rows are in natural order, so no lane permutation is needed.
+        let dv = _mm256_cvtph_ps(_mm_loadu_si128(t.add(crate::kq::q6_d()) as *const __m128i));
+        let mut sumi = [_mm512_setzero_si512(); N];
+        let soff = sb * cstride;
+        for run in 0..16 {
+            let c = run / 8;
+            let r = run % 8;
+            let g = r / 2;
+            let hf = r % 2;
+            // The run's two ql windows are the nibble half's; the two qh windows
+            // hold all four groups' high bits, so one load serves each pair.
+            let w0 = c * 8 + (if g % 2 == 0 { 0 } else { 4 }) + 2 * hf;
+            let h0 = c * 4 + 2 * hf;
+            let high = g >= 2;
+            let (o0, o1) = src.run_step(run);
+            let ql0 = _mm512_loadu_si512(t.add(crate::kq::q6_ql() + w0 * 64) as *const __m512i);
+            let qh0 = _mm512_loadu_si512(t.add(crate::kq::q6_qh() + h0 * 64) as *const __m512i);
+            let ql1 =
+                _mm512_loadu_si512(t.add(crate::kq::q6_ql() + (w0 + 1) * 64) as *const __m512i);
+            let qh1 =
+                _mm512_loadu_si512(t.add(crate::kq::q6_qh() + (h0 + 1) * 64) as *const __m512i);
+            let codes0 = q6k_codes_zmm(ql0, qh0, high, g, lownib, three);
+            let codes1 = q6k_codes_zmm(ql1, qh1, high, g, lownib, three);
+            let scv = q6k8_scale_zmm(t, run);
+            for (u, acc) in sumi.iter_mut().enumerate() {
+                let b = codes[u].add(soff);
+                // The codes are 0..63 (unsigned) and the activation signed, which
+                // is `vpdpbusd`'s operand order; four products per int32 lane.
+                let mut x = _mm512_dpbusd_epi32(_mm512_setzero_si512(), codes0, bcast8(b.add(o0)));
+                x = _mm512_dpbusd_epi32(x, codes1, bcast8(b.add(o1)));
+                *acc = _mm512_add_epi32(*acc, _mm512_mullo_epi32(x, scv));
+            }
+        }
+        // The offset term: `Σ scale · Σq` over the sixteen runs, two runs per
+        // `vpdpwssd`, then `- 32 ·` it once, in int32, as the AVX2 kernel does.
+        let mut bias = [_mm256_setzero_si256(); N];
+        let mut pairs = [[0i32; 8]; N];
+        for (u, p) in pairs.iter_mut().enumerate() {
+            *p = src.sum16_pairs(row0 + u, sb);
+        }
+        for p in 0..8 {
+            let sp = q6k8_scale_pair(t, p);
+            for (u, b) in bias.iter_mut().enumerate() {
+                let sq = _mm256_set1_epi32(pairs[u][p]);
+                *b = _mm256_dpwssd_epi32(*b, sp, sq);
+            }
+        }
+        for u in 0..N {
+            let x = _mm256_sub_epi32(compact8(sumi[u]), _mm256_slli_epi32(bias[u], 5));
+            // `dot_q6k8_ref`'s fold, in its order: (d · dk) · sum, then an add.
+            let x = _mm256_mul_ps(
+                _mm256_mul_ps(dv, _mm256_set1_ps(src.scale(row0 + u, sb))),
+                _mm256_cvtepi32_ps(x),
+            );
+            facc[u] = _mm256_add_ps(facc[u], x);
+        }
+    }
+    let mut lane = [0f32; ROWS];
+    for u in 0..N {
+        _mm256_storeu_ps(lane.as_mut_ptr(), facc[u]);
+        out[(row0 + u) * ROWS..(row0 + u) * ROWS + ROWS].copy_from_slice(&lane);
+    }
+}
+
+/// Eight output rows of a repacked Q6_K tile against a batch of activations, on
+/// the AVX-512 tier. Same groups and tail handling as [`q6k8_gemm`].
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`].
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+pub unsafe fn q6k8_gemm_zmm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let src = Interleaved { acts };
+    let mut b0 = 0;
+    while nb - b0 >= 8 {
+        q6k8_group_zmm::<_, 8>(tile, n_sb, &src, b0, out);
+        b0 += 8;
+    }
+    while nb - b0 >= 4 {
+        q6k8_group_zmm::<_, 4>(tile, n_sb, &src, b0, out);
+        b0 += 4;
+    }
+    match nb - b0 {
+        3 => q6k8_group_zmm::<_, 3>(tile, n_sb, &src, b0, out),
+        2 => q6k8_group_zmm::<_, 2>(tile, n_sb, &src, b0, out),
+        1 => q6k8_group_zmm::<_, 1>(tile, n_sb, &src, b0, out),
+        _ => {}
     }
 }
 
@@ -2861,6 +3106,46 @@ mod tests {
                         avx2[i]
                     );
                 }
+            }
+        }
+    }
+
+    /// The AVX-512 Q6_K kernel against the AVX2 one and the scalar reference: the
+    /// same bits, at every batch width.
+    #[test]
+    fn the_avx512_q6_k_kernel_agrees_with_the_avx2_one_bit_for_bit() {
+        if !crate::simd::have_batched() || !have_zmm512() {
+            return;
+        }
+        for n_sb in [1usize, 3, 8, 32] {
+            let n = n_sb * 256;
+            let mut rng = Rng(0x5EED_6C6C_5A5A_0005 ^ n_sb as u64);
+            let tile = q6k8_tile(&mut rng, n_sb);
+            let batch = acts(&mut rng, 40, n);
+            let mut kq = KqActs::default();
+            kq.fill(&batch);
+            for nb in 4..=40usize {
+                let mut avx2 = vec![0.0f32; nb * 8];
+                let mut zmm = vec![0.0f32; nb * 8];
+                unsafe {
+                    q6k8_gemm(&tile, n_sb, &kq, nb, &mut avx2);
+                    q6k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut zmm);
+                }
+                for i in 0..nb * 8 {
+                    assert_eq!(
+                        avx2[i].to_bits(),
+                        zmm[i].to_bits(),
+                        "n_sb {n_sb} nb {nb} element {i}: {} against {}",
+                        zmm[i],
+                        avx2[i]
+                    );
+                }
+                let want = crate::kq::dot_q6k8_ref(&tile, n_sb, 3, &batch[nb - 1]);
+                assert!(
+                    ulps(zmm[(nb - 1) * 8 + 3], want) <= 1,
+                    "the reference disagrees at nb {nb}: {} against {want}",
+                    zmm[(nb - 1) * 8 + 3]
+                );
             }
         }
     }

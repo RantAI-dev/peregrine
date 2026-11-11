@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **A 512-bit Q6_K tile kernel (S5.1).** Q6_K's codes split out of a 64-byte window exactly as
+  Q4_K's nibbles do, so the tile kernel now loads eight rows' eight bytes at a time, builds the
+  six-bit codes from `ql`'s nibble and `qh`'s two bits, and accumulates them with `vpdpbusd`
+  straight into int32 — no int16 stage, so none of the AVX2 kernel's widening every two
+  `vpmaddubsw`. The run stays the unit because the scale does: two `vpdpbusd` per activation row,
+  then one exact int32 scale multiply. The format's `-32` offset is eight `vpdpwssd` of paired
+  scales against paired per-16 sums, shifted by five once per super-block, as the AVX2 kernel has
+  it. Eight activation rows per group, window-major, as the Q4_K kernel. One core, L1 tile: 39.2 →
+  62.0 GMAC/s at sixteen activation rows, 33.9 → 57.2 at one hundred and twenty-eight; on a
+  DRAM-sized tile 31.9 → 46–50. End to end the 1B's prefill gains 1.7 % at twelve threads (Q6_K
+  is 15.4 % of it, but a sixteen-token pass streams the weights). The one-row GEMV is unchanged.
+  No golden moves. See `docs/design/s5.1-q6k-zmm.md`.
+
 - **The AVX-512 Q4_K and Q5_0 kernels work eight activation rows per pass (S5.1).** The prefill
   group was four rows, and each super-block's weight windows, scale decode and min term were
   re-done for each of them; a super-block is now decoded once for eight, with the window loop
