@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The `modern-bert` family's element-wise kernels have NEON bodies, and its aarch64
+  goldens are recorded (roadmap S4.9n)**: `geglu_erf` (the exact erf GELU times the second
+  half) and `layer_norm_rows_nobias` (the f64 two-pass norm with one final multiply and no
+  add) were scalar on every machine; on aarch64 with NEON they now evaluate eight elements
+  and eight rows at a time, lane for lane with the scalar definition — the same erf chain
+  and series selection as `gelu_erf_rows`' NEON body, and the same `f64` index-order sum and
+  variance per row. Unit tests compare the bodies against the scalar twins bit for bit
+  (NaN against NaN) on lengths 0–2304 including every remainder, both zeros, subnormals,
+  `±1e30`, infinities, NaN payloads, a row of all `-0.0`, a constant row, and a 100 000-value
+  sweep in `[-12, 12]`; the golden test is the end-to-end check. The synthetic
+  `modern-bert-Q8_0` golden is recorded for `aarch64`, `aarch64-neon`,
+  `aarch64-neon-dotprod` and `aarch64-neon-i8mm` (scalar and neon reproduce the x86_64
+  hash), and no existing golden moved. On the ARM host (10 threads, nine interleaved
+  rounds, medians) the family's throughput is unchanged within the run spread — 0.990–1.002
+  of the before build — because the element-wise work is about 1 % of a pass beside the
+  matrices; against llama.cpp v0.9.0 `cd959ba` gte-modernbert-base is 1.09× at 16 tokens and
+  0.87–0.94× from 128 tokens up in Q8_0, and 1.15–1.56× in F16. The vectors agree to cosine
+  0.99978 (Q8_0) and 0.9999999 (F16). See
+  `benchmarks/results/spark-arm-2026-11-12-modern-bert/README.md`.
+
 - **The `modern-bert` family: ModernBERT, gte-modernbert and Granite Embedding R2 (roadmap
   S4.7)**: `architecture = "modern-bert"` is the 2024 encoder those files ship as. Its blocks are
   pre-norm and use two LayerNorms with a weight and no bias (layer 0's attention norm is the

@@ -112,7 +112,9 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    matrix; the context limit; the no-allocation pass; the server and CLI cases
    (`a_modern_bert_encoder_*`); and
    `tests/golden/synthetic/<tier>/modern-bert-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
-   under SDE (no aarch64 golden yet). Its ignored real-file test uses the 200 texts (16–6976 tokens)
+   under SDE, and on the ARM host for `aarch64`, `aarch64-neon`, `aarch64-neon-dotprod` and
+   `aarch64-neon-i8mm` (the scalar and neon hashes equal the x86_64 one; the two int8 tiers
+   differ, as the Q8_0 tile fuses its block scale). Its ignored real-file test uses the 200 texts (16–6976 tokens)
    and llama.cpp's ids and vectors under `tests/fixtures/modern-bert/` for gte-modernbert-base and
    Granite Embedding R2, F16 and Q8_0, and skips a file that is absent.
    The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),

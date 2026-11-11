@@ -1053,13 +1053,57 @@ pub fn geglu(gate: &mut [f32], up: &[f32]) {
 /// `0.5·x·(1 + erff(x/√2))·g` left to right; [`gelu_erf`] is `(0.5·x)·(1 + erf(x/√2))`
 /// and the final multiply is the same one, so the bits match for the same `erf`.
 ///
-/// Scalar, and deliberately so (S4.7): it has no vector path, so there is no second
-/// arithmetic to keep in step. A vector body may only be added if it evaluates these
-/// same expressions lane-wise.
+/// The portable body is scalar, so there is no second arithmetic to keep in step.
+/// A vector body may only be added if it evaluates these same expressions lane-wise.
+/// On aarch64 with NEON, eight elements are evaluated at once: the same erf chain as
+/// [`gelu_erf_rows`]' NEON body, then one multiply by `up`.
 pub fn geglu_erf(gate: &mut [f32], up: &[f32]) {
-    debug_assert_eq!(gate.len(), up.len());
+    assert_eq!(
+        gate.len(),
+        up.len(),
+        "geglu_erf: {} gate values, {} up values",
+        gate.len(),
+        up.len()
+    );
+    #[cfg(target_arch = "aarch64")]
+    {
+        if vector_ok() {
+            // SAFETY: NEON checked, and the lengths were asserted above.
+            unsafe { geglu_erf_neon(gate, up) };
+            return;
+        }
+    }
     for (g, &u) in gate.iter_mut().zip(up) {
         *g = gelu_erf(*g) * u;
+    }
+}
+
+/// The NEON [`geglu_erf`]: eight elements per step, through [`gelu_erf_8_neon`] and
+/// one `vmulq_f32`, so each lane is the scalar definition's arithmetic.
+///
+/// # Safety
+///
+/// NEON must be available, and `gate` and `up` must have the same length.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn geglu_erf_neon(gate: &mut [f32], up: &[f32]) {
+    let n = gate.len();
+    let g = gate.as_mut_ptr();
+    let u = up.as_ptr();
+    let mut i = 0;
+    while i + 8 <= n {
+        gelu_erf_8_neon(g.add(i));
+        let a0 = vld1q_f32(g.add(i));
+        let a1 = vld1q_f32(g.add(i + 4));
+        let u0 = vld1q_f32(u.add(i));
+        let u1 = vld1q_f32(u.add(i + 4));
+        vst1q_f32(g.add(i), vmulq_f32(a0, u0));
+        vst1q_f32(g.add(i + 4), vmulq_f32(a1, u1));
+        i += 8;
+    }
+    while i < n {
+        *g.add(i) = gelu_erf(*g.add(i)) * *u.add(i);
+        i += 1;
     }
 }
 
@@ -2081,10 +2125,12 @@ pub fn layer_norm_row_nobias(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32
 
 /// [`layer_norm_row_nobias`] over `nb` rows of `dim` floats.
 ///
-/// Scalar (S4.7): the AVX2 body of [`layer_norm_rows`] adds a bias in its final
-/// lane-wise step, and this form's defined arithmetic is one multiply. A vector
-/// body goes here when a profile asks for one; it must be `to_bits` equal to the
-/// scalar twin, as the bias form's is.
+/// The portable body is scalar: the AVX2 body of [`layer_norm_rows`] adds a bias in
+/// its final lane-wise step, and this form's defined arithmetic is one multiply. A
+/// vector body must be `to_bits` equal to the scalar twin, as the bias form's is.
+/// On aarch64 with NEON, eight rows are normalised at a time exactly as
+/// [`layer_norm_rows`]' NEON body does, and the final step is one multiply by the
+/// weight with no add.
 pub fn layer_norm_rows_nobias(
     x: &[f32],
     weight: &[f32],
@@ -2107,6 +2153,14 @@ pub fn layer_norm_rows_nobias(
         "layer_norm_rows_nobias: a {dim}-wide row needs {dim} weights, got {}",
         weight.len()
     );
+    #[cfg(target_arch = "aarch64")]
+    {
+        if vector_ok() {
+            // SAFETY: NEON checked, and the lengths were asserted above.
+            unsafe { layer_norm_rows_nobias_neon(x, weight, eps, dim, nb, out) };
+            return;
+        }
+    }
     for r in 0..nb {
         layer_norm_row_nobias(
             &x[r * dim..(r + 1) * dim],
@@ -2114,6 +2168,120 @@ pub fn layer_norm_rows_nobias(
             eps,
             &mut out[r * dim..(r + 1) * dim],
         );
+    }
+}
+
+/// The NEON [`layer_norm_rows_nobias`]: eight rows per step, one `float64x2_t` lane
+/// pair per two rows, exactly as [`layer_norm_rows_neon`], with the final add gone.
+///
+/// # Safety
+///
+/// NEON must be available.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn layer_norm_rows_nobias_neon(
+    x: &[f32],
+    weight: &[f32],
+    eps: f32,
+    dim: usize,
+    nb: usize,
+    out: &mut [f32],
+) {
+    let mut r = 0;
+    while r + 8 <= nb {
+        layer_norm_8_rows_nobias_neon(x, weight, eps, dim, r, out);
+        r += 8;
+    }
+    while r < nb {
+        layer_norm_row_nobias(
+            &x[r * dim..(r + 1) * dim],
+            weight,
+            eps,
+            &mut out[r * dim..(r + 1) * dim],
+        );
+        r += 1;
+    }
+}
+
+/// Eight rows of [`layer_norm_row_nobias`], walked in index order in four `f64` lane
+/// pairs, then one `f32` multiply by the weight per element.
+///
+/// # Safety
+///
+/// NEON must be available, `r0 + 8 <= nb`, and the slices must cover `nb * dim`.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn layer_norm_8_rows_nobias_neon(
+    x: &[f32],
+    weight: &[f32],
+    eps: f32,
+    dim: usize,
+    r0: usize,
+    out: &mut [f32],
+) {
+    let base = x.as_ptr().add(r0 * dim);
+    let load = |i: usize, lane: usize| *base.add(lane * dim + i);
+    let pair = |i: usize, g: usize| {
+        vcombine_f64(
+            vdup_n_f64(load(i, 2 * g) as f64),
+            vdup_n_f64(load(i, 2 * g + 1) as f64),
+        )
+    };
+    let mut s = [vdupq_n_f64(0.0); 4];
+    let mut i = 0;
+    while i < dim {
+        for (g, sg) in s.iter_mut().enumerate() {
+            *sg = vaddq_f64(*sg, pair(i, g));
+        }
+        i += 1;
+    }
+    let nf = vdupq_n_f64(dim as f64);
+    let mut m = [vdupq_n_f64(0.0); 4];
+    for (g, mg) in m.iter_mut().enumerate() {
+        *mg = vdivq_f64(s[g], nf);
+    }
+    // The variance uses the unrounded `m`, and `d·d + var` is a mul and an add,
+    // not a fused multiply-add: the definition's two roundings.
+    let mut var = [vdupq_n_f64(0.0); 4];
+    i = 0;
+    while i < dim {
+        for (g, vg) in var.iter_mut().enumerate() {
+            let d = vsubq_f64(pair(i, g), m[g]);
+            *vg = vaddq_f64(*vg, vmulq_f64(d, d));
+        }
+        i += 1;
+    }
+    let eps = vdupq_n_f64(eps as f64);
+    let one = vdupq_n_f64(1.0);
+    let mut inv = [vdupq_n_f64(0.0); 4];
+    for (g, ig) in inv.iter_mut().enumerate() {
+        *ig = vdivq_f64(one, vsqrtq_f64(vaddq_f64(vdivq_f64(var[g], nf), eps)));
+    }
+    let mut mean = [0.0f32; 8];
+    let mut scale = [0.0f32; 8];
+    for g in 0..4 {
+        vst1_f32(mean.as_mut_ptr().add(2 * g), vcvt_f32_f64(m[g]));
+        vst1_f32(scale.as_mut_ptr().add(2 * g), vcvt_f32_f64(inv[g]));
+    }
+    for j in 0..8 {
+        let mb = vdupq_n_f32(mean[j]);
+        let ib = vdupq_n_f32(scale[j]);
+        let src = x.as_ptr().add((r0 + j) * dim);
+        let dst = out.as_mut_ptr().add((r0 + j) * dim);
+        let mut k = 0;
+        while k + 4 <= dim {
+            let xv = vld1q_f32(src.add(k));
+            let t = vmulq_f32(vsubq_f32(xv, mb), ib);
+            let wv = vld1q_f32(weight.as_ptr().add(k));
+            vst1q_f32(dst.add(k), vmulq_f32(t, wv));
+            k += 4;
+        }
+        while k < dim {
+            let t = (*src.add(k) - mean[j]) * scale[j];
+            *dst.add(k) = t * *weight.get_unchecked(k);
+            k += 1;
+        }
     }
 }
 
@@ -3845,6 +4013,211 @@ mod tests {
         for i in 0..n {
             let want = gelu_erf(values[i]) * ups[i];
             assert_eq!(got[i].to_bits(), want.to_bits(), "index {i}");
+        }
+    }
+
+    /// `NaN` compares equal to `NaN` (its payload is not part of a definition);
+    /// every other result must match bit for bit.
+    fn same_bits(a: f32, b: f32) -> bool {
+        a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+    }
+
+    /// The input classes the element-wise kernels must keep: both zeros, the
+    /// subnormals on either side of zero, the `f32` extremes, `±1e30`, the
+    /// infinities and qNaN/sNaN payloads.
+    fn elementwise_edges() -> Vec<f32> {
+        let mut v = erf_boundary_inputs();
+        v.extend([1e30f32, -1e30, 1e30, -1e30]);
+        v
+    }
+
+    /// One gate row and one up row: 100 000 pseudo-random values in `[-12, 12]`
+    /// (the range the GELU is asked for), with the edge classes scattered through
+    /// both ends.
+    fn elementwise_sweep() -> (Vec<f32>, Vec<f32>) {
+        let n = 100_000usize;
+        let mut gate = prng(0x51ed_270b, n, -12.0, 12.0);
+        let mut up = prng(0x0bad_c0de, n, -12.0, 12.0);
+        let edges = elementwise_edges();
+        for (i, &e) in edges.iter().enumerate() {
+            gate[i] = e;
+            up[i] = edges[(i * 5 + 1) % edges.len()];
+            gate[n - 1 - i] = edges[(i * 3 + 2) % edges.len()];
+            up[n - 1 - i] = e;
+        }
+        (gate, up)
+    }
+
+    fn check_geglu(gate: &[f32], up: &[f32], what: &str, run: impl Fn(&mut [f32], &[f32])) {
+        let mut got = gate.to_vec();
+        run(&mut got, up);
+        for i in 0..gate.len() {
+            let want = gelu_erf(gate[i]) * up[i];
+            assert!(
+                same_bits(got[i], want),
+                "{what}: index {i} of {}: gate {:?} ({:#010x}), up {:?} ({:#010x}): \
+                 got {:#010x}, scalar {:#010x}",
+                gate.len(),
+                gate[i],
+                gate[i].to_bits(),
+                up[i],
+                up[i].to_bits(),
+                got[i].to_bits(),
+                want.to_bits()
+            );
+        }
+    }
+
+    /// The two degenerate lengths and every remainder of the eight-wide body.
+    const ELEMENTWISE_LENGTHS: [usize; 15] =
+        [0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33, 768, 1152, 2304];
+
+    #[test]
+    fn geglu_erf_matches_the_scalar_twin() {
+        let (gate, up) = elementwise_sweep();
+        check_geglu(&gate, &up, "the 100 000-value sweep", geglu_erf);
+        for n in ELEMENTWISE_LENGTHS {
+            check_geglu(&gate[..n], &up[..n], &format!("length {n}"), geglu_erf);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn geglu_erf_neon_is_bit_equal_to_the_scalar_loop() {
+        if !vector_ok() {
+            eprintln!("geglu_erf NEON: no NEON under this tier cap; nothing to compare");
+            return;
+        }
+        let (gate, up) = elementwise_sweep();
+        check_geglu(&gate, &up, "the 100 000-value sweep", |g, u| unsafe {
+            geglu_erf_neon(g, u)
+        });
+        for n in ELEMENTWISE_LENGTHS {
+            check_geglu(
+                &gate[..n],
+                &up[..n],
+                &format!("length {n}"),
+                |g, u| unsafe { geglu_erf_neon(g, u) },
+            );
+        }
+    }
+
+    fn check_layer_norm_nobias(
+        x: &[f32],
+        weight: &[f32],
+        eps: f32,
+        dim: usize,
+        nb: usize,
+        what: &str,
+        run: impl Fn(&[f32], &[f32], f32, usize, usize, &mut [f32]),
+    ) {
+        let mut got = vec![0.0f32; nb * dim];
+        run(x, weight, eps, dim, nb, &mut got);
+        let mut want = vec![0.0f32; nb * dim];
+        for r in 0..nb {
+            layer_norm_row_nobias(
+                &x[r * dim..(r + 1) * dim],
+                weight,
+                eps,
+                &mut want[r * dim..(r + 1) * dim],
+            );
+        }
+        for i in 0..nb * dim {
+            assert!(
+                same_bits(got[i], want[i]),
+                "{what}: dim {dim}, row {}, index {}: got {:#010x}, scalar {:#010x}",
+                i / dim.max(1),
+                i % dim.max(1),
+                got[i].to_bits(),
+                want[i].to_bits()
+            );
+        }
+    }
+
+    /// Every width the two bodies special-case, several row counts (the eight-row
+    /// body and its tail), and the rows whose bits the definition distinguishes:
+    /// all `-0.0`, a constant, `±1e30`, subnormals, infinities and NaN payloads.
+    /// One case of the no-bias norm: a label, the input, the weight, `eps`, the
+    /// row count and the width.
+    type LayerNormCase = (String, Vec<f32>, Vec<f32>, f32, usize, usize);
+
+    fn layer_norm_nobias_cases() -> Vec<LayerNormCase> {
+        let pool = prng(0x2545_f491, 11 * 2304, -17.0, 17.0);
+        let w = prng(0xdead_beef, 2304, 0.25, 2.0);
+        let mut cases = Vec::new();
+        for dim in ELEMENTWISE_LENGTHS {
+            for nb in [1usize, 3, 10] {
+                for eps in [1e-5f32, 1e-12] {
+                    cases.push((
+                        format!("dim {dim}, {nb} rows, eps {eps}"),
+                        pool[..nb * dim].to_vec(),
+                        w[..dim].to_vec(),
+                        eps,
+                        nb,
+                        dim,
+                    ));
+                }
+            }
+        }
+        let rows: Vec<(String, Vec<f32>)> = vec![
+            ("a row of all -0.0".into(), vec![-0.0f32; 768]),
+            ("a constant row".into(), vec![7.0f32; 768]),
+            ("a row of 1e30".into(), vec![1e30f32; 768]),
+            ("a row of subnormals".into(), vec![f32::from_bits(1); 768]),
+            (
+                "a row holding both infinities".into(),
+                [f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0].repeat(192),
+            ),
+            (
+                "a row holding a NaN payload".into(),
+                vec![f32::from_bits(0x7fc0_1234); 768],
+            ),
+            (
+                "a 37-wide dim (not a multiple of 4)".into(),
+                prng(0x37, 37, -12.0, 12.0),
+            ),
+            (
+                "a 1151-wide dim (not a multiple of 4)".into(),
+                prng(0x1151, 1151, -12.0, 12.0),
+            ),
+        ];
+        for (label, row) in rows {
+            let dim = row.len();
+            let mut x = Vec::with_capacity(10 * dim);
+            for _ in 0..10 {
+                x.extend_from_slice(&row);
+            }
+            cases.push((label, x, w[..dim].to_vec(), 1e-12, 10, dim));
+        }
+        cases
+    }
+
+    #[test]
+    fn layer_norm_rows_nobias_matches_the_scalar_twin() {
+        for (what, x, w, eps, nb, dim) in layer_norm_nobias_cases() {
+            check_layer_norm_nobias(&x, &w, eps, dim, nb, &what, layer_norm_rows_nobias);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn layer_norm_rows_nobias_neon_is_bit_equal_to_the_scalar_twin() {
+        if !vector_ok() {
+            eprintln!("layer_norm_rows_nobias NEON: no NEON under this tier cap");
+            return;
+        }
+        for (what, x, w, eps, nb, dim) in layer_norm_nobias_cases() {
+            check_layer_norm_nobias(
+                &x,
+                &w,
+                eps,
+                dim,
+                nb,
+                &what,
+                |x, w, eps, dim, nb, out| unsafe {
+                    layer_norm_rows_nobias_neon(x, w, eps, dim, nb, out)
+                },
+            );
         }
     }
 }
