@@ -123,13 +123,11 @@ pub fn run(args: &DecideArgs) -> Result<(), String> {
         while next < prompts.len() && engine.has_room() {
             let free = engine.max_slots() - engine.active();
             let k = free.min(prompts.len() - next);
-            let ids = engine
-                .admit_labels_group(
-                    prompts[next..next + k].to_vec(),
-                    SlotCfg::default(),
-                    question_labels[next..next + k].to_vec(),
-                )
-                .map_err(|e| e)?;
+            let ids = engine.admit_labels_group(
+                prompts[next..next + k].to_vec(),
+                SlotCfg::default(),
+                question_labels[next..next + k].to_vec(),
+            )?;
             debug_assert_eq!(ids.len(), k);
             for (j, id) in ids.into_iter().enumerate() {
                 by_slot.insert(id, next + j);

@@ -693,7 +693,7 @@ fn a_forked_question_beside_other_slots_is_bit_identical() {
         }
         for (i, w) in want.iter().enumerate() {
             assert_eq!(
-                bits(&got[i].as_ref().expect("the group's question answered")),
+                bits(got[i].as_ref().expect("the group's question answered")),
                 bits(w),
                 "{arch}: forked question {i} changed beside other endpoints"
             );
