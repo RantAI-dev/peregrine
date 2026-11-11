@@ -1,0 +1,639 @@
+{
+ "rows": [
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "4t_on_cores0to3",
+   "threads": 4,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 244.51176579251012,
+   "prefill_s": 2.0939687640000004,
+   "prof": "",
+   "wall_s": 2.7,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "4t_on_cores4to7",
+   "threads": 4,
+   "cpus": "8-15",
+   "env": {},
+   "prefill_tok_s": 269.69826735171546,
+   "prefill_s": 1.8984178319999998,
+   "prof": "",
+   "wall_s": 2.445,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "4t_on_cores8to11",
+   "threads": 4,
+   "cpus": "16-23",
+   "env": {},
+   "prefill_tok_s": 264.3175428525798,
+   "prefill_s": 1.9370640119999998,
+   "prof": "",
+   "wall_s": 2.521,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "8t_smt_cores0to3",
+   "threads": 8,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 401.42249612422074,
+   "prefill_s": 1.275464143,
+   "prof": "",
+   "wall_s": 1.849,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "8t_cores4to11",
+   "threads": 8,
+   "cpus": "8-23",
+   "env": {},
+   "prefill_tok_s": 392.0241822566977,
+   "prefill_s": 1.3060418799999998,
+   "prof": "",
+   "wall_s": 1.895,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "12t_free",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 493.1838918199899,
+   "prefill_s": 1.0381523170000002,
+   "prof": "",
+   "wall_s": 1.602,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "24t_free",
+   "threads": 24,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 468.5932902370221,
+   "prefill_s": 1.0926319489999998,
+   "prof": "",
+   "wall_s": 1.79,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "4t_on_cores0to3",
+   "threads": 4,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 265.1950310686726,
+   "prefill_s": 1.9306545750000002,
+   "prof": "",
+   "wall_s": 2.477,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "4t_on_cores4to7",
+   "threads": 4,
+   "cpus": "8-15",
+   "env": {},
+   "prefill_tok_s": 263.0517234324057,
+   "prefill_s": 1.946385271,
+   "prof": "",
+   "wall_s": 0.853,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "4t_on_cores8to11",
+   "threads": 4,
+   "cpus": "16-23",
+   "env": {},
+   "prefill_tok_s": 243.65918087365662,
+   "prefill_s": 2.101295745,
+   "prof": "",
+   "wall_s": 2.61,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "8t_smt_cores0to3",
+   "threads": 8,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 404.34256714764587,
+   "prefill_s": 1.2662530280000002,
+   "prof": "",
+   "wall_s": 1.814,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "8t_cores4to11",
+   "threads": 8,
+   "cpus": "8-23",
+   "env": {},
+   "prefill_tok_s": 413.57204317479534,
+   "prefill_s": 1.2379947059999998,
+   "prof": "",
+   "wall_s": 1.773,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "12t_free",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 483.59692821309164,
+   "prefill_s": 1.0587329449999998,
+   "prof": "",
+   "wall_s": 1.619,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "24t_free",
+   "threads": 24,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 302.20900712602224,
+   "prefill_s": 1.6941917280000003,
+   "prof": "",
+   "wall_s": 2.361,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "4t_on_cores0to3",
+   "threads": 4,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 244.18631212635367,
+   "prefill_s": 2.096759624,
+   "prof": "",
+   "wall_s": 2.604,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "4t_on_cores4to7",
+   "threads": 4,
+   "cpus": "8-15",
+   "env": {},
+   "prefill_tok_s": 270.92699808590976,
+   "prefill_s": 1.889807969,
+   "prof": "",
+   "wall_s": 2.417,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "4t_on_cores8to11",
+   "threads": 4,
+   "cpus": "16-23",
+   "env": {},
+   "prefill_tok_s": 266.6626910314944,
+   "prefill_s": 1.9200286250000003,
+   "prof": "",
+   "wall_s": 2.426,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "8t_smt_cores0to3",
+   "threads": 8,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 410.4195977583174,
+   "prefill_s": 1.2475037809999998,
+   "prof": "",
+   "wall_s": 1.837,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "8t_cores4to11",
+   "threads": 8,
+   "cpus": "8-23",
+   "env": {},
+   "prefill_tok_s": 413.5229219196259,
+   "prefill_s": 1.2381417640000003,
+   "prof": "",
+   "wall_s": 1.791,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "12t_free",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 493.02872785954344,
+   "prefill_s": 1.0384790400000001,
+   "prof": "",
+   "wall_s": 1.606,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "24t_free",
+   "threads": 24,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 451.1284894577193,
+   "prefill_s": 1.134931648,
+   "prof": "",
+   "wall_s": 1.834,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "4t_on_cores0to3",
+   "threads": 4,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 135.2485200722585,
+   "prefill_s": 3.7856236780000003,
+   "prof": "",
+   "wall_s": 4.414,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "4t_on_cores4to7",
+   "threads": 4,
+   "cpus": "8-15",
+   "env": {},
+   "prefill_tok_s": 144.92747687102045,
+   "prefill_s": 3.5328014469999998,
+   "prof": "",
+   "wall_s": 2.602,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "4t_on_cores8to11",
+   "threads": 4,
+   "cpus": "16-23",
+   "env": {},
+   "prefill_tok_s": 137.25071879414443,
+   "prefill_s": 3.730399406999999,
+   "prof": "",
+   "wall_s": 4.364,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "8t_smt_cores0to3",
+   "threads": 8,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 232.25983892744787,
+   "prefill_s": 2.204427603,
+   "prof": "",
+   "wall_s": 2.862,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "8t_cores4to11",
+   "threads": 8,
+   "cpus": "8-23",
+   "env": {},
+   "prefill_tok_s": 229.765997274802,
+   "prefill_s": 2.2283540910000004,
+   "prof": "",
+   "wall_s": 2.854,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "12t_free",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 294.0349750582823,
+   "prefill_s": 1.7412894499999996,
+   "prof": "",
+   "wall_s": 2.404,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "24t_free",
+   "threads": 24,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 331.14019848195545,
+   "prefill_s": 1.546172897,
+   "prof": "",
+   "wall_s": 2.347,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "4t_on_cores0to3",
+   "threads": 4,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 138.0270886567123,
+   "prefill_s": 3.7094167889999996,
+   "prof": "",
+   "wall_s": 4.334,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "4t_on_cores4to7",
+   "threads": 4,
+   "cpus": "8-15",
+   "env": {},
+   "prefill_tok_s": 139.19381464358872,
+   "prefill_s": 3.678324366,
+   "prof": "",
+   "wall_s": 4.336,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "4t_on_cores8to11",
+   "threads": 4,
+   "cpus": "16-23",
+   "env": {},
+   "prefill_tok_s": 139.60925004776135,
+   "prefill_s": 3.6673787720000006,
+   "prof": "",
+   "wall_s": 4.319,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "8t_smt_cores0to3",
+   "threads": 8,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 232.87741324143096,
+   "prefill_s": 2.1985816180000004,
+   "prof": "",
+   "wall_s": 1.193,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "8t_cores4to11",
+   "threads": 8,
+   "cpus": "8-23",
+   "env": {},
+   "prefill_tok_s": 237.8575970742312,
+   "prefill_s": 2.1525484419999996,
+   "prof": "",
+   "wall_s": 2.797,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "12t_free",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 300.8314256140795,
+   "prefill_s": 1.7019498509999995,
+   "prof": "",
+   "wall_s": 2.325,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "24t_free",
+   "threads": 24,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 304.9098096137789,
+   "prefill_s": 1.67918507,
+   "prof": "",
+   "wall_s": 2.474,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "4t_on_cores0to3",
+   "threads": 4,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 134.38301544490346,
+   "prefill_s": 3.8100052920000005,
+   "prof": "",
+   "wall_s": 4.436,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "4t_on_cores4to7",
+   "threads": 4,
+   "cpus": "8-15",
+   "env": {},
+   "prefill_tok_s": 140.48263349815937,
+   "prefill_s": 3.6445786019999997,
+   "prof": "",
+   "wall_s": 4.256,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "4t_on_cores8to11",
+   "threads": 4,
+   "cpus": "16-23",
+   "env": {},
+   "prefill_tok_s": 140.06358926345445,
+   "prefill_s": 3.6554825040000005,
+   "prof": "",
+   "wall_s": 4.271,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "8t_smt_cores0to3",
+   "threads": 8,
+   "cpus": "0-7",
+   "env": {},
+   "prefill_tok_s": 229.4509127933978,
+   "prefill_s": 2.231414091,
+   "prof": "",
+   "wall_s": 2.879,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "8t_cores4to11",
+   "threads": 8,
+   "cpus": "8-23",
+   "env": {},
+   "prefill_tok_s": 230.75403518612345,
+   "prefill_s": 2.21881277,
+   "prof": "",
+   "wall_s": 2.831,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "12t_free",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 293.7175443045753,
+   "prefill_s": 1.7431713219999996,
+   "prof": "",
+   "wall_s": 2.423,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "24t_free",
+   "threads": 24,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 274.9264659094868,
+   "prefill_s": 1.8623161590000001,
+   "prof": "",
+   "wall_s": 2.65,
+   "bytes_acts": 293727109120
+  }
+ ],
+ "extra": {},
+ "summary": {
+  "qwen05": {
+   "4t_on_cores0to3": {
+    "median": 244.5,
+    "n": 3,
+    "spread": 10.5
+   },
+   "4t_on_cores4to7": {
+    "median": 269.7,
+    "n": 3,
+    "spread": 3.9
+   },
+   "4t_on_cores8to11": {
+    "median": 264.3,
+    "n": 3,
+    "spread": 11.5
+   },
+   "8t_smt_cores0to3": {
+    "median": 404.3,
+    "n": 3,
+    "spread": 4.5
+   },
+   "8t_cores4to11": {
+    "median": 413.5,
+    "n": 3,
+    "spread": 10.8
+   },
+   "12t_free": {
+    "median": 493.0,
+    "n": 3,
+    "spread": 4.8
+   },
+   "24t_free": {
+    "median": 451.1,
+    "n": 3,
+    "spread": 83.2
+   }
+  },
+  "llama1b": {
+   "4t_on_cores0to3": {
+    "median": 135.2,
+    "n": 3,
+    "spread": 1.8
+   },
+   "4t_on_cores4to7": {
+    "median": 140.5,
+    "n": 3,
+    "spread": 2.9
+   },
+   "4t_on_cores8to11": {
+    "median": 139.6,
+    "n": 3,
+    "spread": 1.4
+   },
+   "8t_smt_cores0to3": {
+    "median": 232.3,
+    "n": 3,
+    "spread": 1.7
+   },
+   "8t_cores4to11": {
+    "median": 230.8,
+    "n": 3,
+    "spread": 4.0
+   },
+   "12t_free": {
+    "median": 294.0,
+    "n": 3,
+    "spread": 3.6
+   },
+   "24t_free": {
+    "median": 304.9,
+    "n": 3,
+    "spread": 28.1
+   }
+  }
+ }
+}

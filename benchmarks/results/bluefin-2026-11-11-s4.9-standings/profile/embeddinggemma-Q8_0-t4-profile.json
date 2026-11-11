@@ -1,0 +1,295 @@
+{
+ "model": "~/models/embed/embeddinggemma/embeddinggemma-Q8_0.gguf",
+ "threads": 4,
+ "method": "PEREGRINE_PROF2=1, peregrine-bench example cellprof: engine wall and StepStats for one request of the cell, tokenisation timed apart",
+ "cells": {
+  "L16_b1": {
+   "cell": "L16_b1",
+   "batch": 1,
+   "tokens": 16,
+   "bytes": 80,
+   "texts_per_s": 65.112,
+   "tokens_per_s": 1041.8,
+   "wall_s": 0.0154,
+   "tokenise_s": 8.2e-05,
+   "tokenise_ms_per_text": 0.082,
+   "stats_ms": {
+    "matmul": 12.485,
+    "head": 0.0,
+    "attention": 0.384,
+    "other": 2.477,
+    "total": 15.346,
+    "barriers": 266
+   },
+   "prof_ms": {
+    "norms": 0.156,
+    "quantise": 0.256,
+    "barrier wait": 0.207
+   }
+  },
+  "L16_b8": {
+   "cell": "L16_b8",
+   "batch": 8,
+   "tokens": 128,
+   "bytes": 695,
+   "texts_per_s": 87.077,
+   "tokens_per_s": 1393.2,
+   "wall_s": 0.0919,
+   "tokenise_s": 0.000483,
+   "tokenise_ms_per_text": 0.06,
+   "stats_ms": {
+    "matmul": 73.379,
+    "head": 0.0,
+    "attention": 2.46,
+    "other": 15.978,
+    "total": 91.817,
+    "barriers": 1072
+   },
+   "prof_ms": {
+    "norms": 0.925,
+    "quantise": 1.57,
+    "barrier wait": 2.038
+   }
+  },
+  "L16_b32": {
+   "cell": "L16_b32",
+   "batch": 32,
+   "tokens": 512,
+   "bytes": 2734,
+   "texts_per_s": 88.706,
+   "tokens_per_s": 1419.3,
+   "wall_s": 0.3607,
+   "tokenise_s": 0.001319,
+   "tokenise_ms_per_text": 0.041,
+   "stats_ms": {
+    "matmul": 288.931,
+    "head": 0.0,
+    "attention": 9.407,
+    "other": 62.184,
+    "total": 360.522,
+    "barriers": 4288
+   },
+   "prof_ms": {
+    "norms": 3.668,
+    "quantise": 6.169,
+    "barrier wait": 8.437
+   }
+  },
+  "L128_b1": {
+   "cell": "L128_b1",
+   "batch": 1,
+   "tokens": 128,
+   "bytes": 722,
+   "texts_per_s": 10.182,
+   "tokens_per_s": 1303.3,
+   "wall_s": 0.0982,
+   "tokenise_s": 0.00044,
+   "tokenise_ms_per_text": 0.44,
+   "stats_ms": {
+    "matmul": 75.969,
+    "head": 0.0,
+    "attention": 6.955,
+    "other": 15.254,
+    "total": 98.178,
+    "barriers": 290
+   },
+   "prof_ms": {
+    "norms": 0.926,
+    "quantise": 1.581,
+    "barrier wait": 2.209
+   }
+  },
+  "L128_b8": {
+   "cell": "L128_b8",
+   "batch": 8,
+   "tokens": 1024,
+   "bytes": 6114,
+   "texts_per_s": 10.269,
+   "tokens_per_s": 1314.4,
+   "wall_s": 0.779,
+   "tokenise_s": 0.002383,
+   "tokenise_ms_per_text": 0.298,
+   "stats_ms": {
+    "matmul": 602.376,
+    "head": 0.0,
+    "attention": 55.852,
+    "other": 120.712,
+    "total": 778.939,
+    "barriers": 2320
+   },
+   "prof_ms": {
+    "norms": 7.365,
+    "quantise": 12.713,
+    "barrier wait": 15.86
+   }
+  },
+  "L128_b32": {
+   "cell": "L128_b32",
+   "batch": 32,
+   "tokens": 4096,
+   "bytes": 24825,
+   "texts_per_s": 10.216,
+   "tokens_per_s": 1307.6,
+   "wall_s": 3.1325,
+   "tokenise_s": 0.008578,
+   "tokenise_ms_per_text": 0.268,
+   "stats_ms": {
+    "matmul": 2417.664,
+    "head": 0.0,
+    "attention": 222.849,
+    "other": 491.467,
+    "total": 3131.98,
+    "barriers": 9280
+   },
+   "prof_ms": {
+    "norms": 29.864,
+    "quantise": 50.663,
+    "barrier wait": 81.774
+   }
+  },
+  "L512_b1": {
+   "cell": "L512_b1",
+   "batch": 1,
+   "tokens": 512,
+   "bytes": 3155,
+   "texts_per_s": 1.892,
+   "tokens_per_s": 968.6,
+   "wall_s": 0.5286,
+   "tokenise_s": 0.001541,
+   "tokenise_ms_per_text": 1.541,
+   "stats_ms": {
+    "matmul": 322.147,
+    "head": 0.0,
+    "attention": 134.56,
+    "other": 71.901,
+    "total": 528.608,
+    "barriers": 578
+   },
+   "prof_ms": {
+    "norms": 6.016,
+    "quantise": 8.772,
+    "barrier wait": 43.754
+   }
+  },
+  "L512_b8": {
+   "cell": "L512_b8",
+   "batch": 8,
+   "tokens": 4096,
+   "bytes": 25464,
+   "texts_per_s": 2.003,
+   "tokens_per_s": 1025.7,
+   "wall_s": 3.9934,
+   "tokenise_s": 0.008878,
+   "tokenise_ms_per_text": 1.11,
+   "stats_ms": {
+    "matmul": 2445.912,
+    "head": 0.0,
+    "attention": 1009.37,
+    "other": 537.974,
+    "total": 3993.256,
+    "barriers": 4624
+   },
+   "prof_ms": {
+    "norms": 44.994,
+    "quantise": 66.728,
+    "barrier wait": 291.719
+   }
+  },
+  "L512_b32": {
+   "cell": "L512_b32",
+   "batch": 32,
+   "tokens": 16384,
+   "bytes": 101485,
+   "texts_per_s": 2.0,
+   "tokens_per_s": 1024.0,
+   "wall_s": 16.0002,
+   "tokenise_s": 0.03347,
+   "tokenise_ms_per_text": 1.046,
+   "stats_ms": {
+    "matmul": 9802.171,
+    "head": 0.0,
+    "attention": 4038.022,
+    "other": 2159.464,
+    "total": 15999.656,
+    "barriers": 18496
+   },
+   "prof_ms": {
+    "norms": 181.13,
+    "quantise": 268.297,
+    "barrier wait": 1163.15
+   }
+  },
+  "L2000_b1": {
+   "cell": "L2000_b1",
+   "batch": 1,
+   "tokens": 2000,
+   "bytes": 12410,
+   "texts_per_s": 0.404,
+   "tokens_per_s": 807.9,
+   "wall_s": 2.4754,
+   "tokenise_s": 0.004358,
+   "tokenise_ms_per_text": 4.358,
+   "stats_ms": {
+    "matmul": 1207.266,
+    "head": 0.0,
+    "attention": 960.807,
+    "other": 307.358,
+    "total": 2475.43,
+    "barriers": 1730
+   },
+   "prof_ms": {
+    "norms": 41.044,
+    "quantise": 38.145,
+    "barrier wait": 114.927
+   }
+  },
+  "L2000_b8": {
+   "cell": "L2000_b8",
+   "batch": 8,
+   "tokens": 16012,
+   "bytes": 99213,
+   "texts_per_s": 0.407,
+   "tokens_per_s": 814.1,
+   "wall_s": 19.668,
+   "tokenise_s": 0.032084,
+   "tokenise_ms_per_text": 4.01,
+   "stats_ms": {
+    "matmul": 9604.229,
+    "head": 0.0,
+    "attention": 7627.031,
+    "other": 2436.625,
+    "total": 19667.886,
+    "barriers": 13840
+   },
+   "prof_ms": {
+    "norms": 328.026,
+    "quantise": 306.967,
+    "barrier wait": 927.485
+   }
+  },
+  "mixed_b32": {
+   "cell": "mixed_b32",
+   "batch": 32,
+   "tokens": 3516,
+   "bytes": 21242,
+   "texts_per_s": 10.697,
+   "tokens_per_s": 1175.3,
+   "wall_s": 2.9916,
+   "tokenise_s": 0.007532,
+   "tokenise_ms_per_text": 0.235,
+   "stats_ms": {
+    "matmul": 2087.049,
+    "head": 0.0,
+    "attention": 467.761,
+    "other": 436.385,
+    "total": 2991.195,
+    "barriers": 9184
+   },
+   "prof_ms": {
+    "norms": 30.666,
+    "quantise": 49.396,
+    "barrier wait": 124.59
+   }
+  }
+ }
+}

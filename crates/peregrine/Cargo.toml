@@ -45,6 +45,7 @@ default = [
     "arch-qwen35",
     "arch-gemma3",
     "arch-gemma-embedding",
+    "arch-bert",
     "arch-qwen3moe",
     "arch-gpt-oss",
     "arch-phi3",
@@ -69,6 +70,7 @@ arch-qwen = ["peregrine-models/arch-qwen"]
 arch-qwen35 = ["peregrine-models/arch-qwen35"]
 arch-gemma3 = ["peregrine-models/arch-gemma3"]
 arch-gemma-embedding = ["peregrine-models/arch-gemma-embedding"]
+arch-bert = ["peregrine-models/arch-bert"]
 arch-qwen3moe = ["peregrine-models/arch-qwen3moe"]
 arch-gpt-oss = ["peregrine-models/arch-gpt-oss"]
 arch-phi3 = ["peregrine-models/arch-phi3"]

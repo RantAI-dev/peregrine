@@ -763,6 +763,149 @@ pub fn write_gemma_embedding(
     path
 }
 
+/// The shape of a synthetic `bert` encoder (roadmap S4.6a).
+#[derive(Clone, Copy, Debug)]
+pub struct BertConfig {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    /// `bert.pooling_type`: 2 is cls (BGE's default), 1 is mean (E5/GTE-style).
+    pub pooling_type: u32,
+    /// Whether the file carries the WordPiece (`bert`) or the unigram (`t5`, XLM-R)
+    /// tokenizer. The weights are the same either way.
+    pub unigram: bool,
+    /// Token-type rows in `token_types.weight` (BERT's Sentence A/B is 2).
+    pub n_token_types: usize,
+}
+
+impl Default for BertConfig {
+    fn default() -> Self {
+        BertConfig {
+            d_model: 128,
+            n_layer: 2,
+            n_head: 4,
+            n_ff: 256,
+            ctx: 64,
+            pooling_type: 2,
+            unigram: false,
+            n_token_types: 2,
+        }
+    }
+}
+
+/// Write a synthetic `bert` encoder: post-norm blocks, absolute positions, token
+/// types, biases on every projection, LayerNorm (weight and bias) and the exact
+/// GELU — the graph `src/models/bert.cpp` builds.
+///
+/// Every matrix is `fmt` (F32 or Q8_0, both multiples of the block size); the
+/// norms and the biases are F32, as the converter writes them. `pooling_type` is
+/// the file's own (`1` mean, `2` cls), so `Model::pooling` reports it.
+pub fn write_bert(dir: &Path, fmt: Format, seed: u64, s: BertConfig) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    w.str("general.architecture", "bert");
+    w.str("general.name", &format!("synthetic-bert-{}", fmt.label()));
+    let k = |x: &str| format!("bert.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.f32(&k("attention.layer_norm_epsilon"), 1e-5);
+    w.u32(&k("pooling_type"), s.pooling_type);
+    w.bool(&k("causal_attention"), false);
+
+    if s.unigram {
+        vocab::add_unigram_tokenizer_metadata(&mut w);
+    } else {
+        vocab::add_bert_tokenizer_metadata(&mut w);
+    }
+
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    // A bias of its own scale, and never zero: a bias the engine forgot to add
+    // must move the vector.
+    let bias = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        let mut out = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            let v = rng.f32_range(-0.05, 0.05);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        w.add_tensor(name, &[n as u64], Format::F32, out);
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    mat(
+        &mut w,
+        &mut rng,
+        "token_types.weight",
+        s.d_model,
+        s.n_token_types,
+    );
+    mat(&mut w, &mut rng, "position_embd.weight", s.d_model, s.ctx);
+    norm(&mut w, &mut rng, "token_embd_norm.weight", s.d_model);
+    bias(&mut w, &mut rng, "token_embd_norm.bias", s.d_model);
+
+    for i in 0..s.n_layer {
+        let p = |x: &str| format!("blk.{i}.{x}");
+        for (name, cols, rows) in [
+            ("attn_q", s.d_model, s.d_model),
+            ("attn_k", s.d_model, s.d_model),
+            ("attn_v", s.d_model, s.d_model),
+            ("attn_output", s.d_model, s.d_model),
+            ("ffn_up", s.d_model, s.n_ff),
+            ("ffn_down", s.n_ff, s.d_model),
+        ] {
+            mat(&mut w, &mut rng, &p(&format!("{name}.weight")), cols, rows);
+        }
+        for (name, n) in [
+            ("attn_q.bias", s.d_model),
+            ("attn_k.bias", s.d_model),
+            ("attn_v.bias", s.d_model),
+            ("attn_output.bias", s.d_model),
+            ("ffn_up.bias", s.n_ff),
+            ("ffn_down.bias", s.d_model),
+        ] {
+            bias(&mut w, &mut rng, &p(name), n);
+        }
+        for norm_name in ["attn_output_norm", "layer_output_norm"] {
+            norm(
+                &mut w,
+                &mut rng,
+                &p(&format!("{norm_name}.weight")),
+                s.d_model,
+            );
+            bias(
+                &mut w,
+                &mut rng,
+                &p(&format!("{norm_name}.bias")),
+                s.d_model,
+            );
+        }
+    }
+
+    let name = if s.unigram {
+        format!("bert-unigram-{}.gguf", fmt.label())
+    } else {
+        format!("bert-{}.gguf", fmt.label())
+    };
+    let path = dir.join(name);
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// The shape of a synthetic `mistral3` embedder (roadmap S4.14).
 ///
 /// The default has query heads wider than the residual (6 × 32 over 128), two key/value

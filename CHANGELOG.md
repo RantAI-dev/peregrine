@@ -80,6 +80,46 @@ c63d13b (docs: the mistral3 reading note, the supported-model list and the tests
   NVIDIA's Nemotron 3.5 Embed vocabulary tokenizes to the same ids (361 strings, plus 22 for the
   zero-width-non-joiner rule). `encode_unparsed` is llama.cpp's `parse_special = false`, which the
   byte-level BPE path previously ignored.
+- **The `bert` family: MiniLM, BGE, E5, GTE and bge-m3 embeddings (roadmap S4.6, part a)**:
+  `architecture = "bert"` is the post-norm encoder every encoder-only embedding file in
+  llama.cpp's format ships as — token + token-type + learned absolute-position embeddings and one
+  LayerNorm, then per layer q/k/v with biases, full bidirectional attention, the output
+  projection, a residual and a LayerNorm; the feed-forward (up, the exact GELU, down), a
+  residual and a second LayerNorm. There is no pre-norm: each layer's output *is* its normalised
+  value. The graph, the tensors and the metadata are transcribed from llama.cpp v0.9.0
+  (`src/models/bert.cpp`, `llama-model.cpp`, `llama-graph.cpp`, `conversion/bert.py`) in
+  `docs/reference/bert.md`. The family is an embedding model: the engine schedules whole texts
+  with no KV cache, `pooling_type` is the file's own (`cls` for BGE/bge-m3, `mean` for
+  MiniLM/E5/GTE), and the position table is the text limit — the XLM-R converter chops the
+  `pad+1` offset off the table, so positions are 0-based and `bge-m3`'s 8192 rows are 8192
+  tokens. Every projection goes through the shared GEMM, so F32/F16 files use the packed float
+  kernel and Q8_0 the int8 tiles, each distinct activation quantised once (S4.9a); biases are
+  added after the matmul. New, defined kernels in `peregrine-kernels::vmath`: `erf` (the
+  Maclaurin series with range splitting, in f64, measured at max 1 f32 ulp against an
+  independent oracle over `[−6, 6]`), `gelu_erf` (the model's own exact GELU — llama.cpp
+  computes it through an f16 lookup table) and `layer_norm_row(s)` (mean and variance in f64 in
+  index order, one rounding of the scale, then the f32 scale-and-shift, unfused); the AVX2
+  bodies are S4.9h's, and the definitions are what must not change. On 200 mixed-length texts
+  (16–428 tokens) the token ids are identical to llama.cpp's on all 200 for every file, and
+  against the **fp32 PyTorch reference** (sentence-transformers, `max_seq_length = 512`)
+  Peregrine reaches cosine min/mean 0.9999996/0.9999998 on MiniLM F16, 0.9991371/0.9994906 on
+  MiniLM Q8_0, 1.0000000/1.0000000 on bge-small F32, 0.9997426/0.9998402 on bge-small Q8_0 and
+  0.9968921/0.9991315 on bge-m3 Q8_0 — better than llama.cpp's own Q8_0 in minimum and mean
+  on MiniLM and bge-m3 and in mean on bge-small (its minimum there is 1.3e-5 lower, inside the
+  1e-4 slack). A synthetic `bert` file (with
+  the WordPiece vocabulary and a second with the XLM-R unigram one) is checked bit for bit
+  against an independent scalar reference forward, is batch-invariant (2/7/64 texts, mixed
+  lengths, 1/2/4/8 threads, both admission orders), allocates nothing in a whole-text pass, and
+  has a golden on each pinned x86 tier; server and CLI tests cover the endpoint, `cls`/`mean`
+  pooling, Matryoshka truncation and the chat refusal. `peregrine run` on a bidirectional
+  encoder now names it as an embedding model instead of complaining about a missing chat
+  template. The real-file fixtures are under `tests/fixtures/bert/` with an ignored test. Speed on
+  H0 after S4.9g's attention strip (4 threads, medians of three, load 6.6–10): MiniLM F16 161
+  texts/s at 16 tokens single (llama.cpp 102) and 5.30 at 512 tokens (llama.cpp 6.41); bge-small
+  Q8_0 98.8 (llama.cpp 72.8) and 2.47 (llama.cpp 3.27); a single 16-token text's p50 is 7.2 ms
+  against llama.cpp's 9.2 ms on MiniLM and 11.7 against 16.2 on bge-small. The remaining 15–30 %
+  at 128–512 tokens is the scalar exact GELU and the per-row LayerNorms (S4.9h) plus the serial
+  int8 activation fill a float file does not need; the phase table is in the reference note.
 - **A decision computes only its label rows of the output head (S4.9d)**: a `Want::Labels` slot used
   to evaluate the whole vocabulary row of its last prompt position and gather the handful of token
   ids it reads. The head now evaluates those ids alone: one dot product of the already-quantised

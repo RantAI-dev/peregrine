@@ -21,6 +21,7 @@ default = [
     "arch-qwen35",
     "arch-gemma3",
     "arch-gemma-embedding",
+    "arch-bert",
     "arch-qwen3moe",
     "arch-gpt-oss",
     "arch-phi3",
@@ -41,6 +42,7 @@ arch-qwen = []
 arch-qwen35 = []
 arch-gemma3 = []
 arch-gemma-embedding = []
+arch-bert = []
 arch-qwen3moe = []
 arch-gpt-oss = []
 arch-phi3 = []
@@ -108,7 +110,7 @@ required-features = ["arch-qwen", "fmt-kquant"]
 
 [[test]]
 name = "synthetic"
-required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-gemma3", "arch-gemma-embedding", "arch-gpt-oss", "arch-phi3", "arch-mistral3", "mtp", "fmt-mxfp4", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
+required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-gemma3", "arch-gemma-embedding", "arch-bert", "arch-gpt-oss", "arch-phi3", "arch-mistral3", "mtp", "fmt-mxfp4", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
 
 [lints]
 workspace = true

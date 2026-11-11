@@ -1,0 +1,179 @@
+diff --git a/crates/peregrine-models/src/bert/mod.rs b/crates/peregrine-models/src/bert/mod.rs
+index f348c87..ccb7f71 100644
+--- a/crates/peregrine-models/src/bert/mod.rs
++++ b/crates/peregrine-models/src/bert/mod.rs
+@@ -29,6 +29,49 @@ use peregrine_core::pool::Pool;
+ use peregrine_core::quant::QuantAct;
+ use peregrine_core::tokenizer::Tokenizer;
+ 
++/// Temporary phase timers for the S4.9k standings (not part of the engine).
++/// Off unless `PEREGRINE_BERT_PHASES` is set; the counters are exported so the
++/// cellprof example can print them. A companion patch file records this change.
++pub mod phases {
++    use std::sync::atomic::{AtomicU64, Ordering};
++
++    pub const N: usize = 7;
++    const NAMES: [&str; N] = ["embed+norm", "attention", "layer norm", "gelu", "pooling",
++                              "quantise ln", "quantise gelu"];
++    pub static C: [AtomicU64; N] = [
++        AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
++        AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
++    ];
++
++    #[inline]
++    pub fn on() -> bool {
++        std::env::var_os("PEREGRINE_BERT_PHASES").is_some()
++    }
++
++    #[inline]
++    pub fn add(i: usize, ns: u64) {
++        C[i].fetch_add(ns, Ordering::Relaxed);
++    }
++
++    pub fn reset() {
++        for c in &C {
++            c.store(0, Ordering::Relaxed);
++        }
++    }
++
++    pub fn names() -> &'static [&'static str; N] {
++        &NAMES
++    }
++
++    pub fn take() -> [u64; N] {
++        let mut out = [0u64; N];
++        for (o, c) in out.iter_mut().zip(C.iter()) {
++            *o = c.swap(0, Ordering::Relaxed);
++        }
++        out
++    }
++}
++
+ /// The family, registered as `bert`.
+ pub struct BertFamily;
+ 
+@@ -522,7 +565,11 @@ fn layer_norm_rows_fill(
+             let n = oc.len() / dim;
+             peregrine_core::vmath::layer_norm_rows(xc, w, b, eps, dim, n, oc);
+             for (i, a) in ac.iter_mut().enumerate() {
++                let tq = phases::on().then(Instant::now);
+                 a.fill(&oc[i * dim..(i + 1) * dim]);
++                if let Some(t) = tq {
++                    phases::add(5, t.elapsed().as_nanos() as u64);
++                }
+             }
+         },
+     );
+@@ -564,7 +611,11 @@ fn bias_gelu_fill(
+                     }
+                 }
+                 peregrine_core::vmath::gelu_erf_rows(row);
++                let tq = phases::on().then(Instant::now);
+                 a.fill(row);
++                if let Some(t) = tq {
++                    phases::add(6, t.elapsed().as_nanos() as u64);
++                }
+             }
+         },
+     );
+@@ -738,6 +789,7 @@ impl Architecture for Bert {
+         }
+ 
+         // ---- embeddings: token + token type (row 0) + absolute position ----
++        let t_embed = phases::on().then(Instant::now);
+         let mut row = 0usize;
+         for t in texts {
+             for &tok in t.iter() {
+@@ -785,6 +837,9 @@ impl Architecture for Bert {
+             xin[..nb * dm].copy_from_slice(&st.xb[..nb * dm]);
+             st.x = xin;
+         }
++        if let Some(t) = t_embed {
++            phases::add(0, t.elapsed().as_nanos() as u64);
++        }
+ 
+         for l in &self.layers {
+             // ---- q/k/v (+ biases): one quantisation and one fork-join for the three
+@@ -832,6 +887,7 @@ impl Architecture for Bert {
+             }
+ 
+             // ---- attention: one n × n block per text, no cache ----
++            let t_attn = phases::on().then(Instant::now);
+             peregrine_core::blocks::bidir::attend_texts(
+                 cfg,
+                 &st.q,
+@@ -845,6 +901,9 @@ impl Architecture for Bert {
+                 pool,
+                 stats,
+             );
++            if let Some(t) = t_attn {
++                phases::add(1, t.elapsed().as_nanos() as u64);
++            }
+ 
+             // ---- attn_output (+ bias), residual, attn_output_norm ----
+             // The bias and the residual are added to each chunk as the projection
+@@ -867,6 +926,7 @@ impl Architecture for Bert {
+                     add_bias_residual(chunk, &st.x[r0 * dm..r0 * dm + chunk.len()], &l.bo, dm);
+                 },
+             );
++            let t_ln = phases::on().then(Instant::now);
+             layer_norm_rows_fill(
+                 pool,
+                 stats,
+@@ -879,6 +939,9 @@ impl Architecture for Bert {
+                 &mut st.xb,
+                 &mut st.acts,
+             );
++            if let Some(t) = t_ln {
++                phases::add(2, t.elapsed().as_nanos() as u64);
++            }
+ 
+             // ---- feed-forward: up (+ bias), the exact GELU, down (+ bias) ----
+             {
+@@ -901,7 +964,11 @@ impl Architecture for Bert {
+                     &mut st.kq,
+                 );
+             }
++            let t_gelu = phases::on().then(Instant::now);
+             bias_gelu_fill(pool, stats, &mut st.hb, &l.up_b, ff, nb, &mut st.acts);
++            if let Some(t) = t_gelu {
++                phases::add(3, t.elapsed().as_nanos() as u64);
++            }
+             {
+                 let mut jobs = [RowsOut {
+                     lin: &l.down,
+@@ -925,6 +992,7 @@ impl Architecture for Bert {
+             add_bias_residual(&mut st.xb2[..nb * dm], &st.xb[..nb * dm], &l.down_b, dm);
+             // The layer's output is its normalised value: the next layer applies no
+             // pre-norm, so `st.x` and the activation rows are its input directly.
++            let t_ln2 = phases::on().then(Instant::now);
+             layer_norm_rows_fill(
+                 pool,
+                 stats,
+@@ -937,12 +1005,16 @@ impl Architecture for Bert {
+                 &mut st.x,
+                 &mut st.acts,
+             );
++            if let Some(t) = t_ln2 {
++                phases::add(2, t.elapsed().as_nanos() as u64);
++            }
+         }
+ 
+         // ---- pooling, text by text (the vector this text's slot reads) ----
+         if st.pool_sum.len() < dm {
+             st.pool_sum.resize(dm, 0.0);
+         }
++        let t_pool = phases::on().then(Instant::now);
+         for (i, (t, s)) in texts.iter().zip(&spans).enumerate() {
+             let row0 = s.row0;
+             peregrine_core::embed::pool_rows_into(
+@@ -954,6 +1026,9 @@ impl Architecture for Bert {
+             );
+             st.hidden[row0 * dm..row0 * dm + dm].copy_from_slice(&st.xb2[..dm]);
+         }
++        if let Some(t) = t_pool {
++            phases::add(4, t.elapsed().as_nanos() as u64);
++        }
+         st.positions = pos;
+         st.spans = spans;
+         stats.ns_total += t_fwd.elapsed().as_nanos() as u64;

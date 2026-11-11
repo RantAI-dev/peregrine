@@ -13,6 +13,8 @@
     clippy::chunks_exact_to_as_chunks
 )]
 
+#[cfg(feature = "arch-bert")]
+pub mod bert;
 #[cfg(any(
     feature = "arch-llama",
     feature = "arch-qwen",
@@ -50,6 +52,8 @@ pub mod qwen35;
 #[cfg(feature = "arch-qwen3moe")]
 pub mod qwen3moe;
 
+#[cfg(feature = "arch-bert")]
+pub use bert::BertFamily;
 #[cfg(any(
     feature = "arch-llama",
     feature = "arch-qwen",
@@ -108,6 +112,8 @@ pub const ARCHS: &[&str] = &[
     "gemma3",
     #[cfg(feature = "arch-gemma-embedding")]
     "gemma-embedding",
+    #[cfg(feature = "arch-bert")]
+    "bert",
     #[cfg(feature = "arch-qwen3moe")]
     "qwen3moe",
     #[cfg(feature = "arch-gpt-oss")]
@@ -130,6 +136,8 @@ pub static FAMILIES: &[&dyn Family] = &[
     &Gemma3Family,
     #[cfg(feature = "arch-gemma-embedding")]
     &GemmaEmbeddingFamily,
+    #[cfg(feature = "arch-bert")]
+    &BertFamily,
     #[cfg(feature = "arch-qwen3moe")]
     &Qwen3MoeFamily,
     #[cfg(feature = "arch-gpt-oss")]
