@@ -281,6 +281,41 @@ fn a_question_is_identical_alone_and_beyond_the_slot_count() {
     }
 }
 
+/// S4.9j: the questions of one request share their state, so the engine forwards it once and forks
+/// its cache. The answers must be the ones each question gets in a request of its own.
+#[test]
+fn a_forked_request_answers_like_one_question_per_request() {
+    let dir = tmpdir("fork");
+    let model = decision_model(&dir);
+    // Four slots and three questions: every question is admitted at once and forked from one
+    // evaluation of the state. The state is long enough to be worth a prefix (`prefix::MIN_PREFIX`).
+    let (_guard, port) = serve(&model, 4);
+    let state = "a plain state with a few words about a long walk through a quiet town on a summer morning with several stops along the way, a market, a bridge and a river";
+    let question = |i: usize| {
+        format!(
+            r#""q{i}":{{"type":"choice","instructions":"pick a word","criteria":{{"one{i}":null,"two{i}":null,"three{i}":null}}}}"#
+        )
+    };
+    let questions: Vec<String> = (0..3).map(question).collect();
+    let body = format!(
+        r#"{{"state":"{state}","questions":{{{}}}}}"#,
+        questions.join(",")
+    );
+    let (status, all) = post(port, &body);
+    assert_eq!(status, 200, "{all:?}");
+    assert_eq!(keys(all.get("answers").unwrap()), ["q0", "q1", "q2"]);
+    for i in 0..3 {
+        let alone_body = format!(r#"{{"state":"{state}","questions":{{{}}}}}"#, question(i));
+        let (status, alone) = post(port, &alone_body);
+        assert_eq!(status, 200, "{alone:?}");
+        assert_eq!(
+            answer(&all, &format!("q{i}")),
+            answer(&alone, &format!("q{i}")),
+            "question {i} changed when it was forked from the group's state"
+        );
+    }
+}
+
 #[test]
 fn every_validation_message_is_llama_cpps() {
     let dir = tmpdir("errors");
