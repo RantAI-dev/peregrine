@@ -84,7 +84,7 @@ with no decode.
 | S4.6 | `bert` family and the classifier head: MiniLM, bge, e5, bge-m3, bge-reranker; `/v1/classify` | 1.5 |
 | S4.7 | `modern-bert` and labelled classifier heads (guards, routers) | 1.0 |
 | S4.8 | `nomic-bert`, `jina-bert-v2/v3` | 1.0 |
-| S4.9 | Speed: F32/F16 GEMM blocking, `n × n` attention tiles, small-model thread choice, prompt-sized caches for pooled and decision slots, duplicate cache; targets met on x86, then NEON | 2.0 |
+| S4.9 | State of the art for embeddings and decision models against every engine (OpenVINO, ONNX Runtime, llama.cpp): the plan and its steps S4.9a-l are in [`docs/design/s4.9-sota.md`](design/s4.9-sota.md): token-budget passes with no padding, the batch-invariant float GEMM, the encoder attention strip, state forking for decision models, threading for small work, and the proof run on three machines | 6.0 |
 | S4.10 | Several models in one server | 1.0 |
 | S4.11 | System One, part 2: Kev (pointer head) and vLLM D3 (non-causal Qwen 3.5) | 1.0 |
 | S4.12 | System One, part 3: Laya and Julia-1 on `modern-bert` | 0.5 |
