@@ -1180,7 +1180,7 @@ fn erfc_tail(a: f64) -> f64 {
 /// `x` is `f32`; every intermediate is `f64` and the result is rounded to `f32`
 /// once, at the end. Range splitting, all on `a = |x|`:
 ///
-/// * `a ≤ 1`: 10 terms of the Maclaurin series ([`erf_series`]);
+/// * `a ≤ 1`: 10 terms of the Maclaurin series (`erf_series`);
 /// * `1 < a ≤ 2`: 22 terms of the same series;
 /// * `2 < a ≤ 3`: 36 terms;
 /// * `3 < a < 4.6`: `1 − erfc_tail(a)`, the asymptotic `erfc`;
@@ -2661,8 +2661,7 @@ mod tests {
             n += 1.0;
             assert!(n < 10_000.0);
         }
-        let v = 2.0 / std::f64::consts::PI.sqrt() * (-x * x).exp() * sum;
-        v
+        2.0 / std::f64::consts::PI.sqrt() * (-x * x).exp() * sum
     }
 
     fn ulp_distance(a: f32, b: f32) -> u32 {

@@ -1757,12 +1757,13 @@ fn read_fixture_vectors(path: &std::path::Path, dim: usize) -> Vec<Vec<f32>> {
         path.display()
     );
     bytes
-        .chunks_exact(4 * dim)
-        .map(|c| {
-            c.chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-                .collect()
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect::<Vec<f32>>()
+        .chunks(dim)
+        .map(|v| v.to_vec())
         .collect()
 }
 

@@ -464,8 +464,13 @@ fn add_bias(out: &mut [f32], dim: usize, nb: usize, bias: &[f32]) {
 
 /// LayerNorm every row of the batch into `out` (f32 only, no quantisation); the
 /// per-row arithmetic is `vmath::layer_norm_row`'s, and shared with the reference.
-#[inline]
+///
+/// Rows are independent, so a batch is split across the pool; a row's bits are the
+/// per-row result's whatever the split.
+#[allow(clippy::too_many_arguments)]
 fn layer_norm_rows(
+    pool: &Pool,
+    stats: &mut StepStats,
     x: &[f32],
     w: &[f32],
     b: &[f32],
@@ -474,7 +479,47 @@ fn layer_norm_rows(
     nb: usize,
     out: &mut [f32],
 ) {
-    peregrine_core::vmath::layer_norm_rows(x, w, b, eps, dim, nb, out);
+    let parallel = nb >= peregrine_core::blocks::ROW_PARALLEL && pool.width() > 1;
+    peregrine_core::blocks::par::for_row_chunks(
+        pool,
+        parallel,
+        out,
+        dim,
+        nb,
+        peregrine_core::blocks::par::Sched::Static,
+        |_wk, rows, chunk| {
+            for (i, r) in rows.enumerate() {
+                peregrine_core::vmath::layer_norm_row(
+                    &x[r * dim..(r + 1) * dim],
+                    w,
+                    b,
+                    eps,
+                    &mut chunk[i * dim..(i + 1) * dim],
+                );
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
+}
+
+/// [`peregrine_core::vmath::gelu_erf_rows`] over the batch's `nb` feed-forward rows,
+/// split across the pool. Element-wise, so every value is the scalar definition's.
+fn gelu_rows(pool: &Pool, stats: &mut StepStats, hb: &mut [f32], dim: usize, nb: usize) {
+    let parallel = nb >= peregrine_core::blocks::ROW_PARALLEL && pool.width() > 1;
+    peregrine_core::blocks::par::for_row_chunks(
+        pool,
+        parallel,
+        hb,
+        dim,
+        nb,
+        peregrine_core::blocks::par::Sched::Static,
+        |_wk, _rows, chunk| peregrine_core::vmath::gelu_erf_rows(chunk),
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
 }
 
 impl Architecture for Bert {
@@ -563,11 +608,11 @@ impl Architecture for Bert {
     /// 2. `token_embd_norm`: LayerNorm with weight and bias;
     /// 3. per layer, post-norm:
     ///    a. q/k/v (+ biases), with **no** pre-norm: the layer's input is already
-    ///       the previous layer's normalised output;
+    ///    the previous layer's normalised output;
     ///    b. attention over the whole text, `1/√head_dim` scale, no cache;
     ///    c. `attn_output` (+ bias); `x = x + that`; `attn_output_norm`;
     ///    d. `ffn_up` (+ bias); the exact GELU; `ffn_down` (+ bias);
-    ///       `x = x + that`; `layer_output_norm` → the next layer's input;
+    ///    `x = x + that`; `layer_output_norm` → the next layer's input;
     /// 4. pooling (the caller's type) of the last layer's rows, then the engine's
     ///    truncation and L2 normalisation.
     ///
@@ -665,6 +710,8 @@ impl Architecture for Bert {
         {
             let mut xin = std::mem::take(&mut st.x);
             layer_norm_rows(
+                pool,
+                stats,
                 &xin,
                 &self.tok_norm_w,
                 &self.tok_norm_b,
@@ -761,6 +808,8 @@ impl Architecture for Bert {
                 st.xb2[i] += st.x[i];
             }
             layer_norm_rows(
+                pool,
+                stats,
                 &st.xb2,
                 &l.attn_norm_w,
                 &l.attn_norm_b,
@@ -796,7 +845,7 @@ impl Architecture for Bert {
                 );
             }
             add_bias(&mut st.hb, ff, nb, &l.up_b);
-            peregrine_core::vmath::gelu_erf_rows(&mut st.hb[..nb * ff]);
+            gelu_rows(pool, stats, &mut st.hb[..nb * ff], ff, nb);
             // The GELU output is the down projection's input: quantise it once here
             // rather than filling the same rows again inside the matmul (S4.9a).
             for r in 0..nb {
@@ -829,6 +878,8 @@ impl Architecture for Bert {
             // The layer's output is its normalised value: the next layer applies no
             // pre-norm, so `st.x` and the activation rows are its input directly.
             layer_norm_rows(
+                pool,
+                stats,
                 &st.xb2,
                 &l.out_norm_w,
                 &l.out_norm_b,

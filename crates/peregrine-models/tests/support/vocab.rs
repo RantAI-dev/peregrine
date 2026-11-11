@@ -358,7 +358,7 @@ pub fn add_unigram_tokenizer_metadata(w: &mut GgufWriter) {
     for (i, c) in "abcdefghijklmnopqrstuvwxyz"
         .chars()
         .chain("0123456789".chars())
-        .chain([',', '.', '!', '?', '-', '\''].into_iter())
+        .chain([',', '.', '!', '?', '-', '\''])
         .enumerate()
     {
         add(
