@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Tool calling, first part: the tool module and the `hermes` format for Qwen 2.5 (S6.2)**:
+  `peregrine_core::tools` holds what tool calling needs outside the forward pass. The renderer
+  writes a conversation with tools (tool definitions, earlier calls, tool results) into the prompt
+  the way Qwen 2.5's own chat template does, and is checked byte for byte against llama.cpp
+  v0.9.0's `POST /apply-template` on 34 conversations (`scripts/tool-fixtures.py`,
+  `tests/fixtures/tools-qwen25.jsonl`): 32 give identical prompts, and the two llama.cpp refuses
+  (call arguments that are not JSON) are refused here too. Tool definitions are normalised as
+  llama.cpp normalises them before the template sees them. The parser splits a model's output
+  into text and calls as it arrives, never passes on half a tag, and gives a call that does not
+  parse back as text. A template is recognised by exact comparison with the copy in the crate; a
+  variant is refused, not guessed at. The chat endpoint does not use this yet (S6.3).
 - **An exact result cache for embeddings, and duplicate texts computed once (S4.9k)**: `POST
   /v1/embeddings` keeps finished vectors keyed by the token ids, the pooling and the requested
   dimensions, so a hit returns the bits a computation would (the value is already truncated and
