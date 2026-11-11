@@ -89,6 +89,13 @@ impl KqEntry {
 /// The order is the file's own: the matrices are laid out by their offset in the
 /// data section, so a file always produces the same store.
 pub fn layout(g: &Gguf) -> Vec<KqEntry> {
+    layout_with(g, false)
+}
+
+/// [`layout`], leaving out the Q8_0 matrices [`crate::fpack::convertible`] converts
+/// into f32 panels when `q8_as_f32` is set (S4.9m): their bytes are never read as
+/// int8 tiles, so a second store of them would be dead weight.
+pub fn layout_with(g: &Gguf, q8_as_f32: bool) -> Vec<KqEntry> {
     // A file with no `output.weight` uses its token embedding as the output head.
     // The embedding is normally left out — it is gathered, not multiplied — but a
     // tied Q8_0 head is a matrix the repacked kernel should read, so it is added.
@@ -99,7 +106,8 @@ pub fn layout(g: &Gguf) -> Vec<KqEntry> {
         .tensors
         .iter()
         .filter(|(name, t)| {
-            eligible(t) || (tied_q8_head && name.as_str() == EMBEDDING && t.kind == Format::Q8_0)
+            (eligible(t) || (tied_q8_head && name.as_str() == EMBEDDING && t.kind == Format::Q8_0))
+                && !(q8_as_f32 && crate::fpack::convertible(t))
         })
         .collect();
     mats.sort_by_key(|(name, t)| (t.offset, name.as_str()));
@@ -138,7 +146,12 @@ fn eligible(t: &TensorInfo) -> bool {
 /// The families read the file after this, so every matrix they hold carries the
 /// offset of its repacked bytes.
 pub fn repack(g: &mut Gguf) -> KqStore {
-    let entries = layout(g);
+    repack_with(g, false)
+}
+
+/// [`repack`], leaving out the Q8_0 matrices converted into f32 panels (S4.9m).
+pub fn repack_with(g: &mut Gguf, q8_as_f32: bool) -> KqStore {
+    let entries = layout_with(g, q8_as_f32);
     let total: usize = entries.iter().map(|e| e.len).sum();
     let mut store = KqStore::new(total);
     {

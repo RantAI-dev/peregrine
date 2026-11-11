@@ -81,7 +81,7 @@ with no decode.
 | S4.3 | System One, part 1: `/v1/systemone`, the answer math, the label-logit types on Qwen 3.5 (OpenJev, Lev, Nimble, pplx-decider, H2O Lightning) | 1.5 |
 | S4.4 | Bidirectional forward; `gemma-embedding` (EmbeddingGemma) — `Architecture::forward_texts` over whole texts with no KV cache, symmetric sliding-window attention, mean/cls pooling and the `dense_2`/`dense_3` head (#162); EmbeddingGemma 300M checked against llama.cpp v0.9.0 — done | 1.0 |
 | S4.5 | WordPiece and SentencePiece-unigram tokenizers — done (#157) | 0.5 |
-| S4.6 | `bert` family and the classifier head: MiniLM, bge, e5, bge-m3, bge-reranker; `/v1/classify` | 1.5 |
+| S4.6 | `bert` family and the classifier head: MiniLM, bge, e5, bge-m3, bge-reranker; `/v1/classify` — part a, the family (post-norm blocks, absolute positions, token types, biases everywhere, LayerNorm, the exact GELU, cls/mean pooling; WordPiece and the XLM-R unigram vocabulary) with the defined `erf`/`gelu_erf`/`layer_norm` kernels: MiniLM-L6-v2, bge-small-en-v1.5 and bge-m3 checked against llama.cpp v0.9.0 and the fp32 PyTorch reference — done | 1.5 |
 | S4.7 | `modern-bert` and labelled classifier heads (guards, routers) | 1.0 |
 | S4.8 | `nomic-bert`, `jina-bert-v2/v3` | 1.0 |
 | S4.9 | State of the art for embeddings and decision models against every engine (OpenVINO, ONNX Runtime, llama.cpp): the plan and its steps S4.9a-l are in [`docs/design/s4.9-sota.md`](design/s4.9-sota.md): token-budget passes with no padding, the batch-invariant float GEMM, the encoder attention strip, state forking for decision models, threading for small work, and the proof run on three machines | 6.0 |
@@ -95,6 +95,34 @@ Each model is checked against llama.cpp on the same file before it is listed; a 
 bit-identical alone and in any batch.
 
 Ideas that are not scheduled yet are kept in the [backlog](backlog.md).
+
+## Stage 5: prompt speed on AVX-512
+
+The ik_llama.cpp fork processes prompts about twice as fast as Peregrine on the AVX-512 desktop
+([benchmark.md](benchmark.md)). The study and the list of what to build are in
+[`docs/design/s5-prefill-avx512.md`](design/s5-prefill-avx512.md).
+
+| ID | Item | pw |
+|---|---|---|
+| S5.1 | The k-quant prefill kernels on AVX-512: the Q4_K and Q5_0 epilogue per group of rows, a 512-bit Q6_K tile, a write-out that makes a wide pass pay | 2.0 |
+| S5.2 | A 512-bit attention score kernel; thread scaling past 12 threads | 1.5 |
+| S5.3 | The same questions on AVX2 and NEON; ik_llama.cpp measured on bluefin and ARM | 1.0 |
+
+## Stage 6: tool calling
+
+OpenAI's tool-calling shapes on `/v1/chat/completions`, for the models trained to call tools. The
+prompt is the one llama.cpp builds from the model's template, byte for byte. Design:
+[`docs/design/s6-tool-calling.md`](design/s6-tool-calling.md).
+
+| ID | Item | pw |
+|---|---|---|
+| S6.1 | Design | 0.2 |
+| S6.2 | The tool module: the `hermes` format (Qwen 2.5) and the `qwen-xml` format (Qwen 3.5 / Bonsai 2), renderers and parsers, fixtures from llama.cpp — done for both in the module; Qwen 3 is next | 1.0 |
+| S6.3 | The endpoint: `tools`, `tool_choice`, `tool_calls` in requests and responses, streaming — done for the `hermes` format (Qwen 2.5): 15 of 16 replies identical to llama.cpp's on the same file | 1.0 |
+| S6.4 | The `llama3` format (Llama 3.1 / 3.2) | 0.5 |
+| S6.5 | The `harmony` format (gpt-oss) | 0.5 |
+| S6.6 | Constrained sampling for calls: a JSON-schema matcher and a token mask; `tool_choice: "required"` and named choices | 2.0 |
+| S6.7 | The `generic` format for templates without a tool section | 0.5 |
 
 ## Open decisions
 

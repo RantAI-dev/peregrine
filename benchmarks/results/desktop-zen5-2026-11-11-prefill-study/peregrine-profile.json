@@ -1,0 +1,217 @@
+{
+ "rows": [
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "krepack_default",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full"
+   },
+   "prefill_tok_s": 468.2810589888949,
+   "prefill_s": 1.091225003,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 34100.8)\n  matmul qkv          2467.3\n  matmul wo           2537.3\n  matmul gate/up     12132.1\n  matmul down         7759.7\n  output head            0.0\n  attention           3418.5\n  norms                 84.9\n  quantise             771.6\n  rope+bias            431.3\n  kv write             439.8\n  residual             902.3\n  swiglu                 0.0\n  barrier wait        7805.7\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0         14669.5\n    fmt Q8_0            94.5\n    fmt Q6_K          3290.1\n    fmt Q4_K          3002.9\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 2.133,
+   "bytes_acts": 89202253056
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "krepack_0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full",
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 314.76220862080453,
+   "prefill_s": 1.6234477519999997,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 50732.7)\n  matmul qkv          3901.0\n  matmul wo           3265.7\n  matmul gate/up     27793.0\n  matmul down         7183.7\n  output head            0.0\n  attention           3257.1\n  norms                 70.6\n  quantise             732.6\n  rope+bias            422.5\n  kv write             457.0\n  residual             667.6\n  swiglu                 0.0\n  barrier wait        8088.2\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0         31700.2\n    fmt Q8_0           152.8\n    fmt Q6_K          3148.6\n    fmt Q4_K          3183.5\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 2.289,
+   "bytes_acts": 278098071552
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "krepack_default",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full"
+   },
+   "prefill_tok_s": 475.84911043729,
+   "prefill_s": 1.073869823,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 33558.4)\n  matmul qkv          2380.1\n  matmul wo           2393.5\n  matmul gate/up     11939.7\n  matmul down         7570.6\n  output head            0.0\n  attention           3475.8\n  norms                 90.2\n  quantise             724.5\n  rope+bias            461.0\n  kv write             422.6\n  residual             919.3\n  swiglu                 0.0\n  barrier wait        7893.2\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0         14356.7\n    fmt Q8_0            92.8\n    fmt Q6_K          3234.9\n    fmt Q4_K          2924.8\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 1.972,
+   "bytes_acts": 89202253056
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "krepack_0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full",
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 316.35341050669336,
+   "prefill_s": 1.6152820959999998,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 50477.6)\n  matmul qkv          3910.2\n  matmul wo           3276.4\n  matmul gate/up     27722.2\n  matmul down         7217.2\n  output head            0.0\n  attention           3236.2\n  norms                 69.8\n  quantise             629.6\n  rope+bias            397.9\n  kv write             447.7\n  residual             635.1\n  swiglu                 0.0\n  barrier wait        8190.6\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0         31780.0\n    fmt Q8_0           154.3\n    fmt Q6_K          3143.6\n    fmt Q4_K          3217.5\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 2.262,
+   "bytes_acts": 278098071552
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "krepack_default",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full"
+   },
+   "prefill_tok_s": 505.26646004445723,
+   "prefill_s": 1.0113475570000001,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 31604.6)\n  matmul qkv          2303.8\n  matmul wo           2397.3\n  matmul gate/up     11508.2\n  matmul down         6980.8\n  output head            0.0\n  attention           3257.5\n  norms                 84.6\n  quantise             636.4\n  rope+bias            392.8\n  kv write             456.0\n  residual             658.7\n  swiglu                 0.0\n  barrier wait        7205.1\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0         13728.9\n    fmt Q8_0            88.4\n    fmt Q6_K          3003.3\n    fmt Q4_K          2719.2\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 1.686,
+   "bytes_acts": 89202253056
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "krepack_0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full",
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 307.2537042551681,
+   "prefill_s": 1.663120714,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 51972.5)\n  matmul qkv          3975.7\n  matmul wo           3291.6\n  matmul gate/up     27532.7\n  matmul down         8351.9\n  output head            0.0\n  attention           3500.8\n  norms                 70.7\n  quantise             709.3\n  rope+bias            388.6\n  kv write             453.5\n  residual             749.5\n  swiglu                 0.0\n  barrier wait        8140.4\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0         31630.8\n    fmt Q8_0           157.0\n    fmt Q6_K          3512.8\n    fmt Q4_K          3854.7\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 2.334,
+   "bytes_acts": 278098071552
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "krepack_default",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full"
+   },
+   "prefill_tok_s": 290.7673893506905,
+   "prefill_s": 1.7574185370000004,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 54919.3)\n  matmul qkv          4720.0\n  matmul wo           4002.7\n  matmul gate/up     20689.1\n  matmul down        15204.9\n  output head            0.0\n  attention           4172.3\n  norms                190.2\n  quantise             958.1\n  rope+bias            440.6\n  kv write             807.3\n  residual             653.9\n  swiglu                 0.0\n  barrier wait        7860.6\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0             0.0\n    fmt Q8_0             0.0\n    fmt Q6_K          8532.5\n    fmt Q4_K         30963.6\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 2.541,
+   "bytes_acts": 293153423360
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "krepack_0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full",
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 191.90166443771815,
+   "prefill_s": 2.6628221360000004,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 83213.2)\n  matmul qkv          8132.7\n  matmul wo           5839.7\n  matmul gate/up     40472.5\n  matmul down        18024.2\n  output head            0.0\n  attention           4350.1\n  norms                 93.2\n  quantise             997.2\n  rope+bias            544.4\n  kv write             859.3\n  residual             679.6\n  swiglu                 0.0\n  barrier wait        9570.8\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0             0.0\n    fmt Q8_0             0.0\n    fmt Q6_K          8355.9\n    fmt Q4_K         59222.6\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 3.569,
+   "bytes_acts": 1157644156928
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "krepack_default",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full"
+   },
+   "prefill_tok_s": 282.7113568222579,
+   "prefill_s": 1.8074972500000002,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 56484.3)\n  matmul qkv          4907.4\n  matmul wo           4102.1\n  matmul gate/up     20900.7\n  matmul down        15383.9\n  output head            0.0\n  attention           4395.8\n  norms                185.1\n  quantise            1126.4\n  rope+bias            501.0\n  kv write             861.3\n  residual             820.9\n  swiglu                 0.0\n  barrier wait        8994.9\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0             0.0\n    fmt Q8_0             0.0\n    fmt Q6_K          8566.5\n    fmt Q4_K         31264.8\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 2.618,
+   "bytes_acts": 293153423360
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "krepack_0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full",
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 196.0256556337278,
+   "prefill_s": 2.6068016370000002,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 81462.6)\n  matmul qkv          7950.4\n  matmul wo           5701.1\n  matmul gate/up     39824.6\n  matmul down        17670.6\n  output head            0.0\n  attention           4178.4\n  norms                 99.3\n  quantise             974.6\n  rope+bias            507.7\n  kv write             782.0\n  residual             565.6\n  swiglu                 0.0\n  barrier wait        9086.5\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0             0.0\n    fmt Q8_0             0.0\n    fmt Q6_K          8141.2\n    fmt Q4_K         58150.8\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 3.351,
+   "bytes_acts": 1157644156928
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "krepack_default",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full"
+   },
+   "prefill_tok_s": 286.5556676296642,
+   "prefill_s": 1.783248624,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 55726.5)\n  matmul qkv          4853.0\n  matmul wo           4062.8\n  matmul gate/up     21193.7\n  matmul down        15246.6\n  output head            0.0\n  attention           4197.3\n  norms                198.8\n  quantise             945.1\n  rope+bias            399.0\n  kv write             848.4\n  residual             651.1\n  swiglu                 0.0\n  barrier wait        7552.9\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0             0.0\n    fmt Q8_0             0.0\n    fmt Q6_K          8599.1\n    fmt Q4_K         31666.5\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 1.108,
+   "bytes_acts": 293153423360
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "krepack_0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PROF2": "full",
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 196.84352145143,
+   "prefill_s": 2.595970627999999,
+   "prof": "peregrine profile: 32 prefill steps, 511 tokens, mean \u00b5s/step (wall 81124.1)\n  matmul qkv          8134.5\n  matmul wo           5719.2\n  matmul gate/up     39672.0\n  matmul down        17597.0\n  output head            0.0\n  attention           4167.3\n  norms                102.5\n  quantise             962.8\n  rope+bias            435.2\n  kv write             795.0\n  residual             530.9\n  swiglu                 0.0\n  barrier wait        8603.9\n  other                  0.0\n    attn scores          0.0\n    attn softmax         0.0\n    attn mix             0.0\n    attn kv decode       0.0\n    fmt Q5_0             0.0\n    fmt Q8_0             0.0\n    fmt Q6_K          8266.1\n    fmt Q4_K         58097.0\n    fmt Q5_K             0.0\n    fmt other            0.0\n",
+   "wall_s": 3.369,
+   "bytes_acts": 1157644156928
+  }
+ ],
+ "extra": {},
+ "summary": {
+  "qwen05": {
+   "krepack_default": {
+    "median": 475.8,
+    "n": 3,
+    "spread": 18.5
+   },
+   "krepack_0": {
+    "median": 314.8,
+    "n": 3,
+    "spread": 4.5
+   }
+  },
+  "llama1b": {
+   "krepack_default": {
+    "median": 286.6,
+    "n": 3,
+    "spread": 4.0
+   },
+   "krepack_0": {
+    "median": 196.0,
+    "n": 3,
+    "spread": 2.5
+   }
+  }
+ }
+}

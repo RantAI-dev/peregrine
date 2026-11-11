@@ -5,11 +5,13 @@ use std::time::Instant;
 
 use peregrine_core::arch::{ActLayout, Architecture, Family, Loaded};
 use peregrine_core::blocks::linear::LinJob;
-use peregrine_core::blocks::par::{Disjoint, OutPtr};
+use peregrine_core::blocks::par::Disjoint;
 use peregrine_core::gguf::{Format, Gguf, TensorInfo};
 use peregrine_core::model::{Caches, Config, Linear, State, StepStats, TileStore, Weights};
 use peregrine_core::pool::Pool;
 use peregrine_core::tokenizer::Tokenizer;
+
+use crate::encoder::{linear_rows, linear_rows_shared, RowsOut};
 
 pub(crate) struct Gemma3Layer {
     pub(crate) attn_norm: TensorInfo,
@@ -37,131 +39,6 @@ pub fn attention_scale(n_layer: usize, d_model: usize, n_head: usize, head_dim: 
     } else {
         1.0 / (head_dim as f32).sqrt()
     }
-}
-
-/// One projection over many rows, split into matmul-sized chunks.
-///
-/// The shared GEMM accepts at most `MAX_BATCH` rows per call (`blocks::linear::MAX_BATCH`);
-/// an encoder forwards a whole text (up to the model's context) at once, so a layer's
-/// projection runs in as many calls as it takes, one weight pass each. Rows of the batch
-/// are contiguous, so the chunk is a plain row range and a row's bits do not depend on
-/// where a chunk boundary fell.
-#[allow(clippy::too_many_arguments)]
-fn linear_rows(
-    w: &Weights,
-    pool: &Pool,
-    stats: &mut StepStats,
-    lin: &Linear,
-    acts: &mut [peregrine_core::quant::QuantAct],
-    lb_x: &mut [f32],
-    lb_t: &mut [f32],
-    input: &[f32],
-    d_in: usize,
-    nb: usize,
-    out: &mut [f32],
-    out_dim: usize,
-    kq: &mut peregrine_kernels::kq::KqActs,
-) {
-    let step = peregrine_core::blocks::linear::MAX_BATCH;
-    let mut r0 = 0;
-    while r0 < nb {
-        let r1 = (r0 + step).min(nb);
-        let take = r1 - r0;
-        for (i, a) in acts[r0..r1].iter_mut().enumerate() {
-            a.fill(&input[(r0 + i) * d_in..(r0 + i + 1) * d_in]);
-        }
-        let lbx = Disjoint::new(lb_x);
-        let lbt = Disjoint::new(lb_t);
-        let jobs = [LinJob {
-            lin,
-            out: Disjoint::new(&mut out[r0 * out_dim..r1 * out_dim]),
-        }];
-        peregrine_core::blocks::linear::linear_group(
-            w,
-            w.lb(),
-            &jobs,
-            &acts[r0..r1],
-            &input[r0 * d_in..r1 * d_in],
-            d_in,
-            take,
-            lbx,
-            lbt,
-            pool,
-            stats,
-            kq,
-        );
-        r0 = r1;
-    }
-}
-
-/// One or more projections that read the **same** activation rows, in matmul-sized
-/// chunks, without quantising anything: the rows are already in `acts`, filled once by
-/// the norm or activation that produced them (S4.9a).
-///
-/// The causal families group q/k/v and gate/up this way: several matrices read the same
-/// normed row, so one fill and one fork-join serve them all. An encoder had the float
-/// rows in hand and re-quantised them per projection — six of the seven fills of a layer
-/// were the same bytes again, serially, while the matmuls ran in parallel.
-#[allow(clippy::too_many_arguments)]
-fn linear_rows_shared(
-    w: &Weights,
-    pool: &Pool,
-    stats: &mut StepStats,
-    jobs: &mut [RowsOut<'_>],
-    acts: &[peregrine_core::quant::QuantAct],
-    lb_x: &mut [f32],
-    lb_t: &mut [f32],
-    input: &[f32],
-    d_in: usize,
-    nb: usize,
-    kq: &mut peregrine_kernels::kq::KqActs,
-) {
-    debug_assert!(!jobs.is_empty() && jobs.len() <= 4);
-    let step = peregrine_core::blocks::linear::MAX_BATCH;
-    let empty: &mut [f32] = &mut [];
-    let mut lj = [LinJob {
-        lin: jobs[0].lin,
-        out: Disjoint::new(empty),
-    }; 4];
-    let mut r0 = 0;
-    let njobs = jobs.len();
-    while r0 < nb {
-        let r1 = (r0 + step).min(nb);
-        let take = r1 - r0;
-        for i in 0..njobs {
-            lj[i].lin = jobs[i].lin;
-            let width = jobs[i].out_dim;
-            // SAFETY: each job's output is a different buffer (q, k, v; gate, up; one
-            // projection), and this chunk of it belongs to this call alone.
-            lj[i].out = Disjoint::new(unsafe { jobs[i].out.rows(r0..r1, width) });
-        }
-        let lbx = Disjoint::new(lb_x);
-        let lbt = Disjoint::new(lb_t);
-        peregrine_core::blocks::linear::linear_group(
-            w,
-            w.lb(),
-            &lj[..njobs],
-            &acts[r0..r1],
-            &input[r0 * d_in..r1 * d_in],
-            d_in,
-            take,
-            lbx,
-            lbt,
-            pool,
-            stats,
-            kq,
-        );
-        r0 = r1;
-    }
-}
-
-/// One projection of [`linear_rows_shared`]: the matrix, its output buffer, and the
-/// width of one output row. Every job's buffer must be a different one — the group
-/// writes them in one fork-join.
-struct RowsOut<'a> {
-    lin: &'a Linear,
-    out: OutPtr<'a>,
-    out_dim: usize,
 }
 
 pub struct Gemma3 {
@@ -670,18 +547,25 @@ impl Architecture for Gemma3 {
 
     fn act_layout(&self) -> ActLayout {
         let mut keep_f32 = false;
+        let mut quantize = false;
         self.linear_groups(&mut |lins| {
             for lin in lins {
-                if let Some(ti) = lin.dense() {
-                    if matches!(ti.kind, Format::F32 | Format::F16 | Format::BF16) {
-                        keep_f32 = true;
+                match lin.dense() {
+                    Some(ti) => {
+                        if matches!(ti.kind, Format::F32 | Format::F16 | Format::BF16) {
+                            keep_f32 = true;
+                        } else {
+                            quantize = true;
+                        }
                     }
+                    None => quantize = true,
                 }
             }
         });
         ActLayout {
             keep_f32,
             act_width: self.dense_width,
+            quantize,
             ..ActLayout::default()
         }
     }

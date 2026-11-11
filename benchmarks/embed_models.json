@@ -9,6 +9,10 @@
    "dim": 384,
    "tokenizer_dir": "minilm/ref",
    "rows": [
+    {"engine": "peregrine", "precision": "f16", "path": "minilm/minilm-f16.gguf",
+     "notes": "GGUF from second-state/All-MiniLM-L6-v2-Embedding-GGUF; peregrine serve /v1/embeddings"},
+    {"engine": "peregrine", "precision": "q8_0", "path": "minilm/minilm-q8_0.gguf",
+     "notes": "GGUF Q8_0, same repo; peregrine serve /v1/embeddings"},
     {"engine": "llama_cpp", "precision": "f16", "path": "minilm/minilm-f16.gguf",
      "notes": "GGUF from second-state/All-MiniLM-L6-v2-Embedding-GGUF"},
     {"engine": "llama_cpp", "precision": "q8_0", "path": "minilm/minilm-q8_0.gguf",
@@ -22,7 +26,11 @@
      "fastembed_name": "sentence-transformers/all-MiniLM-L6-v2",
      "notes": "onnx/model_quint8_avx2.onnx from the sentence-transformers repo"},
     {"engine": "openvino", "precision": "fp32", "path": "prepared/minilm-st",
-     "notes": "sentence-transformers, OpenVINO backend (exported IR)"}
+     "notes": "sentence-transformers, OpenVINO backend (exported IR)"},
+    {"engine": "onnxruntime", "precision": "fp32", "path": "prepared/minilm-onnx-fp32",
+     "notes": "onnx/model.onnx fp32, plain ONNX Runtime, mean pooling over last_hidden_state"},
+    {"engine": "onnxruntime", "precision": "int8", "path": "prepared/minilm-onnx-int8",
+     "notes": "onnx/model_quint8_avx2.onnx, plain ONNX Runtime, mean pooling; a different quantisation from Q8_0"}
    ]
   },
   "bge-small": {
@@ -33,6 +41,10 @@
    "dim": 384,
    "tokenizer_dir": "bge-small/ref",
    "rows": [
+    {"engine": "peregrine", "precision": "f32", "path": "bge-small/bge-small-f32.gguf",
+     "notes": "GGUF F32 from CompendiumLabs/bge-small-en-v1.5-gguf; peregrine serve /v1/embeddings"},
+    {"engine": "peregrine", "precision": "q8_0", "path": "bge-small/bge-small-q8_0.gguf",
+     "notes": "GGUF Q8_0, same repo; peregrine serve /v1/embeddings"},
     {"engine": "llama_cpp", "precision": "f32", "path": "bge-small/bge-small-f32.gguf",
      "notes": "GGUF F32 from CompendiumLabs/bge-small-en-v1.5-gguf"},
     {"engine": "llama_cpp", "precision": "q8_0", "path": "bge-small/bge-small-q8_0.gguf",
@@ -46,7 +58,11 @@
      "fastembed_name": "BAAI/bge-small-en-v1.5",
      "notes": "Xenova/bge-small-en-v1.5 onnx/model_int8.onnx"},
     {"engine": "openvino", "precision": "fp32", "path": "prepared/bge-small-st",
-     "notes": "sentence-transformers, OpenVINO backend (exported IR)"}
+     "notes": "sentence-transformers, OpenVINO backend (exported IR)"},
+    {"engine": "onnxruntime", "precision": "fp32", "path": "prepared/bge-small-onnx-fp32",
+     "notes": "Xenova/bge-small-en-v1.5 onnx/model.onnx fp32, plain ONNX Runtime, cls pooling"},
+    {"engine": "onnxruntime", "precision": "int8", "path": "prepared/bge-small-onnx-int8",
+     "notes": "Xenova/bge-small-en-v1.5 onnx/model_int8.onnx, plain ONNX Runtime, cls pooling; a different quantisation from Q8_0"}
    ]
   },
   "bge-base": {
@@ -77,12 +93,15 @@
    "max_batch_tokens": 16384,
    "hf": "BAAI/bge-m3",
    "pooling": "cls",
-   "max_tokens": 1024,
+   "max_tokens": 2048,
    "dim": 1024,
    "tokenizer_dir": "bge-m3/ref",
    "rows": [
+    {"engine": "peregrine", "precision": "q8_0", "path": "bge-m3-Q8_0.gguf",
+     "notes": "GGUF Q8_0, gpustack/bge-m3-GGUF; peregrine serve /v1/embeddings"},
     {"engine": "llama_cpp", "precision": "q8_0", "path": "bge-m3-Q8_0.gguf",
-     "notes": "GGUF Q8_0; server context capped at 2048 tokens/slot because this model's KV is 2 GB at 32k"}
+     "batch": 2048, "ubatch": 2048, "server_ctx": 16448, "parallel": 8,
+     "notes": "GGUF Q8_0; -np 8 and one 2 048-token ubatch so a 2 000-token text fits, -c 16448 for eight 2 056-token slots"}
    ]
   },
   "qwen3-embed-0.6b": {
@@ -95,6 +114,8 @@
    "rows": [
     {"engine": "llama_cpp", "precision": "q8_0", "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
      "notes": "GGUF Q8_0 from Qwen/Qwen3-Embedding-0.6B-GGUF"},
+    {"engine": "llama_cpp", "precision": "f16", "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-f16.gguf",
+     "notes": "the same weights widened with llama-quantize F16, for the S4.9k standings"},
     {"engine": "peregrine", "precision": "q8_0",
      "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
      "notes": "the causal embedding path (S4.1); S4.9b pass budget"},
@@ -116,6 +137,22 @@
     {"engine": "peregrine", "precision": "q8_0",
      "path": "embeddinggemma/embeddinggemma-Q8_0.gguf",
      "notes": "the encoder path (S4.4): whole texts, no KV cache; S4.9b pass budget"}
+   ]
+  },
+  "nemotron-3.5-embed-1b": {
+   "max_batch_tokens": 32768,
+   "hf": "W4D/Nemotron-3.5-Embed-1B-GGUF",
+   "pooling": "mean",
+   "max_tokens": 2048,
+   "dim": 2048,
+   "tokenizer_dir": "nemotron/ref",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "q8_0",
+     "path": "nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
+     "notes": "GGUF Q8_0 from W4D/Nemotron-3.5-Embed-1B-GGUF"},
+    {"engine": "peregrine", "precision": "q8_0",
+     "path": "nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
+     "notes": "the mistral3 non-causal encoder path (S4.14b), mean pooling"}
    ]
   }
  }

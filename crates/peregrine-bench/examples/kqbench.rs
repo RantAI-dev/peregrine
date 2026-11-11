@@ -6,7 +6,9 @@
 //!
 //! One thread, a synthetic eight-row tile and synthetic activations, alternating
 //! the two kernels so a busy machine moves both. Reports ns per (tile, activation
-//! row, super-block) for the GEMV (1 row) and the GEMM (4 and 64 rows).
+//! row, super-block) for the GEMV (1 row) and the GEMM (4 and 64 rows), and then the
+//! row kernel against the tile kernel at 1, 16, 64 and 128 activation rows (S5's
+//! widths: a decode row, the prefill chunk, and the widths beyond it).
 
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kq::{
@@ -15,7 +17,7 @@ use peregrine_kernels::kq::{
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kqsimd::{
     q4k8_gemm, q4k8_gemm_zmm, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm, q5_08_gemm_zmm, q5k8_gemm,
-    q5k8_gemv, q6k8_gemm, q6k8_gemv,
+    q5k8_gemv, q6k8_gemm, q6k8_gemm_zmm, q6k8_gemv,
 };
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::quant::QuantAct;
@@ -146,7 +148,7 @@ fn main() {
     }
     let n = n_sb * 256;
     let t = tile(n_sb, 0x5EED_1234);
-    let batch = acts(64, n, 0xC0DE_5678);
+    let batch = acts(128, n, 0xC0DE_5678);
     let mut kq = KqActs::default();
     kq.fill(&batch);
     let mut out = vec![0.0f32; 64 * 8];
@@ -213,6 +215,89 @@ fn main() {
             2048.0 / ns
         );
     }
+    // The widths the prefill study asks for (S5): the row kernel against the tile kernel on
+    // the same eight rows, at 1, 16, 64 and 128 activation rows. The tile `t` above is the
+    // repacked store, so the row kernel needs the file's own bytes; they are rebuilt here.
+    {
+        let rb = n_sb * 144;
+        let mut rows = vec![0u8; 8 * rb];
+        for r in 0..8 {
+            for sb in 0..n_sb {
+                let at = r * rb + sb * 144;
+                let b = &mut rows[at..at + 144];
+                b.copy_from_slice(&prng(0xA5A5_1234 ^ (r * 97 + sb) as u64, 144));
+                b[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                b[2..4].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes());
+            }
+        }
+        let mut tile = vec![0u8; n_sb * Q4K8::SIZE];
+        for sb in 0..n_sb {
+            let mut blocks: [&[u8]; 8] = [&[]; 8];
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = &rows[r * rb + sb * 144..r * rb + sb * 144 + 144];
+            }
+            repack_q4k8(&blocks, &mut tile[sb * Q4K8::SIZE..(sb + 1) * Q4K8::SIZE]);
+        }
+        let mut o = vec![0.0f32; 8 * 128];
+        for &nb in &[1usize, 4, 16, 64, 128] {
+            let mut row = Vec::new();
+            let mut tl = Vec::new();
+            let mut tz = Vec::new();
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    for r in 0..8 {
+                        let rw = &rows[r * rb..(r + 1) * rb];
+                        unsafe {
+                            peregrine_kernels::simd::dot_batch(
+                                peregrine_kernels::format::Format::Q4_K,
+                                rw,
+                                &batch[..nb],
+                                &mut o[r * nb..(r + 1) * nb],
+                            )
+                        };
+                    }
+                }
+                row.push(t0.elapsed().as_secs_f64());
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    unsafe {
+                        if nb < 4 {
+                            q4k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut o)
+                        } else {
+                            q4k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                        }
+                    }
+                }
+                tl.push(t0.elapsed().as_secs_f64());
+                if zmm {
+                    let t0 = Instant::now();
+                    for _ in 0..reps {
+                        unsafe {
+                            if nb < 4 {
+                                q4k8_gemv_zmm(&tile, n_sb, &batch[..nb], nb, &mut o)
+                            } else {
+                                q4k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o)
+                            }
+                        }
+                    }
+                    tz.push(t0.elapsed().as_secs_f64());
+                }
+            }
+            let macs = 2048.0 * n_sb as f64 * nb as f64 * reps as f64;
+            let g = |v: &mut Vec<f64>| macs / best(v) / 1e9;
+            print!(
+                "q4k {nb:>3} acts: row {:6.1}  tile(avx2) {:6.1}",
+                g(&mut row),
+                g(&mut tl)
+            );
+            if zmm {
+                print!("  tile(zmm) {:6.1}", g(&mut tz));
+            }
+            println!("  GMAC/s/core");
+        }
+    }
+
     if zmm {
         for (name, v, rows) in [
             ("zmm gemm(4)", &mut z4, 4usize),
@@ -231,54 +316,34 @@ fn main() {
     let n_blk = n / 32;
     let t5 = tile5(n_blk, 0x5EED_5A5A);
     unsafe { q5_08_gemm(&t5, n_blk, &batch[..4], 4, &mut out) };
-    let mut q4 = Vec::new();
-    let mut q64 = Vec::new();
-    for _ in 0..5 {
-        let t0 = Instant::now();
-        for _ in 0..reps {
-            unsafe { q5_08_gemm(&t5, n_blk, &batch[..4], 4, &mut out) };
-        }
-        q4.push(t0.elapsed().as_secs_f64());
-        let t0 = Instant::now();
-        for _ in 0..reps {
-            unsafe { q5_08_gemm(&t5, n_blk, &batch[..64], 64, &mut out) };
-        }
-        q64.push(t0.elapsed().as_secs_f64());
-    }
-    for (name, v, rows) in [
-        ("q5 gemm(4)", &mut q4, 4usize),
-        ("q5 gemm(64)", &mut q64, 64),
-    ] {
-        let ns = per(best(v), rows) / 8.0; // per block: one block is 1/8 of a super-block
-        println!(
-            "{name}: {ns:.2} ns/(tile*act*blk)  {:.1} GMAC/s/core",
-            256.0 / ns
-        );
-    }
-    if zmm {
-        let mut q4z = Vec::new();
-        let mut q64z = Vec::new();
+    for &nb in &[1usize, 4, 16, 64, 128] {
+        let mut q = Vec::new();
+        let mut qz = Vec::new();
         for _ in 0..5 {
             let t0 = Instant::now();
             for _ in 0..reps {
-                unsafe { q5_08_gemm_zmm(&t5, n_blk, &batch[..4], 4, &mut out) };
+                unsafe { q5_08_gemm(&t5, n_blk, &batch[..nb], nb, &mut out) };
             }
-            q4z.push(t0.elapsed().as_secs_f64());
-            let t0 = Instant::now();
-            for _ in 0..reps {
-                unsafe { q5_08_gemm_zmm(&t5, n_blk, &batch[..64], 64, &mut out) };
+            q.push(t0.elapsed().as_secs_f64());
+            if zmm {
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    unsafe { q5_08_gemm_zmm(&t5, n_blk, &batch[..nb], nb, &mut out) };
+                }
+                qz.push(t0.elapsed().as_secs_f64());
             }
-            q64z.push(t0.elapsed().as_secs_f64());
         }
-        for (name, v, rows) in [
-            ("q5 zmm gemm(4)", &mut q4z, 4usize),
-            ("q5 zmm gemm(64)", &mut q64z, 64),
-        ] {
-            let ns = per(best(v), rows) / 8.0;
+        let ns = per(best(&mut q), nb) / 8.0; // per block: one block is 1/8 of a super-block
+        if zmm {
+            let zns = per(best(&mut qz), nb) / 8.0;
             println!(
-                "{name}: {ns:.2} ns/(tile*act*blk)  {:.1} GMAC/s/core",
-                256.0 / ns
+                "q5 {nb:>3} acts: avx2 {:.1} G  zmm {:.1} G MAC/s/core  ({:+.0}%)",
+                256.0 / ns,
+                256.0 / zns,
+                (ns / zns - 1.0) * 100.0
             );
+        } else {
+            println!("q5 {nb:>3} acts: avx2 {:.1} G MAC/s/core", 256.0 / ns);
         }
     }
 
@@ -337,9 +402,10 @@ fn main() {
                 repack_q5k8(&blocks, out)
             }
         }
-        for &nb in &[1usize, 4, 16, 64] {
+        for &nb in &[1usize, 4, 16, 64, 128] {
             let mut old = Vec::new();
             let mut new = Vec::new();
+            let mut wide = Vec::new();
             let mut o = vec![0.0f32; 8 * nb];
             for _ in 0..5 {
                 let t0 = Instant::now();
@@ -374,14 +440,29 @@ fn main() {
                     }
                 }
                 new.push(t0.elapsed().as_secs_f64());
+                if zmm && fmt == peregrine_kernels::format::Format::Q6_K {
+                    let t0 = Instant::now();
+                    for _ in 0..reps {
+                        unsafe { q6k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o) };
+                    }
+                    wide.push(t0.elapsed().as_secs_f64());
+                }
             }
             let macs = 8.0 * 256.0 * n_sb as f64 * nb as f64 * reps as f64;
             let old_g = macs / best(&mut old) / 1e9;
             let new_g = macs / best(&mut new) / 1e9;
-            println!(
-                "{label} {nb:>2} acts: row {old_g:6.1} G  tile {new_g:6.1} G MAC/s/core  ({:+.0}%)",
-                (new_g / old_g - 1.0) * 100.0
-            );
+            if wide.is_empty() {
+                println!(
+                    "{label} {nb:>3} acts: row {old_g:6.1} G  tile {new_g:6.1} G MAC/s/core  ({:+.0}%)",
+                    (new_g / old_g - 1.0) * 100.0
+                );
+            } else {
+                let wide_g = macs / best(&mut wide) / 1e9;
+                println!(
+                    "{label} {nb:>3} acts: row {old_g:6.1} G  tile {new_g:6.1} G  zmm {wide_g:6.1} G MAC/s/core  (zmm {:+.0}%)",
+                    (wide_g / new_g - 1.0) * 100.0
+                );
+            }
         }
     }
 }

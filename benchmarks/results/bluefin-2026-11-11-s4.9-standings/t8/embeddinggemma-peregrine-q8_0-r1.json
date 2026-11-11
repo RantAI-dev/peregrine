@@ -1,0 +1,193 @@
+{
+ "benchmark": "peregrine-s4.2-embed",
+ "timestamp": "2026-11-11T11:39:40.415107+00:00",
+ "round": 1,
+ "model": {
+  "name": "embeddinggemma",
+  "hf": "google/embeddinggemma-300m",
+  "pooling": "mean",
+  "max_tokens": 2048,
+  "dim": 768,
+  "tokenizer_dir": "embeddinggemma/ref"
+ },
+ "row": {
+  "engine": "peregrine",
+  "precision": "q8_0",
+  "path": "~/models/embed/embeddinggemma/embeddinggemma-Q8_0.gguf",
+  "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+  "size_bytes": 333590944,
+  "fingerprint": {
+   "kind": "file",
+   "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+   "size_bytes": 333590944
+  },
+  "notes": "the encoder path (S4.4): whole texts, no KV cache; S4.9b pass budget"
+ },
+ "machine": {
+  "hostname": "bluefin",
+  "os": "Linux",
+  "kernel": "7.2.7-200.fc44.x86_64",
+  "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+  "cpu_features": [
+   "fma",
+   "avx",
+   "avx2"
+  ],
+  "cores_logical": 8,
+  "threads_tested": 8,
+  "governor": "powersave",
+  "python": "3.14.8"
+ },
+ "engine": {
+  "name": "peregrine",
+  "binary": "/var/tmp/target-s49k/release/peregrine",
+  "worktree": "/var/tmp/wt-s49k-standings",
+  "commit": "d211c49c15ab0d92c0ed26391d978460942bda3f",
+  "branch": "bench-bluefin-s4.9-standings",
+  "server_version": "peregrine 0.1.2"
+ },
+ "start": {
+  "cmd": [
+   "/var/tmp/target-s49k/release/peregrine",
+   "serve",
+   "-m",
+   "~/models/embed/embeddinggemma/embeddinggemma-Q8_0.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8442",
+   "-t",
+   "8",
+   "-c",
+   "2048",
+   "--slots",
+   "10",
+   "--no-profile"
+  ],
+  "threads": 8,
+  "slots": 10,
+  "pooling": "mean"
+ },
+ "host_before": {
+  "loadavg": [
+   4.392578125,
+   4.62744140625,
+   4.1865234375
+  ],
+  "mem_available_gb": 7.61,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.48
+ },
+ "host_after": {
+  "loadavg": [
+   4.392578125,
+   4.62744140625,
+   4.1865234375
+  ],
+  "mem_available_gb": 7.6,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.48
+ },
+ "preflight": {
+  "loadavg": [
+   4.51416015625,
+   4.6552734375,
+   4.193359375
+  ],
+  "mem_available_gb": 7.76,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.48
+ },
+ "settings": {
+  "lengths": [
+   16
+  ],
+  "batches": [
+   1,
+   8,
+   32
+  ],
+  "clients": [
+   1
+  ],
+  "threads": 8,
+  "budget_s": 1.2,
+  "max_requests": 20,
+  "max_big_requests": 1,
+  "max_cell_seconds": 600.0,
+  "texts_file": "/var/tmp/embed-texts-s49k/embeddinggemma.json",
+  "texts_per_length": 40
+ },
+ "cells": {
+  "L16_b1_c1": {
+   "texts_per_s": 68.248,
+   "tokens_per_s": 1092.0,
+   "wall_s": 0.293,
+   "requests": 20,
+   "texts": 20,
+   "tokens_calibrated": 320,
+   "tokens_reported": 320,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.014212,
+    "p99": 0.016087,
+    "min": 0.014003,
+    "max": 0.01625,
+    "n": 20
+   },
+   "length": 16,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 0.29,
+   "tokens_per_text_median": 16
+  },
+  "L16_b8_c1": {
+   "texts_per_s": 76.662,
+   "tokens_per_s": 1226.6,
+   "wall_s": 0.1044,
+   "requests": 1,
+   "texts": 8,
+   "tokens_calibrated": 128,
+   "tokens_reported": 128,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.10404,
+    "p99": 0.10404,
+    "min": 0.10404,
+    "max": 0.10404,
+    "n": 1
+   },
+   "length": 16,
+   "batch": 8,
+   "clients": 1,
+   "elapsed_s": 0.1,
+   "tokens_per_text_median": 16
+  },
+  "L16_b32_c1": {
+   "texts_per_s": 76.248,
+   "tokens_per_s": 1220.0,
+   "wall_s": 0.4197,
+   "requests": 1,
+   "texts": 32,
+   "tokens_calibrated": 512,
+   "tokens_reported": 512,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.419228,
+    "p99": 0.419228,
+    "min": 0.419228,
+    "max": 0.419228,
+    "n": 1
+   },
+   "length": 16,
+   "batch": 32,
+   "clients": 1,
+   "elapsed_s": 0.42,
+   "tokens_per_text_median": 16
+  }
+ }
+}

@@ -290,6 +290,34 @@ impl MatKernels {
         crate::fpack::gemm(fmt, packed, n_in, panels, acts, bias, out);
     }
 
+    /// [`MatKernels::fp_panels_gemm`] with the caller's output stride: activation
+    /// row `b` is written at `out[b · out_stride ..][..panels · 16]`, so a
+    /// projection's row-major buffer is filled in place.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fp_panels_gemm_strided(
+        &self,
+        fmt: Format,
+        packed: &[u8],
+        n_in: usize,
+        panels: usize,
+        acts: &[QuantAct],
+        bias: Option<&[f32]>,
+        out: &mut [f32],
+        out_stride: usize,
+    ) {
+        assert!(
+            self.fp_panels_for(fmt),
+            "the packed float kernel used where it cannot run"
+        );
+        assert!(packed.len() >= panels * crate::fpack::panel_bytes(fmt, n_in));
+        assert!(out_stride >= panels * crate::fpack::PANEL);
+        assert!(
+            acts.is_empty()
+                || out.len() >= (acts.len() - 1) * out_stride + panels * crate::fpack::PANEL
+        );
+        crate::fpack::gemm_strided(fmt, packed, n_in, panels, acts, bias, out, out_stride);
+    }
+
     /// Eight rows of a repacked Q4_K tile against one to three activations, in
     /// the plain per-row layout.
     ///
@@ -369,10 +397,15 @@ impl MatKernels {
             "the output holds fewer than eight rows per activation"
         );
         #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
-        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
-        // `n_sb` tiles and the activation the rows the caller says.
+        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); `kq_zmm` is
+        // `have_zmm512()`, which is a superset of those. The tile holds `n_sb`
+        // tiles and the activation the rows the caller says.
         unsafe {
-            crate::kqsimd::q6k8_gemm(tile, n_sb, acts, nb, out)
+            if self.kq_zmm {
+                crate::kqsimd::q6k8_gemm_zmm(tile, n_sb, acts, nb, out)
+            } else {
+                crate::kqsimd::q6k8_gemm(tile, n_sb, acts, nb, out)
+            }
         }
         #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
         // SAFETY: `kq_tiles` is `have_dotprod()`; `kq_i8mm` is `have_i8mm()`. The
@@ -852,10 +885,10 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
     // it stays on the `sdot` batch kernel and is not listed there.
     #[cfg(target_arch = "aarch64")]
     let tiers: &[Tier] = match fmt {
-        // The packed float GEMM's NEON kernel (S4.9f): F32 and BF16 on NEON, F16 where
-        // the half-to-single widening instruction (`fp16`) is part of the tier.
-        Format::F32 | Format::BF16 => &[Tier::Scalar, Tier::Neon],
-        Format::F16 => &[Tier::Scalar, Tier::NeonDotprod],
+        // The packed float GEMM's NEON kernel (S4.9f): F32, BF16 and F16 all run on
+        // baseline NEON; `fcvtl` is base Advanced SIMD, not the `fp16` arithmetic
+        // extension.
+        Format::F32 | Format::F16 | Format::BF16 => &[Tier::Scalar, Tier::Neon],
         #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => &[Tier::Scalar, Tier::NeonDotprod],
         #[cfg(feature = "fmt-legacy")]
@@ -978,8 +1011,8 @@ mod tests {
         }
         assert_eq!(kernels_for(Format::F32), &[Tier::Scalar, Tier::Neon]);
         assert_eq!(kernels_for(Format::BF16), &[Tier::Scalar, Tier::Neon]);
-        // F16's widening instruction (`fcvtl`) is part of the `fp16` rung, above NEON.
-        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar, Tier::NeonDotprod]);
+        // `fcvtl` is base Advanced SIMD, so F16's packed kernel is on plain NEON too.
+        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar, Tier::Neon]);
     }
 
     #[test]

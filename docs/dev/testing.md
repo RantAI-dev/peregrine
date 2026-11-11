@@ -94,7 +94,16 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    `cargo test -p peregrine --release --test systemone_real -- --ignored` drives the real endpoint
    with the 48 fixture requests and compares every answer with llama.cpp's;
    `cargo test -p peregrine-models --release --test systemone_openjev` does the same through the
-   pieces directly. The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
+   pieces directly.
+   S4.6a's `bert` family is covered the same way: a synthetic post-norm encoder with the WordPiece
+   vocabulary (and a second with the XLM-R unigram one), the vector against `tests/support/bert_ref.rs`'s
+   independent scalar forward (bit for bit for F32; for Q8_0 exactly on the scalar tier and to 1–2 ulp
+   elsewhere, where the int8 tile fuses its block scale and the scalar twin does not), the invariance
+   matrix, the position-table limit, the no-allocation pass, the server and CLI cases
+   (`a_bert_encoder_*`), and `tests/golden/synthetic/<tier>/bert-Q8_0.golden` recorded on scalar, AVX2
+   and AVX-512 under SDE. Its three ignored real-file tests use the 200-text fixtures under
+   `tests/fixtures/bert/` (llama.cpp's ids and vectors, the fp32 PyTorch reference vectors) and skip,
+   with a notice, when the GGUF files are absent. The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
    admission orders), and the tier golden (`tests/golden/synthetic/<tier>/gemma-embedding-Q8_0.golden`,
@@ -104,7 +113,16 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    tests are EmbeddingGemma 300M (batch invariance, and the 200-text cosine bound against
    llama.cpp's vectors in `tests/fixtures/embeddinggemma/`, which states the per-format bound
    from `docs/design/s4-embeddings-decisions.md` §5); `peregrine-tests` cover the server and CLI
-   refusal of chat on an encoder.
+   refusal of chat on an encoder. S4.14b adds the same for `mistral3` (Nemotron 3.5 Embed 1B): a
+   synthetic non-causal file whose original context is 32 tokens, so the YaRN ramp and the
+   attention temperature's steps run; the vector against its own reference forward; the invariance
+   matrix; the tier golden
+   (`tests/golden/synthetic/<tier>/mistral3-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
+   under SDE, no aarch64 golden); no-allocation coverage; and an ignored real-file test that feeds
+   the 64 token-id lists from `tests/fixtures/nemotron/` and checks the F16 and Q8_0 cosines
+   against llama.cpp's vectors; a second ignored test encodes the fixture texts with the file's
+   Tekken tokenizer (S4.14a), checks all 64 id lists against llama.cpp's, and checks that a text
+   embedded by its ids and by its own encoding is the same vector bit for bit.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.
@@ -352,6 +370,24 @@ override, because `llama-tokenize`'s own `--override-kv` never reaches the loade
 splitter was also compared with llama.cpp's `unicode_regex_split` on the Tekken and `tekken-num3`
 patterns over 10,538 strings (every three-character combination of the classes that matter, 4,000
 random mixed-script strings, and runs of each class), with no divergence.
+
+### Tool-calling prompts: fixtures rendered by llama.cpp
+
+`crates/peregrine-core/tests/tools_render.rs` rebuilds the prompt of every case in
+`tests/fixtures/tools-*.jsonl` from the request alone and compares it byte for byte with the prompt
+llama.cpp built. It needs no model file and runs in CI. A case llama.cpp refused must be refused by
+Peregrine too.
+
+The fixtures come from llama.cpp itself: `scripts/tool-fixtures.py` sends each case of
+`scripts/tool-cases.json` (messages and tools in OpenAI's shapes) to `POST /apply-template` of a
+`llama-server --jinja` built at v0.9.0 (`cd959ba`) and stores the request text exactly as sent and
+the prompt that came back. `--template <file>` renders with a template file in place of the model's
+own, so a template can be exercised with any small chat model loaded. The Qwen 2.5 fixture was made
+with `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf` (the pinned bartowski upload) and its own template, which
+is the file `crates/peregrine-core/src/tools/qwen25.jinja`. The Qwen 3.5 fixture was made with the
+same model loaded and `--template crates/peregrine-core/src/tools/qwen35.jinja --set qwen35`: that
+file is the template of `Ternary-Bonsai-2-2B-PQ2_0.gguf`, which llama.cpp cannot load itself, and
+the set adds the cases that only this family has (thinking on and off, thinking in the history).
 
 ### System One prompts: fixtures rendered by llama.cpp
 

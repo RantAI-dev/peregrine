@@ -49,7 +49,7 @@ pub enum Rope {
 /// Write a dense `arch` model ("llama", "qwen2" or "qwen3") whose matrices are all `fmt`, seeded by
 /// `seed`. `qwen2` carries the attention biases and NeoX rotary pairing its loader requires.
 pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None, &[])
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None, &[], None)
 }
 
 /// A dense `arch` file that declares the pooling type an embedder was trained with
@@ -72,6 +72,7 @@ pub fn write_dense_pooled(
         false,
         Some(pooling),
         &[],
+        None,
     )
 }
 
@@ -80,7 +81,7 @@ pub fn write_dense_pooled(
 /// zeros is what the suffix index needs to find a match in (the same n-gram twice), and what makes the
 /// draft it proposes the token the target draws.
 pub fn write_dense_accepting(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true, None, &[])
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true, None, &[], None)
 }
 
 /// A dense model carrying extra GGUF metadata (the decision keys of S4.3, or one deliberately
@@ -93,7 +94,43 @@ pub fn write_dense_extra(
     s: Dense,
     extra: &[(String, MetaValue)],
 ) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None, extra)
+    write_dense_impl(
+        dir,
+        arch,
+        fmt,
+        seed,
+        s,
+        Rope::None,
+        false,
+        None,
+        extra,
+        None,
+    )
+}
+
+/// A dense `arch` file with a chosen `tokenizer.chat_template`. The weights and the
+/// vocabulary are [`write_dense`]'s; only the template string differs, which is how a
+/// synthetic file can carry a tool format's template.
+pub fn write_dense_with_template(
+    dir: &Path,
+    arch: &str,
+    fmt: Format,
+    seed: u64,
+    s: Dense,
+    template: &str,
+) -> PathBuf {
+    write_dense_impl(
+        dir,
+        arch,
+        fmt,
+        seed,
+        s,
+        Rope::None,
+        false,
+        None,
+        &[],
+        Some(template),
+    )
 }
 
 /// The decision metadata a synthetic decision model carries: `<arch>.decision.type`, the
@@ -184,6 +221,7 @@ pub fn write_rope_dense(dir: &Path, rope: Rope, seed: u64) -> PathBuf {
         false,
         None,
         &[],
+        None,
     )
 }
 
@@ -198,6 +236,7 @@ fn write_dense_impl(
     accept: bool,
     pooling: Option<u32>,
     extra: &[(String, MetaValue)],
+    chat_template: Option<&str>,
 ) -> PathBuf {
     let mut rng = Rng::new(seed);
     let mut w = GgufWriter::new();
@@ -236,7 +275,10 @@ fn write_dense_impl(
         ("qwen2", TemplateKind::Qwen3)
     };
     vocab::add_tokenizer_metadata(&mut w, pre);
-    w.str("tokenizer.chat_template", vocab::chat_template(tpl));
+    w.str(
+        "tokenizer.chat_template",
+        chat_template.unwrap_or_else(|| vocab::chat_template(tpl)),
+    );
 
     let kv = s.n_head_kv * head_dim;
     let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
@@ -759,6 +801,326 @@ pub fn write_gemma_embedding(
     mat(&mut w, &mut rng, "dense_3.weight", s.dense_width, s.d_model);
 
     let path = dir.join(format!("gemma-embedding-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
+/// The shape of a synthetic `bert` encoder (roadmap S4.6a).
+#[derive(Clone, Copy, Debug)]
+pub struct BertConfig {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    /// `bert.pooling_type`: 2 is cls (BGE's default), 1 is mean (E5/GTE-style).
+    pub pooling_type: u32,
+    /// Whether the file carries the WordPiece (`bert`) or the unigram (`t5`, XLM-R)
+    /// tokenizer. The weights are the same either way.
+    pub unigram: bool,
+    /// Token-type rows in `token_types.weight` (BERT's Sentence A/B is 2).
+    pub n_token_types: usize,
+}
+
+impl Default for BertConfig {
+    fn default() -> Self {
+        BertConfig {
+            d_model: 128,
+            n_layer: 2,
+            n_head: 4,
+            n_ff: 256,
+            ctx: 64,
+            pooling_type: 2,
+            unigram: false,
+            n_token_types: 2,
+        }
+    }
+}
+
+/// Write a synthetic `bert` encoder: post-norm blocks, absolute positions, token
+/// types, biases on every projection, LayerNorm (weight and bias) and the exact
+/// GELU — the graph `src/models/bert.cpp` builds.
+///
+/// Every matrix is `fmt` (F32 or Q8_0, both multiples of the block size); the
+/// norms and the biases are F32, as the converter writes them. `pooling_type` is
+/// the file's own (`1` mean, `2` cls), so `Model::pooling` reports it.
+pub fn write_bert(dir: &Path, fmt: Format, seed: u64, s: BertConfig) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    w.str("general.architecture", "bert");
+    w.str("general.name", &format!("synthetic-bert-{}", fmt.label()));
+    let k = |x: &str| format!("bert.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.f32(&k("attention.layer_norm_epsilon"), 1e-5);
+    w.u32(&k("pooling_type"), s.pooling_type);
+    w.bool(&k("causal_attention"), false);
+
+    if s.unigram {
+        vocab::add_unigram_tokenizer_metadata(&mut w);
+    } else {
+        vocab::add_bert_tokenizer_metadata(&mut w);
+    }
+
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    // A bias of its own scale, and never zero: a bias the engine forgot to add
+    // must move the vector.
+    let bias = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        let mut out = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            let v = rng.f32_range(-0.05, 0.05);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        w.add_tensor(name, &[n as u64], Format::F32, out);
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    mat(
+        &mut w,
+        &mut rng,
+        "token_types.weight",
+        s.d_model,
+        s.n_token_types,
+    );
+    mat(&mut w, &mut rng, "position_embd.weight", s.d_model, s.ctx);
+    norm(&mut w, &mut rng, "token_embd_norm.weight", s.d_model);
+    bias(&mut w, &mut rng, "token_embd_norm.bias", s.d_model);
+
+    for i in 0..s.n_layer {
+        let p = |x: &str| format!("blk.{i}.{x}");
+        for (name, cols, rows) in [
+            ("attn_q", s.d_model, s.d_model),
+            ("attn_k", s.d_model, s.d_model),
+            ("attn_v", s.d_model, s.d_model),
+            ("attn_output", s.d_model, s.d_model),
+            ("ffn_up", s.d_model, s.n_ff),
+            ("ffn_down", s.n_ff, s.d_model),
+        ] {
+            mat(&mut w, &mut rng, &p(&format!("{name}.weight")), cols, rows);
+        }
+        for (name, n) in [
+            ("attn_q.bias", s.d_model),
+            ("attn_k.bias", s.d_model),
+            ("attn_v.bias", s.d_model),
+            ("attn_output.bias", s.d_model),
+            ("ffn_up.bias", s.n_ff),
+            ("ffn_down.bias", s.d_model),
+        ] {
+            bias(&mut w, &mut rng, &p(name), n);
+        }
+        for norm_name in ["attn_output_norm", "layer_output_norm"] {
+            norm(
+                &mut w,
+                &mut rng,
+                &p(&format!("{norm_name}.weight")),
+                s.d_model,
+            );
+            bias(
+                &mut w,
+                &mut rng,
+                &p(&format!("{norm_name}.bias")),
+                s.d_model,
+            );
+        }
+    }
+
+    let name = if s.unigram {
+        format!("bert-unigram-{}.gguf", fmt.label())
+    } else {
+        format!("bert-{}.gguf", fmt.label())
+    };
+    let path = dir.join(name);
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
+/// The shape of a synthetic `mistral3` embedder (roadmap S4.14).
+///
+/// The default has query heads wider than the residual (6 × 32 over 128), two key/value
+/// heads over six query heads, YaRN with a 32-token original context and a 4× factor,
+/// and an attention temperature of 0.1: a text of 40 tokens sees positions at and above
+/// the original context, so both the YaRN ramp and the temperature run.
+#[derive(Clone, Copy, Debug)]
+pub struct Mistral3Config {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    /// The head width (`attention.key_length`); `n_head * head_dim` may exceed `d_model`.
+    pub head_dim: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    /// `rope.scaling.original_context_length`: the YaRN original context and the
+    /// attention temperature's divisor.
+    pub n_ctx_orig: usize,
+    pub factor: f32,
+    pub beta_fast: f32,
+    pub beta_slow: f32,
+    pub log_mul: f32,
+    /// `attention.temperature_scale`; 0 writes the key as zero and disables the scaling.
+    pub temp_scale: f32,
+    pub pooling_type: u32,
+    /// Write `attention.causal true` — a file the loader must refuse by name.
+    pub causal: bool,
+}
+
+impl Default for Mistral3Config {
+    fn default() -> Self {
+        Mistral3Config {
+            d_model: 128,
+            n_layer: 3,
+            n_head: 6,
+            n_head_kv: 2,
+            head_dim: 32,
+            n_ff: 256,
+            ctx: 256,
+            n_ctx_orig: 32,
+            factor: 4.0,
+            beta_fast: 8.0,
+            beta_slow: 1.0,
+            log_mul: 1.0,
+            temp_scale: 0.1,
+            pooling_type: 1,
+            causal: false,
+        }
+    }
+}
+
+/// Write a synthetic `mistral3` embedder: NVIDIA Nemotron 3.5 Embed 1B's shape, tiny.
+///
+/// There is no output head and no chat template: the file only produces embeddings.
+pub fn write_mistral3(dir: &Path, fmt: Format, seed: u64, s: Mistral3Config) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    w.str("general.architecture", "mistral3");
+    w.str(
+        "general.name",
+        &format!("synthetic-mistral3-{}", fmt.label()),
+    );
+    let k = |x: &str| format!("mistral3.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("attention.head_count_kv"), s.n_head_kv as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.u32(&k("attention.key_length"), s.head_dim as u32);
+    w.u32(&k("attention.value_length"), s.head_dim as u32);
+    w.u32(&k("rope.dimension_count"), s.head_dim as u32);
+    w.f32(&k("rope.freq_base"), 10_000.0);
+    w.str(&k("rope.scaling.type"), "yarn");
+    w.f32(&k("rope.scaling.factor"), s.factor);
+    w.u32(
+        &k("rope.scaling.original_context_length"),
+        s.n_ctx_orig as u32,
+    );
+    w.f32(&k("rope.scaling.yarn_beta_fast"), s.beta_fast);
+    w.f32(&k("rope.scaling.yarn_beta_slow"), s.beta_slow);
+    w.f32(&k("rope.scaling.yarn_log_multiplier"), s.log_mul);
+    w.bool(&k("attention.causal"), s.causal);
+    w.f32(&k("attention.temperature_scale"), s.temp_scale);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-5);
+    w.u32(&k("pooling_type"), s.pooling_type);
+
+    vocab::add_tokenizer_metadata(&mut w, "qwen2");
+    // No chat template: an embedding-only file has none, and the build says so.
+
+    let kv = s.n_head_kv * s.head_dim;
+    let q = s.n_head * s.head_dim;
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    for i in 0..s.n_layer {
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_q.weight"),
+            s.d_model,
+            q,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_k.weight"),
+            s.d_model,
+            kv,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_v.weight"),
+            s.d_model,
+            kv,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_output.weight"),
+            q,
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_gate.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_up.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_down.weight"),
+            s.n_ff,
+            s.d_model,
+        );
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+
+    let path = dir.join(format!("mistral3-{}.gguf", fmt.label()));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }

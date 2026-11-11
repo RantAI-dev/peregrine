@@ -28,6 +28,49 @@ fn dynamic_rows() -> bool {
     *D.get_or_init(|| crate::options::get().dynamic_rows)
 }
 
+/// The transposed output of one matrix of a group: `rows` floats per activation.
+///
+/// A repacked tile's block is activation-major — `blk[b · nrows + i]`, row `i` of
+/// the tile for activation `b` — and the output is transposed, `out[(b0 + b) ·
+/// rows + row]`. The old write-out walked the rows first, which is one
+/// single-float store per (row, activation), each `rows` floats from the next
+/// (32 KiB on the 1B at chunk 128): every store its own cache line, so a wider
+/// pass paid for it. Turned around the same data is contiguous on both sides —
+/// one activation's tile is `nrows` consecutive floats in the block *and* in the
+/// output — so each activation is one slice copy and the tile block stays in L1.
+///
+/// The packed-float and per-row paths keep the scatter: their blocks are
+/// row-major (`blk[i · nb + b]`), so their activation-major output would need a
+/// transpose, which is a job for a kernel that writes the treated layout.
+struct Untiler<'a, 'b> {
+    out: &'b OutPtr<'a>,
+    /// The first activation of the group's output block.
+    b0: usize,
+    /// The floats between two activations of the output.
+    rows: usize,
+    /// The activations in the block.
+    nb: usize,
+}
+
+impl Untiler<'_, '_> {
+    /// Copy rows `lo..hi` of `base_row`'s tile from `blk` into every activation.
+    ///
+    /// # Safety
+    ///
+    /// Every row in `lo..hi` of the range must belong to this worker, as it did
+    /// for the scatter this replaces.
+    #[inline]
+    unsafe fn untile(&self, base_row: usize, blk: &[f32], nrows: usize, lo: usize, hi: usize) {
+        for b in 0..self.nb {
+            let src = &blk[b * nrows + lo..b * nrows + hi];
+            let dst = self
+                .out
+                .chunk((self.b0 + b) * self.rows + base_row + lo, hi - lo);
+            dst.copy_from_slice(src);
+        }
+    }
+}
+
 /// One matrix of a fused matmul group, and where its output goes.
 #[derive(Clone, Copy)]
 pub struct MatJob<'a> {
@@ -57,6 +100,13 @@ fn act_bytes(a: &QuantAct) -> usize {
         + a.tq.len()
         + 4 * (a.d.len() + a.dk.len() + a.td.len() + a.xf.len())
         + 2 * (a.sums.len() + a.bsums.len() + a.tls.len())
+}
+
+/// The format of a matrix's packed float panels: the file's format, or F32 for a
+/// Q8_0 matrix dequantised into f32 panels at load (S4.9m).
+#[inline]
+fn panel_fmt(t: &TensorInfo) -> Format {
+    t.fp_kind.unwrap_or(t.kind)
 }
 
 /// One matrix of a fused group, dense or LittleBit. `linear_group` dispatches.
@@ -136,7 +186,7 @@ fn matmul_block(
     let mut paths = [MatPath::PerRow; 4];
     for (p, j) in paths.iter_mut().zip(jobs) {
         *p = mk.path(
-            j.w.kind,
+            panel_fmt(j.w),
             j.w.tile_off.is_some(),
             j.w.kq_off.is_some(),
             j.w.fp_off.is_some(),
@@ -286,21 +336,21 @@ fn matmul_block(
                                     }
                                 }
                             }
-                            for i in 0..KQ_TILE_ROWS {
-                                let row = t * KQ_TILE_ROWS + i;
-                                if row < r || row >= rz {
-                                    continue;
-                                }
-                                for b in 0..nb {
-                                    // SAFETY: the row belongs to this worker (a
-                                    // `share` range, or a chunk claimed from
-                                    // the counter), and the tile's rows are the
-                                    // job's rows.
-                                    unsafe {
-                                        j.out.set((b0 + b) * rows + row, out[b * KQ_TILE_ROWS + i])
-                                    };
-                                }
-                            }
+                            // Only the tile's rows this worker owns: a range can
+                            // start or end inside a tile, and the other rows of
+                            // it belong to another worker (or to nobody).
+                            let lo = r.max(t * KQ_TILE_ROWS) - t * KQ_TILE_ROWS;
+                            let hi = rz.min((t + 1) * KQ_TILE_ROWS) - t * KQ_TILE_ROWS;
+                            let u = Untiler {
+                                out: &j.out,
+                                b0,
+                                rows,
+                                nb,
+                            };
+                            // SAFETY: those rows of this job belong to this
+                            // worker (a `share` range, or a chunk claimed from
+                            // the counter), and the tile's rows are the job's.
+                            unsafe { u.untile(t * KQ_TILE_ROWS, out, KQ_TILE_ROWS, lo, hi) };
                         }
                     }
                     // The rows past the last whole group of eight: today's
@@ -328,7 +378,8 @@ fn matmul_block(
                     // starts or ends inside a panel computes the panel and keeps
                     // the rows it asked for; a row's bits do not depend on that.
                     let off = j.w.fp_off.expect("a packed float path has a store offset");
-                    let pb = peregrine_kernels::fpack::panel_bytes(j.w.kind, n);
+                    let fmt = panel_fmt(j.w);
+                    let pb = peregrine_kernels::fpack::panel_bytes(fmt, n);
                     let store = w.fp();
                     let mut blk = [0.0f32; 16 * MAX_BATCH];
                     let first = r / 16;
@@ -336,7 +387,7 @@ fn matmul_block(
                     for p in first..last {
                         let at = off + p * pb;
                         mk.fp_panels_gemm(
-                            j.w.kind,
+                            fmt,
                             &store[at..at + pb],
                             n,
                             1,
@@ -532,34 +583,60 @@ fn fp_group(
         let b0 = (local / per) * bs;
         let pn = FP_UNIT_PANELS.min(panels - first_panel);
         let bn = bs.min(nb - b0);
-        let pb = peregrine_kernels::fpack::panel_bytes(j.w.kind, n);
+        let pb = peregrine_kernels::fpack::panel_bytes(panel_fmt(j.w), n);
         let off = j.w.fp_off.expect("a packed float path has a store offset") + first_panel * pb;
         let at = off + pn * pb;
         let tf = crate::prof::detail().then(Instant::now);
-        let mut blk = [0.0f32; FP_UNIT_PANELS * 16 * MAX_BATCH];
-        let out = &mut blk[..pn * 16 * bn];
-        // SAFETY: `out` holds one unit; the store holds the matrix's panels.
-        MatKernels::get().fp_panels_gemm(
-            j.w.kind,
-            &store[off..at],
-            n,
-            pn,
-            &acts[b0..b0 + bn],
-            None,
-            out,
-        );
-        for i in 0..pn * 16 {
-            let row = first_panel * 16 + i;
-            if row >= rows {
-                break;
-            }
-            for b in 0..bn {
-                // SAFETY: unit `u` is computed by exactly one worker, so every
-                // (b, row) it writes is written once.
-                unsafe {
-                    j.out
-                        .set((b_off + b0 + b) * rows + row, out[b * pn * 16 + i])
-                };
+        let pan = pn * 16;
+        let first_row = first_panel * 16;
+        // The direct store is used for the engine's own block (b_off == 0): a wider
+        // pass that the matmul driver split, and a shape whose rows are not whole
+        // panels, go through the block and the copy.
+        if b_off == 0 && first_row + pan <= rows {
+            // The kernel writes straight into the projection's row-major output:
+            // activation row `b` lands at `out[b · rows ..][..pn · 16]`, the rows this
+            // unit owns. No temporary block, no copy (S4.9m).
+            // SAFETY: unit `u` is computed by exactly one worker, and the window holds
+            // the unit's own rows of every activation row; the other rows of the same
+            // output belong to other units and are written by them alone.
+            let win = unsafe {
+                j.out
+                    .window_mut(b0 * rows + first_row, (bn - 1) * rows + pan)
+            };
+            MatKernels::get().fp_panels_gemm_strided(
+                panel_fmt(j.w),
+                &store[off..at],
+                n,
+                pn,
+                &acts[b0..b0 + bn],
+                None,
+                win,
+                rows,
+            );
+        } else {
+            // A matrix whose output rows are not a whole number of panels: the
+            // kernel's padded lanes have no row in the output, so this last panel
+            // goes through a block and only the rows that exist are stored.
+            let mut blk = [0.0f32; FP_UNIT_PANELS * 16 * MAX_BATCH];
+            let out = &mut blk[..pn * 16 * bn];
+            MatKernels::get().fp_panels_gemm(
+                panel_fmt(j.w),
+                &store[off..at],
+                n,
+                pn,
+                &acts[b0..b0 + bn],
+                None,
+                out,
+            );
+            for i in 0..pan {
+                let row = first_row + i;
+                if row >= rows {
+                    break;
+                }
+                for b in 0..bn {
+                    // SAFETY: unit `u` is computed by exactly one worker.
+                    unsafe { j.out.set((b_off + b0 + b) * rows + row, out[b * pan + i]) };
+                }
             }
         }
         if let Some(t) = tf {
@@ -747,10 +824,11 @@ fn one_row_outputs(
             }
             MatPath::FloatPanels => {
                 let off = head.fp_off.expect("a packed float path has a store offset");
-                let pb = peregrine_kernels::fpack::panel_bytes(head.kind, n);
+                let fmt = panel_fmt(head);
+                let pb = peregrine_kernels::fpack::panel_bytes(fmt, n);
                 let p = r / 16;
                 mk.fp_panels_gemm(
-                    head.kind,
+                    fmt,
                     &w.fp()[off + p * pb..off + (p + 1) * pb],
                     n,
                     1,
