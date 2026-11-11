@@ -585,6 +585,10 @@ impl Engine {
     ) -> Engine {
         let c = model.cfg;
         let max_slots = max_slots.max(1);
+        // A bidirectional model schedules whole texts, never chunks, and writes no KV
+        // cache: the scratch must hold the longest accepted text (the engine's context)
+        // and the budget of one step is that many rows (design §2.2).
+        let bidirectional = model.causality() == crate::arch::Causality::Bidirectional;
         // The prompt tokens one weight pass carries.
         let prefill_chunk = prefill_chunk.clamp(1, crate::options::MAX_PREFILL_CHUNK);
         // One position more than the model's own context is allowed: the engine
@@ -596,16 +600,34 @@ impl Engine {
         // logits, a prefill chunk wants none. The scratch keeps the width it had before the chunk became an
         // option, because it also holds the speculation's rows: a narrower chunk must not narrow the drafts.
         // The matmul's row limit caps the whole thing, and a chunk beside the decode rows must fit in it.
-        let max_batch =
-            (prefill_chunk.max(SCRATCH_CHUNK) + max_slots).min(crate::blocks::linear::MAX_BATCH);
-        // An MTP verification pass wants logits for two rows, whatever the slot count.
-        let use_mtp = model.has_mtp() && mtp_enabled() && mixed();
-        let max_logit_rows = if use_mtp { max_slots.max(2) } else { max_slots };
+        let max_batch = if bidirectional {
+            max_ctx
+        } else {
+            (prefill_chunk.max(SCRATCH_CHUNK) + max_slots).min(crate::blocks::linear::MAX_BATCH)
+        };
+        // An MTP verification pass wants logits for two rows, whatever the slot count. An
+        // encoder never samples: one row is all its state ever needs.
+        let use_mtp = !bidirectional && model.has_mtp() && mtp_enabled() && mixed();
+        let max_logit_rows = if bidirectional {
+            1
+        } else if use_mtp {
+            max_slots.max(2)
+        } else {
+            max_slots
+        };
         let mut state = model.new_state(max_batch, max_logit_rows, max_ctx, threads);
         // A pooled slot asks for every row's final hidden state, and a decode step must not allocate:
         // the buffer is sized once, here. (The hybrid family resizes it per forward, which keeps
         // the capacity.)
         state.hidden.resize(max_batch * c.d_model, 0.0);
+        if bidirectional {
+            // No cache is ever written, so the attention scratch is not needed. The
+            // pooling accumulator is the family's, per text.
+            state.attn = crate::blocks::attn::AttnScratch::new(&c, 1, threads);
+            // One score row per worker, long enough for the longest text of a pass.
+            state.attn.bidir_scores = vec![0.0; threads.max(1) * max_batch];
+            state.pool_sum = vec![0.0; c.d_model];
+        }
         Engine {
             spec_drafts: 0,
             spec_hits: 0,
@@ -690,6 +712,10 @@ impl Engine {
     }
     /// Bytes one slot's cache holds, for sizing a deployment.
     pub fn cache_bytes_per_slot(&self) -> u64 {
+        // An encoder writes no cache: its slots are bounded by the text, not by a cache.
+        if self.model.causality() == crate::arch::Causality::Bidirectional {
+            return 0;
+        }
         let c = self.model.cfg;
         KvCache::new(self.kv_prec, c.kv_layers(), c.n_kv_head, c.head_dim, 1).bytes_per_position()
             * self.max_ctx as u64
@@ -805,13 +831,30 @@ impl Engine {
         if prompt.is_empty() {
             return self.refuse(prompt, cache, "the prompt is empty".into());
         }
-        // A pooled slot pools the rows the model computed; `Cls` needs an encoder (S4.4 onward),
-        // and a causal decoder's row 0 is one token's view, not a text's vector.
-        if let Want::Pooled(Pooling::Cls) = want {
+        let bidirectional = self.model.causality() == crate::arch::Causality::Bidirectional;
+        // An encoder has no decode path at all: a chat request on it is refused by name
+        // (design §3). Everything it serves is a whole text, so it is pooled.
+        if bidirectional && want.is_tokens() {
             return self.refuse(
                 prompt,
                 cache,
-                "cls pooling is not implemented for causal models".into(),
+                format!(
+                    "{} is an embedding model and cannot generate text; use /v1/embeddings (or `peregrine embed`)",
+                    self.model.cfg.arch_name
+                ),
+            );
+        }
+        // A labels slot reads one prompt row's logits at a few token ids (S4.3). That is a
+        // decoder's read-out; an encoder has no decode path and no such rows, so it is refused
+        // by name, as a token slot is above (design §3).
+        if bidirectional && want.is_labels() {
+            return self.refuse(
+                prompt,
+                cache,
+                format!(
+                    "{} is an embedding model and cannot read label logits; use /v1/embeddings (or `peregrine embed`)",
+                    self.model.cfg.arch_name
+                ),
             );
         }
         if want.is_labels() {
@@ -829,6 +872,17 @@ impl Engine {
                         "label token {l} is outside the vocabulary of {}",
                         self.model.cfg.n_vocab
                     ),
+                );
+            }
+        }
+        // A pooled slot pools the rows the model computed; `Cls` needs an encoder (S4.4 onward),
+        // and a causal decoder's row 0 is one token's view, not a text's vector.
+        if let Want::Pooled(Pooling::Cls) = want {
+            if !bidirectional {
+                return self.refuse(
+                    prompt,
+                    cache,
+                    "cls pooling is not implemented for causal models".into(),
                 );
             }
         }
@@ -877,6 +931,11 @@ impl Engine {
                     );
                 }
                 kv
+            }
+            None if bidirectional => {
+                // An encoder never writes a cache; a zero-position one is a marker, not
+                // an allocation (design §2.2, and the slot-memory limit S4.1 found).
+                self.model.new_cache(self.kv_prec, 0)
             }
             None => {
                 let mut kv = self.model.new_cache(self.kv_prec, self.max_ctx);
@@ -1285,6 +1344,9 @@ impl Engine {
         if self.slots.is_empty() {
             return vec![];
         }
+        if self.model.causality() == crate::arch::Causality::Bidirectional {
+            return self.bidirectional_step();
+        }
         if mixed() {
             return self.mixed_step();
         }
@@ -1315,6 +1377,130 @@ impl Engine {
             };
         }
         self.decode()
+    }
+
+    /// One bidirectional step: whole texts, side by side, up to the scratch's row budget
+    /// (design §2.2).
+    ///
+    /// A text is never split. The step takes the oldest texts whose lengths fit in
+    /// `state.max_batch` rows together; a text longer than what is left runs alone in its
+    /// own pass. Every text of the pass is one `forward_texts` call, so all of them share
+    /// the layer projections' weight passes, and each one's attention is its own block:
+    /// its vector cannot depend on who else was admitted (design §2.3).
+    fn bidirectional_step(&mut self) -> Vec<Emission> {
+        let t0 = std::time::Instant::now();
+        let before = self.stats;
+        let budget = self.state.max_batch;
+        // (slot index, first row, length)
+        let mut chosen: Vec<(usize, usize, usize)> = Vec::new();
+        let mut rows = 0usize;
+        for i in 0..self.slots.len() {
+            let n = self.slots[i].prompt.len();
+            if chosen.is_empty() {
+                if n > budget {
+                    let id = self.slots.remove(i).id;
+                    return vec![Emission {
+                        slot: id,
+                        token: 0,
+                        text: String::new(),
+                        logprob: 0.0,
+                        finish: Some(Finish::Error(format!(
+                            "text of {n} tokens does not fit the bidirectional pass of {budget} rows"
+                        ))),
+                        cost: None,
+                        embedding: None,
+                        label_logits: None,
+                    }];
+                }
+                chosen.push((i, 0, n));
+                rows = n;
+            } else if rows + n <= budget {
+                chosen.push((i, rows, n));
+                rows += n;
+            } else {
+                break;
+            }
+        }
+        if chosen.is_empty() {
+            return vec![];
+        }
+        let texts: Vec<&[u32]> = chosen
+            .iter()
+            .map(|&(i, _, _)| self.slots[i].prompt.as_slice())
+            .collect();
+        let poolings: Vec<Pooling> = chosen
+            .iter()
+            .map(|&(i, _, _)| {
+                self.slots[i]
+                    .want
+                    .pooling()
+                    .expect("only pooled slots reach a bidirectional step")
+            })
+            .collect();
+        self.state.want_hidden = true;
+        let r = self.model.forward_texts(
+            &mut self.state,
+            &self.pool,
+            &texts,
+            &poolings,
+            &mut self.stats,
+        );
+        self.state.want_hidden = false;
+        let secs = t0.elapsed().as_secs_f64();
+        if let Err(e) = r {
+            let ids: Vec<SlotId> = chosen.iter().map(|&(i, _, _)| self.slots[i].id).collect();
+            let out: Vec<Emission> = ids
+                .iter()
+                .map(|&slot| Emission {
+                    slot,
+                    token: 0,
+                    text: String::new(),
+                    logprob: 0.0,
+                    finish: Some(Finish::Error(e.clone())),
+                    cost: None,
+                    embedding: None,
+                    label_logits: None,
+                })
+                .collect();
+            self.slots.retain(|s| !ids.contains(&s.id));
+            return out;
+        }
+        let dm = self.model.cfg.d_model;
+        let mut out = Vec::with_capacity(chosen.len());
+        for &(i, row0, n) in &chosen {
+            let vector = self.state.hidden[row0 * dm..(row0 + 1) * dm].to_vec();
+            let s = &mut self.slots[i];
+            s.fed = n;
+            s.prefilled = n;
+            s.pos = n;
+            s.prefill_s = secs * n as f64 / rows.max(1) as f64;
+            out.push(Emission {
+                slot: s.id,
+                token: 0,
+                text: String::new(),
+                logprob: 0.0,
+                finish: Some(Finish::Stop),
+                cost: Some(SlotCost {
+                    prompt_tokens: s.prompt_tokens,
+                    prefilled: s.prefilled,
+                    produced: 0,
+                    prefill_s: s.prefill_s,
+                    decode_s: 0.0,
+                }),
+                embedding: Some(vector),
+                label_logits: None,
+            });
+        }
+        self.reap(&out);
+        self.last_step = StepReport {
+            stats: self.stats.since(&before),
+            secs: t0.elapsed().as_secs_f64(),
+            rows,
+            tokens: out.len(),
+            drafted: 0,
+            accepted: 0,
+        };
+        out
     }
 
     /// The mixed step: decode rows for the ready slots first (they want logits), then prompt runs for the others,

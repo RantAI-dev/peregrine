@@ -79,7 +79,7 @@ with no decode.
 | S4.1 | Pooled outputs on causal models; `/v1/embeddings`, `peregrine embed`; Qwen3-Embedding against llama.cpp — done (#158) | 0.5 |
 | S4.2 | Benchmark harness modes for embeddings, rerank and System One; competitor baselines (llama.cpp, text-embeddings-inference, fastembed, OpenVINO) on H1 and H2 | 1.0 |
 | S4.3 | System One, part 1: `/v1/systemone`, the answer math, the label-logit types on Qwen 3.5 (OpenJev, Lev, Nimble, pplx-decider, H2O Lightning) | 1.5 |
-| S4.4 | Bidirectional forward; `gemma-embedding` (EmbeddingGemma) | 1.0 |
+| S4.4 | Bidirectional forward; `gemma-embedding` (EmbeddingGemma) — `Architecture::forward_texts` over whole texts with no KV cache, symmetric sliding-window attention, mean/cls pooling and the `dense_2`/`dense_3` head (#162); EmbeddingGemma 300M checked against llama.cpp v0.9.0 — done | 1.0 |
 | S4.5 | WordPiece and SentencePiece-unigram tokenizers — done (#157) | 0.5 |
 | S4.6 | `bert` family and the classifier head: MiniLM, bge, e5, bge-m3, bge-reranker; `/v1/classify` | 1.5 |
 | S4.7 | `modern-bert` and labelled classifier heads (guards, routers) | 1.0 |

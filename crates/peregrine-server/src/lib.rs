@@ -263,8 +263,21 @@ pub async fn run(a: Args) {
             std::process::exit(2);
         }
     };
+    let model = match peregrine_models::keep::open_with_template(&a.model, a.littlebit, chosen) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("cannot open {}: {e}", a.model.display());
+            std::process::exit(2);
+        }
+    };
+    // An embedding-only model has no chat template and needs none: it serves
+    // `/v1/embeddings` and refuses generation (design §3). The placeholder is never
+    // rendered because `chat` answers 400 before it.
     let template = match chosen {
         Some(t) => t,
+        None if model.causality() == peregrine_core::arch::Causality::Bidirectional => {
+            Template::ChatMl
+        }
         None => match Template::detect(&gguf) {
             Ok(t) => t,
             Err(e) => {
@@ -272,13 +285,6 @@ pub async fn run(a: Args) {
                 std::process::exit(2);
             }
         },
-    };
-    let model = match peregrine_models::keep::open_with_template(&a.model, a.littlebit, chosen) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("cannot open {}: {e}", a.model.display());
-            std::process::exit(2);
-        }
     };
     let kv_prec = match a.kv.as_deref() {
         Some(s) => match peregrine_core::kv::KvPrec::parse(s) {
@@ -2072,6 +2078,14 @@ async fn chat(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Resp
         return not_supported(
             "This model is a decision model without text generation, use /v1/systemone",
         );
+    }
+    // `gemma-embedding` (and, later, the other encoders) has no decode path: the
+    // request is refused by name rather than served as a broken completion (design §3).
+    if app.model.causality() == peregrine_core::arch::Causality::Bidirectional {
+        return bad(format!(
+            "{} is an embedding model and cannot generate text; POST /v1/embeddings returns its vectors",
+            app.model.cfg.arch_name
+        ));
     }
     let mut p = match plan(&body) {
         Ok(p) => p,

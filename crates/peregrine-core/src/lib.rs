@@ -136,12 +136,14 @@ pub fn check_compatible_metadata(
     families: &[&dyn arch::Family],
 ) -> Result<(), String> {
     let arch = g.str("general.architecture").unwrap_or("unknown");
-    if !families.iter().any(|f| f.names().contains(&arch)) {
+    let family = families.iter().find(|f| f.names().contains(&arch));
+    let Some(family) = family else {
         let feat = match arch {
             "llama" => Some("arch-llama"),
             "qwen2" | "qwen3" => Some("arch-qwen"),
             "qwen25" | "qwen35" => Some("arch-qwen35"),
             "gemma3" => Some("arch-gemma3"),
+            "gemma-embedding" => Some("arch-gemma-embedding"),
             "qwen3moe" => Some("arch-qwen3moe"),
             "gpt-oss" => Some("arch-gpt-oss"),
             "phi3" => Some("arch-phi3"),
@@ -160,7 +162,7 @@ pub fn check_compatible_metadata(
             "architecture {arch:?} — Peregrine implements {}",
             arch_names.join(", ")
         ));
-    }
+    };
     for t in g.tensors.values() {
         if !t.kind.is_supported() {
             let feat = t.kind.required_feature().unwrap_or("unknown");
@@ -193,14 +195,20 @@ pub fn check_compatible_metadata(
             return Err(format!("rope scaling {t:?} is not implemented"));
         }
     }
-    match template {
-        // The caller named the template: it is used as it is, and the file's own
-        // template (if any) is not read.
-        Some(t) => t.tokens_present(g)?,
-        None => {
-            template::Template::detect(g).map_err(|e| {
-                format!("{e} — a file without a usable chat template needs --chat-template <name>")
-            })?;
+    // An embedding-only file has no chat template and needs none: it is served on the
+    // embeddings endpoint and refuses generation (design §3).
+    if !family.embedding_only() {
+        match template {
+            // The caller named the template: it is used as it is, and the file's own
+            // template (if any) is not read.
+            Some(t) => t.tokens_present(g)?,
+            None => {
+                template::Template::detect(g).map_err(|e| {
+                    format!(
+                        "{e} — a file without a usable chat template needs --chat-template <name>"
+                    )
+                })?;
+            }
         }
     }
     Ok(())

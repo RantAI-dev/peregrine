@@ -53,6 +53,20 @@ All notable changes to this project are documented here. The format follows
   llama.cpp v0.9.0 itself; with the model file present the token ids match too, and the renderer,
   the tokenizer, a labels slot and the answer math together give llama.cpp's answers on all 48
   requests (the same option chosen, probabilities within 2.5e-3). No endpoint yet.
+- **The bidirectional pass and `gemma-embedding`** (roadmap S4.4): EmbeddingGemma 300M as the
+  first encoder. `Architecture::causality` and `Architecture::forward_texts` forward whole texts
+  side by side — ragged rows, one `n × n` attention block per text, f32 keys and values with no
+  KV cache — under llama.cpp's mask rule (a sliding layer is a symmetric `± n_swa/2` window, a
+  global layer is unmasked). The engine admits only pooled slots for an encoder, takes whole
+  texts up to the scratch budget, allocates no per-slot cache, and refuses chat with a 400 that
+  says the model is an embedding model. `gemma-embedding` reuses the Gemma 3 blocks and adds
+  llama.cpp's `dense_2`/`dense_3` pair, mean pooling over a text's own rows (f64 accumulator, one
+  rounding) and `cls` pooling; `peregrine embed`, `peregrine inspect` and `POST /v1/embeddings`
+  work unchanged. Synthetic encoders, an exact scalar reference forward, batch invariance and
+  three kernel-tier goldens are in CI. Against llama.cpp's vectors on 200 texts, Peregrine's
+  Q8_0 is no further from a full-precision F16 conversion of the same weights than llama.cpp's
+  Q8_0 is (min 0.99875 vs 0.99801 at 768 d, means within 6e-7), and the per-format bound is
+  measured and encoded with the reference vectors under `tests/fixtures/embeddinggemma/`.
 - **WordPiece and SentencePiece-unigram tokenizers** (roadmap S4.5), the two vocabularies
   encoder models ship: `tokenizer.ggml.model = "bert"` (all-MiniLM, bge, e5, gte) and
   `"t5"` (T5 and the XLM-R vocabulary: bge-m3, multilingual-e5, bge-reranker). Both are

@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod dspark;
+pub mod embed_ref;
 pub mod models;
 pub mod vocab;
 pub mod weights;
