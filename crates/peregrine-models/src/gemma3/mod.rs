@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use peregrine_core::arch::{ActLayout, Architecture, Family, Loaded};
 use peregrine_core::blocks::linear::LinJob;
-use peregrine_core::blocks::par::Disjoint;
+use peregrine_core::blocks::par::{Disjoint, OutPtr};
 use peregrine_core::gguf::{Format, Gguf, TensorInfo};
 use peregrine_core::model::{Caches, Config, Linear, State, StepStats, TileStore, Weights};
 use peregrine_core::pool::Pool;
@@ -94,6 +94,76 @@ fn linear_rows(
     }
 }
 
+/// One or more projections that read the **same** activation rows, in matmul-sized
+/// chunks, without quantising anything: the rows are already in `acts`, filled once by
+/// the norm or activation that produced them (S4.9a).
+///
+/// The causal families group q/k/v and gate/up this way: several matrices read the same
+/// normed row, so one fill and one fork-join serve them all. An encoder had the float
+/// rows in hand and re-quantised them per projection — six of the seven fills of a layer
+/// were the same bytes again, serially, while the matmuls ran in parallel.
+#[allow(clippy::too_many_arguments)]
+fn linear_rows_shared(
+    w: &Weights,
+    pool: &Pool,
+    stats: &mut StepStats,
+    jobs: &mut [RowsOut<'_>],
+    acts: &[peregrine_core::quant::QuantAct],
+    lb_x: &mut [f32],
+    lb_t: &mut [f32],
+    input: &[f32],
+    d_in: usize,
+    nb: usize,
+    kq: &mut peregrine_kernels::kq::KqActs,
+) {
+    debug_assert!(!jobs.is_empty() && jobs.len() <= 4);
+    let step = peregrine_core::blocks::linear::MAX_BATCH;
+    let empty: &mut [f32] = &mut [];
+    let mut lj = [LinJob {
+        lin: jobs[0].lin,
+        out: Disjoint::new(empty),
+    }; 4];
+    let mut r0 = 0;
+    let njobs = jobs.len();
+    while r0 < nb {
+        let r1 = (r0 + step).min(nb);
+        let take = r1 - r0;
+        for i in 0..njobs {
+            lj[i].lin = jobs[i].lin;
+            let width = jobs[i].out_dim;
+            // SAFETY: each job's output is a different buffer (q, k, v; gate, up; one
+            // projection), and this chunk of it belongs to this call alone.
+            lj[i].out = Disjoint::new(unsafe { jobs[i].out.rows(r0..r1, width) });
+        }
+        let lbx = Disjoint::new(lb_x);
+        let lbt = Disjoint::new(lb_t);
+        peregrine_core::blocks::linear::linear_group(
+            w,
+            w.lb(),
+            &lj[..njobs],
+            &acts[r0..r1],
+            &input[r0 * d_in..r1 * d_in],
+            d_in,
+            take,
+            lbx,
+            lbt,
+            pool,
+            stats,
+            kq,
+        );
+        r0 = r1;
+    }
+}
+
+/// One projection of [`linear_rows_shared`]: the matrix, its output buffer, and the
+/// width of one output row. Every job's buffer must be a different one — the group
+/// writes them in one fork-join.
+struct RowsOut<'a> {
+    lin: &'a Linear,
+    out: OutPtr<'a>,
+    out_dim: usize,
+}
+
 pub struct Gemma3 {
     pub(crate) tok_embd: TensorInfo,
     pub(crate) out_norm: TensorInfo,
@@ -113,6 +183,10 @@ pub struct Gemma3 {
     pub(crate) dense_width: usize,
     /// A bidirectional encoder (`gemma-embedding`): no KV cache and no causal mask.
     pub(crate) embedding: bool,
+    /// Whether any matrix this model multiplies reads the per-256 activation layout
+    /// (`Format::reads_k_layout`). A Q8_0/F16 model does not, and the layout is then
+    /// never built (S4.9a).
+    pub(crate) k_layout: bool,
 }
 
 #[cfg(feature = "arch-gemma-embedding")]
@@ -496,6 +570,19 @@ impl Gemma3 {
             shape(t, dm, cfg.n_vocab)?;
         }
 
+        // The activation layout the matrices read: a model of 32- and 128-weight
+        // formats never reads the per-256 one, so it is not built (S4.9a).
+        let mut linears: Vec<&Linear> = Vec::new();
+        for l in &layers {
+            linears.extend([&l.wq, &l.wk, &l.wv, &l.wo, &l.gate, &l.up, &l.down]);
+        }
+        linears.push(&head);
+        linears.extend([&dense_2, &dense_3].into_iter().flatten());
+        let k_layout = linears
+            .iter()
+            .filter_map(|lin| lin.dense())
+            .any(|t| t.kind.reads_k_layout());
+
         let initial_swa_ctx = ctx_train.max(2048);
         let rope_swa = peregrine_core::blocks::rope::build_rope_table(
             rope_dim,
@@ -521,6 +608,7 @@ impl Gemma3 {
                 dense_3,
                 dense_width,
                 embedding,
+                k_layout,
             }),
             rope_factors,
             tiles: TileStore::default(),
@@ -626,6 +714,10 @@ impl Architecture for Gemma3 {
         }
         let nb = tokens.len();
         let t_fwd = Instant::now();
+        // The per-256 activation layout is built only when a matrix reads it (S4.9a).
+        for a in st.acts.iter_mut() {
+            a.set_k_layout(self.k_layout);
+        }
 
         // 1. Embedding lookup scaled by sqrt(d_model)
         for (i, &t) in tokens.iter().enumerate() {
@@ -793,14 +885,15 @@ impl Architecture for Gemma3 {
             }
 
             // ---- Attention post-norm and residual add ----
-            peregrine_core::blocks::norm::norm_rows(
+            // Nothing multiplies this norm's output: it is added to the residual, so its
+            // quantisation is skipped (S4.9a).
+            peregrine_core::blocks::norm::norm_rows_f32(
                 w,
                 &l.attn_post_norm,
                 dm,
                 cfg.eps,
                 &st.xb2,
                 &mut st.xb,
-                &mut st.acts,
                 nb,
                 pool,
                 stats,
@@ -891,14 +984,13 @@ impl Architecture for Gemma3 {
             }
 
             // ---- Feed-forward post-norm and residual add ----
-            peregrine_core::blocks::norm::norm_rows(
+            peregrine_core::blocks::norm::norm_rows_f32(
                 w,
                 &l.ffn_post_norm,
                 dm,
                 cfg.eps,
                 &st.xb2,
                 &mut st.xb,
-                &mut st.acts,
                 nb,
                 pool,
                 stats,
@@ -1021,6 +1113,10 @@ impl Architecture for Gemma3 {
         let kvd = cfg.kv_dim();
         let ff = cfg.n_ff;
         let nb: usize = texts.iter().map(|t| t.len()).sum();
+        // The per-256 activation layout is built only when a matrix reads it (S4.9a).
+        for a in st.acts.iter_mut() {
+            a.set_k_layout(self.k_layout);
+        }
 
         // The batch's positions: every text starts at 0. Both buffers are taken out of
         // the state (and put back at the end) so the loop can borrow the rest of `st`
@@ -1091,52 +1187,40 @@ impl Architecture for Gemma3 {
                 stats,
             );
 
-            // ---- QKV projections, one weight pass per matmul-sized chunk ----
-            linear_rows(
-                w,
-                pool,
-                stats,
-                &l.wq,
-                &mut st.acts,
-                &mut st.lb_x,
-                &mut st.lb_t,
-                &st.xb,
-                dm,
-                nb,
-                &mut st.q,
-                qd,
-                &mut st.kq,
-            );
-            linear_rows(
-                w,
-                pool,
-                stats,
-                &l.wk,
-                &mut st.acts,
-                &mut st.lb_x,
-                &mut st.lb_t,
-                &st.xb,
-                dm,
-                nb,
-                &mut st.k,
-                kvd,
-                &mut st.kq,
-            );
-            linear_rows(
-                w,
-                pool,
-                stats,
-                &l.wv,
-                &mut st.acts,
-                &mut st.lb_x,
-                &mut st.lb_t,
-                &st.xb,
-                dm,
-                nb,
-                &mut st.v,
-                kvd,
-                &mut st.kq,
-            );
+            // ---- QKV projections: one quantisation and one fork-join for the three
+            // matrices, which read the same normed rows (S4.9a) ----
+            {
+                let mut jobs = [
+                    RowsOut {
+                        lin: &l.wq,
+                        out: Disjoint::new(&mut st.q),
+                        out_dim: qd,
+                    },
+                    RowsOut {
+                        lin: &l.wk,
+                        out: Disjoint::new(&mut st.k),
+                        out_dim: kvd,
+                    },
+                    RowsOut {
+                        lin: &l.wv,
+                        out: Disjoint::new(&mut st.v),
+                        out_dim: kvd,
+                    },
+                ];
+                linear_rows_shared(
+                    w,
+                    pool,
+                    stats,
+                    &mut jobs,
+                    &st.acts,
+                    &mut st.lb_x,
+                    &mut st.lb_t,
+                    &st.xb,
+                    dm,
+                    nb,
+                    &mut st.kq,
+                );
+            }
 
             // ---- per-head q/k RMSNorm and RoPE ----
             peregrine_core::blocks::attn::prepare_rows(
@@ -1192,14 +1276,14 @@ impl Architecture for Gemma3 {
                 dm,
                 &mut st.kq,
             );
-            peregrine_core::blocks::norm::norm_rows(
+            // The post-attention norm feeds only the residual add: no quantisation.
+            peregrine_core::blocks::norm::norm_rows_f32(
                 w,
                 &l.attn_post_norm,
                 dm,
                 cfg.eps,
                 &st.xb2,
                 &mut st.xb,
-                &mut st.acts,
                 nb,
                 pool,
                 stats,
@@ -1221,36 +1305,34 @@ impl Architecture for Gemma3 {
                 pool,
                 stats,
             );
-            linear_rows(
-                w,
-                pool,
-                stats,
-                &l.gate,
-                &mut st.acts,
-                &mut st.lb_x,
-                &mut st.lb_t,
-                &st.xb,
-                dm,
-                nb,
-                &mut st.hb,
-                ff,
-                &mut st.kq,
-            );
-            linear_rows(
-                w,
-                pool,
-                stats,
-                &l.up,
-                &mut st.acts,
-                &mut st.lb_x,
-                &mut st.lb_t,
-                &st.xb,
-                dm,
-                nb,
-                &mut st.hb2,
-                ff,
-                &mut st.kq,
-            );
+            // Gate and up read the same normed rows: one quantisation, one fork-join.
+            {
+                let mut jobs = [
+                    RowsOut {
+                        lin: &l.gate,
+                        out: Disjoint::new(&mut st.hb),
+                        out_dim: ff,
+                    },
+                    RowsOut {
+                        lin: &l.up,
+                        out: Disjoint::new(&mut st.hb2),
+                        out_dim: ff,
+                    },
+                ];
+                linear_rows_shared(
+                    w,
+                    pool,
+                    stats,
+                    &mut jobs,
+                    &st.acts,
+                    &mut st.lb_x,
+                    &mut st.lb_t,
+                    &st.xb,
+                    dm,
+                    nb,
+                    &mut st.kq,
+                );
+            }
             peregrine_core::blocks::ffn::geglu_rows(
                 ff,
                 &mut st.hb,
@@ -1260,29 +1342,36 @@ impl Architecture for Gemma3 {
                 pool,
                 stats,
             );
-            linear_rows(
-                w,
-                pool,
-                stats,
-                &l.down,
-                &mut st.acts,
-                &mut st.lb_x,
-                &mut st.lb_t,
-                &st.hb,
-                ff,
-                nb,
-                &mut st.xb2,
-                dm,
-                &mut st.kq,
-            );
-            peregrine_core::blocks::norm::norm_rows(
+            // The activation of `geglu_rows` is already quantised: the down projection
+            // reads it as it is instead of filling the same rows again (S4.9a).
+            {
+                let mut jobs = [RowsOut {
+                    lin: &l.down,
+                    out: Disjoint::new(&mut st.xb2),
+                    out_dim: dm,
+                }];
+                linear_rows_shared(
+                    w,
+                    pool,
+                    stats,
+                    &mut jobs,
+                    &st.acts,
+                    &mut st.lb_x,
+                    &mut st.lb_t,
+                    &st.hb,
+                    ff,
+                    nb,
+                    &mut st.kq,
+                );
+            }
+            // The post-FFN norm feeds only the residual add: no quantisation.
+            peregrine_core::blocks::norm::norm_rows_f32(
                 w,
                 &l.ffn_post_norm,
                 dm,
                 cfg.eps,
                 &st.xb2,
                 &mut st.xb,
-                &mut st.acts,
                 nb,
                 pool,
                 stats,

@@ -125,6 +125,25 @@ impl Format {
         }
     }
 
+    /// Whether this format's matmul kernels read the **per-256** activation layout
+    /// (`QuantAct::qk`, `dk`, `bsums`).
+    ///
+    /// The 256-weight super-block formats do. Every 32- and 128-weight format reads
+    /// only the per-32 layout (`q`, `d`, `sums`), so a model made entirely of those
+    /// never touches the per-256 buffers — and building them is a second quantisation
+    /// of the same row (S4.9a).
+    pub const fn reads_k_layout(self) -> bool {
+        matches!(
+            self,
+            Format::Q2_K
+                | Format::Q3_K
+                | Format::Q4_K
+                | Format::Q5_K
+                | Format::Q6_K
+                | Format::IQ4_XS
+        )
+    }
+
     /// The Cargo feature that enables kernels and runtime support for this format,
     /// or None if the format is always enabled (F32, F16, BF16).
     pub const fn required_feature(self) -> Option<&'static str> {
