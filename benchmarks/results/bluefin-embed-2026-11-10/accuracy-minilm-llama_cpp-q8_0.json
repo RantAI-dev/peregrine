@@ -1,0 +1,57 @@
+{
+ "benchmark": "peregrine-s4.2-embed-accuracy",
+ "timestamp": "2026-11-10T19:23:32.491247+00:00",
+ "model": {
+  "name": "minilm",
+  "hf": "sentence-transformers/all-MiniLM-L6-v2",
+  "pooling": "mean"
+ },
+ "row": {
+  "engine": "llama_cpp",
+  "precision": "q8_0",
+  "path": "/var/home/shiro/models/embed/minilm/minilm-q8_0.gguf",
+  "sha256": "263215c3cadd6e16740741a7624ab4cbb6c8e777688bd5331ecfbf5681c2f8ed"
+ },
+ "reference": {
+  "label": "torch-fp32",
+  "backend": "torch-fp32",
+  "dim": 384,
+  "count": 200
+ },
+ "engine": {
+  "name": "llama.cpp",
+  "version": "v0.9.0",
+  "commit": "cd959ba",
+  "repo": "https://github.com/ggml-org/llama.cpp",
+  "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+  "flash_attn": "auto",
+  "parallel_slots": 10,
+  "slots_fallback": "llama-server aborted with -np 10 (build_pooling assertion); restarted with -np 1",
+  "slots_fallback_log": "/var/tmp/llama.cpp/build/bin/libllama-server-impl.so(_ZN19server_context_impl10load_modelER13common_params+0x64b) [0x7f9576f44ccb]\n/var/tmp/llama.cpp/build/bin/libllama-server-impl.so(+0x625a3) [0x7f9576e625a3]\n/var/tmp/llama.cpp/build/bin/libllama-server-impl.so(_Z12llama_serveriPPc+0x1135) [0x7f9576e63fc5]\n/lib64/libc.so.6(+0x3681) [0x7f9575158681]\n/lib64/libc.so.6(__libc_start_main+0x88) [0x7f9575158798]\n/var/tmp/llama.cpp/build/bin/llama-server() [0x4003b5]",
+  "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+ },
+ "host_before": {
+  "loadavg": [
+   0.77587890625,
+   0.681640625,
+   3.9052734375
+  ],
+  "mem_available_gb": 6.78,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.24
+ },
+ "cosine": {
+  "mean": 0.999614,
+  "min": 0.999416,
+  "p1": 0.999454,
+  "p50": 0.999619
+ },
+ "norm": {
+  "min": 1.0,
+  "max": 1.0,
+  "mean": 1.0
+ },
+ "dim": 384,
+ "n": 200
+}

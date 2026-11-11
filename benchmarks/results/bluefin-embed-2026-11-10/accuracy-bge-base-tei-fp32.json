@@ -1,0 +1,54 @@
+{
+ "benchmark": "peregrine-s4.2-embed-accuracy",
+ "timestamp": "2026-11-10T21:21:14.289640+00:00",
+ "model": {
+  "name": "bge-base",
+  "hf": "BAAI/bge-base-en-v1.5",
+  "pooling": "cls"
+ },
+ "row": {
+  "engine": "tei",
+  "precision": "fp32",
+  "path": "/var/home/shiro/models/embed/bge-base/ref",
+  "kind": "dir",
+  "sha256": "0ed4d61307dd16da763c208321d95c7af7280a4128d4dc7e922fbacc87bf8eaa",
+  "size_bytes": 438900339
+ },
+ "reference": {
+  "label": "torch-fp32",
+  "backend": "torch-fp32",
+  "dim": 768,
+  "count": 200
+ },
+ "engine": {
+  "name": "text-embeddings-inference",
+  "version": "1.9.4",
+  "image": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4",
+  "runtime": "podman",
+  "backend": "candle (CPU image; no ONNX Runtime backend in published CPU images)"
+ },
+ "host_before": {
+  "loadavg": [
+   3.78369140625,
+   3.4521484375,
+   2.994140625
+  ],
+  "mem_available_gb": 6.52,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.64
+ },
+ "cosine": {
+  "mean": 0.999994,
+  "min": 0.999986,
+  "p1": 0.999989,
+  "p50": 0.999994
+ },
+ "norm": {
+  "min": 1.0,
+  "max": 1.0,
+  "mean": 1.0
+ },
+ "dim": 768,
+ "n": 200
+}

@@ -1,0 +1,456 @@
+{
+ "benchmark": "peregrine-s4.2-embed",
+ "timestamp": "2026-11-10T21:31:20.979677+00:00",
+ "round": 1,
+ "model": {
+  "name": "qwen3-embed-0.6b",
+  "hf": "Qwen/Qwen3-Embedding-0.6B",
+  "pooling": "last",
+  "max_tokens": 512,
+  "dim": 1024,
+  "tokenizer_dir": "qwen3-embed-0.6b"
+ },
+ "row": {
+  "engine": "llama_cpp",
+  "precision": "q8_0",
+  "path": "/var/home/shiro/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+  "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+  "size_bytes": 639150592,
+  "fingerprint": {
+   "kind": "file",
+   "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+   "size_bytes": 639150592
+  },
+  "notes": "GGUF Q8_0 from Qwen/Qwen3-Embedding-0.6B-GGUF"
+ },
+ "machine": {
+  "hostname": "bluefin",
+  "os": "Linux",
+  "kernel": "7.2.7-200.fc44.x86_64",
+  "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+  "cpu_features": [
+   "fma",
+   "avx",
+   "avx2"
+  ],
+  "cores_logical": 8,
+  "threads_tested": 4,
+  "governor": "powersave",
+  "python": "3.14.8"
+ },
+ "engine": {
+  "name": "llama.cpp",
+  "version": "v0.9.0",
+  "commit": "cd959ba",
+  "repo": "https://github.com/ggml-org/llama.cpp",
+  "binary": "/var/tmp/llama.cpp/build/bin/llama-server",
+  "flash_attn": "auto",
+  "parallel_slots": 10,
+  "server_version": "version: 0.9.0-dev (build 1, commit cd959ba)"
+ },
+ "start": {
+  "cmd": [
+   "/var/tmp/llama.cpp/build/bin/llama-server",
+   "-m",
+   "/var/home/shiro/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+   "--embedding",
+   "--pooling",
+   "last",
+   "-t",
+   "4",
+   "-c",
+   "5200",
+   "-b",
+   "1024",
+   "-ub",
+   "1024",
+   "-np",
+   "10",
+   "-fa",
+   "auto",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8450"
+  ],
+  "pooling": "last",
+  "threads": 4,
+  "parallel": 10,
+  "ctx": 5200,
+  "batch": 1024,
+  "ubatch": 1024
+ },
+ "host_before": {
+  "loadavg": [
+   0.7939453125,
+   1.6337890625,
+   2.392578125
+  ],
+  "mem_available_gb": 5.64,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.63
+ },
+ "host_after": {
+  "loadavg": [
+   3.98095703125,
+   2.9345703125,
+   2.77197265625
+  ],
+  "mem_available_gb": 5.48,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.79
+ },
+ "preflight": {
+  "loadavg": [
+   0.2109375,
+   1.552734375,
+   2.375
+  ],
+  "mem_available_gb": 6.54,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.63
+ },
+ "settings": {
+  "lengths": [
+   16,
+   128,
+   512
+  ],
+  "batches": [
+   1,
+   8,
+   32,
+   128
+  ],
+  "clients": [
+   1,
+   10
+  ],
+  "threads": 4,
+  "budget_s": 2.0,
+  "max_requests": 60,
+  "max_big_requests": 3,
+  "max_cell_seconds": 120.0,
+  "texts_file": "/var/tmp/embed-texts/qwen3-embed-0.6b.json",
+  "texts_per_length": 128
+ },
+ "cells": {
+  "L16_b1_c1": {
+   "texts_per_s": 15.735,
+   "tokens_per_s": 251.8,
+   "wall_s": 2.0337,
+   "requests": 32,
+   "texts": 32,
+   "tokens_calibrated": 512,
+   "tokens_reported": 512,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.063063,
+    "p99": 0.064612,
+    "min": 0.062646,
+    "max": 0.065,
+    "n": 32
+   },
+   "length": 16,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 2.03,
+   "tokens_per_text_median": 16
+  },
+  "L16_b1_c10": {
+   "texts_per_s": 15.168,
+   "tokens_per_s": 242.7,
+   "wall_s": 3.9557,
+   "requests": 60,
+   "texts": 60,
+   "tokens_calibrated": 960,
+   "tokens_reported": 960,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.619472,
+    "p99": 0.746346,
+    "min": 0.063868,
+    "max": 0.746424,
+    "n": 60
+   },
+   "length": 16,
+   "batch": 1,
+   "clients": 10,
+   "elapsed_s": 3.96,
+   "tokens_per_text_median": 16
+  },
+  "L16_b8_c1": {
+   "texts_per_s": 14.645,
+   "tokens_per_s": 234.3,
+   "wall_s": 1.6388,
+   "requests": 3,
+   "texts": 24,
+   "tokens_calibrated": 384,
+   "tokens_reported": 384,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.509465,
+    "p99": 0.626065,
+    "min": 0.50026,
+    "max": 0.628445,
+    "n": 3
+   },
+   "length": 16,
+   "batch": 8,
+   "clients": 1,
+   "elapsed_s": 1.64,
+   "tokens_per_text_median": 16
+  },
+  "L16_b32_c1": {
+   "texts_per_s": 15.221,
+   "tokens_per_s": 243.5,
+   "wall_s": 2.1023,
+   "requests": 1,
+   "texts": 32,
+   "tokens_calibrated": 512,
+   "tokens_reported": 512,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 2.101754,
+    "p99": 2.101754,
+    "min": 2.101754,
+    "max": 2.101754,
+    "n": 1
+   },
+   "length": 16,
+   "batch": 32,
+   "clients": 1,
+   "elapsed_s": 2.1,
+   "tokens_per_text_median": 16
+  },
+  "L16_b128_c1": {
+   "texts_per_s": 16.011,
+   "tokens_per_s": 256.3,
+   "wall_s": 7.9946,
+   "requests": 1,
+   "texts": 128,
+   "tokens_calibrated": 2049,
+   "tokens_reported": 2049,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 7.993011,
+    "p99": 7.993011,
+    "min": 7.993011,
+    "max": 7.993011,
+    "n": 1
+   },
+   "length": 16,
+   "batch": 128,
+   "clients": 1,
+   "elapsed_s": 7.99,
+   "tokens_per_text_median": 16
+  },
+  "L128_b1_c1": {
+   "texts_per_s": 2.193,
+   "tokens_per_s": 280.7,
+   "wall_s": 2.2802,
+   "requests": 5,
+   "texts": 5,
+   "tokens_calibrated": 640,
+   "tokens_reported": 640,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.452255,
+    "p99": 0.47104,
+    "min": 0.449576,
+    "max": 0.471709,
+    "n": 5
+   },
+   "length": 128,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 2.28,
+   "tokens_per_text_median": 128
+  },
+  "L128_b1_c10": {
+   "texts_per_s": 2.201,
+   "tokens_per_s": 281.7,
+   "wall_s": 9.0865,
+   "requests": 20,
+   "texts": 20,
+   "tokens_calibrated": 2560,
+   "tokens_reported": 2560,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 4.096455,
+    "p99": 4.543181,
+    "min": 0.452646,
+    "max": 4.543618,
+    "n": 20
+   },
+   "length": 128,
+   "batch": 1,
+   "clients": 10,
+   "elapsed_s": 9.09,
+   "tokens_per_text_median": 128
+  },
+  "L128_b8_c1": {
+   "texts_per_s": 2.219,
+   "tokens_per_s": 284.0,
+   "wall_s": 3.6053,
+   "requests": 1,
+   "texts": 8,
+   "tokens_calibrated": 1024,
+   "tokens_reported": 1024,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 3.604989,
+    "p99": 3.604989,
+    "min": 3.604989,
+    "max": 3.604989,
+    "n": 1
+   },
+   "length": 128,
+   "batch": 8,
+   "clients": 1,
+   "elapsed_s": 3.61,
+   "tokens_per_text_median": 128
+  },
+  "L128_b32_c1": {
+   "texts_per_s": 2.204,
+   "tokens_per_s": 282.2,
+   "wall_s": 14.5164,
+   "requests": 1,
+   "texts": 32,
+   "tokens_calibrated": 4096,
+   "tokens_reported": 4096,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 14.515898,
+    "p99": 14.515898,
+    "min": 14.515898,
+    "max": 14.515898,
+    "n": 1
+   },
+   "length": 128,
+   "batch": 32,
+   "clients": 1,
+   "elapsed_s": 14.52,
+   "tokens_per_text_median": 128
+  },
+  "L128_b128_c1": {
+   "texts_per_s": 2.166,
+   "tokens_per_s": 277.2,
+   "wall_s": 59.0964,
+   "requests": 1,
+   "texts": 128,
+   "tokens_calibrated": 16384,
+   "tokens_reported": 16384,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 59.094833,
+    "p99": 59.094833,
+    "min": 59.094833,
+    "max": 59.094833,
+    "n": 1
+   },
+   "length": 128,
+   "batch": 128,
+   "clients": 1,
+   "elapsed_s": 59.1,
+   "tokens_per_text_median": 128
+  },
+  "L512_b1_c1": {
+   "texts_per_s": 0.497,
+   "tokens_per_s": 254.7,
+   "wall_s": 2.0101,
+   "requests": 1,
+   "texts": 1,
+   "tokens_calibrated": 512,
+   "tokens_reported": 512,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 2.009861,
+    "p99": 2.009861,
+    "min": 2.009861,
+    "max": 2.009861,
+    "n": 1
+   },
+   "length": 512,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 2.01,
+   "tokens_per_text_median": 512
+  },
+  "L512_b1_c10": {
+   "texts_per_s": 0.497,
+   "tokens_per_s": 254.5,
+   "wall_s": 20.1192,
+   "requests": 10,
+   "texts": 10,
+   "tokens_calibrated": 5120,
+   "tokens_reported": 5120,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 12.077361,
+    "p99": 19.933348,
+    "min": 2.031221,
+    "max": 20.114353,
+    "n": 10
+   },
+   "length": 512,
+   "batch": 1,
+   "clients": 10,
+   "elapsed_s": 20.12,
+   "tokens_per_text_median": 512
+  },
+  "L512_b8_c1": {
+   "texts_per_s": 0.494,
+   "tokens_per_s": 252.9,
+   "wall_s": 16.1956,
+   "requests": 1,
+   "texts": 8,
+   "tokens_calibrated": 4096,
+   "tokens_reported": 4096,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 16.195304,
+    "p99": 16.195304,
+    "min": 16.195304,
+    "max": 16.195304,
+    "n": 1
+   },
+   "length": 512,
+   "batch": 8,
+   "clients": 1,
+   "elapsed_s": 16.2,
+   "tokens_per_text_median": 512
+  },
+  "L512_b32_c1": {
+   "texts_per_s": 0.493,
+   "tokens_per_s": 252.3,
+   "wall_s": 64.9272,
+   "requests": 1,
+   "texts": 32,
+   "tokens_calibrated": 16378,
+   "tokens_reported": 16378,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 64.926684,
+    "p99": 64.926684,
+    "min": 64.926684,
+    "max": 64.926684,
+    "n": 1
+   },
+   "length": 512,
+   "batch": 32,
+   "clients": 1,
+   "elapsed_s": 64.93,
+   "tokens_per_text_median": 512
+  },
+  "L512_b128_c1": {
+   "skipped": "128 texts x 512 tokens = 65536 tokens per request exceeds this model's 32768-token batch cap; the padded batch's attention buffers would not fit in the host's memory budget",
+   "batch_tokens": 65536,
+   "batch_token_cap": 32768
+  }
+ }
+}
