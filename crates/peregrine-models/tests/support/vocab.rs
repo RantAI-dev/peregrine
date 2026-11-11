@@ -193,7 +193,8 @@ pub fn add_gemma_tokenizer_metadata(w: &mut GgufWriter) {
 }
 
 /// Writes tokenizer metadata to a `GgufWriter`.
-pub fn add_tokenizer_metadata(w: &mut GgufWriter, pre: &str) {    let (tokens, types, merges) = build_vocab();
+pub fn add_tokenizer_metadata(w: &mut GgufWriter, pre: &str) {
+    let (tokens, types, merges) = build_vocab();
     w.str("tokenizer.ggml.model", "gpt2");
     w.str("tokenizer.ggml.pre", pre);
     w.arr_str("tokenizer.ggml.tokens", &tokens);
@@ -219,16 +220,49 @@ pub fn bert_vocab() -> (Vec<String>, Vec<i32>) {
         .iter()
         .map(|s| (*s).to_string())
         .collect();
-    let mut types = vec![TYPE_CONTROL, TYPE_UNKNOWN, TYPE_CONTROL, TYPE_CONTROL, TYPE_CONTROL];
+    let mut types = vec![
+        TYPE_CONTROL,
+        TYPE_UNKNOWN,
+        TYPE_CONTROL,
+        TYPE_CONTROL,
+        TYPE_CONTROL,
+    ];
     for word in [
-        "▁the", "▁a", "▁test", "▁hello", "▁world", "▁text", "▁of", "▁and", "▁to", "▁in", "▁is",
-        "▁for", "▁on", "▁it", "▁with", "▁as", "▁at", "▁this", "▁be", "▁by", "▁capitol", "▁france",
-        "▁paris", "▁city", "▁what", "▁one", "▁two", "▁three",
+        "▁the",
+        "▁a",
+        "▁test",
+        "▁hello",
+        "▁world",
+        "▁text",
+        "▁of",
+        "▁and",
+        "▁to",
+        "▁in",
+        "▁is",
+        "▁for",
+        "▁on",
+        "▁it",
+        "▁with",
+        "▁as",
+        "▁at",
+        "▁this",
+        "▁be",
+        "▁by",
+        "▁capitol",
+        "▁france",
+        "▁paris",
+        "▁city",
+        "▁what",
+        "▁one",
+        "▁two",
+        "▁three",
     ] {
         tokens.push(word.to_string());
         types.push(TYPE_NORMAL);
     }
-    for cont in ["##s", "##ing", "##ed", "##er", "##ly", "##tion", "##al", "##ness", "##est"] {
+    for cont in [
+        "##s", "##ing", "##ed", "##er", "##ly", "##tion", "##al", "##ness", "##est",
+    ] {
         tokens.push(cont.to_string());
         types.push(TYPE_NORMAL);
     }
@@ -280,15 +314,41 @@ pub fn add_unigram_tokenizer_metadata(w: &mut GgufWriter) {
         .collect();
     let mut types = vec![TYPE_UNKNOWN, TYPE_CONTROL, TYPE_CONTROL, TYPE_CONTROL];
     let mut scores = vec![0.0f32, 0.0, 0.0, 0.0];
-    let add = |tokens: &mut Vec<String>, types: &mut Vec<i32>, scores: &mut Vec<f32>, t: &str, s: f32| {
-        tokens.push(t.to_string());
-        types.push(TYPE_NORMAL);
-        scores.push(s);
-    };
+    let add =
+        |tokens: &mut Vec<String>, types: &mut Vec<i32>, scores: &mut Vec<f32>, t: &str, s: f32| {
+            tokens.push(t.to_string());
+            types.push(TYPE_NORMAL);
+            scores.push(s);
+        };
     for (i, word) in [
-        "▁the", "▁a", "▁test", "▁hello", "▁world", "▁text", "▁of", "▁and", "▁to", "▁in", "▁is",
-        "▁for", "▁on", "▁it", "▁with", "▁as", "▁at", "▁this", "▁be", "▁by", "▁capitol", "▁france",
-        "▁paris", "▁city", "▁what", "▁one", "▁two", "▁three",
+        "▁the",
+        "▁a",
+        "▁test",
+        "▁hello",
+        "▁world",
+        "▁text",
+        "▁of",
+        "▁and",
+        "▁to",
+        "▁in",
+        "▁is",
+        "▁for",
+        "▁on",
+        "▁it",
+        "▁with",
+        "▁as",
+        "▁at",
+        "▁this",
+        "▁be",
+        "▁by",
+        "▁capitol",
+        "▁france",
+        "▁paris",
+        "▁city",
+        "▁what",
+        "▁one",
+        "▁two",
+        "▁three",
     ]
     .iter()
     .enumerate()
@@ -301,7 +361,13 @@ pub fn add_unigram_tokenizer_metadata(w: &mut GgufWriter) {
         .chain([',', '.', '!', '?', '-', '\''].into_iter())
         .enumerate()
     {
-        add(&mut tokens, &mut types, &mut scores, &format!("{c}"), -20.0 - i as f32);
+        add(
+            &mut tokens,
+            &mut types,
+            &mut scores,
+            &format!("{c}"),
+            -20.0 - i as f32,
+        );
     }
     let mut i = 0;
     while tokens.len() < BERT_VOCAB_SIZE {

@@ -1280,7 +1280,15 @@ pub fn gelu_erf_rows(x: &mut [f32]) {
 
 /// [`layer_norm_row`] over `nb` rows of `dim` floats — the batch form the encoder
 /// calls once per norm. A row's bits are [`layer_norm_row`]'s, whatever the batch.
-pub fn layer_norm_rows(x: &[f32], weight: &[f32], bias: &[f32], eps: f32, dim: usize, nb: usize, out: &mut [f32]) {
+pub fn layer_norm_rows(
+    x: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    eps: f32,
+    dim: usize,
+    nb: usize,
+    out: &mut [f32],
+) {
     for r in 0..nb {
         layer_norm_row(
             &x[r * dim..(r + 1) * dim],
@@ -2702,7 +2710,9 @@ mod tests {
         let mut max_abs = 0.0f64;
         let mut at = 0.0f64;
         // The rows path must be the single-element function element by element.
-        let mut row: Vec<f32> = (0..1001).map(|i| -12.0 + 24.0 * i as f32 / 1000.0).collect();
+        let mut row: Vec<f32> = (0..1001)
+            .map(|i| -12.0 + 24.0 * i as f32 / 1000.0)
+            .collect();
         let single: Vec<f32> = row.iter().map(|&x| gelu_erf(x)).collect();
         gelu_erf_rows(&mut row);
         assert_eq!(

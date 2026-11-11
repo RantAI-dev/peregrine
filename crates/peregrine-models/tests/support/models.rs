@@ -881,8 +881,18 @@ pub fn write_bert(dir: &Path, fmt: Format, seed: u64, s: BertConfig) -> PathBuf 
             bias(&mut w, &mut rng, &p(name), n);
         }
         for norm_name in ["attn_output_norm", "layer_output_norm"] {
-            norm(&mut w, &mut rng, &p(&format!("{norm_name}.weight")), s.d_model);
-            bias(&mut w, &mut rng, &p(&format!("{norm_name}.bias")), s.d_model);
+            norm(
+                &mut w,
+                &mut rng,
+                &p(&format!("{norm_name}.weight")),
+                s.d_model,
+            );
+            bias(
+                &mut w,
+                &mut rng,
+                &p(&format!("{norm_name}.bias")),
+                s.d_model,
+            );
         }
     }
 

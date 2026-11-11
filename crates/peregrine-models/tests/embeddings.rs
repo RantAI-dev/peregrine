@@ -1363,7 +1363,10 @@ fn a_bert_file_reports_itself_as_an_encoder_with_its_pooling() {
         assert_eq!(model.pooling().unwrap(), Some(want), "pooling_type {id}");
         assert_eq!(model.embedding_width(), model.cfg.d_model);
         // The position table is the context: the text limit is the file's.
-        assert_eq!(model.cfg.ctx_train, support::models::BertConfig::default().ctx);
+        assert_eq!(
+            model.cfg.ctx_train,
+            support::models::BertConfig::default().ctx
+        );
     }
 }
 
@@ -1640,7 +1643,13 @@ fn the_synthetic_bert_matches_its_golden_for_the_tier() {
             }
         }
         use std::fmt::Write as _;
-        writeln!(out, "{} {dims:?} len {} fnv {h:016x}", pooling.name(), v.len()).unwrap();
+        writeln!(
+            out,
+            "{} {dims:?} len {} fnv {h:016x}",
+            pooling.name(),
+            v.len()
+        )
+        .unwrap();
     }
     let tier = peregrine_core::cpu::tier_name();
     let golden_tier = format!(
@@ -1650,7 +1659,11 @@ fn the_synthetic_bert_matches_its_golden_for_the_tier() {
         } else {
             tier.as_str()
         },
-        if cfg!(target_os = "macos") { "-macos" } else { "" }
+        if cfg!(target_os = "macos") {
+            "-macos"
+        } else {
+            ""
+        }
     );
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden/synthetic")

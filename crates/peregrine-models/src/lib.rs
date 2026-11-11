@@ -13,6 +13,8 @@
     clippy::chunks_exact_to_as_chunks
 )]
 
+#[cfg(feature = "arch-bert")]
+pub mod bert;
 #[cfg(any(
     feature = "arch-llama",
     feature = "arch-qwen",
@@ -20,8 +22,6 @@
     feature = "arch-phi3"
 ))]
 pub mod dense;
-#[cfg(feature = "arch-bert")]
-pub mod bert;
 #[cfg(any(feature = "arch-gemma3", feature = "arch-gemma-embedding"))]
 pub mod gemma3;
 #[cfg(feature = "arch-gpt-oss")]
@@ -42,6 +42,8 @@ pub mod qwen35;
 #[cfg(feature = "arch-qwen3moe")]
 pub mod qwen3moe;
 
+#[cfg(feature = "arch-bert")]
+pub use bert::BertFamily;
 #[cfg(any(feature = "arch-llama", feature = "arch-qwen", feature = "arch-phi3"))]
 pub use dense::DenseFamily;
 #[cfg(feature = "arch-llama")]
@@ -54,8 +56,6 @@ pub use dense::QwenFamily;
 pub use gemma3::Gemma3Family;
 #[cfg(feature = "arch-gemma-embedding")]
 pub use gemma3::GemmaEmbeddingFamily;
-#[cfg(feature = "arch-bert")]
-pub use bert::BertFamily;
 #[cfg(feature = "arch-gpt-oss")]
 pub use gptoss::GptOssFamily;
 #[cfg(feature = "arch-qwen35")]

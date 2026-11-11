@@ -137,20 +137,16 @@ impl Bert {
 
         // The token type table is required by llama.cpp's loader (`n_token_types == 0`
         // throws); its row 0 is what the graph adds to every token.
-        let n_token_types = g
-            .u32("tokenizer.ggml.token_type_count")
-            .map_err(|_| {
-                "bert model needs to define token type count \
+        let n_token_types = g.u32("tokenizer.ggml.token_type_count").map_err(|_| {
+            "bert model needs to define token type count \
                  (tokenizer.ggml.token_type_count)"
-                    .to_string()
-            })? as usize;
+                .to_string()
+        })? as usize;
         if n_token_types == 0 {
             return Err("bert model needs to define token type count".into());
         }
 
-        let eps = g
-            .f32(&k("attention.layer_norm_epsilon"))
-            .unwrap_or(1e-5);
+        let eps = g.f32(&k("attention.layer_norm_epsilon")).unwrap_or(1e-5);
 
         // The position table is the text limit, and there is no offset: llama.cpp
         // indexes it with the sequence's own 0-based positions (build_inp_pos), and
@@ -466,7 +462,15 @@ fn add_bias(out: &mut [f32], dim: usize, nb: usize, bias: &[f32]) {
 /// LayerNorm every row of the batch into `out` (f32 only, no quantisation); the
 /// per-row arithmetic is `vmath::layer_norm_row`'s, and shared with the reference.
 #[inline]
-fn layer_norm_rows(x: &[f32], w: &[f32], b: &[f32], eps: f32, dim: usize, nb: usize, out: &mut [f32]) {
+fn layer_norm_rows(
+    x: &[f32],
+    w: &[f32],
+    b: &[f32],
+    eps: f32,
+    dim: usize,
+    nb: usize,
+    out: &mut [f32],
+) {
     peregrine_core::vmath::layer_norm_rows(x, w, b, eps, dim, nb, out);
 }
 
@@ -524,7 +528,14 @@ impl Architecture for Bert {
         f: &mut dyn FnMut(&mut Linear) -> Result<(), String>,
     ) -> Result<(), String> {
         for l in &mut self.layers {
-            for lin in [&mut l.wq, &mut l.wk, &mut l.wv, &mut l.wo, &mut l.up, &mut l.down] {
+            for lin in [
+                &mut l.wq,
+                &mut l.wk,
+                &mut l.wv,
+                &mut l.wo,
+                &mut l.up,
+                &mut l.down,
+            ] {
                 f(lin)?;
             }
         }
@@ -641,10 +652,7 @@ impl Architecture for Bert {
                     &mut st.xb2[..dm],
                     stats,
                 );
-                for (x, &p) in st.x[row * dm..(row + 1) * dm]
-                    .iter_mut()
-                    .zip(&st.xb2[..dm])
-                {
+                for (x, &p) in st.x[row * dm..(row + 1) * dm].iter_mut().zip(&st.xb2[..dm]) {
                     *x += p;
                 }
                 row += 1;
@@ -749,7 +757,15 @@ impl Architecture for Bert {
             for i in 0..nb * dm {
                 st.xb2[i] += st.x[i];
             }
-            layer_norm_rows(&st.xb2, &l.attn_norm_w, &l.attn_norm_b, cfg.eps, dm, nb, &mut st.xb);
+            layer_norm_rows(
+                &st.xb2,
+                &l.attn_norm_w,
+                &l.attn_norm_b,
+                cfg.eps,
+                dm,
+                nb,
+                &mut st.xb,
+            );
             // The normed rows feed ffn_up: one fill, one group.
             for r in 0..nb {
                 st.acts[r].fill(&st.xb[r * dm..(r + 1) * dm]);
@@ -809,7 +825,15 @@ impl Architecture for Bert {
             }
             // The layer's output is its normalised value: the next layer applies no
             // pre-norm, so `st.x` and the activation rows are its input directly.
-            layer_norm_rows(&st.xb2, &l.out_norm_w, &l.out_norm_b, cfg.eps, dm, nb, &mut st.x);
+            layer_norm_rows(
+                &st.xb2,
+                &l.out_norm_w,
+                &l.out_norm_b,
+                cfg.eps,
+                dm,
+                nb,
+                &mut st.x,
+            );
             for r in 0..nb {
                 st.acts[r].fill(&st.x[r * dm..(r + 1) * dm]);
             }
