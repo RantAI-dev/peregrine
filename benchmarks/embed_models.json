@@ -138,6 +138,22 @@
      "path": "embeddinggemma/embeddinggemma-Q8_0.gguf",
      "notes": "the encoder path (S4.4): whole texts, no KV cache; S4.9b pass budget"}
    ]
+  },
+  "nemotron-3.5-embed-1b": {
+   "max_batch_tokens": 32768,
+   "hf": "W4D/Nemotron-3.5-Embed-1B-GGUF",
+   "pooling": "mean",
+   "max_tokens": 2048,
+   "dim": 2048,
+   "tokenizer_dir": "nemotron/ref",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "q8_0",
+     "path": "nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
+     "notes": "GGUF Q8_0 from W4D/Nemotron-3.5-Embed-1B-GGUF"},
+    {"engine": "peregrine", "precision": "q8_0",
+     "path": "nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
+     "notes": "the mistral3 non-causal encoder path (S4.14b), mean pooling"}
+   ]
   }
  }
 }

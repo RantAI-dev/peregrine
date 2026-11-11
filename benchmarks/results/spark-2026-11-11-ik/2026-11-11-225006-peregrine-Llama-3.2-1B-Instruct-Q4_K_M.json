@@ -1,0 +1,226 @@
+{
+  "benchmark": "peregrine-s3.1",
+  "timestamp": "2026-11-11T15:46:50.113813+00:00",
+  "model": {
+    "path": "~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+    "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+    "sha256": "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
+    "size_bytes": 807694464,
+    "bytes_per_token_telemetry": 801191568.0
+  },
+  "machine": {
+    "hostname": "thinkstationpgx-0010",
+    "os": "Linux",
+    "kernel": "6.17.0-1008-nvidia",
+    "platform": "Linux-6.17.0-1008-nvidia-aarch64-with-glibc2.39",
+    "cpu_model": "unknown",
+    "cpu_features": [],
+    "threads_tested": 10,
+    "governor": "performance",
+    "bandwidth_ceiling_bytes_per_s": 98121650877.32465,
+    "bandwidth_ceiling_gb_s": 98.122,
+    "flops_ceiling": 196169977361.98462,
+    "gflops_ceiling": 196.17,
+    "simd_tier": "aarch64-neon-i8mm",
+    "ridge_point": 1.999
+  },
+  "engine": {
+    "name": "peregrine",
+    "version": "0.1.0",
+    "commit": "487f0a2cf42200b05192dff423784d6ea2605648",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "build_command": "cargo build --release -p peregrine"
+  },
+  "settings": {
+    "contexts": [
+      4096
+    ],
+    "runs": 3,
+    "decode_tokens": 256,
+    "threads": 10,
+    "mode": "server",
+    "user_counts": [
+      1
+    ],
+    "engine_args": {
+      "peregrine": [
+        "--opt",
+        "decode_threads=10"
+      ],
+      "llama.cpp": [
+        "-ngl",
+        "0"
+      ],
+      "ik_llama.cpp": [
+        "-ngl",
+        "0"
+      ]
+    },
+    "chat_template_kwargs": null,
+    "token_tolerance": 0,
+    "interleaved": true,
+    "llama_flash_attn": "auto",
+    "port_base": 8201,
+    "ports": "fresh free port per phase (pick_free_port)"
+  },
+  "results": {
+    "4096": {
+      "single_user": {
+        "decode_tok_s": [
+          95.35794783307277,
+          94.42225948172943,
+          93.96245800682405
+        ],
+        "prefill_tok_s": [
+          409.47349089321625,
+          407.97871918159643,
+          407.10026044874394
+        ],
+        "ttft_s": [
+          9.884167671203613,
+          9.935136079788208,
+          9.956338882446289
+        ],
+        "prompt_tokens": [
+          4077,
+          4078,
+          4078
+        ]
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": [],
+        "decode_aggregate_tok_s": [],
+        "ttft_s": [],
+        "prompt_tokens": []
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": [],
+        "decode_aggregate_tok_s": [],
+        "ttft_s": [],
+        "prompt_tokens": []
+      }
+    }
+  },
+  "summary": {
+    "4096": {
+      "context": 4096,
+      "actual_prompt_tokens": 4078,
+      "single_user": {
+        "decode_tok_s": {
+          "median": 94.42,
+          "spread": 0.7,
+          "min": 93.96,
+          "max": 95.36
+        },
+        "prefill_tok_s": {
+          "median": 407.98,
+          "spread": 1.19,
+          "min": 407.1,
+          "max": 409.47
+        },
+        "ttft_s": {
+          "median": 9.94,
+          "spread": 0.04,
+          "min": 9.88,
+          "max": 9.96
+        },
+        "prompt_tokens": {
+          "median": 4078,
+          "spread": 0.5,
+          "min": 4077,
+          "max": 4078
+        },
+        "bytes_per_token": 801191568.0,
+        "fraction_of_ceiling": 0.771,
+        "percent_of_ceiling": 77.1,
+        "raw_samples": {
+          "decode_tok_s": [
+            95.35794783307277,
+            94.42225948172943,
+            93.96245800682405
+          ],
+          "prefill_tok_s": [
+            409.47349089321625,
+            407.97871918159643,
+            407.10026044874394
+          ],
+          "ttft_s": [
+            9.884167671203613,
+            9.935136079788208,
+            9.956338882446289
+          ],
+          "prompt_tokens": [
+            4077,
+            4078,
+            4078
+          ]
+        }
+      },
+      "multi_user_4": {
+        "aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "decode_aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "ttft_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "prompt_tokens": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [],
+          "decode_aggregate_tok_s": [],
+          "ttft_s": [],
+          "prompt_tokens": []
+        }
+      },
+      "multi_user_10": {
+        "aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "decode_aggregate_tok_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "first_token_time_s": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "prompt_tokens": {
+          "median": 0.0,
+          "spread": 0.0,
+          "min": 0.0,
+          "max": 0.0
+        },
+        "raw_samples": {
+          "aggregate_tok_s": [],
+          "decode_aggregate_tok_s": [],
+          "ttft_s": [],
+          "prompt_tokens": []
+        }
+      }
+    }
+  }
+}
