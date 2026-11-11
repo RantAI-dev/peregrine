@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The packed float GEMM and the encoder attention strip on aarch64 (S4.9f, S4.9g)**: the float
+  F32/F16/BF16 matrices now go through the packed 16-output panels on ARM too, with a NEON kernel
+  (four `float32x4_t` accumulators per panel, four activation rows, one `vfmaq_f32` per term;
+  `fcvtl` widens f16 and a high-half shift widens bf16, both exact). The kernel computes the same
+  sequential FMA chain as the scalar reference and the x86 kernels, so a result's bits still do not
+  depend on the batch, pass size, thread count or tier. The bidirectional attention strip gets its
+  NEON twins as well: a 4×16 score tile, `vmaxq_f32`, `exp4`, and a six-row value mix. Measured on
+  a 20-core big.LITTLE ARM host, 16 threads, `/v1/embeddings`: Qwen3-Embedding 0.6B f16 goes from
+  22 to 517-630 tokens/s (24-28×, and ahead of llama.cpp v0.9.0 at 16 and 128 tokens, level at
+  512); EmbeddingGemma 300M Q8_0 gains 1.9× at 128 tokens and 2.6× at 512. The aarch64 float
+  goldens moved once; the three NEON tiers agree bit for bit, and no integer-path golden changed.
+
 - **Repacked Q5_K tiles on x86 (S4.9i)**: a Q5_K matrix is now rewritten at load into the
   eight-row tile (`Q5K8`, 1408 bytes, size-neutral), with the fifth bits transposed once and
   the nibbles, scales and mins in the Q4_K tile's layout. An AVX2 GEMM for four or more
@@ -21,6 +33,12 @@ All notable changes to this project are documented here. The format follows
   keeps Q6_K on the row path there; the kernels are ready for a tier whose GEMV wins. Goldens:
   the synthetic Q5_K files (AVX2 and AVX-512) and Qwen3.5-2B's real-model golden (both tiers)
   move; nothing without a Q5_K matmul changes.
+- **The Tekken pre-tokenizer (S4.14a)**: `tokenizer.ggml.pre = "pixtral"` / `"tekken"`,
+  `"tekken-num3"` and `"nemotron-3.5-embed"` are pre-types of their own, with `ignore_merges` and the
+  case-sensitive pattern evaluated exactly as llama.cpp's `std::regex` over collapsed text does, so
+  NVIDIA's Nemotron 3.5 Embed vocabulary tokenizes to the same ids (361 strings, plus 22 for the
+  zero-width-non-joiner rule). `encode_unparsed` is llama.cpp's `parse_special = false`, which the
+  byte-level BPE path previously ignored.
 - **The `bert` family: MiniLM, BGE, E5, GTE and bge-m3 embeddings (roadmap S4.6, part a)**:
   `architecture = "bert"` is the post-norm encoder every encoder-only embedding file in
   llama.cpp's format ships as — token + token-type + learned absolute-position embeddings and one

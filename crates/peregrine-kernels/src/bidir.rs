@@ -53,14 +53,20 @@
 //!
 //! # aarch64
 //!
-//! The scalar twins compile everywhere and are the reference. `// S4.9g:` marks where
-//! the NEON kernels go (`simd.rs`/`neon.rs` style: `vfmaq_f32` with the same lane
-//! meaning, and `exp4` from `vmath`).
+//! The scalar twins compile everywhere and are the reference. The NEON kernels are
+//! beside them: `vfmaq_f32` with one key per lane (four lanes, so a 4×16 tile),
+//! `vmaxq_f32` for the soft-max's exact maximum, `vmath::exp4` for the weights
+//! (bit-identical to `exp_scalar`), and a six-row value mix with two `float32x4_t`
+//! per row. Every result is bit-identical to the scalar twins.
 
 use crate::vmath::exp_scalar;
 
+#[cfg(target_arch = "aarch64")]
+use crate::vmath::exp4;
 #[cfg(target_arch = "x86_64")]
 use crate::vmath::exp8;
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
@@ -103,22 +109,34 @@ const KEYS_PER_GROUP: usize = 4 * LANES;
 /// query broadcast per head dimension), the same shape as the float GEMM's 6×16 tile
 /// and for the same reason: sixteen keys amply amortise the panel load, six rows
 /// amortise the broadcast, and twelve accumulators leave room for the live loads on
-/// AVX2's sixteen registers. Measured shapes and their rates are in
-/// `docs/design/s4.9-sota.md`.
+/// AVX2's sixteen registers. NEON is four lanes wide and has thirty-two registers, so
+/// its tile is four rows × sixteen keys (sixteen accumulators). Measured shapes and
+/// their rates are in `docs/design/s4.9-sota.md`.
+#[cfg(target_arch = "x86_64")]
 pub const TILE_ROWS: usize = 6;
+#[cfg(target_arch = "aarch64")]
+pub const TILE_ROWS: usize = 4;
 
-/// Keys per score tile: two `ymm` of eight lanes (one lane per key).
+/// Keys per score tile: four vectors of one lane per key (two `ymm` in AVX2, four
+/// `float32x4_t` on NEON).
 pub const TILE_KEYS: usize = 16;
 
-/// Value rows the mix shares one value load between: six rows × two `ymm` of head
+/// Value rows the mix shares one value load between: six rows × two vectors of head
 /// dimensions is twelve accumulators that share each value load, the same register
 /// block as the score tile and for the same reason.
 pub const MIX_BLOCK: usize = 6;
 /// Keys per vector lane group on every tier: one lane per key, so a lane is one score.
+#[cfg(target_arch = "x86_64")]
 pub const VEC: usize = 8;
+/// Four lanes on NEON, one key each.
+#[cfg(target_arch = "aarch64")]
+pub const VEC: usize = 4;
 
 /// Keys per vector accumulator — one `__m256` lane per key, so a lane is one score.
 #[cfg(target_arch = "x86_64")]
+const LANES: usize = VEC;
+/// Four lanes on NEON.
+#[cfg(target_arch = "aarch64")]
 const LANES: usize = VEC;
 
 /// Head-dimension steps of lookahead for the panel prefetch in a score tile.
@@ -135,6 +153,13 @@ const SCORE_PF: usize = 8;
 #[inline]
 fn vector_ok() -> bool {
     crate::simd::have_batched()
+}
+
+/// Whether the NEON kernels may run on this machine and tier.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn vector_ok() -> bool {
+    crate::cpu::have_neon()
 }
 
 /// The window of query row `i` of a text of `n` keys: `lo..hi`.
@@ -225,9 +250,14 @@ pub fn scores_row(
             return;
         }
     }
-    // S4.9g: the NEON kernel goes here — `vfmaq_f32` with the same lane meaning (one key
-    // per lane, the head dimension folded inside it) and `vmath`'s `exp4` for the weights,
-    // beside `scores_row_scalar` as the reference, exactly as the AVX2 one does on x86.
+    #[cfg(target_arch = "aarch64")]
+    {
+        if vector_ok() {
+            // SAFETY: NEON checked; every load and store is bounds-checked above.
+            unsafe { scores_row_neon(q, panel, n, hd, lo, hi, scale, out) };
+            return;
+        }
+    }
     scores_row_scalar(q, panel, n, hd, lo, hi, scale, out)
 }
 
@@ -324,6 +354,84 @@ unsafe fn scores_row_avx2(
     }
 }
 
+/// NEON's four accumulators, four keys each: the chain over the head dimension is the
+/// inner loop, so each key's dependency is one FMA deep.
+///
+/// # Safety
+/// NEON must be available; `lo..hi ⊆ 0..n`, `q.len() >= hd`, `panel.len() >= hd * n`,
+/// `out.len() >= n`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn scores_row_neon(
+    q: &[f32],
+    panel: &[f32],
+    n: usize,
+    hd: usize,
+    lo: usize,
+    hi: usize,
+    scale: f32,
+    out: &mut [f32],
+) {
+    let s = vdupq_n_f32(scale);
+    macro_rules! group16 {
+        ($j:expr) => {{
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut a2 = vdupq_n_f32(0.0);
+            let mut a3 = vdupq_n_f32(0.0);
+            for k in 0..hd {
+                let qk = vdupq_n_f32(*q.get_unchecked(k));
+                let p = panel.as_ptr().add(k * n + $j);
+                a0 = vfmaq_f32(a0, vld1q_f32(p), qk);
+                a1 = vfmaq_f32(a1, vld1q_f32(p.add(4)), qk);
+                a2 = vfmaq_f32(a2, vld1q_f32(p.add(8)), qk);
+                a3 = vfmaq_f32(a3, vld1q_f32(p.add(12)), qk);
+            }
+            let o = out.as_mut_ptr().add($j);
+            vst1q_f32(o, vmulq_f32(a0, s));
+            vst1q_f32(o.add(4), vmulq_f32(a1, s));
+            vst1q_f32(o.add(8), vmulq_f32(a2, s));
+            vst1q_f32(o.add(12), vmulq_f32(a3, s));
+        }};
+    }
+    macro_rules! group4 {
+        ($j:expr) => {{
+            let mut a0 = vdupq_n_f32(0.0);
+            for k in 0..hd {
+                let qk = vdupq_n_f32(*q.get_unchecked(k));
+                let p = panel.as_ptr().add(k * n + $j);
+                a0 = vfmaq_f32(a0, vld1q_f32(p), qk);
+            }
+            vst1q_f32(out.as_mut_ptr().add($j), vmulq_f32(a0, s));
+        }};
+    }
+    let mut j = lo;
+    while j + 16 <= hi {
+        group16!(j);
+        j += 16;
+    }
+    while j + LANES <= hi {
+        group4!(j);
+        j += LANES;
+    }
+    if j < hi {
+        if hi - lo >= LANES {
+            // The last group overlaps the previous one: the keys it recomputes are the
+            // same keys with the same arithmetic, and only lanes inside `hi` are read.
+            group4!(hi - LANES);
+        } else {
+            for j in j..hi {
+                let mut acc = 0.0f32;
+                for k in 0..hd {
+                    acc = q[k].mul_add(*panel.get_unchecked(k * n + j), acc);
+                }
+                *out.get_unchecked_mut(j) = acc * scale;
+            }
+        }
+    }
+}
+
 /// `out[r*out_stride + j] = scale · Σ_k q[r*q_stride + k]·panel[k*n + j]`, for every
 /// row `r` in `0..rows` and every key `j` in `j0..j1`; one sequential FMA chain per
 /// `(row, key)`, in head-dimension order.
@@ -398,8 +506,40 @@ pub fn scores_tile_shaped(
         "score rows shorter than the strip"
     );
     assert!(panel.len() >= hd * n, "key panel shorter than hd * n");
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let _ = (rows_tile, keys_tile);
+    #[cfg(target_arch = "aarch64")]
+    {
+        let len = j1 - j0;
+        // NEON's tile is four rows × sixteen keys: below sixteen keys it halves to
+        // eight and then to four, and below four the range is a scalar tail (the edge
+        // of a sliding window is at most three keys wide).
+        let kt = if len >= 16 {
+            16
+        } else if len >= 8 {
+            8
+        } else if len >= VEC {
+            4
+        } else {
+            0
+        };
+        let _ = keys_tile;
+        if kt != 0 && vector_ok() {
+            let rt = match rows_tile.min(rows) {
+                1 => 1,
+                2 | 3 => 2,
+                _ => 4,
+            };
+            // SAFETY: NEON checked; the shape is at most the strip and the key range
+            // holds a whole key tile.
+            unsafe {
+                scores_tile_neon(
+                    rt, kt, q, q_stride, panel, n, hd, rows, j0, j1, scale, out, out_stride,
+                )
+            };
+            return;
+        }
+    }
     #[cfg(target_arch = "x86_64")]
     {
         let len = j1 - j0;
@@ -662,6 +802,201 @@ unsafe fn score_block<const R: usize, const NV: usize>(
     }
 }
 
+/// The NEON score-tile dispatcher: one monomorphisation per measured shape (four rows
+/// and sixteen, eight or four keys; four-by-four is 1×4 rows).
+///
+/// # Safety
+/// NEON must be available; the bounds are those of [`scores_tile`], and callers have
+/// already narrowed the shape to the strip and to the key range.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn scores_tile_neon(
+    rows_tile: usize,
+    keys_tile: usize,
+    q: &[f32],
+    q_stride: usize,
+    panel: &[f32],
+    n: usize,
+    hd: usize,
+    rows: usize,
+    j0: usize,
+    j1: usize,
+    scale: f32,
+    out: &mut [f32],
+    out_stride: usize,
+) {
+    macro_rules! run {
+        ($rt:literal, $nv:literal) => {
+            score_tile_neon::<$rt, $nv>(
+                q, q_stride, panel, n, hd, rows, j0, j1, scale, out, out_stride,
+            )
+        };
+    }
+    match (rows_tile, keys_tile) {
+        (1, 4) => run!(1, 1),
+        (1, 8) => run!(1, 2),
+        (1, 16) => run!(1, 4),
+        (2, 4) => run!(2, 1),
+        (2, 8) => run!(2, 2),
+        (2, 16) => run!(2, 4),
+        (4, 4) => run!(4, 1),
+        (4, 8) => run!(4, 2),
+        (4, 16) => run!(4, 4),
+        _ => scores_tile_scalar(
+            q, q_stride, panel, n, hd, rows, j0, j1, scale, out, out_stride,
+        ),
+    }
+}
+
+/// One NEON score-tile shape: `R` rows × `NV` vectors of `VEC` keys, `R*NV`
+/// accumulators.
+///
+/// # Safety
+/// NEON must be available; `j1 - j0 >= NV*VEC`, `j1 <= n`, `rows > 0`,
+/// `q.len() >= (rows - 1) * q_stride + hd`, `out.len() >= (rows - 1) * out_stride + j1`,
+/// `panel.len() >= hd * n`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn score_tile_neon<const R: usize, const NV: usize>(
+    q: &[f32],
+    q_stride: usize,
+    panel: &[f32],
+    n: usize,
+    hd: usize,
+    rows: usize,
+    j0: usize,
+    j1: usize,
+    scale: f32,
+    out: &mut [f32],
+    out_stride: usize,
+) {
+    let w = NV * VEC;
+    debug_assert!(j1 - j0 >= w && rows > 0);
+    let s = vdupq_n_f32(scale);
+    let pp = panel.as_ptr();
+    let mut r0 = 0;
+    while r0 + R <= rows {
+        score_block_neon::<R, NV>(
+            q.as_ptr().add(r0 * q_stride),
+            q_stride,
+            pp,
+            n,
+            hd,
+            j0,
+            j1,
+            s,
+            out.as_mut_ptr().add(r0 * out_stride),
+            out_stride,
+            R,
+        );
+        r0 += R;
+    }
+    let rn = rows - r0;
+    if rn > 0 {
+        let qs = &q[r0 * q_stride..];
+        let os = &mut out[r0 * out_stride..];
+        if rn >= 4 && R > 4 {
+            score_tile_neon::<4, NV>(
+                qs, q_stride, panel, n, hd, rn, j0, j1, scale, os, out_stride,
+            );
+        } else if rn >= 2 && R > 2 {
+            score_tile_neon::<2, NV>(
+                qs, q_stride, panel, n, hd, rn, j0, j1, scale, os, out_stride,
+            );
+        } else {
+            score_tile_neon::<1, NV>(
+                qs, q_stride, panel, n, hd, rn, j0, j1, scale, os, out_stride,
+            );
+        }
+    }
+}
+
+/// One register-blocked NEON step of [`score_tile`]: `R` rows × `NV` vectors,
+/// every `(row, key)` its own head-dimension chain.
+///
+/// # Safety
+/// NEON must be available; pointers are those of [`score_tile`] with `stored <= R`
+/// and `j0 + NV*VEC <= j1`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn score_block_neon<const R: usize, const NV: usize>(
+    q: *const f32,
+    q_stride: usize,
+    panel: *const f32,
+    n: usize,
+    hd: usize,
+    j0: usize,
+    j1: usize,
+    scale: float32x4_t,
+    out: *mut f32,
+    out_stride: usize,
+    stored: usize,
+) {
+    let mut qp = [q; R];
+    for (r, p) in qp.iter_mut().enumerate() {
+        *p = q.add(r.min(stored - 1) * q_stride);
+    }
+    let mut j = j0;
+    loop {
+        let mut acc = [[vdupq_n_f32(0.0); NV]; R];
+        for k in 0..hd {
+            let p = panel.add(k * n + j);
+            let mut w = [vdupq_n_f32(0.0); NV];
+            for (v, wv) in w.iter_mut().enumerate() {
+                *wv = vld1q_f32(p.add(v * VEC));
+            }
+            for (r, qr) in qp.iter().enumerate() {
+                let qk = vdupq_n_f32(*qr.add(k));
+                for (v, wv) in w.iter().enumerate() {
+                    acc[r][v] = vfmaq_f32(acc[r][v], *wv, qk);
+                }
+            }
+        }
+        for r in 0..stored {
+            let o = out.add(r * out_stride + j);
+            for (v, a) in acc[r].iter().enumerate() {
+                vst1q_f32(o.add(v * VEC), vmulq_f32(*a, scale));
+            }
+        }
+        if j + 2 * NV * VEC <= j1 {
+            j += NV * VEC;
+        } else if j + NV * VEC >= j1 {
+            break;
+        } else {
+            // One overlapping tile to the end of the range.
+            j = j1 - NV * VEC;
+        }
+    }
+}
+
+/// # Safety
+/// NEON must be available; `lo <= hi <= x.len()`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn max_row_neon(x: &[f32], lo: usize, hi: usize) -> f32 {
+    let mut m = vdupq_n_f32(f32::NEG_INFINITY);
+    let mut j = lo;
+    while j + LANES <= hi {
+        m = vmaxq_f32(m, vld1q_f32(x.as_ptr().add(j)));
+        j += LANES;
+    }
+    // A maximum is exact, so the lanes can be folded in any order.
+    let mut lanes = [0.0f32; 4];
+    vst1q_f32(lanes.as_mut_ptr(), m);
+    let mut best = f32::NEG_INFINITY;
+    for &e in &lanes {
+        best = best.max(e);
+    }
+    while j < hi {
+        best = best.max(*x.get_unchecked(j));
+        j += 1;
+    }
+    best
+}
+
 /// The maximum of `x[lo..hi]`, the soft-max's shift.
 ///
 /// A maximum is exact — associative and commutative on finite values — so the vector
@@ -678,6 +1013,13 @@ pub fn max_row(x: &[f32], lo: usize, hi: usize) -> f32 {
         if vector_ok() {
             // SAFETY: AVX2 + FMA checked; the loop stays inside `lo..hi`.
             return unsafe { max_row_avx2(x, lo, hi) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if vector_ok() {
+            // SAFETY: NEON checked; the loop stays inside `lo..hi`.
+            return unsafe { max_row_neon(x, lo, hi) };
         }
     }
     max_row_scalar(x, lo, hi)
@@ -741,6 +1083,14 @@ pub fn exp_row(x: &mut [f32], lo: usize, hi: usize, max: f32) -> f64 {
             return sum_row(x, lo, hi);
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if vector_ok() {
+            // SAFETY: NEON checked; the loop keeps every access inside `lo..hi`.
+            unsafe { exp_row_neon(x, lo, hi, max) };
+            return sum_row(x, lo, hi);
+        }
+    }
     exp_row_scalar(x, lo, hi, max);
     sum_row(x, lo, hi)
 }
@@ -773,6 +1123,24 @@ unsafe fn exp_row_avx2(x: &mut [f32], lo: usize, hi: usize, max: f32) {
     while j + LANES <= hi {
         let v = _mm256_loadu_ps(x.as_ptr().add(j));
         _mm256_storeu_ps(x.as_mut_ptr().add(j), exp8(_mm256_sub_ps(v, m)));
+        j += LANES;
+    }
+    while j < hi {
+        *x.get_unchecked_mut(j) = exp_scalar(*x.get_unchecked(j) - max);
+        j += 1;
+    }
+}
+
+/// # Safety
+/// NEON must be available; `lo <= hi <= x.len()`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn exp_row_neon(x: &mut [f32], lo: usize, hi: usize, max: f32) {
+    let m = vdupq_n_f32(max);
+    let mut j = lo;
+    while j + LANES <= hi {
+        let v = exp4(vsubq_f32(vld1q_f32(x.as_ptr().add(j)), m));
+        vst1q_f32(x.as_mut_ptr().add(j), v);
         j += LANES;
     }
     while j < hi {
@@ -833,6 +1201,21 @@ pub fn mix_rows(
             // `d0 + 16 <= hd <= v_stride - base`.
             unsafe {
                 mix_rows_blocks_avx2(
+                    MIX_BLOCK, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out,
+                    out_stride, obase,
+                )
+            };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if vector_ok() {
+            // SAFETY: NEON checked; rows are inside `e`, `inv` and `out`, keys inside
+            // `n`, and the value loads stay inside one row of `v` because
+            // `d0 + 8 <= hd <= v_stride - base`.
+            unsafe {
+                mix_rows_blocks_neon(
                     MIX_BLOCK, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out,
                     out_stride, obase,
                 )
@@ -918,7 +1301,7 @@ pub fn mix_rows_shaped(
         out.len() >= (rows - 1) * out_stride + obase + hd,
         "output rows shorter than the strip"
     );
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let _ = rows_block;
     #[cfg(target_arch = "x86_64")]
     {
@@ -927,6 +1310,20 @@ pub fn mix_rows_shaped(
             // key and head dimension the block's clamped tails read.
             unsafe {
                 mix_rows_blocks_avx2(
+                    rows_block, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out,
+                    out_stride, obase,
+                )
+            };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if vector_ok() {
+            // SAFETY: NEON checked; the bounds asserted above cover every row, key and
+            // head dimension the block's clamped tails read.
+            unsafe {
+                mix_rows_blocks_neon(
                     rows_block, e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out,
                     out_stride, obase,
                 )
@@ -1160,6 +1557,225 @@ unsafe fn mix_block<const R: usize, const V: usize>(
     if d0 < hd {
         // Head dimensions narrower than one accumulator pair: scalar, in the same
         // ascending order as the reference (the loop's order over `d` is free).
+        for r in 0..rn {
+            let (lo, hi) = bands[r];
+            let er = ep.add((r0 + r) * e_stride);
+            let o = out.as_mut_ptr().add((r0 + r) * out_stride + obase);
+            for d in d0..hd {
+                let mut a = 0.0f32;
+                for j in lo..hi {
+                    a = (*er.add(j)).mul_add(*vp.add(j * v_stride + base + d), a);
+                }
+                *o.add(d) = a * *inv.get_unchecked(r0 + r);
+            }
+        }
+    }
+}
+
+/// # Safety
+/// NEON must be available, and every row/key/head index must be in bounds.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_rows_blocks_neon(
+    rows_block: usize,
+    e: &[f32],
+    e_stride: usize,
+    i0: usize,
+    rows: usize,
+    n: usize,
+    half: Option<usize>,
+    v: &[f32],
+    v_stride: usize,
+    base: usize,
+    hd: usize,
+    inv: &[f32],
+    out: &mut [f32],
+    out_stride: usize,
+    obase: usize,
+) {
+    macro_rules! run {
+        ($rb:literal, $vv:literal) => {
+            mix_row_blocks_neon::<$rb, $vv>(
+                e, e_stride, i0, rows, n, half, v, v_stride, base, hd, inv, out, out_stride, obase,
+            )
+        };
+    }
+    match rows_block {
+        1 => run!(1, 2),
+        2 => run!(2, 2),
+        4 => run!(4, 2),
+        12 => run!(12, 1),
+        _ => run!(6, 2),
+    }
+}
+
+/// [`mix_rows`] in blocks of `R` rows that share one value load, `NV` vectors of head
+/// dimensions each; the tail narrows through eight, four, two and one row.
+///
+/// # Safety
+/// NEON must be available, and every row/key/head index must be in bounds.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_row_blocks_neon<const R: usize, const NV: usize>(
+    e: &[f32],
+    e_stride: usize,
+    i0: usize,
+    rows: usize,
+    n: usize,
+    half: Option<usize>,
+    v: &[f32],
+    v_stride: usize,
+    base: usize,
+    hd: usize,
+    inv: &[f32],
+    out: &mut [f32],
+    out_stride: usize,
+    obase: usize,
+) {
+    let mut r0 = 0;
+    while r0 + R <= rows {
+        mix_block_neon::<R, NV>(
+            e, e_stride, i0, n, half, v, v_stride, base, hd, inv, out, out_stride, obase, r0, R,
+        );
+        r0 += R;
+    }
+    if r0 == rows {
+        return;
+    }
+    if R > 8 && rows - r0 >= 8 {
+        mix_block_neon::<8, NV>(
+            e, e_stride, i0, n, half, v, v_stride, base, hd, inv, out, out_stride, obase, r0, 8,
+        );
+        r0 += 8;
+    }
+    if R > 4 && rows - r0 >= 4 {
+        mix_block_neon::<4, NV>(
+            e, e_stride, i0, n, half, v, v_stride, base, hd, inv, out, out_stride, obase, r0, 4,
+        );
+        r0 += 4;
+    }
+    if rows - r0 >= 2 {
+        mix_block_neon::<2, NV>(
+            e, e_stride, i0, n, half, v, v_stride, base, hd, inv, out, out_stride, obase, r0, 2,
+        );
+        r0 += 2;
+    }
+    if r0 < rows {
+        mix_block_neon::<1, NV>(
+            e, e_stride, i0, n, half, v, v_stride, base, hd, inv, out, out_stride, obase, r0, 1,
+        );
+    }
+}
+
+/// `R` rows at a time, `NV` vectors of head dimensions per row, one value load for the
+/// block; the ascending edge/core/edge fold of [`mix_block`].
+///
+/// # Safety
+/// NEON must be available, and every row/key/head index must be in bounds.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_block_neon<const R: usize, const NV: usize>(
+    e: &[f32],
+    e_stride: usize,
+    i0: usize,
+    n: usize,
+    half: Option<usize>,
+    v: &[f32],
+    v_stride: usize,
+    base: usize,
+    hd: usize,
+    inv: &[f32],
+    out: &mut [f32],
+    out_stride: usize,
+    obase: usize,
+    r0: usize,
+    rn: usize,
+) {
+    debug_assert!(rn > 0 && rn <= R);
+    let ep = e.as_ptr();
+    let vp = v.as_ptr();
+    let mut bands = [(0usize, 0usize); R];
+    for (r, b) in bands.iter_mut().enumerate() {
+        *b = band(i0 + r0 + r.min(rn - 1), n, half);
+    }
+    let core_lo = bands.iter().map(|b| b.0).max().unwrap_or(0);
+    let core_hi = bands.iter().map(|b| b.1).min().unwrap_or(0);
+    if core_lo > core_hi {
+        // The block's windows have no key in common — a window narrower than the row
+        // block. One row at a time, still vectorised over the head dimension.
+        for r in 0..rn {
+            mix_block_neon::<1, NV>(
+                e,
+                e_stride,
+                i0,
+                n,
+                half,
+                v,
+                v_stride,
+                base,
+                hd,
+                inv,
+                out,
+                out_stride,
+                obase,
+                r0 + r,
+                1,
+            );
+        }
+        return;
+    }
+    let step = NV * VEC;
+    let mut d0 = 0;
+    while d0 + step <= hd {
+        let mut acc = [[vdupq_n_f32(0.0); NV]; R];
+        for r in 0..R {
+            let er = ep.add((r0 + r.min(rn - 1)) * e_stride);
+            for j in bands[r].0..core_lo {
+                let ev = vdupq_n_f32(*er.add(j));
+                let p = vp.add(j * v_stride + base + d0);
+                for (vv, a) in acc[r].iter_mut().enumerate() {
+                    *a = vfmaq_f32(*a, vld1q_f32(p.add(vv * VEC)), ev);
+                }
+            }
+        }
+        for j in core_lo..core_hi {
+            let p = vp.add(j * v_stride + base + d0);
+            let mut val = [vdupq_n_f32(0.0); NV];
+            for (vv, w) in val.iter_mut().enumerate() {
+                *w = vld1q_f32(p.add(vv * VEC));
+            }
+            for r in 0..R {
+                let ev = vdupq_n_f32(*ep.add((r0 + r.min(rn - 1)) * e_stride + j));
+                for (vv, w) in val.iter().enumerate() {
+                    acc[r][vv] = vfmaq_f32(acc[r][vv], *w, ev);
+                }
+            }
+        }
+        for r in 0..R {
+            let er = ep.add((r0 + r.min(rn - 1)) * e_stride);
+            for j in core_hi..bands[r].1 {
+                let ev = vdupq_n_f32(*er.add(j));
+                let p = vp.add(j * v_stride + base + d0);
+                for (vv, a) in acc[r].iter_mut().enumerate() {
+                    *a = vfmaq_f32(*a, vld1q_f32(p.add(vv * VEC)), ev);
+                }
+            }
+        }
+        for r in 0..rn {
+            let o = out.as_mut_ptr().add((r0 + r) * out_stride + obase + d0);
+            let k = vdupq_n_f32(*inv.get_unchecked(r0 + r));
+            for (vv, a) in acc[r].iter().enumerate() {
+                vst1q_f32(o.add(vv * VEC), vmulq_f32(*a, k));
+            }
+        }
+        d0 += step;
+    }
+    if d0 < hd {
+        // Head dimensions narrower than one accumulator pair: scalar, in the same
+        // ascending order as the reference.
         for r in 0..rn {
             let (lo, hi) = bands[r];
             let er = ep.add((r0 + r) * e_stride);
@@ -1650,7 +2266,7 @@ mod tests {
 
     #[test]
     fn a_mix_block_never_changes_a_row() {
-        for &hd in &[16usize, 32, 64, 256] {
+        for &hd in &[7usize, 12, 16, 32, 64, 256] {
             for &n in &[16usize, 33, 128] {
                 for &half in &[None, Some(5)] {
                     let q = prng(0x4b10 ^ hd as u64 ^ n as u64, n * hd, -1.0, 1.0);
@@ -1687,7 +2303,7 @@ mod tests {
     #[test]
     fn every_band_size_matches_the_scalar_twin() {
         let n = 40;
-        for &hd in &[16usize, 32, 256] {
+        for &hd in &[7usize, 12, 16, 32, 256] {
             let q = prng(0x8bad ^ hd as u64, n * hd, -1.0, 1.0);
             let k = prng(0x8bae ^ hd as u64, n * hd, -1.0, 1.0);
             let v = prng(0x8baf ^ hd as u64, n * hd, -1.0, 1.0);

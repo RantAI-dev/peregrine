@@ -3,7 +3,10 @@
 // implementation rather than from Peregrine.
 //
 // Reads: model path, case file (one escaped case per line).
-// Writes per line: bare ids, special ids, detokenized text (escaped), TAB separated.
+// Writes per line: bare ids, special ids, escaped text, detokenized text, and the
+// ids with special tokens but special parsing off (`parse_special = false`), TAB
+// separated. The last column was added for the Tekken fixture; consumers that only
+// read the first four columns are unaffected.
 //
 // Build (from a llama.cpp checkout at cd959ba with build/bin/llama-tokenize):
 //   g++ -std=c++17 -O2 -I include -I common -I build/ggml/include \
@@ -45,13 +48,28 @@ static void print_ids(const std::vector<llama_token> & ids) {
 }
 
 int main(int argc, char ** argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s MODEL.gguf CASES.txt\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: %s MODEL.gguf CASES.txt [KEY=VALUE]\n", argv[0]);
         return 2;
     }
     llama_backend_init();
     llama_model_params mp = llama_model_default_params();
     mp.vocab_only = true;
+    std::vector<llama_model_kv_override> overrides(2); // the loader walks to a zero key
+    if (argc == 4) {
+        // A string override of an existing metadata key, e.g.
+        // `tokenizer.ggml.pre=nemotron-3.5-embed`. `--override-kv` exists in the CLI
+        // but the tokenize tool does not pass it on to the loader.
+        const char * eq = strchr(argv[3], '=');
+        if (!eq || (size_t) (eq - argv[3]) >= sizeof(overrides[0].key)) {
+            fprintf(stderr, "bad override: %s\n", argv[3]);
+            return 2;
+        }
+        overrides[0].tag = LLAMA_KV_OVERRIDE_TYPE_STR;
+        memcpy(overrides[0].key, argv[3], (size_t) (eq - argv[3]));
+        snprintf(overrides[0].val_str, sizeof(overrides[0].val_str), "%s", eq + 1);
+        mp.kv_overrides = overrides.data();
+    }
     llama_model * model = llama_model_load_from_file(argv[1], mp);
     if (!model) {
         fprintf(stderr, "cannot load %s\n", argv[1]);
@@ -115,19 +133,43 @@ int main(int argc, char ** argv) {
         int n = llama_tokenize(vocab, unescaped.data(), (int) unescaped.size(), bare.data(),
                                (int) bare.size(), /*add_special*/ false, /*parse_special*/ true);
         if (n < 0) {
+            bare.resize(-n);
+            n = llama_tokenize(vocab, unescaped.data(), (int) unescaped.size(), bare.data(),
+                               (int) bare.size(), false, true);
+        }
+        if (n < 0) {
             fprintf(stderr, "tokenize failed for %s\n", escaped.c_str());
             return 1;
         }
         bare.resize(n);
 
-        std::vector<llama_token> special(bare.size() + 4);
+        std::vector<llama_token> special(llama_vocab_n_tokens(vocab) + 16);
         n = llama_tokenize(vocab, unescaped.data(), (int) unescaped.size(), special.data(),
                            (int) special.size(), /*add_special*/ true, /*parse_special*/ true);
+        if (n < 0) {
+            special.resize(-n);
+            n = llama_tokenize(vocab, unescaped.data(), (int) unescaped.size(), special.data(),
+                               (int) special.size(), true, true);
+        }
         if (n < 0) {
             fprintf(stderr, "tokenize(special) failed for %s\n", escaped.c_str());
             return 1;
         }
         special.resize(n);
+
+        std::vector<llama_token> noparse(llama_vocab_n_tokens(vocab) + 16);
+        n = llama_tokenize(vocab, unescaped.data(), (int) unescaped.size(), noparse.data(),
+                           (int) noparse.size(), /*add_special*/ true, /*parse_special*/ false);
+        if (n < 0) {
+            noparse.resize(-n);
+            n = llama_tokenize(vocab, unescaped.data(), (int) unescaped.size(), noparse.data(),
+                               (int) noparse.size(), true, false);
+        }
+        if (n < 0) {
+            fprintf(stderr, "tokenize(no parse) failed for %s\n", escaped.c_str());
+            return 1;
+        }
+        noparse.resize(n);
 
         std::string detok(bare.size() * 8 + 16, '\0');
         int m = llama_detokenize(vocab, bare.data(), (int) bare.size(), &detok[0],
@@ -144,7 +186,9 @@ int main(int argc, char ** argv) {
         print_ids(bare);
         printf("\t");
         print_ids(special);
-        printf("\t%s\t%s\n", escaped.c_str(), escape(detok).c_str());
+        printf("\t%s\t%s\t", escaped.c_str(), escape(detok).c_str());
+        print_ids(noparse);
+        printf("\n");
     }
     llama_model_free(model);
     llama_backend_free();

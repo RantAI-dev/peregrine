@@ -26,7 +26,7 @@ pub enum MatPath {
     PerRow,
     /// Repacked eight-row k-quant, Q5_0 or Q8_0 tiles (AVX2 and up).
     KqTiles,
-    /// Float weights packed into 16-output-row panels (S4.9f; x86-64).
+    /// Float weights packed into 16-output-row panels (S4.9f; x86-64 and aarch64).
     FloatPanels,
 }
 
@@ -90,11 +90,12 @@ impl MatKernels {
         let kq_zmm = kq_tiles && crate::kqsimd::have_zmm512();
         #[cfg(not(target_arch = "x86_64"))]
         let kq_zmm = false;
-        // The packed float GEMM (S4.9f) runs on x86-64 — the scalar tier included,
-        // on the scalar chain — and its load-time store is built only where it does.
-        #[cfg(target_arch = "x86_64")]
+        // The packed float GEMM (S4.9f) runs on x86-64 and aarch64 — the scalar tier
+        // included, on the scalar chain — and its load-time store is built only where
+        // it does.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         let fp_panels = crate::fpack::have_packed() && crate::options::get().fpack;
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let fp_panels = false;
         MatKernels {
             tiles,
@@ -851,6 +852,10 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
     // it stays on the `sdot` batch kernel and is not listed there.
     #[cfg(target_arch = "aarch64")]
     let tiers: &[Tier] = match fmt {
+        // The packed float GEMM's NEON kernel (S4.9f): F32 and BF16 on NEON, F16 where
+        // the half-to-single widening instruction (`fp16`) is part of the tier.
+        Format::F32 | Format::BF16 => &[Tier::Scalar, Tier::Neon],
+        Format::F16 => &[Tier::Scalar, Tier::NeonDotprod],
         #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => &[Tier::Scalar, Tier::NeonDotprod],
         #[cfg(feature = "fmt-legacy")]
@@ -971,7 +976,10 @@ mod tests {
                 &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm]
             );
         }
-        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar]);
+        assert_eq!(kernels_for(Format::F32), &[Tier::Scalar, Tier::Neon]);
+        assert_eq!(kernels_for(Format::BF16), &[Tier::Scalar, Tier::Neon]);
+        // F16's widening instruction (`fcvtl`) is part of the `fp16` rung, above NEON.
+        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar, Tier::NeonDotprod]);
     }
 
     #[test]

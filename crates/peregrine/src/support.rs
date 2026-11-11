@@ -116,8 +116,9 @@ pub fn support_markdown() -> String {
     let cpu_str = "x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code";
 
     // 4. Tokenizers
-    let tok_str = "GPT-2 byte-level BPE, SentencePiece BPE (llama), WordPiece (bert), \
-         SentencePiece unigram (t5)";
+    let tok_str = "GPT-2 byte-level BPE (smollm, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, \
+         tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), \
+         WordPiece (bert), SentencePiece unigram (t5)";
 
     // 5. Chat templates
     let tmpl_str = "read from the model file and rendered exactly as llama.cpp renders them: \
