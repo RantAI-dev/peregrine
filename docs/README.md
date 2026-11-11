@@ -8,6 +8,7 @@
 | [docker.md](docker.md) | the server container image: build, run, flags, volumes |
 | [service.md](service.md) | background server, status/stop, zero-downtime `upgrade`, systemd |
 | [roadmap.md](roadmap.md) | the plan, stage by stage, with issue IDs |
+| [backlog.md](backlog.md) | ideas not scheduled yet, each with its evidence and size |
 | [../ARCHITECTURE.md](../ARCHITECTURE.md) | a map of the code and its invariants |
 
 | For contributors | |
