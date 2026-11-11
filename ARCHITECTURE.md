@@ -73,6 +73,7 @@ allocate no cache.
 | `tern.rs` | Ternary kernels for PQ2_0 / PTQ1_0 (AVX2, AVX-512 VNNI/GFNI/VBMI tiers). |
 | `hadamard.rs` | Fast Walsh-Hadamard transform for rotated weights and the rotated int8 KV cache. |
 | `options.rs` | The kernel switches (`PEREGRINE_ISA`, `ZMM`, `NO_WIDE`, `PF`, `TQ_SPAN`, `EXACT`, `KREPACK`, `FPACK`), set from `EngineOptions`. |
+| `packcache.rs` | The on-disk cache of the load-time packs (S4.9e): the key and version, the file format, atomic writes, header/body verification, the LRU size cap, and `peregrine inspect`/`tier -m`'s model status. |
 
 `peregrine-core` re-exports these modules under their old paths (`peregrine_core::simd`, ...).
 
@@ -87,6 +88,7 @@ allocate no cache.
 | `arch.rs` | The `Architecture`, `MtpHead` and `Family` traits (ADR 0006). |
 | `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, the tile/k-quant/float stores for repacked and packed weights, LittleBit accounting, and parameterized loading via family table. |
 | `kq.rs`, `fpack.rs` | The load-time packs: k-quants into eight-row tiles (S3.4) and F32/F16/BF16 into 16-row panels (S4.9f), both filled by reading the file so the mapped pages stay cold. |
+| `packcache.rs` | Where those two stores are cached on disk and mapped read-only on the next load (S4.9e): `~/.cache/peregrine/packs`, keyed by the model's size, mtime and header hash, the layout version, the packed tensors, the switches and the kernel tier; atomic writes, a sampled body checksum and an LRU cap. |
 | `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
 | `model/mtp.rs` | Re-exports for the multi-token-prediction head traits. |
 | `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU, GeGLU, OpenAI's `swiglu_oai`), `moe` (the router, the expert feed-forward, the expert biases), `rope` (the plain and the YaRN tables), `attn` (attention scratch, row prep, KV write, attention, the attention sinks), `bidir` (the encoder's per-text `n × n` attention and its symmetric sliding window), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |
