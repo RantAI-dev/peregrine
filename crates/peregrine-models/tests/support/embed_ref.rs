@@ -396,8 +396,13 @@ pub fn hidden_rows_mistral3(model: &Model, tokens: &[u32]) -> Vec<f32> {
         beta_fast,
         beta_slow,
     );
-    let table =
-        peregrine_core::blocks::rope::build_rope_table_yarn(cfg.rope_dim, base, n.max(1), None, &yarn);
+    let table = peregrine_core::blocks::rope::build_rope_table_yarn(
+        cfg.rope_dim,
+        base,
+        n.max(1),
+        None,
+        &yarn,
+    );
     let temp_scale = g
         .f32(&format!("{arch}.attention.temperature_scale"))
         .unwrap_or(0.0);
@@ -457,8 +462,7 @@ pub fn hidden_rows_mistral3(model: &Model, tokens: &[u32]) -> Vec<f32> {
             );
             // `llm_graph_input_attn_temp::set_input`: Q is multiplied per row, after RoPE.
             if temp_scale != 0.0 {
-                let t = peregrine_core::vmath::det_ln(((r / n_ctx_orig) as f32) + 1.0)
-                    * temp_scale
+                let t = peregrine_core::vmath::det_ln(((r / n_ctx_orig) as f32) + 1.0) * temp_scale
                     + 1.0;
                 for x in &mut q[r * qd..(r + 1) * qd] {
                     *x *= t;

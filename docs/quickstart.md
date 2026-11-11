@@ -240,6 +240,21 @@ peregrine embed -m hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0
   "task: search result | query: What is the capital of France?"
 ```
 
+Nemotron 3.5 Embed 1B (`mistral3`, licence OpenMDW 1.1) is the second encoder, and the first from
+the Mistral 3 family: 16 blocks without the causal mask, 24 query heads of 128 over 8 key/value
+heads, YaRN positions, an attention temperature that steps up at position 16384, then the mean over
+the text and 2048 dimensions. It was trained with a role prefix, so a question starts with
+`query: ` and a document with `passage: `:
+
+```sh
+peregrine embed -m Nemotron-3.5-Embed-1B-Q8_0.gguf \
+  "query: What is the capital of France?" \
+  "passage: Paris is the capital of France."
+```
+
+Its file says `context_length 262144`, but the model is trained for 32768 tokens; a longer text is
+refused with the position limit, not attempted.
+
 ## 7. Decisions (System One)
 
 A native decision model answers questions about a state without generating text: each option is a

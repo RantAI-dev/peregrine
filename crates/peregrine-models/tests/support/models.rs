@@ -822,7 +822,10 @@ pub fn write_mistral3(dir: &Path, fmt: Format, seed: u64, s: Mistral3Config) -> 
     let mut rng = Rng::new(seed);
     let mut w = GgufWriter::new();
     w.str("general.architecture", "mistral3");
-    w.str("general.name", &format!("synthetic-mistral3-{}", fmt.label()));
+    w.str(
+        "general.name",
+        &format!("synthetic-mistral3-{}", fmt.label()),
+    );
     let k = |x: &str| format!("mistral3.{x}");
     w.u32(&k("block_count"), s.n_layer as u32);
     w.u32(&k("embedding_length"), s.d_model as u32);

@@ -11,10 +11,10 @@ use peregrine_core::model::{Caches, Config, Linear, State, StepStats, TileStore,
 use peregrine_core::pool::Pool;
 use peregrine_core::tokenizer::Tokenizer;
 
-use crate::layer;
-use crate::layer::AttnWeights;
 #[cfg(feature = "arch-mistral3")]
 use crate::encoder::{linear_rows, linear_rows_shared, RowsOut};
+use crate::layer;
+use crate::layer::AttnWeights;
 
 /// llama.cpp's defaults for the YaRN ramp (`src/llama-hparams.h`): `yarn_beta_fast` 32 and
 /// `yarn_beta_slow` 1.
@@ -378,8 +378,12 @@ impl Dense {
         // is 32768 tokens: the engine sizes the pass's whole-text scratch to its context,
         // so the larger number would only be memory. Longer texts are refused by the
         // engine's own "does not fit in N positions" check.
-        let ctx_train = (g.u32(&k("context_length")).unwrap_or(2048) as usize)
-            .min(if is_mistral3 { MISTRAL3_MAX_TEXT } else { usize::MAX });
+        let ctx_train =
+            (g.u32(&k("context_length")).unwrap_or(2048) as usize).min(if is_mistral3 {
+                MISTRAL3_MAX_TEXT
+            } else {
+                usize::MAX
+            });
         let rope_yarn = if is_mistral3 && g.str(&k("rope.scaling.type")) == Ok("yarn") {
             let factor = g.f32(&k("rope.scaling.factor")).map_err(|_| {
                 "mistral3: the file asks for YaRN rope scaling but carries no \
@@ -397,9 +401,7 @@ impl Dense {
                 .map(|v| if v < 0.0 { 1.0 } else { v })
                 .unwrap_or(1.0);
             let attn_factor = g.f32(&k("rope.scaling.attn_factor")).unwrap_or(1.0);
-            let log_mul = g
-                .f32(&k("rope.scaling.yarn_log_multiplier"))
-                .unwrap_or(0.0);
+            let log_mul = g.f32(&k("rope.scaling.yarn_log_multiplier")).unwrap_or(0.0);
             let beta_fast = g
                 .f32(&k("rope.scaling.yarn_beta_fast"))
                 .unwrap_or(YARN_BETA_FAST);
@@ -439,11 +441,9 @@ impl Dense {
                     .u32(&k("rope.scaling.original_context_length"))
                     .unwrap_or(0) as usize;
                 if floor == 0 {
-                    return Err(
-                        "mistral3: attention.temperature_scale needs a non-zero \
+                    return Err("mistral3: attention.temperature_scale needs a non-zero \
                          rope.scaling.original_context_length"
-                            .to_string(),
-                    );
+                        .to_string());
                 }
                 Some(AttnTemp { scale, floor })
             }
@@ -775,20 +775,8 @@ impl Dense {
             // ---- RoPE on Q and K. There is no per-head norm and no bias ----
             peregrine_core::prof::time(peregrine_core::prof::Slot::Rope, || {
                 peregrine_core::blocks::attn::prepare_rows(
-                    cfg,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    &st.rope,
-                    &mut st.q,
-                    &mut st.k,
-                    &mut st.v,
-                    nb,
-                    positions,
-                    pool,
-                    stats,
+                    cfg, None, None, None, None, None, &st.rope, &mut st.q, &mut st.k, &mut st.v,
+                    nb, positions, pool, stats,
                 )
             });
 
@@ -1054,9 +1042,7 @@ impl Architecture for Dense {
     ) -> Result<(), String> {
         #[cfg(feature = "arch-mistral3")]
         if self.arch.is_mistral3() {
-            return self.forward_texts_embedding(
-                _w, _cfg, _st, _pool, _texts, _poolings, _stats,
-            );
+            return self.forward_texts_embedding(_w, _cfg, _st, _pool, _texts, _poolings, _stats);
         }
         Err(format!(
             "{} has no bidirectional forward pass",

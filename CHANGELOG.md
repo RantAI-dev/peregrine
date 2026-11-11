@@ -8,6 +8,31 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The `mistral3` encoder and NVIDIA Nemotron 3.5 Embed 1B (S4.14b)**: `arch-mistral3` adds
+  `Arch::Mistral3` to the dense family — the Mistral 3 blocks with query heads wider than the
+  residual (24 × 128 over 2048), 8 grouped key/value heads, YaRN positions (factor 16, original
+  context 16384, `yarn_log_multiplier` 1), llama.cpp's per-row attention temperature
+  (`1 + 0.1·ln(⌊pos/16384⌋ + 1)` after rotation, exactly 1 below 16384), non-causal attention, and
+  mean pooling to 2048 dimensions (`dimensions` 1024 and 512 are the Matryoshka truncations). A
+  causal `mistral3` file — a Mistral 3 chat model — is refused by name. The bidirectional pass is
+  the encoder schedule `gemma-embedding` already used, moved to a shared `encoder.rs` unchanged:
+  every row of every text goes through the projections in the same weight passes, attention is one
+  `n × n` block per text with no cache, and a text's vector depends only on its own length. The
+  file's 262144-token context is capped at the model's real 32768 so the pass scratch is not sized
+  for a context the model cannot use; a longer text is refused with the position limit. On 64
+  texts (7–1520 tokens, `query: `/`passage: ` prefixes, ten non-English), against llama.cpp v0.9.0
+  on the same Q8_0 and F16 files: Peregrine F16 vs llama.cpp F16 min cosine 0.9999998 / mean
+  0.99999994 at 2048 d (0.9999996 / 0.99999992 at 1024, 0.9999992 / 0.99999989 at 512); Q8_0 vs
+  the F16 reference min 0.999775 / mean 0.9998594 (llama.cpp's own Q8_0: 0.999762 / 0.9998549),
+  and the two engines' Q8_0 agree to 0.999944 / 0.9999777. Q4_K_M measured the same way: 0.9866695
+  / 0.99241421 against the F16 reference, against llama.cpp's Q4_K_M 0.9996871 / 0.99986461.
+  Tests: a synthetic non-causal `mistral3` file with wider query heads, grouped KV heads and a
+  32-token YaRN original context (so the ramp, the temperature's first step and positions above
+  it all run) checked bit for bit against an exact scalar reference forward; the invariance matrix
+  over pass budgets, thread counts and admission orders; tier goldens on scalar, AVX2 and AVX-512
+  (under SDE); no-allocation coverage; and the ignored real-file gate with llama.cpp's token ids
+  and vectors in `crates/peregrine-models/tests/fixtures/nemotron/`. No existing golden moves.
+
 - **The packed float GEMM and the encoder attention strip on aarch64 (S4.9f, S4.9g)**: the float
   F32/F16/BF16 matrices now go through the packed 16-output panels on ARM too, with a NEON kernel
   (four `float32x4_t` accumulators per panel, four activation rows, one `vfmaq_f32` per term;
@@ -20,6 +45,7 @@ All notable changes to this project are documented here. The format follows
   512); EmbeddingGemma 300M Q8_0 gains 1.9× at 128 tokens and 2.6× at 512. The aarch64 float
   goldens moved once; the three NEON tiers agree bit for bit, and no integer-path golden changed.
 
+c63d13b (docs: the mistral3 reading note, the supported-model list and the tests (S4.14b))
 - **Repacked Q5_K tiles on x86 (S4.9i)**: a Q5_K matrix is now rewritten at load into the
   eight-row tile (`Q5K8`, 1408 bytes, size-neutral), with the fifth bits transposed once and
   the nibbles, scales and mins in the Q4_K tile's layout. An AVX2 GEMM for four or more

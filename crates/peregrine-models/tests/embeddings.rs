@@ -371,12 +371,8 @@ fn a_pooled_slot_that_finishes_in_a_decode_pass_is_reaped() {
 // ---------------------------------------------------------------------------
 
 fn mistral3(dir: &std::path::Path, fmt: Format, seed: u64) -> Arc<Model> {
-    let path = support::models::write_mistral3(
-        dir,
-        fmt,
-        seed,
-        support::models::Mistral3Config::default(),
-    );
+    let path =
+        support::models::write_mistral3(dir, fmt, seed, support::models::Mistral3Config::default());
     load(&path)
 }
 
@@ -399,8 +395,10 @@ fn a_mistral3_file_reports_itself_as_an_encoder() {
 #[test]
 fn a_causal_mistral3_file_is_refused_by_name() {
     let dir = tmpdir("mistral3-causal");
-    let mut cfg = support::models::Mistral3Config::default();
-    cfg.causal = true;
+    let cfg = support::models::Mistral3Config {
+        causal: true,
+        ..Default::default()
+    };
     let path = support::models::write_mistral3(&dir, Format::F32, 82, cfg);
     let g = peregrine_core::Gguf::open(&path).expect("open the synthetic model");
     let err = match peregrine_models::load(g) {
@@ -527,7 +525,6 @@ fn a_mistral3_vector_is_bit_identical_alone_in_batches_and_in_any_order() {
     }
 }
 
-
 /// The synthetic `mistral3` encoder's golden for the current kernel tier.
 ///
 /// The vector is the whole output, so the golden hashes every bit of two vectors (mean at
@@ -603,7 +600,6 @@ fn the_synthetic_mistral3_matches_its_golden_for_the_tier() {
         );
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // S4.4: the bidirectional encoder, `gemma-embedding`
@@ -1450,7 +1446,7 @@ fn read_vectors_dim(path: &std::path::Path, dims: usize) -> Vec<Vec<f32>> {
     let bytes = std::fs::read(path).unwrap();
     let row = dims * 4;
     assert!(
-        bytes.len() % row == 0,
+        bytes.len().is_multiple_of(row),
         "{}: not a whole number of {dims}-d rows",
         path.display()
     );
@@ -1584,8 +1580,7 @@ fn embeddinggemma_real_file_is_within_the_bound_of_llama_cpp() {
 #[test]
 #[ignore = "needs Nemotron-3.5-Embed-1B-F16.gguf and -Q8_0.gguf in ~/models/nemotron/"]
 fn nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp() {
-    let fixture =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nemotron");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nemotron");
     let tokens: Vec<Vec<u32>> = std::fs::read_to_string(fixture.join("tokens.txt"))
         .unwrap()
         .lines()
