@@ -148,6 +148,18 @@ peregrine embed -m hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0
   "task: search result | query: What is the capital of France?"
 ```
 
+The BERT encoders — all-MiniLM, BGE, E5, GTE and the XLM-R models (bge-m3, multilingual-e5) —
+are the same kind of pass with a different block: post-norm, biases on every projection, learned
+absolute positions, token types, LayerNorm and the exact GELU, pooled by the file's `cls` or
+`mean`. One file serves every model of the family, and a long text is refused against the
+model's own position table (512 for MiniLM/BGE, 8192 for bge-m3):
+
+```sh
+peregrine embed -m hf:second-state/All-MiniLM-L6-v2-Embedding-GGUF/all-MiniLM-L6-v2-Q8_0.gguf \
+  "What is the capital of France?"
+peregrine serve -m hf:CompendiumLabs/bge-small-en-v1.5-gguf/bge-small-en-v1.5-q8_0.gguf --port 8202
+```
+
 A chat request on an encoder is a 400 that says the model is an embedding model.
 
 Without a server:
@@ -270,12 +282,12 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 <!-- support:begin -->
 | | Supported now |
 |---|---|
-| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Gemma 3 embedding (EmbeddingGemma), Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4 |
+| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Gemma 3 embedding (EmbeddingGemma), BERT encoder (MiniLM, BGE, E5, GTE, bge-m3), Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4 |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE (smollm, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
-| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean) and Gemma 3 encoders (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`), `POST /v1/embeddings`, `peregrine embed` |
+| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), the BERT encoders (MiniLM, BGE, E5, GTE, bge-m3: cls/mean) and Gemma 3 encoders (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`), `POST /v1/embeddings`, `peregrine embed` |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->
 

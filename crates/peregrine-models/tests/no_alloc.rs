@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use support::models::{
-    write_dense, write_gemma_embedding, write_hybrid, write_moe, Dense, GemmaEmbeddingConfig,
-    MoeShape,
+    write_bert, write_dense, write_gemma_embedding, write_hybrid, write_moe, BertConfig, Dense,
+    GemmaEmbeddingConfig, MoeShape,
 };
 
 /// Allocations counted while `COUNTING` was set.
@@ -323,6 +323,18 @@ fn a_decode_step_allocates_nothing() {
         if n != 0 {
             failures.push(format!(
                 "gemma-embedding whole-text pass, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
+    // The BERT family (S4.6a): the same whole-text pass, with the embedding LayerNorm,
+    // the GELU rows and the cls pooling its graph adds.
+    let bert = load(&write_bert(&dir, Format::Q8_0, 7008, BertConfig::default()));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&bert, threads);
+        if n != 0 {
+            failures.push(format!(
+                "bert whole-text pass, {threads} threads: {n} allocations per pass"
             ));
         }
     }

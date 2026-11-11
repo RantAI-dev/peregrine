@@ -507,3 +507,95 @@ fn a_chat_request_is_served_while_a_wide_embedding_request_runs() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["data"].as_array().unwrap().len(), 128);
 }
+
+/// The BERT family served (roadmap S4.6a): a synthetic `bert` file with cls pooling
+/// answers `/v1/embeddings` for strings (WordPiece `[CLS] … [SEP]`), refuses chat by
+/// name, and names its position table as the text limit.
+#[test]
+fn a_bert_encoder_serves_embeddings_and_refuses_chat() {
+    let dir = tmpdir("bert");
+    let model = support::models::write_bert(
+        &dir,
+        Format::F16,
+        71,
+        support::models::BertConfig::default(),
+    );
+    let port = free_port();
+    let log = dir.join("serve.log");
+    let log_file = std::fs::File::create(&log).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
+        .args([
+            "serve",
+            "-m",
+            model.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--ctx",
+            "64",
+            "--threads",
+            "2",
+            "--slots",
+            "4",
+            "--no-profile",
+        ])
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .expect("spawn peregrine serve");
+    let _guard = Guard(child);
+    wait_for_health(port);
+
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": ["hello world", "the test of a paris city", "hello world"]}),
+    );
+    assert_eq!(status, 200, "{body}");
+    // The file's width is 128; cls pooling is the file's own.
+    for i in 0..3 {
+        let v = embedding(&body, i);
+        assert_eq!(v.len(), 128, "width");
+        assert!((norm(&v) - 1.0).abs() < 1e-4, "normalised");
+    }
+    assert_eq!(
+        bits(&embedding(&body, 0)),
+        bits(&embedding(&body, 2)),
+        "the same text has one vector"
+    );
+    // Matryoshka: truncate, then normalise.
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": "hello", "dimensions": 32}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(embedding(&body, 0).len(), 32);
+
+    // Chat on an encoder is a 400 that names what the model is.
+    let (status, body) = post(
+        port,
+        "/v1/chat/completions",
+        json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("embedding model"));
+
+    // The position table is 64 rows: a longer text is refused, and `truncate` opts in.
+    let long: Vec<u32> = (5..90).collect();
+    let (status, body) = post(port, "/v1/embeddings", json!({"input": long}));
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("64 positions"), "message: {message}");
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": long, "truncate": true}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["usage"]["prompt_tokens"].as_u64().unwrap(), 64);
+}

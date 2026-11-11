@@ -94,7 +94,16 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    `cargo test -p peregrine --release --test systemone_real -- --ignored` drives the real endpoint
    with the 48 fixture requests and compares every answer with llama.cpp's;
    `cargo test -p peregrine-models --release --test systemone_openjev` does the same through the
-   pieces directly. The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
+   pieces directly.
+   S4.6a's `bert` family is covered the same way: a synthetic post-norm encoder with the WordPiece
+   vocabulary (and a second with the XLM-R unigram one), the vector against `tests/support/bert_ref.rs`'s
+   independent scalar forward (bit for bit for F32; for Q8_0 exactly on the scalar tier and to 1–2 ulp
+   elsewhere, where the int8 tile fuses its block scale and the scalar twin does not), the invariance
+   matrix, the position-table limit, the no-allocation pass, the server and CLI cases
+   (`a_bert_encoder_*`), and `tests/golden/synthetic/<tier>/bert-Q8_0.golden` recorded on scalar, AVX2
+   and AVX-512 under SDE. Its three ignored real-file tests use the 200-text fixtures under
+   `tests/fixtures/bert/` (llama.cpp's ids and vectors, the fp32 PyTorch reference vectors) and skip,
+   with a notice, when the GGUF files are absent. The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
    admission orders), and the tier golden (`tests/golden/synthetic/<tier>/gemma-embedding-Q8_0.golden`,
