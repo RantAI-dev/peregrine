@@ -447,6 +447,10 @@ impl Model {
         );
         let (lx, lt) = self.lb_scratch(max_batch);
         st.set_lb_scratch(lx, lt);
+        if self.causality() == crate::arch::Causality::Bidirectional {
+            // An encoder's strip scratch (S4.9g): the pass allocates nothing.
+            st.attn.bidir.resize(max_batch, self.cfg.head_dim, threads);
+        }
         st
     }
 

@@ -405,7 +405,7 @@ fn the_pooled_vector_is_the_exact_scalar_reference_forward() {
     let dir = tmpdir("encoder-reference");
     let model = gemma_embedding(&dir, Format::F32, 42);
     for pooling in [Pooling::Mean, Pooling::Cls, Pooling::Last] {
-        for (i, len) in [1usize, 2, 7, 31].into_iter().enumerate() {
+        for (i, len) in [1usize, 2, 7, 31, 37, 64, 100].into_iter().enumerate() {
             let text = encoder_text(1 + i as u32, len);
             let want = support::embed_ref::reference_embedding(&model, &text, pooling);
             let got = embed_batch(
@@ -954,6 +954,7 @@ fn a_wide_embedding_batch_is_admitted_beside_a_chat_slot() {
 fn the_synthetic_encoder_matches_its_golden_for_the_tier() {
     let dir = tmpdir("encoder-golden");
     let model = gemma_embedding(&dir, Format::Q8_0, 46);
+
     let mut out = String::new();
     for (pooling, dims) in [(Pooling::Mean, None), (Pooling::Cls, Some(128usize))] {
         let text = encoder_text(21, 37);
