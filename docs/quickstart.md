@@ -170,8 +170,8 @@ silently ignored.
 
 ## 6. Embeddings
 
-A causal model trained as an embedder — Qwen3-Embedding, for example — serves a vector per text from
-the same server and the same engine:
+A causal model trained as an embedder — Qwen3-Embedding, for example — or a bidirectional encoder such
+as EmbeddingGemma serves a vector per text from the same server and the same engine:
 
 ```sh
 peregrine serve -m hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf --port 8201
@@ -210,6 +210,16 @@ peregrine embed -m model.gguf --json --dimensions 256 < texts.txt
 
 A text longer than the context is an error naming the limit rather than a silent truncation; pass
 `truncate: true` (API) or `--truncate` (CLI) to opt in.
+
+EmbeddingGemma 300M (`gemma-embedding`) is a bidirectional encoder: a text is forwarded whole (it is
+never chunked and no KV cache is written), mean-pooled, then passed through `dense_2`/`dense_3` and
+normalised. It serves the same endpoints, and a chat request on it is a 400 that says it is an
+embedding model:
+
+```sh
+peregrine embed -m hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf \
+  "task: search result | query: What is the capital of France?"
+```
 
 ## 7. Decisions (System One)
 

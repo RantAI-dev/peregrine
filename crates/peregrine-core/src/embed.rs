@@ -98,6 +98,42 @@ pub fn pool_rows(rows: &[f32], dim: usize, pooling: Pooling, out: &mut Vec<f32>)
     }
 }
 
+/// [`pool_rows`] with caller-owned buffers, so a bidirectional forward pools text by text
+/// without allocating: `sum` is `dim` f64 accumulators (reused, zeroed here) and `out` is
+/// `dim` floats. The arithmetic and its order are [`pool_rows`]' exactly.
+pub fn pool_rows_into(
+    rows: &[f32],
+    dim: usize,
+    pooling: Pooling,
+    sum: &mut [f64],
+    out: &mut [f32],
+) {
+    if dim == 0 || rows.is_empty() {
+        out[..dim].fill(0.0);
+        return;
+    }
+    match pooling {
+        Pooling::Last => {
+            let start = (rows.len() / dim - 1) * dim;
+            out[..dim].copy_from_slice(&rows[start..start + dim]);
+        }
+        Pooling::Mean => {
+            let n = rows.len() / dim;
+            sum[..dim].fill(0.0);
+            for row in rows.chunks_exact(dim) {
+                for (s, &x) in sum[..dim].iter_mut().zip(row) {
+                    *s += x as f64;
+                }
+            }
+            let inv = 1.0 / n as f64;
+            for (o, &s) in out[..dim].iter_mut().zip(&sum[..dim]) {
+                *o = (s * inv) as f32;
+            }
+        }
+        Pooling::Cls => out[..dim].copy_from_slice(&rows[..dim]),
+    }
+}
+
 /// Truncate to `dimensions` (Matryoshka), then L2-normalise — in that order, as the design says.
 ///
 /// The norm accumulates the squares in `f64`, takes the square root in `f64`, then scales each

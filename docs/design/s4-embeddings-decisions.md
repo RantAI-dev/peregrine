@@ -256,9 +256,20 @@ A model is listed when, on the same file:
 
 1. **Tokenizer**: identical ids to llama.cpp's `llama-tokenize` on the fixture strings (the
    existing 22 plus accented, CJK, and long-word cases for WordPiece).
-2. **Vectors**: cosine similarity to llama.cpp's embedding ≥ 0.999 on 200 texts of mixed length
-   (the engines quantise activations differently; the bound is set per format from measurement, the
-   way KL is today), and ≥ 0.9999 against Peregrine's own exact scalar path.
+2. **Vectors**: cosine similarity to llama.cpp's embedding on 200 texts of mixed length, with the
+   per-format bound set from measurement (the way KL is today), and ≥ 0.9999 against Peregrine's
+   own exact scalar path. Both engines quantise activations differently, so the bound is stated
+   against the truth as well: Peregrine must be no further from a full-precision reference (the
+   same weights in F16, `dense_2`/`dense_3` present) than llama.cpp is, within 1e-4. Measured for
+   `gemma-embedding` (S4.4, 200 texts, both engines at their Q8_0 path, reference = llama.cpp on
+   the F16 conversion): llama.cpp Q8_0 vs the reference is min 0.99801 / mean 0.999473 at 768 d
+   and min 0.99840 / mean 0.999555 at 256 d; Peregrine Q8_0 vs the reference is min 0.99875 /
+   mean 0.999473 and min 0.99890 / mean 0.999552; Peregrine F16 vs the reference is min 0.99998.
+   The per-format bound for this family is therefore **min 0.998 and mean 0.9995 at 768 d, min
+   0.9985 and mean 0.9996 at 256 d** against llama.cpp's Q8_0, encoded with the reference vectors
+   in `crates/peregrine-models/tests/fixtures/embeddinggemma/`. The design's original 0.999 was an
+   F16-class bound: a Q8_0 engine's own distance from the unquantised model is about 0.998 at the
+   minimum, for llama.cpp as much as for Peregrine. F16 models keep the 0.9999-class bound.
 3. **Task**: an MTEB subset (retrieval: NFCorpus, SciFact; STS: STSBenchmark; one classification
    and one reranking set) within 0.5 point of llama.cpp and of the model's published F32 number.
 4. **Decisions**: the rendered prompt and its token ids identical to llama.cpp's on the fixture

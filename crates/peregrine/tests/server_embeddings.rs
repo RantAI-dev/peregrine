@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use support::models::{write_dense_pooled, Dense};
+use support::models::{write_dense_pooled, write_gemma_embedding, Dense, GemmaEmbeddingConfig};
 
 const WIDTH: usize = 256;
 
@@ -354,4 +354,94 @@ fn unknown_fields_and_bad_formats_are_refused_and_over_length_names_the_limit() 
         64,
         "the truncated text is billed at the served limit"
     );
+}
+
+/// A bidirectional encoder (roadmap S4.4): the embeddings route works, `dimensions` truncates
+/// after the dense head, and chat is refused with a message that names the model's purpose.
+#[test]
+fn an_encoder_serves_embeddings_and_refuses_chat() {
+    let dir = tmpdir("encoder");
+    let model = write_gemma_embedding(&dir, Format::F16, 61, GemmaEmbeddingConfig::default());
+    let port = free_port();
+    let log = dir.join("serve.log");
+    let log_file = std::fs::File::create(&log).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
+        .args([
+            "serve",
+            "-m",
+            model.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--ctx",
+            "128",
+            "--threads",
+            "2",
+            "--slots",
+            "4",
+            "--no-profile",
+        ])
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .expect("spawn peregrine serve");
+    let _guard = Guard(child);
+    wait_for_health(port);
+
+    let a: Vec<u32> = (11..48).collect();
+    let b: Vec<u32> = (20..35).collect();
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": [a.clone(), b.clone(), a.clone()]}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let width = 128usize;
+    assert_eq!(embedding(&body, 0).len(), width);
+    assert!((norm(&embedding(&body, 0)) - 1.0).abs() < 1e-5);
+    assert_eq!(
+        bits(&embedding(&body, 0)),
+        bits(&embedding(&body, 2)),
+        "the same text is the same vector twice in one request"
+    );
+
+    // Matryoshka: truncated, then normalised.
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": [a.clone()], "dimensions": 64, "encoding_format": "base64"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let v = floats(&json!(unbase64_f32(
+        body["data"][0]["embedding"].as_str().unwrap()
+    )));
+    assert_eq!(v.len(), 64);
+    assert!((norm(&v) - 1.0).abs() < 1e-5);
+
+    let (status, body) = post(
+        port,
+        "/v1/chat/completions",
+        json!({"messages": [{"role": "user", "content": "hi"}]}),
+    );
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("embedding model"), "message: {message}");
+    assert!(message.contains("cannot generate"), "message: {message}");
+
+    // An over-length text names the encoder's context, not a cache's.
+    let long: Vec<u32> = (0..200).collect();
+    let (status, body) = post(port, "/v1/embeddings", json!({"input": long}));
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("200 tokens"), "message: {message}");
+    assert!(message.contains("128 positions"), "message: {message}");
+}
+
+fn unbase64_f32(s: &str) -> Vec<f32> {
+    let bytes = unbase64(s);
+    bytes
+        .chunks(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }

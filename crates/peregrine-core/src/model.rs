@@ -292,6 +292,7 @@ impl Model {
                     "qwen2" | "qwen3" => Some("arch-qwen"),
                     "qwen25" | "qwen35" => Some("arch-qwen35"),
                     "gemma3" => Some("arch-gemma3"),
+                    "gemma-embedding" => Some("arch-gemma-embedding"),
                     "phi3" => Some("arch-phi3"),
                     _ => None,
                 };
@@ -368,6 +369,56 @@ impl Model {
     /// Recurrent state geometry for hybrid architectures, if any.
     pub fn recurrent_shape(&self) -> Option<crate::arch::RecurrentShape> {
         self.arch.recurrent()
+    }
+
+    /// Whether this model's rows attend causally or to a whole text (design §2.2).
+    pub fn causality(&self) -> crate::arch::Causality {
+        self.arch.causality()
+    }
+
+    /// One bidirectional pass over whole texts (design §2.2).
+    ///
+    /// The engine schedules whole texts for a bidirectional model: a text is never split
+    /// and no KV cache is written. On return `st.hidden` holds one vector per text at
+    /// that text's first global row, with the family's head applied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_texts(
+        &self,
+        st8: &mut State,
+        pool: &Pool,
+        texts: &[&[u32]],
+        poolings: &[crate::embed::Pooling],
+        stats: &mut StepStats,
+    ) -> Result<(), String> {
+        if texts.len() != poolings.len() {
+            return Err(format!(
+                "{} texts but {} pooling types",
+                texts.len(),
+                poolings.len()
+            ));
+        }
+        let total: usize = texts.iter().map(|t| t.len()).sum();
+        if total == 0 {
+            return Ok(());
+        }
+        if total > st8.max_batch {
+            return Err(format!(
+                "batch of {total} rows exceeds the scratch of {}",
+                st8.max_batch
+            ));
+        }
+        for (i, t) in texts.iter().enumerate() {
+            if t.is_empty() {
+                return Err(format!("text {i} has no tokens"));
+            }
+            for &id in t.iter() {
+                if id as usize >= self.cfg.n_vocab {
+                    return Err(format!("token {id} in text {i} is outside the vocabulary"));
+                }
+            }
+        }
+        self.arch
+            .forward_texts(&self.w, &self.cfg, st8, pool, texts, poolings, stats)
     }
 
     // a cache shaped for this model: K/V for the layers that attend, plus the recurrent state of a

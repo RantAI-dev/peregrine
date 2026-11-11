@@ -139,6 +139,17 @@ own — `last` for Qwen3-Embedding, `mean` for the models trained that way — a
 input order, bit-identical alone or in any batch. A text longer than `-c` is a 400 that names the
 limit, unless the request sets `truncate: true`.
 
+Bidirectional encoders are embedders too. EmbeddingGemma 300M (`gemma-embedding`) runs every text as
+one whole bidirectional pass — no chunking, no KV cache — and applies its mean pooling, its
+`dense_2`/`dense_3` head, and the Matryoshka truncation:
+
+```sh
+peregrine embed -m hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf \
+  "task: search result | query: What is the capital of France?"
+```
+
+A chat request on an encoder is a 400 that says the model is an embedding model.
+
 Without a server:
 
 ```sh
@@ -147,8 +158,7 @@ echo "one text per line" | peregrine embed -m model.gguf          # stdin
 peregrine embed -m model.gguf --json --dimensions 256 "..."       # the API's JSON shape
 ```
 
-Only causal decoders are embedders in this build (S4.1); bidirectional encoder families and their
-classifier heads arrive in later S4 steps. `peregrine inspect` prints the pooling type a file declares.
+`peregrine inspect` prints the pooling type a file declares and whether it is an embedding model.
 
 ## Decisions (System One)
 
@@ -256,12 +266,12 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 <!-- support:begin -->
 | | Supported now |
 |---|---|
-| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4 |
+| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Gemma 3 embedding (EmbeddingGemma), Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4 |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE, SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
-| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), `POST /v1/embeddings`, `peregrine embed` |
+| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean) and Gemma 3 encoders (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`), `POST /v1/embeddings`, `peregrine embed` |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->
 
