@@ -69,6 +69,7 @@ pub mod lbq {
 }
 pub mod model;
 pub mod options;
+pub mod packcache;
 pub mod pool;
 pub mod prefix;
 pub mod profile;

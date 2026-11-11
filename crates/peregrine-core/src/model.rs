@@ -228,6 +228,8 @@ impl TileStore {
 #[derive(Default)]
 pub struct KqStore {
     map: Option<memmap2::MmapMut>,
+    /// A read-only mapping of a pack cache file (S4.9e), or `None`.
+    ro: Option<memmap2::Mmap>,
     heap: Vec<u8>,
 }
 
@@ -240,20 +242,41 @@ impl KqStore {
                 let _ = m.advise(memmap2::Advice::HugePage);
                 return KqStore {
                     map: Some(m),
+                    ro: None,
                     heap: Vec::new(),
                 };
             }
         }
         KqStore {
             map: None,
+            ro: None,
             heap: vec![0u8; len],
         }
     }
+
+    /// A store that reads its bytes from a mapped pack cache file (S4.9e).
+    pub fn from_map(map: memmap2::Mmap) -> KqStore {
+        KqStore {
+            map: None,
+            ro: Some(map),
+            heap: Vec::new(),
+        }
+    }
+
+    /// Whether the bytes come from a file mapping (a pack cache hit).
+    pub fn is_file_map(&self) -> bool {
+        self.ro.is_some()
+    }
+
     #[inline]
     pub fn bytes(&self) -> &[u8] {
-        self.map.as_deref().unwrap_or(&self.heap)
+        self.ro
+            .as_deref()
+            .or(self.map.as_deref())
+            .unwrap_or(&self.heap)
     }
     pub fn bytes_mut(&mut self) -> &mut [u8] {
+        debug_assert!(self.ro.is_none(), "a mapped pack cache is read-only");
         match &mut self.map {
             Some(m) => m,
             None => &mut self.heap,
@@ -278,6 +301,8 @@ impl KqStore {
 #[derive(Default)]
 pub struct FpStore {
     map: Option<memmap2::MmapMut>,
+    /// A read-only mapping of a pack cache file (S4.9e), or `None`.
+    ro: Option<memmap2::Mmap>,
     heap: Vec<u8>,
 }
 
@@ -290,20 +315,41 @@ impl FpStore {
                 let _ = m.advise(memmap2::Advice::HugePage);
                 return FpStore {
                     map: Some(m),
+                    ro: None,
                     heap: Vec::new(),
                 };
             }
         }
         FpStore {
             map: None,
+            ro: None,
             heap: vec![0u8; len],
         }
     }
+
+    /// A store that reads its bytes from a mapped pack cache file (S4.9e).
+    pub fn from_map(map: memmap2::Mmap) -> FpStore {
+        FpStore {
+            map: None,
+            ro: Some(map),
+            heap: Vec::new(),
+        }
+    }
+
+    /// Whether the bytes come from a file mapping (a pack cache hit).
+    pub fn is_file_map(&self) -> bool {
+        self.ro.is_some()
+    }
+
     #[inline]
     pub fn bytes(&self) -> &[u8] {
-        self.map.as_deref().unwrap_or(&self.heap)
+        self.ro
+            .as_deref()
+            .or(self.map.as_deref())
+            .unwrap_or(&self.heap)
     }
     pub fn bytes_mut(&mut self) -> &mut [u8] {
+        debug_assert!(self.ro.is_none(), "a mapped pack cache is read-only");
         match &mut self.map {
             Some(m) => m,
             None => &mut self.heap,
@@ -327,7 +373,8 @@ impl Model {
         let kq = crate::options::get().kq_repack && mk.kq_tiles();
         // Same rule for the float pack (S4.9f): on where the packed kernel runs.
         let fp = crate::options::get().fpack && mk.fp_panels();
-        Self::load_with_kq_fp(g, families, kq, fp)
+        let cache = crate::packcache::PackCache::from_options(crate::options::get());
+        Self::load_with_kq_fp_cache(g, families, kq, fp, cache.as_ref())
     }
 
     /// Load a model from a parsed GGUF file, with the k-quant repack forced on or
@@ -351,12 +398,27 @@ impl Model {
     /// explicitly (S3.4's k-quant eight-row tiles, S4.9f's float panels).
     ///
     /// This is the switch an A/B needs: the same file, loaded both ways, and the
-    /// two compared.
+    /// two compared. It never uses the pack cache; [`Model::load_with`] does.
     pub fn load_with_kq_fp(
         g: Gguf,
         families: &[&dyn crate::arch::Family],
         kq: bool,
         fp: bool,
+    ) -> Result<Model, String> {
+        Self::load_with_kq_fp_cache(g, families, kq, fp, None)
+    }
+
+    /// [`Model::load_with_kq_fp`], with an explicit pack cache (S4.9e).
+    ///
+    /// `Some(cache)` maps the packed stores from the cache file when its key
+    /// matches, and writes the file after packing when it does not. `None` always
+    /// packs in memory.
+    pub fn load_with_kq_fp_cache(
+        g: Gguf,
+        families: &[&dyn crate::arch::Family],
+        kq: bool,
+        fp: bool,
+        cache: Option<&crate::packcache::PackCache>,
     ) -> Result<Model, String> {
         let arch_name = g.str("general.architecture")?;
         let family = families
@@ -387,22 +449,65 @@ impl Model {
                     )
                 }
             })?;
+        let mut g = g;
         // The k-quant repack (S3.4): the Q4_K and Q6_K matrices, and Q5_0, are
         // rewritten into eight-row tiles before the family reads the file, so every matrix the
         // family holds knows where its repacked bytes are.
-        let mut g = g;
-        let kq = if kq {
-            crate::kq::repack(&mut g)
+        let kq_layout = if kq {
+            crate::kq::layout(&g)
         } else {
-            KqStore::default()
+            Vec::new()
+        };
+        let fp_layout = if fp {
+            crate::fpack::layout(&g)
+        } else {
+            Vec::new()
+        };
+        let key = match cache {
+            Some(c) => c.key(&g, &kq_layout, &fp_layout, kq, fp).ok(),
+            None => None,
+        };
+        let mut kq_store = None;
+        let mut fp_store = None;
+        let mut hit = false;
+        if let (Some(c), Some(k)) = (cache, key.as_ref()) {
+            if let Some(h) = c.open(k) {
+                // The packed bytes are the ones the key described, so the tensor
+                // directory only has to learn where each matrix sits.
+                hit = true;
+                for e in &kq_layout {
+                    if let Some(t) = g.tensors.get_mut(&e.name) {
+                        t.kq_off = Some(e.offset);
+                    }
+                }
+                for e in &fp_layout {
+                    if let Some(t) = g.tensors.get_mut(&e.name) {
+                        t.fp_off = Some(e.offset);
+                    }
+                }
+                kq_store = h.kq.map(KqStore::from_map);
+                fp_store = h.fp.map(FpStore::from_map);
+            }
+        }
+        let kq = match kq_store {
+            Some(s) => s,
+            None if kq => crate::kq::repack(&mut g),
+            None => KqStore::default(),
         };
         // The float pack (S4.9f): every F32, F16 and BF16 matrix into 16-row panels,
         // before the family reads the file, so each matrix knows where its panels are.
-        let fp = if fp {
-            crate::fpack::repack(&mut g)
-        } else {
-            FpStore::default()
+        let fp = match fp_store {
+            Some(s) => s,
+            None if fp => crate::fpack::repack(&mut g),
+            None => FpStore::default(),
         };
+        // A miss packed the stores above: write them beside the model cache so the
+        // next start maps instead of packing. Best effort, never an error.
+        if !hit {
+            if let (Some(c), Some(k)) = (cache, key.as_ref()) {
+                c.write(k, kq.bytes(), fp.bytes());
+            }
+        }
         let tk = Tokenizer::from_gguf(&g)?;
         let loaded = family.load(&g, &tk)?;
         Ok(Model {
@@ -680,6 +785,12 @@ impl Model {
     /// packed kernel to read it.
     pub fn fp(&self) -> &[u8] {
         self.w.fp.bytes()
+    }
+
+    /// Whether the packed stores were mapped from a pack cache file (S4.9e)
+    /// rather than built in memory at this load.
+    pub fn packed_from_cache(&self) -> bool {
+        self.w.kq.is_file_map() || self.w.fp.is_file_map()
     }
 
     /// `general.name`, or an empty string.
