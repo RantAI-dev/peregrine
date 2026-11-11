@@ -1686,10 +1686,14 @@ mod tests {
                 h.fetch_add(1, Ordering::SeqCst);
             }
         });
-        // Let the busy side take many turns, then ask once.
+        // Let the busy side take many turns, then ask once. The count starts once the
+        // second participant has entered: the passes the busy side ran before that were
+        // not taken from anyone, and on a loaded machine this thread can be off the CPU
+        // for thousands of them. From `enter` on, the busy side can finish the pass in
+        // flight and take at most one more before the turn is the newcomer's.
         wait_until(|| hot.load(Ordering::SeqCst) >= 100);
-        let before = hot.load(Ordering::SeqCst);
         turn.enter(1);
+        let before = hot.load(Ordering::SeqCst);
         let _guard = turn.acquire(1);
         let after = hot.load(Ordering::SeqCst);
         assert!(
