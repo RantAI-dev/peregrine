@@ -688,7 +688,13 @@ impl Engine {
         // whole texts, so its budget is the same number but a longer text still runs alone.
         let pass_rows = pass_rows
             .or(crate::options::get().pass_rows)
-            .unwrap_or_else(|| crate::options::pass_rows_default_for(threads, c.d_model))
+            .unwrap_or_else(|| {
+                crate::options::pass_rows_default_for(
+                    c.d_model,
+                    model.bytes_per_param(),
+                    bidirectional,
+                )
+            })
             .clamp(1, crate::options::MAX_PASS_ROWS);
         let work_cache_bytes = work_cache_budget();
         // One position more than the model's own context is allowed: the engine
@@ -1996,7 +2002,12 @@ impl Engine {
         // embedding texts is unchanged at this bound (S4.9b's chat-latency check).
         let mut work_budget = self.pass_rows;
         if !dec.is_empty() {
-            work_budget = work_budget.min(self.prefill_chunk);
+            // One prefill chunk of rows would cost a decoding chat 3.2x its token rate on
+            // bluefin (54.0 to 17.1 tok/s beside two embedding streams); a quarter chunk
+            // costs 1.4x (measured in the PR) and still moves four rows of embedding work
+            // per pass. The price is paid where it is cheapest: an embedding text waits
+            // behind another pass, not behind its own weight read.
+            work_budget = work_budget.min((self.prefill_chunk / 4).max(1));
         }
         work_budget = work_budget.min(self.state.max_batch.saturating_sub(dec.len()));
         // (slot index, tokens taken, first batch row): the rows of one prefilled slot are

@@ -152,8 +152,8 @@ pub fn describe_runtime() -> String {
     let pass = o.pass_rows.map_or_else(
         || {
             format!(
-                "{} (default, for d_model 1024; threads × L2/2 / (4 × d_model))",
-                peregrine_core::options::pass_rows_default_for(threads, 1024)
+                "{} (default, for a Q8_0 model of d_model 1024; L2 and bytes-per-weight)",
+                peregrine_core::options::pass_rows_default_for(1024, 1.06, false)
             )
         },
         |n| n.to_string(),

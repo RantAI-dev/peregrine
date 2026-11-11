@@ -97,7 +97,10 @@
      "notes": "GGUF Q8_0 from Qwen/Qwen3-Embedding-0.6B-GGUF"},
     {"engine": "peregrine", "precision": "q8_0",
      "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
-     "notes": "pre-merge branch build of origin/s4.1-embeddings (63288ec), PR #158; not on main yet"}
+     "notes": "the causal embedding path (S4.1); S4.9b pass budget"},
+    {"engine": "peregrine", "precision": "f16",
+     "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-f16.gguf",
+     "notes": "the same weights widened with llama-quantize F16, for the S4.9b memory-bound sweep"}
    ]
   },
   "embeddinggemma": {
@@ -109,7 +112,10 @@
    "tokenizer_dir": "embeddinggemma/ref",
    "rows": [
     {"engine": "llama_cpp", "precision": "q8_0", "path": "embeddinggemma/embeddinggemma-Q8_0.gguf",
-     "notes": "GGUF Q8_0 from ggml-org/embeddinggemma-300M-GGUF; the google/ PyTorch repo is licence-gated"}
+     "notes": "GGUF Q8_0 from ggml-org/embeddinggemma-300M-GGUF; the google/ PyTorch repo is licence-gated"},
+    {"engine": "peregrine", "precision": "q8_0",
+     "path": "embeddinggemma/embeddinggemma-Q8_0.gguf",
+     "notes": "the encoder path (S4.4): whole texts, no KV cache; S4.9b pass budget"}
    ]
   }
  }

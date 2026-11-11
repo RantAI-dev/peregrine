@@ -147,18 +147,40 @@ fn parse_cache_size(s: &str) -> Option<usize> {
     digits.trim().parse::<usize>().ok().map(|n| n * mult)
 }
 
-/// The default row budget of a non-decoding pass (S4.9b), for `threads` workers and a model of
-/// width `d_model`.
+/// Rows of a pass per byte of weights: the measured ridge of this engine's kernels.
 ///
-/// The design rule: the activation rows of one pass should stay near the per-core L2, about
-/// `threads × L2/2 / (4 × d_model)` rows' worth, clamped to [`PASS_ROWS_DEFAULT`]'s measured
-/// range. Measured on bluefin (4 workers, 512 KiB L2/core) in the S4.9b sweep: throughput at 256
-/// rows is within noise of 512 on both embedding models and ahead of 64; the bound is
-/// [`MAX_PASS_ROWS`].
-pub fn pass_rows_default_for(threads: usize, d_model: usize) -> usize {
-    let l2 = l2_bytes();
-    let rows = threads.max(1) * (l2 / 2) / (4 * d_model.max(1));
-    rows.clamp(16, MAX_PASS_ROWS)
+/// A pass is memory-bound below this many rows and compute-bound above it. It is
+/// `FLOP/s ÷ (2 × bytes/s)`: every step reads the weights once (a pass's bytes are the model's
+/// weight bytes whatever its row count) and does `2 × params` FLOPs per row. Measured on bluefin
+/// at 4 threads, Q8_0: a 0.6B model does 417 GFLOP/s in 16-row passes and 373 GFLOP/s at 256, so
+/// 16 rows is already at the ridge; the ratio 420 GFLOP/s over 2 × 19.5 GB/s is [`ROWS_PER_WEIGHT_BYTE`].
+pub const ROWS_PER_WEIGHT_BYTE: f64 = 10.8;
+
+/// The default row budget of a non-decoding pass (S4.9b): what keeps a pass's activations hot
+/// and stops it before it turns compute-bound.
+///
+/// Two bounds, the smaller wins.
+///
+/// * The activation rows of one pass should stay inside half the L2. The measured files show the
+///   pass's buffers are shared by the workers — the design's `threads × L2/2` overcounts them by
+///   the thread count — so the bound is `L2/2 / (4 × d_model)` (four f32 buffers of `d_model` per
+///   row).
+/// * A pass turns compute-bound at `bytes_per_param × `[`ROWS_PER_WEIGHT_BYTE`] rows; packing
+///   more only spends compute at lower efficiency.
+///
+/// The sweep on bluefin (4 threads, 512 KiB L2 per core) pinned it: Q8_0 (1.06 bytes per weight)
+/// is best at 16 rows and 7-16% slower at 32 and above; F16 (2 bytes per weight) gains 5-15% at
+/// 32; the 300M encoder is flat from 32 and 12-14% ahead of 16. A bidirectional model packs whole
+/// texts, so its floor is 32. `PEREGRINE_PASS_ROWS` overrides the result.
+pub fn pass_rows_default_for(d_model: usize, bytes_per_param: f64, bidirectional: bool) -> usize {
+    let l2_rows = (l2_bytes() / 2) / (4 * d_model.max(1));
+    let ridge = (bytes_per_param.max(0.1) * ROWS_PER_WEIGHT_BYTE) as usize;
+    let rows = l2_rows.min(ridge);
+    if bidirectional {
+        rows.max(PASS_ROWS_DEFAULT / 8).clamp(16, 128)
+    } else {
+        rows.clamp(16, 64)
+    }
 }
 
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
@@ -808,14 +830,16 @@ mod tests {
 
     #[test]
     fn the_pass_budget_default_follows_the_machine_and_the_model() {
-        // 16 rows is the floor and `MAX_PASS_ROWS` the ceiling; a narrower model gets more rows
-        // than a wider one on the same machine.
-        assert!(pass_rows_default_for(1, 1 << 20) >= 16);
-        assert!(pass_rows_default_for(64, 16) <= MAX_PASS_ROWS);
+        // 16 rows is the floor and the ceiling is a format's measured ridge: Q8_0 (1.06 bytes per
+        // weight) sits at the ridge at 16, F16 (2) fits more, and an encoder starts at 32.
+        assert!(pass_rows_default_for(1024, 1.06, false) >= 16);
+        assert!(pass_rows_default_for(1024, 2.0, false) >= 16);
+        assert!(pass_rows_default_for(4096, 4.0, false) <= 64);
+        assert!(pass_rows_default_for(1024, 1.06, true) >= 32);
         if l2_bytes() >= 64 << 10 {
             assert!(
-                pass_rows_default_for(4, 1024) >= pass_rows_default_for(4, 4096),
-                "a narrower model fits more rows in the same caches"
+                pass_rows_default_for(1024, 4.0, false) >= pass_rows_default_for(8192, 4.0, false),
+                "a narrower model fits more activation rows in the same caches"
             );
         }
         assert!(parse_cache_size("512K") == Some(512 << 10));
