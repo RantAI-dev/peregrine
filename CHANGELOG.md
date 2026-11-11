@@ -76,6 +76,16 @@ All notable changes to this project are documented here. The format follows
   and no result moves; `prefill_chunk.rs` gains a mid-prompt width switch and an engine test
   that the pass widens with no decoder, narrows beside one, and widens again. See
   `docs/design/s5-prefill-avx512.md` §8.
+- **NEON twins for long-text attention and the bert family's element-wise work (S4.9g/S4.9h).**
+  The key-major 16-key panel, its tiled score kernel and the 128-key-blocked value mix now run on
+  aarch64 too, as a four-row × sixteen-key `vfmaq_f32` tile and a six-row × two-vector mix. The
+  bert family's `gelu_erf_rows` and `layer_norm_rows` get NEON bodies: eight elements per step
+  with two `f64` lanes per `erf`, and eight rows per step with one `f64` lane pair per two rows.
+  Both are bit-identical to the scalar twins, on every input and at every width the tests pin,
+  so no golden changed on any tier. One thread at head_dim 64/128 and 512-8 192 keys the score
+  kernel goes from 50-67 % to 77-78 % of the core's FMA peak; Nemotron 3.5 Embed 1B Q8_0 at
+  8 192 tokens goes 75.4 → 47.3 s at 10 threads (attention 98.3 → 42.4 s). The strided float
+  GEMM was already on its NEON store path. See `docs/design/s4.9-sota.md` §9 and §12.
 
 - **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The
   kernels hand back a tile as row-major (`blk[i · nb + b]`) and the output is transposed
