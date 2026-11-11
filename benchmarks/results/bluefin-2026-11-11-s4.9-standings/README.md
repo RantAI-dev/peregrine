@@ -25,7 +25,14 @@ Models: `EmbeddingGemma-300M` Q8_0 and `Qwen3-Embedding-0.6B` Q8_0 and F16, unde
 - **Decisions**: `benchmarks/decide.py` (new; one state, `noul` questions in one
   `/v1/systemone` request), `benchmarks/decide_texts.py` for the token-calibrated states
   (64/300/1000 tokens). Seven requests per cell per round, three rounds, median. Four
-  slots on Peregrine and one llama.cpp slot; both engines see the same requests.
+  slots on Peregrine; llama.cpp runs `-np 11`, one slot for each of the largest request's
+  ten questions plus a spare, with `-c 16384` so a 1 000-token state fits every slot.
+  That is the fair setting: llama.cpp answers one request's questions as a group that
+  shares its common prefix (`server_decision_group_tasks`), so with fewer slots than
+  questions the request is split into several groups and the state is evaluated once per
+  group. Both engines see the same requests. Three llama.cpp settings were measured per
+  cell (below); the table reports the fastest, because the engines are compared at their
+  best documented setting.
 - **Profile**: `crates/peregrine-bench/examples/cellprof.rs` (new) drives the same
   `Engine` and prints `StepStats` plus the `PEREGRINE_PROF2=1` buckets for one request of
   each cell, with tokenisation timed apart. `benchmarks/prof_cells.py` (new) is the
@@ -235,30 +242,52 @@ tokens (25-39% of the pass, the largest single lever left), (b) the float panel 
 ## Decisions, `/v1/systemone`, 4 threads
 
 One shared state, 1/3/10 `noul` questions in one request; questions per second and the
-ratio (Peregrine / llama.cpp). Medians of three rounds, seven requests per cell per round.
+ratio (Peregrine / llama.cpp). Medians of three rounds, seven requests per cell per round,
+both engines re-measured in the same session on 2026-11-11. The llama.cpp column is that
+engine's fastest of the three settings measured per cell: `-np 11, -c 16384, -ub 512`
+(the fair default in `decide.py`), and for the two 10-question cells `-np 11, -c 16384,
+-ub 2048 -kvu --cache-ram 256`, which is 3-6% faster there. `-np 1, -c 8192` was measured
+as the historical setting.
 
-| state tokens | questions | peregrine q/s | llama.cpp q/s | ratio |
-|---:|---:|---:|---:|---:|
-| 64 | 1 | 174.27 | 115.29 | **1.51x** |
-| 64 | 3 | 234.24 | 121.77 | **1.92x** |
-| 64 | 10 | 292.35 | 125.11 | **2.34x** |
-| 300 | 1 | 62.07 | 45.74 | **1.36x** |
-| 300 | 3 | 120.91 | 46.80 | **2.58x** |
-| 300 | 10 | 189.92 | 47.97 | **3.96x** |
-| 1000 | 1 | 19.64 | 15.15 | **1.30x** |
-| 1000 | 3 | 46.83 | 15.59 | **3.00x** |
-| 1000 | 10 | 91.55 | 15.72 | **5.83x** |
+| state tokens | questions | peregrine q/s | llama.cpp q/s | ratio | llama.cpp setting |
+|---:|---:|---:|---:|---:|---|
+| 64 | 1 | 175.37 | 118.62 | **1.48x** | -np 11, -c 16384, -ub 512 |
+| 64 | 3 | 208.42 | 162.04 | **1.29x** | -np 11, -c 16384, -ub 512 |
+| 64 | 10 | 262.87 | 216.01 | **1.22x** | -np 11, -c 16384, -ub 2048, -kvu, cache-ram 256 |
+| 300 | 1 | 62.79 | 46.73 | **1.34x** | -np 11, -c 16384, -ub 512 |
+| 300 | 3 | 123.47 | 88.82 | **1.39x** | -np 11, -c 16384, -ub 512 |
+| 300 | 10 | 193.79 | 138.98 | **1.39x** | -np 11, -c 16384, -ub 2048, -kvu, cache-ram 256 |
+| 1000 | 1 | 20.13 | 15.64 | **1.29x** | -np 11, -c 16384, -ub 512 |
+| 1000 | 3 | 47.79 | 35.70 | **1.34x** | -np 11, -c 16384, -ub 512 |
+| 1000 | 10 | 93.63 | 67.75 | **1.38x** | -np 11, -c 16384, -ub 512 |
 
-llama.cpp's per-question cost is flat at 63-65 ms once the state reaches 1 000 tokens: it
-re-evaluates the whole prompt for each question (its fork limit is three children per
-prefix). Peregrine's S4.9j fork reduces a 10-question request to one prefix evaluation
-plus ten short tails, so the advantage grows with the question count.
+The first version of this table ran llama.cpp on **one slot** and reported 1.30-5.83x for
+Peregrine. That was wrong: llama.cpp groups the questions of one request into slots and
+forwards their common prefix once per group (`server_decision_group_tasks`), so a single
+slot evaluates the state once per question and the ratio grew with the question count.
+With as many slots as questions the state is forwarded once, llama.cpp's per-question cost
+falls from 63 ms to 14.8 ms at 1 000 tokens and from 20.6 ms to 7.3 ms at 300, and the real
+same-day advantage is 1.22-1.48x, not a multiple.
+
+Being exact about what remains: llama.cpp still pays one tail per question and its Q8_0
+group decode spreads the ten tails over ten slots, while Peregrine's S4.9j fork forwards
+the shared state once into four slots and then shares the tails' weight passes. On this
+host the honest decision table is 1.2-1.5x for Peregrine, and the 10-question row is the
+narrowest because llama.cpp's grouping is at its best there.
+
+The one-slot numbers, kept in `decide/one-slot/`, are with `-np 1, -c 8192, -ub 512`:
+115-125 q/s at 64 and 46-48 at 300 whatever the question count, and 15.1-15.9 at 1 000.
 
 ## Raw data
 
 - `*-r{1,2,3}.json` — the three embedding rounds per model/engine/precision.
 - `t8/*-r{1,2,3}.json` — the 8-thread 16-token cells.
-- `decide/decide-{peregrine,llama_cpp}-r{1,2,3}.json` — the decision cells.
+- `decide/fair/decide-{peregrine,llama_cpp}-r{1,2,3}.json` — the same-day decision cells
+  (4 Peregrine slots; llama.cpp `-np 11, -c 16384, -ub 512`).
+- `decide/kvu/decide-llama_cpp-r{1,2,3}.json` — llama.cpp `-np 11, -c 16384, -ub 2048,
+  -kvu, --cache-ram 256`, the fastest setting at 10 questions of a 64- or 300-token state.
+- `decide/one-slot/decide-llama_cpp-r{1,2,3}.json` — the historical `-np 1, -c 8192`
+  setting, kept to show why it was the wrong comparison.
 - `profile/*-t4-profile.json` — the per-cell stage profile.
 - `*-skips.json` — the one skipped cell and why.
 

@@ -110,22 +110,78 @@ def profile_tables(directory):
     return "\n\n".join(out)
 
 
+def decision_rounds(directory):
+    """engine -> config -> cell -> [questions/s per round], with a config label."""
+    out = {}
+    labels = {}
+    for f in sorted((directory / "decide").rglob("decide-*.json")):
+        d = json.loads(f.read_text(encoding="utf-8"))
+        engine = d["engine"]
+        cfg = f.parent.name
+        settings = d.get("settings", {})
+        if engine == "llama_cpp":
+            label = (f"-np {settings.get('llama_slots', '?')}, "
+                     f"-c {settings.get('llama_ctx', settings.get('ctx', '?'))}, "
+                     f"-ub {settings.get('llama_ubatch', '?')}")
+            if settings.get("llama_kv_unified"):
+                label += ", -kvu"
+            if settings.get("llama_cache_ram"):
+                label += f", cache-ram {settings['llama_cache_ram']}"
+        else:
+            label = f"{settings.get('slots', '?')} slots, -c {settings.get('ctx', '?')}"
+        labels.setdefault((engine, cfg), label)
+        for cell, c in d["cells"].items():
+            out.setdefault(engine, {}).setdefault(cfg, {}).setdefault(cell, []).append(
+                c["questions_per_s"])
+    return out, labels
+
+
+def _cell_key(cell):
+    return (int(cell.split("_")[0][1:]), int(cell.split("_q")[1]))
+
+
 def decision_tables(directory):
+    data, labels = decision_rounds(directory)
     out = []
-    for engine in ("peregrine", "llama_cpp"):
-        files = sorted((directory / "decide").glob(f"decide-{engine}-r*.json"))
-        if not files:
-            continue
-        cells = {}
-        for f in files:
-            d = json.loads(f.read_text(encoding="utf-8"))
-            for cell, c in d["cells"].items():
-                cells.setdefault(cell, []).append(c["questions_per_s"])
-        lines = [f"### {engine}, 4 threads", "",
+    if "peregrine" in data:
+        cells = data["peregrine"].get("fair", {})
+        lines = ["### peregrine, 4 threads, 4 slots", "",
                  "| state tokens | questions | questions/s |", "|---:|---:|---:|"]
-        for cell in sorted(cells, key=lambda c: (int(c.split("_")[0][1:]), int(c.split("_q")[1]))):
+        for cell in sorted(cells, key=_cell_key):
             state, q = cell[1:].split("_q")
             lines.append(f"| {state} | {q} | {statistics.median(cells[cell]):.2f} |")
+        out.append("\n".join(lines))
+    if "llama_cpp" in data:
+        configs = data["llama_cpp"]
+        cells = {c for cfg in configs.values() for c in cfg}
+        # The best configuration for each cell, chosen by its median over the rounds.
+        best = {}
+        for cell in cells:
+            ranked = [(statistics.median(configs[cfg][cell]), cfg)
+                      for cfg in configs if cell in configs[cfg]]
+            best[cell] = max(ranked)
+        lines = ["### llama.cpp, 4 threads, best setting per cell", "",
+                 "| state tokens | questions | questions/s | setting |", "|---:|---:|---:|---|"]
+        for cell in sorted(cells, key=_cell_key):
+            state, q = cell[1:].split("_q")
+            value, cfg = best[cell]
+            lines.append(f"| {state} | {q} | {value:.2f} | {labels[('llama_cpp', cfg)]} |")
+        out.append("\n".join(lines))
+    if "peregrine" in data and "llama_cpp" in data:
+        per = data["peregrine"].get("fair", {})
+        configs = data["llama_cpp"]
+        cells = sorted(set(per) & {c for cfg in configs.values() for c in cfg}, key=_cell_key)
+        lines = ["### Peregrine / llama.cpp, same day, 4 threads", "",
+                 "| state tokens | questions | peregrine q/s | llama.cpp q/s | ratio | llama.cpp setting |",
+                 "|---:|---:|---:|---:|---:|---|"]
+        for cell in cells:
+            ranked = [(statistics.median(configs[cfg][cell]), cfg)
+                      for cfg in configs if cell in configs[cfg]]
+            value, cfg = max(ranked)
+            p = statistics.median(per[cell])
+            state, q = cell[1:].split("_q")
+            lines.append(f"| {state} | {q} | {p:.2f} | {value:.2f} | "
+                         f"**{p / value:.2f}×** | {labels[('llama_cpp', cfg)]} |")
         out.append("\n".join(lines))
     return "\n\n".join(out)
 

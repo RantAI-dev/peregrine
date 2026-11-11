@@ -7,10 +7,18 @@ requests.  The states come from `decide_texts.py` (token-calibrated with the
 model's own tokenizer, within 2%).  Standard library only; each engine is a
 subprocess this script starts and stops by PID.
 
+The fair llama.cpp setting is the default: `-np 11` (one slot per question of
+the largest request plus a spare) and `-c 16384` (so a 1 000-token state fits
+a slot).  llama.cpp groups a request's questions in `server_decision_group_tasks`
+and forwards their common prefix once per group; fewer slots than questions
+splits the request into groups and evaluates the state once per group, which
+makes llama.cpp look far slower than it is.  `--llama-slots 1` reproduces the
+historical, unfair setting for comparison.
+
   python benchmarks/decide.py --engine peregrine --binary target/release/peregrine \
       --model ~/models/tinyopenjev-for-testing-Q8_0.gguf \
       --states /var/tmp/embed-texts-s49k/decide-states.json \
-      --output-dir benchmarks/results/bluefin-2026-11-11-s4.9-standings/decide
+      --output-dir benchmarks/results/bluefin-2026-11-11-s4.9-standings/decide/fair
 """
 
 import argparse
@@ -29,6 +37,13 @@ import urllib.request
 
 PEREGRINE = "peregrine"
 LLAMA = "llama_cpp"
+
+# Result files never carry this machine's home path.
+HOME = os.path.expanduser("~")
+
+
+def clean_path(text):
+    return text.replace(HOME, "~") if HOME not in ("", "/") else text
 
 # Ten noul questions, in request order.  The answers are probabilities, so the
 # wording only has to give the model something to decide; the timing is what
@@ -109,13 +124,19 @@ class Server:
                 str(Path(args.server_bin).expanduser()),
                 "-m", str(Path(args.model).expanduser()),
                 "-t", str(args.threads),
-                "-c", str(args.ctx),
-                "-np", "1",
-                "-b", "2048",
-                "-ub", "512",
+                "-c", str(args.llama_ctx),
+                "-np", str(args.llama_slots),
+                "-b", str(args.llama_batch),
+                "-ub", str(args.llama_ubatch),
                 "--host", "127.0.0.1",
                 "--port", str(self.port),
             ]
+            if args.llama_kv_unified:
+                cmd.append("-kvu")
+            if args.llama_cache_ram is not None:
+                cmd += ["--cache-ram", str(args.llama_cache_ram)]
+            if args.llama_flash_attn:
+                cmd += ["-fa", args.llama_flash_attn]
         self.cmd = cmd
         self.proc = subprocess.Popen(cmd, stdout=self.log, stderr=subprocess.STDOUT, env=env)
         if not wait_ready(self.base + "/v1/models", self.proc):
@@ -172,8 +193,24 @@ def main():
     ap.add_argument("--questions", default="1,3,10")
     ap.add_argument("--runs", type=int, default=21)
     ap.add_argument("--threads", type=int, default=4)
-    ap.add_argument("--ctx", type=int, default=8192)
-    ap.add_argument("--slots", type=int, default=4)
+    ap.add_argument("--ctx", type=int, default=8192,
+                    help="Peregrine context (per slot)")
+    ap.add_argument("--llama-ctx", type=int, default=16384,
+                    help="llama.cpp -c: the KV pool; with -np 11 it must hold "
+                         "a 1000-token state in every slot")
+    ap.add_argument("--slots", type=int, default=4,
+                    help="Peregrine server slots")
+    ap.add_argument("--llama-batch", type=int, default=2048)
+    ap.add_argument("--llama-ubatch", type=int, default=512)
+    ap.add_argument("--llama-cache-ram", type=int, default=None,
+                    help="llama.cpp --cache-ram MiB (0 keeps the decision-model default)")
+    ap.add_argument("--llama-flash-attn", default=None,
+                    help="llama.cpp -fa value (auto, on, off)")
+    ap.add_argument("--llama-kv-unified", action="store_true",
+                    help="llama.cpp -kvu (one KV pool shared across slots)")
+    ap.add_argument("--llama-slots", type=int, default=11,
+                    help="llama.cpp -np: at least the largest question count, "
+                         "so one request's questions share their prefix")
     ap.add_argument("--port", type=int, default=8351)
     ap.add_argument("--binary", default="target/release/peregrine")
     ap.add_argument("--server-bin", default="/var/tmp/llama.cpp/build/bin/llama-server")
@@ -238,7 +275,7 @@ def main():
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "round": args.round,
         "engine": args.engine,
-        "model": str(Path(args.model).expanduser()),
+        "model": clean_path(str(Path(args.model).expanduser())),
         "machine": {
             "hostname": platform.node(),
             "cpu": platform.processor(),
@@ -247,11 +284,18 @@ def main():
         },
         "settings": {
             "ctx": args.ctx,
+            "llama_ctx": args.llama_ctx,
             "slots": args.slots,
+            "llama_slots": args.llama_slots,
+            "llama_batch": args.llama_batch,
+            "llama_ubatch": args.llama_ubatch,
+            "llama_kv_unified": args.llama_kv_unified,
+            "llama_cache_ram": args.llama_cache_ram,
+            "llama_flash_attn": args.llama_flash_attn,
             "runs": args.runs,
             "questions": qcounts,
             "states": lengths,
-            "cmd": server.cmd,
+            "cmd": [clean_path(part) for part in server.cmd],
         },
         "cells": cells,
     }
