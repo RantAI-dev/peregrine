@@ -55,6 +55,25 @@ pub struct PromptQuestion {
     pub options: Vec<PromptOption>,
 }
 
+impl PromptQuestion {
+    /// A question whose options are `keys` with empty descriptions and no instructions, for the
+    /// answer math and its tests. The endpoint builds a question from a request's `criteria`
+    /// ([`options_from_criteria`]).
+    pub fn new(kind: QuestionKind, keys: &[&str]) -> PromptQuestion {
+        PromptQuestion {
+            kind,
+            instructions: Value::Null,
+            options: keys
+                .iter()
+                .map(|k| PromptOption {
+                    key: (*k).to_string(),
+                    description: Value::Str(String::new()),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// How a decision type orders a question's options (the flags `parse_questions` reads in
 /// llama.cpp's `server-decision.cpp`). The order matters twice: it is the order the prompt lists
 /// the options in and the order their scores are read in.

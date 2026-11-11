@@ -32,6 +32,8 @@ pub use support::support;
 #[cfg(feature = "cli")]
 pub mod bench;
 #[cfg(feature = "cli")]
+pub mod decide;
+#[cfg(feature = "cli")]
 pub mod embed;
 #[cfg(feature = "cli")]
 pub mod run;

@@ -16,9 +16,7 @@
 
 use std::sync::Arc;
 
-use peregrine_core::decision::{
-    format_answer, Answer, DecisionInfo, DecisionType, Question, QuestionOption, QuestionType,
-};
+use peregrine_core::decision::{format_answer, Answer, DecisionInfo, DecisionType};
 use peregrine_core::json::Value;
 use peregrine_core::kv::KvPrec;
 use peregrine_core::serve::{Engine, SlotCfg};
@@ -96,23 +94,21 @@ fn openjev_answers_match_llama_cpp_on_the_model_file() {
     for (n, line) in fixture.lines().enumerate() {
         let case = Value::parse(line).expect("a fixture line");
         let q = case.get("question").expect("question");
-        let (kind, math_kind) = match q.get("type").and_then(Value::as_str).expect("type") {
-            "choice" => (QuestionKind::Choice, QuestionType::Choice),
-            "score" => (QuestionKind::Score, QuestionType::Score),
-            "noul" => (QuestionKind::Noul, QuestionType::Noul),
+        let kind = match q.get("type").and_then(Value::as_str).expect("type") {
+            "choice" => QuestionKind::Choice,
+            "score" => QuestionKind::Score,
+            "noul" => QuestionKind::Noul,
             other => panic!("unknown question type {other:?}"),
         };
         let criteria = q.get("criteria").cloned().unwrap_or(Value::Null);
         let options = options_from_criteria(kind, &criteria, OPENJEV_RULES).expect("options");
-        let prompt = render_openjev(
-            &PromptQuestion {
-                kind,
-                instructions: q.get("instructions").cloned().unwrap_or(Value::Null),
-                options: options.clone(),
-            },
-            case.get("state").expect("state"),
-        )
-        .expect("the prompt renders");
+        let prompt_question = PromptQuestion {
+            kind,
+            instructions: q.get("instructions").cloned().unwrap_or(Value::Null),
+            options,
+        };
+        let prompt = render_openjev(&prompt_question, case.get("state").expect("state"))
+            .expect("the prompt renders");
 
         // One labels slot: prefill the prompt, read the last row's logits at the option letters.
         let mut engine = Engine::new(model.clone(), 4, 4096, 1, KvPrec::F16, 0);
@@ -120,7 +116,7 @@ fn openjev_answers_match_llama_cpp_on_the_model_file() {
             .admit_labels(
                 tk.encode(&prompt),
                 SlotCfg::default(),
-                letters[..options.len()].to_vec(),
+                letters[..prompt_question.options.len()].to_vec(),
             )
             .map_err(|(_, e)| e)
             .expect("the labels slot is admitted");
@@ -134,19 +130,9 @@ fn openjev_answers_match_llama_cpp_on_the_model_file() {
         }
         let scores = scores.expect("the slot returned its label logits");
 
-        let question = Question {
-            kind: math_kind,
-            options: options
-                .iter()
-                .map(|o| QuestionOption {
-                    key: o.key.clone(),
-                    description: String::new(),
-                })
-                .collect(),
-        };
         let answer = format_answer(
             info.kind(),
-            &question,
+            &prompt_question,
             &[scores],
             info.temperatures(),
             info.score_bias(),
