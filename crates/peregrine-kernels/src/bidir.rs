@@ -210,8 +210,13 @@ pub fn scores_row(
     scale: f32,
     out: &mut [f32],
 ) {
-    debug_assert!(lo <= hi && hi <= n);
-    debug_assert!(q.len() >= hd && panel.len() >= hd * n && out.len() >= n);
+    // Checked in every build: the vector kernel below reads and writes through raw
+    // pointers, so these bounds are what makes this safe function sound.
+    assert!(lo <= hi && hi <= n, "score range outside the keys");
+    assert!(
+        q.len() >= hd && panel.len() >= hd * n && out.len() >= hi,
+        "score buffers shorter than the range"
+    );
     #[cfg(target_arch = "x86_64")]
     {
         if vector_ok() {
@@ -376,11 +381,23 @@ pub fn scores_tile_shaped(
     out: &mut [f32],
     out_stride: usize,
 ) {
-    debug_assert!(j0 <= j1 && j1 <= n);
-    debug_assert!(rows > 0);
-    debug_assert!(q.len() >= rows * q_stride);
-    debug_assert!(out.len() >= rows * out_stride);
-    debug_assert!(panel.len() >= hd * n);
+    if rows == 0 {
+        return;
+    }
+    // Checked in every build: the vector kernel reads and writes through raw pointers,
+    // so these bounds are what makes this safe function sound. The last row needs only
+    // its own head (`hd` floats) and its scores up to `j1`, not a whole stride: callers
+    // pass slices that end with the buffer.
+    assert!(j0 <= j1 && j1 <= n, "key range outside the keys");
+    assert!(
+        q.len() >= (rows - 1) * q_stride + hd,
+        "query rows shorter than the strip"
+    );
+    assert!(
+        out.len() >= (rows - 1) * out_stride + j1,
+        "score rows shorter than the strip"
+    );
+    assert!(panel.len() >= hd * n, "key panel shorter than hd * n");
     #[cfg(not(target_arch = "x86_64"))]
     let _ = (rows_tile, keys_tile);
     #[cfg(target_arch = "x86_64")]
@@ -514,8 +531,9 @@ unsafe fn scores_tile_avx2(
 /// the same slots, and the soft-max reads only the row's own band.
 ///
 /// # Safety
-/// AVX2 and FMA must be available; `j1 - j0 >= W`, `rows > 0`, `q.len() >= rows *
-/// q_stride`, `out.len() >= rows * out_stride`, `panel.len() >= hd * n`.
+/// AVX2 and FMA must be available; `j1 - j0 >= W`, `j1 <= n`, `rows > 0`,
+/// `q.len() >= (rows - 1) * q_stride + hd`, `out.len() >= (rows - 1) * out_stride + j1`,
+/// `panel.len() >= hd * n` (what [`scores_tile_shaped`] asserts).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[allow(clippy::too_many_arguments)]
@@ -653,7 +671,8 @@ unsafe fn score_block<const R: usize, const NV: usize>(
 /// A NaN in a score would make the two paths differ in the same way the FPU's
 /// `maxps` and `f32::max` always do; real scores are finite.
 pub fn max_row(x: &[f32], lo: usize, hi: usize) -> f32 {
-    debug_assert!(lo <= hi && hi <= x.len());
+    // Checked in every build: the vector path indexes without bounds checks.
+    assert!(lo <= hi && hi <= x.len(), "band outside the row");
     #[cfg(target_arch = "x86_64")]
     {
         if vector_ok() {
@@ -712,7 +731,8 @@ unsafe fn max_row_avx2(x: &[f32], lo: usize, hi: usize) -> f32 {
 /// every path, which is what makes the denominator order-independent of the kernel:
 /// the *definition* is the ascending sum, not the hardware's grouping.
 pub fn exp_row(x: &mut [f32], lo: usize, hi: usize, max: f32) -> f64 {
-    debug_assert!(lo <= hi && hi <= x.len());
+    // Checked in every build: the vector path indexes without bounds checks.
+    assert!(lo <= hi && hi <= x.len(), "band outside the row");
     #[cfg(target_arch = "x86_64")]
     {
         if vector_ok() {
@@ -785,9 +805,26 @@ pub fn mix_rows(
     out_stride: usize,
     obase: usize,
 ) {
-    debug_assert!(e.len() >= rows * e_stride);
-    debug_assert!(inv.len() >= rows);
-    debug_assert!(out.len() >= rows * out_stride);
+    if rows == 0 || n == 0 {
+        return;
+    }
+    // Checked in every build: the vector kernel reads and writes through raw pointers,
+    // so these bounds are what makes this safe function sound. Every band lies inside
+    // `0..n` because the rows are rows of the text (`i0 + rows <= n`).
+    assert!(i0 + rows <= n, "mix rows outside the text");
+    assert!(
+        e.len() >= (rows - 1) * e_stride + n,
+        "weight rows shorter than the strip"
+    );
+    assert!(inv.len() >= rows, "one denominator per row");
+    assert!(
+        v.len() >= (n - 1) * v_stride + base + hd,
+        "value rows shorter than the text"
+    );
+    assert!(
+        out.len() >= (rows - 1) * out_stride + obase + hd,
+        "output rows shorter than the strip"
+    );
     #[cfg(target_arch = "x86_64")]
     {
         if vector_ok() {
@@ -861,9 +898,26 @@ pub fn mix_rows_shaped(
     out_stride: usize,
     obase: usize,
 ) {
-    debug_assert!(e.len() >= rows * e_stride);
-    debug_assert!(inv.len() >= rows);
-    debug_assert!(out.len() >= rows * out_stride);
+    if rows == 0 || n == 0 {
+        return;
+    }
+    // Checked in every build: the vector kernel reads and writes through raw pointers,
+    // so these bounds are what makes this safe function sound. Every band lies inside
+    // `0..n` because the rows are rows of the text (`i0 + rows <= n`).
+    assert!(i0 + rows <= n, "mix rows outside the text");
+    assert!(
+        e.len() >= (rows - 1) * e_stride + n,
+        "weight rows shorter than the strip"
+    );
+    assert!(inv.len() >= rows, "one denominator per row");
+    assert!(
+        v.len() >= (n - 1) * v_stride + base + hd,
+        "value rows shorter than the text"
+    );
+    assert!(
+        out.len() >= (rows - 1) * out_stride + obase + hd,
+        "output rows shorter than the strip"
+    );
     #[cfg(not(target_arch = "x86_64"))]
     let _ = rows_block;
     #[cfg(target_arch = "x86_64")]
