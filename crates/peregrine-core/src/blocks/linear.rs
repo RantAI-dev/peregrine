@@ -1,6 +1,6 @@
 //! Fused linear transformation blocks (dense GEMM groups and LittleBit).
 
-use crate::blocks::par::{OutPtr, SharedBuf};
+use crate::blocks::par::{Disjoint, OutPtr, SharedBuf};
 use crate::gguf::{Format, TensorInfo};
 use crate::lbq::Slb;
 use crate::model::{Linear, StepStats, Weights};
@@ -590,6 +590,262 @@ fn fp_group(
         st.bytes_acts += (rows.div_ceil(16) * blocks * nb * act_bytes(&acts[0])) as u64;
     }
     st.barriers += 1;
+}
+
+/// One value per requested token id of one activation row, with the arithmetic the
+/// full-row head uses for that weight row on this tier (S4.9d).
+///
+/// A row is computed by the same kernel the full path would run it in: the per-row
+/// kernel (`quant::dot_batch`, or the eight-row Q5_0/Q8_0 one when the pass has a
+/// single activation) for a matrix stored as rows; the eight-row k-quant tile, the
+/// sixteen-row ternary tile or the packed float panel that contains it, taking the
+/// one output. Every one of those kernels computes each output independently of its
+/// neighbours, so the value is the full row's entry bit for bit. `acts` is the whole
+/// pass's activation batch; `b` is taken in the `MAX_BATCH`-row block the matmul
+/// driver would have handed the kernel.
+#[allow(clippy::too_many_arguments)]
+fn one_row_outputs(
+    w: &Weights,
+    head: &TensorInfo,
+    acts: &[QuantAct],
+    b: usize,
+    ids: &[u32],
+    out: &mut [f32],
+    st: &mut StepStats,
+    kq: &mut peregrine_kernels::kq::KqActs,
+) {
+    let n = head.dims[0] as usize;
+    let n_out = head.dims[1] as usize;
+    let rb = row_bytes(head.kind, n);
+    // The matmul driver splits a wide pass into blocks of at most `MAX_BATCH`
+    // activation rows, and a block's kernel call is the one the full path makes:
+    // take the block that holds this row, and the row's place in it.
+    let b0 = (b / MAX_BATCH) * MAX_BATCH;
+    let nb = MAX_BATCH.min(acts.len() - b0);
+    let block = &acts[b0..b0 + nb];
+    let b = b - b0;
+    let mk = MatKernels::get();
+    let path = mk.path(
+        head.kind,
+        head.tile_off.is_some(),
+        head.kq_off.is_some(),
+        head.fp_off.is_some(),
+        block[0].ptq1,
+    );
+    // The batched k-quant tiles read the interleaved activation, which the full
+    // path fills once per block (S3.4).
+    if nb >= 4
+        && matches!(head.kind, Format::Q4_K | Format::Q6_K)
+        && head.kq_off.is_some()
+        && mk.kq_tiles_for(head.kind)
+    {
+        kq.fill(block);
+    }
+    let bytes = w.bytes(head);
+    let mut blk = [0.0f32; 16 * MAX_BATCH];
+    let mut tmp = [0.0f32; MAX_BATCH];
+    let mut eight = [0.0f32; 8];
+    for (k, &id) in ids.iter().enumerate() {
+        let r = id as usize;
+        assert!(r < n_out, "label {r} outside the head's {n_out} rows");
+        let (v, read) = match path {
+            MatPath::Tiles => {
+                // The 16-row ternary tile that holds row `r`; its outputs are the
+                // same whatever tile count the call covers.
+                let toff = head.tile_off.expect("a tiled path has a tile offset");
+                let tb = 16 * rb;
+                let p = r / 16;
+                mk.tiles_pq2(
+                    &w.tiles()[toff + p * tb..toff + (p + 1) * tb],
+                    n / 128,
+                    1,
+                    block,
+                    &mut blk[..16 * nb],
+                );
+                (blk[(r % 16) * nb + b], 16)
+            }
+            MatPath::RowsPq2 | MatPath::RowsPtq1 => {
+                let row = &bytes[r * rb..(r + 1) * rb];
+                if path == MatPath::RowsPtq1 {
+                    mk.rows_ptq1(row, rb, 1, block, &mut tmp[..nb]);
+                } else {
+                    mk.rows_pq2(row, rb, 1, block, &mut tmp[..nb]);
+                }
+                (tmp[b], 1)
+            }
+            MatPath::KqTiles => {
+                let kq_off = head.kq_off.expect("the repacked path has a store offset");
+                let n_sb = n / head.kind.block();
+                let tile_bytes = match head.kind {
+                    Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
+                    Format::Q5_0 => peregrine_kernels::kq::Q5_08::SIZE,
+                    Format::Q8_0 => peregrine_kernels::kq::Q8_08::SIZE,
+                    Format::Q6_K => peregrine_kernels::kq::Q6K8::SIZE,
+                    _ => unreachable!("a repacked path has a repacked format"),
+                };
+                let repacked = (n_out / KQ_TILE_ROWS) * KQ_TILE_ROWS;
+                if r >= repacked {
+                    // Past the last whole group of eight: the file's own row kernel.
+                    mk.row(
+                        head.kind,
+                        &bytes[r * rb..(r + 1) * rb],
+                        block,
+                        &mut tmp[..nb],
+                    );
+                    (tmp[b], 1)
+                } else {
+                    let t = r / KQ_TILE_ROWS;
+                    let at = kq_off + t * n_sb * tile_bytes;
+                    let tile = &w.kq()[at..at + n_sb * tile_bytes];
+                    match head.kind {
+                        Format::Q5_0 => {
+                            if nb >= 4 {
+                                mk.kq_tiles_q5_0(tile, n_sb, block, nb, &mut blk[..8 * nb])
+                            } else {
+                                mk.kq_tiles_q5_0_gemv(tile, n_sb, block, nb, &mut blk[..8 * nb])
+                            }
+                        }
+                        Format::Q8_0 => {
+                            if nb >= 4 {
+                                mk.kq_tiles_q8_0(tile, n_sb, block, nb, &mut blk[..8 * nb])
+                            } else {
+                                mk.kq_tiles_q8_0_gemv(tile, n_sb, block, nb, &mut blk[..8 * nb])
+                            }
+                        }
+                        Format::Q6_K => {
+                            if nb >= 4 {
+                                mk.kq_tiles_q6k(tile, n_sb, kq, nb, &mut blk[..8 * nb])
+                            } else {
+                                mk.kq_tiles_q6k_gemv(tile, n_sb, block, nb, &mut blk[..8 * nb])
+                            }
+                        }
+                        _ => {
+                            if nb >= 4 {
+                                mk.kq_tiles_q4k(tile, n_sb, kq, nb, &mut blk[..8 * nb])
+                            } else {
+                                mk.kq_tiles_q4k_gemv(tile, n_sb, block, nb, &mut blk[..8 * nb])
+                            }
+                        }
+                    }
+                    (blk[b * KQ_TILE_ROWS + (r % KQ_TILE_ROWS)], KQ_TILE_ROWS)
+                }
+            }
+            MatPath::FloatPanels => {
+                let off = head.fp_off.expect("a packed float path has a store offset");
+                let pb = peregrine_kernels::fpack::panel_bytes(head.kind, n);
+                let p = r / 16;
+                mk.fp_panels_gemm(
+                    head.kind,
+                    &w.fp()[off + p * pb..off + (p + 1) * pb],
+                    n,
+                    1,
+                    block,
+                    None,
+                    &mut blk[..16 * nb],
+                );
+                (blk[b * 16 + (r % 16)], 16)
+            }
+            MatPath::PerRow => {
+                if nb == 1 && mk.rows8(head.kind) {
+                    let start = (r / 8) * 8;
+                    if start + 8 <= n_out {
+                        mk.row8(
+                            head.kind,
+                            &bytes[start * rb..(start + 8) * rb],
+                            rb,
+                            &block[0],
+                            &mut eight,
+                        );
+                        (eight[r - start], 8)
+                    } else {
+                        mk.row(
+                            head.kind,
+                            &bytes[r * rb..(r + 1) * rb],
+                            block,
+                            &mut tmp[..nb],
+                        );
+                        (tmp[0], 1)
+                    }
+                } else {
+                    mk.row(
+                        head.kind,
+                        &bytes[r * rb..(r + 1) * rb],
+                        block,
+                        &mut tmp[..nb],
+                    );
+                    (tmp[b], 1)
+                }
+            }
+        };
+        out[k] = v;
+        st.bytes_weights += (read * rb) as u64;
+        st.macs += (read * n * nb) as u64;
+    }
+}
+
+/// The output head's rows for one pass (S4.9d).
+///
+/// `acts` holds one quantised activation per entry of `want_logits`, normed and
+/// quantised by the caller exactly as the full head does it. Every row not named in
+/// `label_rows` is written whole into `logits[row · n_out..]` through the same group
+/// kernel as before. A label row — `(index into want_logits, start in label_ids,
+/// count)` — is evaluated only at its token ids and written to `label_out`.
+#[allow(clippy::too_many_arguments)]
+pub fn output_rows(
+    w: &Weights,
+    head: &TensorInfo,
+    acts: &[QuantAct],
+    want_logits: &[usize],
+    logits: &mut [f32],
+    label_rows: &[(usize, usize, usize)],
+    label_ids: &[u32],
+    label_out: &mut [f32],
+    pool: &Pool,
+    st: &mut StepStats,
+    kq: &mut peregrine_kernels::kq::KqActs,
+) {
+    let n_out = head.dims[1] as usize;
+    let nl = want_logits.len();
+    debug_assert!(acts.len() >= nl);
+    // Every contiguous run of rows that wants the whole vocabulary is one group
+    // call; its output starts at that run's first logit row.
+    let mut i = 0usize;
+    while i < nl {
+        if label_rows.iter().any(|r| r.0 == i) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < nl && !label_rows.iter().any(|r| r.0 == i) {
+            i += 1;
+        }
+        let job = MatJob {
+            w: head,
+            out: Disjoint::new(&mut logits[start * n_out..i * n_out]),
+            rows: None,
+        };
+        matmul_group(w, &[job], &acts[start..i], i - start, pool, st, kq);
+    }
+    if label_rows.is_empty() {
+        return;
+    }
+    let t0 = Instant::now();
+    for &(row, start, count) in label_rows {
+        debug_assert!(row < nl && start + count <= label_ids.len());
+        one_row_outputs(
+            w,
+            head,
+            acts,
+            // `acts` is one row per `want_logits` entry, so the label row's
+            // activation is at its position in that list, not its batch row.
+            row,
+            &label_ids[start..start + count],
+            &mut label_out[start..start + count],
+            st,
+            kq,
+        );
+    }
+    st.ns_matmul += t0.elapsed().as_nanos() as u64;
 }
 
 /// Several matrices that share one activation, each dense or LittleBit.

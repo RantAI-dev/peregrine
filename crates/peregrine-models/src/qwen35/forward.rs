@@ -290,6 +290,9 @@ impl Qwen35 {
             fam,
             want_hidden,
             hidden,
+            label_rows,
+            label_ids,
+            label_out,
             ..
         } = st8;
         if fam.is_none() {
@@ -673,15 +676,32 @@ impl Qwen35 {
             self.rotate_rows(hs, acts, &xb_taken, d, nl, false, pool, stats);
             *xb = xb_taken;
             let before = stats.ns_matmul;
-            self.mm(
-                w,
-                &[(&self.head, Disjoint::new(logits))],
-                &acts[..nl],
-                nl,
-                pool,
-                stats,
-                kq,
-            );
+            if label_rows.is_empty() {
+                self.mm(
+                    w,
+                    &[(&self.head, Disjoint::new(logits))],
+                    &acts[..nl],
+                    nl,
+                    pool,
+                    stats,
+                    kq,
+                );
+            } else {
+                // S4.9d: each label row is evaluated only at its token ids.
+                blocks::linear::output_rows(
+                    w,
+                    &self.head,
+                    &acts[..nl],
+                    want_logits,
+                    logits,
+                    label_rows,
+                    label_ids,
+                    label_out,
+                    pool,
+                    stats,
+                    kq,
+                );
+            }
             stats.ns_head += stats.ns_matmul - before;
             stats.ns_matmul = before;
         }

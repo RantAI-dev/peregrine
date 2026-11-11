@@ -2066,14 +2066,24 @@ impl Engine {
             }
         }
         let mut want: Vec<usize> = (0..n_dec).collect();
-        // A labels slot that completes its prompt in this pass wants its last row's logits. They
-        // are gathered after the pass; the row is the same one the model computes for a
-        // one-row pass, because the head is the same code (`layer::head_rows`).
-        let mut label_rows: Vec<(usize, usize)> = Vec::new();
+        // A labels slot that completes its prompt in this pass wants its last row's logits.
+        // They are gathered after the pass; the row is the same one the model computes for a
+        // one-row pass, because the head is the same code (`layer::head_rows`). S4.9d: the
+        // head evaluates only the label ids, not the whole vocabulary row.
+        // (pre index, start in `state.label_out`, count) per labels slot finishing here.
+        let mut label_rows: Vec<(usize, usize, usize)> = Vec::new();
+        self.state.label_rows.clear();
+        self.state.label_ids.clear();
+        self.state.label_out.clear();
         for (k, &(i, take, row0)) in pre.iter().enumerate() {
             let s = &self.slots[i];
             if s.want.is_labels() && s.fed + take >= s.prefill_len() {
-                label_rows.push((k, want.len()));
+                let start = self.state.label_ids.len();
+                let count = s.labels.len();
+                self.state.label_ids.extend_from_slice(&s.labels);
+                self.state.label_out.resize(start + count, 0.0);
+                self.state.label_rows.push((want.len(), start, count));
+                label_rows.push((k, start, count));
                 want.push(row0 + take - 1);
             }
         }
@@ -2155,7 +2165,6 @@ impl Engine {
             }
         }
         let mut pooled_out: Vec<Emission> = Vec::new();
-        let n_vocab = self.model.cfg.n_vocab;
         for (k, &(i, take, row0)) in pre.iter().enumerate() {
             let last = self.slots[i].prefill_len();
             let s = &mut self.slots[i];
@@ -2178,11 +2187,10 @@ impl Engine {
                 )
             });
             let label_logits = if s.want.is_labels() {
-                let row = label_rows.iter().find(|&&(pk, _)| pk == k).map(|&(_, r)| r);
-                row.map(|r| {
-                    let logits = self.state.logits_row(r, n_vocab);
-                    s.labels.iter().map(|&l| logits[l as usize]).collect()
-                })
+                label_rows
+                    .iter()
+                    .find(|&&(pk, _, _)| pk == k)
+                    .map(|&(_, start, count)| self.state.label_out[start..start + count].to_vec())
             } else {
                 None
             };
@@ -2259,10 +2267,18 @@ impl Engine {
         let chunk: Vec<u32> = s.prompt[s.fed..s.fed + take].to_vec();
         let start = s.fed;
         // A labels slot reads its last prompt row: this chunk's last row, when it completes the
-        // prompt. The forward pass writes exactly that row's full logits, which are then gathered
-        // at the label ids (the head has no cheaper path that would be bit-identical).
+        // prompt. S4.9d: the head evaluates only the label ids of that row, which is bit-identical
+        // to gathering them out of the full row.
         let labels_done = s.want.is_labels() && s.fed + take >= last;
         let want_logits: &[usize] = if labels_done { &[take - 1] } else { &[] };
+        self.state.label_rows.clear();
+        self.state.label_ids.clear();
+        self.state.label_out.clear();
+        if labels_done {
+            self.state.label_ids.extend_from_slice(&s.labels);
+            self.state.label_out.resize(s.labels.len(), 0.0);
+            self.state.label_rows.push((0, 0, s.labels.len()));
+        }
         self.state.want_hidden = self.wants_hidden();
         self.model.forward(
             &mut self.state,
@@ -2287,15 +2303,7 @@ impl Engine {
             self.slots[i].pool_accumulate(&self.state.hidden[..take * d_model], d_model);
         }
         let label_logits = if labels_done {
-            let n_vocab = self.model.cfg.n_vocab;
-            let logits = self.state.logits_row(0, n_vocab);
-            Some(
-                self.slots[i]
-                    .labels
-                    .iter()
-                    .map(|&l| logits[l as usize])
-                    .collect(),
-            )
+            Some(self.state.label_out[..self.slots[i].labels.len()].to_vec())
         } else {
             None
         };
@@ -2374,6 +2382,9 @@ impl Engine {
             &self.pool
         };
         self.state.want_hidden = hidden;
+        self.state.label_rows.clear();
+        self.state.label_ids.clear();
+        self.state.label_out.clear();
         let r = self.model.forward_rows(
             &mut self.state,
             &mut Caches::PerRow(&mut caches),
@@ -2773,6 +2784,9 @@ impl Engine {
         // slower than plain decode).
         let pool = self.pool1.as_ref().unwrap_or(&self.pool);
         self.state.want_hidden = self.wants_hidden();
+        self.state.label_rows.clear();
+        self.state.label_ids.clear();
+        self.state.label_out.clear();
         let tv = std::time::Instant::now();
         let r = {
             let kv = &mut self.slots[si].kv;

@@ -25,6 +25,7 @@ fn wide() -> Dense {
         n_head_kv: 2,
         n_ff: 2048,
         ctx: 1024,
+        tied: false,
     }
 }
 

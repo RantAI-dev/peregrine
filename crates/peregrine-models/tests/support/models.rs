@@ -16,6 +16,8 @@ pub struct Dense {
     pub n_head_kv: usize,
     pub n_ff: usize,
     pub ctx: usize,
+    /// Write no `output.weight`: the file ties its output head to the token embedding.
+    pub tied: bool,
 }
 
 impl Default for Dense {
@@ -28,6 +30,7 @@ impl Default for Dense {
             n_head_kv: 4,
             n_ff: 512,
             ctx: 512,
+            tied: false,
         }
     }
 }
@@ -339,23 +342,26 @@ fn write_dense_impl(
         );
     }
     norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
-    if accept {
-        // Every output row is the same row, so every logit is the same value and
-        // the argmax picks row 0 whatever the hidden state: the model always
-        // answers token 0.
-        let row = generate_weights(fmt, s.d_model, &mut rng);
-        let mut data = Vec::with_capacity(row.len() * VOCAB_SIZE);
-        for _ in 0..VOCAB_SIZE {
-            data.extend_from_slice(&row);
+    // A tied file writes no `output.weight`: the loader uses `token_embd.weight`.
+    if !s.tied {
+        if accept {
+            // Every output row is the same row, so every logit is the same value and
+            // the argmax picks row 0 whatever the hidden state: the model always
+            // answers token 0.
+            let row = generate_weights(fmt, s.d_model, &mut rng);
+            let mut data = Vec::with_capacity(row.len() * VOCAB_SIZE);
+            for _ in 0..VOCAB_SIZE {
+                data.extend_from_slice(&row);
+            }
+            w.add_tensor(
+                "output.weight",
+                &[s.d_model as u64, VOCAB_SIZE as u64],
+                fmt,
+                data,
+            );
+        } else {
+            mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
         }
-        w.add_tensor(
-            "output.weight",
-            &[s.d_model as u64, VOCAB_SIZE as u64],
-            fmt,
-            data,
-        );
-    } else {
-        mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
     }
     if matches!(rope, Rope::Freqs) {
         // Llama 3.x stores one positive factor per rotary frequency; the loader divides
@@ -370,11 +376,12 @@ fn write_dense_impl(
     let name = match (accept, rope) {
         (true, _) => format!("{arch}-{}-accept", fmt.label()),
         (false, Rope::None) => format!(
-            "{arch}-{}",
+            "{arch}-{}{}",
             match pooling {
                 Some(p) => format!("{}-pool{p}", fmt.label()),
                 None => fmt.label().to_string(),
-            }
+            },
+            if s.tied { "-tied" } else { "" }
         ),
         (false, Rope::Freqs) => format!("{arch}-rope-freqs-{}", fmt.label()),
         (false, Rope::Linear { .. }) => format!("{arch}-rope-linear-{}", fmt.label()),
