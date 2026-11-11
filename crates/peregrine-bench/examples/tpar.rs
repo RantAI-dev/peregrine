@@ -1,10 +1,22 @@
 #![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 // the PQ2_0 kernel across the pool: one 12288×4096 matrix (13.4 MB) per call, chunked rows.
+#[cfg(target_arch = "x86_64")]
 use peregrine_core::gguf::Format;
+#[cfg(target_arch = "x86_64")]
 use peregrine_core::pool::Pool;
+#[cfg(target_arch = "x86_64")]
 use peregrine_core::quant::{f32_to_f16, row_bytes, QuantAct};
+#[cfg(target_arch = "x86_64")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_arch = "x86_64")]
 use std::time::Instant;
+
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {
+    println!("tpar benchmarks the x86-only PQ2_0 kernel; nothing to run on this architecture");
+}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let rows: usize = std::env::var("ROWS")
         .ok()

@@ -852,10 +852,10 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
     // it stays on the `sdot` batch kernel and is not listed there.
     #[cfg(target_arch = "aarch64")]
     let tiers: &[Tier] = match fmt {
-        // The packed float GEMM's NEON kernel (S4.9f): F32 and BF16 on NEON, F16 where
-        // the half-to-single widening instruction (`fp16`) is part of the tier.
-        Format::F32 | Format::BF16 => &[Tier::Scalar, Tier::Neon],
-        Format::F16 => &[Tier::Scalar, Tier::NeonDotprod],
+        // The packed float GEMM's NEON kernel (S4.9f): F32, BF16 and F16 all run on
+        // baseline NEON; `fcvtl` is base Advanced SIMD, not the `fp16` arithmetic
+        // extension.
+        Format::F32 | Format::F16 | Format::BF16 => &[Tier::Scalar, Tier::Neon],
         #[cfg(feature = "fmt-legacy")]
         Format::Q8_0 => &[Tier::Scalar, Tier::NeonDotprod],
         #[cfg(feature = "fmt-legacy")]
@@ -978,8 +978,8 @@ mod tests {
         }
         assert_eq!(kernels_for(Format::F32), &[Tier::Scalar, Tier::Neon]);
         assert_eq!(kernels_for(Format::BF16), &[Tier::Scalar, Tier::Neon]);
-        // F16's widening instruction (`fcvtl`) is part of the `fp16` rung, above NEON.
-        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar, Tier::NeonDotprod]);
+        // `fcvtl` is base Advanced SIMD, so F16's packed kernel is on plain NEON too.
+        assert_eq!(kernels_for(Format::F16), &[Tier::Scalar, Tier::Neon]);
     }
 
     #[test]

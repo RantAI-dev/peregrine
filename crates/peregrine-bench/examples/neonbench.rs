@@ -115,7 +115,7 @@ fn main() {
                 for _ in 0..16 {
                     // Small signed scales, so the products stay in the range a real
                     // model's do.
-                    w.push((next() % 17) as u8);
+                    w.push(next() % 17);
                 }
                 w.extend_from_slice(&0x2000u16.to_le_bytes());
             }

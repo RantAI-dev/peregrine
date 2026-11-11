@@ -244,8 +244,8 @@ anything else as a string.
 
 ## Performance
 
-Against the fastest engine that runs the same file on the same machine and thread count —
-llama.cpp v0.9.0 for the Q4_K_M models, and PrismML's llama.cpp fork for the ternary Bonsai 2 files:
+Against llama.cpp v0.9.0 for the Q4_K_M models and PrismML's llama.cpp fork for the ternary Bonsai 2
+files, on the same file, machine and thread count:
 
 ![Where Peregrine is fastest](docs/img/bench-wins.svg)
 
@@ -259,6 +259,10 @@ llama.cpp v0.9.0 for the Q4_K_M models, and PrismML's llama.cpp fork for the ter
   1.03–1.43× on the 4-core Ryzen 3, and 1.78–2.45× on ARM Cortex-X925 (`aarch64-neon-i8mm`).
 - **Bonsai 2 (ternary): 1.4–2.3× the decode and 1.9–2.6× the prompt speed** of PrismML's fork across
   x86-64 (AVX-512 and AVX2) and ARM64 (NEON), and **1.8–2.8× with 10 users**.
+
+- **Where Peregrine is behind:** the ik_llama.cpp fork processes prompts about twice as fast on the
+  AVX-512 desktop (Peregrine at 0.39–0.58×). Decode is level with it (0.89–1.06×) and Peregrine is ahead
+  with 10 users (1.05–3.09×).
 
 Full tables, charts, accuracy verification, and machine records are in [docs/benchmark.md](docs/benchmark.md).
 

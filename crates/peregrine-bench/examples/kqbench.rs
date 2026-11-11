@@ -8,16 +8,21 @@
 //! the two kernels so a busy machine moves both. Reports ns per (tile, activation
 //! row, super-block) for the GEMV (1 row) and the GEMM (4 and 64 rows).
 
+#[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kq::{
     repack_q4k8, repack_q5_08, repack_q5k8, repack_q6k8, KqActs, Q4K8, Q5K8, Q5_08, Q6K8,
 };
+#[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kqsimd::{
     q4k8_gemm, q4k8_gemm_zmm, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm, q5_08_gemm_zmm, q5k8_gemm,
     q5k8_gemv, q6k8_gemm, q6k8_gemv,
 };
+#[cfg(target_arch = "x86_64")]
 use peregrine_kernels::quant::QuantAct;
+#[cfg(target_arch = "x86_64")]
 use std::time::Instant;
 
+#[cfg(target_arch = "x86_64")]
 fn prng(seed: u64, n: usize) -> Vec<u8> {
     let mut s = seed | 1;
     (0..n)
@@ -30,6 +35,7 @@ fn prng(seed: u64, n: usize) -> Vec<u8> {
         .collect()
 }
 
+#[cfg(target_arch = "x86_64")]
 fn tile(n_sb: usize, seed: u64) -> Vec<u8> {
     let mut out = vec![0u8; n_sb * Q4K8::SIZE];
     for sb in 0..n_sb {
@@ -47,6 +53,7 @@ fn tile(n_sb: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+#[cfg(target_arch = "x86_64")]
 fn tile5(n_blk: usize, seed: u64) -> Vec<u8> {
     let mut out = vec![0u8; n_blk * Q5_08::SIZE];
     for t in 0..n_blk {
@@ -63,6 +70,7 @@ fn tile5(n_blk: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+#[cfg(target_arch = "x86_64")]
 fn acts(rows: usize, n: usize, seed: u64) -> Vec<QuantAct> {
     (0..rows)
         .map(|r| {
@@ -82,11 +90,18 @@ fn acts(rows: usize, n: usize, seed: u64) -> Vec<QuantAct> {
         .collect()
 }
 
+#[cfg(target_arch = "x86_64")]
 fn best(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[0]
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {
+    println!("kqbench benchmarks the x86-only AVX2/AVX-512 k-quant kernels; nothing to run on this architecture");
+}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let n_sb: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(8);

@@ -1,14 +1,20 @@
 // which part bounds the batched PQ2_0 kernel? Variants of the 2-row × T kernel with one piece removed.
 #![allow(clippy::all)]
+#[cfg(target_arch = "x86_64")]
 use peregrine_core::gguf::Format;
+#[cfg(target_arch = "x86_64")]
 use peregrine_core::quant::{f32_to_f16, row_bytes, tp_off, QuantAct};
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+#[cfg(target_arch = "x86_64")]
 use std::time::Instant;
 
+#[cfg(target_arch = "x86_64")]
 const fn pm(s: u32) -> i64 {
     (((1u64 << (2 * s)) << 56) | ((1u64 << (2 * s + 1)) << 48)) as i64
 }
 
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c,avx512f,avx512bw,avx512vl,avx512vnni,gfni")]
 unsafe fn k2r<const T: usize, const V: u32>(
     w0: &[u8],
@@ -111,6 +117,7 @@ unsafe fn k2r<const T: usize, const V: u32>(
 }
 
 /// Row-interleaved tiles: per (16-row tile, group): 8 quads × [16 rows × 4 code bytes] (512 B), then 16 f16 scales.
+#[cfg(target_arch = "x86_64")]
 fn repack16(w: &[u8], rows: usize, rb: usize) -> Vec<u8> {
     let ng = rb / 34;
     let mut out = vec![0u8; w.len()];
@@ -136,11 +143,13 @@ fn repack16(w: &[u8], rows: usize, rb: usize) -> Vec<u8> {
 
 /// Activation side for the tiled kernel: per group, per quad q, per plane s, the 4 bytes
 /// [a[16q+s], a[16q+4+s], a[16q+8+s], a[16q+12+s]] (broadcast to every row lane). One scale per SPAN values.
+#[cfg(target_arch = "x86_64")]
 struct TAct {
     b: Vec<i8>,
     d: Vec<f32>,
     nsum: Vec<i32>,
 }
+#[cfg(target_arch = "x86_64")]
 fn tact(x: &[f32], span: usize) -> TAct {
     let n = x.len();
     let mut q = vec![0i8; n];
@@ -173,6 +182,7 @@ fn tact(x: &[f32], span: usize) -> TAct {
 }
 
 /// 16 rows × T activations over one tile; SPAN values share an activation scale.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c,avx512f,avx512bw,avx512vl,avx512vnni,gfni")]
 unsafe fn tile16<const T: usize, const SPAN: usize>(
     wt: &[u8],
@@ -227,6 +237,14 @@ unsafe fn tile16<const T: usize, const SPAN: usize>(
     }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {
+    println!(
+        "kexp benchmarks the x86-only AVX-512 k-quant kernels; nothing to run on this architecture"
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let (rows, n) = (2048usize, 4096usize);
     let rb = row_bytes(Format::PQ2_0, n);
