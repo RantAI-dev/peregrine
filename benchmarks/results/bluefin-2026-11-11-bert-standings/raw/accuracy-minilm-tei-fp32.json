@@ -1,0 +1,54 @@
+{
+ "benchmark": "peregrine-s4.2-embed-accuracy",
+ "timestamp": "2026-11-11T13:45:24.607705+00:00",
+ "model": {
+  "name": "minilm",
+  "hf": "sentence-transformers/all-MiniLM-L6-v2",
+  "pooling": "mean"
+ },
+ "row": {
+  "engine": "tei",
+  "precision": "fp32",
+  "path": "~/models/embed/minilm/ref",
+  "kind": "dir",
+  "sha256": "aa42abb2e76928055a3c1234e1eed34aba1e9ddb0566c35218be7c9a3bb5dbb7",
+  "size_bytes": 91567744
+ },
+ "reference": {
+  "label": "torch-fp32",
+  "backend": "torch-fp32",
+  "dim": 384,
+  "count": 200
+ },
+ "engine": {
+  "name": "text-embeddings-inference",
+  "version": "1.9.4",
+  "image": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4",
+  "runtime": "podman",
+  "backend": "candle (CPU image; no ONNX Runtime backend in published CPU images)"
+ },
+ "host_before": {
+  "loadavg": [
+   3.734375,
+   3.87841796875,
+   3.513671875
+  ],
+  "mem_available_gb": 7.59,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.32
+ },
+ "cosine": {
+  "mean": 0.999998,
+  "min": 0.999995,
+  "p1": 0.999996,
+  "p50": 0.999998
+ },
+ "norm": {
+  "min": 1.0,
+  "max": 1.0,
+  "mean": 1.0
+ },
+ "dim": 384,
+ "n": 200
+}
