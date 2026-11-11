@@ -239,7 +239,7 @@ fn format_row(n_in: usize, n_out: usize, nb: usize, xs: &[QuantAct], q8: bool) -
         fpack::gemm(Format::F16, &p16, n_in, panels, xs, None, &mut out);
         std::hint::black_box(&out);
     });
-    let int8 = if q8 && n_in % 32 == 0 && n_out % 8 == 0 {
+    let int8 = if q8 && n_in.is_multiple_of(32) && n_out.is_multiple_of(8) {
         let wq = q8_weights(n_out, n_in, 13);
         let nblk = n_in / 32;
         let mut q = vec![0.0f32; 8 * nb];

@@ -262,6 +262,7 @@ impl MatKernels {
     /// `packed` holds `panels` panels of `n_in` weights; `out[b · panels · 16 + i]`
     /// receives output row `i` of the run for activation row `b`. Every element is
     /// one sequential FMA chain over `k`, so the bits do not depend on the batch.
+    #[allow(clippy::too_many_arguments)]
     pub fn fp_panels_gemm(
         &self,
         fmt: Format,

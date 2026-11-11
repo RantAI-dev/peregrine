@@ -1033,6 +1033,7 @@ mod tests {
                     g,
                     tiles: TileStore::default(),
                     kq: KqStore::default(),
+                    fp: crate::model::FpStore::default(),
                     #[cfg(feature = "littlebit")]
                     lb: None,
                 },

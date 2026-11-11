@@ -460,7 +460,6 @@ fn fp_group(
         let rows = j.rows();
         let panels = rows.div_ceil(16);
         let bs = peregrine_kernels::fpack::row_block(n);
-        let blocks = nb.div_ceil(bs);
         let per = panels.div_ceil(FP_UNIT_PANELS);
         let local = u - bases[ji];
         let first_panel = (local % per) * FP_UNIT_PANELS;
@@ -473,7 +472,6 @@ fn fp_group(
         let tf = crate::prof::detail().then(Instant::now);
         let mut blk = [0.0f32; FP_UNIT_PANELS * 16 * MAX_BATCH];
         let out = &mut blk[..pn * 16 * bn];
-        let _ = blocks;
         // SAFETY: `out` holds one unit; the store holds the matrix's panels.
         MatKernels::get().fp_panels_gemm(
             j.w.kind,

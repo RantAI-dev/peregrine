@@ -762,6 +762,7 @@ mod tests {
             offset: 1000,
             tile_off: Some(42),
             kq_off: None,
+            fp_off: None,
         };
         let q = t_f16.rows(0, 32).expect("q slice");
         assert_eq!(q.name, "attn_qkv[0..32]");
