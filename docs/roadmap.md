@@ -58,7 +58,7 @@ Each model is checked against llama.cpp on the same file before it is listed.
 | S3.1 | Benchmark harness (`benchmarks/`): one script per engine at pinned versions, the four numbers at three contexts, fraction-of-ceiling, raw JSON — done | 1.0 |
 | S3.2 | Competitor baselines on H1, H2 and H3 — desktop (H1), bluefin (H2), and Spark ARM (H3) baselines done, incl. the Bonsai 2/PrismML comparisons (#116, #134, #141) and the 2026-11-09 re-measurement — done | 1.0 |
 | S3.3 | Task-accuracy gate against the reference engine (GSM8K, HumanEval+, MMLU subset), batch and speculation invariance on 500+ prompts — KL against llama.cpp per model (`docs/targets.md`), task-accuracy gate and 520-prompt batch/speculation invariance passed on all three hosts (bluefin AVX2 #144, desktop AVX-512 #145, Spark ARM #142; `docs/dev/accuracy.md`, `benchmarks/accuracy/`) — done | 1.0 |
-| S3.4 | Faster k-quant kernels (repacked row tiles, int8 dot products) — repacked store (#86), AVX2 Q4_K (#88), Q5_0 (#103–#105), AVX-512 Q4_K/Q5_0 (#108, #111), wide Q6_K (#118), wide Q5_K (#133), Q8_0 tiles (#122) — done | 1.5 |
+| S3.4 | Faster k-quant kernels (repacked row tiles, int8 dot products) — repacked store (#86), AVX2 Q4_K (#88), Q5_0 (#103–#105), AVX-512 Q4_K/Q5_0 (#108, #111), wide Q6_K (#118), wide Q5_K (#133), Q8_0 tiles (#122), Q5_K/Q6_K x86 tiles (S4.9i) — done | 1.5 |
 | S3.5 | Batched ternary GEMM toward the int8 compute roof; prompt path (large tiles, chunked Gated DeltaNet scan) — prefill chunk tuning (`PEREGRINE_PREFILL_CHUNK`, #87, #92) and batched ternary GEMM (#138; chunked scan design in `docs/design/s3.5-delta-scan.md`) — done | 1.5 |
 | S3.6 | Faster PTQ1_0 for the 27B | 0.5 |
 | S3.7 | Long context: split-K attention per length; q8 KV as an opt-in with its own accuracy report — attention split into more tasks at short context (#94), F16-direct register-block attention (#109), query×position prefill tiles (#113), the F16 K/V prefill path (#115) and the AVX-512 attention mix (#121) done; q8 KV open | 1.0 |
@@ -89,6 +89,7 @@ with no decode.
 | S4.11 | System One, part 2: Kev (pointer head) and vLLM D3 (non-causal Qwen 3.5) | 1.0 |
 | S4.12 | System One, part 3: Laya and Julia-1 on `modern-bert` | 0.5 |
 | S4.13 | Generative rerankers (Qwen3-Reranker) on `/v1/rerank` | 0.5 |
+| S4.14 | `mistral3` embedders: Nemotron 3.5 Embed 1B and Nemotron 3 Embed 1B (text input), with the Tekken tokenizer | 1.0 |
 
 Each model is checked against llama.cpp on the same file before it is listed; a text's output is
 bit-identical alone and in any batch.

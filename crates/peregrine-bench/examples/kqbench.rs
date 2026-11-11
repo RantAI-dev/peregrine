@@ -8,9 +8,12 @@
 //! the two kernels so a busy machine moves both. Reports ns per (tile, activation
 //! row, super-block) for the GEMV (1 row) and the GEMM (4 and 64 rows).
 
-use peregrine_kernels::kq::{repack_q4k8, repack_q5_08, KqActs, Q4K8, Q5_08};
+use peregrine_kernels::kq::{
+    repack_q4k8, repack_q5_08, repack_q5k8, repack_q6k8, KqActs, Q4K8, Q5K8, Q5_08, Q6K8,
+};
 use peregrine_kernels::kqsimd::{
-    q4k8_gemm, q4k8_gemm_zmm, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm, q5_08_gemm_zmm,
+    q4k8_gemm, q4k8_gemm_zmm, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm, q5_08_gemm_zmm, q5k8_gemm,
+    q5k8_gemv, q6k8_gemm, q6k8_gemv,
 };
 use peregrine_kernels::quant::QuantAct;
 use std::time::Instant;
@@ -260,6 +263,109 @@ fn main() {
             println!(
                 "{name}: {ns:.2} ns/(tile*act*blk)  {:.1} GMAC/s/core",
                 256.0 / ns
+            );
+        }
+    }
+
+    // Q6_K and Q5_K (S4.9i): the repacked tile against the row-at-a-time path,
+    // at the widths that decide the GEMV/GEMM split. One (tile, act, sb) is
+    // eight rows x 256 weights = 2048 MACs.
+    for (fmt, ts, block, label) in [
+        (
+            peregrine_kernels::format::Format::Q6_K,
+            Q6K8::SIZE,
+            210usize,
+            "q6k",
+        ),
+        (
+            peregrine_kernels::format::Format::Q5_K,
+            Q5K8::SIZE,
+            176usize,
+            "q5k",
+        ),
+    ] {
+        let rb = n_sb * block;
+        let mut rows = vec![0u8; 8 * rb];
+        for r in 0..8 {
+            for sb in 0..n_sb {
+                let at = r * rb + sb * block;
+                let b = &mut rows[at..at + block];
+                b.copy_from_slice(&prng(0x9E37_79B9 ^ (r * 131 + sb) as u64, block));
+                if fmt == peregrine_kernels::format::Format::Q5_K {
+                    b[0..2]
+                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                    b[2..4].copy_from_slice(
+                        &peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes(),
+                    );
+                    for i in 0..12 {
+                        b[4 + i] &= 0x3F;
+                    }
+                } else {
+                    b[208..210]
+                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                    for i in 0..16 {
+                        b[192 + i] &= 0x3F;
+                    }
+                }
+            }
+        }
+        let mut tile = vec![0u8; n_sb * ts];
+        for sb in 0..n_sb {
+            let mut blocks: [&[u8]; 8] = [&[]; 8];
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = &rows[r * rb + sb * block..r * rb + sb * block + block];
+            }
+            let out = &mut tile[sb * ts..(sb + 1) * ts];
+            if fmt == peregrine_kernels::format::Format::Q6_K {
+                repack_q6k8(&blocks, out)
+            } else {
+                repack_q5k8(&blocks, out)
+            }
+        }
+        for &nb in &[1usize, 4, 16, 64] {
+            let mut old = Vec::new();
+            let mut new = Vec::new();
+            let mut o = vec![0.0f32; 8 * nb];
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    for r in 0..8 {
+                        let row = &rows[r * rb..(r + 1) * rb];
+                        unsafe {
+                            peregrine_kernels::simd::dot_batch(
+                                fmt,
+                                row,
+                                &batch[..nb],
+                                &mut o[r * nb..(r + 1) * nb],
+                            )
+                        };
+                    }
+                }
+                old.push(t0.elapsed().as_secs_f64());
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    unsafe {
+                        if nb < 4 {
+                            if fmt == peregrine_kernels::format::Format::Q6_K {
+                                q6k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut o)
+                            } else {
+                                q5k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut o)
+                            }
+                        } else if fmt == peregrine_kernels::format::Format::Q6_K {
+                            q6k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                        } else {
+                            q5k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                        }
+                    }
+                }
+                new.push(t0.elapsed().as_secs_f64());
+            }
+            let macs = 8.0 * 256.0 * n_sb as f64 * nb as f64 * reps as f64;
+            let old_g = macs / best(&mut old) / 1e9;
+            let new_g = macs / best(&mut new) / 1e9;
+            println!(
+                "{label} {nb:>2} acts: row {old_g:6.1} G  tile {new_g:6.1} G MAC/s/core  ({:+.0}%)",
+                (new_g / old_g - 1.0) * 100.0
             );
         }
     }
