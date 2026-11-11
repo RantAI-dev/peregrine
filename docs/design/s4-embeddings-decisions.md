@@ -84,8 +84,8 @@ what it asks for at the end:
 pub enum Want {
     Tokens,                         // today: sample and stream
     Pooled(Pooling),                // an embedding: Last | Mean | Cls, then the model's own head
-    Labels { ids: Vec<u32> },       // a decision: the last row's logits at these label tokens
-    Head,                           // a classifier or decision head's outputs
+    Labels,                         // a decision: the last row's logits at these label tokens
+    Head,                           // a classifier head's row for the text (S4.6b)
 }
 ```
 
@@ -129,8 +129,13 @@ mean, one f32 rounding at the end).
   then optional truncation to `dimensions` (Matryoshka), then L2 normalisation. Truncate, then
   normalise.
 - Classifier head *(transcribe per family)*: `cls` (dense + activation) and `cls.output`, giving one
-  logit (a reranker; the score is the sigmoid) or one per label (`classifier.output_labels`; the
-  scores are the softmax, or sigmoids when the file says multi-label).
+  logit (a reranker) or one per label (`classifier.output_labels`).
+  **As built (S4.6b)**: the reranker's `relevance_score` is that raw logit, because that is what
+  llama.cpp returns (`send_rerank` reads `embd[0]`; the earlier note said sigmoid, which no
+  llama.cpp path applies for `bert`); a classifier's scores are the softmax of the head's outputs,
+  and the sigmoid only when the file has one output and names its label. The head's activation is
+  the file's `classifier.activation` (tanh unless it says gelu or silu), and its pool is row 0
+  unless `classifier.pooling_type = 1` (mean).
 
 ### 2.5 System One decisions
 
@@ -234,7 +239,11 @@ Shapes follow what clients already speak; unknown fields are rejected, as in cha
   truncation; `truncate: true` opts into truncation.
 - `POST /v1/rerank` (Jina / Cohere shape, also served at `/rerank`): `query`, `documents`, `top_n`,
   `return_documents`; `results: [{index, relevance_score}]` sorted by score.
-- `POST /v1/classify`: `input` (string or array); `results: [{label, score, scores: {label: p}}]`.
+- `POST /v1/classify`: `input` (string or array); `results: [{index, label, score, scores:
+  {label: p}}]`, in input order — `label` is the most likely label, `score` its probability and
+  `scores` every label's (the softmax of the head's outputs; a sigmoid when a one-output head names
+  its label). A head with several outputs and no labels is served as `LABEL_0`, `LABEL_1`, …; a
+  one-output head with no labels is a reranker and is refused here by name.
 - `POST /v1/systemone` (TypeSafe / llama.cpp shape): `state` (string, object or array; a
   non-string is given to the model as JSON text), `questions` (id → `{type, instructions,
   criteria}`); response `{model, answers: {id: {...}}, usage: {input_tokens, output_tokens: 0}}`
@@ -319,7 +328,17 @@ A model is listed when, on the same file:
    1e-2 of `llama-server`'s on the same file (measured on the tiny test file: 2.5e-3 at most,
    about the size of the difference between Peregrine's own kernel paths) (first on `ggml-org/tinyopenjev-for-testing-gguf`, the file
    llama.cpp's own tests use, then on each real model listed); the chosen option identical except
-   at near-ties; rerank scores within 1e-3; classifier label argmax identical except at near-ties.
+   at near-ties; classifier label argmax identical except at near-ties.
+   **Rerank, as built (S4.6b)**: 1e-3 was an F16-class number and no Q8_0 encoder can hold it, by
+   either engine. On 320 pairs the two engines' Q8_0 scores differ by 0.0107 mean / 0.186 max,
+   while each engine's *own* Q8_0 scores are 0.0158 (llama.cpp, max 0.222) and 0.0174 (Peregrine,
+   max 0.282) from its FP16 run: the quantisation moves the scores further than the engines differ.
+   At the same precision (FP16 vs FP16) the difference is 0.0047 mean / 0.0688 max, and it is one
+   thing — llama.cpp's GELU is the tanh approximation through an f16 table, ours is the exact erf
+   form (ADR 0003) — because substituting llama.cpp's own GELU into our pass brings it to 0.00056
+   mean / 0.0067 max. The gate for this family is therefore: pair token ids identical, document
+   order identical outside near-ties (scores within 1e-2), and scores within the measured 2e-2
+   mean, 0.3 max.
 5. **Invariance** (§2.3): bit-identical alone and batched, on every kernel tier, with goldens.
 
 Synthetic encoders (tiny random `bert`, `modern-bert`, `gemma-embedding` files with every head)
@@ -336,7 +355,8 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.3 | System One, part 1: decision metadata, `/v1/systemone`, the answer math, `Want::Labels`, the state fork, the **openjev** renderer; parity with `llama-server` on the tinyopenjev test file. Then the other label-logit types, one renderer each: **lev** (two-variant choice, 9-point noul), **nimble**, **pplx-decider**, **h2o-lightning** | S4.1 |
 | S4.4 | Bidirectional forward (§2.2) and `gemma-embedding`: EmbeddingGemma 300M | S4.1 |
 | S4.5 | WordPiece and unigram tokenizers against `llama-tokenize` | |
-| S4.6 | `bert` family and the `cls` head: MiniLM, bge, e5, bge-m3; bge-reranker-v2-m3 on `/v1/rerank`; `/v1/classify` | S4.4, S4.5 |
+| S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
+| S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
 | S4.7 | `modern-bert` and labelled classifier heads | S4.6 |
 | S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3` | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
@@ -363,3 +383,34 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
    llama.cpp byte for byte on the fixtures; an unknown type or an unrecognised template is refused.
 5. **Multi-model serving is last** (S4.10): every earlier step is useful with one model per
    process, and it needs a decision on how models share the thread pool.
+
+## 8. S4.6b as built: the classifier head, rerank and classify
+
+The second half of S4.6 is on top of the family: `crates/peregrine-models/src/bert/mod.rs` reads
+the head (`cls`, `cls.bias`, `cls.output`, `classifier.output_labels`, `classifier.activation`,
+`classifier.pooling_type`) and computes its row after the last layer for the texts that ask for
+it; `Want::Head` is the slot, `Architecture::forward_texts` takes a `TextWant` per text
+(`Pooled` or `Head`), and the row lands in `State::head_out`, sized once with the rest of the
+scratch so a head pass allocates nothing. The head is a property of the tensors, not of
+`<arch>.pooling_type`: llama.cpp's converter never writes `pooling_type = 4` for a `bert` file,
+and llama-server is told `--reranking` instead.
+
+Four decisions the note left open, now settled:
+
+1. **`relevance_score` is the raw logit**, in llama.cpp's shape, at four paths (`/v1/rerank`,
+   `/rerank`, `/v1/reranking`, `/reranking`); `return_documents` adds the text, and `top_n`
+   defaults to every document. The TEI request shape (`texts`) is refused by name: it answers a
+   bare array, a second response shape this step does not need.
+2. **`/v1/classify`** answers one entry per input, in input order, as §3 now states.
+3. **A pair longer than the position table** is refused with the limit, or truncated under
+   `"truncate": true` — the embeddings rule, because a rerank pair is one text.
+4. **A generative reranker's `rerank` chat template** is refused by name; it is a prompt, not a
+   pair, and it is S4.13.
+
+What was measured on bluefin (4 threads): 320 pairs in eight languages, ids identical and order
+identical to llama.cpp for bge-reranker-v2-m3 Q8_0 and bge-reranker-base Q8_0 (the numbers in §5);
+rerank throughput level with llama.cpp at 123-token pairs and 5-6 % ahead at 449-token ones
+(`docs/reference/bert.md`). No published `bert` GGUF with `classifier.output_labels` turned up
+(searches for DistilBERT/XLM-R classifiers found embedding conversions only, whose files carry no
+`cls` tensors), so `/v1/classify` is covered end to end by the synthetic labelled file and the
+server tests, not by a real-file gate.

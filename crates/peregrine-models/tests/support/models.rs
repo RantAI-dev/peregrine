@@ -805,21 +805,51 @@ pub fn write_gemma_embedding(
     path
 }
 
+/// The classifier head of a synthetic `bert` file (roadmap S4.6b).
+#[derive(Clone, Debug)]
+pub struct BertHeadConfig {
+    /// `cls.output`'s rows: 1 is a reranker's raw score, more is a classifier.
+    pub n_out: usize,
+    /// `classifier.output_labels`; empty writes no key (a reranker).
+    pub labels: Vec<String>,
+    /// `classifier.activation`; `None` writes no key, which llama.cpp reads as `tanh`.
+    pub activation: Option<&'static str>,
+    /// Write `cls.weight`/`cls.bias` (the dense layer). `false` writes only `cls.output`,
+    /// the one-layer head (jina-reranker-tiny's shape).
+    pub dense: bool,
+    /// `classifier.pooling_type`: 1 writes mean, anything else names row 0.
+    pub pooling_type: Option<u32>,
+}
+
+impl Default for BertHeadConfig {
+    fn default() -> Self {
+        BertHeadConfig {
+            n_out: 1,
+            labels: Vec::new(),
+            activation: None,
+            dense: true,
+            pooling_type: None,
+        }
+    }
+}
+
 /// The shape of a synthetic `bert` encoder (roadmap S4.6a).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct BertConfig {
     pub d_model: usize,
     pub n_layer: usize,
     pub n_head: usize,
     pub n_ff: usize,
     pub ctx: usize,
-    /// `bert.pooling_type`: 2 is cls (BGE's default), 1 is mean (E5/GTE-style).
+    /// `bert.pooling_type`: 2 is cls (BGE's default), 1 is mean (E5/GTE-style), 4 rank.
     pub pooling_type: u32,
     /// Whether the file carries the WordPiece (`bert`) or the unigram (`t5`, XLM-R)
     /// tokenizer. The weights are the same either way.
     pub unigram: bool,
     /// Token-type rows in `token_types.weight` (BERT's Sentence A/B is 2).
     pub n_token_types: usize,
+    /// The classifier head, when the file has one (S4.6b).
+    pub head: Option<BertHeadConfig>,
 }
 
 impl Default for BertConfig {
@@ -833,6 +863,7 @@ impl Default for BertConfig {
             pooling_type: 2,
             unigram: false,
             n_token_types: 2,
+            head: None,
         }
     }
 }
@@ -936,6 +967,36 @@ pub fn write_bert(dir: &Path, fmt: Format, seed: u64, s: BertConfig) -> PathBuf 
                 s.d_model,
             );
         }
+    }
+
+    if let Some(h) = &s.head {
+        if h.dense {
+            mat(&mut w, &mut rng, "cls.weight", s.d_model, s.d_model);
+            bias(&mut w, &mut rng, "cls.bias", s.d_model);
+        }
+        if let Some(a) = h.activation {
+            w.str(&k("classifier.activation"), a);
+        }
+        if let Some(p) = h.pooling_type {
+            w.u32(&k("classifier.pooling_type"), p);
+        }
+        if !h.labels.is_empty() {
+            w.arr_str(&k("classifier.output_labels"), &h.labels);
+        }
+        // llama.cpp's converter writes a one-row output weight 1-d, as it does for
+        // `token_types.weight`; the loader accepts the missing trailing 1.
+        let dims: Vec<u64> = if h.n_out == 1 {
+            vec![s.d_model as u64]
+        } else {
+            vec![s.d_model as u64, h.n_out as u64]
+        };
+        w.add_tensor(
+            "cls.output.weight",
+            &dims,
+            fmt,
+            generate_weights(fmt, s.d_model * h.n_out, &mut rng),
+        );
+        bias(&mut w, &mut rng, "cls.output.bias", h.n_out);
     }
 
     let name = if s.unigram {

@@ -191,7 +191,24 @@ peregrine embed -m hf:W4D/Nemotron-3.5-Embed-1B-GGUF/Nemotron-3.5-Embed-1B-Q8_0.
   "passage: Paris is the capital of France."
 ```
 
-A chat request on an encoder is a 400 that says the model is an embedding model.
+A BERT reranker is the same encoder with its classifier head. Every (query, document) pair is one
+text — `[CLS] query [SEP] document` for a WordPiece vocabulary, `<s> query </s> document </s>` for
+the XLM-R one — and the head scores it. The score is the head's raw logit, as llama.cpp returns
+it; the documents come back sorted, highest first:
+
+```sh
+peregrine serve -m hf:gpustack/bge-reranker-v2-m3-GGUF/bge-reranker-v2-m3-Q8_0.gguf --port 8203
+curl -s localhost:8203/v1/rerank -H 'content-type: application/json' -d '{
+  "query": "What is the capital of France?",
+  "documents": ["Paris is the capital of France.", "Lyon is a city in France."],
+  "top_n": 2
+}'
+```
+
+The same file at `/rerank`, `/v1/reranking` and `/reranking`, a `peregrine rerank -m model.gguf
+--query "..." "doc one" "doc two"` on the command line, and `/v1/classify` for a head with
+`classifier.output_labels` (every label and its probability, the top one first). A file without a
+head answers 400 by name.
 
 Without a server:
 
@@ -199,6 +216,7 @@ Without a server:
 peregrine embed -m model.gguf "What is the capital of France?"   # one line of floats per text
 echo "one text per line" | peregrine embed -m model.gguf          # stdin
 peregrine embed -m model.gguf --json --dimensions 256 "..."       # the API's JSON shape
+peregrine rerank -m reranker.gguf --query "..." "doc one" "doc two" # scores, highest first
 ```
 
 `peregrine inspect` prints the pooling type a file declares and whether it is an embedding model.
@@ -266,6 +284,7 @@ anything else as a string.
 | `peregrine stop` | Gracefully drain in-flight requests and stop the background server. |
 | `peregrine upgrade [--check] [--version TAG]` | Download, verify (`SHA256SUMS`), and atomically install the newest release with zero-downtime handoff (`SO_REUSEPORT`). |
 | `peregrine embed -m <MODEL> [TEXT]...` | Embed texts (or stdin lines): one L2-normalised vector per text, the file's own pooling type (`--dimensions`, `--json`). |
+| `peregrine rerank -m <MODEL> --query <Q> [DOC]...` | Rank documents (or stdin lines) by relevance to the query with a reranker's classifier head (`--top-n`, `--json`, `--truncate`). |
 | `peregrine decide -m <MODEL> --state <TEXT> --questions <JSON>` | Answer questions about a state with a native decision model (System One): one line per answer, or the API JSON with `--json` (`--request` for a whole body). |
 | `peregrine inspect <MODEL>` | Inspect GGUF metadata, architecture, quantization formats, pooling type, and check whether this build can run the file. |
 | `peregrine bench -m <MODEL>` | Measure single-user prefill and greedy decode tok/s and memory bandwidth (bytes/token). |
@@ -320,6 +339,7 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 | Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
 | Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format); the prompt is the one llama.cpp builds from the model's template |
+| Rerank and classify | a `bert` file's classifier head (`cls`, `cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3 and bge-reranker-base checked against llama.cpp v0.9.0 |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->
 

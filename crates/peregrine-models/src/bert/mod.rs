@@ -72,6 +72,46 @@ pub(crate) struct BertLayer {
     pub(crate) out_norm_b: Vec<f32>,
 }
 
+/// The classifier head of a `bert` file (roadmap S4.6b), transcribed from
+/// `llm_graph_context::build_pooling`'s `LLAMA_POOLING_TYPE_RANK` branch
+/// (`src/llama-graph.cpp:4185-4226`) and `llama_model_bert::load_arch_tensors`
+/// (`src/models/bert.cpp:34-38`):
+///
+/// ```text
+/// h = pooled(x)                      // row 0, or the mean when classifier.pooling_type = 1
+/// if cls:      h = cls.weight · h + cls.bias; h = act(h)   // act: tanh (default), gelu, silu
+/// if cls.out:  y = cls.out.weight · h + cls.out.bias
+/// ```
+///
+/// There is no normalisation and no softmax for this family: `/v1/rerank`'s score is
+/// `y[0]`, the raw logit, and a labelled file's scores are the caller's softmax.
+pub(crate) struct BertHead {
+    /// `cls.weight` (+ `cls.bias`): the dense layer between the pooled row and the
+    /// activation. Absent on a one-layer head (only `cls.output`).
+    pub(crate) dense: Option<Linear>,
+    pub(crate) dense_b: Vec<f32>,
+    /// `cls.output.weight` (+ `.bias`) — `[d_model, n_out]`, written 1-d when a file has
+    /// one output. Absent on a head that *is* the dense layer (jina-reranker-tiny).
+    pub(crate) out: Option<Linear>,
+    pub(crate) out_b: Vec<f32>,
+    pub(crate) act: HeadAct,
+    /// `classifier.pooling_type == 1` (mean) instead of row 0.
+    pub(crate) mean: bool,
+    /// The width of one output row: `cls.output`'s rows, or `d_model` without one.
+    pub(crate) n_out: usize,
+    /// `classifier.output_labels`, in file order. Empty when the file has none.
+    pub(crate) labels: Vec<String>,
+}
+
+/// `classifier.activation`: llama.cpp's `LLM_CLS_ACT_TYPES_FROM_STRING`
+/// (`src/llama-model.cpp:1209-1213`), whose default is TANH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadAct {
+    Tanh,
+    Gelu,
+    Silu,
+}
+
 /// A loaded `bert` model.
 pub struct Bert {
     pub(crate) tok_embd: TensorInfo,
@@ -82,6 +122,8 @@ pub struct Bert {
     pub(crate) tok_norm_w: Vec<f32>,
     pub(crate) tok_norm_b: Vec<f32>,
     pub(crate) layers: Vec<BertLayer>,
+    /// The classifier head, when the file carries one (S4.6b).
+    pub(crate) head: Option<BertHead>,
     /// Rows of the position table: the longest text the model can embed. This is
     /// `context_length`; a file whose metadata claims more is refused at load.
     pub(crate) n_pos: usize,
@@ -283,6 +325,111 @@ impl Bert {
         let tok_norm_w = vec_f32("token_embd_norm.weight", d_model)?;
         let tok_norm_b = vec_f32("token_embd_norm.bias", d_model)?;
 
+        // ---- the classifier head (S4.6b) ----
+        //
+        // `cls` is the dense layer of the classification head and `cls.output` its
+        // projection; both are `TENSOR_NOT_REQUIRED` in llama.cpp. A file with either has
+        // a head, and `n_cls_out` (the labels' count) defaults to 1.
+        let labels = g
+            .arr_str(&k("classifier.output_labels"))
+            .map(<[String]>::to_vec)
+            .unwrap_or_default();
+        // A trailing 1 is dropped by the converters: `cls.output.weight` of a one-output
+        // file is written 1-d, as `token_types.weight` is.
+        let mat2 = |name: &str| -> Option<TensorInfo> {
+            g.tensor(name).ok().map(|t| {
+                let mut t = t.clone();
+                if t.dims.len() == 1 {
+                    t.dims.push(1);
+                }
+                t
+            })
+        };
+        let head = match (mat2("cls.weight"), mat2("cls.output.weight")) {
+            (None, None) => {
+                if !labels.is_empty() {
+                    return Err(format!(
+                        "{} declares classifier.output_labels ({}) but carries neither cls.weight \
+                         nor cls.output.weight",
+                        arch,
+                        labels.join(", ")
+                    ));
+                }
+                None
+            }
+            (dense_t, out_t) => {
+                // llama.cpp sizes `cls.output` by the labels when the file has them, and
+                // by 1 otherwise; a mismatch is the metadata's error.
+                let n_out = if labels.is_empty() {
+                    out_t.as_ref().map_or(d_model, |t| t.dims[1] as usize)
+                } else {
+                    labels.len()
+                };
+                let dense = match dense_t {
+                    Some(t) => {
+                        shape(&t, d_model, d_model)
+                            .map_err(|e| format!("the classifier head's cls.weight: {e}"))?;
+                        Some(Linear::Dense(t))
+                    }
+                    None => None,
+                };
+                let out = match out_t {
+                    Some(t) => {
+                        let want = if labels.is_empty() {
+                            "one output".to_string()
+                        } else {
+                            format!("{} outputs (its labels)", labels.len())
+                        };
+                        if t.dims[0] as usize != d_model || t.dims[1] as usize != n_out {
+                            return Err(format!(
+                                "cls.output.weight is {:?}, expected [{d_model}, {n_out}] \
+                                 for {want}",
+                                t.dims
+                            ));
+                        }
+                        Some(Linear::Dense(t))
+                    }
+                    None => None,
+                };
+                let dense_b = if dense.is_some() {
+                    bias_or_zero("cls.bias", d_model)?
+                } else {
+                    Vec::new()
+                };
+                let out_b = if out.is_some() {
+                    bias_or_zero("cls.output.bias", n_out)?
+                } else {
+                    Vec::new()
+                };
+                let act = match g.str(&k("classifier.activation")) {
+                    Ok("tanh") => HeadAct::Tanh,
+                    Ok("gelu") => HeadAct::Gelu,
+                    Ok("silu") => HeadAct::Silu,
+                    Ok(other) => {
+                        return Err(format!(
+                            "{}classifier.activation {other:?} is not one llama.cpp reads \
+                             (gelu, silu, tanh)",
+                            k("")
+                        ))
+                    }
+                    Err(_) => HeadAct::Tanh,
+                };
+                // `classifier.pooling_type`: 1 means mean, anything else row 0
+                // (`build_pooling` checks `LLAMA_POOLING_TYPE_MEAN`).
+                let mean = g.u32(&k("classifier.pooling_type")) == Ok(1);
+                Some(BertHead {
+                    dense,
+                    dense_b,
+                    out,
+                    out_b,
+                    act,
+                    mean,
+                    n_out,
+                    labels,
+                })
+            }
+        };
+
         let cfg = Config {
             arch_name: "bert",
             rope_neox: false,
@@ -306,6 +453,11 @@ impl Bert {
         for l in &layers {
             linears.extend([&l.wq, &l.wk, &l.wv, &l.wo, &l.up, &l.down]);
         }
+        if let Some(h) = &head {
+            // The head's matrices read the same activation rows as a layer's, so they
+            // count for the layout decision too (a Q8_0 `cls.weight` needs the int8 rows).
+            linears.extend(h.dense.iter().chain(h.out.iter()));
+        }
         let k_layout = linears
             .iter()
             .filter_map(|lin| lin.dense())
@@ -320,6 +472,7 @@ impl Bert {
                 tok_norm_w,
                 tok_norm_b,
                 layers,
+                head,
                 n_pos,
                 k_layout,
             }),
@@ -578,6 +731,14 @@ impl Architecture for Bert {
         Causality::Bidirectional
     }
 
+    fn head_width(&self) -> usize {
+        self.head.as_ref().map_or(0, |h| h.n_out)
+    }
+
+    fn head_labels(&self) -> &[String] {
+        self.head.as_ref().map_or(&[], |h| h.labels.as_slice())
+    }
+
     fn act_layout(&self) -> ActLayout {
         // A float (F32/F16/BF16) matrix's packed kernel reads the f32 activation
         // rows (`keep_f32`); an all-Q8_0 file never needs them (S4.9f, S4.9a).
@@ -651,6 +812,11 @@ impl Architecture for Bert {
                 f(lin)?;
             }
         }
+        if let Some(h) = &mut self.head {
+            for lin in [h.dense.as_mut(), h.out.as_mut()].into_iter().flatten() {
+                f(lin)?;
+            }
+        }
         Ok(())
     }
 
@@ -660,6 +826,11 @@ impl Architecture for Bert {
             f(&[&l.wo]);
             f(&[&l.up]);
             f(&[&l.down]);
+        }
+        if let Some(h) = &self.head {
+            for lin in [h.dense.as_ref(), h.out.as_ref()].into_iter().flatten() {
+                f(&[lin]);
+            }
         }
     }
 
@@ -689,7 +860,7 @@ impl Architecture for Bert {
         st: &mut State,
         pool: &Pool,
         texts: &[&[u32]],
-        poolings: &[peregrine_core::embed::Pooling],
+        wants: &[peregrine_core::arch::TextWant],
         stats: &mut StepStats,
     ) -> Result<(), String> {
         let t_fwd = Instant::now();
@@ -943,24 +1114,129 @@ impl Architecture for Bert {
             );
         }
 
-        // ---- pooling, text by text (the vector this text's slot reads) ----
+        // ---- read-outs, text by text (the vector or the head row this text's slot reads) ----
         if st.pool_sum.len() < dm {
             st.pool_sum.resize(dm, 0.0);
         }
+        let hw = self.head.as_ref().map_or(0, |h| h.n_out);
         for (i, (t, s)) in texts.iter().zip(&spans).enumerate() {
             let row0 = s.row0;
-            peregrine_core::embed::pool_rows_into(
-                &st.x[row0 * dm..(row0 + t.len()) * dm],
-                dm,
-                poolings[i],
-                &mut st.pool_sum,
-                &mut st.xb2[..dm],
-            );
-            st.hidden[row0 * dm..row0 * dm + dm].copy_from_slice(&st.xb2[..dm]);
+            match wants[i] {
+                peregrine_core::arch::TextWant::Pooled(pooling) => {
+                    peregrine_core::embed::pool_rows_into(
+                        &st.x[row0 * dm..(row0 + t.len()) * dm],
+                        dm,
+                        pooling,
+                        &mut st.pool_sum,
+                        &mut st.xb2[..dm],
+                    );
+                    st.hidden[row0 * dm..row0 * dm + dm].copy_from_slice(&st.xb2[..dm]);
+                }
+                peregrine_core::arch::TextWant::Head => {
+                    let h = self.head.as_ref().ok_or_else(|| {
+                        format!("the {} model has no classifier head", cfg.arch_name)
+                    })?;
+                    head_row(w, pool, st, h, row0, t.len(), dm, hw, stats)?;
+                }
+            }
         }
         st.positions = pos;
         st.spans = spans;
         stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
         Ok(())
     }
+}
+
+/// One text's classifier head row (S4.6b), into `st.head_out[row0 * hw ..]`.
+///
+/// The pooled row comes from the text's last-layer rows (`st.x`), reduced by the head's
+/// `classifier.pooling_type` (row 0, or the mean); then `cls` (+ bias, activation) and
+/// `cls.output` (+ bias), exactly `build_pooling`'s rank branch. A head's output does not
+/// depend on the other texts of the pass: all of its inputs are that text's own rows, and
+/// the two projections are one row each.
+#[allow(clippy::too_many_arguments)]
+fn head_row(
+    w: &Weights,
+    pool: &Pool,
+    st: &mut State,
+    h: &BertHead,
+    row0: usize,
+    len: usize,
+    dm: usize,
+    hw: usize,
+    stats: &mut StepStats,
+) -> Result<(), String> {
+    // The pooled row, into `st.xb[..dm]` (the head's input row).
+    if h.mean {
+        st.pool_sum[..dm].fill(0.0);
+        for r in st.x[row0 * dm..(row0 + len) * dm].chunks_exact(dm) {
+            for (s, &x) in st.pool_sum[..dm].iter_mut().zip(r) {
+                *s += x as f64;
+            }
+        }
+        let inv = 1.0 / len.max(1) as f64;
+        for (o, &s) in st.xb[..dm].iter_mut().zip(&st.pool_sum[..dm]) {
+            *o = (s * inv) as f32;
+        }
+    } else {
+        st.xb[..dm].copy_from_slice(&st.x[row0 * dm..row0 * dm + dm]);
+    }
+
+    if let Some(dense) = &h.dense {
+        // `cls.weight · h + cls.bias`, then the head's activation.
+        linear_rows(
+            w,
+            pool,
+            stats,
+            dense,
+            &mut st.acts,
+            &mut st.lb_x,
+            &mut st.lb_t,
+            &st.xb[..dm],
+            dm,
+            1,
+            &mut st.xb2[..dm],
+            dm,
+            &mut st.kq,
+            |chunk, _| add_bias(chunk, dm, 1, &h.dense_b),
+        );
+        let row = &mut st.xb2[..dm];
+        match h.act {
+            HeadAct::Tanh => {
+                for v in row.iter_mut() {
+                    *v = v.tanh();
+                }
+            }
+            HeadAct::Gelu => peregrine_core::vmath::gelu_erf_rows(row),
+            HeadAct::Silu => {
+                for v in row.iter_mut() {
+                    *v *= 1.0 / (1.0 + (-*v).exp());
+                }
+            }
+        }
+        st.xb[..dm].copy_from_slice(&st.xb2[..dm]);
+    }
+
+    match &h.out {
+        // `cls.output.weight · h + cls.output.bias`: the file's outputs.
+        Some(out) => linear_rows(
+            w,
+            pool,
+            stats,
+            out,
+            &mut st.acts,
+            &mut st.lb_x,
+            &mut st.lb_t,
+            &st.xb[..dm],
+            dm,
+            1,
+            &mut st.head_out[row0 * hw..row0 * hw + hw],
+            hw,
+            &mut st.kq,
+            |chunk, _| add_bias(chunk, hw, 1, &h.out_b),
+        ),
+        // A head without `cls.output` *is* its dense layer: `d_model` values out.
+        None => st.head_out[row0 * hw..row0 * hw + hw].copy_from_slice(&st.xb[..hw]),
+    }
+    Ok(())
 }
