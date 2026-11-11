@@ -151,10 +151,9 @@ fn matmul_block(
     // the k-quant tiles need it — the Q5_0 and Q8_0 tiles read the per-32 layout
     // the activation already has — and its fill requires a whole number of 256-weight
     // super-blocks, which a Q5_0 or Q8_0 matrix's 896-wide rows are not.
-    let kq_fill = jobs
-        .iter()
-        .zip(paths)
-        .any(|(j, &p)| p == MatPath::KqTiles && matches!(j.w.kind, Format::Q4_K | Format::Q6_K));
+    let kq_fill = jobs.iter().zip(paths).any(|(j, &p)| {
+        p == MatPath::KqTiles && matches!(j.w.kind, Format::Q4_K | Format::Q5_K | Format::Q6_K)
+    });
     if kq_fill && nb >= 4 {
         kq.fill(&acts[..nb]);
     }
@@ -224,6 +223,7 @@ fn matmul_block(
                     let n_sb = n / j.w.kind.block();
                     let tile_bytes = match j.w.kind {
                         Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
+                        Format::Q5_K => peregrine_kernels::kq::Q5K8::SIZE,
                         Format::Q5_0 => peregrine_kernels::kq::Q5_08::SIZE,
                         Format::Q8_0 => peregrine_kernels::kq::Q8_08::SIZE,
                         Format::Q6_K => peregrine_kernels::kq::Q6K8::SIZE,
@@ -269,6 +269,13 @@ fn matmul_block(
                                         mk.kq_tiles_q6k(tile, n_sb, kq, nb, out);
                                     } else {
                                         mk.kq_tiles_q6k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    }
+                                }
+                                Format::Q5_K => {
+                                    if nb >= 4 {
+                                        mk.kq_tiles_q5k(tile, n_sb, kq, nb, out);
+                                    } else {
+                                        mk.kq_tiles_q5k_gemv(tile, n_sb, &acts[..nb], nb, out);
                                     }
                                 }
                                 _ => {
@@ -678,6 +685,7 @@ fn one_row_outputs(
                 let n_sb = n / head.kind.block();
                 let tile_bytes = match head.kind {
                     Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
+                    Format::Q5_K => peregrine_kernels::kq::Q5K8::SIZE,
                     Format::Q5_0 => peregrine_kernels::kq::Q5_08::SIZE,
                     Format::Q8_0 => peregrine_kernels::kq::Q8_08::SIZE,
                     Format::Q6_K => peregrine_kernels::kq::Q6K8::SIZE,
@@ -717,6 +725,13 @@ fn one_row_outputs(
                                 mk.kq_tiles_q6k(tile, n_sb, kq, nb, &mut blk[..8 * nb])
                             } else {
                                 mk.kq_tiles_q6k_gemv(tile, n_sb, block, nb, &mut blk[..8 * nb])
+                            }
+                        }
+                        Format::Q5_K => {
+                            if nb >= 4 {
+                                mk.kq_tiles_q5k(tile, n_sb, kq, nb, &mut blk[..8 * nb])
+                            } else {
+                                mk.kq_tiles_q5k_gemv(tile, n_sb, block, nb, &mut blk[..8 * nb])
                             }
                         }
                         _ => {

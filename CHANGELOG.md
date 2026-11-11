@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Repacked Q5_K tiles on x86 (S4.9i)**: a Q5_K matrix is now rewritten at load into the
+  eight-row tile (`Q5K8`, 1408 bytes, size-neutral), with the fifth bits transposed once and
+  the nibbles, scales and mins in the Q4_K tile's layout. An AVX2 GEMM for four or more
+  activation rows and a raw-layout GEMV for one to three, both bit-identical to a new scalar
+  reference (`dot_q5k8_ref`) and to each other. The int16 stage widens after every two windows:
+  eight products per lane, 8·31·127 = 31 496 < 32 767. On bluefin, Qwen3.5-2B Q4_K_M at four
+  threads: prompt 132.6 → 141.9 tok/s at 100 tokens (+7.0 %) and 136.9 → 143.8 at 400 (+5.0 %),
+  decode flat (29.0 → 29.1 and 29.1 → 29.1); the Q6_K-only models are unchanged. The Q6_K
+  tile's x86 GEMM and GEMV are implemented and tested too (four products per int16 lane,
+  32 004 < 32 767), but its GEMV loses 21 % to the row kernel at one row on AVX2, so decision 9
+  keeps Q6_K on the row path there; the kernels are ready for a tier whose GEMV wins. Goldens:
+  the synthetic Q5_K files (AVX2 and AVX-512) and Qwen3.5-2B's real-model golden (both tiers)
+  move; nothing without a Q5_K matmul changes.
 - **A decision computes only its label rows of the output head (S4.9d)**: a `Want::Labels` slot used
   to evaluate the whole vocabulary row of its last prompt position and gather the handful of token
   ids it reads. The head now evaluates those ids alone: one dot product of the already-quantised
