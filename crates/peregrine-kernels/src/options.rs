@@ -26,6 +26,10 @@ pub struct KernelOptions {
     /// AVX2 repacked kernel there, and the A/B measured a large prompt win for a decode cost the
     /// decision accepts (see `kq_repack_default`). The switch is the A/B of the repack.
     pub kq_repack: bool,
+    /// `PEREGRINE_FPACK=0`: keep the F32, F16 and BF16 matrices in the file's own rows and
+    /// multiply them with the pre-S4.9f float tile. On by default on x86-64, where the packed
+    /// kernels run; it is the A/B switch of the float pack.
+    pub fpack: bool,
 }
 
 /// Default prefetch distance (bytes), the value the k-quant kernels were tuned with.
@@ -62,6 +66,7 @@ impl Default for KernelOptions {
             // `resolved_under`, not `resolved`: the latter reads these options, and this is the
             // default they are read into.
             kq_repack: kq_repack_default(crate::cpu::resolved_under(None)),
+            fpack: true,
         }
     }
 }
@@ -85,6 +90,7 @@ pub fn get() -> &'static KernelOptions {
                 .unwrap_or(d.tq_span),
             exact: s("EXACT").is_some_and(|v| v == "1"),
             kq_repack: kq_repack_from(s("KREPACK").as_deref(), crate::cpu::resolved_under(isa)),
+            fpack: s("FPACK").is_none_or(|v| v != "0"),
         }
     })
 }

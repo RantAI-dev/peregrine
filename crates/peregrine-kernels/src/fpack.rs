@@ -305,7 +305,12 @@ mod x86 {
         have_avx2()
     }
 
-    /// One activation row: the widest single-row kernel this CPU has.
+    /// One activation row: the single-row kernel.
+    ///
+    /// AVX-512 does not get its own: the 256-bit GEMV measured faster on this CPU
+    /// (19.8 against 15.7 GMAC/s for f16 at 384 wide), because a 512-bit load and
+    /// FMA is two 256-bit halves here and the eight-panel ymm version already
+    /// streams the weights once.
     ///
     /// # Safety
     /// As [`super::gemm`]: the caller checks the lengths and the feature sets.
@@ -318,11 +323,7 @@ mod x86 {
         bias: Option<&[f32]>,
         out: &mut [f32],
     ) {
-        if have_zmm() {
-            gemv_avx512(fmt, packed, n_in, panels, act, bias, out)
-        } else {
-            gemv_avx2(fmt, packed, n_in, panels, act, bias, out)
-        }
+        gemv_avx2(fmt, packed, n_in, panels, act, bias, out)
     }
 
     /// Sixteen weights of one panel step as two ymm vectors of f32.
@@ -349,18 +350,6 @@ mod x86 {
                     _mm256_castsi256_ps(_mm256_slli_epi32::<16>(hi)),
                 )
             }
-        }
-    }
-
-    /// Sixteen weights of one panel step as one zmm vector of f32.
-    #[inline(always)]
-    unsafe fn w16_zmm(fmt: Format, p: *const u8) -> __m512 {
-        match fmt {
-            Format::F32 => _mm512_loadu_ps(p as *const f32),
-            Format::F16 => _mm512_cvtph_ps(_mm256_loadu_si256(p as *const __m256i)),
-            _ => _mm512_castsi512_ps(_mm512_slli_epi32::<16>(_mm512_cvtepu16_epi32(
-                _mm256_loadu_si256(p as *const __m256i),
-            ))),
         }
     }
 
@@ -439,34 +428,35 @@ mod x86 {
         }
     }
 
-    /// Twelve accumulator pairs: one `k` step over the twelve rows of an AVX-512 tile.
-    macro_rules! step12 {
-        ($acc:ident, $xp:ident, $k:ident, $w0:ident, $w1:ident) => {
-            step12!(@row $acc, $xp, $k, $w0, $w1, 0);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 1);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 2);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 3);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 4);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 5);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 6);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 7);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 8);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 9);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 10);
-            step12!(@row $acc, $xp, $k, $w0, $w1, 11);
+    /// Twelve accumulator pairs, two panels in flight: one `k` step.
+    macro_rules! step6x2 {
+        ($a:ident, $b:ident, $xp:ident, $k:ident, $w0:ident, $w1:ident, $v0:ident, $v1:ident) => {
+            step6x2!(@row $a, $b, $xp, $k, $w0, $w1, $v0, $v1, 0);
+            step6x2!(@row $a, $b, $xp, $k, $w0, $w1, $v0, $v1, 1);
+            step6x2!(@row $a, $b, $xp, $k, $w0, $w1, $v0, $v1, 2);
+            step6x2!(@row $a, $b, $xp, $k, $w0, $w1, $v0, $v1, 3);
+            step6x2!(@row $a, $b, $xp, $k, $w0, $w1, $v0, $v1, 4);
+            step6x2!(@row $a, $b, $xp, $k, $w0, $w1, $v0, $v1, 5);
         };
-        (@row $acc:ident, $xp:ident, $k:ident, $w0:ident, $w1:ident, $r:literal) => {{
-            let x = _mm512_set1_ps(*$xp[$r].add($k));
-            $acc[$r][0] = _mm512_fmadd_ps(x, $w0, $acc[$r][0]);
-            $acc[$r][1] = _mm512_fmadd_ps(x, $w1, $acc[$r][1]);
+        (@row $a:ident, $b:ident, $xp:ident, $k:ident, $w0:ident, $w1:ident, $v0:ident, $v1:ident, $r:literal) => {{
+            let x = _mm256_broadcast_ss(&*$xp[$r].add($k));
+            $a[$r][0] = _mm256_fmadd_ps(x, $w0, $a[$r][0]);
+            $a[$r][1] = _mm256_fmadd_ps(x, $w1, $a[$r][1]);
+            $b[$r][0] = _mm256_fmadd_ps(x, $v0, $b[$r][0]);
+            $b[$r][1] = _mm256_fmadd_ps(x, $v1, $b[$r][1]);
         }};
     }
 
-    /// Two panels, twelve activation rows at a time (AVX-512).
+    /// Two panels, six activation rows at a time, on 256-bit vectors (AVX-512's
+    /// thirty-two registers).
     ///
-    /// Two panels side by side make each activation broadcast feed twice the
-    /// multiplies; an odd panel count repeats the last panel and drops its lanes.
-    #[target_feature(enable = "avx512f,avx512vl,avx2,fma,f16c")]
+    /// This CPU double-pumps a 512-bit FMA into two 256-bit halves and issues one of
+    /// those per two cycles, so a zmm tile computes exactly what two ymm tiles do in
+    /// the same time — measured, a 12×32 zmm tile reached 13.5 GMAC/s against this
+    /// one's 27. What the AVX-512 tier does buy is registers: two panels in flight
+    /// (24 accumulators) amortise each activation broadcast over two panels, and the
+    /// panel loads stay 256 bits wide.
+    #[target_feature(enable = "avx512vl,avx2,fma,f16c")]
     pub unsafe fn gemm_avx512(
         fmt: Format,
         packed: &[u8],
@@ -488,42 +478,53 @@ mod x86 {
             let mut p = 0;
             while p < panels {
                 let two = p + 1 < panels;
-                let w0 = packed.as_ptr().add(p * pb);
-                let w1 = if two { w0.add(pb) } else { w0 };
+                let wa = packed.as_ptr().add(p * pb);
+                let wb = if two { wa.add(pb) } else { wa };
                 let op = out.as_mut_ptr().add(b0 * stride + p * PANEL);
-                let (ib0, ib1) = match bias {
+                let (ia0, ia1, ib0, ib1) = match bias {
                     Some(v) => {
                         let q = v.as_ptr().add(p * PANEL);
+                        let q2 = if two { q.add(PANEL) } else { q };
                         (
-                            _mm512_loadu_ps(q),
-                            _mm512_loadu_ps(if two { q.add(PANEL) } else { q }),
+                            _mm256_loadu_ps(q),
+                            _mm256_loadu_ps(q.add(8)),
+                            _mm256_loadu_ps(q2),
+                            _mm256_loadu_ps(q2.add(8)),
                         )
                     }
-                    None => (_mm512_setzero_ps(), _mm512_setzero_ps()),
+                    None => (
+                        _mm256_setzero_ps(),
+                        _mm256_setzero_ps(),
+                        _mm256_setzero_ps(),
+                        _mm256_setzero_ps(),
+                    ),
                 };
                 let mut t = 0;
                 while t < bn {
-                    let tn = (bn - t).min(12);
-                    let mut xp = [std::ptr::null(); 12];
+                    let tn = (bn - t).min(6);
+                    let mut xp = [std::ptr::null(); 6];
                     for (r, x) in xp.iter_mut().enumerate() {
                         *x = acts[b0 + t + r.min(tn - 1)].xf.as_ptr();
                     }
-                    let mut acc = [[ib0, ib1]; 12];
+                    let mut acc = [[ia0, ia1]; 6];
+                    let mut acc2 = [[ib0, ib1]; 6];
                     for k in 0..n_in {
                         let at = k * PANEL * eb;
-                        crate::simd::prefetch_ahead(w0.add(at), pf, 1);
+                        crate::simd::prefetch_ahead(wa.add(at), pf, 1);
                         if two {
-                            crate::simd::prefetch_ahead(w1.add(at), pf, 1);
+                            crate::simd::prefetch_ahead(wb.add(at), pf, 1);
                         }
-                        let v0 = w16_zmm(fmt, w0.add(at));
-                        let v1 = w16_zmm(fmt, w1.add(at));
-                        step12!(acc, xp, k, v0, v1);
+                        let (a0, a1) = w16(fmt, wa.add(at));
+                        let (v0, v1) = w16(fmt, wb.add(at));
+                        step6x2!(acc, acc2, xp, k, a0, a1, v0, v1);
                     }
                     for r in 0..tn {
                         let o = op.add((t + r) * stride);
-                        _mm512_storeu_ps(o, acc[r][0]);
+                        _mm256_storeu_ps(o, acc[r][0]);
+                        _mm256_storeu_ps(o.add(8), acc[r][1]);
                         if two {
-                            _mm512_storeu_ps(o.add(PANEL), acc[r][1]);
+                            _mm256_storeu_ps(o.add(PANEL), acc2[r][0]);
+                            _mm256_storeu_ps(o.add(PANEL + 8), acc2[r][1]);
                         }
                     }
                     t += tn;
@@ -597,68 +598,7 @@ mod x86 {
             p += group;
         }
     }
-
-    /// One activation row against eight panels at a time (AVX-512).
-    ///
-    /// One zmm accumulator holds a whole panel (16 outputs). Eight panels in flight
-    /// amortise each activation broadcast over eight FMAs and stream eight panels
-    /// once, which is what a decode step wants.
-    #[target_feature(enable = "avx512f,avx512vl,avx2,fma,f16c")]
-    pub unsafe fn gemv_avx512(
-        fmt: Format,
-        packed: &[u8],
-        n_in: usize,
-        panels: usize,
-        act: &QuantAct,
-        bias: Option<&[f32]>,
-        out: &mut [f32],
-    ) {
-        let eb = elem_bytes(fmt);
-        let pb = panel_bytes(fmt, n_in);
-        let pf = crate::simd::prefetch_distance();
-        let x = act.xf.as_ptr();
-        let mut p = 0;
-        while p < panels {
-            let group = (panels - p).min(8);
-            let mut w = [packed.as_ptr(); 8];
-            let mut acc = [_mm512_setzero_ps(); 8];
-            for i in 0..group {
-                w[i] = packed.as_ptr().add((p + i) * pb);
-                if let Some(v) = bias {
-                    acc[i] = _mm512_loadu_ps(v.as_ptr().add((p + i) * PANEL));
-                }
-            }
-            for i in group..8 {
-                w[i] = w[group - 1];
-            }
-            for k in 0..n_in {
-                let xv = _mm512_set1_ps(*x.add(k));
-                for &wp in w.iter() {
-                    crate::simd::prefetch_ahead(wp.add(k * PANEL * eb), pf, 1);
-                }
-                macro_rules! row {
-                    ($i:literal) => {{
-                        acc[$i] =
-                            _mm512_fmadd_ps(xv, w16_zmm(fmt, w[$i].add(k * PANEL * eb)), acc[$i]);
-                    }};
-                }
-                row!(0);
-                row!(1);
-                row!(2);
-                row!(3);
-                row!(4);
-                row!(5);
-                row!(6);
-                row!(7);
-            }
-            for i in 0..group {
-                _mm512_storeu_ps(out.as_mut_ptr().add((p + i) * PANEL), acc[i]);
-            }
-            p += group;
-        }
-    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,13 +871,6 @@ mod tests {
                 unsafe { x86::gemv_avx2(fmt, &packed, n_in, panels, &one[0], None, &mut g) };
                 for r in 0..n_out {
                     assert!(same(g[r], row[r]), "{fmt:?} AVX2 GEMV row {r}");
-                }
-                if x86::have_zmm() {
-                    let mut z = vec![0.0f32; panels * PANEL];
-                    unsafe { x86::gemv_avx512(fmt, &packed, n_in, panels, &one[0], None, &mut z) };
-                    for r in 0..n_out {
-                        assert!(same(z[r], row[r]), "{fmt:?} AVX-512 GEMV row {r}");
-                    }
                 }
             }
         }
