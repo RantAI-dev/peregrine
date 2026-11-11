@@ -97,5 +97,6 @@ The differences the suite found in Peregrine's favour:
 - A malformed JSON body is answered with the OpenAI error object. llama-server returned 400 without a
   JSON content type in this run.
 
-Two differences are deliberate and stay: an unknown model id is accepted (one process serves one
-model, as with llama-server), and sampling controls the engine cannot honour are refused by name.
+Two differences are deliberate and stay: a server with one model accepts any model id (there is
+nothing to choose, as with llama-server; a server started with several `-m` answers an unknown id
+with OpenAI's 404), and sampling controls the engine cannot honour are refused by name.

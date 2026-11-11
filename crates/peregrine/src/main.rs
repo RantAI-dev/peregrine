@@ -28,6 +28,8 @@ enum Cmd {
     },
     /// Embed texts: one vector per text, from a causal model (an embedding model).
     Embed(peregrine::embed::EmbedArgs),
+    /// Rank documents by their relevance to a query, with a reranker's classifier head.
+    Rerank(peregrine::rerank::RerankArgs),
     /// Answer questions about a state with a native decision model (System One).
     Decide(peregrine::decide::DecideArgs),
     /// Benchmark single-user prefill and greedy decode throughput.
@@ -160,6 +162,13 @@ fn main() {
             args.model = resolved(args.model, "peregrine embed");
             if let Err(e) = peregrine::embed::run(&args) {
                 eprintln!("peregrine embed: {e}");
+                std::process::exit(1);
+            }
+        }
+        Cmd::Rerank(mut args) => {
+            args.model = resolved(args.model, "peregrine rerank");
+            if let Err(e) = peregrine::rerank::run(&args) {
+                eprintln!("peregrine rerank: {e}");
                 std::process::exit(1);
             }
         }

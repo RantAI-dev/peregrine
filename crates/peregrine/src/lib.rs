@@ -36,6 +36,8 @@ pub mod decide;
 #[cfg(feature = "cli")]
 pub mod embed;
 #[cfg(feature = "cli")]
+pub mod rerank;
+#[cfg(feature = "cli")]
 pub mod run;
 #[cfg(all(feature = "cli", feature = "server"))]
 pub mod service;

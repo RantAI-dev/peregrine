@@ -1,13 +1,15 @@
 # `bert` (MiniLM, BGE, E5, GTE, bge-m3)
 
-Reference note for roadmap **S4.6, part a**, transcribed from **llama.cpp v0.9.0,
+Reference note for roadmap **S4.6, part a** (the family) and **part b** (the classifier head,
+`/v1/rerank` and `/v1/classify`), transcribed from **llama.cpp v0.9.0,
 commit `cd959ba`**: `src/models/bert.cpp` (the graph), `src/llama-model.cpp` (the tensors,
 `causal_attn`, `pooling_type`), `src/llama-graph.cpp` (`build_inp_pos`,
 `build_attn_inp_no_cache`, `build_norm`, `build_ffn`), `src/llama-hparams.h`,
 `src/llama-arch.cpp` and `conversion/bert.py` (token types, the XLM-R position table). Every
 detail below was read from that source, not from the design note. Peregrine's implementation
-is `crates/peregrine-models/src/bert/mod.rs` (`Bert::load`, `forward_texts`), the pooling in
-`crates/peregrine-core/src/embed.rs` and the element-wise kernels in
+is `crates/peregrine-models/src/bert/mod.rs` (`Bert::load`, `forward_texts`, `BertHead`,
+`head_row`), the pooling in `crates/peregrine-core/src/embed.rs`, the head slot in
+`crates/peregrine-core/src/serve.rs` (`Want::Head`) and the element-wise kernels in
 `crates/peregrine-kernels/src/vmath.rs`.
 
 ## What it is
@@ -16,7 +18,7 @@ is `crates/peregrine-models/src/bert/mod.rs` (`Bert::load`, `forward_texts`), th
 embedding model in llama.cpp's format ships as: all-MiniLM-L6/L12, bge-small/base/large-en-v1.5,
 e5, gte, and the XLM-R based bge-m3 and multilingual-e5 (which differ only in width, depth and
 vocabulary). The same graph with a classifier head (`cls`, `cls.output`) is the reranker /
-classifier half of the step and is **not** part of S4.6a.
+classifier half of the step, S4.6b, which has its own section below.
 
 Three functions are text-in, one vector-out: `<arch>.embedding_length` wide, L2-normalised.
 
@@ -74,7 +76,7 @@ The reference files and their SHA-256:
 | `blk.N.ffn_up.weight` / `.bias` | `[n_embd, n_ff]` | |
 | `blk.N.ffn_down.weight` / `.bias` | `[n_ff, n_embd]` | |
 | `blk.N.layer_output_norm.weight` / `.bias` | `[n_embd]` | post-FFN LayerNorm |
-| `cls.weight` / `cls.bias`, `cls.output.weight` / `.bias` | | the head: S4.6b, not read here |
+| `cls.weight` / `cls.bias`, `cls.output.weight` / `.bias` | | the classifier head: see below |
 
 Every projection has a bias, and every norm has a weight **and** a bias: this family is
 LayerNorm, not RMSNorm. There is no output head and no final norm after the last layer — the
@@ -221,6 +223,139 @@ The bge-small F32 row is the strongest statement about the graph: against the fp
 Peregrine's vectors round to the reference's to the printed precision on every text, while
 llama.cpp's GELU-through-f16 keeps it at 0.9999963.
 
+
+## The classifier head (S4.6b)
+
+A `bert` file may carry a classification head on top of the encoder. llama.cpp reads it from
+four optional tensors and three optional keys, and only when the context's pooling type is
+`rank` (`4`): the head is not applied to a `cls`-pooled embedding.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `bert.pooling_type` | u32 | absent = 0 (none) | `4` is `rank`: pool one row, then the head (`llama-arch.cpp:461`, read at `llama-model.cpp:1473`) |
+| `bert.classifier.output_labels` | array of string | absent | the labels, which also size the head's output (`llama-model.cpp:1634-1637`) |
+| `bert.classifier.activation` | string | absent = `tanh` | `gelu` (the exact erf form), `silu` or `tanh` (`llama-model.cpp:1475-1480`, `1209-1213`) |
+| `bert.classifier.pooling_type` | u32 | absent = row 0 | `1` (mean) pools the mean before the head (`llama-graph.cpp:4187-4195`) |
+
+The tensors (`src/models/bert.cpp:34-38`, all `TENSOR_NOT_REQUIRED`):
+
+| Tensor | Shape | Notes |
+|---|---|---|
+| `cls.weight` | `[n_embd, n_embd]` | the head's dense layer (Hugging Face's `classifier.dense`) |
+| `cls.bias` | `[n_embd]` | |
+| `cls.output.weight` | `[n_embd, n_cls_out]` | the projection to the file's outputs; written **1-d** (`[n_embd]`) when `n_cls_out` is 1, as `bge-reranker-v2-m3-Q8_0.gguf` does |
+| `cls.output.bias` | `[n_cls_out]` | |
+
+`n_cls_out` is the number of labels when the file names them, and `1` otherwise
+(`llama-hparams.h:271`). A file with `cls` but no `cls.output` (jina-reranker-v1-tiny-en) is a
+one-layer head and its row is `n_embd` wide. `cls.norm` exists as a tensor name
+(`llama-arch.cpp:603`) but `bert`'s loader does not create it — only `modern-bert` and `lfm2` do
+— so a `bert` file that carries it loads with an "unused tensor" warning and the norm is **not**
+applied; Peregrine ignores it too. `classifier.activation` is read for every architecture, and its
+default is `GGML_UNARY_OP_TANH` (`llama-hparams.h:429`): a BERT reranker's head is
+dense → **tanh** → output, which is what bge-reranker's checkpoint does.
+
+The head's row, transcribed from `llm_graph_context::build_pooling`
+(`llama-graph.cpp:4185-4226`), for one sequence:
+
+1. pool row 0 of the text (`build_inp_cls`), or the mean of its rows when
+   `bert.classifier.pooling_type = 1` (`4187-4195`);
+2. if `cls`: `h = cls.weight · pooled + cls.bias`, then `h = activation(h)` (`4199-4204`);
+   `cls.norm`, when the arch has it, follows the activation (`4205-4208`);
+3. if `cls.output`: `y = cls.output.weight · h + cls.output.bias` (`4215-4220`);
+4. a softmax **only** for Qwen 3 generative rerankers (`4222-4225`), never for `bert`.
+
+The result is `result_embd_pooled` (`4233-4234`), and a `rank` context extracts `n_cls_out`
+floats per sequence (`llama-context.cpp:1887-1901`).
+
+**Which files declare `rank`.** llama.cpp's converter never writes `pooling_type = 4` for a
+`bert` file: it writes what the sentence-transformers pooling module says (`conversion/base.py`,
+`_try_set_pooling_type`), and the reranker uploads therefore carry **no** `bert.pooling_type` at
+all (the bge-reranker files below have none). llama-server is told instead:
+`--reranking` sets `embedding` and `pooling_type = RANK` (`common/arg.cpp:3472-3476`), and
+`--pooling rank` does the same directly (`2264-2271`); the route refuses without it
+(`server-context.cpp:7009-7011`). Peregrine therefore reads the head from the tensors — a file
+with `cls` or `cls.output` has one — and serves `/v1/rerank` and `/v1/classify` from it, rather
+than requiring a flag for what the file's tensors already say.
+
+### `/v1/rerank`
+
+The route is served at four paths, `/rerank`, `/reranking`, `/v1/rerank` and `/v1/reranking`
+(`tools/server/server.cpp:195-198`), by one handler, `handle_rerank_impl`
+(`tools/server/server-context.cpp:7007-7155`):
+
+1. **The pair text.** One task per document (`7106-7119`), and each task's tokens are
+   `format_prompt_rerank` (`tools/server/server-common.cpp:1973-2045`):
+   - if the file carries a `rerank` chat template (a generative reranker, S4.13), the template is
+     rendered with `{query}` and `{document}` and tokenized **with** special tokens
+     (`1987-2012`);
+   - otherwise the query and the document are tokenized **separately**, with
+     `add_special = false, parse_special = false` (`2021-2022`), and joined as
+     `[BOS] query [EOS] [SEP] document [EOS]`, where each bracket is present only when the
+     vocabulary says so and `EOS` falls back to `SEP` when the file has no EOS (`2023-2042`).
+     For a **BERT WordPiece** vocabulary that is `[CLS] query [SEP] document` (the file's BOS is
+     `[CLS]`, its EOS is absent and `add_sep` is on: `llama-vocab.cpp:2785-2789`); for an
+     **XLM-R unigram** vocabulary it is `<s> query </s> document </s>` (`add_bos` and `add_eos`,
+     no `add_sep`). `Tokenizer::encode_pair` is this function, and
+     `tests/fixtures/bert/rerank/*.ids` holds its output for 320 pairs.
+2. **The score.** `send_rerank` reads the pooled tensor's first float,
+   `res->score = embd[0]` (`server-context.cpp:2599-2626`): the **raw logit**, with no sigmoid
+   and no normalisation. bge-reranker-v2-m3's `Paris is the capital of France.` against
+   `What is the capital of France?` scores `8.6065` — a client that wants a probability applies
+   its own sigmoid.
+3. **The response** (`server-common.cpp:1613-1657`): `{"model", "object": "list", "usage":
+   {"prompt_tokens", "total_tokens"}, "results": [{"index", "relevance_score"}]}`, sorted by
+   score descending, cut to `top_n` (which defaults to every document), and `usage.prompt_tokens`
+   is the sum of each pair's token count (`tokens_evaluated`, `server-task.cpp:1501-1512`). The
+   TEI shape (`"texts"` in the request) returns a bare array of `{"index", "score"}`; Peregrine
+   serves the Jina shape only and refuses `texts` by name.
+4. **The request.** `query` and each document may be a string or an object with `text` (a
+   string or an array of strings, joined); `image`/`video` need a multimodal projector
+   (`7021-7060`); `top_n` must be non-negative (`7098-7103`).
+
+`/v1/classify` has no llama.cpp counterpart: llama.cpp's `/v1/embeddings` returns the pooled row
+of a `cls` file, not the head's outputs. Peregrine's shape is the design's
+(`docs/design/s4-embeddings-decisions.md` §3): one entry per input, the softmax of the head's
+outputs (a sigmoid when the file has one output and names it), every label and its probability,
+and the most likely label.
+
+## Accuracy of the head
+
+`crates/peregrine-models/tests/rerank_real.rs` runs 320 (query, document) pairs — 40 queries of
+eight documents, in English, Chinese, French, German, Spanish, Russian, Arabic and Japanese,
+mixing 16- and 428-token documents — through both engines on the same files. The fixtures are
+`crates/peregrine-models/tests/fixtures/bert/rerank/`.
+
+| File | Pairs | Token ids | Score difference (mean / p95 / max) | Order |
+|---|---|---|---|---|
+| `bge-reranker-v2-m3-Q8_0.gguf` | 320 | identical (26,175 ids) | 0.0107 / 0.0588 / 0.186 | identical |
+| `bge-reranker-base-q8_0.gguf` | 319 (one pair is past its 512-token table) | identical | 0.0103 / 0.0708 / 0.245 | identical |
+
+"Identical" order means no two documents of a query swapped outside a near-tie, which the test
+defines as scores within **1e-2** of each other in either engine.
+
+The design's 1e-3 was an F16-class number and is **not** what a Q8_0 encoder can deliver, by
+either engine. Measured on the same pairs:
+
+| Comparison | mean abs | max abs |
+|---|---|---|
+| llama.cpp Q8_0 vs llama.cpp FP16 | 0.0158 | 0.222 |
+| Peregrine Q8_0 vs Peregrine FP16 | 0.0174 | 0.282 |
+| Peregrine Q8_0 vs llama.cpp Q8_0 | 0.0107 | 0.186 |
+| Peregrine FP16 vs llama.cpp FP16 | 0.0047 | 0.0688 |
+| Peregrine FP16 with llama.cpp's GELU substituted vs llama.cpp FP16 | 0.00056 | 0.0067 |
+
+So each engine's own quantisation moves its scores twice as far as the two engines differ from
+each other, and the residue at the same precision is one thing: llama.cpp's activation. Its GELU
+is the tanh approximation evaluated through a 64 K-entry f16 table (`ggml-cpu/vec.h:999-1013`,
+`ggml-cpu/ggml-cpu.c:3908`), whose f16 input rounding alone is ~5e-4 relative; this family
+evaluates the exact `erf` form the checkpoints train with (ADR 0003, and the section above), and
+that difference compounds through 24 layers into 5e-3 of a logit's score. Substituting
+llama.cpp's own GELU into our pass brings the pair to 5.6e-4 mean (0.0067 max), which is the
+matrix and attention arithmetic alone: the head is the reference's, bit for bit, on the synthetic
+files. The gate for this family is therefore the measured one above, and the order is the property
+that matters for a reranker.
+
 ## What the other BERT-like families do differently (not this step)
 
 Read from the same source, one line each; `nomic-bert`/`nomic-bert-moe` and `jina-bert-v2/v3`
@@ -293,8 +428,46 @@ were about a third of the pass and are now about a tenth. The embedding phase's 
 serial int8 quantisation `QuantAct::fill` performed for a file whose matrices are F16; a pure
 float file now keeps only the f32 row copy, and the gather is 1 % of the pass.
 
+### Rerank throughput (S4.6b)
+
+`bge-reranker-v2-m3-Q8_0.gguf`, 4 threads, one query against N documents, medians of three,
+both engines asked over HTTP on the same file, one engine at a time
+(`scripts/rerank-bench.py`). Documents of about 123 and 449 tokens; the count in the table is
+what the response's `usage` reports, per pair.
+
+| tokens/pair | documents | Peregrine pairs/s | llama.cpp pairs/s | ratio |
+|---|---|---|---|---|
+| 123 | 8 | 3.28 | 3.34 | 0.98 |
+| 123 | 32 | 3.30 | 3.33 | 0.99 |
+| 123 | 100 | 3.32 | 3.29 | 1.01 |
+| 449 | 8 | 0.83 | 0.79 | 1.05 |
+| 449 | 32 | 0.83 | 0.78 | 1.06 |
+| 449 | 100 | 0.83 | 0.78 | 1.06 |
+
+Level at short pairs and 5-6 % ahead at long ones. The 1-2 % at 123 tokens is the pass budget,
+not a kernel: the engine runs **one 123-token text per pass** at that size (the profiler's
+`rows/step` is 123 and barrier wait is 4 % of the wall), while llama.cpp packs about sixteen pairs
+into one 2048-token ubatch; with `PEREGRINE_PASS_ROWS=2048` the same run measures 3.36 pairs/s
+against llama.cpp's 3.33. The pass budget is S4.9's to tune (the default was measured for
+embeddings, where one text is the normal case), so this step leaves it alone and records the
+number. The head itself is not in this: its two projections are 1.3 M MACs against the encoder's
+78 G for a 123-token pair.
+
 ## What Peregrine does
 
+- The classifier head (`Bert::load`, `BertHead`, `head_row`): `cls` → activation → `cls.output`,
+  with the file's `classifier.activation` (tanh by default), its
+  `classifier.pooling_type` (row 0, or the mean) and its `classifier.output_labels`. A 1-d
+  `cls.output.weight` is accepted as a one-row matrix, which is how the reranker uploads write it.
+  A head slot (`Want::Head`) is one `TextWant::Head` text of a bidirectional pass: the head runs
+  after the last layer, on that text's rows, and writes `n_cls_out` floats into
+  `State::head_out` at the text's first row. Every input it reads is the text's own, so the row is
+  bit-identical in any batch (tested on the synthetic files and on the real file).
+- `/v1/rerank` (four routes), `/v1/classify`, `peregrine rerank`, and `/v1/models`'
+  `output_modalities` (`["rerank"]` for a one-output head, `["classify"]` for a labelled one).
+  A file without a head answers 400 by name; a pair past the position table is refused with the
+  limit, or truncated with `"truncate": true`, as `/v1/embeddings` does; a generative `rerank`
+  chat template is refused by name (S4.13).
 - `Bert::forward_texts` runs one whole text per unit (never chunked, no KV cache), with all
   texts of a pass side by side in the shared GEMM; a layer's activation is filled once per
   distinct input (the normed rows for q/k/v, the same rows for `ffn_up`, the GELU output for

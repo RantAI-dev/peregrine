@@ -23,8 +23,8 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use support::models::{
-    write_dense, write_dense_pooled, write_gemma_embedding, write_hybrid_decision, DecisionSpec,
-    Dense, GemmaEmbeddingConfig,
+    write_bert, write_dense, write_dense_pooled, write_gemma_embedding, write_hybrid_decision,
+    BertConfig, BertHeadConfig, DecisionSpec, Dense, GemmaEmbeddingConfig,
 };
 
 fn tmpdir(name: &str) -> PathBuf {
@@ -621,6 +621,122 @@ fn the_cli_takes_repeated_models_and_aliases() {
     assert!(!out.status.success(), "two equal ids were accepted");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--alias"), "{stderr}");
+}
+
+/// A server with one model serves it whatever name a request sends: an OpenAI client is
+/// configured with some model name, and with one model there is nothing to choose.
+#[test]
+fn a_one_model_server_accepts_any_model_name() {
+    let dir = tmpdir("any-name");
+    let chat = write_dense(&dir, "llama", Format::F16, 11, Dense::default());
+    let (_guard, port) = serve(&dir, &[(&chat, "peregrine")], 2, 512);
+    let (status, named) = post(port, "/v1/chat/completions", &chat_body("peregrine", 4));
+    assert_eq!(status, 200, "{named}");
+    for name in ["gpt-4o-mini", "definitely-not-the-served-model"] {
+        let (status, other) = post(port, "/v1/chat/completions", &chat_body(name, 4));
+        assert_eq!(status, 200, "{name}: {other}");
+        assert_eq!(content(&other), content(&named), "{name}");
+    }
+}
+
+/// `/v1/rerank` and `/v1/classify` go to the model the request names (S4.6b on a
+/// several-models server), and each answer is the one that file gives alone.
+#[test]
+fn rerank_and_classify_are_routed_by_id() {
+    let dir = tmpdir("heads");
+    let dirs: Vec<PathBuf> = ["embed", "rank", "labels"]
+        .iter()
+        .map(|d| {
+            let d = dir.join(d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        })
+        .collect();
+    let embed = write_dense_pooled(&dirs[0], "llama", Format::F16, 12, Dense::default(), 3);
+    let rank = write_bert(
+        &dirs[1],
+        Format::F32,
+        71,
+        BertConfig {
+            pooling_type: 4,
+            head: Some(BertHeadConfig {
+                n_out: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    let labels = write_bert(
+        &dirs[2],
+        Format::F32,
+        72,
+        BertConfig {
+            head: Some(BertHeadConfig {
+                n_out: 3,
+                labels: vec!["negative".into(), "neutral".into(), "positive".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    let rerank_body = |model: &str| {
+        json!({
+            "model": model,
+            "query": "hello world",
+            "documents": ["the cat sat on the mat", "hello world", "taxes"],
+        })
+    };
+    let classify_body = |model: &str| json!({"model": model, "input": ["hello world", "a text"]});
+
+    let (guard, port) = serve(
+        &dir,
+        &[(&embed, "embed"), (&rank, "rank"), (&labels, "labels")],
+        2,
+        128,
+    );
+    let (_, listed) = http(port, "GET", "/v1/models", None);
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    let modality = |i: usize| listed["data"][i]["architecture"]["output_modalities"][0].clone();
+    assert_eq!(modality(1), "rerank");
+    assert_eq!(modality(2), "classify");
+
+    let (status, ranked) = post(port, "/v1/rerank", &rerank_body("rank"));
+    assert_eq!(status, 200, "{ranked}");
+    assert_eq!(ranked["model"], "rank");
+    assert_eq!(ranked["results"].as_array().unwrap().len(), 3);
+    let (status, classified) = post(port, "/v1/classify", &classify_body("labels"));
+    assert_eq!(status, 200, "{classified}");
+    assert_eq!(classified["model"], "labels");
+
+    // The first `-m` is an embedder: a request that names no model, or names it, is told
+    // that file has no head; an unknown id is a 404 on these routes too.
+    for model in ["", "embed"] {
+        let (status, refused) = post(port, "/v1/rerank", &rerank_body(model));
+        assert_eq!(status, 400, "{model:?}: {refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no classifier head"),
+            "{refused}"
+        );
+    }
+    for path in ["/v1/rerank", "/v1/classify"] {
+        let (status, unknown) = post(port, path, &rerank_body("nope"));
+        assert_eq!(status, 404, "{path}: {unknown}");
+        assert_eq!(unknown["error"]["code"], "model_not_found");
+    }
+    drop(guard);
+
+    // Each file alone gives the same scores.
+    let (guard, port) = serve(&dir, &[(&rank, "rank")], 2, 128);
+    let (_, alone) = post(port, "/v1/rerank", &rerank_body("rank"));
+    drop(guard);
+    assert_eq!(ranked["results"], alone["results"]);
+    let (guard, port) = serve(&dir, &[(&labels, "labels")], 2, 128);
+    let (_, alone) = post(port, "/v1/classify", &classify_body("labels"));
+    drop(guard);
+    assert_eq!(classified["results"], alone["results"]);
 }
 
 /// The duplicate-text embedding cache (S4.9k) is per model: the same text and the same

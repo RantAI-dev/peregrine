@@ -62,6 +62,18 @@ pub enum Causality {
     Bidirectional,
 }
 
+/// What one text of a bidirectional pass is read out as (design §2.1).
+///
+/// A pooled slot wants one vector: the text's rows reduced by the request's
+/// [`Pooling`]. A head slot wants the classifier head's row for the text
+/// (`cls` → activation → `cls.output`, roadmap S4.6b), whose width is the file's
+/// number of outputs, not `d_model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextWant {
+    Pooled(Pooling),
+    Head,
+}
+
 /// The architecture trait implemented by each model family.
 pub trait Architecture: Send + Sync + 'static {
     #[allow(clippy::too_many_arguments)]
@@ -97,9 +109,10 @@ pub trait Architecture: Send + Sync + 'static {
     ///
     /// On return `st.hidden` holds one vector per text (the model's head already applied —
     /// EmbeddingGemma's `dense_2`/`dense_3`), at row `texts[t]`'s first global row, in
-    /// text order. Pooling is the caller's `poolings[t]`: the request may name a type the
+    /// text order. Pooling is the caller's `wants[t]`: the request may name a type the
     /// file did not declare, and `Cls` is legal here because row 0 of an encoder sees the
-    /// whole text.
+    /// whole text. A [`TextWant::Head`] text instead leaves the classifier head's row in
+    /// `st.head_out` at `row0 * head_width()`.
     ///
     /// The default refuses: a causal family has no bidirectional pass.
     #[allow(clippy::too_many_arguments)]
@@ -110,13 +123,25 @@ pub trait Architecture: Send + Sync + 'static {
         _st: &mut State,
         _pool: &Pool,
         _texts: &[&[u32]],
-        _poolings: &[Pooling],
+        _wants: &[TextWant],
         _stats: &mut StepStats,
     ) -> Result<(), String> {
         Err(format!(
             "{} has no bidirectional forward pass",
             _cfg.arch_name
         ))
+    }
+
+    /// The width of one text's classifier-head row (roadmap S4.6b). `0` for a family
+    /// with no head, which is every family but `bert` today.
+    fn head_width(&self) -> usize {
+        0
+    }
+
+    /// The file's `classifier.output_labels`, in file order. Empty when the head has none
+    /// (a reranker's one raw score) or the family has no head.
+    fn head_labels(&self) -> &[String] {
+        &[]
     }
 
     fn act_layout(&self) -> ActLayout {

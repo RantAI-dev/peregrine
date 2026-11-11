@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use support::models::{
     write_bert, write_dense, write_gemma_embedding, write_hybrid, write_mistral3,
-    write_modern_bert, write_moe, BertConfig, Dense, GemmaEmbeddingConfig, Mistral3Config,
-    ModernBertConfig, MoeShape,
+    write_modern_bert, write_moe, BertConfig, BertHeadConfig, Dense, GemmaEmbeddingConfig,
+    Mistral3Config, ModernBertConfig, MoeShape,
 };
 
 /// Allocations counted while `COUNTING` was set.
@@ -124,7 +124,8 @@ fn check_decode(model: &Model, threads: usize, prec: KvPrec) -> usize {
 }
 
 /// A bidirectional pass over whole texts (roadmap S4.4): the projections, the per-text
-/// attention and the pooled dense head allocate nothing once the state's scratch is warm.
+/// attention, the pooled dense head and (S4.6b) the classifier head allocate nothing once
+/// the state's scratch is warm.
 fn check_forward_texts(model: &Model, threads: usize) -> usize {
     let c = model.cfg;
     let pool = Pool::new(threads);
@@ -135,11 +136,17 @@ fn check_forward_texts(model: &Model, threads: usize) -> usize {
     let b: Vec<u32> = (20..35).collect();
     let c3: Vec<u32> = (13..22).collect();
     let texts: [&[u32]; 3] = [&a, &b, &c3];
-    let poolings = [peregrine_core::embed::Pooling::Mean; 3];
+    let mut wants =
+        [peregrine_core::arch::TextWant::Pooled(peregrine_core::embed::Pooling::Mean); 3];
+    // A model with a classifier head reads one text out as the head's row; the head's
+    // projections then run in the same pass (S4.6b). Without a head, every text pools.
+    if model.has_head() {
+        wants[1] = peregrine_core::arch::TextWant::Head;
+    }
     let mut stats = StepStats::default();
     let mut run = |st: &mut State| {
         model
-            .forward_texts(st, &pool, &texts, &poolings, &mut stats)
+            .forward_texts(st, &pool, &texts, &wants, &mut stats)
             .unwrap();
     };
     for _ in 0..4 {
@@ -353,6 +360,30 @@ fn a_decode_step_allocates_nothing() {
         if n != 0 {
             failures.push(format!(
                 "bert whole-text pass, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
+    // A BERT file with a classifier head (S4.6b): the head's two projections run in the
+    // pass, and they must allocate nothing either.
+    let bert_head = load(&write_bert(
+        &dir,
+        Format::Q8_0,
+        7009,
+        BertConfig {
+            pooling_type: 4,
+            head: Some(BertHeadConfig {
+                n_out: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&bert_head, threads);
+        if n != 0 {
+            failures.push(format!(
+                "bert classifier head, {threads} threads: {n} allocations per pass"
             ));
         }
     }

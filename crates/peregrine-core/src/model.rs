@@ -568,6 +568,11 @@ impl Model {
             // An encoder's strip scratch (S4.9g): the pass allocates nothing.
             st.attn.bidir.resize(max_batch, self.cfg.head_dim, threads);
         }
+        let hw = self.head_width();
+        if hw > 0 {
+            // A classifier head's rows, one per text of a pass (S4.6b).
+            st.head_out = vec![0.0; max_batch * hw];
+        }
         st
     }
 
@@ -591,21 +596,23 @@ impl Model {
     ///
     /// The engine schedules whole texts for a bidirectional model: a text is never split
     /// and no KV cache is written. On return `st.hidden` holds one vector per text at
-    /// that text's first global row, with the family's head applied.
+    /// that text's first global row, with the family's head applied; a text whose
+    /// [`crate::arch::TextWant`] is `Head` leaves the classifier head's row in `st.head_out` at
+    /// `row0 * head_width()` instead.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_texts(
         &self,
         st8: &mut State,
         pool: &Pool,
         texts: &[&[u32]],
-        poolings: &[crate::embed::Pooling],
+        wants: &[crate::arch::TextWant],
         stats: &mut StepStats,
     ) -> Result<(), String> {
-        if texts.len() != poolings.len() {
+        if texts.len() != wants.len() {
             return Err(format!(
-                "{} texts but {} pooling types",
+                "{} texts but {} read-outs",
                 texts.len(),
-                poolings.len()
+                wants.len()
             ));
         }
         let total: usize = texts.iter().map(|t| t.len()).sum();
@@ -638,7 +645,25 @@ impl Model {
             }
         }
         self.arch
-            .forward_texts(&self.w, &self.cfg, st8, pool, texts, poolings, stats)
+            .forward_texts(&self.w, &self.cfg, st8, pool, texts, wants, stats)
+    }
+
+    /// The width of one text's classifier-head row: the number of outputs
+    /// (`cls.output`) the file's head has, or `d_model` for a head that is one layer
+    /// (`cls` alone). `0` when the model has no head (S4.6b).
+    pub fn head_width(&self) -> usize {
+        self.arch.head_width()
+    }
+
+    /// Whether the model carries a classifier head (`cls`, `cls.output`).
+    pub fn has_head(&self) -> bool {
+        self.head_width() > 0
+    }
+
+    /// The file's `classifier.output_labels` (S4.6b), in file order; empty when the head
+    /// has none or the model has no head.
+    pub fn head_labels(&self) -> &[String] {
+        self.arch.head_labels()
     }
 
     // a cache shaped for this model: K/V for the layers that attend, plus the recurrent state of a

@@ -466,6 +466,11 @@ pub async fn run(a: Args) {
         .route("/metrics", get(metrics))
         .route("/v1/chat/completions", post(chat))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/rerank", post(rerank))
+        .route("/rerank", post(rerank))
+        .route("/v1/reranking", post(rerank))
+        .route("/reranking", post(rerank))
+        .route("/v1/classify", post(classify))
         .route("/v1/systemone", post(systemone))
         .with_state(app);
     let addr = format!("{}:{}", a.host, a.port);
@@ -778,13 +783,22 @@ async fn health() -> Json<Value> {
 async fn models(State(s): State<Arc<App>>) -> Json<Value> {
     // What llama.cpp advertises for each file (`server_model_output_modalities`,
     // `server-common.cpp:207-241`): a native decision model answers decisions, not text, and an
-    // `openjev` file has no text generation even though it carries an LM head.
+    // `openjev` file has no text generation even though it carries an LM head. A file with a
+    // classifier head answers rerank or classify (S4.6b): one output with no labels is a
+    // reranker's score, several outputs or named labels are a classifier's.
     let data: Vec<Value> = s
         .models
         .iter()
         .map(|m| {
             let output_modalities = if m.decider.is_some() {
                 json!(["decisions"])
+            } else if m.model.has_head() {
+                let n_out = m.model.head_width();
+                if n_out == 1 && m.model.head_labels().is_empty() {
+                    json!(["rerank"])
+                } else {
+                    json!(["classify"])
+                }
             } else {
                 json!(["text"])
             };
@@ -1622,6 +1636,7 @@ fn engine_thread(
                         Want::Tokens => engine.admit(j.prompt, j.cfg),
                         Want::Pooled(pooling) => engine.admit_pooled(j.prompt, j.cfg, pooling),
                         Want::Labels => engine.admit_labels(j.prompt, j.cfg, j.labels),
+                        Want::Head => engine.admit_head(j.prompt, j.cfg),
                     };
                     match admitted {
                         Ok(id) => {
@@ -1637,6 +1652,7 @@ fn engine_thread(
                                 cost: None,
                                 embedding: None,
                                 label_logits: None,
+                                head: None,
                             });
                         }
                     }
@@ -1698,6 +1714,7 @@ fn engine_thread(
                                     cost: None,
                                     embedding: None,
                                     label_logits: None,
+                                    head: None,
                                 });
                             }
                         }
@@ -2337,13 +2354,18 @@ fn not_supported(message: impl Into<String>) -> Response {
         .into_response()
 }
 
-/// The model a request names: its `model` field, or the first `-m` when the field is absent
-/// (so a single-model client keeps working). An unknown id is OpenAI's 404.
+/// The model a request names: its `model` field, or the first `-m` when the field is absent.
+///
+/// A server with one model serves it whatever the field says, as it always has and as
+/// llama-server does: OpenAI clients send the name they were configured with, and with one
+/// model there is nothing to choose (`docs/compat.md`). With several models the name is a
+/// choice, and an unknown id is OpenAI's 404.
 fn route_model(app: &App, requested: Option<&str>) -> Result<Arc<Served>, Box<Response>> {
     match requested.filter(|s| !s.is_empty()) {
         None => Ok(app.models[app.default].clone()),
         Some(id) => match app.by_id.get(id) {
             Some(&i) => Ok(app.models[i].clone()),
+            None if app.models.len() == 1 => Ok(app.models[app.default].clone()),
             None => {
                 let ids: Vec<&str> = app.models.iter().map(|m| m.alias.as_str()).collect();
                 Err(Box::new(
@@ -2680,6 +2702,439 @@ fn ordered_json(value: &OrderedValue) -> Response {
         value.to_jinja_json(),
     )
         .into_response()
+}
+
+/// What `/v1/rerank` asks for (roadmap S4.6b), in the Jina / Cohere shape llama.cpp serves.
+#[derive(Debug, Clone, PartialEq)]
+struct RerankSpec {
+    pub model: String,
+    pub query: String,
+    pub documents: Vec<String>,
+    pub top_n: usize,
+    pub return_documents: bool,
+    pub truncate: bool,
+}
+
+/// The fields `/v1/rerank` accepts. Anything else is refused by name, as on the chat route.
+const RERANK_FIELDS: &[&str] = &[
+    "model",
+    "query",
+    "documents",
+    "top_n",
+    "return_documents",
+    "truncate",
+    "user",
+];
+
+/// One rerank input: a string, or an object carrying its text (`{"text": "…"}`; llama.cpp
+/// accepts an array of strings there too and joins it).
+///
+/// Image and video input need a multimodal projector, which a `bert` reranker never has;
+/// llama.cpp answers the same way without `--mmproj`.
+fn rerank_text(v: &Value, what: &str) -> Result<String, String> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        Value::Object(o) => {
+            if let Some(k) = ["image", "video", "fps", "max_frames"]
+                .iter()
+                .find(|k| o.contains_key(**k))
+            {
+                return Err(format!(
+                    "{k} is not supported by /v1/rerank: image and video input need a multimodal projector, and a bert reranker has none"
+                ));
+            }
+            match o.get("text") {
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(Value::Array(items)) => {
+                    let mut out = String::new();
+                    for t in items {
+                        let s = t
+                            .as_str()
+                            .ok_or_else(|| "\"text\" array elements must be strings".to_string())?;
+                        out.push_str(s);
+                    }
+                    Ok(out)
+                }
+                Some(Value::Null) | None => Ok(String::new()),
+                Some(_) => Err("\"text\" must be a string or an array of strings".into()),
+            }
+        }
+        _ => Err(format!(
+            "each {what} must be a string or an object of the form {{\"text\": …}}"
+        )),
+    }
+}
+
+/// Read `/v1/rerank` (`docs/design/s4-embeddings-decisions.md` §3).
+fn parse_rerank_request(b: &Value) -> Result<RerankSpec, String> {
+    let Some(obj) = b.as_object() else {
+        return Err("the request body must be a JSON object".into());
+    };
+    for k in obj.keys() {
+        if !RERANK_FIELDS.contains(&k.as_str()) {
+            return Err(format!("{k} is not supported by /v1/rerank"));
+        }
+    }
+    let query = match b.get("query") {
+        Some(v) => rerank_text(v, "query")?,
+        None => return Err("\"query\" must be provided".into()),
+    };
+    let documents = match b.get("documents") {
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len());
+            for v in items {
+                out.push(rerank_text(v, "document")?);
+            }
+            out
+        }
+        Some(Value::Array(_)) => {
+            return Err("\"documents\" must be a non-empty array of strings or objects".into())
+        }
+        Some(_) => {
+            return Err("\"documents\" must be a non-empty array of strings or objects".into())
+        }
+        None => return Err("\"documents\" must be provided".into()),
+    };
+    let top_n = match b.get("top_n") {
+        None | Some(Value::Null) => documents.len(),
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .filter(|&n| n <= usize::MAX as u64)
+                .ok_or_else(|| "\"top_n\" must be a non-negative integer".to_string())?;
+            usize::try_from(n).unwrap_or(usize::MAX)
+        }
+    };
+    let return_documents = match b.get("return_documents") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "return_documents must be a boolean".to_string())?,
+    };
+    let truncate = match b.get("truncate") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "truncate must be a boolean".to_string())?,
+    };
+    Ok(RerankSpec {
+        model: b
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        query,
+        documents,
+        top_n,
+        return_documents,
+        truncate,
+    })
+}
+
+/// `POST /v1/rerank` (also `/rerank`, `/v1/reranking`, `/reranking`: llama.cpp serves all
+/// four; S4.6b).
+///
+/// Every (query, document) pair is one text of the batch, built by the tokenizer's pair
+/// encoding — `format_prompt_rerank`'s own rule: `[CLS] q [SEP] d` for WordPiece,
+/// `<s> q </s> d </s>` for the XLM-R vocabulary. Each pair is a head slot, so all of them
+/// share weight passes, and the answer is `cls` → activation → `cls.output` at row 0.
+/// The score is that raw logit, as llama.cpp returns it (`send_rerank`: `embd[0]`).
+async fn rerank(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
+    let app = match route_model(&state, body.get("model").and_then(Value::as_str)) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
+    if !app.model.has_head() {
+        return bad(format!(
+            "{} has no classifier head (cls / cls.output), so it cannot rerank; use /v1/embeddings",
+            app.model.cfg.arch_name
+        ));
+    }
+    // A generative reranker's `rerank` template is a prompt, not a pair: that is S4.13.
+    if app
+        .model
+        .gguf()
+        .str("tokenizer.chat_template.rerank")
+        .is_ok()
+    {
+        return bad(
+            "this file carries a \"rerank\" chat template (a generative reranker), which is not \
+             supported yet; a bert reranker is scored with its classifier head",
+        );
+    }
+    let spec = match parse_rerank_request(&body) {
+        Ok(s) => s,
+        Err(e) => return bad(e),
+    };
+    // Tokenize before reserving a place: an over-length pair is the caller's error.
+    let mut pairs: Vec<Vec<u32>> = Vec::with_capacity(spec.documents.len());
+    for (i, doc) in spec.documents.iter().enumerate() {
+        let mut tokens = app.model.tk.encode_pair(&spec.query, doc);
+        if let Err(e) = fit_tokens(i, &mut tokens, app.max_ctx, spec.truncate) {
+            return bad(e);
+        }
+        pairs.push(tokens);
+    }
+    if spec.top_n == 0 {
+        // Nothing to rank: no pair is worth a forward pass.
+        return Json(json!({
+            "model": if spec.model.is_empty() { app.alias.clone() } else { spec.model.clone() },
+            "object": "list",
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+            "results": [],
+        }))
+        .into_response();
+    }
+    if !try_reserve_n(&app.busy, 1, MIN_WAITING.max(2 * app.max_slots)) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "too many requests are waiting for this model", "type": "overloaded_error", "code": 503}})),
+        )
+            .into_response();
+    }
+    let _busy = BusyGuard(app.clone());
+    app.requests.fetch_add(1, Ordering::SeqCst);
+    let prompt_tokens: u64 = pairs.iter().map(|t| t.len() as u64).sum();
+    let jobs = pairs
+        .iter()
+        .map(|t| SlotJob {
+            prompt: t.clone(),
+            want: Want::Head,
+            labels: Vec::new(),
+        })
+        .collect();
+    let emissions = match run_jobs(&app, jobs).await {
+        Ok(e) => e,
+        Err(response) => return *response,
+    };
+    if emissions.len() != pairs.len() {
+        return internal("the engine returned the wrong number of rerank scores");
+    }
+    let mut ranked: Vec<(usize, f32)> = Vec::with_capacity(pairs.len());
+    for (i, em) in emissions.into_iter().enumerate() {
+        let Some(head) = em.head else {
+            return internal("the engine returned no classifier head row");
+        };
+        let Some(&score) = head.first() else {
+            return internal("the classifier head row is empty");
+        };
+        ranked.push((i, score));
+    }
+    // Descending by score, then by document index so equal scores keep request order
+    // (llama.cpp sorts by score alone and leaves ties in whatever order its sort ends in).
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let results: Vec<Value> = ranked
+        .iter()
+        .take(spec.top_n)
+        .map(|&(i, score)| {
+            let mut r = json!({"index": i, "relevance_score": score});
+            if spec.return_documents {
+                r["document"] = json!({"text": spec.documents[i]});
+            }
+            r
+        })
+        .collect();
+    let model = if spec.model.is_empty() {
+        app.alias.clone()
+    } else {
+        spec.model.clone()
+    };
+    Json(json!({
+        "model": model,
+        "object": "list",
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+        "results": results,
+    }))
+    .into_response()
+}
+
+/// What `/v1/classify` asks for (S4.6b).
+#[derive(Debug, Clone, PartialEq)]
+struct ClassifySpec {
+    pub model: String,
+    pub inputs: Vec<String>,
+    pub truncate: bool,
+}
+
+/// The fields `/v1/classify` accepts.
+const CLASSIFY_FIELDS: &[&str] = &["model", "input", "truncate", "user"];
+
+/// Read `/v1/classify`: `input` is a string or an array of strings.
+fn parse_classify_request(b: &Value) -> Result<ClassifySpec, String> {
+    let Some(obj) = b.as_object() else {
+        return Err("the request body must be a JSON object".into());
+    };
+    for k in obj.keys() {
+        if !CLASSIFY_FIELDS.contains(&k.as_str()) {
+            return Err(format!("{k} is not supported by /v1/classify"));
+        }
+    }
+    let inputs = match b.get("input") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, v) in items.iter().enumerate() {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| format!("input {i} must be a string"))?;
+                out.push(s.to_string());
+            }
+            out
+        }
+        Some(Value::Array(_)) => return Err("input must not be an empty array".into()),
+        Some(_) => return Err("input must be a string or an array of strings".into()),
+        None => return Err("input must be provided".into()),
+    };
+    let truncate = match b.get("truncate") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "truncate must be a boolean".to_string())?,
+    };
+    Ok(ClassifySpec {
+        model: b
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        inputs,
+        truncate,
+    })
+}
+
+/// The probability of each output of a classifier head: a softmax when the file has more
+/// than one output, a sigmoid when it has one (a single-label head, which is a reranker's
+/// shape and is refused here unless the file names its label).
+///
+/// The softmax subtracts the maximum and sums in f64, rounding once per probability, so a
+/// batch's probabilities do not depend on the order the texts were computed in.
+fn head_probabilities(out: &[f32]) -> Vec<f32> {
+    if out.len() == 1 {
+        let x = out[0];
+        return vec![(1.0 / (1.0 + (-x as f64).exp())) as f32];
+    }
+    let max = out.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let sum: f64 = out.iter().map(|&x| (x as f64 - max).exp()).sum();
+    out.iter()
+        .map(|&x| ((x as f64 - max).exp() / sum) as f32)
+        .collect()
+}
+
+/// `POST /v1/classify` (S4.6b): one entry per input, with every label's probability and
+/// the most likely one.
+///
+/// The shape is the design's (`docs/design/s4-embeddings-decisions.md` §3):
+/// `results: [{index, label, score, scores: {label: probability}}]`, in input order. A
+/// `bert` head with `classifier.output_labels` names its labels; a head with several
+/// outputs and no labels is served as `LABEL_0`, `LABEL_1`, … (Hugging Face's own default
+/// names, which the converter drops when it writes the file).
+async fn classify(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
+    let app = match route_model(&state, body.get("model").and_then(Value::as_str)) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
+    let n_out = app.model.head_width();
+    if n_out == 0 {
+        return bad(format!(
+            "{} has no classifier head (cls / cls.output), so it cannot classify",
+            app.model.cfg.arch_name
+        ));
+    }
+    let file_labels = app.model.head_labels();
+    if n_out == 1 && file_labels.is_empty() {
+        return bad(
+            "this file's head has one output and no classifier.output_labels: it is a reranker, \
+             so use /v1/rerank",
+        );
+    }
+    let labels: Vec<String> = if file_labels.is_empty() {
+        (0..n_out).map(|i| format!("LABEL_{i}")).collect()
+    } else if file_labels.len() == n_out {
+        file_labels.to_vec()
+    } else {
+        return bad(format!(
+            "the file names {} labels for a head of {n_out} outputs",
+            file_labels.len()
+        ));
+    };
+    let spec = match parse_classify_request(&body) {
+        Ok(s) => s,
+        Err(e) => return bad(e),
+    };
+    let mut texts: Vec<Vec<u32>> = Vec::with_capacity(spec.inputs.len());
+    for (i, input) in spec.inputs.iter().enumerate() {
+        let mut tokens = app.model.tk.encode_special(input);
+        if let Err(e) = fit_tokens(i, &mut tokens, app.max_ctx, spec.truncate) {
+            return bad(e);
+        }
+        texts.push(tokens);
+    }
+    if !try_reserve_n(&app.busy, 1, MIN_WAITING.max(2 * app.max_slots)) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "too many requests are waiting for this model", "type": "overloaded_error", "code": 503}})),
+        )
+            .into_response();
+    }
+    let _busy = BusyGuard(app.clone());
+    app.requests.fetch_add(1, Ordering::SeqCst);
+    let prompt_tokens: u64 = texts.iter().map(|t| t.len() as u64).sum();
+    let jobs = texts
+        .iter()
+        .map(|t| SlotJob {
+            prompt: t.clone(),
+            want: Want::Head,
+            labels: Vec::new(),
+        })
+        .collect();
+    let emissions = match run_jobs(&app, jobs).await {
+        Ok(e) => e,
+        Err(response) => return *response,
+    };
+    if emissions.len() != texts.len() {
+        return internal("the engine returned the wrong number of classifier rows");
+    }
+    let mut results = Vec::with_capacity(texts.len());
+    for (i, em) in emissions.into_iter().enumerate() {
+        let Some(head) = em.head else {
+            return internal("the engine returned no classifier head row");
+        };
+        if head.len() != n_out {
+            return internal(format!(
+                "the classifier head row is {} wide, the file's head is {n_out}",
+                head.len()
+            ));
+        }
+        let probs = head_probabilities(&head);
+        let (top, &score) = probs
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(&a.0)))
+            .expect("a head has at least one output");
+        let scores: serde_json::Map<String, Value> = labels
+            .iter()
+            .zip(&probs)
+            .map(|(l, &p)| (l.clone(), json!(p)))
+            .collect();
+        results.push(json!({
+            "index": i,
+            "label": labels[top],
+            "score": score,
+            "scores": Value::Object(scores),
+        }));
+    }
+    let model = if spec.model.is_empty() {
+        app.alias.clone()
+    } else {
+        spec.model.clone()
+    };
+    Json(json!({
+        "object": "list",
+        "model": model,
+        "results": results,
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+    }))
+    .into_response()
 }
 
 /// `POST /v1/systemone` (S4.3c): every question is one labels slot in the engine, so they share
@@ -3025,9 +3480,10 @@ pub fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_f32, chat_choice, chunk_json, continuation_prefix, fit_tokens,
-        parse_embedding_request, plan, route_tool_events, tool_fields_present, tool_request,
-        EmbedInput, Msg, Penalties, ReasoningFormat, ToolFormat, ToolReply,
+        base64_f32, chat_choice, chunk_json, continuation_prefix, fit_tokens, head_probabilities,
+        parse_classify_request, parse_embedding_request, parse_rerank_request, plan,
+        route_tool_events, tool_fields_present, tool_request, EmbedInput, Msg, Penalties,
+        ReasoningFormat, ToolFormat, ToolReply,
     };
     use axum::Json;
     use serde_json::{json, Value};
@@ -3629,6 +4085,89 @@ mod tests {
         assert!(t == (0..8).collect::<Vec<u32>>());
         // A text that tokenizes to nothing is refused too.
         assert!(fit_tokens(2, &mut vec![], 8, false).is_err());
+    }
+
+    #[test]
+    fn the_rerank_request_is_jina_shaped_and_strict() {
+        let spec = parse_rerank_request(&json!({
+            "query": "q", "documents": ["a", {"text": "b"}], "top_n": 1,
+        }))
+        .unwrap();
+        assert_eq!(spec.query, "q");
+        assert_eq!(spec.documents, ["a", "b"]);
+        assert_eq!(spec.top_n, 1);
+        assert!(!spec.return_documents);
+        // `top_n` defaults to every document; `model` is echoed, `user` accepted.
+        let spec = parse_rerank_request(&json!({
+            "query": {"text": ["a", "b"]}, "documents": ["d"], "model": "m", "user": "u",
+        }))
+        .unwrap();
+        assert_eq!(spec.query, "ab");
+        assert_eq!(spec.top_n, 1);
+        assert_eq!(spec.model, "m");
+        // Every refusal names its field.
+        for (body, needle) in [
+            (json!({"documents": ["d"]}), "query"),
+            (json!({"query": "q"}), "documents"),
+            (json!({"query": "q", "documents": []}), "non-empty"),
+            (
+                json!({"query": "q", "documents": ["d"], "top_n": -1}),
+                "top_n",
+            ),
+            (
+                json!({"query": "q", "documents": ["d"], "other": 1}),
+                "other",
+            ),
+            (
+                json!({"query": "q", "documents": [{"image": "u"}]}),
+                "image",
+            ),
+            (json!({"query": 3, "documents": ["d"]}), "query"),
+        ] {
+            let err = parse_rerank_request(&body).err().unwrap_or_default();
+            assert!(err.contains(needle), "{body} -> {err:?}");
+        }
+    }
+
+    #[test]
+    fn head_probabilities_are_a_softmax_or_a_sigmoid() {
+        // One output: the logistic function of the logit.
+        let p = head_probabilities(&[0.0]);
+        assert_eq!(p, vec![0.5]);
+        assert!((head_probabilities(&[2.0])[0] - 0.880_797) < 1e-5);
+        // More than one: a softmax that sums to one, in f64.
+        let p = head_probabilities(&[1.0, 2.0, 3.0]);
+        assert!((p.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!(p[0] < p[1] && p[1] < p[2]);
+        // Equal logits are equal probabilities, and a large logit does not overflow.
+        assert_eq!(head_probabilities(&[0.0, 0.0]), vec![0.5, 0.5]);
+        let p = head_probabilities(&[1e30, 0.0]);
+        assert_eq!(p, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn the_classify_request_takes_a_string_or_an_array_of_strings() {
+        assert_eq!(
+            parse_classify_request(&json!({"input": "a"}))
+                .unwrap()
+                .inputs,
+            ["a"]
+        );
+        assert_eq!(
+            parse_classify_request(&json!({"input": ["a", "b"]}))
+                .unwrap()
+                .inputs,
+            ["a", "b"]
+        );
+        for (body, needle) in [
+            (json!({}), "input"),
+            (json!({"input": []}), "empty"),
+            (json!({"input": [1]}), "string"),
+            (json!({"input": "a", "documents": []}), "documents"),
+        ] {
+            let err = parse_classify_request(&body).err().unwrap_or_default();
+            assert!(err.contains(needle), "{body} -> {err:?}");
+        }
     }
 
     #[test]
