@@ -623,6 +623,10 @@ struct Inner {
     /// neither mutex when nobody is asleep.
     sleepers: AtomicUsize,
     caller_sleeping: AtomicBool,
+    /// True while a caller is inside `run`. A pool runs one job at a time; engines
+    /// that share a pool take the server's `PassTurn` first, and a second caller is
+    /// refused with a panic rather than left to overwrite a job workers still read.
+    in_run: AtomicBool,
     /// Parking for idle workers. `park` is only touched under the mutex, which is
     /// what makes "publish then notify if anyone sleeps" race-free.
     park: Mutex<usize>,
@@ -781,6 +785,7 @@ impl Pool {
             poisoned: AtomicBool::new(false),
             sleepers: AtomicUsize::new(0),
             caller_sleeping: AtomicBool::new(false),
+            in_run: AtomicBool::new(false),
             park: Mutex::new(0),
             wake: Condvar::new(),
             done_mu: Mutex::new(()),
@@ -877,12 +882,30 @@ impl Pool {
             f(0, 1);
             return;
         }
+        // One caller at a time. This is what the SAFETY comment below rests on: a pool
+        // shared by several engines (S4.10) is only sound while their passes take
+        // turns, so a caller that arrives while another is inside is a bug in the
+        // caller and is stopped here, before it can touch the job.
+        if self.inner.in_run.swap(true, Ordering::Acquire) {
+            panic!(
+                "Pool::run was entered by two callers at once; engines that share a pool \
+                 must hold the pass turn"
+            );
+        }
+        struct Running<'a>(&'a AtomicBool);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _running = Running(&self.inner.in_run);
         let job = Job {
             data: &f as *const F as *const (),
             call: trampoline::<F>,
         };
-        // SAFETY: no worker is running a job (the previous call waited for
-        // `remaining == 0`), and none reads `job` until it sees the new epoch.
+        // SAFETY: this is the only caller inside `run` (checked above), no worker is
+        // running a job (the previous call waited for `remaining == 0`), and none reads
+        // `job` until it sees the new epoch.
         unsafe { *self.inner.job.get() = Some(job) };
         self.inner.remaining.0.store(self.n - 1, Ordering::Release);
         self.inner.epoch.0.fetch_add(1, Ordering::SeqCst);
@@ -1223,6 +1246,49 @@ pub fn share(total: usize, w: usize, n: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A pool shared by several engines is sound only while one caller is inside
+    /// `run`. A second caller must be stopped, and the pool must keep working.
+    #[test]
+    fn a_second_caller_is_refused_and_the_pool_survives() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let pool = Arc::new(Pool::new(2));
+        let inside = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let first = {
+            let (pool, inside, release) = (pool.clone(), inside.clone(), release.clone());
+            std::thread::spawn(move || {
+                pool.run(|_, _| {
+                    inside.store(true, Ordering::SeqCst);
+                    while !release.load(Ordering::SeqCst) {
+                        std::thread::yield_now();
+                    }
+                });
+            })
+        };
+        while !inside.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let ran = AtomicUsize::new(0);
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.run(|_, _| {
+                ran.fetch_add(1, Ordering::SeqCst);
+            });
+        }));
+        assert!(
+            second.is_err(),
+            "a second caller must not get into the pool"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "and must not run anything");
+        release.store(true, Ordering::SeqCst);
+        first.join().expect("the first caller finishes normally");
+        // The refusal left the pool usable.
+        pool.run(|_, _| {
+            ran.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn a_caller_panic_waits_for_the_workers_and_the_pool_survives() {
