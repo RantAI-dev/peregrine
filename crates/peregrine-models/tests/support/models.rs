@@ -572,6 +572,190 @@ pub fn write_gemma3_named(
     path
 }
 
+/// An EmbeddingGemma-shaped model: the Gemma 3 blocks, bidirectional, plus the two
+/// sentence-transformers dense modules and mean pooling.
+#[derive(Clone, Copy, Debug)]
+pub struct GemmaEmbeddingConfig {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    pub n_ff: usize,
+    pub dense_width: usize,
+    pub ctx: usize,
+    pub sliding_window: usize,
+    pub pooling_type: u32,
+}
+
+impl Default for GemmaEmbeddingConfig {
+    fn default() -> Self {
+        GemmaEmbeddingConfig {
+            d_model: 128,
+            n_layer: 6,
+            n_head: 4,
+            n_head_kv: 2,
+            n_ff: 256,
+            dense_width: 256,
+            ctx: 256,
+            sliding_window: 8,
+            pooling_type: 1,
+        }
+    }
+}
+
+/// Write a synthetic `gemma-embedding` model (roadmap S4.4).
+///
+/// Six layers with llama.cpp's default sliding-window pattern (five local at window 8 and
+/// one global), GQA (four query heads over two), per-head q/k norms, GeGLU, and the
+/// `dense_2`/`dense_3` pair. There is no output head: the file never generates.
+pub fn write_gemma_embedding(
+    dir: &Path,
+    fmt: Format,
+    seed: u64,
+    s: GemmaEmbeddingConfig,
+) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let head_dim = s.d_model / s.n_head;
+    w.str("general.architecture", "gemma-embedding");
+    w.str(
+        "general.name",
+        &format!("synthetic-gemma-embedding-{}", fmt.label()),
+    );
+    let k = |x: &str| format!("gemma-embedding.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("attention.head_count_kv"), s.n_head_kv as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.u32(&k("attention.key_length"), head_dim as u32);
+    w.u32(&k("attention.value_length"), head_dim as u32);
+    w.u32(&k("rope.dimension_count"), head_dim as u32);
+    w.f32(&k("rope.freq_base"), 1_000_000.0);
+    w.f32(&k("rope.freq_base_swa"), 10_000.0);
+    w.u32(&k("attention.sliding_window"), s.sliding_window as u32);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-6);
+    w.u32(&k("dense_2_feat_in"), s.d_model as u32);
+    w.u32(&k("dense_2_feat_out"), s.dense_width as u32);
+    w.u32(&k("dense_3_feat_in"), s.dense_width as u32);
+    w.u32(&k("dense_3_feat_out"), s.d_model as u32);
+    w.u32(&k("pooling_type"), s.pooling_type);
+
+    vocab::add_gemma_tokenizer_metadata(&mut w);
+    // No chat template: an embedding-only file has none, and the build says so.
+
+    let kv = s.n_head_kv * head_dim;
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    for i in 0..s.n_layer {
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_q.weight"),
+            s.d_model,
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_k.weight"),
+            s.d_model,
+            kv,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_v.weight"),
+            s.d_model,
+            kv,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_q_norm.weight"),
+            head_dim,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_k_norm.weight"),
+            head_dim,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_output.weight"),
+            s.d_model,
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.post_attention_norm.weight"),
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_gate.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_up.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_down.weight"),
+            s.n_ff,
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.post_ffw_norm.weight"),
+            s.d_model,
+        );
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+    mat(&mut w, &mut rng, "dense_2.weight", s.d_model, s.dense_width);
+    mat(&mut w, &mut rng, "dense_3.weight", s.dense_width, s.d_model);
+
+    let path = dir.join(format!("gemma-embedding-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// Write a `qwen35` hybrid model (Gated DeltaNet layers, one gated-attention layer in every
 /// `interval`, Hadamard-rotated ternary matmuls) with every matmul in `fmt` (PQ2_0 or PTQ1_0).
 ///

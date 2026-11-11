@@ -21,6 +21,10 @@ pub struct AttnScratch {
     /// have a cache of their own (the decoding users of a mixed step).
     runs: Vec<(usize, usize, usize)>,
     rows: Vec<usize>,
+    /// One score row per worker for the bidirectional pass (`blocks/bidir.rs`), so a
+    /// text's `n × n` scores are computed once instead of twice. Sized `threads ×
+    /// max_batch`; unused by a causal model.
+    pub bidir_scores: Vec<f32>,
 }
 
 impl AttnScratch {
@@ -37,6 +41,7 @@ impl AttnScratch {
             ml: vec![(0.0, 0.0); cfg.n_kv_head * attn::MAX_CHUNKS * attn::MAX_PARTIAL_ROWS],
             runs: Vec::new(),
             rows: Vec::new(),
+            bidir_scores: vec![0.0; threads.max(1) * max_batch],
         }
     }
 }

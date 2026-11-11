@@ -9,6 +9,7 @@
 //! computations moved here in roadmap S1.2 step 3.
 
 pub mod attn;
+pub mod bidir;
 pub mod embed;
 pub mod ffn;
 pub mod linear;

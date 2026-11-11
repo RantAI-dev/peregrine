@@ -88,7 +88,17 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    `cargo test -p peregrine --release --test systemone_real -- --ignored` drives the real endpoint
    with the 48 fixture requests and compares every answer with llama.cpp's;
    `cargo test -p peregrine-models --release --test systemone_openjev` does the same through the
-   pieces directly.
+   pieces directly. The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
+   the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
+   the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
+   admission orders), and the tier golden (`tests/golden/synthetic/<tier>/gemma-embedding-Q8_0.golden`,
+   recorded on scalar, AVX2 and AVX-512 under SDE). There is no aarch64 golden yet: it will be
+   recorded on the ARM host, the test treats a missing golden as a skip unless
+   `PEREGRINE_GOLDEN=require`, and the aarch64 CI jobs do not set it. Its two ignored real-file
+   tests are EmbeddingGemma 300M (batch invariance, and the 200-text cosine bound against
+   llama.cpp's vectors in `tests/fixtures/embeddinggemma/`, which states the per-format bound
+   from `docs/design/s4-embeddings-decisions.md` §5); `peregrine-tests` cover the server and CLI
+   refusal of chat on an encoder.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.
