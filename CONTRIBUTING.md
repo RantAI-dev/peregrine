@@ -17,6 +17,15 @@ cargo quick                    # fast-rebuild release-speed build for daily work
 
 Model-dependent tests skip without model files; see `docs/dev/testing.md` for where they look.
 
+## Hygiene
+
+`scripts/hygiene.sh` fails on a tracked credential file, on a credential-shaped string in a tracked
+text file, and (when `HYGIENE_BANNED_PATTERN` is set) on a banned name. Run it before a PR; CI runs the
+same script on the tree and on the PR's commit range, and `scripts/hygiene-selftest.sh` tests it.
+A deliberate false positive can carry a `hygiene:allow` comment on its line. Maintainers export
+`HYGIENE_BANNED_PATTERN` from their own notes when running it locally; the pattern is never written
+into the repository.
+
 ## Before you open a PR
 
 - **Small and focused.** One change per PR. Refactors that move code do not also change behaviour.
