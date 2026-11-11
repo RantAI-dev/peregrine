@@ -8,6 +8,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Decision questions fork one evaluation of their shared state (S4.9j, part 1)**: a cache snapshot
+  now carries a hybrid model's per-layer Gated DeltaNet state and convolution history
+  (`KvSnapshot::rec`), restorable only at the snapshot's own length, and `KvCache::fork_from` copies
+  everything a later row reads — attention K/V rows `0..p`, each recurrent layer's state after row
+  `p−1`, the convolution ring — from one cache into another at position `p`, dense and hybrid alike.
+  `Engine::admit_labels_group` admits a decision request's questions as one group: the longest common
+  prompt beginning is forwarded **once** in the first question's slot, its state forked into every
+  sibling at that position, and the tails (different lengths, several slots' rows in one pass) then
+  share weight passes; a request wider than the engine is admitted in several groups, each forked
+  from one evaluation (or a prefix-store restore) of the beginning. `/v1/systemone` and
+  `peregrine decide` use it. A forked question is bit-identical to the same question computed alone:
+  tested for groups of 2/3/10 with different tail lengths, the fork at 1 token, at a prefill chunk
+  boundary, mid-chunk and one row before the end, in the f16 and f32 caches, at chunks 1/16/64 and
+  1/2/4 threads on synthetic `llama` and `qwen35` files, and beside chat and embedding slots. Rows
+  forwarded for a group are `prefix + Σ tail` (pinned by a count test). The prefix store keeps hybrid
+  snapshots now, and a group's shared beginning is offered to it at the fork, so a repeated state (or
+  a fixed system prompt) is evaluated once per process, bounded by the store's byte budget.
+  `crates/peregrine-bench/examples/decide_fork.rs` measures the fork against admitting questions one
+  by one on a real hybrid model. Also removes an accidentally committed `.env` (local credentials)
+  and ignores it.
+
 - **System One decisions end to end (S4.3c)**: `POST /v1/systemone` and `peregrine decide` serve
   native decision models of the `openjev` type. The request is the llama.cpp shape — a `state` and
   a non-empty `questions` object of `choice` (a non-empty criteria object, options in request

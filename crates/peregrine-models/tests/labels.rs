@@ -6,8 +6,8 @@
 //! position, alone, after a sibling question with the same prompt prefix (the prefix store), and in
 //! a batch of questions.
 //!
-//! The synthetic `llama` (dense, prefix-reusing) and `qwen35` (hybrid: recurrent state, so the
-//! store declines to keep its cache) files exercise both families without model files.
+//! The synthetic `llama` (dense) and `qwen35` (hybrid: a snapshot carries the recurrent state too,
+//! so it restores only at its own length) files exercise both families without model files.
 
 mod support;
 
@@ -53,9 +53,19 @@ fn question(i: usize) -> Vec<u32> {
 /// The reference: one forward over the whole prompt, asking for its last row's logits, then the
 /// same gather the engine does.
 fn reference(model: &Model, prompt: &[u32], labels: &[u32], threads: usize) -> Vec<f32> {
+    reference_prec(model, prompt, labels, threads, KvPrec::F16)
+}
+
+fn reference_prec(
+    model: &Model,
+    prompt: &[u32],
+    labels: &[u32],
+    threads: usize,
+    prec: KvPrec,
+) -> Vec<f32> {
     let pool = Pool::new(threads);
     let mut st = model.new_state(prompt.len(), 1, model.cfg.ctx_train, threads);
-    let mut kv = model.new_cache(KvPrec::F16, model.cfg.ctx_train);
+    let mut kv = model.new_cache(prec, model.cfg.ctx_train);
     let mut stats = StepStats::default();
     model
         .forward(
@@ -81,6 +91,8 @@ struct Run {
     logits: Vec<Vec<f32>>,
     /// The prefilled token count of every question.
     prefilled: Vec<usize>,
+    /// The batch rows forwarded to answer the questions, summed over the steps.
+    rows: usize,
 }
 
 /// Admit `prompts` as labels slots in one engine and run it to completion. `prefix_bytes` sizes the
@@ -92,27 +104,65 @@ fn run(
     chunk: usize,
     prefix_bytes: usize,
 ) -> Run {
+    run_prec(
+        model,
+        prompts,
+        threads,
+        chunk,
+        prefix_bytes,
+        KvPrec::F16,
+        None,
+    )
+}
+
+/// [`run`] with a cache precision, and — when `group` is `Some(min_prefix)` — the questions admitted
+/// as one group (S4.9j) rather than one by one.
+fn run_prec(
+    model: &Arc<Model>,
+    prompts: &[Vec<u32>],
+    threads: usize,
+    chunk: usize,
+    prefix_bytes: usize,
+    prec: KvPrec,
+    group: Option<usize>,
+) -> Run {
     let mut engine = Engine::new_with_chunk(
         model.clone(),
         threads,
         model.cfg.ctx_train,
         prompts.len(),
-        KvPrec::F16,
+        prec,
         prefix_bytes,
         chunk,
     );
     let mut by_slot: HashMap<u64, usize> = HashMap::new();
-    for (i, p) in prompts.iter().enumerate() {
-        let id = engine
-            .admit_labels(p.clone(), SlotCfg::default(), LABELS.to_vec())
-            .expect("admit a labels slot");
-        by_slot.insert(id, i);
+    match group {
+        Some(min_prefix) => {
+            let labels = vec![LABELS.to_vec(); prompts.len()];
+            let ids = engine
+                .admit_labels_group_from(prompts.to_vec(), SlotCfg::default(), labels, min_prefix)
+                .expect("admit a group of labels slots");
+            for (i, id) in ids.into_iter().enumerate() {
+                by_slot.insert(id, i);
+            }
+        }
+        None => {
+            for (i, p) in prompts.iter().enumerate() {
+                let id = engine
+                    .admit_labels(p.clone(), SlotCfg::default(), LABELS.to_vec())
+                    .expect("admit a labels slot");
+                by_slot.insert(id, i);
+            }
+        }
     }
     let mut logits: Vec<Option<Vec<f32>>> = vec![None; prompts.len()];
     let mut prefilled = vec![0usize; prompts.len()];
+    let mut rows = 0usize;
     let mut steps = 0;
     while engine.active() > 0 {
-        for em in engine.step() {
+        let emitted = engine.step();
+        rows += engine.last_step.rows;
+        for em in emitted {
             let Some(&i) = by_slot.get(&em.slot) else {
                 continue;
             };
@@ -133,6 +183,7 @@ fn run(
             .map(|v| v.expect("one emission per question"))
             .collect(),
         prefilled,
+        rows,
     }
 }
 
@@ -245,9 +296,11 @@ fn a_question_after_another_with_the_same_prefix_is_bit_identical() {
                     reused.push((hits > hits_before, prefilled));
                     hits_before = hits;
                 }
-                // A dense model shares the prefix (the earlier question's cache is in the store); a
-                // hybrid one cannot — its snapshot would carry no recurrent state, which the store
-                // already declines to keep — so it recomputes and is still bit-identical.
+                // A dense model shares the prefix (the earlier question's cache is in the store). A
+                // hybrid model does not: the stored entry is a whole question, longer than the
+                // beginning these prompts share, and a hybrid snapshot restores only at its own
+                // length (a group's shared beginning — the same length for every question — is what
+                // it keeps; see `a_repeated_state_is_restored_across_requests`).
                 if arch == "llama" {
                     for (i, (did_reuse, prefilled)) in reused.iter().enumerate().skip(1) {
                         assert!(
@@ -263,7 +316,7 @@ fn a_question_after_another_with_the_same_prefix_is_bit_identical() {
                 } else {
                     assert!(
                         reused.iter().all(|&(did_reuse, _)| !did_reuse),
-                        "{arch} is hybrid: its cache is not kept in the prefix store"
+                        "{arch} is hybrid: a longer stored question cannot restore a shorter beginning"
                     );
                 }
             }
@@ -372,6 +425,23 @@ fn labels_through_the_unmixed_scheduler() {
                         "{arch}: question {i} in a batch (unmixed), {threads} threads, chunk {chunk}"
                     );
                 }
+                // S4.9j: the fork is taken in `prefill_chunk` on this path.
+                let r = run_prec(
+                    &model,
+                    &prompts,
+                    threads,
+                    chunk,
+                    1 << 20,
+                    KvPrec::F16,
+                    Some(1),
+                );
+                for (i, want) in reference.iter().enumerate() {
+                    assert_eq!(
+                        bits(&r.logits[i]),
+                        bits(want),
+                        "{arch}: forked question {i} (unmixed), {threads} threads, chunk {chunk}"
+                    );
+                }
             }
         }
     }
@@ -449,4 +519,260 @@ fn a_pooled_emission_has_no_label_logits() {
     let em = emissions.last().expect("an emission");
     assert!(em.embedding.is_some());
     assert!(em.label_logits.is_none());
+}
+
+/// Questions that share exactly `shared` tokens and then differ: question `i` appends a tail of
+/// `tails[i % tails.len()]` tokens, whose first token differs per question (so the longest common
+/// beginning is exactly `shared`).
+fn forked_questions(shared: usize, tails: &[usize], n: usize) -> Vec<Vec<u32>> {
+    let base: Vec<u32> = (0..shared as u32).map(|i| 100 + (i * 7) % 90).collect();
+    (0..n)
+        .map(|i| {
+            let t = tails[i % tails.len()];
+            let mut p = base.clone();
+            for j in 0..t {
+                p.push(30 + ((i * 11 + j * 5) % 120) as u32);
+            }
+            p
+        })
+        .collect()
+}
+
+/// S4.9j: a question forked from a group's one evaluation of the shared beginning must equal the
+/// same question computed alone from position 0, bit for bit — for groups of 2, 3 and 10 with tails
+/// of different lengths, with the fork anywhere (a single token in, a prefill chunk boundary, the
+/// middle of a chunk, one row before the end), on a dense (`llama`) and a hybrid (`qwen35`) model,
+/// in the f16 and f32 caches, at 1, 2 and 4 threads and prefill chunks of 1, 16 and 64.
+#[test]
+fn a_forked_question_is_bit_identical_wherever_the_fork_is() {
+    let dir = tmpdir("fork");
+    // (shared tokens, tail lengths the questions cycle through): the fork at 1, at chunk
+    // boundaries and past one, and one row before the shortest question's end.
+    let cases: Vec<(usize, Vec<usize>)> = vec![
+        (1, vec![1, 2, 7]),
+        (16, vec![1, 3, 9]),
+        (17, vec![2, 4, 6]),
+        (24, vec![1]),
+        (64, vec![1, 5, 33]),
+    ];
+    for (arch, model) in models(&dir) {
+        for prec in [KvPrec::F16, KvPrec::F32] {
+            for threads in [1usize, 2, 4] {
+                for chunk in [1usize, 16, 64] {
+                    for (shared, tails) in &cases {
+                        for n in [2usize, 3, 10] {
+                            let asked = forked_questions(*shared, tails, n);
+                            let want: Vec<Vec<f32>> = asked
+                                .iter()
+                                .map(|p| reference_prec(&model, p, &LABELS, threads, prec))
+                                .collect();
+                            let r = run_prec(
+                                &model,
+                                &asked,
+                                threads,
+                                chunk,
+                                /* prefix_bytes */ 1 << 20,
+                                prec,
+                                Some(1),
+                            );
+                            for (i, w) in want.iter().enumerate() {
+                                assert_eq!(
+                                    bits(&r.logits[i]),
+                                    bits(w),
+                                    "{arch} {prec:?}: question {i} of {n}, shared {shared}, \
+                                     {threads} threads, chunk {chunk}, tails {tails:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// S4.9j: a group forwards the shared beginning once and each question only its own tail. Rows
+/// forwarded are `shared + Σ tail`, not `Σ prompt`; and a shared beginning below the threshold is
+/// admitted as separate slots, which forward every token as before.
+#[test]
+fn a_group_forwards_the_shared_beginning_once() {
+    let dir = tmpdir("rows");
+    for (arch, model) in models(&dir) {
+        let (shared, tails, n) = (24usize, [2usize, 5, 9], 3usize);
+        let asked = forked_questions(shared, &tails, n);
+        let want_rows: usize = shared + tails.iter().sum::<usize>();
+        for threads in [1usize, 2, 4] {
+            for chunk in [1usize, 16, 64] {
+                let r = run_prec(
+                    &model,
+                    &asked,
+                    threads,
+                    chunk,
+                    0,
+                    KvPrec::F16,
+                    Some(peregrine_core::prefix::MIN_PREFIX),
+                );
+                assert_eq!(
+                    r.rows, want_rows,
+                    "{arch}: {threads} threads, chunk {chunk}: rows forwarded"
+                );
+                assert_eq!(
+                    r.rows,
+                    asked.iter().map(Vec::len).sum::<usize>() - (n - 1) * shared,
+                    "{arch}: the saving is one shared beginning"
+                );
+                // Every question still paid for its own prompt in its own accounting (the rows it
+                // shares were forwarded once for the group).
+                for (i, p) in asked.iter().enumerate() {
+                    assert_eq!(r.prefilled[i], p.len(), "{arch}: question {i}");
+                }
+                // Below the threshold, the slots are independent and forward everything.
+                let short = forked_questions(8, &tails, n);
+                let r = run_prec(
+                    &model,
+                    &short,
+                    threads,
+                    chunk,
+                    0,
+                    KvPrec::F16,
+                    Some(peregrine_core::prefix::MIN_PREFIX),
+                );
+                assert_eq!(
+                    r.rows,
+                    short.iter().map(Vec::len).sum::<usize>(),
+                    "{arch}: an 8-token beginning is not worth a fork"
+                );
+            }
+        }
+    }
+}
+
+/// S4.9j: a group beside a chat slot and an embedding slot — one weight pass carrying a forked
+/// question's tail rows, other users' decode rows and an embedding's prompt rows — still reads the
+/// same bits as the question alone.
+#[test]
+fn a_forked_question_beside_other_slots_is_bit_identical() {
+    let dir = tmpdir("fork-beside");
+    for (arch, model) in models(&dir) {
+        let asked = forked_questions(24, &[3, 5, 7], 3);
+        let want: Vec<Vec<f32>> = asked
+            .iter()
+            .map(|p| reference_prec(&model, p, &LABELS, 2, KvPrec::F16))
+            .collect();
+        let mut engine = Engine::new_with_chunk(
+            model.clone(),
+            2,
+            model.cfg.ctx_train,
+            5,
+            KvPrec::F16,
+            1 << 20,
+            16,
+        );
+        let ids = engine
+            .admit_labels_group_from(
+                asked.clone(),
+                SlotCfg::default(),
+                vec![LABELS.to_vec(); asked.len()],
+                1,
+            )
+            .expect("admit the group");
+        engine
+            .admit_pooled(
+                vec![70, 71, 72, 73, 74, 75],
+                SlotCfg::default(),
+                peregrine_core::embed::Pooling::Last,
+            )
+            .expect("admit an embedding slot");
+        engine
+            .admit(
+                vec![80, 81, 82, 83, 84, 85],
+                SlotCfg {
+                    max_tokens: 4,
+                    ..SlotCfg::default()
+                },
+            )
+            .expect("admit a chat slot");
+        let mut got: Vec<Option<Vec<f32>>> = vec![None; ids.len()];
+        let mut steps = 0;
+        while engine.active() > 0 {
+            for em in engine.step() {
+                if let Some(Finish::Error(e)) = &em.finish {
+                    panic!("{arch}: a slot failed: {e}");
+                }
+                if let Some(i) = ids.iter().position(|id| *id == em.slot) {
+                    if let Some(v) = &em.label_logits {
+                        got[i] = Some(v.clone());
+                    }
+                }
+            }
+            steps += 1;
+            assert!(steps < 100_000, "{arch}: the engine made no progress");
+        }
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(
+                bits(got[i].as_ref().expect("the group's question answered")),
+                bits(w),
+                "{arch}: forked question {i} changed beside other endpoints"
+            );
+        }
+    }
+}
+
+/// S4.9j: with a store budget, the shared beginning a group forks is kept, so the next request with
+/// the same state restores it instead of forwarding it — on a hybrid model too, whose snapshot now
+/// carries the recurrent state.
+#[test]
+fn a_repeated_state_is_restored_across_requests() {
+    let dir = tmpdir("fork-store");
+    for (arch, model) in models(&dir) {
+        let asked = forked_questions(24, &[3, 5, 7], 3);
+        let mut engine = Engine::new_with_chunk(
+            model.clone(),
+            2,
+            model.cfg.ctx_train,
+            3,
+            KvPrec::F16,
+            8 << 20,
+            16,
+        );
+        let mut answers: Vec<Vec<Vec<f32>>> = Vec::new();
+        let mut hits = Vec::new();
+        for _ in 0..2 {
+            let ids = engine
+                .admit_labels_group(asked.clone(), SlotCfg::default(), vec![LABELS.to_vec(); 3])
+                .expect("admit the group");
+            let mut got: Vec<Option<Vec<f32>>> = vec![None; ids.len()];
+            while engine.active() > 0 {
+                for em in engine.step() {
+                    if let Some(i) = ids.iter().position(|id| *id == em.slot) {
+                        if let Some(v) = &em.label_logits {
+                            got[i] = Some(v.clone());
+                        }
+                    }
+                }
+            }
+            answers.push(got.into_iter().map(|v| v.expect("an answer")).collect());
+            hits.push(engine.prefix_stats().2);
+        }
+        let want: Vec<Vec<f32>> = asked
+            .iter()
+            .map(|p| reference_prec(&model, p, &LABELS, 2, KvPrec::F16))
+            .collect();
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(
+                bits(&answers[0][i]),
+                bits(w),
+                "{arch}: question {i} of the first request"
+            );
+            assert_eq!(
+                bits(&answers[1][i]),
+                bits(w),
+                "{arch}: question {i} of the repeated request"
+            );
+        }
+        assert!(
+            hits[1] > hits[0],
+            "{arch}: the repeated state was not restored from the store ({hits:?})"
+        );
+    }
 }
