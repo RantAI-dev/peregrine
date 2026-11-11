@@ -6,6 +6,52 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The
+  kernels hand back a tile as row-major (`blk[i · nb + b]`) and the output is transposed
+  (`out[(b0 + b) · rows + row]`), so the write-out used to be `8 · nb` single-float stores per
+  tile with a stride of `rows` floats (32 KiB on the 1B at chunk 128): every store its own cache
+  line, and a wider pass paid for it. Turned around, one activation's tile is eight consecutive
+  floats in both places, so `untile` copies each activation's rows as one slice — `nb` copies
+  instead of `8 · nb` scattered stores, and the tile block stays in L1. The packed-float and
+  per-row paths keep their scatter: their blocks are row-major, so their output would need a real
+  transpose. Nothing allocates and no result moves (`prefill_chunk.rs` passes unchanged). At twelve threads the 1B's
+  prefill at chunk 128 goes 266.2 → 347.7 tok/s against 294.5 → 324.6 at 16, so a wide pass is now
+  the fastest pass where before it was the slowest for the 1B; at one thread chunk 64 goes 35.7 →
+  56.1 (+57 %). The default chunk stays 16: chunk 64 is
+  the best for throughput at twelve threads for both models, but the default also sets how long a
+  decoding user waits behind another user's prompt pass, and that trade was not measured here. See
+  `docs/design/s5.1-wide-pass.md`.
+
+- **A 512-bit Q6_K tile kernel (S5.1).** Q6_K's codes split out of a 64-byte window exactly as
+  Q4_K's nibbles do, so the tile kernel now loads eight rows' eight bytes at a time, builds the
+  six-bit codes from `ql`'s nibble and `qh`'s two bits, and accumulates them with `vpdpbusd`
+  straight into int32 — no int16 stage, so none of the AVX2 kernel's widening every two
+  `vpmaddubsw`. The run stays the unit because the scale does: two `vpdpbusd` per activation row,
+  then one exact int32 scale multiply. The format's `-32` offset is eight `vpdpwssd` of paired
+  scales against paired per-16 sums, shifted by five once per super-block, as the AVX2 kernel has
+  it. Eight activation rows per group, window-major, as the Q4_K kernel. One core, L1 tile: 39.2 →
+  62.0 GMAC/s at sixteen activation rows, 33.9 → 57.2 at one hundred and twenty-eight; on a
+  DRAM-sized tile 31.9 → 46–50. End to end the 1B's prefill gains 1.7 % at twelve threads (Q6_K
+  is 15.4 % of it, but a sixteen-token pass streams the weights). The one-row GEMV is unchanged.
+  No golden moves. See `docs/design/s5.1-q6k-zmm.md`.
+
+- **The AVX-512 Q4_K and Q5_0 kernels work eight activation rows per pass (S5.1).** The prefill
+  group was four rows, and each super-block's weight windows, scale decode and min term were
+  re-done for each of them; a super-block is now decoded once for eight, with the window loop
+  outside the row loop so sixteen `vpdpbusd` chains overlap. The Q4_K min term sums two sub-blocks
+  per `vpdpwssd` against paired sums kept in the interleaved activation (`KqActs::bsp`) instead of
+  eight scalar broadcasts and eight int32 multiplies per row, and both kernels work out a row's
+  activation addressing once per call. All of it is bit-identical: the integer sums are
+  order-free and the fold is unchanged, so no golden moves. One core, L1-resident: Q4_K 76.8 →
+  80.8 GMAC/s at sixteen activation rows and 74.6 → 79.3 at sixty-four, Q5_0 48.4 → 54.2 and
+  47.8 → 54.3; the one-row decode kernel 43.5 → 44.0. End to end at 512 tokens: +6.0 % (Qwen 2.5
+  0.5B) and +2.1 % (Llama 3.2 1B) prefill at twelve threads, +5.8 % / +4.7 % at one, decode
+  unchanged. The kernel was not the engine's limit at a sixteen-token pass — the weights stream
+  from DRAM per pass — which is what the wider-pass work is for. See
+  `docs/design/s5.1-kq-epilogue.md`.
+
 ### Added
 
 - **Tool calling on the chat endpoint (S6.3)**: `POST /v1/chat/completions` reads OpenAI's `tools`,

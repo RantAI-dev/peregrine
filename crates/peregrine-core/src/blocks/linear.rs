@@ -28,6 +28,49 @@ fn dynamic_rows() -> bool {
     *D.get_or_init(|| crate::options::get().dynamic_rows)
 }
 
+/// The transposed output of one matrix of a group: `rows` floats per activation.
+///
+/// A repacked tile's block is activation-major — `blk[b · nrows + i]`, row `i` of
+/// the tile for activation `b` — and the output is transposed, `out[(b0 + b) ·
+/// rows + row]`. The old write-out walked the rows first, which is one
+/// single-float store per (row, activation), each `rows` floats from the next
+/// (32 KiB on the 1B at chunk 128): every store its own cache line, so a wider
+/// pass paid for it. Turned around the same data is contiguous on both sides —
+/// one activation's tile is `nrows` consecutive floats in the block *and* in the
+/// output — so each activation is one slice copy and the tile block stays in L1.
+///
+/// The packed-float and per-row paths keep the scatter: their blocks are
+/// row-major (`blk[i · nb + b]`), so their activation-major output would need a
+/// transpose, which is a job for a kernel that writes the treated layout.
+struct Untiler<'a, 'b> {
+    out: &'b OutPtr<'a>,
+    /// The first activation of the group's output block.
+    b0: usize,
+    /// The floats between two activations of the output.
+    rows: usize,
+    /// The activations in the block.
+    nb: usize,
+}
+
+impl Untiler<'_, '_> {
+    /// Copy rows `lo..hi` of `base_row`'s tile from `blk` into every activation.
+    ///
+    /// # Safety
+    ///
+    /// Every row in `lo..hi` of the range must belong to this worker, as it did
+    /// for the scatter this replaces.
+    #[inline]
+    unsafe fn untile(&self, base_row: usize, blk: &[f32], nrows: usize, lo: usize, hi: usize) {
+        for b in 0..self.nb {
+            let src = &blk[b * nrows + lo..b * nrows + hi];
+            let dst = self
+                .out
+                .chunk((self.b0 + b) * self.rows + base_row + lo, hi - lo);
+            dst.copy_from_slice(src);
+        }
+    }
+}
+
 /// One matrix of a fused matmul group, and where its output goes.
 #[derive(Clone, Copy)]
 pub struct MatJob<'a> {
@@ -293,21 +336,21 @@ fn matmul_block(
                                     }
                                 }
                             }
-                            for i in 0..KQ_TILE_ROWS {
-                                let row = t * KQ_TILE_ROWS + i;
-                                if row < r || row >= rz {
-                                    continue;
-                                }
-                                for b in 0..nb {
-                                    // SAFETY: the row belongs to this worker (a
-                                    // `share` range, or a chunk claimed from
-                                    // the counter), and the tile's rows are the
-                                    // job's rows.
-                                    unsafe {
-                                        j.out.set((b0 + b) * rows + row, out[b * KQ_TILE_ROWS + i])
-                                    };
-                                }
-                            }
+                            // Only the tile's rows this worker owns: a range can
+                            // start or end inside a tile, and the other rows of
+                            // it belong to another worker (or to nobody).
+                            let lo = r.max(t * KQ_TILE_ROWS) - t * KQ_TILE_ROWS;
+                            let hi = rz.min((t + 1) * KQ_TILE_ROWS) - t * KQ_TILE_ROWS;
+                            let u = Untiler {
+                                out: &j.out,
+                                b0,
+                                rows,
+                                nb,
+                            };
+                            // SAFETY: those rows of this job belong to this
+                            // worker (a `share` range, or a chunk claimed from
+                            // the counter), and the tile's rows are the job's.
+                            unsafe { u.untile(t * KQ_TILE_ROWS, out, KQ_TILE_ROWS, lo, hi) };
                         }
                     }
                     // The rows past the last whole group of eight: today's
