@@ -138,6 +138,19 @@ fn main() {
         .and_then(|x| x.parse().ok())
         .unwrap_or(30);
     let model = Arc::new(peregrine_models::open(&path).expect("open the model"));
+    // What a snapshot of the shared beginning costs: its K/V rows plus the hybrid model's recurrent
+    // state (the fork copies both into each question's slot, and the store keeps one).
+    let per_pos = model.new_cache(KvPrec::F16, 1).bytes_per_position();
+    let rec = model.recurrent_shape().map_or(0, |r| {
+        (r.n_layers * (r.state_floats + r.conv_floats) * 4) as u64
+    });
+    println!(
+        "a snapshot of {state} tokens: {:.1} MB ({} positions of K/V, {:.1} MB of recurrent state); \
+         each question's cache adds its tail",
+        (per_pos * state as u64 + rec) as f64 / 1e6,
+        state,
+        rec as f64 / 1e6
+    );
     println!(
         "{}: {} threads, prefill chunk {chunk}, {state}-token shared prefix + {tail}-token tails\n",
         path.file_name().unwrap().to_string_lossy(),
