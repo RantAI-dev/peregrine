@@ -1,0 +1,3 @@
+dpbusd zmm: 1.65 G instr/s  105.8 GMAC/s
+dpbusd ymm: 3.58 G instr/s  114.6 GMAC/s
+vfmadd zmm:  1.81 G instr/s

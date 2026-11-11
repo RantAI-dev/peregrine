@@ -1,0 +1,21 @@
+Llama-3.2-1B-Instruct-Q4_K_M.gguf  (GGUF v3, 16 layers)
+  attn_q          67.109 MMAC per layer
+  attn_k          16.777 MMAC per layer
+  attn_v          16.777 MMAC per layer
+  attn_output     67.109 MMAC per layer
+  ffn_gate       268.435 MMAC per layer
+  ffn_up         268.435 MMAC per layer
+  ffn_down       268.435 MMAC per layer
+  trunk        0.9731 GMAC per token
+
+qwen2.5-0.5b-instruct-q4_k_m.gguf  (GGUF v3, 24 layers)
+  attn_q          19.289 MMAC per layer
+  attn_k           2.756 MMAC per layer
+  attn_v           2.756 MMAC per layer
+  attn_output     19.268 MMAC per layer
+  ffn_gate       104.595 MMAC per layer
+  ffn_up         104.595 MMAC per layer
+  ffn_down       104.595 MMAC per layer
+  trunk        0.3579 GMAC per token
+  output head  0.1361 GMAC (last token only; +0.07 % of a 512-token pass)
+

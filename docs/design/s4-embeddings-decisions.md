@@ -357,7 +357,7 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.5 | WordPiece and unigram tokenizers against `llama-tokenize` | |
 | S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
 | S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
-| S4.7 | `modern-bert` and labelled classifier heads | S4.6 |
+| S4.7 | `modern-bert` and labelled classifier heads. **Part a done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; a classifier head is read and ignored until S4.6b serves heads | S4.6 |
 | S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3` | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
 | S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |

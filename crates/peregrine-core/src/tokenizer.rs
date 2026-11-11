@@ -142,6 +142,10 @@ const TYPE_BYTE: i32 = 6;
 pub enum PreType {
     /// `smollm`: digits one at a time, then the GPT-2 alternation.
     SmolLm,
+    /// `gpt2` / `gpt-2` / `modern-bert`: the GPT-2 alternation alone (contractions,
+    /// ` ?\p{L}+`, ` ?\p{N}+`, ` ?[^\s\p{L}\p{N}]+`, `\s+(?!\S)`), with digits in
+    /// one run (`src/llama-vocab.cpp`, `LLAMA_VOCAB_PRE_TYPE_GPT2`).
+    Gpt2,
     /// `llama-bpe`: Llama 3's pattern, digits in groups of up to three.
     Llama3,
     /// `qwen2`: Llama 3's pattern with digits one at a time.
@@ -174,6 +178,7 @@ impl PreType {
     pub fn from_name(name: &str) -> Option<PreType> {
         Some(match name {
             "smollm" => PreType::SmolLm,
+            "gpt2" | "gpt-2" | "modern-bert" => PreType::Gpt2,
             "llama-bpe" => PreType::Llama3,
             "qwen2" => PreType::Qwen2,
             "qwen35" => PreType::Qwen35,
@@ -189,6 +194,7 @@ impl PreType {
     pub fn name(self) -> &'static str {
         match self {
             PreType::SmolLm => "smollm",
+            PreType::Gpt2 => "gpt2",
             PreType::Llama3 => "llama-bpe",
             PreType::Qwen2 => "qwen2",
             PreType::Qwen35 => "qwen35",
@@ -203,9 +209,12 @@ impl PreType {
 }
 
 /// Pre-tokenizer names this crate implements, for the compatibility probe's message.
-/// `pixtral` is a second name for `tekken`, as it is in llama.cpp.
+/// `pixtral` is a second name for `tekken` and `modern-bert` for `gpt2`, as they are
+/// in llama.cpp.
 pub const PRE_TYPES: &[&str] = &[
     "smollm",
+    "gpt2",
+    "modern-bert",
     "llama-bpe",
     "qwen2",
     "qwen35",
@@ -2087,6 +2096,16 @@ impl Tokenizer {
 
     fn encode_plain_bpe(&self, text: &str, bpe: &BpeData, out: &mut Vec<u32>) {
         match self.pre {
+            PreType::Gpt2 => {
+                let mut p = 0usize;
+                while p < text.len() {
+                    let take = match_piece(&text[p..]).unwrap_or_else(|| {
+                        text[p..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)
+                    });
+                    self.bpe(&text[p..p + take], bpe, out);
+                    p += take;
+                }
+            }
             PreType::SmolLm => {
                 for chunk in split_numbers(text) {
                     let mut p = 0usize;
@@ -3689,7 +3708,9 @@ abc", 3
             PreType::from_name("nemotron-3.5-embed"),
             Some(PreType::Nemotron35Embed)
         );
-        assert!(PreType::from_name("gpt2").is_none());
+        // ModernBERT's vocabulary says `modern-bert`; it is the GPT-2 pattern.
+        assert_eq!(PreType::from_name("modern-bert"), Some(PreType::Gpt2));
+        assert_eq!(PreType::from_name("gpt-2"), Some(PreType::Gpt2));
     }
 
     #[test]
@@ -3715,6 +3736,27 @@ abc", 3
         assert_eq!(split_numbers("a1b"), vec!["a", "1", "b"]);
         assert_eq!(split_numbers("2026"), vec!["2", "0", "2", "6"]);
         assert_eq!(split_numbers(" 5%"), vec![" ", "5", "%"]);
+    }
+
+    /// The GPT-2 pre-type is the plain alternation, with digits in one run
+    /// (`LLAMA_VOCAB_PRE_TYPE_GPT2`; ModernBERT's `modern-bert` pre-tokenizer).
+    #[test]
+    fn the_gpt2_splitter_keeps_digit_runs_together() {
+        fn split(s: &str) -> Vec<&str> {
+            let mut out = Vec::new();
+            let mut p = 0usize;
+            while p < s.len() {
+                let take = match_piece(&s[p..])
+                    .unwrap_or_else(|| s[p..].chars().next().map(|c| c.len_utf8()).unwrap_or(1));
+                out.push(&s[p..p + take]);
+                p += take;
+            }
+            out
+        }
+        assert_eq!(split("Hello world!"), vec!["Hello", " world", "!"]);
+        assert_eq!(split("it's 2026!"), vec!["it", "'s", " 2026", "!"]);
+        assert_eq!(split("  x"), vec![" ", " x"]);
+        assert_eq!(split("\n\nline"), vec!["\n", "\n", "line"]);
     }
 
     #[test]

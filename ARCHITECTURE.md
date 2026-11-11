@@ -50,8 +50,9 @@ prompt, keeps the chat history and lends the slot the cache the conversation has
 
 Every decoder forwards rows causally and writes a KV cache: a prompt is read in chunks, a decode step is
 one row per user, and the cache is what makes the next token cheap. A **bidirectional encoder** (`bert`:
-MiniLM, BGE, E5, GTE, bge-m3; `gemma-embedding`: EmbeddingGemma; `mistral3`: Nemotron 3.5 Embed) is the
-other shape. `Architecture::causality` says which a family is.
+MiniLM, BGE, E5, GTE, bge-m3; `modern-bert`: ModernBERT, gte-modernbert, Granite Embedding R2;
+`gemma-embedding`: EmbeddingGemma; `mistral3`: Nemotron 3.5 Embed) is the other shape.
+`Architecture::causality` says which a family is.
 For an encoder the engine schedules **whole texts**, never chunks: `Architecture::forward_texts` takes
 the batch's ragged texts, sends every row of every text through the layer projections in the same weight
 passes, and computes attention as one `n × n` block per text. Keys and values stay f32 in the pass, no KV
@@ -111,6 +112,7 @@ allocate no cache.
 |---|---|
 | `dense/` | Dense transformer architectures: Llama, Qwen2, Qwen3, Phi-3, Phi-4 (fused tensors split at load), and Mistral 3 as a bidirectional embedder (`mistral3`). `dense/layer.rs` holds the attention path and the output head the dense and the MoE families share. |
 | `bert/` | The BERT encoder family (`bert`): post-norm blocks with biases on every projection, learned absolute positions, token types, LayerNorm and the exact GELU; bidirectional attention over whole texts, cls/mean pooling. MiniLM, BGE, E5, GTE and the XLM-R models (bge-m3, multilingual-e5). |
+| `modern_bert.rs` | The ModernBERT family (`modern-bert`): pre-norm blocks whose norms have a weight and no bias, a fused q/k/v matrix, RoPE with separate local/global bases, every third layer global and the others on a symmetric 128-token window, the gated feed-forward (erf GeGLU, tanh GeGLU or SwiGLU), cls/mean pooling. ModernBERT-base/large, gte-modernbert, Granite Embedding R2; a classifier head is read and not served yet. |
 | `gemma3/` | Gemma 3 and `gemma-embedding`: interleaved sliding-window/global attention, 4 norms per layer, per-head q/k RMSNorm, GeGLU activation, tied output head; the encoder is the same blocks bidirectional, with mean/cls pooling and the `dense_2`/`dense_3` head. |
 | `qwen35/` | Hybrid architectures: Gated DeltaNet linear attention + softmax attention, Hadamard rotation, MTP head. |
 | `qwen3moe/` | Mixture of experts: Qwen3's attention and a bank of experts (the router and the expert feed-forward), over the shared `blocks::moe`. |
@@ -158,6 +160,7 @@ The engine provides fine-grained Cargo features across its layers so embedders c
 | | `arch-gemma3` | `peregrine-models` | Gemma 3 (`gemma3`) |
 | | `arch-gemma-embedding` | `peregrine-models` | Gemma 3 bidirectional encoder (`gemma-embedding`, EmbeddingGemma) |
 | | `arch-bert` | `peregrine-models` | BERT bidirectional encoder (`bert`: MiniLM, BGE, E5, GTE, bge-m3) |
+| | `arch-modern-bert` | `peregrine-models` | ModernBERT bidirectional encoder (`modern-bert`: ModernBERT, gte-modernbert, Granite Embedding R2) |
 | | `arch-qwen3moe` | `peregrine-models` | Mixture of experts (`qwen3moe`) |
 | | `arch-gpt-oss` | `peregrine-models` | OpenAI's mixture of experts (`gpt-oss`) |
 | | `arch-phi3` | `peregrine-models` | Phi-3 and Phi-4 (`phi3`) |

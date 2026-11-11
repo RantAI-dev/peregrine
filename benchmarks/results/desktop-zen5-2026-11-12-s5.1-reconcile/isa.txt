@@ -1,0 +1,23 @@
+avx=1 avx2=1 fma=1 f16c=1 avx512=1 avx512_vbmi=1 avx512_vnni=1 avx512_bf16=1 matmul_int8=0
+--- vpdpbusd instructions in libggml.so ---
+26526
+--- ldd of the llama-bench the numbers come from ---
+	linux-vdso.so.1 (0x00007882e865a000)
+	libllama.so => /home/uaa/.cache/peregrine-bench/ik_llama.cpp-479074c/build/src/libllama.so (0x00007882e7e00000)
+	libggml.so => /home/uaa/.cache/peregrine-bench/ik_llama.cpp-479074c/build/ggml/src/libggml.so (0x00007882e6200000)
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007882e5e00000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007882e8564000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007882e8536000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007882e5a00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007882e865c000)
+	libgomp.so.1 => /lib/x86_64-linux-gnu/libgomp.so.1 (0x00007882e7daa000)
+--- build flags (build/CMakeCache.txt) ---
+CMAKE_BUILD_TYPE:STRING=Release
+GGML_AVX2:BOOL=OFF
+GGML_AVX512:BOOL=ON
+GGML_AVX512_BF16:BOOL=ON
+GGML_AVX512_VBMI:BOOL=ON
+GGML_AVX512_VNNI:BOOL=ON
+GGML_NATIVE:BOOL=ON
+--- commit ---
+479074c cuda: use token count as batch size when offloading SSM_CONV and Q/K RMS norms to GPU (#2889)

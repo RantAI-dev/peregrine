@@ -6,7 +6,76 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The `modern-bert` family: ModernBERT, gte-modernbert and Granite Embedding R2 (roadmap
+  S4.7)**: `architecture = "modern-bert"` is the 2024 encoder those files ship as. Its blocks are
+  pre-norm and use two LayerNorms with a weight and no bias (layer 0's attention norm is the
+  identity); attention is RoPE with a separate base for the local and the global layers, and every
+  third layer from the first sees the whole text while the two between see a symmetric
+  `attention.sliding_window / 2` either side (64 tokens for the 128-token files); q, k and v come
+  from one fused matrix; the feed-forward is a gated pair whose `ffn_up` is `2·n_ff` wide, with the
+  first half activated (the exact erf GELU for ModernBERT and Granite R2, SiLU for a file that says
+  so) and multiplied by the second; the final `output_norm` feeds the file's `cls` or `mean`
+  pooling. The graph, the tensors, the mask and the tokenizer are transcribed from llama.cpp v0.9.0
+  in `docs/reference/modern-bert.md`. New defined kernels in `peregrine-kernels::vmath`:
+  `layer_norm_rows_nobias` (the f64 two-pass norm without the final `+ 0`, so a `-0.0` product stays
+  negative) and `geglu_erf` (the exact GELU times the second half); both are **scalar** in this
+  step, with tests, and a vector body may only be added if it is `to_bits` equal. The tokenizer
+  gains the GPT-2 `modern-bert` pre-type (the plain GPT-2 alternation: `smollm` with digit runs
+  kept together), so a text is `<bos> … <eos>` as the converter writes it. On 200 texts of 16 to
+  6976 tokens, the ids are identical to llama.cpp's on all 200 for both reference models; cosine
+  against llama.cpp is min/mean 0.9999936/0.9999997 on gte-modernbert-base F16 and
+  0.9999997/0.9999999 on Granite R2 F16. Q8_0, against llama.cpp's F16 conversion, is
+  0.9963540/0.9996125 on gte (llama.cpp's own Q8_0: 0.9981270/0.9996284) and
+  0.9998753/0.9999246 on Granite (llama.cpp: 0.9998838/0.9999252): 1.6e-5 and 6.5e-7 below
+  llama.cpp's mean distance, inside the design's 1e-4 band. A file with a classifier head
+  (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`) loads, shape-checks and ignores
+  the head with one line of output, and still serves embeddings when it declares a pooling type;
+  `classify`/`rerank` wait for the BERT family's head (S4.6b). A synthetic four-layer file (a
+  window of 8, two different RoPE bases, F32 and Q8_0, the three activations and a classifier
+  variant) is checked bit for bit against an independent scalar reference, is batch- and
+  thread-invariant, allocates nothing in a pass, and has a golden on each pinned x86 tier (the
+  aarch64 ones are not recorded on this host). Speed on a shared 8-core AVX2 Xeon, 4 threads,
+  medians of three, texts/s against llama.cpp on the same F16 file: 30.8 vs 21.7 at 16 tokens,
+  4.59 vs 3.55 at 128, 1.29 vs 0.892 at 512, 0.255 vs 0.180 at 2000; batch 32 is 37.3 vs 29.4 at
+  16 and 5.20 vs 3.76 at 128. The matrices take 69 % of a 512-token pass and 56 % of a 2000-token
+  one; attention grows from 11 % to 27 %. The fixtures are under
+  `crates/peregrine-models/tests/fixtures/modern-bert/`.
+
 ### Changed
+
+- **The Q4_K kernel is at the machine's byte-dot roof, and the fork's is not faster (S5.1b).** This
+  item was "rebuild the Q4_K kernel with ik_llama.cpp's instruction mix at 120 GMAC/s per core".
+  Both kernels were disassembled instruction for instruction and both were measured, and the target
+  is above what this core does with a byte dot product: a 512-bit `vpdpbusd` costs twice a 256-bit
+  one here, so both widths roof at 106–117 GMAC/s per core (16 accumulators, one barrier per
+  iteration), and Peregrine's kernel is at 77–81 of that (73 %) against the fork's 58–67 (55 %),
+  measured through the fork's own `ggml_mul_mat`. The "134–148 GMAC/s" that set the target does not
+  reproduce. A 256-bit kernel with the fork's shape was built and measured 12 % slower, and
+  removing half the 512-bit broadcasts bought 3 %, so nothing was shipped: the only code change is
+  `kqbench`'s output buffer, sized for the 128 activation rows its width sweep already asked for.
+  Peregrine is at 0.52 of ik_llama.cpp on Qwen 2.5 0.5B (594.0 against 1 132.6 tok/s) and 0.64 on
+  Llama 3.2 1B (338.4 against 530.6) at 512 prompt tokens and twelve threads, so the remaining
+  prompt-time gap is outside the Q4_K kernel. See `docs/design/s5-prefill-avx512.md` §9.
+
+- **A wide prefill pass when no user is decoding (S5.1a).** The chunk was 16 tokens because the
+  chunk is also how long a *decoding* user waits while another user's prompt is read. When
+  nobody is decoding nobody is waiting, and §6 item 3 (PR #209) made a wide pass pay, so the
+  engine now picks the chunk per pass: 64 tokens when no slot is ready to decode, today's rule
+  otherwise (including the 64-token pieces of a prompt over 1024 tokens). `PEREGRINE_PREFILL_CHUNK`
+  still forces one chunk. The rule is the same on the AVX-512 and AVX2 tiers: 64 beat 128 on both
+  1B models on both tiers and lost 5 % (avx512) and 1 % (avx2) to it on Qwen, and 64 is free in
+  memory — the scratch already holds 64 prompt rows for speculation, where 128 would have cost
+  17.6 MiB on the 1B. Single user at 512 prompt tokens, twelve threads: Llama 3.2 1B 305.5 →
+  338.4 tok/s (time to first token 1.68 → 1.51 s), Qwen 2.5 0.5B 488.0 → 594.0 (1.05 → 0.86 s),
+  Gemma 3 1B 277.2 → 326.8 (1.85 → 1.57 s); 4096-token prompts are flat because they were
+  already read in 64-token pieces. At four and ten users the per-user decode rate while another
+  user's prompt is read is unchanged (53.1 → 53.4 and 52.8 → 54.4 tok/s for the 1B; 78.7 → 77.1
+  and 79.9 → 82.9 for Qwen) and total throughput does not drop. Nothing allocates in the pass
+  and no result moves; `prefill_chunk.rs` gains a mid-prompt width switch and an engine test
+  that the pass widens with no decoder, narrows beside one, and widens again. See
+  `docs/design/s5-prefill-avx512.md` §8.
 
 - **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The
   kernels hand back a tile as row-major (`blk[i · nb + b]`) and the output is transposed

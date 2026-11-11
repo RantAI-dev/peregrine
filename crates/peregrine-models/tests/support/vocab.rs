@@ -206,6 +206,26 @@ pub fn add_tokenizer_metadata(w: &mut GgufWriter, pre: &str) {
     w.bool("tokenizer.ggml.add_bos_token", false);
 }
 
+/// The `modern-bert` vocabulary: the GPT-2 byte-level BPE above with the
+/// converter's pre-tokenizer name and special-token flags. llama.cpp's
+/// `ModernBertModel.set_vocab` writes `add_bos_token`, `add_eos_token` and
+/// `add_sep_token` true, so a text is `<bos> … <eos>` (the separator is stored but
+/// never added by `tokenize`).
+pub fn add_modern_bert_tokenizer_metadata(w: &mut GgufWriter) {
+    let (tokens, types, merges) = build_vocab();
+    w.str("tokenizer.ggml.model", "gpt2");
+    w.str("tokenizer.ggml.pre", "modern-bert");
+    w.arr_str("tokenizer.ggml.tokens", &tokens);
+    w.arr_i32("tokenizer.ggml.token_type", &types);
+    w.arr_str("tokenizer.ggml.merges", &merges);
+    w.u32("tokenizer.ggml.bos_token_id", 258); // <|endoftext|>
+    w.u32("tokenizer.ggml.eos_token_id", 257); // <|im_end|>
+    w.u32("tokenizer.ggml.padding_token_id", 258);
+    w.bool("tokenizer.ggml.add_bos_token", true);
+    w.bool("tokenizer.ggml.add_eos_token", true);
+    w.bool("tokenizer.ggml.add_sep_token", true);
+}
+
 /// The vocabulary size of the synthetic encoders (`bert` and unigram): a multiple
 /// of 32 so a Q8_0 token-embedding row quantises in whole blocks.
 pub const BERT_VOCAB_SIZE: usize = 320;

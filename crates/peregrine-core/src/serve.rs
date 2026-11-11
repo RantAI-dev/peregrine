@@ -55,6 +55,17 @@ fn prefill_chunk(threads: usize) -> usize {
         .unwrap_or_else(|| crate::options::prefill_chunk_default_for(threads))
 }
 
+/// The prompt tokens one weight pass carries when no slot is decoding
+/// ([`crate::options::wide_chunk_default_for`], by kernel tier).
+///
+/// `PEREGRINE_PREFILL_CHUNK` forces one chunk, so an explicit chunk is also the wide one.
+fn wide_prefill_chunk(threads: usize) -> usize {
+    crate::options::get().prefill_chunk.unwrap_or_else(|| {
+        crate::options::wide_chunk_default_for(crate::cpu::resolved())
+            .max(crate::options::prefill_chunk_default_for(threads))
+    })
+}
+
 /// Users served at once by default. Above the machine's roofline ridge (about seven rows) another user adds no
 /// throughput, and every user's own tokens arrive more slowly, so this is deliberately below it.
 pub const DEFAULT_MAX_SLOTS: usize = 4;
@@ -540,6 +551,9 @@ pub struct Engine {
     /// The prompt tokens one weight pass carries: the engine prefills a prompt in pieces of this
     /// size (`PEREGRINE_PREFILL_CHUNK`).
     prefill_chunk: usize,
+    /// The prompt tokens one pass carries when no slot is decoding (S5.1): the same read, wider,
+    /// because no decoding user is waiting behind it.
+    wide_chunk: usize,
     /// The rows one weight pass carries for work that never decodes: pooled and label slots
     /// (S4.9b, `PEREGRINE_PASS_ROWS`).
     pass_rows: usize,
@@ -640,7 +654,7 @@ impl Engine {
         kv_prec: KvPrec,
         prefix_cache_bytes: usize,
     ) -> Engine {
-        Self::new_with_chunk(
+        Self::build(
             model,
             threads,
             max_ctx,
@@ -648,6 +662,8 @@ impl Engine {
             kv_prec,
             prefix_cache_bytes,
             prefill_chunk(threads),
+            wide_prefill_chunk(threads),
+            None,
         )
     }
 
@@ -656,7 +672,8 @@ impl Engine {
     /// The chunk is how the prompt is *read*, not what it produces: the tokens and the logits
     /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that). It is
     /// clamped to the matmul scratch's row limit, and a mixed step takes fewer rows when the
-    /// other users' decode rows need the room.
+    /// other users' decode rows need the room. A chosen chunk is one chunk: the wide pass of a
+    /// step with no decoder is this one too.
     pub fn new_with_chunk(
         model: Arc<Model>,
         threads: usize,
@@ -696,6 +713,63 @@ impl Engine {
         prefill_chunk: usize,
         pass_rows: Option<usize>,
     ) -> Engine {
+        Self::build(
+            model,
+            threads,
+            max_ctx,
+            max_slots,
+            kv_prec,
+            prefix_cache_bytes,
+            prefill_chunk,
+            prefill_chunk,
+            pass_rows,
+        )
+    }
+
+    /// The engine with a narrow chunk and a wide one (S5.1).
+    ///
+    /// `prefill_chunk` is the chunk of a pass that carries a decode row beside the prompt, and
+    /// `wide_chunk` the chunk of a pass that carries none: with nobody decoding, the narrow chunk
+    /// protects no one and the wider pass is faster. Both are how a prompt is read, not what it
+    /// produces (`crates/peregrine-models/tests/prefill_chunk.rs` pins that a prompt read in
+    /// pieces of different widths gives the same tokens).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_chunks_and_pass(
+        model: Arc<Model>,
+        threads: usize,
+        max_ctx: usize,
+        max_slots: usize,
+        kv_prec: KvPrec,
+        prefix_cache_bytes: usize,
+        prefill_chunk: usize,
+        wide_chunk: usize,
+        pass_rows: Option<usize>,
+    ) -> Engine {
+        Self::build(
+            model,
+            threads,
+            max_ctx,
+            max_slots,
+            kv_prec,
+            prefix_cache_bytes,
+            prefill_chunk,
+            wide_chunk.max(prefill_chunk),
+            pass_rows,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        model: Arc<Model>,
+        threads: usize,
+        max_ctx: usize,
+        max_slots: usize,
+        kv_prec: KvPrec,
+        prefix_cache_bytes: usize,
+        prefill_chunk: usize,
+        wide_chunk: usize,
+        pass_rows: Option<usize>,
+    ) -> Engine {
         let c = model.cfg;
         let max_slots = max_slots.max(1);
         // A bidirectional model schedules whole texts, never chunks, and writes no KV
@@ -707,6 +781,9 @@ impl Engine {
         let float_only = !model.act_layout().quantize;
         // The prompt tokens one weight pass carries.
         let prefill_chunk = prefill_chunk.clamp(1, crate::options::MAX_PREFILL_CHUNK);
+        // The same, for a pass with no decode row beside it (S5.1): never narrower than the
+        // chunk, never wider than the scratch's row limit.
+        let wide_chunk = wide_chunk.clamp(prefill_chunk, crate::options::MAX_PREFILL_CHUNK);
         // The rows one non-decoding pass carries (S4.9b). A bidirectional model schedules
         // whole texts, so its budget is the same number but a longer text still runs alone.
         let budget_rows = pass_rows
@@ -733,7 +810,11 @@ impl Engine {
         // the chunk became an option, because it also holds the speculation's rows: a narrower
         // chunk must not narrow the drafts. The matmul driver splits a batch wider than its own
         // row limit into blocks, so this is bounded by the pass budget, not by that limit.
-        let chat_rows = prefill_chunk.max(SCRATCH_CHUNK).max(LONG_PROMPT_CHUNK) + max_slots;
+        let chat_rows = prefill_chunk
+            .max(wide_chunk)
+            .max(SCRATCH_CHUNK)
+            .max(LONG_PROMPT_CHUNK)
+            + max_slots;
         let max_batch = if bidirectional {
             max_ctx
         } else {
@@ -779,6 +860,7 @@ impl Engine {
             max_ctx,
             kv_prec,
             prefill_chunk,
+            wide_chunk,
             pass_rows: budget_rows,
             work_cache_bytes,
             prefixes: PrefixStore::new(prefix_cache_bytes),
@@ -2057,7 +2139,16 @@ impl Engine {
             .slots
             .iter()
             .any(|s| s.wants_tokens() && !s.prefill_done() && s.prompt.len() > LONG_PROMPT);
-        let chunk = if long_waiting {
+        // With no decoding slot beside the prompt nobody is waiting for this pass, so it takes the
+        // wide chunk (S5.1). With one, the chunk is what bounds that user's wait, as before. A
+        // long prompt is read in larger pieces either way (`LONG_PROMPT_CHUNK`).
+        let chunk = if dec.is_empty() {
+            if long_waiting {
+                LONG_PROMPT_CHUNK.max(self.wide_chunk)
+            } else {
+                self.wide_chunk
+            }
+        } else if long_waiting {
             LONG_PROMPT_CHUNK.max(self.prefill_chunk)
         } else {
             self.prefill_chunk
@@ -2323,12 +2414,23 @@ impl Engine {
     fn prefill_chunk(&mut self, i: usize) -> Result<Vec<Emission>, String> {
         let t0 = std::time::Instant::now();
         let before = self.stats;
+        // A pass with no other slot decoding widens (S5.1): nobody waits behind it. A pass that
+        // is read while someone decodes keeps the narrow chunk, which bounds that user's wait.
+        let other_decoding = self
+            .slots
+            .iter()
+            .enumerate()
+            .any(|(j, o)| j != i && o.ready());
         let s = &mut self.slots[i];
         let last = s.prefill_len();
         // A chat slot keeps the prefill chunk; a slot that never decodes fills the pass up to
         // the pass budget (S4.9b).
         let width = if s.wants_tokens() {
-            self.prefill_chunk
+            if other_decoding {
+                self.prefill_chunk
+            } else {
+                self.wide_chunk
+            }
         } else {
             self.pass_rows
         };

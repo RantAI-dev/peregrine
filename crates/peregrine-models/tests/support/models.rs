@@ -1009,6 +1009,153 @@ pub fn write_bert(dir: &Path, fmt: Format, seed: u64, s: BertConfig) -> PathBuf 
     path
 }
 
+/// The shape of a synthetic `modern-bert` encoder (roadmap S4.7).
+///
+/// The defaults have four layers with the converter's pattern 3: layer 0 and 3
+/// are global and layers 1 and 2 see a symmetric window of 8 (`|i - j| <= 4`),
+/// small enough that a 37-token test text is cut into several bands.
+#[derive(Clone, Copy, Debug)]
+pub struct ModernBertConfig {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    /// `attention.sliding_window`; 0 writes no window (every layer global).
+    pub window: u32,
+    /// `attention.sliding_window_pattern`; every `pattern`-th layer is global.
+    pub pattern: u32,
+    /// `rope.freq_base` (global layers) and `rope.freq_base_swa` (local layers).
+    /// The two differ so a layer that reads the wrong table cannot pass.
+    pub rope_base: f32,
+    pub rope_base_local: f32,
+    /// `modern-bert.hidden_activation`: `"gelu"` (the default, exact erf) or
+    /// `"silu"` (Granite Embedding R2's shape).
+    pub hidden_act: &'static str,
+    /// `modern-bert.pooling_type`: 1 is mean, 2 is cls.
+    pub pooling_type: u32,
+    /// Whether the file carries a classifier head (`cls`, `cls.norm`,
+    /// `cls.output`, `classifier.output_labels`), which this step loads and
+    /// ignores for serving.
+    pub classifier: bool,
+}
+
+impl Default for ModernBertConfig {
+    fn default() -> Self {
+        ModernBertConfig {
+            d_model: 128,
+            n_layer: 4,
+            n_head: 4,
+            n_ff: 192,
+            ctx: 64,
+            window: 8,
+            pattern: 3,
+            rope_base: 100_000.0,
+            rope_base_local: 10_000.0,
+            hidden_act: "gelu",
+            pooling_type: 1,
+            classifier: false,
+        }
+    }
+}
+
+/// Write a synthetic `modern-bert` encoder: pre-norm blocks whose first
+/// attention norm is the identity, a fused `attn_qkv`, RoPE with one base for the
+/// local layers and one for the global ones, the symmetric window, the gated
+/// `ffn_up` (the first half activated) and LayerNorms with a weight and no bias —
+/// the graph `src/models/modern-bert.cpp` builds.
+///
+/// Every matrix is `fmt` (F32 or Q8_0, both multiples of the block size); the
+/// norms are F32, as the converter writes them.
+pub fn write_modern_bert(dir: &Path, fmt: Format, seed: u64, s: ModernBertConfig) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let arch = "modern-bert";
+    w.str("general.architecture", arch);
+    w.str(
+        "general.name",
+        &format!("synthetic-modern-bert-{}", fmt.label()),
+    );
+    let k = |x: &str| format!("{arch}.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.f32(&k("attention.layer_norm_epsilon"), 1e-5);
+    w.f32(&k("rope.freq_base"), s.rope_base);
+    w.f32(&k("rope.freq_base_swa"), s.rope_base_local);
+    w.u32(&k("rope.dimension_count"), (s.d_model / s.n_head) as u32);
+    w.str(&k("hidden_activation"), s.hidden_act);
+    w.u32(&k("pooling_type"), s.pooling_type);
+    if s.window > 0 {
+        w.u32(&k("attention.sliding_window"), s.window);
+        w.u32(&k("attention.sliding_window_pattern"), s.pattern);
+    }
+    vocab::add_modern_bert_tokenizer_metadata(&mut w);
+
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    let bias = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        let mut out = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            let v = rng.f32_range(-0.05, 0.05);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        w.add_tensor(name, &[n as u64], Format::F32, out);
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    norm(&mut w, &mut rng, "token_embd_norm.weight", s.d_model);
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+
+    for i in 0..s.n_layer {
+        let p = |x: &str| format!("blk.{i}.{x}");
+        // Layer 0's attention norm is the identity (llama.cpp's
+        // `TENSOR_NOT_REQUIRED`), so it is not written.
+        if i > 0 {
+            norm(&mut w, &mut rng, &p("attn_norm.weight"), s.d_model);
+        }
+        for (name, cols, rows) in [
+            ("attn_qkv", s.d_model, 3 * s.d_model),
+            ("attn_output", s.d_model, s.d_model),
+            ("ffn_up", s.d_model, 2 * s.n_ff),
+            ("ffn_down", s.n_ff, s.d_model),
+        ] {
+            mat(&mut w, &mut rng, &p(&format!("{name}.weight")), cols, rows);
+        }
+        norm(&mut w, &mut rng, &p("ffn_norm.weight"), s.d_model);
+    }
+
+    if s.classifier {
+        // `ModernBertForSequenceClassification`'s head, in llama.cpp's order:
+        // dense (`cls`), activation, `cls.norm`, then `cls.output`.
+        mat(&mut w, &mut rng, "cls.weight", s.d_model, s.d_model);
+        bias(&mut w, &mut rng, "cls.bias", s.d_model);
+        norm(&mut w, &mut rng, "cls.norm.weight", s.d_model);
+        bias(&mut w, &mut rng, "cls.norm.bias", s.d_model);
+        mat(&mut w, &mut rng, "cls.output.weight", s.d_model, 2);
+        bias(&mut w, &mut rng, "cls.output.bias", 2);
+        w.arr_str(&k("classifier.output_labels"), &["negative", "positive"]);
+        w.str(&k("classifier.activation"), "gelu");
+        w.u32(&k("classifier.pooling_type"), 2);
+    }
+
+    let path = dir.join(format!("modern-bert-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// The shape of a synthetic `mistral3` embedder (roadmap S4.14).
 ///
 /// The default has query heads wider than the residual (6 × 32 over 128), two key/value
