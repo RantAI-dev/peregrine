@@ -686,7 +686,7 @@ impl Engine {
         let prefill_chunk = prefill_chunk.clamp(1, crate::options::MAX_PREFILL_CHUNK);
         // The rows one non-decoding pass carries (S4.9b). A bidirectional model schedules
         // whole texts, so its budget is the same number but a longer text still runs alone.
-        let pass_rows = pass_rows
+        let budget_rows = pass_rows
             .or(crate::options::get().pass_rows)
             .unwrap_or_else(|| {
                 crate::options::pass_rows_default_for(
@@ -712,7 +712,7 @@ impl Engine {
         let max_batch = if bidirectional {
             max_ctx
         } else {
-            pass_rows + chat_rows
+            budget_rows + chat_rows
         };
         // An MTP verification pass wants logits for two rows, whatever the slot count. An
         // encoder never samples: one row is all its state ever needs.
@@ -753,7 +753,7 @@ impl Engine {
             max_ctx,
             kv_prec,
             prefill_chunk,
-            pass_rows,
+            pass_rows: budget_rows,
             work_cache_bytes,
             prefixes: PrefixStore::new(prefix_cache_bytes),
             next_id: 1,
