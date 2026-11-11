@@ -565,6 +565,12 @@ impl Model {
     }
 
     /// Whether this model's rows attend causally or to a whole text (design §2.2).
+    /// The activation layouts the forward needs (S4.9h, S4.9m): a model whose every
+    /// matrix is float keeps only the f32 rows and quantises nothing.
+    pub fn act_layout(&self) -> crate::arch::ActLayout {
+        self.arch.act_layout()
+    }
+
     pub fn causality(&self) -> crate::arch::Causality {
         self.arch.causality()
     }

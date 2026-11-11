@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Whole texts in one weight pass for small float encoders (S4.9m, part a)**: a `bert` file whose
+  every matrix is float and whose weights are at most 256 MiB now takes passes of 128 rows instead
+  of the 32-row bidirectional floor, so a 32-text batch of 16-token texts is four weight passes
+  rather than sixteen. A Q8_0 encoder keeps 32 rows (its tile kernels' activation working set
+  outgrows L2 above it: bge-m3 Q8_0 measured 3% slower at 128); `PEREGRINE_PASS_ROWS` still
+  overrides. Medians of three, 4 threads, on top of the strided store above: all-MiniLM-L6-v2 F16
+  16 tokens × 32 631 → 691 texts/s and × 8 593 → 641; bge-small-en-v1.5 F32 325 → 395 and
+  315 → 380. Whole-slice per-thread threading was measured and not kept: with the copy-out gone
+  the matrix stage is 98% busy inside the kernel and the barrier wait is 1.5-4%. No golden
+  changed; a text's vector is independent of the pass size (the invariance tests pin 1, 16, 64
+  and 256 rows). See `docs/design/s4.9-sota.md` §13.
+
 - **Fewer passes over the activations on the float path (S4.9m, part b)**: the packed float GEMM
   now takes the caller's output stride (`fpack::gemm_strided`), so a projection's panels are
   written straight into its row-major `[row][out]` buffer instead of a 16-row stack block and a
