@@ -217,8 +217,11 @@ impl Bert {
         let type_row0 = match g.tensor("token_types.weight") {
             Ok(t) => {
                 let cols = t.dims.first().copied().unwrap_or(0) as usize;
-                let rows = t.dims.get(1).copied().unwrap_or(0) as usize;
-                if cols != d_model || rows != n_token_types {
+                // A single token type is written as a 1-d `[n_embd]` tensor by
+                // llama.cpp's converter (bge-m3's file has one), so accept the
+                // missing trailing `1` as well.
+                let rows = t.dims.get(1).copied().unwrap_or(1) as usize;
+                if cols != d_model || rows != n_token_types || t.dims.len() > 2 {
                     return Err(format!(
                         "token_types.weight is {:?}, expected [{d_model}, {n_token_types}]",
                         t.dims

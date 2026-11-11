@@ -1187,7 +1187,7 @@ fn erfc_tail(a: f64) -> f64 {
 /// * `a ≥ 4.6`: `1` (`erfc(4.6) = 1.7e-10`, a thousandth of an `f32` ulp of 1).
 ///
 /// Measured against `libm`'s `f64` `erf` over 1 000 001 points in `[−6, 6]`
-/// (`erf_agrees_with_an_independent_oracle`): **max absolute error 5.96e-8, max
+/// (`erf_agrees_with_an_independent_oracle`): **max absolute error 5.44e-8, max
 /// 1 ulp** of the `f32` result — the error is entirely the final rounding
 /// wherever `erf` is near ±1, and the series is ~1e-15 relative near 0.
 ///
@@ -2688,7 +2688,7 @@ mod tests {
         }
         eprintln!("erf: max abs {max_abs:.3e} at {at}, max {max_ulp} ulp");
         // The definition's stated bound: one f32 ulp of the result, everywhere.
-        // (Measured: 5.96e-8 at |erf| ≈ 0.5 — that is the final rounding, not the
+        // (Measured: 5.44e-8 at |erf| ≈ 0.5 — that is the final rounding, not the
         // series; the series itself is under 3e-9 absolute.)
         assert!(max_abs <= 6e-8, "max abs error {max_abs:.3e} at {at}");
         assert!(max_ulp <= 1, "max {max_ulp} ulp at {at}");

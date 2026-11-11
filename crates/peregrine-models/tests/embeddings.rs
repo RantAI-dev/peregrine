@@ -1736,3 +1736,231 @@ fn the_bert_q8_0_vector_is_the_engine_int8_path() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// S4.6a on real files: llama.cpp's ids and vectors, and the fp32 reference
+// ---------------------------------------------------------------------------
+
+/// The directory the fixture vectors live in.
+fn bert_fixtures() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bert")
+}
+
+/// A committed fixture vector file: little-endian f32, `dim` per vector.
+fn read_fixture_vectors(path: &std::path::Path, dim: usize) -> Vec<Vec<f32>> {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let n = bytes.len() / 4;
+    assert_eq!(
+        n % dim,
+        0,
+        "{}: {n} floats is not a whole number of {dim}-d vectors",
+        path.display()
+    );
+    bytes
+        .chunks_exact(4 * dim)
+        .map(|c| {
+            c.chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect()
+        })
+        .collect()
+}
+
+fn read_fixture_ids(path: &std::path::Path) -> Vec<Vec<u32>> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|l| l.split_whitespace().map(|x| x.parse().unwrap()).collect())
+        .collect()
+}
+
+fn bert_cosine(a: &[f32], b: &[f32]) -> f64 {
+    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        dot += x as f64 * y as f64;
+        na += x as f64 * x as f64;
+        nb += y as f64 * y as f64;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// MiniLM-L6-v2, bge-small-en-v1.5 and bge-m3 against llama.cpp v0.9.0 and the fp32
+/// PyTorch reference (S4.6a's accuracy gate; see `docs/reference/bert.md`).
+///
+/// The model file is looked for in `models/`, `~/models/` and the `hf:` cache — the
+/// same places the EmbeddingGemma test uses — and the case is skipped with a notice
+/// when it is absent, so CI needs no files.
+/// `cargo test --release -p peregrine-models --test embeddings -- --ignored` runs it.
+#[test]
+#[ignore = "needs the MiniLM / bge-small / bge-m3 GGUF files from tests/fixtures/bert/README.md"]
+fn the_bert_real_files_match_llama_cpp_and_the_fp32_reference() {
+    let dir = bert_fixtures();
+    let texts: Vec<String> = std::fs::read_to_string(dir.join("texts.txt"))
+        .unwrap()
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+
+    #[derive(Debug)]
+    struct Case {
+        file: &'static str,
+        llama: &'static str,
+        reference: Option<&'static str>,
+        ids: &'static str,
+        dim: usize,
+        /// (min, mean) cosine to the fp32 reference this case must reach, when it has one.
+        bound: Option<(f64, f64)>,
+    }
+    let cases = [
+        Case {
+            file: "all-MiniLM-L6-v2-ggml-model-f16.gguf",
+            llama: "minilm_f16_llama.f32",
+            reference: Some("minilm_torch.f32"),
+            ids: "minilm.ids",
+            dim: 384,
+            bound: Some((0.9999, 0.9999)),
+        },
+        Case {
+            file: "all-MiniLM-L6-v2-Q8_0.gguf",
+            llama: "minilm_q8_0_llama.f32",
+            reference: Some("minilm_torch.f32"),
+            ids: "minilm.ids",
+            dim: 384,
+            bound: None,
+        },
+        Case {
+            file: "bge-small-en-v1.5-f32.gguf",
+            llama: "bge_small_f32_llama.f32",
+            reference: Some("bge_small_torch.f32"),
+            ids: "bge_small.ids",
+            dim: 384,
+            bound: Some((0.9999, 0.9999)),
+        },
+        Case {
+            file: "bge-small-en-v1.5-q8_0.gguf",
+            llama: "bge_small_q8_0_llama.f32",
+            reference: Some("bge_small_torch.f32"),
+            ids: "bge_small.ids",
+            dim: 384,
+            bound: None,
+        },
+        Case {
+            file: "bge-m3-Q8_0.gguf",
+            llama: "bge_m3_q8_0_llama.f32",
+            reference: Some("bge_m3_torch.f32"),
+            ids: "bge_m3.ids",
+            dim: 1024,
+            bound: None,
+        },
+    ];
+
+    for case in cases {
+        let mut candidates = vec![
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../models")
+                .join(case.file),
+            std::path::Path::new("/var/tmp/bert-models").join(case.file),
+        ];
+        if let Ok(h) = std::env::var("HOME") {
+            candidates.push(std::path::Path::new(&h).join("models").join(case.file));
+        }
+        let Some(path) = candidates.into_iter().find(|p| p.is_file()) else {
+            eprintln!("{} is not on this machine; skipped", case.file);
+            continue;
+        };
+        let model = load(&path);
+        let llama = read_fixture_vectors(&dir.join(case.llama), case.dim);
+        let ids = read_fixture_ids(&dir.join(case.ids));
+        let reference = case
+            .reference
+            .map(|f| read_fixture_vectors(&dir.join(f), case.dim));
+        assert_eq!(llama.len(), texts.len(), "{case:?}");
+
+        // 1. The tokenizer: identical ids to llama.cpp on every text.
+        let tokens: Vec<Vec<u32>> = texts.iter().map(|t| model.tk.encode_special(t)).collect();
+        for (i, (ours, theirs)) in tokens.iter().zip(&ids).enumerate() {
+            assert_eq!(ours, theirs, "{}: text {i} token ids", case.file);
+        }
+
+        // 2. The vectors, in one engine, batches of 16 texts.
+        let pooling = model.pooling().unwrap().unwrap();
+        let mut ours: Vec<Vec<f32>> = Vec::new();
+        for chunk in tokens.chunks(16) {
+            let run = embed_batch(&model, chunk, pooling, 8, 1024, 1024, None);
+            for mut v in run.vectors {
+                embed::finish(&mut v, None).unwrap();
+                ours.push(v);
+            }
+        }
+
+        let to_llama: Vec<f64> = ours
+            .iter()
+            .zip(&llama)
+            .map(|(a, b)| bert_cosine(a, b))
+            .collect();
+        let min_mean = |v: &[f64]| {
+            (
+                v.iter().copied().fold(f64::INFINITY, f64::min),
+                v.iter().sum::<f64>() / v.len() as f64,
+            )
+        };
+        let (min_l, mean_l) = min_mean(&to_llama);
+        eprintln!(
+            "{}: {} texts, {}-d, vs llama.cpp min {min_l:.7} mean {mean_l:.7}",
+            case.file,
+            ours.len(),
+            case.dim
+        );
+        // A quantised file is allowed the distance its quantisation costs (the S4 gate's
+        // measured bounds); an F32/F16 file is at the 0.9999 class.
+        let is_quant = case.file.contains("Q8_0") || case.file.contains("q8_0");
+        if is_quant {
+            assert!(
+                min_l >= 0.998 && mean_l >= 0.9995,
+                "{}: vs llama.cpp min {min_l:.6} mean {mean_l:.6}",
+                case.file
+            );
+        } else {
+            assert!(
+                min_l >= 0.9999,
+                "{}: vs llama.cpp min {min_l:.6} mean {mean_l:.6}",
+                case.file
+            );
+        }
+
+        // 3. And the more important number: distance to the fp32 reference. A Q8_0 file
+        // must be no further from it than llama.cpp's Q8_0 is (1e-4 slack on min and mean).
+        if let Some(reference) = reference {
+            let to_ref: Vec<f64> = ours
+                .iter()
+                .zip(&reference)
+                .map(|(a, b)| bert_cosine(a, b))
+                .collect();
+            let llama_ref: Vec<f64> = llama
+                .iter()
+                .zip(&reference)
+                .map(|(a, b)| bert_cosine(a, b))
+                .collect();
+            let (min_r, mean_r) = min_mean(&to_ref);
+            let (min_rl, mean_rl) = min_mean(&llama_ref);
+            eprintln!(
+                "{}: vs fp32 reference min {min_r:.7} mean {mean_r:.7} \
+                 (llama.cpp min {min_rl:.7} mean {mean_rl:.7})",
+                case.file
+            );
+            if let Some((bmin, bmean)) = case.bound {
+                assert!(
+                    min_r >= bmin && mean_r >= bmean,
+                    "{}: vs the reference min {min_r:.6} mean {mean_r:.6}, bound {bmin}/{bmean}",
+                    case.file
+                );
+            }
+            assert!(
+                min_r >= min_rl - 1e-4 && mean_r >= mean_rl - 1e-4,
+                "{}: vs the reference min {min_r:.6} mean {mean_r:.6}; \
+                 llama.cpp min {min_rl:.6} mean {mean_rl:.6}",
+                case.file
+            );
+        }
+    }
+}

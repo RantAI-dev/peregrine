@@ -148,6 +148,18 @@ peregrine embed -m hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0
   "task: search result | query: What is the capital of France?"
 ```
 
+The BERT encoders — all-MiniLM, BGE, E5, GTE and the XLM-R models (bge-m3, multilingual-e5) —
+are the same kind of pass with a different block: post-norm, biases on every projection, learned
+absolute positions, token types, LayerNorm and the exact GELU, pooled by the file's `cls` or
+`mean`. One file serves every model of the family, and a long text is refused against the
+model's own position table (512 for MiniLM/BGE, 8192 for bge-m3):
+
+```sh
+peregrine embed -m hf:second-state/All-MiniLM-L6-v2-Embedding-GGUF/all-MiniLM-L6-v2-Q8_0.gguf \
+  "What is the capital of France?"
+peregrine serve -m hf:CompendiumLabs/bge-small-en-v1.5-gguf/bge-small-en-v1.5-q8_0.gguf --port 8202
+```
+
 A chat request on an encoder is a 400 that says the model is an embedding model.
 
 Without a server:

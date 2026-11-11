@@ -231,6 +231,19 @@ peregrine embed -m hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0
   "task: search result | query: What is the capital of France?"
 ```
 
+The BERT family (`bert` in the file) is served the same way: all-MiniLM, bge-small/base/large,
+e5, gte and the XLM-R models (bge-m3, multilingual-e5). Their blocks are post-norm with biases on
+every projection, learned absolute positions and LayerNorm, and pooling is the file's `cls` or
+`mean`. The text limit is the model's position table — 512 for MiniLM and BGE, 8192 for bge-m3 —
+and an over-length text is a 400 that names it unless `truncate` (API) or `--truncate` (CLI) is
+given:
+
+```sh
+peregrine embed -m hf:second-state/All-MiniLM-L6-v2-Embedding-GGUF/all-MiniLM-L6-v2-Q8_0.gguf \
+  "What is the capital of France?" "Paris is the capital of France."
+peregrine serve -m hf:CompendiumLabs/bge-small-en-v1.5-gguf/bge-small-en-v1.5-q8_0.gguf --port 8202
+```
+
 ## 7. Decisions (System One)
 
 A native decision model answers questions about a state without generating text: each option is a
