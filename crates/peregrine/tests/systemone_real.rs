@@ -49,9 +49,7 @@ fn free_port() -> u16 {
 
 fn try_http(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(300)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(300))).ok();
     let payload = body.unwrap_or_default();
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
@@ -154,18 +152,10 @@ fn the_endpoint_answers_the_fixture_like_llama_cpp() {
         let question = case.get("question").expect("question").clone();
         let body = Value::Obj(vec![
             ("state".into(), state),
-            (
-                "questions".into(),
-                Value::Obj(vec![("q".into(), question)]),
-            ),
+            ("questions".into(), Value::Obj(vec![("q".into(), question)])),
         ]);
-        let (status, text) = try_http(
-            port,
-            "POST",
-            "/v1/systemone",
-            Some(&body.to_jinja_json()),
-        )
-        .expect("the server answers");
+        let (status, text) = try_http(port, "POST", "/v1/systemone", Some(&body.to_jinja_json()))
+            .expect("the server answers");
         assert_eq!(status, 200, "case {}: status {status}", n + 1);
         let out = Value::parse(&text).expect("a response");
         let answer = out
@@ -210,14 +200,16 @@ fn the_endpoint_answers_the_fixture_like_llama_cpp() {
             }
             Some("noul") => {
                 worst_value = worst_value.max(
-                    (number(answer.get("noul").unwrap()) - number(want.get("noul").unwrap()))
-                        .abs(),
+                    (number(answer.get("noul").unwrap()) - number(want.get("noul").unwrap())).abs(),
                 );
             }
             other => panic!("case {}: unexpected answer type {other:?}", n + 1),
         }
 
-        let tokens = case.get("tokens").and_then(Value::as_array).expect("tokens");
+        let tokens = case
+            .get("tokens")
+            .and_then(Value::as_array)
+            .expect("tokens");
         let usage = out.get("usage").expect("usage");
         assert_eq!(
             number(usage.get("input_tokens").unwrap()) as usize,

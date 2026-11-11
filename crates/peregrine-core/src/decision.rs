@@ -657,10 +657,7 @@ impl Decider {
     ///
     /// The messages are llama.cpp's, including the `questions.<id>: ` prefix and the option
     /// limit, so a client sees the same 400 text from either engine.
-    pub fn parse_request(
-        &self,
-        body: &Value,
-    ) -> Result<(Value, Vec<(String, Question)>), String> {
+    pub fn parse_request(&self, body: &Value) -> Result<(Value, Vec<(String, Question)>), String> {
         let state = match body.get("state") {
             Some(v) if !v.is_null() => v.clone(),
             _ => return Err("\"state\" must be provided".into()),
@@ -721,6 +718,17 @@ impl Decider {
     ) -> Result<Vec<u32>, String> {
         let prompt = crate::systemone::render_openjev(question, state)?;
         Ok(tk.encode(&prompt))
+    }
+}
+
+impl fmt::Debug for Decider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The template's bytes are never printed.
+        f.debug_struct("Decider")
+            .field("info", &self.info)
+            .field("labels", &self.labels.len())
+            .field("n_options_max", &self.n_options_max)
+            .finish()
     }
 }
 
@@ -1234,7 +1242,9 @@ mod tests {
 
     /// The message of a body that must be refused.
     fn refused(body: &str) -> String {
-        openjev().parse_request(&request(body)).expect_err("refused")
+        openjev()
+            .parse_request(&request(body))
+            .expect_err("refused")
     }
 
     #[test]
@@ -1245,7 +1255,9 @@ mod tests {
             "\"state\" must be provided"
         );
         assert_eq!(
-            refused("{\"state\":null,\"questions\":{\"a\":{\"type\":\"noul\",\"instructions\":\"x\"}}}"),
+            refused(
+                "{\"state\":null,\"questions\":{\"a\":{\"type\":\"noul\",\"instructions\":\"x\"}}}"
+            ),
             "\"state\" must be provided"
         );
         for body in [
@@ -1321,7 +1333,9 @@ mod tests {
             "{{\"state\":\"s\",\"questions\":{{\"a\":{{\"type\":\"choice\",\"instructions\":\"x\",\"criteria\":{{{}}}}}}}}}",
             criteria.join(",")
         );
-        let (_, questions) = openjev().parse_request(&request(&body)).expect("52 options");
+        let (_, questions) = openjev()
+            .parse_request(&request(&body))
+            .expect("52 options");
         assert_eq!(questions[0].1.options.len(), 52);
     }
 
@@ -1354,10 +1368,7 @@ mod tests {
                 .iter()
                 .map(|o| (o.key.as_str(), &o.description))
                 .collect::<Vec<_>>(),
-            [
-                ("0", &Value::Str("low".into())),
-                ("1", &Value::Null),
-            ]
+            [("0", &Value::Str("low".into())), ("1", &Value::Null),]
         );
 
         // A noul is [true, false] for openjev, described by the criteria object.
@@ -1373,7 +1384,11 @@ mod tests {
         );
         let (_, questions) = openjev().parse_request(&body).expect("a request");
         assert_eq!(questions[0].1.options.len(), 2);
-        assert!(questions[0].1.options.iter().all(|o| o.description.is_null()));
+        assert!(questions[0]
+            .1
+            .options
+            .iter()
+            .all(|o| o.description.is_null()));
     }
 
     #[test]
@@ -1426,10 +1441,7 @@ mod tests {
                     confidence: 0.0,
                 },
             ),
-            (
-                "yes".to_string(),
-                Answer::Noul { noul: 0.25 },
-            ),
+            ("yes".to_string(), Answer::Noul { noul: 0.25 }),
         ];
         let out = response_json("m", &answers, 42);
         let obj = out.as_object().expect("an object");

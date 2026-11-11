@@ -395,8 +395,10 @@ fn a_question_beside_an_embedding_and_a_chat_slot_is_bit_identical() {
                 peregrine_core::embed::Pooling::Last,
             )
             .expect("admit an embedding slot");
-        let mut chat = SlotCfg::default();
-        chat.max_tokens = 4;
+        let chat = SlotCfg {
+            max_tokens: 4,
+            ..SlotCfg::default()
+        };
         engine
             .admit(vec![80, 81, 82, 83, 84, 85], chat)
             .expect("admit a chat slot");

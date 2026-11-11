@@ -7,10 +7,10 @@
 
 mod support;
 
-use peregrine_core::decision::{DecisionInfo, DecisionType};
+use peregrine_core::decision::{Decider, DecisionInfo, DecisionType};
 use peregrine_core::gguf::{Format, Gguf};
 use std::path::PathBuf;
-use support::models::{write_dense_extra, DecisionSpec, Dense};
+use support::models::{write_dense_extra, write_hybrid_decision, DecisionSpec, Dense};
 
 fn tmpdir(test: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
@@ -164,4 +164,54 @@ fn the_sixteen_known_types_are_kept_and_an_unknown_one_keeps_its_name() {
             DecisionType::Unknown(_)
         ));
     }
+}
+
+/// The front end refuses a type or a `systemone` template this build does not render, naming the
+/// type, and accepts the real `openjev` pair with 52 single-token letters (S4.3c).
+#[test]
+fn the_decider_names_a_type_or_template_it_does_not_render() {
+    let root = tmpdir("decider");
+    let load = |dir: &std::path::Path, seed: u64, spec: &DecisionSpec| {
+        let path = write_hybrid_decision(dir, Format::F16, seed, &spec.keys("qwen35"));
+        let g = Gguf::open(&path).expect("open the synthetic model");
+        peregrine_models::load(g).expect("load the synthetic model")
+    };
+
+    // The openjev type with a template the renderer was not written from.
+    let dir = root.join("template");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut spec = DecisionSpec::new("openjev");
+    spec.temperatures = vec![("choice".to_string(), 1.0)];
+    let model = load(&dir, 5, &spec);
+    let err = Decider::from_model(&model).unwrap_err();
+    assert!(err.contains("openjev"), "{err}");
+    assert!(err.contains("systemone"), "{err}");
+    drop(model);
+
+    // A known type this build does not render, with the openjev template.
+    let dir = root.join("type");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut spec = DecisionSpec::new("lev");
+    spec.template = Some(peregrine_core::systemone::OPENJEV_TEMPLATE.to_string());
+    let model = load(&dir, 6, &spec);
+    let err = Decider::from_model(&model).unwrap_err();
+    assert!(
+        err.contains("unsupported decision model type: lev"),
+        "{err}"
+    );
+    drop(model);
+
+    // The real openjev pair: 52 letters, each one distinct token.
+    let dir = root.join("openjev");
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = load(&dir, 7, &DecisionSpec::openjev());
+    let decider = Decider::from_model(&model)
+        .expect("a valid decision model")
+        .expect("a decision model");
+    assert_eq!(decider.n_options_max(), 52);
+    assert_eq!(decider.labels().len(), 52);
+    let mut ids = decider.labels().to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 52);
 }

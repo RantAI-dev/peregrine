@@ -58,7 +58,9 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    temperature and score-bias effects, and the bucket edges at 2/3/5/6/10/11 options and 8/9/26/27
    for Lev). `tests/decision_meta.rs` writes synthetic llama files carrying the decision keys and
    checks the round trip and each refusal (unknown type, missing `systemone` template, a non-positive
-   temperature, a malformed score bias); `crates/peregrine/tests/inspect_decision.rs` pins the one
+   temperature, a malformed score bias, and `Decider`'s refusal of a type or template it does not
+   render, while the real `openjev` pair loads with 52 single-token letters);
+   `crates/peregrine/tests/inspect_decision.rs` pins the one
    `decision` line `peregrine inspect` prints and that the template's text never appears in it.
    `tests/labels.rs` covers `Want::Labels`: its emission's values are bit-identical to the same
    entries of the full logits row a reference forward computes for that position, alone, after a
@@ -66,7 +68,24 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    files, while a hybrid `qwen35` recomputes because a snapshot carries no recurrent state) and in a
    batch of questions, at prefill chunks 1/16/64 and 1/2/4 threads, through both scheduling paths
    (the mixed engine and a `PEREGRINE_MIX=0` child). The read-out computes the full row and gathers:
-   the output head has no cheaper path that would stay bit-identical.
+   the output head has no cheaper path that would stay bit-identical. The same file checks that a
+   question's logits are bit-identical beside an embedding slot and a decoding chat slot, which is
+   what one server serving all three endpoints asks the engine for.
+   S4.3c, the decision endpoint, is tested without model files too. `decision.rs`'s unit tests pin
+   `Decider::parse_request` to llama.cpp's messages (state, questions, instructions, type, criteria,
+   the 52-option limit, media and `videos`), the request and option order, the answer field order and
+   the ordered response text. `crates/peregrine/tests/server_systemone.rs` starts the built server on
+   a synthetic `qwen35` file carrying `decision.type = openjev`, the real `systemone` template (from
+   `peregrine_core::systemone::OPENJEV_TEMPLATE`) and the published temperatures: it covers the three
+   question types, request order, `usage`, every validation message, the media 501s, a chat model
+   refusing the route, a decision model refusing chat, `/v1/models`' modalities, and five questions
+   on two slots (each answer identical alone). `crates/peregrine/tests/cli_decide.rs` pins
+   `peregrine decide`'s one-line and `--json` output and the `@file`/`-`/`--request` sources. With
+   `tinyopenjev-for-testing-Q8_0.gguf` in `~/models/`,
+   `cargo test -p peregrine --release --test systemone_real -- --ignored` drives the real endpoint
+   with the 48 fixture requests and compares every answer with llama.cpp's;
+   `cargo test -p peregrine-models --release --test systemone_openjev` does the same through the
+   pieces directly.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.
@@ -92,6 +111,7 @@ and a drain with a streaming client holding the connection open (it ends at the 
 | Gemma 3 1B Instruct Q4_K_M (`google_gemma-3-1b-it-Q4_K_M.gguf`) | `~/models/` |
 | Qwen3-30B-A3B Q2_K (`Qwen3-30B-A3B-Q2_K.gguf`) | `~/models/` |
 | Qwen3.5-2B Q4_K_M (`Qwen3.5-2B-Q4_K_M.gguf`) | `~/models/` |
+| tinyopenjev test model Q8_0 (`tinyopenjev-for-testing-Q8_0.gguf`, 46 MB) | `models/` or `~/models/` |
 | Phi-4 14B Q4_K_M (`phi-4-Q4_K_M.gguf`) | `~/models/` |
 | `bge-m3-Q2_K.gguf` (encoder-tokenizer XLM-R oracle; optional) | `models/` or `~/models/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |

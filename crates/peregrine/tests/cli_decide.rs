@@ -162,10 +162,7 @@ fn json_is_the_api_shape_and_matches_the_one_question_run() {
         },
         "usage: {usage:?}"
     );
-    assert!(matches!(
-        usage.get("output_tokens"),
-        Some(Value::Int(0))
-    ));
+    assert!(matches!(usage.get("output_tokens"), Some(Value::Int(0))));
 
     // The same request one question at a time: each answer is exactly the one in the batch, and
     // the batch's input_tokens is their sum.
@@ -179,11 +176,20 @@ fn json_is_the_api_shape_and_matches_the_one_question_run() {
             "rate",
             r#"{"rate":{"type":"score","instructions":"how much","criteria":["low","mid","high"]}}"#,
         ),
-        ("yes", r#"{"yes":{"type":"noul","instructions":"is it so?"}}"#),
+        (
+            "yes",
+            r#"{"yes":{"type":"noul","instructions":"is it so?"}}"#,
+        ),
     ] {
         let out = decide(
             &model,
-            &["--state", "a plain state with a few words", "--questions", one, "--json"],
+            &[
+                "--state",
+                "a plain state with a few words",
+                "--questions",
+                one,
+                "--json",
+            ],
         );
         assert!(
             out.status.success(),
@@ -215,9 +221,7 @@ fn state_questions_and_request_read_files_and_stdin() {
     let request_file = dir.join("request.json");
     std::fs::write(
         &request_file,
-        format!(
-            r#"{{"state":"a plain state with a few words","questions":{QUESTIONS}}}"#
-        ),
+        format!(r#"{{"state":"a plain state with a few words","questions":{QUESTIONS}}}"#),
     )
     .unwrap();
 
@@ -283,7 +287,8 @@ fn state_questions_and_request_read_files_and_stdin() {
     let got = Value::parse(&String::from_utf8_lossy(&from_stdin.stdout)).expect("JSON");
     assert_eq!(got.get("answers"), want.get("answers"));
 
-    let request = format!(r#"{{"state":"a plain state with a few words","questions":{QUESTIONS}}}"#);
+    let request =
+        format!(r#"{{"state":"a plain state with a few words","questions":{QUESTIONS}}}"#);
     let from_stdin = decide_stdin(&model, &["--request", "-", "--json"], &request);
     assert!(
         from_stdin.status.success(),

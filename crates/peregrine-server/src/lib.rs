@@ -1631,7 +1631,7 @@ struct SlotJob {
 /// `EngineMsg::Run` is queued, not refused), so a decision with ten questions answers on a
 /// four-slot server and an embedding of thirty texts answers on a four-slot one. The caller has
 /// already reserved the request's place in the wait queue.
-async fn run_jobs(app: &Arc<App>, jobs: Vec<SlotJob>) -> Result<Vec<Emission>, Response> {
+async fn run_jobs(app: &Arc<App>, jobs: Vec<SlotJob>) -> Result<Vec<Emission>, Box<Response>> {
     let mut rxs = Vec::with_capacity(jobs.len());
     for job in jobs {
         let (etx, erx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
@@ -1648,17 +1648,17 @@ async fn run_jobs(app: &Arc<App>, jobs: Vec<SlotJob>) -> Result<Vec<Emission>, R
             })))
             .is_err()
         {
-            return Err(internal("the engine is not running"));
+            return Err(Box::new(internal("the engine is not running")));
         }
         rxs.push(erx);
     }
     let mut out = Vec::with_capacity(rxs.len());
     for mut rx in rxs {
         let Some(em) = rx.recv().await else {
-            return Err(internal("the engine ended without a result"));
+            return Err(Box::new(internal("the engine ended without a result")));
         };
         if let Some(Finish::Error(e)) = &em.finish {
-            return Err(bad(e.clone()));
+            return Err(Box::new(bad(e.clone())));
         }
         out.push(em);
     }
@@ -1925,7 +1925,7 @@ async fn embeddings(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -
         .collect();
     let emissions = match run_jobs(&app, jobs).await {
         Ok(e) => e,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let mut vectors = Vec::with_capacity(emissions.len());
     let mut prompt_tokens = 0u64;
@@ -2039,7 +2039,7 @@ async fn systemone(State(app): State<Arc<App>>, OrderedJson(body): OrderedJson) 
         .collect();
     let emissions = match run_jobs(&app, jobs).await {
         Ok(e) => e,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let mut answers = Vec::with_capacity(questions.len());
     let mut input_tokens = 0usize;

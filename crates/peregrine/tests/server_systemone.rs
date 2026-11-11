@@ -73,8 +73,8 @@ fn try_http(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(
 }
 
 fn post(port: u16, body: &str) -> (u16, Value) {
-    let (status, text) = try_http(port, "POST", "/v1/systemone", Some(body))
-        .expect("the server is listening");
+    let (status, text) =
+        try_http(port, "POST", "/v1/systemone", Some(body)).expect("the server is listening");
     let value = Value::parse(&text).unwrap_or(Value::Null);
     (status, value)
 }
@@ -179,7 +179,10 @@ fn three_question_types_come_back_in_request_order_with_usage() {
 
     // A choice keeps the request's criteria order (not sorted), and the chosen key is one of them.
     let pick = answer(&out, "pick");
-    assert_eq!(keys(pick), ["type", "choice", "probabilities", "confidence"]);
+    assert_eq!(
+        keys(pick),
+        ["type", "choice", "probabilities", "confidence"]
+    );
     assert_eq!(pick.get("type").and_then(Value::as_str), Some("choice"));
     let chosen = pick.get("choice").and_then(Value::as_str).unwrap();
     assert!(["zeta", "alpha", "mid"].contains(&chosen));
@@ -382,15 +385,21 @@ fn media_is_a_501_and_bad_media_is_still_a_400() {
 
     for (body, want) in [
         (
-            format!(r#"{{"state":"s","files":"data:image/png;base64,AA","questions":{{{question}}}}}"#),
+            format!(
+                r#"{{"state":"s","files":"data:image/png;base64,AA","questions":{{{question}}}}}"#
+            ),
             "\"files\" must be an array",
         ),
         (
-            format!(r#"{{"state":"s","images":["http://example.test/a.png"],"questions":{{{question}}}}}"#),
+            format!(
+                r#"{{"state":"s","images":["http://example.test/a.png"],"questions":{{{question}}}}}"#
+            ),
             "media must be data URLs (data:image/..., data:audio/... or data:video/...;base64,...)",
         ),
         (
-            format!(r#"{{"state":"s","videos":["data:video/mp4;base64,AA"],"questions":{{{question}}}}}"#),
+            format!(
+                r#"{{"state":"s","videos":["data:video/mp4;base64,AA"],"questions":{{{question}}}}}"#
+            ),
             "\"videos\" is not supported",
         ),
     ] {
@@ -451,8 +460,13 @@ fn a_chat_model_refuses_systemone_and_the_modalities_differ() {
         Some(&Value::Arr(vec![Value::Str("decisions".into())]))
     );
     // A decision-only model serves no text generation.
-    let (status, out) =
-        try_http(port, "POST", "/v1/chat/completions", Some(r#"{"messages":[]}"#)).unwrap();
+    let (status, out) = try_http(
+        port,
+        "POST",
+        "/v1/chat/completions",
+        Some(r#"{"messages":[]}"#),
+    )
+    .unwrap();
     assert_eq!(status, 501);
     let out = Value::parse(&out).unwrap();
     assert_eq!(

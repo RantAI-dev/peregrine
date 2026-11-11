@@ -161,7 +161,8 @@ pub fn run(args: &DecideArgs) -> Result<(), String> {
         )?;
         answers.push((id.clone(), answer));
     }
-    let response = decision::response_json(&args.model.display().to_string(), &answers, input_tokens);
+    let response =
+        decision::response_json(&args.model.display().to_string(), &answers, input_tokens);
     if args.json {
         println!("{}", response.to_jinja_json());
     } else {
@@ -176,10 +177,11 @@ pub fn run(args: &DecideArgs) -> Result<(), String> {
 fn line(answer: &decision::Answer) -> String {
     match answer {
         decision::Answer::Choice {
-            choice,
-            confidence,
-            ..
-        } => format!("{choice} ({})", peregrine_core::json::float_repr(*confidence)),
+            choice, confidence, ..
+        } => format!(
+            "{choice} ({})",
+            peregrine_core::json::float_repr(*confidence)
+        ),
         decision::Answer::Score { score, .. } => peregrine_core::json::float_repr(*score),
         decision::Answer::Noul { noul } => peregrine_core::json::float_repr(*noul),
     }

@@ -8,6 +8,24 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **System One decisions end to end (S4.3c)**: `POST /v1/systemone` and `peregrine decide` serve
+  native decision models of the `openjev` type. The request is the llama.cpp shape — a `state` and
+  a non-empty `questions` object of `choice` (a non-empty criteria object, options in request
+  order), `score` (2–10 levels, keys `"0"`… ) and `noul` (optional `false`/`true` descriptions,
+  read `[true, false]`) — parsed with the order-keeping JSON value, so the order of the questions
+  and of each criteria object is the order of the answers and options. Every question becomes one
+  labels slot in the engine, so questions share weight passes; a request with more questions than
+  slots queues the rest and still answers in order. The response is
+  `{model, answers, usage:{input_tokens,
+  output_tokens:0}}` with llama.cpp's answer fields (choice and probabilities, score with the
+  legend as given and probabilities, noul) and round-tripping floats. Validation messages,
+  statuses and the 400/501 bodies are llama.cpp's; media is a 501 (no image input yet) and a chat
+  model answers the route with a 501. `GET /v1/models` reports `architecture.output_modalities`
+  `["decisions"]` for a decision model and `["text"]` otherwise, and a decision-only model refuses
+  chat. `peregrine decide -m <file|hf:ref> --state <text|@file|-> --questions <JSON|@file>` (or
+  `--request @file`) prints one line per question or the API JSON with `--json`. A file whose
+  decision type or `systemone` template this build does not render is refused at load, naming the
+  type; the 52 option letters must each be one token.
 - **System One decision-model groundwork (S4.3)**: the answer math, the decision metadata and the
   label read-out, with no endpoint yet. `peregrine_core::decision` transcribes llama.cpp v0.9.0's
   `format_answer`, `get_temperature` and confidence helpers in `f64` — `choice` (best option,

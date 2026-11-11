@@ -150,6 +150,59 @@ peregrine embed -m model.gguf --json --dimensions 256 "..."       # the API's JS
 Only causal decoders are embedders in this build (S4.1); bidirectional encoder families and their
 classifier heads arrive in later S4 steps. `peregrine inspect` prints the pooling type a file declares.
 
+## Decisions (System One)
+
+A native decision model (a file with `<arch>.decision.type` and a `systemone` template) answers
+questions about a state, each answer read from the option letters' logits rather than generated as
+text. The `openjev` type is supported in this build; `POST /v1/systemone` shares the engine and the
+weight passes with chat and embeddings:
+
+```sh
+peregrine serve -m hf:ggml-org/tinyopenjev-for-testing-gguf/tinyopenjev-for-testing-Q8_0.gguf --port 8201
+curl -s localhost:8201/v1/systemone -H 'content-type: application/json' -d '{
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "questions": {
+    "route":   {"type": "choice", "instructions": "Which team should handle this?",
+                "criteria": {"billing": null, "shipping": null, "technical": null}},
+    "angry":   {"type": "noul", "instructions": "Is the customer angry?"},
+    "urgency": {"type": "score", "instructions": "How urgent is this?",
+                "criteria": ["can wait", "this week", "today", "right now"]}
+  }
+}'
+```
+
+That file is a 46 MB test-size model, published for trying the endpoint; a production decision model
+is larger. The body takes:
+
+| Field | Value |
+|---|---|
+| `state` | the text, object or array the questions are about (required) |
+| `questions` | a non-empty object of id → question, in request order (required) |
+| `questions.<id>.type` | `"choice"`, `"score"` or `"noul"` |
+| `questions.<id>.instructions` | the question's text, object or array (required) |
+| `questions.<id>.criteria` | choice: a non-empty object of key → description; score: 2–10 level descriptions, lowest first; noul: an optional object describing `"false"`/`"true"` |
+| `files`, `images` | refused with a 501: image input is not supported yet |
+| `videos` | refused with a 400, as in llama.cpp |
+
+Each question is answered as `{"type":"choice","choice":...,"probabilities":{...},"confidence":...}`,
+`{"type":"score","score":...,"legend":{...},"probabilities":{...},"confidence":...}` or
+`{"type":"noul","noul":...}`, in request order, with `usage.input_tokens` the sum of the prompts'
+token counts. A validation error is a 400 naming the question (`questions.<id>: ...`) with
+llama.cpp's message; a model that is not a decision model is a 501. `GET /v1/models` advertises
+`architecture.output_modalities` as `["decisions"]` for a decision model and `["text"]` otherwise.
+Requests with more questions than free slots queue and still answer in order.
+
+Without a server:
+
+```sh
+peregrine decide -m hf:ggml-org/tinyopenjev-for-testing-gguf/tinyopenjev-for-testing-Q8_0.gguf \
+  --state @message.txt --questions @questions.json          # one line per answer
+peregrine decide -m model.gguf --request @request.json --json   # the API's response
+```
+
+`--state` and `--questions` also take `-` for stdin; a state that is valid JSON is used as that value,
+anything else as a string.
+
 ## CLI reference
 
 | Command | What it does |
@@ -160,6 +213,7 @@ classifier heads arrive in later S4 steps. `peregrine inspect` prints the poolin
 | `peregrine stop` | Gracefully drain in-flight requests and stop the background server. |
 | `peregrine upgrade [--check] [--version TAG]` | Download, verify (`SHA256SUMS`), and atomically install the newest release with zero-downtime handoff (`SO_REUSEPORT`). |
 | `peregrine embed -m <MODEL> [TEXT]...` | Embed texts (or stdin lines): one L2-normalised vector per text, the file's own pooling type (`--dimensions`, `--json`). |
+| `peregrine decide -m <MODEL> --state <TEXT> --questions <JSON>` | Answer questions about a state with a native decision model (System One): one line per answer, or the API JSON with `--json` (`--request` for a whole body). |
 | `peregrine inspect <MODEL>` | Inspect GGUF metadata, architecture, quantization formats, pooling type, and check whether this build can run the file. |
 | `peregrine bench -m <MODEL>` | Measure single-user prefill and greedy decode tok/s and memory bandwidth (bytes/token). |
 | `peregrine tune -m <MODEL>` | Auto-tune thread counts and spin windows for this CPU + model and save a hardware profile. |
@@ -208,6 +262,7 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 | Tokenizers | GPT-2 byte-level BPE, SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 | Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), `POST /v1/embeddings`, `peregrine embed` |
+| Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->
 
 Every supported family is verified against llama.cpp v0.9.0 on real model files for tokenizer parity,
