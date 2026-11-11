@@ -1,0 +1,471 @@
+{
+ "rows": [
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 461.7111297084707,
+   "prefill_s": 1.108918471,
+   "prof": "",
+   "wall_s": 1.977,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 265.218059714217,
+   "prefill_s": 1.930486938,
+   "prof": "",
+   "wall_s": 2.714,
+   "bytes_acts": 278642294784
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 474.29701958394907,
+   "prefill_s": 1.079492341,
+   "prof": "",
+   "wall_s": 2.115,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 465.3669896168754,
+   "prefill_s": 1.1002069579999998,
+   "prof": "",
+   "wall_s": 1.904,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 306.14236299850324,
+   "prefill_s": 1.6724245379999996,
+   "prof": "",
+   "wall_s": 2.286,
+   "bytes_acts": 278642294784
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 467.6354274641148,
+   "prefill_s": 1.0948699990000001,
+   "prof": "",
+   "wall_s": 1.685,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 487.91407717983634,
+   "prefill_s": 1.049365091,
+   "prof": "",
+   "wall_s": 0.066,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 316.99848930345524,
+   "prefill_s": 1.6151496530000002,
+   "prof": "",
+   "wall_s": 2.206,
+   "bytes_acts": 278642294784
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 501.3500514774875,
+   "prefill_s": 1.0212425399999998,
+   "prof": "",
+   "wall_s": 1.604,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 3,
+   "model": "qwen05",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 495.30244280136884,
+   "prefill_s": 1.0337118409999997,
+   "prof": "",
+   "wall_s": 1.605,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 3,
+   "model": "qwen05",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 314.4475407468708,
+   "prefill_s": 1.628252518,
+   "prof": "",
+   "wall_s": 2.175,
+   "bytes_acts": 278642294784
+  },
+  {
+   "round": 3,
+   "model": "qwen05",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 494.52366999104913,
+   "prefill_s": 1.0353397240000002,
+   "prof": "",
+   "wall_s": 1.563,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 4,
+   "model": "qwen05",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 485.6539451357895,
+   "prefill_s": 1.054248617,
+   "prof": "",
+   "wall_s": 1.583,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 4,
+   "model": "qwen05",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 310.2890334468124,
+   "prefill_s": 1.65007443,
+   "prof": "",
+   "wall_s": 2.235,
+   "bytes_acts": 278642294784
+  },
+  {
+   "round": 4,
+   "model": "qwen05",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 477.0104114807895,
+   "prefill_s": 1.073351834,
+   "prof": "",
+   "wall_s": 1.636,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 269.6148305542749,
+   "prefill_s": 1.899005329,
+   "prof": "",
+   "wall_s": 2.554,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 191.6372747394461,
+   "prefill_s": 2.6717140529999996,
+   "prof": "",
+   "wall_s": 3.338,
+   "bytes_acts": 1159909605376
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 292.03801812749913,
+   "prefill_s": 1.7531963929999996,
+   "prof": "",
+   "wall_s": 2.542,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 288.79815720693614,
+   "prefill_s": 1.7728644980000001,
+   "prof": "",
+   "wall_s": 2.693,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 196.70021686348736,
+   "prefill_s": 2.6029457830000005,
+   "prof": "",
+   "wall_s": 3.573,
+   "bytes_acts": 1159909605376
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 299.84644646790474,
+   "prefill_s": 1.7075406629999998,
+   "prof": "",
+   "wall_s": 0.819,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 289.80966107493725,
+   "prefill_s": 1.7666767839999997,
+   "prof": "",
+   "wall_s": 2.418,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 192.79287980469195,
+   "prefill_s": 2.6556997359999994,
+   "prof": "",
+   "wall_s": 3.283,
+   "bytes_acts": 1159909605376
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 299.12555405742535,
+   "prefill_s": 1.711655835,
+   "prof": "",
+   "wall_s": 2.372,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 3,
+   "model": "llama1b",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 300.5374452434569,
+   "prefill_s": 1.7036146680000002,
+   "prof": "",
+   "wall_s": 2.375,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 3,
+   "model": "llama1b",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 198.22451156735067,
+   "prefill_s": 2.5829298100000004,
+   "prof": "",
+   "wall_s": 3.227,
+   "bytes_acts": 1159909605376
+  },
+  {
+   "round": 3,
+   "model": "llama1b",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 294.3935188825228,
+   "prefill_s": 1.7391687219999998,
+   "prof": "",
+   "wall_s": 2.557,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 4,
+   "model": "llama1b",
+   "tag": "krepackdefault",
+   "threads": 12,
+   "cpus": null,
+   "env": {},
+   "prefill_tok_s": 288.26598289630203,
+   "prefill_s": 1.7761374230000002,
+   "prof": "",
+   "wall_s": 2.402,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 4,
+   "model": "llama1b",
+   "tag": "krepack0",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "0"
+   },
+   "prefill_tok_s": 195.94919270429014,
+   "prefill_s": 2.612922222,
+   "prof": "",
+   "wall_s": 3.246,
+   "bytes_acts": 1159909605376
+  },
+  {
+   "round": 4,
+   "model": "llama1b",
+   "tag": "krepack1",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_KREPACK": "1"
+   },
+   "prefill_tok_s": 283.2837160152652,
+   "prefill_s": 1.807375331,
+   "prof": "",
+   "wall_s": 2.566,
+   "bytes_acts": 293727109120
+  }
+ ],
+ "extra": {},
+ "summary": {
+  "qwen05": {
+   "krepackdefault": {
+    "median": 485.7,
+    "n": 5,
+    "spread": 16.8
+   },
+   "krepack0": {
+    "median": 310.3,
+    "n": 5,
+    "spread": 25.9
+   },
+   "krepack1": {
+    "median": 477.0,
+    "n": 5,
+    "spread": 16.9
+   }
+  },
+  "llama1b": {
+   "krepackdefault": {
+    "median": 288.8,
+    "n": 5,
+    "spread": 15.5
+   },
+   "krepack0": {
+    "median": 195.9,
+    "n": 5,
+    "spread": 3.3
+   },
+   "krepack1": {
+    "median": 294.4,
+    "n": 5,
+    "spread": 8.3
+   }
+  }
+ }
+}

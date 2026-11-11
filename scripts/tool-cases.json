@@ -1,0 +1,1033 @@
+{
+ "tools": {
+  "weather": {
+   "type": "function",
+   "function": {
+    "name": "get_weather",
+    "description": "Get the current weather for a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "The city name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   }
+  },
+  "search": {
+   "type": "function",
+   "function": {
+    "name": "web_search",
+    "description": "Search the web.\nReturns the top results; use \"quotes\" for exact phrases.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 20,
+       "default": 5
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "after": {
+         "type": "string",
+         "format": "date"
+        },
+        "languages": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        }
+       },
+       "additionalProperties": false
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  },
+  "clock": {
+   "type": "function",
+   "function": {
+    "name": "now",
+    "description": "",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  },
+  "bare": {
+   "type": "function",
+   "function": {
+    "name": "ping"
+   }
+  },
+  "strict": {
+   "type": "function",
+   "function": {
+    "name": "set_temperature",
+    "description": "Régler le thermostat — 温度を設定する",
+    "strict": true,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "celsius": {
+       "type": "number"
+      },
+      "room": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "hold": {
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "celsius",
+      "room",
+      "hold"
+     ],
+     "additionalProperties": false
+    }
+   }
+  },
+  "deferred": {
+   "type": "function",
+   "defer_loading": true,
+   "function": {
+    "name": "lazy_lookup",
+    "description": "Loaded on demand.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "tolerance": {
+       "type": "number",
+       "default": 1e-05
+      }
+     }
+    }
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "no-tools-user",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello"
+    }
+   ]
+  },
+  {
+   "name": "no-tools-system-user",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are terse."
+    },
+    {
+     "role": "user",
+     "content": "Hello"
+    }
+   ]
+  },
+  {
+   "name": "one-tool-user",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "What is the weather in Paris?"
+    }
+   ]
+  },
+  {
+   "name": "one-tool-system-user",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a weather assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is the weather in Paris?"
+    }
+   ]
+  },
+  {
+   "name": "two-tools",
+   "tools": [
+    "weather",
+    "search"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Find news about the weather in Rome."
+    }
+   ]
+  },
+  {
+   "name": "all-tools",
+   "tools": [
+    "weather",
+    "search",
+    "clock",
+    "bare",
+    "strict"
+   ],
+   "messages": [
+    {
+     "role": "system",
+     "content": "Use tools when they help."
+    },
+    {
+     "role": "user",
+     "content": "What time is it?"
+    }
+   ]
+  },
+  {
+   "name": "bare-tool",
+   "tools": [
+    "bare"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "ping"
+    }
+   ]
+  },
+  {
+   "name": "unicode-tool",
+   "tools": [
+    "strict"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Mets le salon à 21,5 °C."
+    }
+   ]
+  },
+  {
+   "name": "call-and-result",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "{\"temp\": 18, \"sky\": \"clear\"}"
+    },
+    {
+     "role": "user",
+     "content": "And in Rome?"
+    }
+   ]
+  },
+  {
+   "name": "call-null-content",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "18 degrees"
+    }
+   ]
+  },
+  {
+   "name": "call-with-content",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "Let me check.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_1",
+     "content": "18"
+    }
+   ]
+  },
+  {
+   "name": "result-last",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Oslo?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c9",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Oslo\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c9",
+     "content": "{\"temp\": -3}"
+    }
+   ]
+  },
+  {
+   "name": "two-calls-two-results",
+   "tools": [
+    "weather",
+    "clock"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris and the time, please."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "a",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      },
+      {
+       "id": "b",
+       "type": "function",
+       "function": {
+        "name": "now",
+        "arguments": "{}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "a",
+     "content": "18"
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "b",
+     "content": "2026-11-11T10:00:00Z"
+    },
+    {
+     "role": "user",
+     "content": "Thanks. Now Rome."
+    }
+   ]
+  },
+  {
+   "name": "three-results-last",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Paris, Rome, Oslo?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "a",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      },
+      {
+       "id": "b",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Rome\"}"
+       }
+      },
+      {
+       "id": "c",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Oslo\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "a",
+     "content": "18"
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "b",
+     "content": "24"
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c",
+     "content": "-3"
+    }
+   ]
+  },
+  {
+   "name": "nested-arguments",
+   "tools": [
+    "search"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Search for rust simd on github since 2025."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "s1",
+       "type": "function",
+       "function": {
+        "name": "web_search",
+        "arguments": "{\"query\": \"rust simd \\\"portable\\\"\", \"limit\": 3, \"filters\": {\"site\": \"github.com\", \"after\": \"2025-01-01\", \"languages\": [\"en\", \"de\"]}}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "s1",
+     "content": "[{\"title\": \"A\", \"url\": \"https://example.com/a\"},\n {\"title\": \"B\", \"url\": \"https://example.com/b\"}]"
+    },
+    {
+     "role": "user",
+     "content": "Summarise the first."
+    }
+   ]
+  },
+  {
+   "name": "argument-types",
+   "tools": [
+    "strict"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Set it."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "t1",
+       "type": "function",
+       "function": {
+        "name": "set_temperature",
+        "arguments": "{\"celsius\": 21.5, \"room\": null, \"hold\": true, \"zeta\": 1, \"alpha\": -2, \"big\": 12345678901, \"small\": 0.001, \"text\": \"ligne 1\\nligne 2\\t«été» 日本語 \\\\ /\", \"list\": [1, 2.0, false, null, \"x\", {}], \"empty\": {}}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "t1",
+     "content": "ok"
+    }
+   ]
+  },
+  {
+   "name": "empty-arguments",
+   "tools": [
+    "clock"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Time?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "n1",
+       "type": "function",
+       "function": {
+        "name": "now",
+        "arguments": "{}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "n1",
+     "content": "10:00"
+    },
+    {
+     "role": "user",
+     "content": "Again."
+    }
+   ]
+  },
+  {
+   "name": "plain-assistant-with-tools",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello! How can I help?"
+    },
+    {
+     "role": "user",
+     "content": "Weather in Lima?"
+    }
+   ]
+  },
+  {
+   "name": "two-rounds",
+   "tools": [
+    "weather",
+    "search"
+   ],
+   "messages": [
+    {
+     "role": "system",
+     "content": "Plan, then act."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Lima?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "r1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Lima\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "r1",
+     "content": "19"
+    },
+    {
+     "role": "assistant",
+     "content": "It is 19 degrees in Lima."
+    },
+    {
+     "role": "user",
+     "content": "Find a forecast."
+    },
+    {
+     "role": "assistant",
+     "content": "Searching.",
+     "tool_calls": [
+      {
+       "id": "r2",
+       "type": "function",
+       "function": {
+        "name": "web_search",
+        "arguments": "{\"query\": \"Lima forecast\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "r2",
+     "content": "Sunny all week."
+    }
+   ]
+  },
+  {
+   "name": "second-system-message",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "system",
+     "content": "First."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "system",
+     "content": "Second, mid-conversation."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Quito?"
+    }
+   ]
+  },
+  {
+   "name": "angle-brackets-in-text",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Is 3 < 5 && 7 > 2? Also what does a <b>bold</b> tag do?"
+    }
+   ]
+  },
+  {
+   "name": "multiline-result",
+   "tools": [
+    "search"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Search."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "m1",
+       "type": "function",
+       "function": {
+        "name": "web_search",
+        "arguments": "{\"query\": \"x\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "m1",
+     "content": "line one\nline two\n\nline four\n"
+    },
+    {
+     "role": "user",
+     "content": "Go on."
+    }
+   ]
+  },
+  {
+   "name": "history-without-tools",
+   "messages": [
+    {
+     "role": "system",
+     "content": "S"
+    },
+    {
+     "role": "user",
+     "content": "A"
+    },
+    {
+     "role": "assistant",
+     "content": "B"
+    },
+    {
+     "role": "user",
+     "content": "C"
+    }
+   ]
+  },
+  {
+   "name": "deferred-tool",
+   "tools": [
+    "deferred",
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Look it up."
+    }
+   ]
+  },
+  {
+   "name": "arguments-as-object",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "x",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "18"
+    }
+   ]
+  },
+  {
+   "name": "arguments-invalid-json",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "x",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{city: Paris"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "18"
+    }
+   ]
+  },
+  {
+   "name": "arguments-empty-string",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "x",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": ""
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "18"
+    }
+   ]
+  },
+  {
+   "name": "content-parts",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "system",
+     "content": [
+      {
+       "type": "text",
+       "text": "Be brief."
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "part one"
+      },
+      {
+       "type": "text",
+       "text": "part two"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "tool-result-first",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "tool",
+     "content": "orphan result"
+    },
+    {
+     "role": "user",
+     "content": "What was that?"
+    }
+   ]
+  },
+  {
+   "name": "tool-result-with-name",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "x",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "name": "get_weather",
+     "tool_call_id": "x",
+     "content": "18"
+    }
+   ]
+  },
+  {
+   "name": "assistant-prefill",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Say hello."
+    },
+    {
+     "role": "assistant",
+     "content": "Hello, and"
+    }
+   ]
+  },
+  {
+   "name": "number-spellings",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "x",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"a\": 1e-5, \"b\": 1.0, \"c\": 100000000000000000000, \"d\": 1.5e300, \"e\": -0.0, \"f\": 0.1, \"g\": 9007199254740993, \"h\": -7}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "18"
+    }
+   ]
+  },
+  {
+   "name": "reasoning-in-history",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": "Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "x",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      }
+     ],
+     "reasoning_content": "The user wants the weather."
+    },
+    {
+     "role": "tool",
+     "content": "18"
+    }
+   ]
+  },
+  {
+   "name": "null-user-content",
+   "tools": [
+    "weather"
+   ],
+   "messages": [
+    {
+     "role": "user",
+     "content": null
+    }
+   ]
+  }
+ ]
+}

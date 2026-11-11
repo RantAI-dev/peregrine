@@ -25,7 +25,8 @@ use peregrine_core::pool::Pool;
     feature = "arch-llama",
     feature = "arch-qwen",
     feature = "arch-qwen3moe",
-    feature = "arch-phi3"
+    feature = "arch-phi3",
+    feature = "arch-mistral3"
 ))]
 pub(crate) struct AttnWeights {
     pub(crate) attn_norm: TensorInfo,
@@ -48,7 +49,8 @@ pub(crate) struct AttnWeights {
     feature = "arch-llama",
     feature = "arch-qwen",
     feature = "arch-qwen3moe",
-    feature = "arch-phi3"
+    feature = "arch-phi3",
+    feature = "arch-mistral3"
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn attention_rows(

@@ -13,13 +13,24 @@
     clippy::chunks_exact_to_as_chunks
 )]
 
+#[cfg(feature = "arch-bert")]
+pub mod bert;
 #[cfg(any(
     feature = "arch-llama",
     feature = "arch-qwen",
     feature = "arch-qwen3moe",
-    feature = "arch-phi3"
+    feature = "arch-phi3",
+    feature = "arch-mistral3"
 ))]
 pub mod dense;
+/// The scheduling the two bidirectional encoder families share (S4.4, S4.14). The Gemma 3
+/// module holds both the causal model and the encoder, so it needs this whenever it is built.
+#[cfg(any(
+    feature = "arch-gemma3",
+    feature = "arch-gemma-embedding",
+    feature = "arch-mistral3"
+))]
+pub(crate) mod encoder;
 #[cfg(any(feature = "arch-gemma3", feature = "arch-gemma-embedding"))]
 pub mod gemma3;
 #[cfg(feature = "arch-gpt-oss")]
@@ -29,6 +40,7 @@ pub mod gptoss;
     feature = "arch-qwen",
     feature = "arch-qwen3moe",
     feature = "arch-phi3",
+    feature = "arch-mistral3",
     feature = "arch-gpt-oss",
     // Gemma 3's forward uses `layer::write_hidden` (the embedding path) but nothing else here.
     feature = "arch-gemma3",
@@ -40,10 +52,19 @@ pub mod qwen35;
 #[cfg(feature = "arch-qwen3moe")]
 pub mod qwen3moe;
 
-#[cfg(any(feature = "arch-llama", feature = "arch-qwen", feature = "arch-phi3"))]
+#[cfg(feature = "arch-bert")]
+pub use bert::BertFamily;
+#[cfg(any(
+    feature = "arch-llama",
+    feature = "arch-qwen",
+    feature = "arch-phi3",
+    feature = "arch-mistral3"
+))]
 pub use dense::DenseFamily;
 #[cfg(feature = "arch-llama")]
 pub use dense::LlamaFamily;
+#[cfg(feature = "arch-mistral3")]
+pub use dense::Mistral3Family;
 #[cfg(feature = "arch-phi3")]
 pub use dense::Phi3Family;
 #[cfg(feature = "arch-qwen")]
@@ -91,12 +112,16 @@ pub const ARCHS: &[&str] = &[
     "gemma3",
     #[cfg(feature = "arch-gemma-embedding")]
     "gemma-embedding",
+    #[cfg(feature = "arch-bert")]
+    "bert",
     #[cfg(feature = "arch-qwen3moe")]
     "qwen3moe",
     #[cfg(feature = "arch-gpt-oss")]
     "gpt-oss",
     #[cfg(feature = "arch-phi3")]
     "phi3",
+    #[cfg(feature = "arch-mistral3")]
+    "mistral3",
 ];
 
 /// Table of model families implemented by Peregrine.
@@ -111,12 +136,16 @@ pub static FAMILIES: &[&dyn Family] = &[
     &Gemma3Family,
     #[cfg(feature = "arch-gemma-embedding")]
     &GemmaEmbeddingFamily,
+    #[cfg(feature = "arch-bert")]
+    &BertFamily,
     #[cfg(feature = "arch-qwen3moe")]
     &Qwen3MoeFamily,
     #[cfg(feature = "arch-gpt-oss")]
     &GptOssFamily,
     #[cfg(feature = "arch-phi3")]
     &Phi3Family,
+    #[cfg(feature = "arch-mistral3")]
+    &Mistral3Family,
 ];
 
 /// Load a model from a parsed GGUF file using the built-in model families.

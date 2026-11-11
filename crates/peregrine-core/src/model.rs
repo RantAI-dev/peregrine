@@ -432,6 +432,7 @@ impl Model {
                     "gemma3" => Some("arch-gemma3"),
                     "gemma-embedding" => Some("arch-gemma-embedding"),
                     "phi3" => Some("arch-phi3"),
+                    "mistral3" => Some("arch-mistral3"),
                     _ => None,
                 };
                 if let Some(feat) = feat {
