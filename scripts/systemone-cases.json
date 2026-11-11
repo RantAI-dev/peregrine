@@ -1,0 +1,731 @@
+[
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?"
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "score",
+   "instructions": "How urgent is this?",
+   "criteria": [
+    "can wait",
+    "this week",
+    "today",
+    "right now"
+   ]
+  }
+ },
+ {
+  "state": "",
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": "one line",
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": "two\nlines\twith a tab, a \"quote\" and a back\\slash",
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": "accents and scripts: café, naïve, 日本語, Ελληνικά",
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": {
+   "customer": "Ada",
+   "orders": 3,
+   "vip": true,
+   "notes": null
+  },
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": {
+   "zeta": 1,
+   "alpha": {
+    "nested": [
+     1,
+     2.5,
+     "x"
+    ],
+    "empty": {}
+   },
+   "list": []
+  },
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": [
+   {
+    "role": "user",
+    "content": "hello"
+   },
+   {
+    "role": "assistant",
+    "content": "hi there"
+   }
+  ],
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": [
+   "plain",
+   7,
+   1.5,
+   false,
+   null,
+   {
+    "k": "v"
+   }
+  ],
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": 42,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": -7,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": 1.5,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": 100.0,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": 0.0001,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": 1e-05,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": 1e+16,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": 1.2345678901234568e+20,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": true,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": false,
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": "a string that looks like JSON: {\"a\": [1, 2]}",
+  "question": {
+   "type": "choice",
+   "instructions": "Which team should handle this?",
+   "criteria": {
+    "billing": null,
+    "shipping": null,
+    "technical": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": {
+    "ask": "Which team?",
+    "hint": [
+     "be brief",
+     1
+    ]
+   },
+   "criteria": {
+    "a": null,
+    "b": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": [
+    "first",
+    "second"
+   ],
+   "criteria": {
+    "a": null,
+    "b": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "",
+   "criteria": {
+    "a": null,
+    "b": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": 3,
+   "criteria": {
+    "a": null,
+    "b": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Pick one.",
+   "criteria": {
+    "option 0": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Pick one.",
+   "criteria": {
+    "option 0": null,
+    "option 1": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Pick one.",
+   "criteria": {
+    "option 0": null,
+    "option 1": null,
+    "option 2": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Pick one.",
+   "criteria": {
+    "option 0": null,
+    "option 1": null,
+    "option 2": null,
+    "option 3": null,
+    "option 4": null,
+    "option 5": null,
+    "option 6": null,
+    "option 7": null,
+    "option 8": null,
+    "option 9": null,
+    "option 10": null,
+    "option 11": null,
+    "option 12": null,
+    "option 13": null,
+    "option 14": null,
+    "option 15": null,
+    "option 16": null,
+    "option 17": null,
+    "option 18": null,
+    "option 19": null,
+    "option 20": null,
+    "option 21": null,
+    "option 22": null,
+    "option 23": null,
+    "option 24": null,
+    "option 25": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Pick one.",
+   "criteria": {
+    "option 0": null,
+    "option 1": null,
+    "option 2": null,
+    "option 3": null,
+    "option 4": null,
+    "option 5": null,
+    "option 6": null,
+    "option 7": null,
+    "option 8": null,
+    "option 9": null,
+    "option 10": null,
+    "option 11": null,
+    "option 12": null,
+    "option 13": null,
+    "option 14": null,
+    "option 15": null,
+    "option 16": null,
+    "option 17": null,
+    "option 18": null,
+    "option 19": null,
+    "option 20": null,
+    "option 21": null,
+    "option 22": null,
+    "option 23": null,
+    "option 24": null,
+    "option 25": null,
+    "option 26": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Pick one.",
+   "criteria": {
+    "option 0": null,
+    "option 1": null,
+    "option 2": null,
+    "option 3": null,
+    "option 4": null,
+    "option 5": null,
+    "option 6": null,
+    "option 7": null,
+    "option 8": null,
+    "option 9": null,
+    "option 10": null,
+    "option 11": null,
+    "option 12": null,
+    "option 13": null,
+    "option 14": null,
+    "option 15": null,
+    "option 16": null,
+    "option 17": null,
+    "option 18": null,
+    "option 19": null,
+    "option 20": null,
+    "option 21": null,
+    "option 22": null,
+    "option 23": null,
+    "option 24": null,
+    "option 25": null,
+    "option 26": null,
+    "option 27": null,
+    "option 28": null,
+    "option 29": null,
+    "option 30": null,
+    "option 31": null,
+    "option 32": null,
+    "option 33": null,
+    "option 34": null,
+    "option 35": null,
+    "option 36": null,
+    "option 37": null,
+    "option 38": null,
+    "option 39": null,
+    "option 40": null,
+    "option 41": null,
+    "option 42": null,
+    "option 43": null,
+    "option 44": null,
+    "option 45": null,
+    "option 46": null,
+    "option 47": null,
+    "option 48": null,
+    "option 49": null,
+    "option 50": null,
+    "option 51": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Pick one.",
+   "criteria": {
+    "null": null,
+    "empty": "",
+    "text": "a described option",
+    "space": " ",
+    "object": {
+     "why": "because",
+     "n": 2
+    },
+    "empty object": {},
+    "array": [
+     "x",
+     1
+    ],
+    "empty array": [],
+    "zero": 0,
+    "one": 1,
+    "zero float": 0.0,
+    "half": 0.5,
+    "false": false,
+    "true": true,
+    "": "an empty key"
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "choice",
+   "instructions": "Order is kept.",
+   "criteria": {
+    "zebra": "last letter first",
+    "apple": null,
+    "mango": "middle"
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "score",
+   "instructions": "Rate it.",
+   "criteria": [
+    "low",
+    "high"
+   ]
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "score",
+   "instructions": "Rate it.",
+   "criteria": [
+    "none",
+    "little",
+    "some",
+    "much"
+   ]
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "score",
+   "instructions": "Rate it.",
+   "criteria": [
+    "level 0",
+    "level 1",
+    "level 2",
+    "level 3",
+    "level 4",
+    "level 5",
+    "level 6",
+    "level 7",
+    "level 8",
+    "level 9"
+   ]
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "score",
+   "instructions": "Rate it.",
+   "criteria": [
+    null,
+    "",
+    {
+     "d": 1
+    },
+    [
+     "x"
+    ],
+    0,
+    2
+   ]
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?"
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?",
+   "criteria": {}
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?",
+   "criteria": {
+    "true": "the customer is clearly upset"
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?",
+   "criteria": {
+    "false": "the tone is neutral"
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?",
+   "criteria": {
+    "true": "upset",
+    "false": "calm"
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?",
+   "criteria": {
+    "false": "calm",
+    "true": "upset"
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?",
+   "criteria": {
+    "true": "",
+    "false": null
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?",
+   "criteria": {
+    "true": {
+     "sign": "caps"
+    },
+    "false": [
+     "polite"
+    ]
+   }
+  }
+ },
+ {
+  "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+  "question": {
+   "type": "noul",
+   "instructions": "Is the customer angry?",
+   "criteria": {
+    "yes": "ignored key",
+    "true": 1
+   }
+  }
+ },
+ {
+  "state": {
+   "ticket": "Customer message: I was charged twice for my order last week and nobody has replied.",
+   "tags": [
+    "billing",
+    "duplicate"
+   ]
+  },
+  "question": {
+   "type": "score",
+   "instructions": {
+    "q": "How urgent?"
+   },
+   "criteria": [
+    "later",
+    "now"
+   ]
+  }
+ }
+]
