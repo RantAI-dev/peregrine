@@ -111,8 +111,9 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    (`tests/golden/synthetic/<tier>/mistral3-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
    under SDE, no aarch64 golden); no-allocation coverage; and an ignored real-file test that feeds
    the 64 token-id lists from `tests/fixtures/nemotron/` and checks the F16 and Q8_0 cosines
-   against llama.cpp's vectors. The real-file test skips while the build cannot read the file's
-   Tekken pre-tokenizer (S4.14a).
+   against llama.cpp's vectors; a second ignored test encodes the fixture texts with the file's
+   Tekken tokenizer (S4.14a), checks all 64 id lists against llama.cpp's, and checks that a text
+   embedded by its ids and by its own encoding is the same vector bit for bit.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.

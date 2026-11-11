@@ -1616,23 +1616,12 @@ fn nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp() {
         candidates.into_iter().find(|p| p.is_file())
     };
 
-    let embed_with = |path: &std::path::Path| -> Option<Vec<Vec<f32>>> {
-        let g = match peregrine_core::Gguf::open(path) {
-            Ok(g) => g,
-            Err(e) => panic!("{}: {e}", path.display()),
-        };
-        let model = match peregrine_models::load(g) {
-            Ok(m) => Arc::new(m),
-            Err(e) if e.contains("pre-tokenizer") && e.contains("pixtral") => {
-                eprintln!(
-                    "{}: this build's tokenizer does not read the file's Tekken \
-                     pre-tokenizer yet (S4.14a); skipped",
-                    path.display()
-                );
-                return None;
-            }
-            Err(e) => panic!("{}: {e}", path.display()),
-        };
+    let embed_with = |path: &std::path::Path| -> Vec<Vec<f32>> {
+        let g =
+            peregrine_core::Gguf::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let model = Arc::new(
+            peregrine_models::load(g).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+        );
         assert_eq!(
             model.causality(),
             peregrine_core::arch::Causality::Bidirectional
@@ -1640,15 +1629,13 @@ fn nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp() {
         assert_eq!(model.pooling().unwrap(), Some(Pooling::Mean));
         assert_eq!(model.cfg.ctx_train, 32768, "the model's real text limit");
         let run = embed_batch(&model, &tokens, Pooling::Mean, 4, 512, 2048, None);
-        Some(
-            run.vectors
-                .into_iter()
-                .map(|mut v| {
-                    embed::finish(&mut v, None).unwrap();
-                    v
-                })
-                .collect(),
-        )
+        run.vectors
+            .into_iter()
+            .map(|mut v| {
+                embed::finish(&mut v, None).unwrap();
+                v
+            })
+            .collect()
     };
 
     // F16: the whole graph, against llama.cpp's F16 vectors.
@@ -1656,9 +1643,7 @@ fn nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp() {
         eprintln!("Nemotron-3.5-Embed-1B-F16.gguf is not on this machine; skipped");
         return;
     };
-    let Some(ours_f16) = embed_with(&f16_path) else {
-        return;
-    };
+    let ours_f16 = embed_with(&f16_path);
     for dims in [2048usize, 1024, 512] {
         let to_llama: Vec<f64> = ours_f16
             .iter()
@@ -1679,9 +1664,7 @@ fn nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp() {
         eprintln!("Nemotron-3.5-Embed-1B-Q8_0.gguf is not on this machine; skipped");
         return;
     };
-    let Some(ours_q8) = embed_with(&q8_path) else {
-        return;
-    };
+    let ours_q8 = embed_with(&q8_path);
     for dims in [2048usize, 1024, 512] {
         let to_ref: Vec<f64> = ours_q8
             .iter()
@@ -1725,4 +1708,79 @@ fn nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp() {
             "Q8_0 at {dims} d: min to the F16 reference {min_r:.6}, llama.cpp's {min_rl:.6}"
         );
     }
+}
+
+/// The end-to-end check: the real file's own tokenizer (the Tekken pre-tokenizer, S4.14a)
+/// produces llama.cpp's ids for the fixture texts, and a text embedded by its tokens gives
+/// the same bits as the stored id list (roadmap S4.14b).
+///
+/// The ids are checked for all 64 texts. The vectors are checked for eight of them, spread
+/// over the length range (a few tokens to about 1500), because a full second pass over the
+/// model is minutes on a shared host and the vector's dependence on the batch has its own
+/// test.
+#[test]
+#[ignore = "needs Nemotron-3.5-Embed-1B-Q8_0.gguf in ~/models/nemotron/"]
+fn nemotron_3_5_embed_1b_by_text_matches_the_fixture_and_the_ids_path() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nemotron");
+    let texts: Vec<String> = std::fs::read_to_string(fixture.join("texts.txt"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let tokens: Vec<Vec<u32>> = std::fs::read_to_string(fixture.join("tokens.txt"))
+        .unwrap()
+        .lines()
+        .map(|l| l.split_whitespace().map(|t| t.parse().unwrap()).collect())
+        .collect();
+    assert_eq!(texts.len(), tokens.len());
+
+    let name = "Nemotron-3.5-Embed-1B-Q8_0.gguf";
+    let mut candidates = Vec::new();
+    if let Ok(d) = std::env::var("PEREGRINE_NEMOTRON_DIR") {
+        candidates.push(PathBuf::from(d).join(name));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../models/nemotron")
+            .join(name),
+    );
+    if let Ok(h) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(&h).join("models/nemotron").join(name));
+    }
+    let Some(path) = candidates.into_iter().find(|p| p.is_file()) else {
+        eprintln!("{name} is not on this machine; skipped");
+        return;
+    };
+    let model = load(&path);
+
+    // The file's Tekton pre-tokenizer gives llama.cpp's ids on every fixture text.
+    let by_text: Vec<Vec<u32>> = texts.iter().map(|t| model.tk.encode_special(t)).collect();
+    for (i, (got, want)) in by_text.iter().zip(&tokens).enumerate() {
+        assert_eq!(got, want, "text {i} tokenises differently from llama.cpp");
+    }
+
+    // A text embedded by its ids and the same text embedded by its own encoding are the
+    // same vector, bit for bit. The eight span 8 to 1520 tokens.
+    let picks = [0usize, 2, 9, 20, 34, 48, 62, 63];
+    let ids: Vec<Vec<u32>> = picks.iter().map(|&i| tokens[i].clone()).collect();
+    let encoded: Vec<Vec<u32>> = picks.iter().map(|&i| by_text[i].clone()).collect();
+    let from_ids = embed_batch(&model, &ids, Pooling::Mean, 4, 512, 2048, None).vectors;
+    let from_text = embed_batch(&model, &encoded, Pooling::Mean, 4, 512, 2048, None).vectors;
+    for (k, (a, b)) in from_ids.iter().zip(&from_text).enumerate() {
+        let (mut a, mut b) = (a.clone(), b.clone());
+        embed::finish(&mut a, None).unwrap();
+        embed::finish(&mut b, None).unwrap();
+        assert_eq!(
+            bits(&a),
+            bits(&b),
+            "text {} ({} tokens): by ids and by text differ",
+            picks[k],
+            ids[k].len()
+        );
+    }
+    eprintln!(
+        "by text: {} ids match llama.cpp; {} vectors bit-identical to the ids path",
+        texts.len(),
+        picks.len()
+    );
 }

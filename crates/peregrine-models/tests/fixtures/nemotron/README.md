@@ -53,10 +53,9 @@ stored as returned. The ids are also what the test feeds Peregrine, so the test 
 tokenizer.
 
 The upload's `tokenizer.ggml.pre` is `pixtral` (Mistral's Tekken pre-tokenizer, roadmap S4.14a).
-Until that lands in the build under test, the measurement was run on byte-identical copies of
-the three files with only that metadata string changed to `default` (same length, so the rest of
-the file and every weight byte is unchanged). The fixture's ids and vectors come from the
-unmodified uploads.
+The fixture's ids and vectors come from the unmodified uploads, and the accuracy table below is
+from the unmodified files: the build's tokenizer gives the same 64 id lists as the fixture, and
+the ids path and the by-text path give bit-identical vectors.
 
 ## Measured accuracy
 
