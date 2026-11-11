@@ -1409,6 +1409,7 @@ impl Engine {
                         ))),
                         cost: None,
                         embedding: None,
+                        label_logits: None,
                     }];
                 }
                 chosen.push((i, 0, n));
@@ -1458,6 +1459,7 @@ impl Engine {
                     finish: Some(Finish::Error(e.clone())),
                     cost: None,
                     embedding: None,
+                    label_logits: None,
                 })
                 .collect();
             self.slots.retain(|s| !ids.contains(&s.id));
@@ -1486,6 +1488,7 @@ impl Engine {
                     decode_s: 0.0,
                 }),
                 embedding: Some(vector),
+                label_logits: None,
             });
         }
         self.reap(&out);

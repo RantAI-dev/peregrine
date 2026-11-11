@@ -548,6 +548,27 @@ fn a_chat_slot_is_refused_by_an_encoder() {
     engine.cancel(id);
 }
 
+#[test]
+fn a_label_slot_is_refused_by_an_encoder() {
+    let dir = tmpdir("encoder-labels");
+    let model = gemma_embedding(&dir, Format::F32, 47);
+    let mut engine = Engine::new(model, 1, 64, 1, KvPrec::F16, 0);
+    // A label read-out is a decoder's last row's logits (S4.3); an encoder has no
+    // decode path and no logits to read.
+    let err = engine
+        .admit_labels(encoder_text(2, 8), SlotCfg::default(), vec![1, 2])
+        .unwrap_err();
+    assert!(
+        err.1.contains("embedding model") && err.1.contains("label logits"),
+        "{err:?}"
+    );
+    // The refusal leaves the engine free for the slot it does serve.
+    let id = engine
+        .admit_pooled(encoder_text(3, 8), SlotCfg::default(), Pooling::Mean)
+        .unwrap();
+    engine.cancel(id);
+}
+
 /// The synthetic encoder's golden for the current kernel tier.
 ///
 /// The vector is the whole output, so the golden hashes every bit of the two vectors
