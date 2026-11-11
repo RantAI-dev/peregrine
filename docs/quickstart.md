@@ -187,6 +187,37 @@ split their thinking into `reasoning_content`, per `--reasoning-format` and the 
 `reasoning_format`. Fields the engine does not implement are refused with a 400 rather than
 silently ignored.
 
+### Tool calling
+
+With a Qwen 2.5 chat model, pass OpenAI's `tools` and the model may call one:
+
+```python
+tools = [{"type": "function", "function": {
+    "name": "get_weather",
+    "description": "Get the current weather for a city.",
+    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+}}]
+messages = [{"role": "user", "content": "What is the weather in Paris?"}]
+
+first = client.chat.completions.create(model="peregrine", messages=messages, tools=tools)
+call = first.choices[0].message.tool_calls[0]        # finish_reason is "tool_calls"
+print(call.function.name, call.function.arguments)   # get_weather {"city": "Paris"}
+
+# Run the tool yourself, then send its result back.
+messages += [first.choices[0].message,
+             {"role": "tool", "tool_call_id": call.id, "content": '{"temperature_c": 18, "sky": "clear"}'}]
+second = client.chat.completions.create(model="peregrine", messages=messages, tools=tools)
+print(second.choices[0].message.content)             # an answer in text
+```
+
+The prompt Peregrine builds for a request with tools is the one llama.cpp builds from the model's own
+chat template, byte for byte. `tool_choice` may be `"auto"` (the default) or `"none"`;
+`parallel_tool_calls: false` stops after the first call; streaming sends each call as one chunk. Not
+built yet, and refused with a 400 that says so: tool calling for other model families (Qwen 3,
+Qwen 3.5 / Bonsai 2, Llama 3, gpt-oss), and `tool_choice: "required"` or a named function, which need
+constrained sampling. A call the model writes badly (broken JSON, a tool that was not offered) comes
+back as text, not as an error.
+
 ## 6. Embeddings
 
 A causal model trained as an embedder — Qwen3-Embedding, for example — or a bidirectional encoder such

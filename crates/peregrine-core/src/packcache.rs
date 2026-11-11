@@ -57,7 +57,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The packed-layout generation. Bump this whenever `kq.rs` or `fpack.rs`
 /// changes the bytes they write, so old cache files are never trusted.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// The on-disk magic: eight bytes, then the version.
 const MAGIC: &[u8; 8] = b"PRGPACK\0";
@@ -211,9 +211,10 @@ impl PackCache {
         }
         for e in fp {
             text.push_str(&format!(
-                "fp_entry={}|{}|{}|{}|{}|{}\n",
+                "fp_entry={}|{}|{}|{}|{}|{}|{}\n",
                 e.name,
                 e.kind.label(),
+                e.source.label(),
                 e.rows,
                 e.cols,
                 e.offset,

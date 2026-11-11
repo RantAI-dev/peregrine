@@ -48,6 +48,7 @@ use peregrine_core::model::Model;
 use peregrine_core::sample::Penalties;
 use peregrine_core::serve::{Emission, Engine, Finish, SlotCfg, SlotId, Want};
 use peregrine_core::template::Template;
+use peregrine_core::tools::{self, CallParser, Event as ToolEvent, ToolFormat};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -156,6 +157,9 @@ struct Served {
     engine: Arc<EngineShared>,
     model: Arc<Model>,
     template: Template,
+    /// The tool format of the file's own `tokenizer.chat_template`, when Peregrine
+    /// has one for it. `None` refuses `tools` by name.
+    tool_format: Option<ToolFormat>,
     default_system: Option<&'static str>,
     /// Token ids that end a turn under this model's template.
     stop: Vec<u32>,
@@ -380,6 +384,11 @@ pub async fn run(a: Args) {
                 std::process::exit(2);
             }
         };
+        // The tool format of this file's own chat template, when Peregrine has one for it.
+        let tool_format = gguf
+            .str("tokenizer.chat_template")
+            .ok()
+            .and_then(ToolFormat::for_template);
         let pooling = match loaded.pooling() {
             Ok(p) => p,
             Err(e) => {
@@ -420,6 +429,7 @@ pub async fn run(a: Args) {
             engine: shared,
             model: loaded,
             template,
+            tool_format,
             default_system: template.default_system(model.name()),
             stop: template.stop_ids(&model.tk),
             max_ctx,
@@ -895,8 +905,9 @@ fn bad_json(message: String) -> (StatusCode, Json<Value>) {
 
 /// `Json<Value>`, but a body that is not JSON is answered with the same error object as every
 /// other bad request. Axum's own rejection is `text/plain`, which an OpenAI client cannot read as
-/// an error.
-struct OpenAiJson(Value);
+/// an error. The raw text is kept for the chat route's tool path, which reads the tools and
+/// messages again with the order-keeping JSON (a tool's schema is written in the request's order).
+struct OpenAiJson(Value, String);
 
 impl<S> FromRequest<S> for OpenAiJson
 where
@@ -905,11 +916,21 @@ where
     type Rejection = Response;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match Json::<Value>::from_request(req, state).await {
-            Ok(Json(body)) => Ok(OpenAiJson(body)),
-            Err(rejection) => Err(bad(format!(
-                "the request body is not valid JSON: {rejection}"
-            ))),
+        let bytes = match axum::body::Bytes::from_request(req, state).await {
+            Ok(bytes) => bytes,
+            Err(rejection) => {
+                return Err(bad(format!(
+                    "the request body is not valid JSON: {rejection}"
+                )))
+            }
+        };
+        let raw = match std::str::from_utf8(&bytes) {
+            Ok(raw) => raw.to_string(),
+            Err(_) => return Err(bad("the request body is not valid UTF-8")),
+        };
+        match serde_json::from_str(&raw) {
+            Ok(body) => Ok(OpenAiJson(body, raw)),
+            Err(e) => Err(bad(format!("the request body is not valid JSON: {e}"))),
         }
     }
 }
@@ -973,6 +994,94 @@ struct Plan {
     ignore_eos: bool,
     /// Stop sequences: generation ends when the decoded text contains one, and it is not returned.
     stop: Vec<String>,
+    /// The tool path, when the request carries tools or a tool conversation (S6.3).
+    tool: Option<ToolPlan>,
+    /// The first call id's base: derived from the request's own id, so a response's
+    /// calls are unique without a random source.
+    call_base: u64,
+}
+
+/// What one request's tool path needs: the rendered prompt and how to read the reply.
+#[derive(Clone)]
+struct ToolPlan {
+    format: ToolFormat,
+    /// The whole prompt, ending where the assistant starts to write.
+    prompt: String,
+    /// The tools' names, in request order, for the parser.
+    names: Vec<String>,
+    /// `false` for `tool_choice: "none"`: the tools are rendered, the reply is text.
+    parse: bool,
+    /// `false` for `parallel_tool_calls: false`: stop at the first complete call.
+    parallel: bool,
+}
+
+/// One call the model wrote, as the response returns it.
+#[derive(Clone)]
+struct CallOut {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// The streaming side of the tool path: feeds generated content to the parser, records
+/// the calls it returns and assigns each call its id.
+struct ToolReply {
+    parser: CallParser,
+    parallel: bool,
+    call_base: u64,
+    /// The text events joined, as `message.content`.
+    content: String,
+    calls: Vec<CallOut>,
+}
+
+impl ToolReply {
+    fn new(format: ToolFormat, names: Vec<String>, parallel: bool, call_base: u64) -> ToolReply {
+        ToolReply {
+            parser: CallParser::new(format, names),
+            parallel,
+            call_base,
+            content: String::new(),
+            calls: Vec::new(),
+        }
+    }
+
+    fn feed(&mut self, text: &str) -> Vec<ToolEvent> {
+        let mut out = Vec::new();
+        self.parser.push(text, &mut out);
+        out
+    }
+
+    fn finish(&mut self) -> Vec<ToolEvent> {
+        let mut out = Vec::new();
+        self.parser.finish(&mut out);
+        out
+    }
+
+    /// A call id: `call_` plus 24 hex characters, numbered by the request and the call.
+    fn id(&self, index: usize) -> String {
+        format!(
+            "call_{:024x}",
+            self.call_base
+                .wrapping_mul(1_000_000)
+                .wrapping_add(index as u64)
+        )
+    }
+
+    /// Record one complete call from the parser and return it for the reply.
+    fn record(&mut self, index: usize, name: String, arguments: String) -> CallOut {
+        let call = CallOut {
+            id: self.id(index),
+            name,
+            arguments,
+        };
+        self.calls.push(call.clone());
+        call
+    }
+
+    /// `parallel_tool_calls: false` has had its first complete call.
+    fn wants_stop(&self) -> bool {
+        !self.parallel && !self.calls.is_empty()
+    }
 }
 
 /// Most choices one request may ask for.
@@ -1100,7 +1209,109 @@ fn stop_sequences(b: &Value) -> Result<Vec<String>, String> {
     Ok(sequences)
 }
 
+/// Refuse the fields OpenAI replaced with `tools`/`tool_calls` by name. Accepting them
+/// silently would make a request that asked for tools generate an ordinary reply.
+fn refuse_legacy_tools(b: &Value) -> Result<(), String> {
+    for field in ["functions", "function_call"] {
+        if b.get(field).is_some_and(|v| !v.is_null()) {
+            return Err(format!(
+                "{field} is not supported by this backend; send tools and tool_choice (the newer OpenAI fields)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a reply may carry calls. `"required"` and a named function need constrained
+/// sampling (S6.6); an option that cannot be honoured is refused, not ignored.
+fn tool_choice(b: &Value) -> Result<bool, String> {
+    match b.get("tool_choice") {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::String(s)) if s == "auto" => Ok(true),
+        Some(Value::String(s)) if s == "none" => Ok(false),
+        Some(Value::String(s)) if s == "required" => Err(
+            "tool_choice \"required\" needs constrained sampling, which is not built yet".into(),
+        ),
+        Some(Value::Object(o)) => {
+            let name = o
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("a function");
+            Err(format!(
+                "tool_choice naming {name:?} needs constrained sampling, which is not built yet"
+            ))
+        }
+        Some(_) => {
+            Err("tool_choice must be \"auto\", \"none\", \"required\" or a named function".into())
+        }
+    }
+}
+
+fn parallel_tool_calls(b: &Value) -> Result<bool, String> {
+    match b.get("parallel_tool_calls") {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::Bool(v)) => Ok(*v),
+        Some(_) => Err("parallel_tool_calls must be a boolean".into()),
+    }
+}
+
+/// Whether the request asks for the tool path: non-empty `tools`, a `tool` message, or
+/// an assistant message carrying `tool_calls`.
+fn tool_fields_present(b: &Value) -> bool {
+    let tools = match b.get("tools") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(t)) => !t.is_empty(),
+        // A malformed `tools` takes the tool path so the module refuses it by name.
+        Some(_) => true,
+    };
+    let messages = b
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|ms| {
+            ms.iter().any(|m| {
+                let role = m.get("role").and_then(Value::as_str);
+                role == Some("tool")
+                    || (role == Some("assistant")
+                        && m.get("tool_calls").is_some_and(|v| !v.is_null()))
+            })
+        });
+    tools || messages
+}
+
+/// Build the tool path's prompt and parser configuration. `body` is the parsed request
+/// (for its fields); `raw` is the same body's text, parsed again with the order-keeping
+/// JSON, because a tool's schema is written into the prompt in the request's own order.
+fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan, String> {
+    let parse = tool_choice(body)?;
+    let parallel = parallel_tool_calls(body)?;
+    let ordered =
+        OrderedValue::parse(raw).map_err(|e| format!("the request body is not valid JSON: {e}"))?;
+    let tools = tools::tools_from_json(ordered.get("tools"))?;
+    let messages = ordered
+        .get("messages")
+        .ok_or_else(|| "messages must be an array".to_string())?;
+    let messages = tools::messages_from_json(messages)?;
+    let names = tools::tool_names(&tools);
+    let prompt = tools::render(format, &tools, &messages)?;
+    Ok(ToolPlan {
+        format,
+        prompt,
+        names,
+        parse,
+        parallel,
+    })
+}
+
+#[cfg(test)]
 fn plan(b: &Value) -> Result<Plan, String> {
+    plan_with(b, false)
+}
+
+fn plan_with(b: &Value, tool_path: bool) -> Result<Plan, String> {
+    refuse_legacy_tools(b)?;
+    // Validate the tool choice even without tools: `"required"` cannot be honoured.
+    tool_choice(b)?;
     reject_unsupported_sampling(b)?;
     let n = b["n"].as_u64().unwrap_or(1).max(1);
     if n > MAX_CHOICES {
@@ -1114,41 +1325,52 @@ fn plan(b: &Value) -> Result<Plan, String> {
     {
         return Err("grammar-constrained sampling is not supported by this backend".into());
     }
-    let Some(msgs) = b["messages"].as_array() else {
-        return Err("messages must be an array".into());
-    };
-    let text = |m: &Value| -> String {
-        match &m["content"] {
-            Value::String(s) => s.clone(),
-            Value::Array(parts) => parts
-                .iter()
-                .filter_map(|p| p["text"].as_str())
-                .collect::<Vec<_>>()
-                .join(""),
-            _ => String::new(),
-        }
-    };
-    let mut system: Vec<String> = vec![];
-    let mut pairs: Vec<(String, String)> = vec![];
-    let mut pending_user: Option<String> = None;
-    for m in msgs {
-        match m["role"].as_str().unwrap_or("user") {
-            "system" => system.push(text(m)),
-            "user" => {
-                if let Some(u) = pending_user.replace(text(m)) {
-                    // Two user messages in a row: the earlier one got no answer.
-                    pairs.push((u, String::new()));
+    let (system, pairs, user) = if tool_path {
+        // The tool path renders the whole conversation with the tool format; the
+        // ordinary session shape below would lose tool results and calls.
+        (None, Vec::new(), String::new())
+    } else {
+        let Some(msgs) = b["messages"].as_array() else {
+            return Err("messages must be an array".into());
+        };
+        let text = |m: &Value| -> String {
+            match &m["content"] {
+                Value::String(s) => s.clone(),
+                Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(|p| p["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            }
+        };
+        let mut system: Vec<String> = vec![];
+        let mut pairs: Vec<(String, String)> = vec![];
+        let mut pending_user: Option<String> = None;
+        for m in msgs {
+            match m["role"].as_str().unwrap_or("user") {
+                "system" => system.push(text(m)),
+                "user" => {
+                    if let Some(u) = pending_user.replace(text(m)) {
+                        // Two user messages in a row: the earlier one got no answer.
+                        pairs.push((u, String::new()));
+                    }
                 }
+                "assistant" => {
+                    let u = pending_user.take().unwrap_or_default();
+                    pairs.push((u, text(m)));
+                }
+                _ => {}
             }
-            "assistant" => {
-                let u = pending_user.take().unwrap_or_default();
-                pairs.push((u, text(m)));
-            }
-            _ => {}
         }
-    }
-    let Some(user) = pending_user else {
-        return Err("the last message must be from the user".into());
+        let Some(user) = pending_user else {
+            return Err("the last message must be from the user".into());
+        };
+        (
+            (!system.is_empty()).then(|| system.join("\n\n")),
+            pairs,
+            user,
+        )
     };
     let kw = &b["chat_template_kwargs"];
     // llama.cpp v0.9.0 maps `reasoning_effort: "none"` to thinking off and drops the
@@ -1161,7 +1383,7 @@ fn plan(b: &Value) -> Result<Plan, String> {
         None => ReasoningFormat::Auto,
     };
     Ok(Plan {
-        system: (!system.is_empty()).then(|| system.join("\n\n")),
+        system,
         pairs,
         user,
         max_tokens: b["max_tokens"].as_u64().unwrap_or(256).clamp(1, 32_768) as usize,
@@ -1187,12 +1409,21 @@ fn plan(b: &Value) -> Result<Plan, String> {
         stream: b["stream"].as_bool().unwrap_or(false),
         ignore_eos: b["ignore_eos"].as_bool().unwrap_or(false),
         stop: stop_sequences(b)?,
+        tool: None,
+        call_base: 0,
     })
 }
 
 enum Msg {
     /// A piece of text: (text, is_reasoning, logprob).
     Delta(String, bool, f32),
+    /// One complete tool call: its index in the reply, id, name and arguments (JSON text).
+    ToolCall {
+        index: usize,
+        id: String,
+        name: String,
+        arguments: String,
+    },
     Done {
         finish: &'static str,
         usage: Value,
@@ -1584,6 +1815,53 @@ impl EngineShared {
     }
 }
 
+/// Route one batch of the parser's events: text becomes a content delta, a call becomes
+/// one message carrying the whole call. `false` means the caller has gone.
+fn route_tool_events(
+    tool: &mut ToolReply,
+    events: Vec<ToolEvent>,
+    logprob: f32,
+    tx: &tokio::sync::mpsc::UnboundedSender<Msg>,
+) -> bool {
+    for event in events {
+        match event {
+            ToolEvent::Text(text) => {
+                if text.is_empty() {
+                    continue;
+                }
+                tool.content.push_str(&text);
+                if tx.send(Msg::Delta(text, false, logprob)).is_err() {
+                    return false;
+                }
+            }
+            ToolEvent::Call {
+                index,
+                name,
+                arguments,
+            } => {
+                let call = tool.record(index, name, arguments);
+                if tx
+                    .send(Msg::ToolCall {
+                        index,
+                        id: call.id,
+                        name: call.name,
+                        arguments: call.arguments,
+                    })
+                    .is_err()
+                {
+                    return false;
+                }
+                // `parallel_tool_calls: false`: the first complete call ends here,
+                // even if the parser returned more events in the same batch.
+                if tool.wants_stop() {
+                    break;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Serve one request: build its prompt, hand it to the engine, and turn the tokens it sends back into the
 /// deltas the caller is streamed. The reasoning budget is enforced here, by replanning the turn with what the
 /// model has written so far — the engine's prefix store then restores that reasoning instead of recomputing it.
@@ -1593,20 +1871,35 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
     let mut budget_left = p.max_tokens;
     let mut prefix: Option<String> = None;
     let mut finish = "stop";
+    // The tool path's parser; `None` for an ordinary request or `tool_choice: "none"`.
+    let mut tools_out = p
+        .tool
+        .as_ref()
+        .filter(|t| t.parse)
+        .map(|t| ToolReply::new(t.format, t.names.clone(), t.parallel, p.call_base));
     // gpt-oss's reply is split by control tokens; every other template's reasoning is Qwen3's
     // `<think>` span, below.
-    let mut harmony = (app.template == Template::Harmony).then(Harmony::new);
+    let mut harmony = (p.tool.is_none() && app.template == Template::Harmony).then(Harmony::new);
     // At most two passes: the turn as asked, then the same turn continued with the reasoning closed.
     for pass in 0..2 {
         let thinking = p.thinking && pass == 0;
-        let prompt_text = peregrine_core::serve::chat_prompt(
-            app.template,
-            p.system.as_deref().or(app.default_system),
-            &p.pairs,
-            &p.user,
-            thinking || prefix.is_some(),
-            prefix.as_deref(),
-        );
+        let prompt_text = match &p.tool {
+            Some(tool) => {
+                let mut prompt = tool.prompt.clone();
+                if let Some(prefix) = prefix.as_deref() {
+                    prompt.push_str(prefix);
+                }
+                prompt
+            }
+            None => peregrine_core::serve::chat_prompt(
+                app.template,
+                p.system.as_deref().or(app.default_system),
+                &p.pairs,
+                &p.user,
+                thinking || prefix.is_some(),
+                prefix.as_deref(),
+            ),
+        };
         let prompt = app.model.tk.encode_prompt(&prompt_text);
         if prompt.len() + 1 >= app.max_ctx {
             let _ = tx.send(Msg::Err(format!(
@@ -1768,7 +2061,23 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
                 run.content_tokens += 1;
                 budget_left = budget_left.saturating_sub(1);
                 let (text, hit) = stops.feed(&em.text);
-                if !push_reply(&mut run, p, &tx, text, false, em.logprob) {
+                if !text.is_empty() {
+                    match tools_out.as_mut() {
+                        Some(tool) => {
+                            let events = tool.feed(&text);
+                            if !route_tool_events(tool, events, em.logprob, &tx) {
+                                break;
+                            }
+                        }
+                        None => {
+                            if !push_reply(&mut run, p, &tx, text, false, em.logprob) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if tools_out.as_ref().is_some_and(ToolReply::wants_stop) {
+                    stopped = true;
                     break;
                 }
                 if hit {
@@ -1820,8 +2129,31 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
                 if !held.is_empty() {
                     let _ = send_harmony_delta(&mut run, p, &tx, 0.0, channel, held);
                 }
+            } else if let Some(tool) = tools_out.as_mut() {
+                if reasoning {
+                    if !push_reply(&mut run, p, &tx, held, true, 0.0) {
+                        // The caller has gone; there is nothing left to send it.
+                    }
+                } else {
+                    let events = tool.feed(&held);
+                    if !route_tool_events(tool, events, 0.0, &tx) {
+                        // The caller has gone; there is nothing left to send it.
+                    }
+                    let events = tool.finish();
+                    if !route_tool_events(tool, events, 0.0, &tx) {
+                        // The caller has gone; there is nothing left to send it.
+                    }
+                    if tool.wants_stop() {
+                        stopped = true;
+                    }
+                }
             } else if !push_reply(&mut run, p, &tx, held, reasoning, 0.0) {
                 // The caller has gone; there is nothing left to send it.
+            }
+        }
+        if let Some(tool) = tools_out.as_ref() {
+            if !tool.calls.is_empty() {
+                finish = "tool_calls";
             }
         }
         if stopped {
@@ -2228,7 +2560,7 @@ fn base64_f32(v: &[f32]) -> String {
 ///
 /// Every input of one request becomes a slot, so the texts share weight passes; the results
 /// come back in input order.
-async fn embeddings(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Response {
+async fn embeddings(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
     let app = match route_model(&state, body.get("model").and_then(Value::as_str)) {
         Ok(m) => m,
         Err(response) => return *response,
@@ -2446,7 +2778,40 @@ async fn systemone(State(state): State<Arc<App>>, OrderedJson(body): OrderedJson
     ))
 }
 
-async fn chat(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Response {
+/// One call in the OpenAI response shape.
+fn tool_call_json(call: &CallOut) -> Value {
+    json!({
+        "id": call.id,
+        "type": "function",
+        "function": {"name": call.name, "arguments": call.arguments}
+    })
+}
+
+/// One non-streamed choice: `content` is `null` when the reply is only calls, and
+/// `tool_calls` is present only when there are calls.
+fn chat_choice(
+    index: usize,
+    content: String,
+    reasoning: String,
+    calls: &[CallOut],
+    finish: &str,
+) -> Value {
+    let content = if calls.is_empty() {
+        json!(content)
+    } else if content.is_empty() {
+        Value::Null
+    } else {
+        json!(content)
+    };
+    let mut message =
+        json!({"role": "assistant", "content": content, "reasoning_content": reasoning});
+    if !calls.is_empty() {
+        message["tool_calls"] = Value::Array(calls.iter().map(tool_call_json).collect());
+    }
+    json!({"index": index, "message": message, "finish_reason": finish})
+}
+
+async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) -> Response {
     let app = match route_model(&state, body.get("model").and_then(Value::as_str)) {
         Ok(m) => m,
         Err(response) => return *response,
@@ -2464,10 +2829,26 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Re
             app.model.cfg.arch_name
         ));
     }
-    let mut p = match plan(&body) {
+    let tool_path = tool_fields_present(&body);
+    let tool = if tool_path {
+        let Some(format) = app.tool_format else {
+            return bad(format!(
+                "{}'s chat template has no tool format Peregrine supports yet",
+                app.model.name()
+            ));
+        };
+        match tool_request(format, &body, &raw) {
+            Ok(tool) => Some(tool),
+            Err(e) => return bad(e),
+        }
+    } else {
+        None
+    };
+    let mut p = match plan_with(&body, tool_path) {
         Ok(p) => p,
         Err(e) => return bad(e),
     };
+    p.tool = tool;
     if body.get("reasoning_format").is_none() {
         p.reasoning_format = state.reasoning_format;
     }
@@ -2483,7 +2864,9 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Re
             .into_response();
     }
     let busy = BusyGuard(app.clone());
-    app.requests.fetch_add(1, Ordering::SeqCst);
+    let seq = app.requests.fetch_add(1, Ordering::SeqCst) + 1;
+    // Each choice gets its own block of call ids, so the ids are unique across the response.
+    p.call_base = seq.wrapping_mul(MAX_CHOICES);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Msg>();
     let app2 = app.clone();
     let p = Arc::new(p);
@@ -2492,7 +2875,7 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Re
         let _busy = busy; // released when the generation ends, also if it panics
         generate(&app2, &p2, tx).await;
     });
-    let id = format!("chatcmpl-{}", app.requests.load(Ordering::SeqCst));
+    let id = format!("chatcmpl-{seq}");
     let model = app.alias.clone();
     if p.stream {
         let logprobs = p.logprobs;
@@ -2506,6 +2889,7 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Re
         let (txi, rxi) = tokio::sync::mpsc::unbounded_channel::<Msg>();
         let mut pi = (*p).clone();
         pi.seed = p.seed.wrapping_add(i as u64);
+        pi.call_base = p.call_base.wrapping_add(i as u64);
         let app3 = app.clone();
         let busy_i = BusyGuard(app.clone()); // this choice's place, reserved above
         tokio::spawn(async move {
@@ -2519,6 +2903,7 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Re
     let (mut prompt_tokens, mut completion_tokens) = (0u64, 0u64);
     for (index, mut rx) in rxs.into_iter().enumerate() {
         let (mut content, mut reasoning, mut lps) = (String::new(), String::new(), vec![]);
+        let mut calls = Vec::new();
         let mut done = false;
         while let Some(m) = rx.recv().await {
             match m {
@@ -2530,12 +2915,22 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Re
                         lps.push(json!({"token": t, "logprob": lp}));
                     }
                 }
+                Msg::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => calls.push(CallOut {
+                    id,
+                    name,
+                    arguments,
+                }),
                 Msg::Done {
                     finish,
                     usage,
                     timings,
                 } => {
-                    let mut choice = json!({"index": index, "message": {"role": "assistant", "content": content, "reasoning_content": reasoning}, "finish_reason": finish});
+                    let mut choice = chat_choice(index, content, reasoning, &calls, finish);
                     if p.logprobs {
                         choice["logprobs"] = json!({"content": lps});
                     }
@@ -2568,6 +2963,43 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Re
     Json(json!({"id": id, "object": "chat.completion", "model": model, "choices": choices, "usage": usage_all, "timings": timings0})).into_response()
 }
 
+/// One SSE chunk's JSON, from a message of the generation.
+fn chunk_json(m: Msg, id: &str, model: &str, logprobs: bool) -> Value {
+    match m {
+        Msg::Delta(t, r, lp) => {
+            let mut choice = json!({"index": 0, "delta": if r { json!({"reasoning_content": t}) } else { json!({"content": t}) }, "finish_reason": Value::Null});
+            if logprobs && !r {
+                choice["logprobs"] = json!({"content": [{"token": t, "logprob": lp}]});
+            }
+            json!({"id": id, "object": "chat.completion.chunk", "model": model, "choices": [choice]})
+        }
+        Msg::ToolCall {
+            index,
+            id: call_id,
+            name,
+            arguments,
+        } => {
+            let call = json!({
+                "index": index,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments}
+            });
+            json!({"id": id, "object": "chat.completion.chunk", "model": model, "choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": Value::Null}]})
+        }
+        Msg::Done {
+            finish,
+            usage,
+            timings,
+        } => {
+            json!({"id": id, "object": "chat.completion.chunk", "model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": usage, "timings": timings})
+        }
+        Msg::Err(e) => {
+            json!({"error": {"message": e}})
+        }
+    }
+}
+
 fn async_stream(
     rx: tokio::sync::mpsc::UnboundedReceiver<Msg>,
     id: String,
@@ -2575,30 +3007,10 @@ fn async_stream(
     logprobs: bool,
 ) -> impl futures::Stream<Item = Result<Event, std::convert::Infallible>> {
     use tokio_stream::StreamExt;
-    tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(move |m| {
-        let v = match m {
-            Msg::Delta(t, r, lp) => {
-                let mut choice = json!({"index": 0, "delta": if r { json!({"reasoning_content": t}) } else { json!({"content": t}) }, "finish_reason": Value::Null});
-                if logprobs && !r {
-                    choice["logprobs"] = json!({"content": [{"token": t, "logprob": lp}]});
-                }
-                json!({"id": id, "object": "chat.completion.chunk", "model": model, "choices": [choice]})
-            }
-            Msg::Done {
-                finish,
-                usage,
-                timings,
-            } => {
-                json!({"id": id, "object": "chat.completion.chunk", "model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": usage, "timings": timings})
-            }
-            Msg::Err(e) => {
-                json!({"error": {"message": e}})
-            }
-        };
-        Ok(Event::default().data(v.to_string()))
-    })
-    // `[DONE]` after the last chunk, as llama-server and vLLM send it.
-    .chain(tokio_stream::once(Ok(Event::default().data("[DONE]"))))
+    tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+        .map(move |m| Ok(Event::default().data(chunk_json(m, &id, &model, logprobs).to_string())))
+        // `[DONE]` after the last chunk, as llama-server and vLLM send it.
+        .chain(tokio_stream::once(Ok(Event::default().data("[DONE]"))))
 }
 
 /// Log to stderr at `info`, or as `RUST_LOG` says.
@@ -2613,8 +3025,9 @@ pub fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_f32, continuation_prefix, fit_tokens, parse_embedding_request, plan, EmbedInput,
-        Penalties, ReasoningFormat,
+        base64_f32, chat_choice, chunk_json, continuation_prefix, fit_tokens,
+        parse_embedding_request, plan, route_tool_events, tool_fields_present, tool_request,
+        EmbedInput, Msg, Penalties, ReasoningFormat, ToolFormat, ToolReply,
     };
     use axum::Json;
     use serde_json::{json, Value};
@@ -3227,5 +3640,296 @@ mod tests {
         assert_eq!(base64_f32(&[1.0, 1.0]).len(), 12);
         assert!(base64_f32(&[1.0, 1.0]).ends_with('='));
         assert!(!base64_f32(&[1.0, 1.0]).ends_with("=="));
+    }
+
+    // --- S6.3: the tool path -------------------------------------------------------------
+
+    fn tool_format() -> ToolFormat {
+        ToolFormat::for_template(peregrine_core::tools::QWEN25_TEMPLATE)
+            .expect("the hermes template")
+    }
+
+    fn weather_tools() -> Value {
+        json!([{
+            "type": "function",
+            "function": {
+                "name": "weather",
+                "description": "Weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"]
+                }
+            }
+        }])
+    }
+
+    fn tool_body(extra: Value) -> Value {
+        let mut b = json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "What is the weather in Paris?"}]
+        });
+        if let Some(obj) = extra.as_object() {
+            for (k, v) in obj {
+                b[k] = v.clone();
+            }
+        }
+        b
+    }
+
+    fn request(extra: Value) -> super::ToolPlan {
+        let b = tool_body(extra);
+        tool_request(tool_format(), &b, &b.to_string()).expect("the tool request")
+    }
+
+    #[test]
+    fn the_tool_path_is_only_taken_for_tools_or_tool_messages() {
+        assert!(!tool_fields_present(&tool_body(json!({}))));
+        assert!(!tool_fields_present(&tool_body(json!({"tools": []}))));
+        assert!(tool_fields_present(&tool_body(
+            json!({"tools": weather_tools()})
+        )));
+        assert!(tool_fields_present(&tool_body(
+            json!({"messages": [{"role": "user", "content": "hi"}, {"role": "tool", "content": "21"}]})
+        )));
+        assert!(tool_fields_present(&tool_body(
+            json!({"messages": [{"role": "assistant", "content": null, "tool_calls": []}, {"role": "user", "content": "hi"}]})
+        )));
+        // A malformed field takes the path too, so the module refuses it by name.
+        assert!(tool_fields_present(&tool_body(json!({"tools": "weather"}))));
+    }
+
+    #[test]
+    fn a_tool_request_renders_its_tool_names() {
+        let t = request(json!({"tools": weather_tools()}));
+        assert_eq!(t.names, vec!["weather".to_string()]);
+        assert!(t.parse, "auto means calls are read");
+        assert!(t.parallel, "parallel calls default on");
+        assert_eq!(t.format.name(), "hermes");
+        assert!(!t.prompt.is_empty());
+    }
+
+    #[test]
+    fn tool_choice_none_renders_the_same_way_but_returns_text() {
+        let t = request(json!({"tools": weather_tools(), "tool_choice": "none"}));
+        assert!(!t.parse);
+        assert!(!t.prompt.is_empty());
+    }
+
+    #[test]
+    fn required_and_named_choices_are_refused_for_constrained_sampling() {
+        for choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "weather"}}),
+        ] {
+            let b = tool_body(json!({"tools": weather_tools(), "tool_choice": choice}));
+            let err = tool_request(tool_format(), &b, &b.to_string())
+                .err()
+                .expect("refused");
+            assert!(err.contains("constrained sampling"), "{err}");
+        }
+        let b = tool_body(json!({"tools": weather_tools(), "tool_choice": "required"}));
+        let err = plan(&b).err().expect("refused even without the tool path");
+        assert!(err.contains("required"), "{err}");
+    }
+
+    #[test]
+    fn the_legacy_tool_fields_are_refused_by_name() {
+        for field in ["functions", "function_call"] {
+            let b = tool_body(json!({field: []}));
+            let err = plan(&b).err().expect("refused");
+            assert!(err.contains(field), "{field}: {err}");
+        }
+    }
+
+    #[test]
+    fn bad_tools_and_bad_messages_are_refused_by_name() {
+        let b = tool_body(json!({"tools": [{"type": "plugin", "function": {"name": "x"}}]}));
+        let err = tool_request(tool_format(), &b, &b.to_string())
+            .err()
+            .expect("refused");
+        assert!(err.contains("type"), "{err}");
+
+        let b = tool_body(json!({
+            "tools": weather_tools(),
+            "messages": "not an array"
+        }));
+        let err = tool_request(tool_format(), &b, &b.to_string())
+            .err()
+            .expect("refused");
+        assert!(err.contains("messages"), "{err}");
+
+        let b = tool_body(json!({"tools": "weather"}));
+        assert!(tool_request(tool_format(), &b, &b.to_string()).is_err());
+    }
+
+    const WEATHER_CALL: &str =
+        r#"<tool_call>{"name": "weather", "arguments": {"city": "Paris"}}</tool_call>"#;
+    const SEARCH_CALL: &str =
+        r#"<tool_call>{"name": "search", "arguments": {"query": "museum hours"}}</tool_call>"#;
+
+    /// Drive the response path the way `generate` does: pieces of generated content into
+    /// the parser, its events into messages.
+    fn drive(pieces: &[&str], parallel: bool) -> (String, Vec<super::CallOut>, Vec<Msg>) {
+        let mut tool = ToolReply::new(
+            tool_format(),
+            vec!["weather".into(), "search".into()],
+            parallel,
+            42,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for piece in pieces {
+            let events = tool.feed(piece);
+            assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+            if tool.wants_stop() {
+                break;
+            }
+        }
+        if !tool.wants_stop() {
+            let events = tool.finish();
+            assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        }
+        drop(tx);
+        let mut sent = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            sent.push(m);
+        }
+        (tool.content, tool.calls, sent)
+    }
+
+    #[test]
+    fn text_only_is_ordinary_content_with_no_calls() {
+        let (content, calls, sent) = drive(&["It is ", "sunny."], true);
+        assert_eq!(content, "It is sunny.");
+        assert!(calls.is_empty());
+        assert_eq!(sent.len(), 2);
+        let choice = chat_choice(0, content, String::new(), &calls, "stop");
+        assert_eq!(choice["message"]["content"], "It is sunny.");
+        assert!(choice["message"].get("tool_calls").is_none());
+        assert_eq!(choice["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn one_call_has_no_content_and_is_returned_as_a_call() {
+        let (content, calls, _) = drive(&[WEATHER_CALL], true);
+        assert!(content.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "weather");
+        assert_eq!(calls[0].id.len(), 29);
+        assert!(calls[0].id.starts_with("call_"));
+        let choice = chat_choice(0, content, String::new(), &calls, "tool_calls");
+        assert!(choice["message"]["content"].is_null());
+        assert_eq!(choice["message"]["tool_calls"][0]["type"], "function");
+        assert_eq!(
+            choice["message"]["tool_calls"][0]["function"]["name"],
+            "weather"
+        );
+        let args: Value = serde_json::from_str(
+            choice["message"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args["city"], "Paris");
+        assert_eq!(choice["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn text_before_two_calls_keeps_its_text_and_both_calls() {
+        let (content, calls, _) = drive(&["Checking. ", WEATHER_CALL, SEARCH_CALL], true);
+        assert_eq!(content, "Checking.");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "weather");
+        assert_eq!(calls[1].name, "search");
+        assert_ne!(calls[0].id, calls[1].id, "ids are unique in one response");
+    }
+
+    #[test]
+    fn a_broken_call_is_text_never_an_error() {
+        let broken = r#"<tool_call>{"name": "weather", "arguments": {"city": }}</tool_call>"#;
+        let (content, calls, _) = drive(&[broken], true);
+        assert!(calls.is_empty());
+        assert!(content.contains("weather"), "{content}");
+    }
+
+    #[test]
+    fn an_unknown_tool_name_is_text() {
+        let unknown = r#"<tool_call>{"name": "stocks", "arguments": {}}</tool_call>"#;
+        let (content, calls, _) = drive(&[unknown], true);
+        assert!(calls.is_empty());
+        assert!(content.contains("stocks"), "{content}");
+    }
+
+    #[test]
+    fn a_call_split_across_pieces_is_still_one_call() {
+        let mut pieces = Vec::new();
+        for part in WEATHER_CALL.as_bytes().chunks(5) {
+            pieces.push(std::str::from_utf8(part).unwrap());
+        }
+        let (content, calls, _) = drive(&pieces, true);
+        assert!(content.is_empty(), "{content}");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "weather");
+    }
+
+    #[test]
+    fn parallel_false_stops_at_the_first_call() {
+        let (_, calls, _) = drive(&[WEATHER_CALL, SEARCH_CALL], false);
+        assert_eq!(calls.len(), 1, "only the first complete call is returned");
+        assert_eq!(calls[0].name, "weather");
+    }
+
+    #[test]
+    fn streaming_chunks_carry_content_then_a_whole_call_then_the_finish() {
+        let (_, calls, sent) = drive(&["Checking. ", WEATHER_CALL], true);
+        assert_eq!(calls.len(), 1);
+        let chunks: Vec<Value> = sent
+            .into_iter()
+            .map(|m| chunk_json(m, "chatcmpl-1", "test", false))
+            .collect();
+        assert_eq!(chunks[0]["choices"][0]["delta"]["content"], "Checking.");
+        assert_eq!(
+            chunks[1]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            0
+        );
+        assert_eq!(
+            chunks[1]["choices"][0]["delta"]["tool_calls"][0]["id"],
+            calls[0].id
+        );
+        assert_eq!(
+            chunks[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "weather"
+        );
+        let done = chunk_json(
+            Msg::Done {
+                finish: "tool_calls",
+                usage: json!({}),
+                timings: json!({}),
+            },
+            "chatcmpl-1",
+            "test",
+            false,
+        );
+        assert_eq!(done["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(done["choices"][0]["delta"], json!({}));
+    }
+
+    #[test]
+    fn reasoning_is_not_seen_by_the_parser() {
+        // The parser is only given content: a call written inside a reasoning piece would
+        // reach it as a call if reasoning were fed. `drive` (like `generate`) never feeds it.
+        let (content, calls, _) = drive(&["plain text"], true);
+        assert_eq!(content, "plain text");
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn a_response_with_calls_has_finish_reason_tool_calls() {
+        let (_, calls, _) = drive(&[WEATHER_CALL], true);
+        assert!(!calls.is_empty());
+        assert_eq!(
+            chat_choice(0, String::new(), String::new(), &calls, "tool_calls")["finish_reason"],
+            "tool_calls"
+        );
     }
 }

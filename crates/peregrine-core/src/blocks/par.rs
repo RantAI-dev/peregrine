@@ -718,6 +718,26 @@ impl<'a, T> Disjoint<'a, T> {
         std::slice::from_raw_parts_mut(self.ptr.add(off), len)
     }
 
+    /// A mutable window `[off..off+len]` that is **not** claimed as a whole.
+    ///
+    /// A strided writer owns scattered rows of one buffer (each activation row of a
+    /// projection's output); the window spans the rows of other tasks too, so it
+    /// cannot be claimed as `chunk` does. The caller guarantees its *elements* are
+    /// disjoint from every other task's, exactly as if it wrote them with `set`.
+    ///
+    /// # Safety
+    /// `off..off+len` must be in bounds, and every element this task writes through
+    /// the window must belong to it alone.
+    #[inline(always)]
+    pub unsafe fn window_mut(&self, off: usize, len: usize) -> &'a mut [T] {
+        assert!(
+            off.checked_add(len).map_or(false, |end| end <= self.len),
+            "Disjoint::window_mut out of bounds: off={off}, len={len}, total={}",
+            self.len
+        );
+        std::slice::from_raw_parts_mut(self.ptr.add(off), len)
+    }
+
     /// Alias for `chunk`.
     ///
     /// # Safety

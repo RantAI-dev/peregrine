@@ -128,6 +128,26 @@ served — so they share the cores instead of competing for them, and a request'
 change because another model is busy. An unknown `model` is a 404. Every model loads at start; there
 is no unloading of idle models.
 
+### Tool calling
+
+Send OpenAI's `tools` with a chat request and the model may answer with `tool_calls`:
+
+```sh
+curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+  "tools": [{"type": "function", "function": {
+    "name": "get_weather", "description": "Get the current weather for a city.",
+    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]
+}'
+```
+
+The reply's `message.tool_calls` holds the call (`get_weather` with `{"city": "Paris"}`) and
+`finish_reason` is `"tool_calls"`. Run the tool, then send the conversation back with the assistant's
+message and a `tool` message carrying the result, and the model answers in text. Supported today:
+Qwen 2.5 chat models; `tool_choice` `"auto"` and `"none"`; `parallel_tool_calls`; streaming. Other
+model families, and `tool_choice: "required"` or a named function, are refused with a 400 until they
+are built ([design](docs/design/s6-tool-calling.md)).
+
 For a long-lived service, `--background` detaches the server, writes a lifecycle state file and a log,
 and returns once it is listening:
 
@@ -320,6 +340,7 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 | Tokenizers | GPT-2 byte-level BPE (smollm, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 | Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
+| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format); the prompt is the one llama.cpp builds from the model's template |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->
 

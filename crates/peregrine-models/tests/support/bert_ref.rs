@@ -85,6 +85,26 @@ fn mat(g: &Gguf, name: &str) -> Mat {
     let t = g.tensor(name).unwrap_or_else(|e| panic!("{name}: {e}"));
     let d_in = t.dims[0] as usize;
     let d_out = t.dims.get(1).copied().unwrap_or(1) as usize;
+    // S4.9m: a small Q8_0 matrix dequantised into f32 panels at load reads as the
+    // float path, on the dequantised rows (`scale × code`, exact in f32).
+    if t.fp_kind.is_some() {
+        let src_rb = peregrine_core::quant::row_bytes(t.kind, d_in);
+        let mut bytes = vec![0u8; d_out * d_in * 4];
+        let mut row = vec![0.0f32; d_in];
+        for r in 0..d_out {
+            let src = &g.bytes(t)[r * src_rb..(r + 1) * src_rb];
+            dequant_row(t.kind, src, &mut row);
+            for (i, &v) in row.iter().enumerate() {
+                bytes[(r * d_in + i) * 4..(r * d_in + i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        return Mat {
+            kind: Format::F32,
+            bytes,
+            d_in,
+            d_out,
+        };
+    }
     Mat {
         kind: t.kind,
         bytes: g.bytes(t).to_vec(),

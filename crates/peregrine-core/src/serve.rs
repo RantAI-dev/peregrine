@@ -742,6 +742,9 @@ impl Engine {
         // cache: the scratch must hold the longest accepted text (the engine's context)
         // and the budget of one step is that many rows (design §2.2).
         let bidirectional = model.causality() == crate::arch::Causality::Bidirectional;
+        // A small float-only encoder (a converted Q8_0 one included) takes whole-text
+        // passes of `SMALL_FLOAT_ENCODER_BYTES` rows (S4.9m).
+        let float_only = !model.act_layout().quantize;
         // The prompt tokens one weight pass carries.
         let prefill_chunk = prefill_chunk.clamp(1, crate::options::MAX_PREFILL_CHUNK);
         // The rows one non-decoding pass carries (S4.9b). A bidirectional model schedules
@@ -753,6 +756,8 @@ impl Engine {
                     c.d_model,
                     model.bytes_per_param(),
                     bidirectional,
+                    model.weight_bytes(),
+                    float_only,
                 )
             })
             .clamp(1, crate::options::MAX_PASS_ROWS);

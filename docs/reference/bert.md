@@ -159,7 +159,6 @@ llama.cpp's; the measurements below show it (bge-small F32 against the fp32 PyTo
 
 Two definitions live in `peregrine-kernels/src/vmath.rs` and are shared with the test
 reference — their arithmetic and order are part of the result:
-
 - **`erf(x)`** (`vmath::erf`). `x` is f32; every intermediate is f64 and the result is rounded
   to f32 once. Range split, all on `a = |x|`: 10 terms of the Maclaurin series
   `erf(x) = (2/√π)·x·Σ_k (−1)^k x^(2k)/(k!(2k+1))` for `a ≤ 1`, 22 terms for `1 < a ≤ 2`, 36
@@ -180,8 +179,15 @@ reference — their arithmetic and order are part of the result:
   `out_i = ((x_i − m_f32)·inv)·w_i + b_i`, three plain f32 operations, deliberately not fused.
   `m` is rounded once for the shift and unrounded for the variance (the two-pass form).
 
-There is no AVX2 body yet: `// S4.9h:` marks where it goes, and the note says its lane
-arithmetic must reproduce these sequences exactly.
+The AVX2 bodies (S4.9h) reproduce these sequences lane for lane, so they are `to_bits` equal to
+the scalar twins. `gelu_erf_rows` takes sixteen elements per step, four `f64` lanes per `erf`,
+and evaluates the three polynomials above as three Horner chains selected per lane; a block of
+sixteen takes the shortest path every lane in it can take. `layer_norm_rows` takes eight rows per
+step, one `f64` lane per row, so a row's sums stay in index order, and does the scale-and-shift
+eight `f32` lanes along the row. A `layer_norm_rows` row holding an infinity or a NaN produces a
+NaN on both paths, but the NaN payload is not part of the definition (narrowing an `f64` NaN to
+`f32` differs between `cvtsd2ss` and `vcvtpd2ps`); every finite row is bit-identical. aarch64
+keeps the scalar twins and has a `// S4.9h:` note where the NEON bodies go.
 
 ## Accuracy: against llama.cpp and against the truth
 
@@ -257,42 +263,52 @@ tokens 6.8 vs 6.6, 512 tokens 1.24 vs 3.12. Single 16-token text p50: **7.2 ms**
 9.2 ms on MiniLM, 11.7 ms vs 16.2 ms on bge-small (4 threads).
 
 So: ahead on single short texts (the p50 row matters for guard and router models), level at
-batches of short texts, and 15–30 % behind at 128 and 512 tokens. That residue is the
-element-wise work this step ships scalar — the exact GELU (`erf` in f64) and the per-row
-LayerNorms — not attention any more.
+batches of short texts, and behind at 128 and 512 tokens. The residue there is the matrix work
+and attention's tail. S4.9h vectorised the exact GELU and the per-row LayerNorms (each with a
+bit-identical scalar twin) and stopped a float file's activation fills from building int8
+layouts nothing reads.
 
-Temporary per-phase timers on one 420-token MiniLM text, warm passes, 4 threads, ~170 ms:
+Temporary per-phase timers on one 420-token MiniLM text, warm passes, 4 threads. The S4.6a
+column is the note's own measurement at about 170 ms; the S4.9h column is the minimum of 12 warm
+passes on the same host at load average 6.6-6.8 (minimising the shared host's noise):
 
-| phase | ms | share |
+| phase | S4.6a ms (share) | S4.9h ms (share) |
 |---|---|---|
-| embedding lookup + embedding LayerNorm + first activation fills | 40 | 23 % |
-| attention (the S4.9g strip) | 44 | 26 % |
-| q/k/v | 17 | 10 % |
-| `attn_output` + `attn_output_norm` | 20 | 12 % |
-| `ffn_up` (+ bias) | 25 | 15 % |
-| the scalar GELU (420 × 1536 × 6 evaluations) | 16 | 10 % |
-| `ffn_down` + `layer_output_norm` | 8 | 5 % |
-| pooling | 0.1 | — |
+| embedding lookup | 40 (23 %) with norm and fills | 1.2 (1 %) |
+| embedding LayerNorm + fill | — | 0.2 (0 %) |
+| attention (the S4.9g strip) | 44 (26 %) | 27.9 (29 %) |
+| q/k/v | 17 (10 %) | 15.5 (16 %) |
+| `attn_output` + bias + residual | 20 (12 %) with norm | 6.0 (6 %) |
+| `attn_output_norm` + fill | — | 0.6 (1 %) |
+| `ffn_up` | 25 (15 %) | 20.7 (21 %) |
+| the exact GELU + fill | 16 (10 %) | 8.6 (9 %) |
+| `ffn_down` + bias + residual | 8 (5 %) with norm | 15.7 (16 %) |
+| `layer_output_norm` + fill | — | 0.6 (1 %) |
+| pooling | 0.1 | 0.1 |
+| **pass** | **~170** | **97.0** |
 
-Before S4.9g the same text was 636 ms at 4 threads with attention at 55 % (and 1321 ms on one
-thread with attention at 74 %), which is exactly the deficit the strip removed. The embedding
-phase's cost is the row gather plus the serial int8 quantisation `QuantAct::fill` still performs
-for a file whose matrices are F16 (the per-256 layout is skipped, the per-32 one is not) — the
-lever S4.9k names.
+The S4.6a column's rows group the phases differently and the host's load differs, so only the
+shares of the element-wise rows are directly comparable: the GELU, the LayerNorms and the fills
+were about a third of the pass and are now about a tenth. The embedding phase's 40 ms was the
+serial int8 quantisation `QuantAct::fill` performed for a file whose matrices are F16; a pure
+float file now keeps only the f32 row copy, and the gather is 1 % of the pass.
 
 ## What Peregrine does
 
 - `Bert::forward_texts` runs one whole text per unit (never chunked, no KV cache), with all
-  texts of a pass side by side in the shared GEMM; a layer's activation is quantised once per
+  texts of a pass side by side in the shared GEMM; a layer's activation is filled once per
   distinct input (the normed rows for q/k/v, the same rows for `ffn_up`, the GELU output for
   `ffn_down`) and the matrices that share it run in one fork-join (S4.9a). F32/F16 files go
-  through the packed float GEMM (S4.9f), Q8_0 files through the int8 tiles; biases are added
-  after the matmul, as llama.cpp does.
+  through the packed float GEMM (S4.9f), Q8_0 files through the int8 tiles; a pure F32/F16/BF16
+  file does not build the int8 layouts at all (S4.9h), and the norm or GELU that produces a row
+  fills it in the same pool task. Biases are added after the matmul, as llama.cpp does, with the
+  attention output's bias and residual fused into the projection's chunk.
 - The family refuses a text longer than the position table, naming it; chat and label requests
   on it are refused by the engine with the model's name (`is an embedding model …`).
 - Pooling is the text's own rows in position order (`embed::pool_rows_into`), then `finish`'s
   truncation and L2 normalisation.
-- The exact GELU and the defined LayerNorm above; no f16 lookup table.
+- The exact GELU and the defined LayerNorm above, with their AVX2 bodies and no f16 lookup
+  table; the scalar twins are the reference's.
 - Attention is the engine's shared bidirectional block (`blocks::bidir::attend_texts`, now the
   S4.9g strip kernel), the way the float matmul chain is shared: the exact scalar reference
   forward in the tests owns the graph around it and calls the block for the `n × n` attention, so

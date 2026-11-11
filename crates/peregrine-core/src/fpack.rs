@@ -42,8 +42,11 @@ const EMBEDDING: &str = "token_embd.weight";
 pub struct FpEntry {
     /// The tensor's name in the file.
     pub name: String,
-    /// The matrix's format: one of the three float formats.
+    /// The matrix's format in the panel store: one of the three float formats.
     pub kind: Format,
+    /// The matrix's format in the file. Different from `kind` only for a Q8_0 matrix
+    /// dequantised into f32 panels at load (S4.9m).
+    pub source: Format,
     /// Where the matrix's panels start in the store.
     pub offset: usize,
     /// How many bytes they take (whole panels, the last one zero-padded).
@@ -70,23 +73,45 @@ pub fn eligible(t: &TensorInfo) -> bool {
         && t.dims[1] > 0
 }
 
-/// The matrices the store holds, in store order.
+/// Whether a Q8_0 matrix can be dequantised into f32 panels (S4.9m): two-dimensional,
+/// not the gathered embedding, and a whole number of 32-weight blocks.
+pub fn convertible(t: &TensorInfo) -> bool {
+    t.kind == Format::Q8_0
+        && t.dims.len() == 2
+        && t.name != EMBEDDING
+        && t.dims[0] > 0
+        && t.dims[1] > 0
+        && t.dims[0].is_multiple_of(32)
+}
+
+/// The matrices the store holds, in store order, without conversion.
+pub fn layout(g: &Gguf) -> Vec<FpEntry> {
+    layout_with(g, false)
+}
+
+/// The matrices the store holds, in store order; `q8_as_f32` adds every
+/// [`convertible`] Q8_0 matrix, its panels written in F32 (S4.9m).
 ///
 /// The order is the file's own: the matrices are laid out by their offset in the
 /// data section, so a file always produces the same store.
-pub fn layout(g: &Gguf) -> Vec<FpEntry> {
-    let mut mats: Vec<(&String, &TensorInfo)> =
-        g.tensors.iter().filter(|(_, t)| eligible(t)).collect();
+pub fn layout_with(g: &Gguf, q8_as_f32: bool) -> Vec<FpEntry> {
+    let mut mats: Vec<(&String, &TensorInfo)> = g
+        .tensors
+        .iter()
+        .filter(|(_, t)| eligible(t) || (q8_as_f32 && convertible(t)))
+        .collect();
     mats.sort_by_key(|(name, t)| (t.offset, name.as_str()));
     let mut entries = Vec::with_capacity(mats.len());
     let mut at = 0usize;
     for (name, t) in mats {
         let rows = t.dims[1] as usize;
         let cols = t.dims[0] as usize;
-        let len = peregrine_kernels::fpack::packed_len(t.kind, rows, cols);
+        let kind = if convertible(t) { Format::F32 } else { t.kind };
+        let len = peregrine_kernels::fpack::packed_len(kind, rows, cols);
         entries.push(FpEntry {
             name: name.clone(),
-            kind: t.kind,
+            kind,
+            source: t.kind,
             offset: at,
             len,
             rows,
@@ -103,7 +128,15 @@ pub fn layout(g: &Gguf) -> Vec<FpEntry> {
 /// The families read the file after this, so every matrix they hold carries the
 /// offset of its packed panels.
 pub fn repack(g: &mut Gguf) -> FpStore {
-    let entries = layout(g);
+    repack_with(g, false)
+}
+
+/// [`repack`], converting every [`convertible`] Q8_0 matrix into f32 panels when
+/// `q8_as_f32` is set (S4.9m). The tensor keeps its file format and gains
+/// [`TensorInfo::fp_kind`], so a reader of the file's bytes is unaffected while the
+/// float path sees an f32 panel.
+pub fn repack_with(g: &mut Gguf, q8_as_f32: bool) -> FpStore {
+    let entries = layout_with(g, q8_as_f32);
     let total: usize = entries.iter().map(|e| e.len).sum();
     let mut store = FpStore::new(total);
     {
@@ -118,6 +151,7 @@ pub fn repack(g: &mut Gguf) -> FpStore {
     for e in &entries {
         if let Some(t) = g.tensors.get_mut(&e.name) {
             t.fp_off = Some(e.offset);
+            t.fp_kind = (e.kind != e.source).then_some(e.kind);
         }
     }
     store
@@ -131,9 +165,15 @@ pub fn repack(g: &mut Gguf) -> FpStore {
 fn pack_matrix(file: &Gguf, e: &FpEntry, t: &TensorInfo, dst: &mut [u8]) {
     const CHUNK_BYTES: usize = 64 << 20;
     let pb = peregrine_kernels::fpack::panel_bytes(e.kind, e.cols);
-    let rb = e.cols * peregrine_kernels::fpack::elem_bytes(e.kind);
+    // The bytes the file holds per row, and the bytes one row takes in the store.
+    let rb = crate::quant::row_bytes(e.source, e.cols);
+    let out_row = e.cols * peregrine_kernels::fpack::elem_bytes(e.kind);
     let per_chunk = (CHUNK_BYTES / rb.max(1)).max(PANEL).div_ceil(PANEL) * PANEL;
     let mut buf = vec![0u8; per_chunk.min(e.rows) * rb];
+    // A Q8_0 row decoded to f32, and the F32 bytes the panel writer reads; only used
+    // when the matrix is converted, where one panel's rows are decoded at a time.
+    let mut decoded = vec![0.0f32; PANEL * e.cols];
+    let mut bytes = vec![0u8; PANEL * out_row];
     let mut first = 0usize;
     while first < e.rows {
         let n = (e.rows - first).min(per_chunk);
@@ -143,15 +183,40 @@ fn pack_matrix(file: &Gguf, e: &FpEntry, t: &TensorInfo, dst: &mut [u8]) {
         for local in (0..n).step_by(PANEL) {
             let p = (first + local) / PANEL;
             let k = (n - local).min(PANEL);
-            let refs: Vec<&[u8]> = (0..k)
-                .map(|r| &buf[(local + r) * rb..(local + r + 1) * rb])
-                .collect();
-            peregrine_kernels::fpack::pack_panel(
-                e.kind,
-                &refs,
-                e.cols,
-                &mut dst[p * pb..(p + 1) * pb],
-            );
+            if e.source == e.kind {
+                let refs: Vec<&[u8]> = (0..k)
+                    .map(|r| &buf[(local + r) * rb..(local + r + 1) * rb])
+                    .collect();
+                peregrine_kernels::fpack::pack_panel(
+                    e.kind,
+                    &refs,
+                    e.cols,
+                    &mut dst[p * pb..(p + 1) * pb],
+                );
+            } else {
+                // Dequantise this panel's rows (`scale × code` is exact in f32) and
+                // write them in the panel writer's F32 row form.
+                for r in 0..k {
+                    let row = &buf[(local + r) * rb..(local + r + 1) * rb];
+                    peregrine_kernels::quant::dequant_row(
+                        e.source,
+                        row,
+                        &mut decoded[r * e.cols..(r + 1) * e.cols],
+                    );
+                }
+                for (i, &v) in decoded[..k * e.cols].iter().enumerate() {
+                    bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                }
+                let refs: Vec<&[u8]> = (0..k)
+                    .map(|r| &bytes[r * out_row..(r + 1) * out_row])
+                    .collect();
+                peregrine_kernels::fpack::pack_panel(
+                    e.kind,
+                    &refs,
+                    e.cols,
+                    &mut dst[p * pb..(p + 1) * pb],
+                );
+            }
         }
         first += n;
     }
@@ -171,6 +236,7 @@ mod tests {
             tile_off: None,
             kq_off: None,
             fp_off: None,
+            fp_kind: None,
         };
         assert!(eligible(&ti(
             "blk.0.attn_q.weight",
@@ -214,6 +280,7 @@ mod tests {
         let e = FpEntry {
             name: "w".into(),
             kind: Format::F16,
+            source: Format::F16,
             offset: 0,
             len: peregrine_kernels::fpack::packed_len(Format::F16, 17, 8),
             rows: 17,

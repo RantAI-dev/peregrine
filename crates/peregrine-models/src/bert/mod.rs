@@ -336,6 +336,10 @@ impl Bert {
 /// runs in as many calls as it takes, one weight pass each. Rows of the batch are
 /// contiguous, so the chunk is a plain row range and a row's bits do not depend on
 /// where a chunk boundary fell.
+///
+/// `post` runs on each chunk's output as the projection leaves it, so the rows are
+/// still in cache: the bias, the residual and the activation are applied there
+/// (S4.9h) rather than in another walk over the whole batch.
 #[allow(clippy::too_many_arguments)]
 fn linear_rows(
     w: &Weights,
@@ -351,6 +355,7 @@ fn linear_rows(
     out: &mut [f32],
     out_dim: usize,
     kq: &mut peregrine_kernels::kq::KqActs,
+    mut post: impl FnMut(&mut [f32], usize),
 ) {
     let step = peregrine_core::blocks::linear::MAX_BATCH;
     let mut r0 = 0;
@@ -380,6 +385,7 @@ fn linear_rows(
             stats,
             kq,
         );
+        post(&mut out[r0 * out_dim..r1 * out_dim], r0);
         r0 = r1;
     }
 }
@@ -462,40 +468,61 @@ fn add_bias(out: &mut [f32], dim: usize, nb: usize, bias: &[f32]) {
     }
 }
 
-/// LayerNorm every row of the batch into `out` (f32 only, no quantisation); the
-/// per-row arithmetic is `vmath::layer_norm_row`'s, and shared with the reference.
+/// `out[row][i] = (out[row][i] + bias[i]) + residual[row][i]` in one pass (the
+/// residual walk and the bias walk are the same memory, S4.9h). A projection whose
+/// bias is all zero skips the bias add, as [`add_bias`] does, so a `-0.0` stays.
+#[inline]
+fn add_bias_residual(out: &mut [f32], residual: &[f32], bias: &[f32], dim: usize) {
+    if bias.iter().all(|&b| b == 0.0) {
+        for (o, &r) in out.iter_mut().zip(residual) {
+            *o += r;
+        }
+        return;
+    }
+    for (row, res) in out.chunks_mut(dim).zip(residual.chunks_exact(dim)) {
+        for ((o, &b), &r) in row.iter_mut().zip(bias).zip(res) {
+            *o = (*o + b) + r;
+        }
+    }
+}
+
+/// LayerNorm every row of the batch into `out`, then fill each row's activation
+/// while the row is still in cache (`acts[r] = out row r`). The arithmetic is
+/// `vmath::layer_norm_rows`'s, which is `vmath::layer_norm_row`'s per row.
 ///
 /// Rows are independent, so a batch is split across the pool; a row's bits are the
-/// per-row result's whatever the split.
+/// per-row result's whatever the split. The fill is the S4.9a rule: the norm that
+/// produces a row is the one place that row is quantised.
 #[allow(clippy::too_many_arguments)]
-fn layer_norm_rows(
+fn layer_norm_rows_fill(
     pool: &Pool,
     stats: &mut StepStats,
-    x: &[f32],
+    x: &mut [f32],
     w: &[f32],
     b: &[f32],
     eps: f32,
     dim: usize,
     nb: usize,
     out: &mut [f32],
+    acts: &mut [QuantAct],
 ) {
     let parallel = nb >= peregrine_core::blocks::ROW_PARALLEL && pool.width() > 1;
-    peregrine_core::blocks::par::for_row_chunks(
+    peregrine_core::blocks::par::for_row_chunks_3(
         pool,
         parallel,
+        x,
+        dim,
         out,
         dim,
+        acts,
+        1,
         nb,
         peregrine_core::blocks::par::Sched::Static,
-        |_wk, rows, chunk| {
-            for (i, r) in rows.enumerate() {
-                peregrine_core::vmath::layer_norm_row(
-                    &x[r * dim..(r + 1) * dim],
-                    w,
-                    b,
-                    eps,
-                    &mut chunk[i * dim..(i + 1) * dim],
-                );
+        |_wk, _rows, xc, oc, ac| {
+            let n = oc.len() / dim;
+            peregrine_core::vmath::layer_norm_rows(xc, w, b, eps, dim, n, oc);
+            for (i, a) in ac.iter_mut().enumerate() {
+                a.fill(&oc[i * dim..(i + 1) * dim]);
             }
         },
     );
@@ -504,18 +531,42 @@ fn layer_norm_rows(
     }
 }
 
-/// [`peregrine_core::vmath::gelu_erf_rows`] over the batch's `nb` feed-forward rows,
-/// split across the pool. Element-wise, so every value is the scalar definition's.
-fn gelu_rows(pool: &Pool, stats: &mut StepStats, hb: &mut [f32], dim: usize, nb: usize) {
+/// `bias`, then [`peregrine_core::vmath::gelu_erf_rows`], then the activation fill,
+/// per row and in one pool task (S4.9h): the GELU output is the down projection's
+/// input, so the row that was just computed is the row that is quantised.
+#[allow(clippy::too_many_arguments)]
+fn bias_gelu_fill(
+    pool: &Pool,
+    stats: &mut StepStats,
+    hb: &mut [f32],
+    bias: &[f32],
+    dim: usize,
+    nb: usize,
+    acts: &mut [QuantAct],
+) {
     let parallel = nb >= peregrine_core::blocks::ROW_PARALLEL && pool.width() > 1;
-    peregrine_core::blocks::par::for_row_chunks(
+    let has_bias = !bias.iter().all(|&b| b == 0.0);
+    peregrine_core::blocks::par::for_row_chunks_2(
         pool,
         parallel,
         hb,
         dim,
+        acts,
+        1,
         nb,
         peregrine_core::blocks::par::Sched::Static,
-        |_wk, _rows, chunk| peregrine_core::vmath::gelu_erf_rows(chunk),
+        |_wk, _rows, hc, ac| {
+            for (i, a) in ac.iter_mut().enumerate() {
+                let row = &mut hc[i * dim..(i + 1) * dim];
+                if has_bias {
+                    for (o, &b) in row.iter_mut().zip(bias) {
+                        *o += b;
+                    }
+                }
+                peregrine_core::vmath::gelu_erf_rows(row);
+                a.fill(row);
+            }
+        },
     );
     if parallel {
         stats.barriers += 1;
@@ -530,23 +581,36 @@ impl Architecture for Bert {
     fn act_layout(&self) -> ActLayout {
         // A float (F32/F16/BF16) matrix's packed kernel reads the f32 activation
         // rows (`keep_f32`); an all-Q8_0 file never needs them (S4.9f, S4.9a).
+        // `quantize` is off only when *every* matrix reads those f32 rows: a pure
+        // float file never reads the int8 layouts, so the pass does not build them.
         let mut keep_f32 = false;
+        let mut quantize = false;
         self.linear_groups(&mut |lins| {
             for lin in lins {
-                if let Some(ti) = lin.dense() {
-                    if matches!(
-                        ti.kind,
-                        peregrine_core::gguf::Format::F32
-                            | peregrine_core::gguf::Format::F16
-                            | peregrine_core::gguf::Format::BF16
-                    ) {
-                        keep_f32 = true;
+                match lin.dense() {
+                    Some(ti) => {
+                        // A small Q8_0 matrix dequantised into f32 panels at load
+                        // (`fp_kind`) reads the f32 rows too (S4.9m).
+                        if ti.fp_kind.is_some()
+                            || matches!(
+                                ti.kind,
+                                peregrine_core::gguf::Format::F32
+                                    | peregrine_core::gguf::Format::F16
+                                    | peregrine_core::gguf::Format::BF16
+                            )
+                        {
+                            keep_f32 = true;
+                        } else {
+                            quantize = true;
+                        }
                     }
+                    None => quantize = true,
                 }
             }
         });
         ActLayout {
             keep_f32,
+            quantize,
             ..ActLayout::default()
         }
     }
@@ -706,25 +770,24 @@ impl Architecture for Bert {
                 row += 1;
             }
         }
-        // `token_embd_norm` feeds the first block's q/k/v: norm into `st.x`, quantise once.
+        // `token_embd_norm` feeds the first block's q/k/v: norm into `st.xb` and fill
+        // the activation rows in the same task (S4.9h), then make it the layer input.
         {
             let mut xin = std::mem::take(&mut st.x);
-            layer_norm_rows(
+            layer_norm_rows_fill(
                 pool,
                 stats,
-                &xin,
+                &mut xin,
                 &self.tok_norm_w,
                 &self.tok_norm_b,
                 cfg.eps,
                 dm,
                 nb,
                 &mut st.xb,
+                &mut st.acts,
             );
             xin[..nb * dm].copy_from_slice(&st.xb[..nb * dm]);
             st.x = xin;
-        }
-        for r in 0..nb {
-            st.acts[r].fill(&st.x[r * dm..(r + 1) * dm]);
         }
 
         for l in &self.layers {
@@ -788,6 +851,8 @@ impl Architecture for Bert {
             );
 
             // ---- attn_output (+ bias), residual, attn_output_norm ----
+            // The bias and the residual are added to each chunk as the projection
+            // leaves it (S4.9h); the norm then fills the rows its next consumer reads.
             linear_rows(
                 w,
                 pool,
@@ -802,26 +867,22 @@ impl Architecture for Bert {
                 &mut st.xb2,
                 dm,
                 &mut st.kq,
+                |chunk, r0| {
+                    add_bias_residual(chunk, &st.x[r0 * dm..r0 * dm + chunk.len()], &l.bo, dm);
+                },
             );
-            add_bias(&mut st.xb2, dm, nb, &l.bo);
-            for i in 0..nb * dm {
-                st.xb2[i] += st.x[i];
-            }
-            layer_norm_rows(
+            layer_norm_rows_fill(
                 pool,
                 stats,
-                &st.xb2,
+                &mut st.xb2,
                 &l.attn_norm_w,
                 &l.attn_norm_b,
                 cfg.eps,
                 dm,
                 nb,
                 &mut st.xb,
+                &mut st.acts,
             );
-            // The normed rows feed ffn_up: one fill, one group.
-            for r in 0..nb {
-                st.acts[r].fill(&st.xb[r * dm..(r + 1) * dm]);
-            }
 
             // ---- feed-forward: up (+ bias), the exact GELU, down (+ bias) ----
             {
@@ -844,13 +905,7 @@ impl Architecture for Bert {
                     &mut st.kq,
                 );
             }
-            add_bias(&mut st.hb, ff, nb, &l.up_b);
-            gelu_rows(pool, stats, &mut st.hb[..nb * ff], ff, nb);
-            // The GELU output is the down projection's input: quantise it once here
-            // rather than filling the same rows again inside the matmul (S4.9a).
-            for r in 0..nb {
-                st.acts[r].fill(&st.hb[r * ff..(r + 1) * ff]);
-            }
+            bias_gelu_fill(pool, stats, &mut st.hb, &l.up_b, ff, nb, &mut st.acts);
             {
                 let mut jobs = [RowsOut {
                     lin: &l.down,
@@ -871,26 +926,21 @@ impl Architecture for Bert {
                     &mut st.kq,
                 );
             }
-            add_bias(&mut st.xb2, dm, nb, &l.down_b);
-            for i in 0..nb * dm {
-                st.xb2[i] += st.xb[i];
-            }
+            add_bias_residual(&mut st.xb2[..nb * dm], &st.xb[..nb * dm], &l.down_b, dm);
             // The layer's output is its normalised value: the next layer applies no
             // pre-norm, so `st.x` and the activation rows are its input directly.
-            layer_norm_rows(
+            layer_norm_rows_fill(
                 pool,
                 stats,
-                &st.xb2,
+                &mut st.xb2,
                 &l.out_norm_w,
                 &l.out_norm_b,
                 cfg.eps,
                 dm,
                 nb,
                 &mut st.x,
+                &mut st.acts,
             );
-            for r in 0..nb {
-                st.acts[r].fill(&st.x[r * dm..(r + 1) * dm]);
-            }
         }
 
         // ---- pooling, text by text (the vector this text's slot reads) ----
@@ -908,7 +958,6 @@ impl Architecture for Bert {
             );
             st.hidden[row0 * dm..row0 * dm + dm].copy_from_slice(&st.xb2[..dm]);
         }
-
         st.positions = pos;
         st.spans = spans;
         stats.ns_total += t_fwd.elapsed().as_nanos() as u64;

@@ -781,6 +781,15 @@ pub struct KqActs {
     /// once per run, so the tile kernel needs the finer partition that
     /// [`QuantAct::bsums`] already holds. The Q4_K kernels keep using `bs`.
     pub bs16: Vec<i32>,
+    /// `bs` packed for `vpdpwssd`: `groups · super_blocks · 4 · 4`, where entry
+    /// `p` of a row is `S[2p]` in the low 16 bits and `S[2p+1]` in the high,
+    /// both as int16.
+    ///
+    /// The AVX-512 kernel's min term multiplies a row's paired mins by a paired
+    /// sum and sums two sub-blocks per int32 lane. The pairs are built here
+    /// because the same ones are read by every output row of a tile, and `|S|`
+    /// is at most 4 064, so the narrowing is exact.
+    pub bsp: Vec<i32>,
     /// The rows filled.
     pub rows: usize,
     /// The activation width.
@@ -831,6 +840,8 @@ impl KqActs {
         self.bs.resize(groups * n_sb * ACT_GROUP * 8, 0);
         self.bs16.clear();
         self.bs16.resize(groups * n_sb * ACT_GROUP * 16, 0);
+        self.bsp.clear();
+        self.bsp.resize(groups * n_sb * ACT_GROUP * 4, 0);
         for g in 0..groups {
             for sb in 0..n_sb {
                 let base = (g * n_sb + sb) * 1024;
@@ -848,6 +859,7 @@ impl KqActs {
                 let dbase = (g * n_sb + sb) * ACT_GROUP;
                 let bbase = (g * n_sb + sb) * ACT_GROUP * 8;
                 let bbase16 = (g * n_sb + sb) * ACT_GROUP * 16;
+                let pbase = (g * n_sb + sb) * ACT_GROUP * 4;
                 for t in 0..ACT_GROUP {
                     let b = g * ACT_GROUP + t;
                     if b >= acts.len() {
@@ -858,6 +870,12 @@ impl KqActs {
                     let rs = &acts[b].bsums[sb * 16..sb * 16 + 16];
                     for j in 0..8 {
                         self.bs[bbase + t * 8 + j] = rs[2 * j] as i32 + rs[2 * j + 1] as i32;
+                    }
+                    // The same sums, two to a lane, for the AVX-512 min term.
+                    for p in 0..4 {
+                        let lo = self.bs[bbase + t * 8 + 2 * p] & 0xFFFF;
+                        let hi = self.bs[bbase + t * 8 + 2 * p + 1] << 16;
+                        self.bsp[pbase + t * 4 + p] = lo | hi;
                     }
                     // The per-16 run sums themselves, for Q6_K's offset and scale.
                     for (j, &s) in rs.iter().enumerate() {
