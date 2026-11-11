@@ -13,6 +13,21 @@ All notable changes to this project are documented here. The format follows
   name, on the tree and on every commit a pull request adds; `scripts/hygiene-selftest.sh` proves each
   check and `ci-ok` now requires the job.
 
+- **The packed weights are cached on disk and mapped at load (S4.9e)**: after the load-time
+  repack (the Q4_K/Q6_K/Q5_0/Q8_0 eight-row tiles and the S4.9f F32/F16/BF16 sixteen-row panels),
+  the two stores are written to one file under `~/.cache/peregrine/packs/`
+  (`$XDG_CACHE_HOME/peregrine/packs`, `$PEREGRINE_CACHE_DIR/packs`; `PEREGRINE_PACK_CACHE=<dir>`
+  overrides it and `PEREGRINE_PACK_CACHE=0` turns it off). The next load of the same model and the
+  same layout maps that file read-only instead of packing: the pages are the page cache's, shared
+  by every process, and no copy is made. The key is the model's size, mtime and GGUF header/tensor
+  directory hash, a layout version, the packed tensors with their shapes and formats, the repack
+  switches and the kernel tier; a mismatch rebuilds. Files are written to a temporary name and
+  renamed, so concurrent loads and crashes are safe, a read-only or full directory falls back to
+  in-memory packing with one line, and a size cap (`PEREGRINE_PACK_CACHE_MB`, 4 GiB by default)
+  evicts least-recently-used packs. Measured load on this host: 0.30 s → 0.06 s (SmolLM2-360M
+  Q4_K_M), 0.76 s → 0.21 s (Qwen3-Embedding-0.6B Q8_0), 2.50 s → 0.22 s (the 1.2 GB f16 file);
+  `peregrine inspect` and `peregrine tier -m` report a model's cache and its size.
+
 - **Decision questions fork one evaluation of their shared state (S4.9j, part 1)**: a cache snapshot
   now carries a hybrid model's per-layer Gated DeltaNet state and convolution history
   (`KvSnapshot::rec`), restorable only at the snapshot's own length, and `KvCache::fork_from` copies

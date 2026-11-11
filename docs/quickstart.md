@@ -87,6 +87,15 @@ read first, so a model this build cannot run is refused before the weights are d
 `hf:mradermacher/SmolLM2-360M-Instruct-GGUF/SmolLM2-360M-Instruct.Q4_K_M.gguf`. A download that is
 interrupted resumes from its `.part` file on the next run.
 
+The load-time packed weights are cached on disk too, under
+`~/.cache/peregrine/packs/` (`$XDG_CACHE_HOME/peregrine/packs`, or `$PEREGRINE_CACHE_DIR/packs`).
+The first load of a model writes them; later loads map that file read-only, so a one-shot `run`,
+`embed` or `decide` does not repack, and two processes serving the same model share the packed pages.
+`PEREGRINE_PACK_CACHE=<dir>` moves the directory and `PEREGRINE_PACK_CACHE=0` turns the cache off;
+`PEREGRINE_PACK_CACHE_MB` sets its size cap (default 4096 MiB, least-recently-used packs are evicted).
+`peregrine inspect <file>` and `peregrine tier -m <file>` report a model's cache and its size. To
+clear the cache, delete the directory: `rm -rf ~/.cache/peregrine/packs`.
+
 ## 3. Run one prompt
 
 No server and no client needed for a single reply — it streams to stdout:

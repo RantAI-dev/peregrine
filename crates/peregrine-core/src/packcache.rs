@@ -77,7 +77,7 @@ const SAMPLES: usize = 64;
 /// The smallest packed store a cache is worth writing for. A synthetic test model
 /// packs a couple of MiB; a real model orders of magnitude more. Below this the
 /// pack is faster than the cache bookkeeping.
-const MIN_PACK_BYTES: u64 = 4 << 20;
+pub const MIN_PACK_BYTES: u64 = 4 << 20;
 
 const MIB: u64 = 1 << 20;
 
@@ -329,10 +329,9 @@ impl PackCache {
     }
 
     fn tmp_path(&self, key: &PackKey) -> PathBuf {
-        let uniq = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let uniq = SEQ.fetch_add(1, Ordering::Relaxed);
         self.dir.join(format!(
             ".tmp-{}-{:016x}-{uniq}",
             std::process::id(),
@@ -564,8 +563,7 @@ fn read_header(file: &File, len: u64) -> Option<Header> {
     let flags = u32::from_le_bytes(fixed[12..16].try_into().ok()?);
     let key_len = u32::from_le_bytes(fixed[16..20].try_into().ok()?) as usize;
     let header_len = u32::from_le_bytes(fixed[20..24].try_into().ok()?) as usize;
-    if header_len < FIXED + 8
-        || header_len > MAX_HEADER
+    if !(FIXED + 8..=MAX_HEADER).contains(&header_len)
         || header_len as u64 > len
         || key_len != header_len - FIXED - 8
     {
@@ -635,13 +633,11 @@ fn write_file(
 fn map_section(file: &File, off: u64, len: u64) -> Option<Mmap> {
     // SAFETY: the file is the cache file the caller just verified; its length is
     // checked before the mapping is made, and the mapping is read-only.
-    let map = unsafe {
-        memmap2::MmapOptions::new()
-            .offset(off)
-            .len(len as usize)
-            .map(file)
-            .ok()?
-    };
+    let mut opts = memmap2::MmapOptions::new();
+    opts.offset(off).len(len as usize).populate();
+    // SAFETY: the file is the cache file the caller just verified; its length is
+    // checked before the mapping is made, and the mapping is read-only.
+    let map = unsafe { opts.map(file).ok()? };
     // File-backed transparent huge pages are a hint the kernel may ignore (on
     // Linux, a non-tmpfs file mapping ignores MADV_HUGEPAGE); try it when the
     // in-memory stores would have asked for huge pages, so the A/B is honest.
