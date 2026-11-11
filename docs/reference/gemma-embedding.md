@@ -174,6 +174,17 @@ the bound are in `crates/peregrine-models/tests/fixtures/embeddinggemma/` and
   layer's activation is quantised once per distinct input — the normed rows for q/k/v, the
   same rows for gate/up, the GeGLU output for down — and the matrices that share it run in
   one fork-join (S4.9a).
+- Attention is the strip of S4.9g (`peregrine_kernels::bidir`, driven by
+  `blocks/bidir.rs`): one head's keys are transposed once per text into a
+  `[head_dim][n]` panel with the keys along the vector lanes, strips of up to 32 query
+  rows are scored against 128-key blocks of that panel, and each row's window is an exact
+  band — on a sliding layer only the keys with `|i − j| ≤ n_swa/2` are computed, never a
+  mask over a full `n × n` block. The score is one sequential FMA chain over the head
+  dimension, the weights are the engine's own `exp` and the denominator an f64 sum in
+  ascending key order, so a row's bits depend only on its own text, and the scalar and
+  AVX2 kernels agree bit for bit. The mask rule itself is unchanged: a global layer sees
+  every key of the text, a sliding layer the symmetric `± n_swa/2` window, integer
+  division (`n_swa = 512` → ±256).
 - Pooling is the text's own rows, in position order, with an f64 accumulator and one
   rounding (`embed::pool_rows_into`).
 - `dense_2` then `dense_3`, both pure matmuls, then the caller's `dimensions` truncation and

@@ -733,8 +733,9 @@ impl Engine {
             // No cache is ever written, so the attention scratch is not needed. The
             // pooling accumulator is the family's, per text.
             state.attn = crate::blocks::attn::AttnScratch::new(&c, 1, threads);
-            // One score row per worker, long enough for the longest text of a pass.
-            state.attn.bidir_scores = vec![0.0; threads.max(1) * max_batch];
+            // The strip's panel (one head's keys per text) and one score strip per
+            // worker, sized for the longest pass this engine admits (S4.9g).
+            state.attn.bidir.resize(max_batch, c.head_dim, threads);
             state.pool_sum = vec![0.0; c.d_model];
         }
         Engine {

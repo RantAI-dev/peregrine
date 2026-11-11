@@ -1229,7 +1229,7 @@ impl Architecture for Gemma3 {
                 &spans,
                 half_window,
                 1.0,
-                &mut st.attn.bidir_scores,
+                &mut st.attn.bidir,
                 pool,
                 stats,
             );
