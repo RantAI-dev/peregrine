@@ -12,7 +12,8 @@
 
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kq::{
-    repack_q4k8, repack_q5_08, repack_q5k8, repack_q6k8, KqActs, Q4K8, Q5K8, Q5_08, Q6K8,
+    repack_q4k8, repack_q5_08, repack_q5k8, repack_q6k8, KqActs, Q4K8, Q4K_BLOCK, Q5K8, Q5_08,
+    Q6K8, Q6K_BLOCK,
 };
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kqsimd::{
@@ -151,7 +152,8 @@ fn main() {
     let batch = acts(128, n, 0xC0DE_5678);
     let mut kq = KqActs::default();
     kq.fill(&batch);
-    let mut out = vec![0.0f32; 64 * 8];
+    // The width sweeps below go to 128 activation rows, so the output holds them.
+    let mut out = vec![0.0f32; 128 * 8];
     if !peregrine_kernels::simd::have_batched() {
         eprintln!("no AVX2 on this machine");
         return;
@@ -312,6 +314,10 @@ fn main() {
         }
     }
 
+    if std::env::var("KQBENCH_LAYER").is_ok() {
+        layer_mode(n_sb, reps);
+    }
+
     // Q5_0: a block is 32 weights per row, so one (tile, act, block) is 8 x 32 = 256 MACs.
     let n_blk = n / 32;
     let t5 = tile5(n_blk, 0x5EED_5A5A);
@@ -464,5 +470,149 @@ fn main() {
                 );
             }
         }
+    }
+}
+
+/// One real layer's worth of tiles, streamed: `n_tiles` eight-row tiles is the 8192 output
+/// rows of a gate/up matrix, and the activation rows sweep 8, 64 and 512 — the last is the
+/// fork's ubatch, which Peregrine's engine never asks for (its chunk stops at 128) but
+/// which is the width the comparison is about.
+///
+/// This exists for the S5.1 reconciliation (docs/design/s5-prefill-avx512.md §10): the
+/// fork's kernel probe runs an 8192-row matrix, so a single L1 tile would not be the same
+/// experiment. One call here is `n_tiles * 8 rows * (n_sb*256) weights * nb activations`
+/// multiply-accumulates, the same count the fork's probe uses.
+#[cfg(target_arch = "x86_64")]
+fn layer_mode(n_sb: usize, reps: usize) {
+    let n_tiles = 1024; // 8192 output rows / 8
+    let n = n_sb * 256;
+    let batch = acts(512, n, 0xC0DE_5678);
+    let mut kq = KqActs::default();
+    kq.fill(&batch);
+
+    // Q4_K: 8 rows x n_sb super-blocks per tile, the same bytes a file holds.
+    let mut tiles = vec![0u8; n_tiles * n_sb * Q4K8::SIZE];
+    for t in 0..n_tiles {
+        for sb in 0..n_sb {
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = prng(0x5EED_0000 + (t * 8 + r) as u64 * 31 + sb as u64, Q4K_BLOCK);
+                b[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                b[2..4].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes());
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let at = (t * n_sb + sb) * Q4K8::SIZE;
+            repack_q4k8(&refs, &mut tiles[at..at + Q4K8::SIZE]);
+        }
+    }
+    let mut tiles6 = vec![0u8; n_tiles * n_sb * Q6K8::SIZE];
+    for t in 0..n_tiles {
+        for sb in 0..n_sb {
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = prng(0x6EED_0000 + (t * 8 + r) as u64 * 37 + sb as u64, Q6K_BLOCK);
+                b[208..210]
+                    .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let at = (t * n_sb + sb) * Q6K8::SIZE;
+            repack_q6k8(&refs, &mut tiles6[at..at + Q6K8::SIZE]);
+        }
+    }
+
+    // Q5_0: a block is 32 weights per row, so a tile is 8 rows x n_blk blocks.
+    let n_blk = n / 32;
+    let mut tiles5 = vec![0u8; n_tiles * n_blk * Q5_08::SIZE];
+    for t in 0..n_tiles {
+        for blk in 0..n_blk {
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = prng(0x50ED_0000 + (t * 8 + r) as u64 * 41 + blk as u64, 22);
+                b[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let at = (t * n_blk + blk) * Q5_08::SIZE;
+            repack_q5_08(&refs, &mut tiles5[at..at + Q5_08::SIZE]);
+        }
+    }
+
+    let zmm = peregrine_kernels::kqsimd::have_zmm512();
+    for &nb in &[8usize, 64, 512] {
+        let mut o = vec![0.0f32; nb * 8];
+        let macs = (n_tiles * 8 * n * nb * reps) as f64;
+        let mut q4 = Vec::new();
+        let mut q6 = Vec::new();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let at = t * n_sb * Q4K8::SIZE;
+                    unsafe {
+                        if zmm {
+                            q4k8_gemm_zmm(&tiles[at..at + n_sb * Q4K8::SIZE], n_sb, &kq, nb, &mut o)
+                        } else {
+                            q4k8_gemm(&tiles[at..at + n_sb * Q4K8::SIZE], n_sb, &kq, nb, &mut o)
+                        }
+                    }
+                }
+            }
+            q4.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let at = t * n_sb * Q6K8::SIZE;
+                    unsafe {
+                        if zmm {
+                            q6k8_gemm_zmm(
+                                &tiles6[at..at + n_sb * Q6K8::SIZE],
+                                n_sb,
+                                &kq,
+                                nb,
+                                &mut o,
+                            )
+                        } else {
+                            q6k8_gemm(&tiles6[at..at + n_sb * Q6K8::SIZE], n_sb, &kq, nb, &mut o)
+                        }
+                    }
+                }
+            }
+            q6.push(t0.elapsed().as_secs_f64());
+        }
+        let mut q5 = Vec::new();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let at = t * n_blk * Q5_08::SIZE;
+                    unsafe {
+                        if zmm {
+                            q5_08_gemm_zmm(
+                                &tiles5[at..at + n_blk * Q5_08::SIZE],
+                                n_blk,
+                                &batch[..nb],
+                                nb,
+                                &mut o,
+                            )
+                        } else {
+                            q5_08_gemm(
+                                &tiles5[at..at + n_blk * Q5_08::SIZE],
+                                n_blk,
+                                &batch[..nb],
+                                nb,
+                                &mut o,
+                            )
+                        }
+                    }
+                }
+            }
+            q5.push(t0.elapsed().as_secs_f64());
+        }
+        println!(
+            "layer 8192 rows x {n} weights, {nb:>3} acts ({n_tiles} tiles): q4k {:6.1}  q6k {:6.1}  q5_0 {:6.1}  GMAC/s/core ({})",
+            macs / best(&mut q4) / 1e9,
+            macs / best(&mut q6) / 1e9,
+            macs / best(&mut q5) / 1e9,
+            if zmm { "zmm" } else { "avx2" }
+        );
     }
 }

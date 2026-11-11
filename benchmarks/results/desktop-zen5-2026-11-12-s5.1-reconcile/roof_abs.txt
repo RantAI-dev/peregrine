@@ -1,0 +1,8 @@
+instr 32000000000  MACs 2.048e+12
+mono 18.396  raw 17.158  cpu 17.152  tsc 34.251  (Gticks 34.251)
+rate by own clocks: mono 111.3  raw 119.4  cpu 119.4 GMAC/s
+host Date window 18 s (+-2)  ->  113.8 GMAC/s in real seconds
+instr 32000000000  MACs 2.048e+12
+mono 18.342  raw 17.119  cpu 17.112  tsc 34.173  (Gticks 34.173)
+rate by own clocks: mono 111.7  raw 119.6  cpu 119.7 GMAC/s
+host Date window 18 s (+-2)  ->  113.8 GMAC/s in real seconds

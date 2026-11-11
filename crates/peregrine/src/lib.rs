@@ -152,6 +152,9 @@ pub fn describe_runtime() -> String {
     let chunk = o
         .prefill_chunk
         .unwrap_or_else(|| peregrine_core::options::prefill_chunk_default_for(threads));
+    let wide = o.prefill_chunk.unwrap_or_else(|| {
+        peregrine_core::options::wide_chunk_default_for(peregrine_core::cpu::resolved())
+    });
     // The pass budget is per model (it depends on the model's width), so the default is printed
     // for a representative 1024-wide model beside the option.
     let pass = o.pass_rows.map_or_else(
@@ -164,7 +167,7 @@ pub fn describe_runtime() -> String {
         |n| n.to_string(),
     );
     format!(
-        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\npack cache    {}\nprefill chunk {chunk} (for {threads} workers)\npass rows     {pass}\noptions:\n{}",
+        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\npack cache    {}\nprefill chunk {chunk} (for {threads} workers), {wide} with no decoder\npass rows     {pass}\noptions:\n{}",
         peregrine_kernels::cpu::tier_name(),
         peregrine_core::simd_name(),
         o.kq_repack_note(),

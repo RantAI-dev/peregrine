@@ -8,6 +8,38 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The Q4_K kernel is at the machine's byte-dot roof, and the fork's is not faster (S5.1b).** This
+  item was "rebuild the Q4_K kernel with ik_llama.cpp's instruction mix at 120 GMAC/s per core".
+  Both kernels were disassembled instruction for instruction and both were measured, and the target
+  is above what this core does with a byte dot product: a 512-bit `vpdpbusd` costs twice a 256-bit
+  one here, so both widths roof at 106–117 GMAC/s per core (16 accumulators, one barrier per
+  iteration), and Peregrine's kernel is at 77–81 of that (73 %) against the fork's 58–67 (55 %),
+  measured through the fork's own `ggml_mul_mat`. The "134–148 GMAC/s" that set the target does not
+  reproduce. A 256-bit kernel with the fork's shape was built and measured 12 % slower, and
+  removing half the 512-bit broadcasts bought 3 %, so nothing was shipped: the only code change is
+  `kqbench`'s output buffer, sized for the 128 activation rows its width sweep already asked for.
+  Peregrine is at 0.52 of ik_llama.cpp on Qwen 2.5 0.5B (594.0 against 1 132.6 tok/s) and 0.64 on
+  Llama 3.2 1B (338.4 against 530.6) at 512 prompt tokens and twelve threads, so the remaining
+  prompt-time gap is outside the Q4_K kernel. See `docs/design/s5-prefill-avx512.md` §9.
+
+- **A wide prefill pass when no user is decoding (S5.1a).** The chunk was 16 tokens because the
+  chunk is also how long a *decoding* user waits while another user's prompt is read. When
+  nobody is decoding nobody is waiting, and §6 item 3 (PR #209) made a wide pass pay, so the
+  engine now picks the chunk per pass: 64 tokens when no slot is ready to decode, today's rule
+  otherwise (including the 64-token pieces of a prompt over 1024 tokens). `PEREGRINE_PREFILL_CHUNK`
+  still forces one chunk. The rule is the same on the AVX-512 and AVX2 tiers: 64 beat 128 on both
+  1B models on both tiers and lost 5 % (avx512) and 1 % (avx2) to it on Qwen, and 64 is free in
+  memory — the scratch already holds 64 prompt rows for speculation, where 128 would have cost
+  17.6 MiB on the 1B. Single user at 512 prompt tokens, twelve threads: Llama 3.2 1B 305.5 →
+  338.4 tok/s (time to first token 1.68 → 1.51 s), Qwen 2.5 0.5B 488.0 → 594.0 (1.05 → 0.86 s),
+  Gemma 3 1B 277.2 → 326.8 (1.85 → 1.57 s); 4096-token prompts are flat because they were
+  already read in 64-token pieces. At four and ten users the per-user decode rate while another
+  user's prompt is read is unchanged (53.1 → 53.4 and 52.8 → 54.4 tok/s for the 1B; 78.7 → 77.1
+  and 79.9 → 82.9 for Qwen) and total throughput does not drop. Nothing allocates in the pass
+  and no result moves; `prefill_chunk.rs` gains a mid-prompt width switch and an engine test
+  that the pass widens with no decoder, narrows beside one, and widens again. See
+  `docs/design/s5-prefill-avx512.md` §8.
+
 - **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The
   kernels hand back a tile as row-major (`blk[i · nb + b]`) and the output is transposed
   (`out[(b0 + b) · rows + row]`), so the write-out used to be `8 · nb` single-float stores per

@@ -1,0 +1,6 @@
+q4k act  16 out 1024: 565.30 us/call  59.4 GMAC/s/core
+q4k act  64 out 1024: 2609.20 us/call  51.4 GMAC/s/core
+q4k act 128 out 1024: 4198.85 us/call  63.9 GMAC/s/core
+q6k act  16 out 1024: 608.17 us/call  55.2 GMAC/s/core
+q6k act  64 out 1024: 2470.93 us/call  54.3 GMAC/s/core
+q6k act 128 out 1024: 3878.60 us/call  69.2 GMAC/s/core

@@ -1,0 +1,3 @@
+{"engine": "clock", "wall_s": 3.017, "cpu_s": 2.794, "probe": "MONOTONIC 3.000  RAW 2.781  CPU 2.780  TSC/Gticks 5.551  tsc_ghz_if_cpu_accurate 1.997  cpu_over_wall 0.927", "load": ["1.04", "1.44", "1.36"]}
+{"engine": "clock", "wall_s": 3.018, "cpu_s": 2.771, "probe": "MONOTONIC 3.000  RAW 2.757  CPU 2.756  TSC/Gticks 5.504  tsc_ghz_if_cpu_accurate 1.997  cpu_over_wall 0.919", "load": ["1.04", "1.44", "1.36"]}
+{"engine": "clock", "wall_s": 3.018, "cpu_s": 2.755, "probe": "MONOTONIC 3.000  RAW 2.757  CPU 2.739  TSC/Gticks 5.504  tsc_ghz_if_cpu_accurate 2.009  cpu_over_wall 0.913", "load": ["1.04", "1.43", "1.36"]}
