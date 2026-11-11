@@ -777,3 +777,126 @@ Nothing allocates in the pass and no golden moved: the chunk is how a prompt is 
 
 Goldens pass unchanged on `x86_64-avx2-avx512-vnni-gfni-vbmi`, `x86_64-avx2` and `x86_64`
 (scalar) for Llama 3.2 1B, Qwen 2.5 0.5B and Gemma 3 1B.
+
+---
+
+## 9. As built: the Q4_K kernel's instruction mix, measured (S5.1b)
+
+- Status: measured; **no kernel change shipped**, because nothing correct was faster
+- Date: 2026-11-12
+- Host: AMD Ryzen AI 9 HX 370 (Zen 5, 12 cores / 24 threads), WSL2, one core (`taskset -c 4`)
+- Raw measurements and the two probes: `benchmarks/results/desktop-zen5-2026-11-12-s5.1-q4k-kernel-2/`
+- Fork read: ik_llama.cpp at `479074c`, already built at `~/.cache/peregrine-bench/ik_llama.cpp-479074c`
+
+This item was "rebuild the Q4_K kernel with the fork's instruction mix, at 120 GMAC/s per core". The
+instruction mix was read off both binaries, both kernels were measured, and the target turned out to
+be above what this core does with a byte dot product at all. The kernel already runs at the fork's
+rate, and at the machine's.
+
+### 9.1 The two inner loops, instruction for instruction
+
+Fork: `objdump -d` around `mul_mat_q4_k_r4_q8_k<8>` (`+0x6b0`, the 116-instruction loop at
+`0x16951c0`). One iteration is one sub-block: 4 weight rows × 32 weights × 8 activation rows =
+1024 MACs. Peregrine: `objdump -d` on `q4k8_gemm_zmm` in the `kqbench` binary (the loop at
+`0x2cc90`); one iteration is a 4-window group of one super-block, and four of them are a
+super-block: 8 weight rows × 256 weights × 8 activation rows = 16 384 MACs.
+
+Per 1024 MACs, which is the fork's whole iteration and an eighth of Peregrine's super-block:
+
+| per 1024 MACs | fork (256-bit) | Peregrine (512-bit) |
+|---|---|---|
+| `vpdpbusd` | 32 × ymm (32 byte-MACs each) | 16 × zmm (64 each) |
+| multiplies, other | 8 `vpmulld` ymm (int32 scale) | 4 `vpmulld` zmm (int32 scale) |
+| adds | 8 `vpaddd` ymm | 4 `vpaddd` zmm |
+| activation broadcast | 32 `vpshufd` ymm from 8 loads (32 B) | 16 `vpbroadcastq` zmm from memory (8 B) |
+| weight loads | 2 `vpandq` + 2 `vpsrlw` + 2 `vpandq` from memory, 128 B | 8 `vmovdqu64` zmm, 512 B, shared by 8 rows |
+| activation bytes read | 256 | 128 |
+| weight bytes read | 128 | 512 (amortised over 8 rows, so 512 per 8 rows) |
+| nibble decode | 6 ops per 128 B | 4 ops per 64 B (48 per super-block) |
+| loop-carried chains | 8 accumulators, one per activation row, 4 `vpdpbusd` deep; then one `vpmulld`+`vpaddd` per row | 16 accumulators (2 per row), 4 `vpdpbusd` deep; then 2 `vpmulld`+`vpaddd` per row |
+| instructions in the loop | 116 | 215 per group, 860 per super-block |
+| instructions per MAC | 0.113 | 0.052 |
+| measured | 58–67 GMAC/s | 77–81 GMAC/s |
+
+The multiply kinds are the same two on both paths: a VNNI byte dot product and an exact int32
+multiply for the scale. Neither uses `vpmaddubsw` or `vpmaddwd` — those are the AVX2 kernels'
+instructions, needed there because AVX2 has no VNNI; on this tier they would only add the int16
+headroom problem back.
+
+### 9.2 What the fork does that Peregrine does not
+
+The fork forms the same MACs with **256-bit VNNI**: four weight rows per `vpdpbusd` instead of
+eight, so it needs two instructions where Peregrine needs one, and it holds **one int32 accumulator
+per activation row** (eight in all) where Peregrine holds two (sixteen). Its **activation broadcast
+is a register shuffle**, `vpshufd` on the 32-byte `q8_K` load the row already needed, while
+Peregrine's is a **`vpbroadcastq zmm` from memory, one per byte dot product**. Its scale multiply is
+one `vpmulld` per (sub-block, activation row) on int32 partials — the same instruction Peregrine
+uses — and its **min term is computed once per super-block** and shared by all eight activation
+rows, where Peregrine computes a per-row min term with four `vpdpwssd`. Its weight block is four
+rows interleaved per load (32 bytes); Peregrine's is eight (64 bytes).
+
+So the fork wins on instruction count per MAC four times over and still runs *slower* per core than
+Peregrine on this machine. That is the measurement, and §9.3 says why.
+
+### 9.3 The core's byte-dot roof, and what both kernels are at
+
+`peak.c` (in the results directory) is the roof probe: 16 named accumulators, one barrier per
+iteration so nothing is hoisted, one instruction per accumulator per iteration. Measured on this
+host, twice per run:
+
+| probe | result |
+|---|---|
+| `vpdpbusd zmm`, 16 accumulators | 1.65–1.83 G instructions/s = **106–117 GMAC/s** |
+| `vpdpbusd ymm`, 16 accumulators | 3.42–3.64 G instructions/s = **110–117 GMAC/s** |
+| `vfmadd512`, 8 accumulators | 1.67–1.81 G instructions/s |
+
+Two facts follow. A 512-bit byte dot product **costs twice a 256-bit one** (1 per 1.8 cycles
+against 2 per cycle at the same clock), so VNNI width buys **nothing** here — the two columns are
+the same GMAC/s, which is exactly what the two kernels show. And the roofs imply a clock near
+1.7 GHz for a core that issues 2 × 256-bit or 1 × 512-bit vector op per cycle: `vfmadd512` at
+1.7 G/s is one per cycle, and the earlier "455 GMAC/s / 3.55 GHz" figure in §1.2 is not
+reproducible — nothing on this host reaches it, with any width.
+
+Against that roof: Peregrine 77–81 GMAC/s (73 %), the fork 58–67 (55 %). Both are near the wall.
+The 120 GMAC/s target is *above* the register-only roof's 106–117, i.e. unreachable by any kernel
+of this shape on this core, and the "134–148 for ik" that set the target does not reproduce:
+`ik-gemm-harness.c` runs the fork's own kernel through its own `ggml_mul_mat` (Q4_K_R4 weights,
+Q8_K32 activations, one thread, 1024 output rows) and gets **58–67 GMAC/s** at 16, 64 and 128
+activation rows against 4 000-token-equivalent work; its Q6_K kernel measures **52–69**.
+
+Peregrine's own Q6_K ZMM kernel, on the same L1 tile, is 58–61 GMAC/s — the same wall.
+
+### 9.4 What was tried
+
+Three kernels were built and measured in `kqbench`, and none is shipped:
+
+1. **256-bit VNNI with the fork's shape** (4 weight rows per `vpdpbusd`, one broadcast serving two
+   byte dots, register-shuffle broadcast from a 32-byte load, the same exact int32 scale and the
+   same fold four lanes at a time): **65–68 GMAC/s**, i.e. 12 % *slower* than the 512-bit kernel.
+   The extra instructions per MAC cost more than the cheaper broadcast saves.
+2. **Halving the 512-bit broadcasts** (the same broadcast reused by both nibble half), which is
+   not bit-correct but isolates the cost: **81.4 against 78.7** — 3 %. The broadcast is not the
+   kernel's limit.
+3. **Pre-broadened activation** (64 bytes per byte dot product, a plain load instead of
+   `vpbroadcastq`): the load itself is cheap, but building the buffer costs one broadcast and one
+   store per byte dot product, which is the work being removed; it cannot pay.
+
+What the measurement says the remaining 27 % would cost: the kernel issues 860 instructions per
+super-block against 256 `vpdpbusd` (32 per row × 8), i.e. two non-dot instructions per dot, and
+the dot alone is 1 per 1.8 cycles. Cutting the epilogue in half would buy at most a fifth.
+
+### 9.5 Where the prompt-time gap therefore is
+
+Peregrine is at 0.52 of ik_llama.cpp on Qwen 2.5 0.5B (594.0 against 1 132.6 tok/s) and 0.64 on
+Llama 3.2 1B (338.4 against 530.6) at 512 prompt tokens, twelve threads, today's defaults. Since
+the Q4_K kernel is not behind — it is ahead per core — the gap has to be outside it: ik's pass
+splits a prompt over 32-row tiles and its own flash attention (§2.4, §2.5), and its ubatch is 512
+where Peregrine's default pass is 16 (64 wide). The next step for prompt speed is §6 item 4 and
+item 5, not the Q4_K kernel.
+
+### 9.6 Bits
+
+No kernel changed, so no golden could move; the only code change is one line in
+`kqbench` (`out` sized for 128 activation rows, which the width sweep already asked for and
+which used to panic before the Q6_K rows). Goldens pass unchanged on the avx512, avx2 and
+scalar tiers.

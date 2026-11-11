@@ -151,7 +151,8 @@ fn main() {
     let batch = acts(128, n, 0xC0DE_5678);
     let mut kq = KqActs::default();
     kq.fill(&batch);
-    let mut out = vec![0.0f32; 64 * 8];
+    // The width sweeps below go to 128 activation rows, so the output holds them.
+    let mut out = vec![0.0f32; 128 * 8];
     if !peregrine_kernels::simd::have_batched() {
         eprintln!("no AVX2 on this machine");
         return;
