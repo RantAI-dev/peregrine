@@ -93,6 +93,8 @@ with no decode.
 Each model is checked against llama.cpp on the same file before it is listed; a text's output is
 bit-identical alone and in any batch.
 
+Ideas that are not scheduled yet are kept in the [backlog](backlog.md).
+
 ## Open decisions
 
 1. ARM in Stage 2, or x86 only for now.
