@@ -95,6 +95,25 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    with the 48 fixture requests and compares every answer with llama.cpp's;
    `cargo test -p peregrine-models --release --test systemone_openjev` does the same through the
    pieces directly.
+   S4.6b's classifier head is covered without model files by `crates/peregrine-models/tests/bert_heads.rs`:
+   a synthetic `bert` file with a rank head (one output, no labels) and one with a labelled head
+   (three outputs, `classifier.activation = gelu`), whose rows must equal
+   `tests/support/bert_ref.rs`'s reference head bit for bit on an F32 file, the invariance matrix
+   (alone, batches of 2/7/64, pass sizes 1 and 13, 1/2/4 threads), the loader's refusals (labels
+   that disagree with `cls.output`, an activation llama.cpp does not read), the head slot's refusal
+   by name on a file without one, and one tier golden
+   (`tests/golden/synthetic/<tier>/bert-heads-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
+   under SDE; no aarch64 golden). `tests/no_alloc.rs` passes a head text through the whole-text
+   pass. `crates/peregrine/tests/server_rerank.rs` starts the built server on those files and checks
+   `/v1/rerank`'s shape, order, `top_n`, `return_documents`, the four routes, the object form of a
+   document, batch independence of a score, `truncate` and the over-length error, the refusals
+   (no head, unknown field, missing query, image input), `/v1/classify`'s probabilities, and
+   `/v1/models`' `output_modalities`; `crates/peregrine/tests/cli_rerank.rs` pins `peregrine rerank`'s
+   lines, `--top-n`, `--json`, stdin, `--truncate` and the refusal of a headless file. With the two
+   reranker GGUF files in `~/models/embed/`,
+   `cargo test -p peregrine-models --release --test rerank_real -- --ignored --nocapture` compares
+   320 pairs (ids and scores, from `tests/fixtures/bert/rerank/`) against llama.cpp's, and checks
+   that a real file's score is bit-identical in batches of 2, 7 and 8.
    S4.6a's `bert` family is covered the same way: a synthetic post-norm encoder with the WordPiece
    vocabulary (and a second with the XLM-R unigram one), the vector against `tests/support/bert_ref.rs`'s
    independent scalar forward (bit for bit for F32; for Q8_0 exactly on the scalar tier and to 1–2 ulp

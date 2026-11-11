@@ -73,6 +73,12 @@ pub fn support_text() -> String {
         "  causal decoders (last / mean pooling) and bidirectional encoders (mean / cls; BERT, ModernBERT, EmbeddingGemma, and Mistral 3 / Nemotron 3.5 Embed), POST /v1/embeddings, peregrine embed"
     );
 
+    let _ = writeln!(out, "rerank and classify:");
+    let _ = writeln!(
+        out,
+        "  a bert file's classifier head (cls, cls.output, classifier.output_labels), POST /v1/rerank and POST /v1/classify, peregrine rerank"
+    );
+
     let _ = writeln!(out, "decisions:");
     let _ = writeln!(
         out,
@@ -141,6 +147,12 @@ gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Gem
 `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format); the prompt \
 is the one llama.cpp builds from the model's template";
 
+    // 8. Rerank and classify
+    let rr_str = "a `bert` file's classifier head (`cls`, `cls.output`, \
+`classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), \
+`POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3 and bge-reranker-base checked \
+against llama.cpp v0.9.0";
+
     // 8. Decision models
     let dec_str = "native decision models with a `systemone` template: the `openjev` type, \
 `POST /v1/systemone`, `peregrine decide`";
@@ -154,6 +166,7 @@ is the one llama.cpp builds from the model's template";
     let _ = writeln!(out, "| Chat templates | {tmpl_str} |");
     let _ = writeln!(out, "| Embeddings | {embd_str} |");
     let _ = writeln!(out, "| Tool calling | {tool_str} |");
+    let _ = writeln!(out, "| Rerank and classify | {rr_str} |");
     let _ = writeln!(out, "| Decision models | {dec_str} |");
 
     out
@@ -172,6 +185,7 @@ mod tests {
         assert!(text.contains("tokenizers:"));
         assert!(text.contains("chat templates:"));
         assert!(text.contains("embeddings:"));
+        assert!(text.contains("rerank and classify:"));
         assert!(text.contains("decisions:"));
 
         #[cfg(feature = "arch-llama")]
@@ -190,6 +204,7 @@ mod tests {
         assert!(md.contains("| Tokenizers |"));
         assert!(md.contains("| Chat templates |"));
         assert!(md.contains("| Embeddings |"));
+        assert!(md.contains("| Rerank and classify |"));
         assert!(md.contains("| Decision models |"));
 
         #[cfg(feature = "arch-llama")]

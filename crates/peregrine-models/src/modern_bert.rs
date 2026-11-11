@@ -656,10 +656,21 @@ impl Architecture for ModernBert {
         st: &mut State,
         pool: &Pool,
         texts: &[&[u32]],
-        poolings: &[peregrine_core::embed::Pooling],
+        wants: &[peregrine_core::arch::TextWant],
         stats: &mut StepStats,
     ) -> Result<(), String> {
         let t_fwd = Instant::now();
+        // The classifier head of a fine-tuned modern-bert file is not read yet (S4.7 part b),
+        // so a head read-out is refused before any row is computed.
+        if wants
+            .iter()
+            .any(|w| matches!(w, peregrine_core::arch::TextWant::Head))
+        {
+            return Err(format!(
+                "the {} model has no classifier head",
+                cfg.arch_name
+            ));
+        }
         let dm = cfg.d_model;
         let ff = cfg.n_ff;
         let qd = cfg.q_dim();
@@ -953,7 +964,10 @@ impl Architecture for ModernBert {
             peregrine_core::embed::pool_rows_into(
                 &st.xb[row0 * dm..(row0 + t.len()) * dm],
                 dm,
-                poolings[i],
+                match wants[i] {
+                    peregrine_core::arch::TextWant::Pooled(p) => p,
+                    peregrine_core::arch::TextWant::Head => unreachable!("refused above"),
+                },
                 &mut st.pool_sum,
                 &mut st.xb2[..dm],
             );

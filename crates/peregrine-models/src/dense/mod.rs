@@ -667,7 +667,7 @@ impl Dense {
         st: &mut State,
         pool: &Pool,
         texts: &[&[u32]],
-        poolings: &[peregrine_core::embed::Pooling],
+        wants: &[peregrine_core::arch::TextWant],
         stats: &mut StepStats,
     ) -> Result<(), String> {
         let t_fwd = Instant::now();
@@ -945,10 +945,16 @@ impl Dense {
         for (t, text) in texts.iter().enumerate() {
             let row0 = spans[t].row0;
             let n = text.len();
+            let pooling = match wants[t] {
+                peregrine_core::arch::TextWant::Pooled(p) => p,
+                peregrine_core::arch::TextWant::Head => {
+                    return Err(format!("{} has no classifier head", cfg.arch_name))
+                }
+            };
             peregrine_core::embed::pool_rows_into(
                 &st.hidden[row0 * dm..(row0 + n) * dm],
                 dm,
-                poolings[t],
+                pooling,
                 &mut st.pool_sum,
                 &mut st.xb2[..dm],
             );
@@ -1044,12 +1050,12 @@ impl Architecture for Dense {
         _st: &mut State,
         _pool: &Pool,
         _texts: &[&[u32]],
-        _poolings: &[peregrine_core::embed::Pooling],
+        _wants: &[peregrine_core::arch::TextWant],
         _stats: &mut StepStats,
     ) -> Result<(), String> {
         #[cfg(feature = "arch-mistral3")]
         if self.arch.is_mistral3() {
-            return self.forward_texts_embedding(_w, _cfg, _st, _pool, _texts, _poolings, _stats);
+            return self.forward_texts_embedding(_w, _cfg, _st, _pool, _texts, _wants, _stats);
         }
         Err(format!(
             "{} has no bidirectional forward pass",

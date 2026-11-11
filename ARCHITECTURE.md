@@ -142,7 +142,8 @@ listen, so in-flight requests drain instead of failing.
 ### `crates/peregrine-server`: HTTP
 
 A library (`run`, `Args`) and a thin binary. Maps the OpenAI chat request onto `Engine` slots, streams with SSE,
-and exposes `/metrics`. `/v1/embeddings` and `/v1/systemone` submit one pooled or labels slot per input or
+and exposes `/metrics`. `/v1/embeddings`, `/v1/rerank` and `/v1/classify` submit one pooled or
+head slot per text, and `/v1/systemone` one labels slot per input or
 question through the same queue, so they share the weight pass with chat; the decision route's body is
 parsed with `peregrine_core::json` to keep the request's order, and its answers are engine label logits
 through `decision::format_answer`.

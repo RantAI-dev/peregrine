@@ -133,6 +133,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Rerank and classify: the bert family's classifier head (S4.6b)**: a `bert` file's head —
+  `cls` (dense), `cls.bias`, `cls.output` (one row per output, written 1-d for a reranker),
+  `classifier.output_labels`, `classifier.activation` (tanh, gelu or silu) and
+  `classifier.pooling_type` (row 0 or mean) — is read and computed after the last layer, from
+  llama.cpp v0.9.0's `build_pooling` rank branch; the file's own `<arch>.pooling_type` does not
+  have to be `4`, because llama.cpp's converter never writes that for a `bert` file (llama-server
+  is told `--reranking`). A new `Want::Head` slot is one `TextWant::Head` text of a bidirectional
+  pass; its row is bit-identical alone, batched, at any pass size and thread count, and the head's
+  two projections are part of the no-allocation pass. `POST /v1/rerank` (also `/rerank`,
+  `/v1/reranking`, `/reranking`, as llama.cpp serves it) takes `query`, `documents` (strings or
+  `{"text": …}` objects), `top_n`, `return_documents`, `truncate`; each pair is one text built with
+  llama.cpp's `format_prompt_rerank` rule (`[CLS] q [SEP] d`, `<s> q </s> d </s>`), and the score
+  is the head's raw logit, sorted descending, in llama.cpp's response shape. `POST /v1/classify`
+  answers one entry per input with every label's probability (softmax; a sigmoid for a one-output
+  head that names its label) and the top label. `peregrine rerank` ranks documents on the command
+  line, and `/v1/models` reports `["rerank"]` or `["classify"]`. Checked against llama.cpp v0.9.0
+  on bge-reranker-v2-m3 Q8_0 and bge-reranker-base Q8_0, 320 (query, document) pairs in eight
+  languages: pair token ids identical, document order identical, scores 0.0107 and 0.0103 mean
+  apart — less than each engine's own Q8_0 distance from its FP16 run (0.0158), because llama.cpp's
+  GELU is the tanh approximation through f16 and this family's is exact. Rerank throughput at 4
+  threads: level with llama.cpp at 123-token pairs, 5-6 % ahead at 449-token ones. The synthetic
+  `bert` head files have new goldens on the scalar, AVX2 and AVX-512-under-SDE tiers; there is no
+  aarch64 golden yet. See `docs/reference/bert.md` and `docs/design/s4-embeddings-decisions.md` §8.
 - **Tool calling on the chat endpoint (S6.3)**: `POST /v1/chat/completions` reads OpenAI's `tools`,
   `tool_choice` and `parallel_tool_calls`, conversations with assistant `tool_calls` and `tool`
   messages, and answers with `message.tool_calls` and `finish_reason: "tool_calls"`, streamed or

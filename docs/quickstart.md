@@ -315,6 +315,46 @@ peregrine embed -m hf:W4D/Nemotron-3.5-Embed-1B-GGUF/Nemotron-3.5-Embed-1B-Q8_0.
 Its file says `context_length 262144`, but the model is trained for 32768 tokens; a longer text is
 refused with the position limit, not attempted.
 
+### Reranking and classification
+
+A BERT reranker is the same encoder with a classifier head: `cls` (a dense layer), the activation
+the file names (tanh by default) and `cls.output` (the projection to the file's outputs). Every
+(query, document) pair is one text, built with llama.cpp's own pair encoding, and the head's raw
+logit is the score — no sigmoid, exactly what llama-server returns:
+
+```sh
+peregrine serve -m hf:gpustack/bge-reranker-v2-m3-GGUF/bge-reranker-v2-m3-Q8_0.gguf --port 8203
+curl -s http://127.0.0.1:8203/v1/rerank -H 'content-type: application/json' -d '{
+  "query": "What is the capital of France?",
+  "documents": ["Paris is the capital of France.", "Lyon is a city in France."],
+  "top_n": 2
+}'
+```
+
+`results` holds `{"index", "relevance_score"}` in descending order, and `usage.prompt_tokens` counts
+every pair. `return_documents: true` adds each document's text. The route is also at `/rerank`,
+`/v1/reranking` and `/reranking`, as llama.cpp serves it. A pair longer than the model's position
+table is a 400 naming the limit, unless the request sets `truncate: true` — the same rule as
+`/v1/embeddings`.
+
+A file whose head has `classifier.output_labels` (or more than one output) answers
+`POST /v1/classify` instead: `{"input": "..."}` or an array of strings, one result per input with
+every label's probability (the softmax of the head's outputs; a sigmoid when the file has one
+labelled output) and the top label.
+
+On the command line:
+
+```sh
+peregrine rerank -m bge-reranker-v2-m3-Q8_0.gguf --query "What is the capital of France?" \
+  "Paris is the capital of France." "Lyon is a city in France."
+# 8.6065 0 Paris is the capital of France.
+# -1.5817 1 Lyon is a city in France.
+```
+
+`--top-n`, `--json` (the API's shape) and `--truncate` work as they do for `peregrine embed`, and a
+file without a head is refused by name. `/v1/models` reports `output_modalities` as `["rerank"]`
+for a one-output head and `["classify"]` for a labelled one.
+
 ## 7. Decisions (System One)
 
 A native decision model answers questions about a state without generating text: each option is a
