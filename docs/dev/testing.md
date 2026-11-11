@@ -379,6 +379,15 @@ Greedy decoding (32 tokens, 8 threads) was checked against llama.cpp on three pr
 The chat path (`/v1/chat/completions`) answers "The capital of France is Paris.", like llama.cpp's `--jinja` server, on the same prompts: 14 tokens without a system message and 24 with one. The file's template is Phi-4's own ChatML variant (`<|im_start|>role<|im_sep|>text<|im_end|>`, no newlines), which Peregrine detects by `<|im_sep|>` as llama.cpp v0.9.0 does (`src/llama-chat.cpp:99-101`, rendered at `:345-352`).
 The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512`, 20 chunks).
 
+**The AVX2 golden needs re-recording.** The file holds 40 Q5_K tensors, and S4.9i changed the order
+in which the AVX2 and AVX-512 Q5_K kernels add up a row (the result stays within one ulp of the
+scalar reference). `tests/golden/x86_64-avx2/phi-4-Q4_K_M.golden` was recorded before that and no
+longer matches. Loading the file takes about 9 GB of memory, more than any x86 host of the project
+has free, so it could not be recorded again with the change: on an AVX2 machine that has the file,
+`PEREGRINE_GOLDEN=require` fails for this model until someone records it on a larger machine
+(`PEREGRINE_GOLDEN=record`). The other large files (Llama-2-7B, Mistral-7B, Qwen3-30B-A3B) hold no
+Q5_K tensors and are not touched by that change.
+
 ## Accuracy against llama.cpp
 
 `docs/dev/accuracy.md`: the KL-divergence measurement on real text (`peregrine-bench` example `kld`).
