@@ -227,6 +227,10 @@ fn l2_bytes() -> usize {
 }
 
 /// `"1024K"`, `"2M"` or a plain byte count.
+///
+/// Only Linux reads the cache size, and only the unit test needs the parser
+/// elsewhere; a non-Linux build with `-D warnings` must not call it dead code.
+#[cfg(any(target_os = "linux", test))]
 fn parse_cache_size(s: &str) -> Option<usize> {
     let (num, mult) = match s.as_bytes().last()? {
         b'K' | b'k' => (&s[..s.len() - 1], 1 << 10),
