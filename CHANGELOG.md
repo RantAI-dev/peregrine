@@ -394,6 +394,23 @@ c63d13b (docs: the mistral3 reading note, the supported-model list and the tests
   Q8_0, bge-small Q8_0) is the base commit's bit for bit (five texts, `peregrine embed` compared
   with `cmp`), so no golden changed and the 200-text accuracy gate still prints the reference
   note's numbers. See `docs/design/s4.9-sota.md` §10.
+- **Encoder attention at long text lengths (S4.9g, part 3).** The strip's keys are stored
+  key-major in 16-key tiles on x86_64, so a score tile reads the panel front to back instead
+  of one 64-byte run every `n × 4` bytes; the value mix walks the keys in 128-key blocks for
+  every row block of a strip, so a text's values are read from L3 once per strip instead of
+  once per six-row block; a strip is up to 64 rows (1 MiB per worker) instead of 32 (128 KiB).
+  The defined arithmetic is untouched — same head-dimension FMA chain, same row maximum, same
+  `exp8`/`exp_scalar`, same ascending `f64` denominator, same ascending value fold — so no
+  golden changed and the scalar, AVX2 and NEON paths still agree bit for bit. One thread, the
+  score kernel goes from 26-56 % to 58-77 % of the 44.6 GMAC/s peak and the whole stage from
+  12-21 % to 22-28 % at 512-8 192 tokens; four workers reach 2.8-4.1× the one-thread stage at
+  2 048 and above. End to end at 4 threads, EmbeddingGemma 300M Q8_0: 512 tokens 0.968 →
+  0.882 s (attention 220 → 116 ms, 23 % → 13 %), 2 000 tokens 4.290 → 3.837 s (1 255 → 751 ms,
+  29 % → 20 %); bge-m3 Q8_0 at 2 000 15.66 → 14.45 s (attention 6.05 → 5.08 s). Both are faster
+  than llama.cpp v0.9.0 on the same file (1.257/5.637 s and 15.70 s). aarch64 keeps part 2's
+  lane panel and NEON kernels unchanged. See `docs/design/s4.9-sota.md` §9, "Long texts
+  (part 3)".
+
 - **The encoder's attention is a fused, cache-blocked strip with a defined arithmetic (S4.9g).**
   A whole text's bidirectional attention was a scalar, strict-order dot product per (query row,
   key), parallel over rows only — 35 % of an EmbeddingGemma pass at 128 tokens and 60 % at 512, and
