@@ -64,9 +64,11 @@ Why Peregrine should win here, and where the work is:
 | S4.6 | `bert` | all-MiniLM-L6/L12, bge-small/base/large-en-v1.5, e5, gte, bge-m3, multilingual-e5; bge-reranker-v2-m3 with its `cls` head | post-norm encoder, absolute positions, the classifier head |
 | S4.7 | `modern-bert` | ModernBERT, gte-modernbert, mmBERT, Granite Embedding R2, and their fine-tuned classifiers (`classifier.output_labels`) | alternating local and global attention, the labelled head |
 | S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand |
+| S4.14 | `mistral3`, non-causal | Nemotron 3.5 Embed 1B and Nemotron 3 Embed 1B (the same text model; mean pooling, 2048 dimensions); the 8B sizes load by the same code | the Tekken pre-tokenizer, the Mistral 3 block in the dense family, a bidirectional pass for dense models |
 
 Out of scope for this stage: `neo-bert`, `eurobert`, DeBERTa (Prompt Guard 2; llama.cpp does not
-read it either), the ColBERT multi-vector output; and of the decision types, the ones that need a
+read it either), the ColBERT multi-vector output; image input for Nemotron 3.5 Embed (§2.6);
+and of the decision types, the ones that need a
 model family Peregrine does not have (`lfm2-d1`, `lfm3-d1`, `granite-switch`), the large joint head
 (`clef`), vision (`minicpm-ocr-jev`, and image input for every type), and `vllm-decision2`, for
 which no file in llama.cpp's format is published (`docs/reference/systemone.md` §5).
@@ -181,6 +183,46 @@ its last prompt row is computed, like a pooled slot.
 gives Qwen3-Reranker `pooling_type = rank`, labels `["yes", "no"]`, a `rerank` template, and a
 2-row `cls.output` holding the output head's rows for the two tokens (the file may have no output
 head at all). The score is the softmax of those two logits at the last row.
+
+### 2.6 Mistral 3 embedders (S4.14)
+
+NVIDIA's Nemotron 3.5 Embed 1B is a retrieval embedder for text and page images in 34 languages.
+Its text model is a 16-layer Mistral 3 transformer run without the causal mask; llama.cpp v0.9.0
+reads it as `general.architecture = mistral3` with `mistral3.attention.causal = false` and
+`mistral3.pooling_type = 1` (mean). Its text model was taken from Nemotron 3 Embed 1B and kept frozen, so
+one piece of code serves both. What the published files say (Q8_0 header, 146 tensors):
+
+| | |
+|---|---|
+| Size | 16 blocks, width 2048, feed-forward 6144 (SiLU, gated), RMSNorm (ε 1e-5), no biases |
+| Attention | 24 heads of 128 over 8 key/value heads: queries are 3072 wide, keys and values 1024 |
+| Positions | RoPE over the whole head (128), base 1e6, YaRN scaling: factor 16, original context 16384, β 32 / 1, `yarn_log_multiplier` 1 |
+| Attention temperature | `attention.temperature_scale = 0.1`: each query row is multiplied by `1 + 0.1 · ln(⌊pos / 16384⌋ + 1)` after rotation, which is exactly 1 below position 16384 |
+| Output | final RMSNorm, mean over every token, L2 normalisation; 2048 numbers, and the first 1024 or 512 re-normalised (`dimensions`) |
+| Vocabulary | 131072 tokens, byte-pair merges, pre-tokenizer `pixtral` (Mistral's Tekken); no BOS or EOS is added |
+| Limits | 32768 tokens per text (the file's `context_length` is 262144) |
+
+**What Peregrine needs.** The parts exist: a bidirectional pass over whole texts with no cache
+(§2.2), mean pooling, YaRN positions (gpt-oss), heads wider than the model (Qwen3). Missing are the
+Tekken pre-tokenizer, `mistral3` as a member of the dense family, and that family's
+`forward_texts`. The temperature is implemented as written, not skipped for short texts, and tested
+on a synthetic file whose original context is a few tokens.
+
+**Input.** A text is embedded as given. The model was trained on `query: ` and `passage: `
+prefixes, and the client writes them, as it does with llama.cpp. The model's own template also
+puts a zero-width non-joiner after every `[` and `<` of user text so that text can never spell a
+control token; llama.cpp's later pre-tokenizer name `nemotron-3.5-embed` removes the joiner again
+before splitting. The files published so far were converted before that name existed and say
+`pixtral`. Peregrine accepts `tekken`, `pixtral` and `nemotron-3.5-embed`, and gives the same ids
+as llama.cpp for each.
+
+**Not in this step.** Image input: the vision encoder (Pixtral, 24 layers) and its projector ship
+as a separate `mmproj` file, and llama.cpp does not accept images on its embedding endpoint for
+this model either. The causal Mistral 3 chat models (Ministral 3) would load by the same block
+but need Mistral's chat template; they are not claimed here.
+
+**Checks.** The gate of §5 on the real file in Q8_0, Q4_K_M and F16; goldens on every tier; speed
+against llama.cpp on both x86 hosts at 16, 128, 512 and 2000 tokens, alone and batched.
 
 ## 3. API
 
@@ -301,6 +343,7 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |
 | S4.12 | System One, part 3: **laya** and Julia-1 on `modern-bert` with the decision head | S4.7 |
 | S4.13 | Generative rerankers: the rank read-out (`cls.output` on the last row), `/v1/rerank` and `peregrine rerank` with Qwen3-Reranker | S4.3 |
+| S4.14 | `mistral3` embedders (§2.6): the Tekken pre-tokenizer against llama.cpp; the Mistral 3 block and `forward_texts` in the dense family; Nemotron 3.5 Embed 1B against llama.cpp on the real file (Q8_0, Q4_K_M, F16), goldens per tier, speed on both x86 hosts | S4.4 |
 | S4.10 | Several models in one server (`serve -m a -m b`, routed by `model`): a chat model, an embedder and a decision model in one process sharing one pool | S4.3 |
 
 ## 7. Decisions
