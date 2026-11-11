@@ -328,7 +328,8 @@ fn matmul_block(
                     // starts or ends inside a panel computes the panel and keeps
                     // the rows it asked for; a row's bits do not depend on that.
                     let off = j.w.fp_off.expect("a packed float path has a store offset");
-                    let pb = peregrine_kernels::fpack::panel_bytes(j.w.kind, n);
+                    let fmt = j.w.kind;
+                    let pb = peregrine_kernels::fpack::panel_bytes(fmt, n);
                     let store = w.fp();
                     let mut blk = [0.0f32; 16 * MAX_BATCH];
                     let first = r / 16;
@@ -336,7 +337,7 @@ fn matmul_block(
                     for p in first..last {
                         let at = off + p * pb;
                         mk.fp_panels_gemm(
-                            j.w.kind,
+                            fmt,
                             &store[at..at + pb],
                             n,
                             1,
@@ -536,30 +537,56 @@ fn fp_group(
         let off = j.w.fp_off.expect("a packed float path has a store offset") + first_panel * pb;
         let at = off + pn * pb;
         let tf = crate::prof::detail().then(Instant::now);
-        let mut blk = [0.0f32; FP_UNIT_PANELS * 16 * MAX_BATCH];
-        let out = &mut blk[..pn * 16 * bn];
-        // SAFETY: `out` holds one unit; the store holds the matrix's panels.
-        MatKernels::get().fp_panels_gemm(
-            j.w.kind,
-            &store[off..at],
-            n,
-            pn,
-            &acts[b0..b0 + bn],
-            None,
-            out,
-        );
-        for i in 0..pn * 16 {
-            let row = first_panel * 16 + i;
-            if row >= rows {
-                break;
-            }
-            for b in 0..bn {
-                // SAFETY: unit `u` is computed by exactly one worker, so every
-                // (b, row) it writes is written once.
-                unsafe {
-                    j.out
-                        .set((b_off + b0 + b) * rows + row, out[b * pn * 16 + i])
-                };
+        let pan = pn * 16;
+        let first_row = first_panel * 16;
+        // The direct store is used for the engine's own block (b_off == 0): a wider
+        // pass that the matmul driver split, and a shape whose rows are not whole
+        // panels, go through the block and the copy.
+        if b_off == 0 && first_row + pan <= rows {
+            // The kernel writes straight into the projection's row-major output:
+            // activation row `b` lands at `out[b · rows ..][..pn · 16]`, the rows this
+            // unit owns. No temporary block, no copy (S4.9m).
+            // SAFETY: unit `u` is computed by exactly one worker, and the window holds
+            // the unit's own rows of every activation row; the other rows of the same
+            // output belong to other units and are written by them alone.
+            let win = unsafe {
+                j.out
+                    .window_mut(b0 * rows + first_row, (bn - 1) * rows + pan)
+            };
+            MatKernels::get().fp_panels_gemm_strided(
+                j.w.kind,
+                &store[off..at],
+                n,
+                pn,
+                &acts[b0..b0 + bn],
+                None,
+                win,
+                rows,
+            );
+        } else {
+            // A matrix whose output rows are not a whole number of panels: the
+            // kernel's padded lanes have no row in the output, so this last panel
+            // goes through a block and only the rows that exist are stored.
+            let mut blk = [0.0f32; FP_UNIT_PANELS * 16 * MAX_BATCH];
+            let out = &mut blk[..pn * 16 * bn];
+            MatKernels::get().fp_panels_gemm(
+                j.w.kind,
+                &store[off..at],
+                n,
+                pn,
+                &acts[b0..b0 + bn],
+                None,
+                out,
+            );
+            for i in 0..pan {
+                let row = first_row + i;
+                if row >= rows {
+                    break;
+                }
+                for b in 0..bn {
+                    // SAFETY: unit `u` is computed by exactly one worker.
+                    unsafe { j.out.set((b_off + b0 + b) * rows + row, out[b * pan + i]) };
+                }
             }
         }
         if let Some(t) = tf {
@@ -747,10 +774,11 @@ fn one_row_outputs(
             }
             MatPath::FloatPanels => {
                 let off = head.fp_off.expect("a packed float path has a store offset");
-                let pb = peregrine_kernels::fpack::panel_bytes(head.kind, n);
+                let fmt = head.kind;
+                let pb = peregrine_kernels::fpack::panel_bytes(fmt, n);
                 let p = r / 16;
                 mk.fp_panels_gemm(
-                    head.kind,
+                    fmt,
                     &w.fp()[off + p * pb..off + (p + 1) * pb],
                     n,
                     1,
