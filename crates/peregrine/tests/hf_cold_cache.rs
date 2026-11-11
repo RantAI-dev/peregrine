@@ -16,7 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use support::models::{write_dense, Dense};
+use support::models::{write_dense_pooled, Dense};
 
 fn tmpdir(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
@@ -163,7 +163,8 @@ fn read_log(path: &Path) -> String {
 #[test]
 fn a_cold_hf_download_runs_and_serves() {
     let dir = tmpdir("both");
-    let model = write_dense(&dir, "llama", Format::F16, 11, Dense::default());
+    // Pooling type 3 (last) so the same cold file also serves `peregrine embed`.
+    let model = write_dense_pooled(&dir, "llama", Format::F16, 11, Dense::default(), 3);
     let bytes = Arc::new(std::fs::read(&model).unwrap());
     let port = serve(bytes);
     let base = format!("http://127.0.0.1:{port}");
@@ -217,7 +218,28 @@ fn a_cold_hf_download_runs_and_serves() {
     );
     assert!(!cached.with_extension("gguf.part").exists());
 
-    // 2. `serve` on a cold cache: the same first download must not panic before the model loads.
+    // 2. `embed` on a cold cache: the command must set its options after the download, and the
+    //    download must not have read them (the v0.1.2 failure mode).
+    std::fs::remove_dir_all(cache.join("models")).expect("clear the cache for the cold embed");
+    let mut embed = Command::new(&bin);
+    env(&mut embed);
+    let out = embed
+        .args(["embed", "-m", hf, "--no-profile", "--dimensions", "8", "hi"])
+        .output()
+        .expect("run peregrine embed");
+    assert!(
+        out.status.success(),
+        "cold-cache embed failed ({}):\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let floats: Vec<&str> = stdout.split_whitespace().collect();
+    assert_eq!(floats.len(), 8, "one truncated vector");
+    assert!(cached.is_file(), "embed did not download the model");
+
+    // 3. `serve` on a cold cache: the same first download must not panic before the model loads.
     std::fs::remove_dir_all(cache.join("models")).expect("clear the cache for the cold serve");
     let listen = TcpListener::bind("127.0.0.1:0").unwrap();
     let serve_port = listen.local_addr().unwrap().port();

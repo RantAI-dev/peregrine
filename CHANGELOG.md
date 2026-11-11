@@ -7,6 +7,24 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+
+- **System One decision-model groundwork (S4.3)**: the answer math, the decision metadata and the
+  label read-out, with no endpoint yet. `peregrine_core::decision` transcribes llama.cpp v0.9.0's
+  `format_answer`, `get_temperature` and confidence helpers in `f64` — `choice` (best option,
+  probabilities, confidence), `score` (expected level, legend, probabilities, confidence) and `noul`
+  (the probability of true; Lev's nine-point scale) — with the per-type confidence formulas
+  (entropy for vllm-decision2/vllm-d3, `p_max` for lfm3-d1) behind an enum, and is checked against an
+  independent Python implementation to 1e-12 on 45 random cases. `DecisionInfo::from_gguf` reads
+  `<arch>.decision.type` (the sixteen known names), every `temperature`, every
+  `score_bias.<n>.<i>`, `labels` and the presence and byte length of the named `systemone` template,
+  with llama.cpp's validations and messages; `peregrine inspect` prints one `decision` line. The
+  engine gains `Want::Labels` (`Engine::admit_labels`): a slot prefilled like a pooled one, never
+  decoded, whose single emission carries its last prompt row's logits at the given token ids. A
+  question after another with the same prompt prefix restores the cache from the prefix store and
+  is bit-identical on dense models; a hybrid model's cache is not kept there (no recurrent state in
+  a snapshot), so it recomputes. The label logits are bit-identical alone, after a sibling and in a
+  batch, at chunks 1/16/64 and 1/2/4 threads on synthetic llama and qwen35 files, through both
+  scheduling paths.
 - **WordPiece and SentencePiece-unigram tokenizers** (roadmap S4.5), the two vocabularies
   encoder models ship: `tokenizer.ggml.model = "bert"` (all-MiniLM, bge, e5, gte) and
   `"t5"` (T5 and the XLM-R vocabulary: bge-m3, multilingual-e5, bge-reranker). Both are
@@ -21,7 +39,8 @@ All notable changes to this project are documented here. The format follows
   `encode_into` allocates nothing per token: 12 MB/s and 3.4 M tokens/s on WordPiece,
   7 MB/s and 2.0 M tokens/s on the 250k-piece XLM-R vocabulary on the reference machine.
 - `Tokenizer::encode_special` (one text with the file's special tokens as llama.cpp adds
-  them for an embedding input: `[CLS] … [SEP]`, `<s> … </s>`) and `Tokenizer::encode_pair`
+  them for an embedding input: `[CLS] … [SEP]`, `<s> … </s>`, or the file's BOS/EOS
+  prologue and epilogue for a byte-level BPE such as Qwen3-Embedding) and `Tokenizer::encode_pair`
   (a query and a document, formatted exactly like llama.cpp's `format_prompt_rerank`:
   `[CLS] q [SEP] d [SEP]` for BERT, `<s> q </s> d </s>` for XLM-R).
 - Tokenizers are now checked against `llama-tokenize` on three real vocabularies in CI,
@@ -37,6 +56,16 @@ All notable changes to this project are documented here. The format follows
   skipped with a notice otherwise.
 - `crates/peregrine-bench/examples/tokbench.rs`: tokenizer MB/s and tokens/s.
 - `peregrine support` and the README table list the two new tokenizers.
+- **Embeddings on causal models (S4.1)**: `POST /v1/embeddings` and `peregrine embed`.
+  A model file that declares `<arch>.pooling_type` — Qwen3-Embedding and the other decoder-based
+  embedders — takes the OpenAI request shapes (a string, an array of strings, token ids, or arrays
+  of token ids), `dimensions` (Matryoshka truncation before L2 normalisation) and `encoding_format`
+  `float` or `base64`. Every text of one request is a slot in the same engine, prefilled beside
+  chat requests and never decoded; vectors come back in input order and are bit-identical alone or
+  in any batch. The pooling type (`last` or `mean`) and the appended EOS token are read from the
+  file as llama.cpp reads them. `peregrine embed` prints one line of floats per text (or `--json`),
+  reads stdin lines, and `peregrine inspect` reports the file's pooling type.
+- `peregrine support` lists embeddings in the support table.
 
 ## [0.1.2] - 2026-11-10
 

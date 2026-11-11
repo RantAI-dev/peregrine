@@ -275,10 +275,11 @@ fn the_engine_copies_out_the_taps_a_drafter_asks_for() {
             *taps, d_model,
             "the taps of position {pos} are not the layer the drafter asked for"
         );
-        // Only a hybrid forward writes the target's hidden states; a dense one
-        // has none to give.
+        // A dense forward writes the final-norm hidden state it already computes for the output
+        // head into `State::hidden` (S4.1 pools the same rows); a drafter that asked for it is
+        // told the target's row.
         assert_eq!(
-            *hidden, 0,
+            *hidden, d_model,
             "the hidden state of position {pos} is not the target's row"
         );
     }

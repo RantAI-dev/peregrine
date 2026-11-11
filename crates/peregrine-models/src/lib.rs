@@ -29,7 +29,9 @@ pub mod gptoss;
     feature = "arch-qwen",
     feature = "arch-qwen3moe",
     feature = "arch-phi3",
-    feature = "arch-gpt-oss"
+    feature = "arch-gpt-oss",
+    // Gemma 3's forward uses `layer::write_hidden` (the embedding path) but nothing else here.
+    feature = "arch-gemma3"
 ))]
 pub(crate) mod layer;
 #[cfg(feature = "arch-qwen35")]
