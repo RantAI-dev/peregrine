@@ -3,10 +3,12 @@
 //! Written independently of `peregrine_models::gemma3::Gemma3::forward_texts`: the
 //! transcribed llama.cpp graph is reimplemented here layer by layer, on one text at a
 //! time, with plain loops. It uses the same arithmetic primitives the engine uses —
-//! `dot_f32_ref` for a matrix row, `sumsq_f64` for a norm, `gelu_tanh`, the rotary table
-//! — because the test's claim is that the *forward graph and its order* are right, and
-//! those primitives are what makes an F32 model reproduce bit for bit. The synthetic
-//! reference model is F32; other formats are checked by the invariance and golden tests.
+//! `row_dot` for a matrix row (the packed kernel's FMA chain, or the old partial-sum
+//! dot where the tier has no packed kernel), `sumsq_f64` for a norm, `gelu_tanh`, the
+//! rotary table — because the test's claim is that the *forward graph and its order*
+//! are right, and those primitives are what makes an F32 model reproduce bit for bit.
+//! The synthetic reference model is F32; other formats are checked by the invariance
+//! and golden tests.
 //!
 //! The mask rule is llama.cpp v0.9.0's symmetric window (`src/llama-hparams.h`,
 //! `is_masked_swa`): `|p1 - p0| > n_swa / 2` is masked. Pooling is `pool_rows`' rule:
@@ -16,6 +18,31 @@ use peregrine_core::embed::Pooling;
 use peregrine_core::gguf::{Format, Gguf};
 use peregrine_core::model::Model;
 use peregrine_kernels::quant::{dequant_row, dot_f32_ref};
+use peregrine_kernels::table::MatKernels;
+
+/// One float matrix row times an activation row, in the arithmetic the engine defines
+/// for this build.
+///
+/// Where the tier runs the packed float kernel (S4.9f: any x86-64 tier unless
+/// `PEREGRINE_FPACK=0`) a matrix row is one sequential `f32::mul_add` chain from
+/// `+0.0`, which is `fpack::gemm_scalar` and, lane per output, the vector kernels;
+/// it is reproduced here from the row's f32 words rather than called, so the graph
+/// stays the thing under test. Where the kernel is not in the table (aarch64) the
+/// engine multiplies a float row with eight partial sums and a horizontal fold,
+/// which `dot_f32_ref` pins. The predicate is the kernel table's own, so the
+/// reference and the engine cannot disagree about which path a tier takes.
+fn row_dot(row: &[u8], x: &[f32]) -> f32 {
+    if MatKernels::get().fp_panels() {
+        let mut acc = 0.0f32;
+        for (k, &xv) in x.iter().enumerate() {
+            let wv = f32::from_le_bytes(row[k * 4..k * 4 + 4].try_into().unwrap());
+            acc = xv.mul_add(wv, acc);
+        }
+        acc
+    } else {
+        dot_f32_ref(Format::F32, row, x)
+    }
+}
 
 struct Mat {
     bytes: Vec<u8>,
@@ -29,7 +56,7 @@ impl Mat {
     }
     fn apply(&self, x: &[f32], out: &mut [f32]) {
         for (r, o) in out[..self.d_out].iter_mut().enumerate() {
-            *o = dot_f32_ref(Format::F32, self.row(r), x);
+            *o = row_dot(self.row(r), x);
         }
     }
 }
