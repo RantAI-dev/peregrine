@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A required hygiene job (`ci`)**: `scripts/hygiene.sh` fails a tracked credential file, a
+  credential-shaped string in a tracked text file, and (when `HYGIENE_BANNED_PATTERN` is set) a banned
+  name, on the tree and on every commit a pull request adds; `scripts/hygiene-selftest.sh` proves each
+  check and `ci-ok` now requires the job.
+
 - **Decision questions fork one evaluation of their shared state (S4.9j, part 1)**: a cache snapshot
   now carries a hybrid model's per-layer Gated DeltaNet state and convolution history
   (`KvSnapshot::rec`), restorable only at the snapshot's own length, and `KvCache::fork_from` copies

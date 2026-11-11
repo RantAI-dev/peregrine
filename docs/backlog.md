@@ -74,7 +74,6 @@ the stage profile of 2026-11-11 that `docs/design/s4.9-sota.md` is built on.
 
 | Idea | Why | Size |
 |---|---|---|
-| **Secret and name scan in CI** | Credential files and the project's banned-name list are checked by hand today. A required CI job that fails on credential-shaped strings, on `.env` files and on the banned names makes both mechanical. | S |
 | **Fuzz the request parsers** | `json.rs`, the GGUF header and decision-metadata readers and the tokenizers take untrusted input in a server. `cargo fuzz` targets with a short CI run. | S |
 | **Per-test directories as a helper** | Two tests sharing a temp path caused a SIGBUS in CI. One helper that names a directory after the test, used everywhere. | S |
 
