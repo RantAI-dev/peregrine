@@ -13,6 +13,7 @@
 
 use peregrine_kernels::cpu::Tier;
 use peregrine_kernels::fpack;
+#[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kqsimd;
 use peregrine_kernels::quant::{f32_to_f16, row_bytes, QuantAct};
 use peregrine_kernels::table::MatKernels;
@@ -89,7 +90,8 @@ fn acts(rows: usize, n: usize, seed: u64) -> Vec<QuantAct> {
         .collect()
 }
 
-/// A Q8_0 matrix, repacked eight rows at a time.
+/// A Q8_0 matrix, repacked eight rows at a time. The int8 column is x86-only.
+#[cfg(target_arch = "x86_64")]
 fn q8_weights(n_out: usize, n_in: usize, seed: u64) -> Vec<u8> {
     let nb = n_in / 32;
     let mut next = prng(seed);
@@ -256,6 +258,7 @@ fn format_row(n_in: usize, n_out: usize, nb: usize, xs: &[QuantAct], q8: bool) -
         fpack::gemm(Format::BF16, &pbf, n_in, panels, xs, None, &mut out);
         std::hint::black_box(&out);
     });
+    #[cfg(target_arch = "x86_64")]
     let int8 = if q8 && n_in.is_multiple_of(32) && n_out.is_multiple_of(8) {
         let wq = q8_weights(n_out, n_in, 13);
         let nblk = n_in / 32;
@@ -270,6 +273,11 @@ fn format_row(n_in: usize, n_out: usize, nb: usize, xs: &[QuantAct], q8: bool) -
             std::hint::black_box(&q);
         })
     } else {
+        0.0
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let int8 = {
+        let _ = q8;
         0.0
     };
     let _ = row_bytes(Format::F32, n_in);
