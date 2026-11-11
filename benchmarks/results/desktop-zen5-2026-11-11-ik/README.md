@@ -23,12 +23,12 @@ often reported faster than upstream on x86 CPUs. Nothing in the engine changed: 
 | Engine | Version / commit | Build |
 |---|---|---|
 | Peregrine | `origin/main` `99eabe9d9edb1fee43410d12b82de03c085e9280` | `cargo build --release -p peregrine`, rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| llama.cpp | v0.9.0, commit `cd959ba` | harness cache build, CMake Release AVX2/FMA, `llama-server` |
+| ik_llama.cpp | `master` `479074ccac2ac94f06b6d24a9ce26f0f9e9aa6ae` (2026-11-11 08:54:37 +0200) | CMake Release, `-DGGML_NATIVE=ON -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON -DGGML_AVX512_BF16=ON` |
 
 `origin/main` advanced to `af7eb09` while these runs were in progress; the measured tree stayed
 at `99eabe9` so that every row in this folder is one binary, and the rebuilt post-reboot binary
 is the same commit.
-| llama.cpp | v0.9.0, commit `cd959ba` | harness cache build, CMake Release AVX2/FMA, `llama-server` |
-| ik_llama.cpp | `master` `479074ccac2ac94f06b6d24a9ce26f0f9e9aa6ae` (2026-11-11 08:54:37 +0200) | CMake Release, `-DGGML_NATIVE=ON -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON -DGGML_AVX512_BF16=ON` |
 
 The ik_llama.cpp build is the one its `docs/build.md` requires on AVX-512; a plain Release
 build silently falls back to AVX2. Verification: the configure step printed
