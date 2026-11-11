@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use support::models::{write_dense_pooled, write_gemma_embedding, Dense, GemmaEmbeddingConfig};
+use support::models::{
+    write_dense_pooled, write_gemma_embedding, write_modern_bert, Dense, GemmaEmbeddingConfig,
+    ModernBertConfig,
+};
 
 const WIDTH: usize = 256;
 
@@ -506,6 +509,82 @@ fn a_chat_request_is_served_while_a_wide_embedding_request_runs() {
     let (status, body) = embedding.join().expect("the embedding request thread");
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["data"].as_array().unwrap().len(), 128);
+}
+
+/// The ModernBERT family served (roadmap S4.7): a synthetic `modern-bert` file with
+/// mean pooling answers `/v1/embeddings` for strings, refuses chat by name, and
+/// names its context as the text limit.
+#[test]
+fn a_modern_bert_encoder_serves_embeddings_and_refuses_chat() {
+    let dir = tmpdir("modern-bert");
+    let model = write_modern_bert(&dir, Format::F16, 72, ModernBertConfig::default());
+    let port = free_port();
+    let log = dir.join("serve.log");
+    let log_file = std::fs::File::create(&log).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
+        .args([
+            "serve",
+            "-m",
+            model.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--ctx",
+            "64",
+            "--threads",
+            "2",
+            "--slots",
+            "4",
+            "--no-profile",
+        ])
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .expect("spawn peregrine serve");
+    let _guard = Guard(child);
+    wait_for_health(port);
+
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": ["hello world", "the test of a paris city", "hello world"]}),
+    );
+    assert_eq!(status, 200, "{body}");
+    for i in 0..3 {
+        let v = embedding(&body, i);
+        assert_eq!(v.len(), 128, "width");
+        assert!((norm(&v) - 1.0).abs() < 1e-4, "normalised");
+    }
+    assert_eq!(
+        bits(&embedding(&body, 0)),
+        bits(&embedding(&body, 2)),
+        "the same text has one vector"
+    );
+
+    let (status, body) = post(
+        port,
+        "/v1/chat/completions",
+        json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("embedding model"));
+
+    let long: Vec<u32> = (5..90).collect();
+    let (status, body) = post(port, "/v1/embeddings", json!({"input": long}));
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("64 positions"), "message: {message}");
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": long, "truncate": true}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["usage"]["prompt_tokens"].as_u64().unwrap(), 64);
 }
 
 /// The BERT family served (roadmap S4.6a): a synthetic `bert` file with cls pooling

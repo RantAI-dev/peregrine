@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The `modern-bert` family: ModernBERT, gte-modernbert and Granite Embedding R2 (roadmap
+  S4.7)**: `architecture = "modern-bert"` is the 2024 encoder those files ship as. Its blocks are
+  pre-norm and use two LayerNorms with a weight and no bias (layer 0's attention norm is the
+  identity); attention is RoPE with a separate base for the local and the global layers, and every
+  third layer from the first sees the whole text while the two between see a symmetric
+  `attention.sliding_window / 2` either side (64 tokens for the 128-token files); q, k and v come
+  from one fused matrix; the feed-forward is a gated pair whose `ffn_up` is `2·n_ff` wide, with the
+  first half activated (the exact erf GELU for ModernBERT and Granite R2, SiLU for a file that says
+  so) and multiplied by the second; the final `output_norm` feeds the file's `cls` or `mean`
+  pooling. The graph, the tensors, the mask and the tokenizer are transcribed from llama.cpp v0.9.0
+  in `docs/reference/modern-bert.md`. New defined kernels in `peregrine-kernels::vmath`:
+  `layer_norm_rows_nobias` (the f64 two-pass norm without the final `+ 0`, so a `-0.0` product stays
+  negative) and `geglu_erf` (the exact GELU times the second half); both are **scalar** in this
+  step, with tests, and a vector body may only be added if it is `to_bits` equal. The tokenizer
+  gains the GPT-2 `modern-bert` pre-type (the plain GPT-2 alternation: `smollm` with digit runs
+  kept together), so a text is `<bos> … <eos>` as the converter writes it. On 200 texts of 16 to
+  6976 tokens, the ids are identical to llama.cpp's on all 200 for both reference models; cosine
+  against llama.cpp is min/mean 0.9999936/0.9999997 on gte-modernbert-base F16 and
+  0.9999997/0.9999999 on Granite R2 F16. Q8_0, against llama.cpp's F16 conversion, is
+  0.9963540/0.9996125 on gte (llama.cpp's own Q8_0: 0.9981270/0.9996284) and
+  0.9998753/0.9999246 on Granite (llama.cpp: 0.9998838/0.9999252): 1.6e-5 and 6.5e-7 below
+  llama.cpp's mean distance, inside the design's 1e-4 band. A file with a classifier head
+  (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`) loads, shape-checks and ignores
+  the head with one line of output, and still serves embeddings when it declares a pooling type;
+  `classify`/`rerank` wait for the BERT family's head (S4.6b). A synthetic four-layer file (a
+  window of 8, two different RoPE bases, F32 and Q8_0, the three activations and a classifier
+  variant) is checked bit for bit against an independent scalar reference, is batch- and
+  thread-invariant, allocates nothing in a pass, and has a golden on each pinned x86 tier (the
+  aarch64 ones are not recorded on this host). Speed on a shared 8-core AVX2 Xeon, 4 threads,
+  medians of three, texts/s against llama.cpp on the same F16 file: 30.8 vs 21.7 at 16 tokens,
+  4.59 vs 3.55 at 128, 1.29 vs 0.892 at 512, 0.255 vs 0.180 at 2000; batch 32 is 37.3 vs 29.4 at
+  16 and 5.20 vs 3.76 at 128. The matrices take 69 % of a 512-token pass and 56 % of a 2000-token
+  one; attention grows from 11 % to 27 %. The fixtures are under
+  `crates/peregrine-models/tests/fixtures/modern-bert/`.
+
 ### Changed
 
 - **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The

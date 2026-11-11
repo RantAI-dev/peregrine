@@ -1039,6 +1039,24 @@ pub fn geglu(gate: &mut [f32], up: &[f32]) {
     geglu_scalar(gate, up);
 }
 
+/// GeGLU with the **exact** GELU: `gate[i] = gelu_erf(gate[i]) · up[i]`.
+///
+/// This is the ModernBERT family's feed-forward activation (`LLM_FFN_GEGLU_ERF`,
+/// `src/llama-graph.cpp`'s `ggml_geglu_erf`): the first half of the `ffn_up` row is
+/// activated and multiplies the second half. llama.cpp evaluates
+/// `0.5·x·(1 + erff(x/√2))·g` left to right; [`gelu_erf`] is `(0.5·x)·(1 + erf(x/√2))`
+/// and the final multiply is the same one, so the bits match for the same `erf`.
+///
+/// Scalar, and deliberately so (S4.7): it has no vector path, so there is no second
+/// arithmetic to keep in step. A vector body may only be added if it evaluates these
+/// same expressions lane-wise.
+pub fn geglu_erf(gate: &mut [f32], up: &[f32]) {
+    debug_assert_eq!(gate.len(), up.len());
+    for (g, &u) in gate.iter_mut().zip(up) {
+        *g = gelu_erf(*g) * u;
+    }
+}
+
 /// The GeGLU loop, written once: the portable path, and the body of the FMA path.
 ///
 /// `#[inline(always)]`, so that `geglu_fma` compiles the `mul_add`s of [`tanh_scalar`]
@@ -1677,6 +1695,7 @@ unsafe fn layer_norm_8_rows(
 /// single accumulator in index order, not into per-lane partials, or the bits
 /// move). `m` is rounded to `f32` once for the shift, while the variance uses
 /// the unrounded `m`, which is the two-pass form and the more accurate one.
+///
 /// The scale-and-shift is three plain `f32` operations, deliberately not fused:
 /// `mul` then `add`, so a machine with FMA produces the same bits.
 ///
@@ -1704,6 +1723,78 @@ pub fn layer_norm_row(x: &[f32], weight: &[f32], bias: &[f32], eps: f32, out: &m
     for i in 0..n {
         let t = (x[i] - mean) * inv;
         out[i] = t * weight[i] + bias[i];
+    }
+}
+
+/// [`layer_norm_row`] with **no bias**, the ModernBERT family's LayerNorm.
+///
+/// llama.cpp's `build_norm` with a weight and no bias multiplies the centred,
+/// scaled row by the weight alone (`ggml_norm` then `ggml_mul`; `src/llama-graph.cpp`).
+/// The arithmetic is [`layer_norm_row`]'s without the final add:
+///
+/// ```text
+/// out_i = ((x_i − m_f32) · inv) · w_i             f32, in that order
+/// ```
+///
+/// The absent `+ 0` is not cosmetic: the add turns a `-0.0` product into `+0.0`,
+/// so the bias form would give a different bit for a row of negative zeros. This
+/// form keeps llama.cpp's `mul` result.
+pub fn layer_norm_row_nobias(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
+    let n = x.len();
+    debug_assert!(out.len() >= n && weight.len() >= n);
+    let mut sum = 0.0f64;
+    for &v in &x[..n] {
+        sum += v as f64;
+    }
+    let nf = n as f64;
+    let mean64 = sum / nf;
+    let mean = mean64 as f32;
+    let mut var = 0.0f64;
+    for &v in &x[..n] {
+        let d = v as f64 - mean64;
+        var += d * d;
+    }
+    let inv = (1.0 / (var / nf + eps as f64).sqrt()) as f32;
+    for i in 0..n {
+        out[i] = ((x[i] - mean) * inv) * weight[i];
+    }
+}
+
+/// [`layer_norm_row_nobias`] over `nb` rows of `dim` floats.
+///
+/// Scalar (S4.7): the AVX2 body of [`layer_norm_rows`] adds a bias in its final
+/// lane-wise step, and this form's defined arithmetic is one multiply. A vector
+/// body goes here when a profile asks for one; it must be `to_bits` equal to the
+/// scalar twin, as the bias form's is.
+pub fn layer_norm_rows_nobias(
+    x: &[f32],
+    weight: &[f32],
+    eps: f32,
+    dim: usize,
+    nb: usize,
+    out: &mut [f32],
+) {
+    let need = nb
+        .checked_mul(dim)
+        .expect("layer_norm_rows_nobias: row count times width overflows usize");
+    assert!(
+        x.len() >= need && out.len() >= need,
+        "layer_norm_rows_nobias: {nb} rows of {dim} need {need} floats, got {} in and {} out",
+        x.len(),
+        out.len()
+    );
+    assert!(
+        weight.len() >= dim,
+        "layer_norm_rows_nobias: a {dim}-wide row needs {dim} weights, got {}",
+        weight.len()
+    );
+    for r in 0..nb {
+        layer_norm_row_nobias(
+            &x[r * dim..(r + 1) * dim],
+            weight,
+            eps,
+            &mut out[r * dim..(r + 1) * dim],
+        );
     }
 }
 
@@ -3367,6 +3458,74 @@ mod tests {
                     want[i].to_bits()
                 );
             }
+        }
+    }
+
+    /// The no-bias LayerNorm is the bias form with the add removed, bit for bit
+    /// for every row whose products are not zeros; where the product is a zero the
+    /// two differ in the sign, and this form keeps the product's sign.
+    #[test]
+    fn layer_norm_rows_nobias_is_the_bias_form_without_the_add() {
+        let dim = 37usize;
+        let nb = 11usize;
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let x: Vec<f32> = (0..nb * dim)
+            .map(|_| (next() as i32 as f32) / (1u32 << 20) as f32)
+            .collect();
+        let w: Vec<f32> = (0..dim)
+            .map(|_| 0.5 + (next() % 1000) as f32 / 500.0)
+            .collect();
+        let zero_bias = vec![0.0f32; dim];
+        for eps in [1e-12f32, 1e-5] {
+            let mut got = vec![0.0f32; nb * dim];
+            layer_norm_rows_nobias(&x, &w, eps, dim, nb, &mut got);
+            let mut want = vec![0.0f32; nb * dim];
+            layer_norm_rows(&x, &w, &zero_bias, eps, dim, nb, &mut want);
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "eps {eps}"
+            );
+        }
+        // A row of negative zeros: centring gives -0.0 and the weight is positive,
+        // so the product is -0.0; the bias form's `+ 0.0` turns it into +0.0.
+        let x = vec![-0.0f32; dim];
+        let mut got = vec![0.0f32; dim];
+        let mut biased = vec![0.0f32; dim];
+        layer_norm_rows_nobias(&x, &w, 1e-5, dim, 1, &mut got);
+        layer_norm_rows(&x, &w, &zero_bias, 1e-5, dim, 1, &mut biased);
+        assert!(got.iter().all(|v| v.to_bits() == (-0.0f32).to_bits()));
+        assert!(biased.iter().all(|v| v.to_bits() == 0.0f32.to_bits()));
+    }
+
+    /// `geglu_erf` is exactly `gelu_erf` on the first half times the second half.
+    #[test]
+    fn geglu_erf_is_the_exact_gelu_times_the_second_half() {
+        let n = 4097usize;
+        let mut state = 0x1319_8a2e_0370_7344u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let values: Vec<f32> = (0..n)
+            .map(|_| ((next() % 20_001) as f32 - 10_000.0) / 500.0)
+            .collect();
+        let ups: Vec<f32> = (0..n)
+            .map(|_| ((next() % 20_001) as f32 - 10_000.0) / 3000.0)
+            .collect();
+        let mut got = values.clone();
+        geglu_erf(&mut got, &ups);
+        for i in 0..n {
+            let want = gelu_erf(values[i]) * ups[i];
+            assert_eq!(got[i].to_bits(), want.to_bits(), "index {i}");
         }
     }
 }
