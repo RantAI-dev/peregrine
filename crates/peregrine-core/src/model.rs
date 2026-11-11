@@ -272,7 +272,7 @@ impl KqStore {
     pub fn bytes(&self) -> &[u8] {
         self.ro
             .as_deref()
-            .or_else(|| self.map.as_deref())
+            .or(self.map.as_deref())
             .unwrap_or(&self.heap)
     }
     pub fn bytes_mut(&mut self) -> &mut [u8] {
@@ -345,7 +345,7 @@ impl FpStore {
     pub fn bytes(&self) -> &[u8] {
         self.ro
             .as_deref()
-            .or_else(|| self.map.as_deref())
+            .or(self.map.as_deref())
             .unwrap_or(&self.heap)
     }
     pub fn bytes_mut(&mut self) -> &mut [u8] {
