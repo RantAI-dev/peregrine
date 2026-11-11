@@ -41,7 +41,13 @@ All notable changes to this project are documented here. The format follows
   has a golden on each pinned x86 tier; server and CLI tests cover the endpoint, `cls`/`mean`
   pooling, Matryoshka truncation and the chat refusal. `peregrine run` on a bidirectional
   encoder now names it as an embedding model instead of complaining about a missing chat
-  template. The real-file fixtures are under `tests/fixtures/bert/` with an ignored test.
+  template. The real-file fixtures are under `tests/fixtures/bert/` with an ignored test. Speed on
+  H0 after S4.9g's attention strip (4 threads, medians of three, load 6.6–10): MiniLM F16 161
+  texts/s at 16 tokens single (llama.cpp 102) and 5.30 at 512 tokens (llama.cpp 6.41); bge-small
+  Q8_0 98.8 (llama.cpp 72.8) and 2.47 (llama.cpp 3.27); a single 16-token text's p50 is 7.2 ms
+  against llama.cpp's 9.2 ms on MiniLM and 11.7 against 16.2 on bge-small. The remaining 15–30 %
+  at 128–512 tokens is the scalar exact GELU and the per-row LayerNorms (S4.9h) plus the serial
+  int8 activation fill a float file does not need; the phase table is in the reference note.
 - **A decision computes only its label rows of the output head (S4.9d)**: a `Want::Labels` slot used
   to evaluate the whole vocabulary row of its last prompt position and gather the handful of token
   ids it reads. The head now evaluates those ids alone: one dot product of the already-quantised

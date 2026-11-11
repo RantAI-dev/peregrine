@@ -235,42 +235,50 @@ are roadmap S4.8 and `modern-bert` is S4.7:
 
 ## Speed, and where it goes
 
-`/v1/embeddings` on H0 (8 vCPU Xeon E5-2680 v4, AVX2+FMA, **shared host**: load average 9–12
-during the runs), text of ~16/128/512 tokens, medians of three, llama.cpp v0.9.0 on the same file
-and thread count:
+`/v1/embeddings` on H0 (8 vCPU Xeon E5-2680 v4, AVX2+FMA, **shared host**: load average 6.6–10
+during the runs), a text of 16/128/512 tokens repeated `batch` times, medians of three, llama.cpp
+v0.9.0 on the same file and thread count (main's S4.9g attention strip is in both columns for
+Peregrine — it landed before this branch was rebased):
 
-| model, threads | tokens | texts/s (ours vs llama.cpp) |
-|---|---|---|
-| MiniLM F16, 4 | 16 | 33.0 vs 22.0 |
-| | 128 | 6.0 vs 17.8 |
-| | 512 | 1.70 vs 5.37 |
-| bge-small Q8_0, 4 | 16 | 39.7 vs 10.3 (llama's first requests were cold) |
-| | 128 | 5.5 vs 10.3 |
-| | 512 | 0.76 vs 2.21 |
-| bge-small Q8_0, 8 | 16 | 16.5 vs 4.3 (p50 9.3 ms vs 11 ms at batch 1) |
-| | 512 | 1.24 vs 3.12 |
+texts/s, 4 threads:
 
-Batches of 8/32/128 change the picture only a little: parity at 16 tokens (105/179/156 texts/s
-vs llama's 133/182/161), 1.8× behind at 128 and 2.5–3.6× at 512, at every batch size. The gap is
-**length**, not batch, which is the signature of the two `n²`/element-wise pieces this step does
-not contain: the bidirectional attention strip (S4.9g) and the vector erf-GELU/LayerNorm (S4.9h).
+| model | tokens | 1 | 8 | 32 | 128 | llama.cpp (1 / 8 / 32 / 128) |
+|---|---|---|---|---|---|---|
+| MiniLM-L6-v2 F16 | 16 | 161 | 187 | 206 | 135 | 102 / 185 / 217 / 159 |
+| | 128 | 22.5 | 26.1 | 20.5 | 21.7 | 29.5 / 33.6 / 11.1 / 19.9 |
+| | 512 | 5.30 | 5.12 | 2.81 | 4.27 | 6.41 / 6.82 / 3.21 / 3.62 |
+| bge-small Q8_0 | 16 | 98.8 | 80.1 | 24.4 | 87.0 | 72.8 / 116 / 41.6 / 102 |
+| | 128 | 13.4 | 10.9 | 11.2 | 12.3 | 14.2 / 14.4 / 15.0 / 12.1 |
+| | 512 | 2.47 | 2.47 | 2.31 | 1.95 | 3.27 / 3.31 / 3.09 / 3.06 |
 
-Temporary per-phase timers on one 420-token MiniLM text (4 threads, 636 ms):
+At 8 threads, bge-small Q8_0: 16 tokens 16.5 vs 4.3 texts/s (llama's 8-thread run on this host
+was 10× slower than its 4-thread one, load 12 — the 8-thread llama column is not comparable), 128
+tokens 6.8 vs 6.6, 512 tokens 1.24 vs 3.12. Single 16-token text p50: **7.2 ms** vs llama.cpp's
+9.2 ms on MiniLM, 11.7 ms vs 16.2 ms on bge-small (4 threads).
+
+So: ahead on single short texts (the p50 row matters for guard and router models), level at
+batches of short texts, and 15–30 % behind at 128 and 512 tokens. That residue is the
+element-wise work this step ships scalar — the exact GELU (`erf` in f64) and the per-row
+LayerNorms — not attention any more.
+
+Temporary per-phase timers on one 420-token MiniLM text, warm passes, 4 threads, ~170 ms:
 
 | phase | ms | share |
 |---|---|---|
-| attention + Q scale + bias adds | 348 | 55 % |
-| q/k/v + embedding lookup + embedding LayerNorm | 124 | 19 % |
-| `attn_output` + `attn_output_norm` | 64 | 10 % |
-| `ffn_up` (+ bias) | 54 | 8 % |
-| the scalar GELU (420 × 1536 × 6) | 30 | 5 % |
-| `ffn_down` + `layer_output_norm` | 18 | 3 % |
+| embedding lookup + embedding LayerNorm + first activation fills | 40 | 23 % |
+| attention (the S4.9g strip) | 44 | 26 % |
+| q/k/v | 17 | 10 % |
+| `attn_output` + `attn_output_norm` | 20 | 12 % |
+| `ffn_up` (+ bias) | 25 | 15 % |
+| the scalar GELU (420 × 1536 × 6 evaluations) | 16 | 10 % |
+| `ffn_down` + `layer_output_norm` | 8 | 5 % |
 | pooling | 0.1 | — |
 
-Single-threaded the same text is 1321 ms with attention at 74 %. That is what the S4.9 design
-predicted for this family ("35 % of the pass at 128 tokens, 60 % at 512" on the attention loop,
-"a scalar erf would cost half the matrix time"), and the two kernels that remove it are S4.9g
-and S4.9h.
+Before S4.9g the same text was 636 ms at 4 threads with attention at 55 % (and 1321 ms on one
+thread with attention at 74 %), which is exactly the deficit the strip removed. The embedding
+phase's cost is the row gather plus the serial int8 quantisation `QuantAct::fill` still performs
+for a file whose matrices are F16 (the per-256 layout is skipped, the per-32 one is not) — the
+lever S4.9k names.
 
 ## What Peregrine does
 
