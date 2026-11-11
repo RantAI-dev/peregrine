@@ -285,6 +285,21 @@ peregrine embed -m hf:second-state/All-MiniLM-L6-v2-Embedding-GGUF/all-MiniLM-L6
 peregrine serve -m hf:CompendiumLabs/bge-small-en-v1.5-gguf/bge-small-en-v1.5-q8_0.gguf --port 8202
 ```
 
+ModernBERT (`modern-bert` in the file) is the newer encoder: ModernBERT-base and -large,
+gte-modernbert-base and IBM Granite Embedding R2. The blocks are pre-norm with LayerNorms that have
+a weight and no bias, positions are RoPE with separate bases for the local and global layers, every
+third layer sees the whole text and the two between see a 128-token window, and the feed-forward is
+a gated pair. Pooling is the file's `cls` or `mean`; the text limit is the file's
+`context_length` (8192 in these files):
+
+```sh
+peregrine embed -m hf:keisuke-miyako/gte-modernbert-base-gguf/gte-modernbert-base-Q8_0.gguf \
+  "What is the capital of France?"
+```
+
+A file that also carries a classifier head (a guard or router fine-tune) serves its embeddings;
+`classify` and `rerank` are not available for this family yet and the server says so.
+
 Nemotron 3.5 Embed 1B (`mistral3`, licence OpenMDW 1.1) is another encoder, the first from
 the Mistral 3 family: 16 blocks without the causal mask, 24 query heads of 128 over 8 key/value
 heads, YaRN positions, an attention temperature that steps up at position 16384, then the mean over

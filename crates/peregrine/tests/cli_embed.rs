@@ -11,7 +11,10 @@ use peregrine_core::gguf::Format;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use support::models::{write_dense_pooled, write_gemma_embedding, Dense, GemmaEmbeddingConfig};
+use support::models::{
+    write_dense_pooled, write_gemma_embedding, write_modern_bert, Dense, GemmaEmbeddingConfig,
+    ModernBertConfig,
+};
 
 fn tmpdir(test: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("peregrine-cli-embed-{}-{test}", std::process::id()));
@@ -243,6 +246,47 @@ fn an_encoder_embeds_and_refuses_to_generate() {
     assert!(!out.status.success(), "a chat run on an encoder must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("embedding model"), "stderr: {err}");
+}
+
+/// A synthetic `modern-bert` encoder (roadmap S4.7): `embed` works over the
+/// GPT-2 vocabulary (which adds a BOS and an EOS), `inspect` prints the file's
+/// mean pooling, and `run` refuses to generate.
+#[test]
+fn a_modern_bert_encoder_embeds_and_refuses_to_generate() {
+    let dir = tmpdir("modern-bert");
+    let model = write_modern_bert(&dir, Format::F16, 29, ModernBertConfig::default());
+    let out = embed(&model, &["hello world", "the test of a paris city"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        let v = floats(line);
+        assert_eq!(v.len(), 128);
+        assert!((norm(&v) - 1.0).abs() < 1e-5);
+    }
+    let out = Command::new(bin())
+        .arg("inspect")
+        .arg(&model)
+        .output()
+        .expect("run inspect");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("pooling       mean (1) (embedding model)"),
+        "{text}"
+    );
+    let out = Command::new(bin())
+        .args(["run", "-m"])
+        .arg(&model)
+        .args(["--no-profile", "-t", "2", "hello"])
+        .output()
+        .expect("run peregrine run");
+    assert!(!out.status.success(), "a chat run on an encoder must fail");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("embedding model"));
 }
 
 /// A synthetic `bert` encoder (roadmap S4.6a): `embed` works, `inspect` prints the

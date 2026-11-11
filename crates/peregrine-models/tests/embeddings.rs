@@ -2467,3 +2467,603 @@ fn the_bert_real_files_match_llama_cpp_and_the_fp32_reference() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// S4.7: the `modern-bert` family
+// ---------------------------------------------------------------------------
+
+fn modern_bert_model(
+    dir: &std::path::Path,
+    fmt: Format,
+    seed: u64,
+    cfg: support::models::ModernBertConfig,
+) -> Arc<Model> {
+    load(&support::models::write_modern_bert(dir, fmt, seed, cfg))
+}
+
+fn modern_bert_text(seed: u32, n: usize) -> Vec<u32> {
+    (0..n)
+        .map(|i| 7 + (seed.wrapping_mul(53).wrapping_add(i as u32 * 17)) % 280)
+        .collect()
+}
+
+#[test]
+fn a_modern_bert_file_reports_itself_as_an_encoder_with_its_pooling() {
+    let dir = tmpdir("modern-bert-pooling");
+    for (pooling_type, want) in [(1u32, Pooling::Mean), (2, Pooling::Cls)] {
+        let model = modern_bert_model(
+            &dir,
+            Format::F32,
+            41,
+            support::models::ModernBertConfig {
+                pooling_type,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            model.causality(),
+            peregrine_core::arch::Causality::Bidirectional
+        );
+        assert_eq!(model.pooling().unwrap(), Some(want));
+        assert_eq!(model.embedding_width(), model.cfg.d_model);
+        assert_eq!(model.cfg.ctx_train, 64);
+        assert!(model.cfg.rope_neox, "modern-bert rotates neoX pairs");
+    }
+}
+
+/// The scalar reference forward on the three activations the family reads: the
+/// exact erf GeGLU (ModernBERT itself), the tanh GeGLU and Granite's SwiGLU.
+#[test]
+fn the_modern_bert_pooled_vector_is_the_exact_scalar_reference_forward() {
+    let dir = tmpdir("modern-bert-reference");
+    for (i, act) in ["gelu", "gelu_new", "silu"].into_iter().enumerate() {
+        let model = modern_bert_model(
+            &dir,
+            Format::F32,
+            50 + i as u64,
+            support::models::ModernBertConfig {
+                hidden_act: act,
+                ..Default::default()
+            },
+        );
+        for pooling in [Pooling::Mean, Pooling::Cls] {
+            for (j, len) in [1usize, 2, 7, 36, 64].into_iter().enumerate() {
+                let text = modern_bert_text(1 + j as u32, len);
+                let want = support::modern_bert_ref::reference_embedding(&model, &text, pooling);
+                let got = embed_batch(
+                    &model,
+                    std::slice::from_ref(&text),
+                    pooling,
+                    1,
+                    64,
+                    model.cfg.ctx_train,
+                    None,
+                )
+                .vectors;
+                assert_eq!(
+                    bits(&got[0]),
+                    bits(&want),
+                    "{act} {pooling:?} len {len}: the engine differs from the reference"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_modern_berts_vector_is_bit_identical_alone_in_batches_and_in_any_order() {
+    let dir = tmpdir("modern-bert-invariance");
+    for (fmt, seed) in [(Format::F32, 43u64), (Format::Q8_0, 44)] {
+        let model = modern_bert_model(&dir, fmt, seed, Default::default());
+        let pooling = Pooling::Mean;
+        let probe = modern_bert_text(9, 37);
+        let alone = embed_batch(
+            &model,
+            std::slice::from_ref(&probe),
+            pooling,
+            1,
+            64,
+            model.cfg.ctx_train,
+            None,
+        )
+        .vectors[0]
+            .clone();
+
+        for (n, threads) in [(2usize, 1usize), (7, 2), (16, 4), (7, 1), (16, 8)] {
+            let mut texts = Vec::with_capacity(n);
+            for i in 0..n {
+                texts.push(if i == n / 2 {
+                    probe.clone()
+                } else {
+                    modern_bert_text(100 + i as u32, 1 + (i * 11) % 53)
+                });
+            }
+            if n % 2 == 0 {
+                texts.swap(0, n / 2);
+            }
+            let run = embed_batch(
+                &model,
+                &texts,
+                pooling,
+                threads,
+                64,
+                model.cfg.ctx_train,
+                None,
+            );
+            let probe_at = texts.iter().position(|t| t == &probe).unwrap();
+            assert_eq!(
+                bits(&run.vectors[probe_at]),
+                bits(&alone),
+                "{}: probe in a batch of {n}, {threads} threads, admitted at {probe_at}",
+                fmt.label()
+            );
+        }
+
+        // Short texts take a different matmul kernel, and a 64-token text spans the
+        // whole context (and several local windows).
+        for len in [1usize, 2, 3] {
+            let short = modern_bert_text(31 + len as u32, len);
+            let short_alone = embed_batch(
+                &model,
+                std::slice::from_ref(&short),
+                pooling,
+                1,
+                64,
+                model.cfg.ctx_train,
+                None,
+            )
+            .vectors[0]
+                .clone();
+            let mut texts = vec![short.clone()];
+            for i in 0..7 {
+                texts.push(modern_bert_text(200 + i, 13 + i as usize));
+            }
+            let run = embed_batch(&model, &texts, pooling, 4, 64, model.cfg.ctx_train, None);
+            assert_eq!(
+                bits(&run.vectors[0]),
+                bits(&short_alone),
+                "{}: a {len}-token text is the same alone and in a batch",
+                fmt.label()
+            );
+        }
+        let long = modern_bert_text(77, 64);
+        let long_alone = embed_batch(
+            &model,
+            std::slice::from_ref(&long),
+            pooling,
+            2,
+            64,
+            model.cfg.ctx_train,
+            None,
+        )
+        .vectors[0]
+            .clone();
+        let mixed = vec![modern_bert_text(4, 3), modern_bert_text(5, 5), long.clone()];
+        let run = embed_batch(&model, &mixed, pooling, 4, 64, model.cfg.ctx_train, None);
+        assert_eq!(
+            bits(&run.vectors[2]),
+            bits(&long_alone),
+            "{}: the long text is the same alone and in a mixed pass",
+            fmt.label()
+        );
+    }
+}
+
+/// The Q8_0 file takes the repacked int8 tiles (the S4.9m f32-panel rule is for
+/// `bert`), so this exercises the path the Q8_0 casts use. The reference quantises
+/// the activation row once and dots it with the scalar twin (`dot_scalar`), which
+/// is the scalar tier's arithmetic bit for bit. On a SIMD tier the eight-row tile
+/// fuses its block scale into the accumulator; a 1-ulp difference there can flip
+/// one activation code in the next layer's quantiser, so the distance to the
+/// reference is the model's own sensitivity, not one kernel call's rounding. The
+/// bound below is the measured worst over these cases; the exact bits per tier are
+/// the golden's.
+#[test]
+fn the_modern_bert_q8_0_vector_is_the_engine_int8_path() {
+    let dir = tmpdir("modern-bert-q8-reference");
+    let model = modern_bert_model(&dir, Format::Q8_0, 51, Default::default());
+    let mut worst = (0.0f64, 1.0f64);
+    for pooling in [Pooling::Cls, Pooling::Mean] {
+        for (seed, len) in [(1u32, 1usize), (2, 2), (7, 7), (61, 16), (61, 24), (65, 63)] {
+            let text = modern_bert_text(seed, len);
+            let want = support::modern_bert_ref::reference_embedding(&model, &text, pooling);
+            let got = embed_batch(
+                &model,
+                std::slice::from_ref(&text),
+                pooling,
+                1,
+                64,
+                model.cfg.ctx_train,
+                None,
+            )
+            .vectors;
+            let max_abs = got[0]
+                .iter()
+                .zip(&want)
+                .map(|(a, b)| (a - b).abs() as f64)
+                .fold(0.0f64, f64::max);
+            let cos = cosine_at(&got[0], &want, got[0].len());
+            worst = (worst.0.max(max_abs), worst.1.min(cos));
+            eprintln!("Q8_0 {pooling:?} len {len}: max abs {max_abs:.3e}, cosine {cos:.12}");
+            let scalar_tier = peregrine_core::cpu::tier_name() == "x86_64"
+                || peregrine_core::cpu::tier_name() == "aarch64";
+            if scalar_tier {
+                assert_eq!(
+                    bits(&got[0]),
+                    bits(&want),
+                    "{pooling:?} len {len}: the scalar tier is the reference's own kernel"
+                );
+            } else {
+                // The int8 activation quantiser turns a 1-ulp kernel rounding into a
+                // code flip now and then, and the next layer reads the difference;
+                // the run-to-run distance between tiers is therefore the model's
+                // sensitivity, not one kernel call's rounding (S4.9's element-wise
+                // kernels keep tier independence; int8 GEMMs have per-tier goldens).
+                // The bound is the measured worst over these cases, with headroom.
+                assert!(
+                    max_abs < 2e-2 && cos > 0.99999,
+                    "{pooling:?} len {len}: max abs {max_abs:.3e}, cosine {cos:.12}"
+                );
+            }
+        }
+    }
+    eprintln!(
+        "Q8_0 worst over the cases: max abs {:.3e}, cosine {:.12}",
+        worst.0, worst.1
+    );
+}
+
+/// A classifier head is read and ignored: the file still embeds with its own
+/// pooling type, and the head's tensors change nothing about the vector.
+#[test]
+fn a_modern_bert_classifier_file_still_embeds() {
+    let plain_dir = tmpdir("modern-bert-classifier-plain");
+    let head_dir = tmpdir("modern-bert-classifier-head");
+    let plain = modern_bert_model(&plain_dir, Format::F32, 55, Default::default());
+    let head = modern_bert_model(
+        &head_dir,
+        Format::F32,
+        55,
+        support::models::ModernBertConfig {
+            classifier: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(head.pooling().unwrap(), Some(Pooling::Mean));
+    let text = modern_bert_text(3, 21);
+    let a = embed_batch(
+        &plain,
+        std::slice::from_ref(&text),
+        Pooling::Mean,
+        2,
+        64,
+        plain.cfg.ctx_train,
+        None,
+    )
+    .vectors[0]
+        .clone();
+    let b = embed_batch(
+        &head,
+        std::slice::from_ref(&text),
+        Pooling::Mean,
+        2,
+        64,
+        head.cfg.ctx_train,
+        None,
+    )
+    .vectors[0]
+        .clone();
+    assert_eq!(bits(&a), bits(&b), "the head is not part of the encoder");
+}
+
+#[test]
+fn a_modern_bert_text_longer_than_its_context_is_refused_by_name() {
+    let dir = tmpdir("modern-bert-long");
+    let model = modern_bert_model(&dir, Format::F32, 49, Default::default());
+    let ctx = model.cfg.ctx_train;
+    let mut engine = Engine::new(model.clone(), 2, ctx + 1, 1, KvPrec::F16, 0);
+    let id = engine
+        .admit_pooled(
+            modern_bert_text(1, ctx + 1),
+            SlotCfg::default(),
+            Pooling::Mean,
+        )
+        .expect("admitted: the engine allows ctx + 1 rows");
+    let mut errors = Vec::new();
+    let mut steps = 0;
+    while engine.active() > 0 {
+        for em in engine.step() {
+            if em.slot == id {
+                if let Some(Finish::Error(e)) = em.finish {
+                    errors.push(e);
+                }
+            }
+        }
+        steps += 1;
+        assert!(steps < 100, "no progress");
+    }
+    assert_eq!(errors.len(), 1, "one refusal");
+    assert!(
+        errors[0].contains("context_length") && errors[0].contains(&format!("{ctx}")),
+        "{errors:?}"
+    );
+    // The server/CLI rule is the file's context: `ctx + 2` is refused before admission.
+    let mut engine = Engine::new(model, 2, ctx + 1, 1, KvPrec::F16, 0);
+    let err = engine
+        .admit_pooled(
+            modern_bert_text(1, ctx + 2),
+            SlotCfg::default(),
+            Pooling::Mean,
+        )
+        .unwrap_err();
+    assert!(err.1.contains("does not fit"), "{err:?}");
+}
+
+#[test]
+fn a_chat_or_label_slot_is_refused_by_a_modern_bert_encoder() {
+    let dir = tmpdir("modern-bert-refuse");
+    let model = modern_bert_model(&dir, Format::F32, 45, Default::default());
+    let mut engine = Engine::new(model, 1, 64, 1, KvPrec::F16, 0);
+    let err = engine
+        .admit(modern_bert_text(1, 8), SlotCfg::default())
+        .unwrap_err();
+    assert!(
+        err.1.contains("embedding model") && err.1.contains("cannot generate"),
+        "{err:?}"
+    );
+    let err = engine
+        .admit_labels(modern_bert_text(2, 8), SlotCfg::default(), vec![1, 2])
+        .unwrap_err();
+    assert!(
+        err.1.contains("embedding model") && err.1.contains("label logits"),
+        "{err:?}"
+    );
+}
+
+/// The synthetic `modern-bert` encoder's golden for the current kernel tier: the
+/// whole vector's bits, mean- and cls-pooled and one Matryoshka truncation. The
+/// file has both a local and a global layer and a window narrower than the text.
+#[test]
+fn the_synthetic_modern_bert_matches_its_golden_for_the_tier() {
+    let dir = tmpdir("modern-bert-golden");
+    let model = modern_bert_model(&dir, Format::Q8_0, 46, Default::default());
+    let mut out = String::new();
+    for (pooling, dims) in [(Pooling::Mean, None), (Pooling::Cls, Some(64usize))] {
+        let text = modern_bert_text(21, 37);
+        let run = embed_batch(
+            &model,
+            std::slice::from_ref(&text),
+            pooling,
+            3,
+            64,
+            model.cfg.ctx_train,
+            None,
+        );
+        let mut v = run.vectors[0].clone();
+        embed::finish(&mut v, dims).unwrap();
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for x in &v {
+            for b in x.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        use std::fmt::Write as _;
+        writeln!(
+            out,
+            "{} {dims:?} len {} fnv {h:016x}",
+            pooling.name(),
+            v.len()
+        )
+        .unwrap();
+    }
+    let tier = peregrine_core::cpu::tier_name();
+    let golden_tier = format!(
+        "{}{}",
+        if tier == "x86_64-avx2-vnni256" {
+            "x86_64-avx2"
+        } else {
+            tier.as_str()
+        },
+        if cfg!(target_os = "macos") {
+            "-macos"
+        } else {
+            ""
+        }
+    );
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/synthetic")
+        .join(golden_tier);
+    let gpath = dir.join("modern-bert-Q8_0.golden");
+    let record = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record");
+    let require = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "require");
+    if record && tier != "x86_64-avx2-vnni256" {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&gpath, &out).unwrap();
+        eprintln!("synthetic: recorded modern-bert-Q8_0 ({tier})");
+    } else if let Ok(want) = std::fs::read_to_string(&gpath) {
+        assert_eq!(want, out, "{}", gpath.display());
+    } else if require {
+        panic!(
+            "modern-bert-Q8_0 has no golden for tier {tier} ({}); record it with PEREGRINE_GOLDEN=record",
+            gpath.display()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S4.7 on real files: llama.cpp's ids and vectors
+// ---------------------------------------------------------------------------
+
+/// gte-modernbert-base (F16 and Q8_0) and Granite Embedding Small English R2
+/// (F16 and Q8_0) against llama.cpp v0.9.0 (see `docs/reference/modern-bert.md`).
+///
+/// The 200 texts are 16 to 6976 tokens, five of them past the 128-token local
+/// window, so both mask rules run. `gte_f16_llama.f32` is the full-precision
+/// reference for the Q8_0 cases (llama.cpp on the F16 conversion), as the S4 gate
+/// states. The files are looked for in `models/`, `~/models/` and
+/// `/var/tmp/s47-models`; a missing file skips its case, so CI needs none.
+/// `cargo test --release -p peregrine-models --test embeddings -- --ignored` runs it.
+#[test]
+#[ignore = "needs the gte-modernbert-base / granite-embedding-r2 GGUF files from tests/fixtures/modern-bert/README.md"]
+fn the_modern_bert_real_files_match_llama_cpp() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/modern-bert");
+    let texts: Vec<String> = std::fs::read_to_string(dir.join("texts.txt"))
+        .unwrap()
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    let ids = read_fixture_ids(&dir.join("ids.txt"));
+
+    #[derive(Debug)]
+    struct Case {
+        file: &'static str,
+        llama: &'static str,
+        reference: &'static str,
+        dim: usize,
+        /// (min, mean) cosine to the reference this file must reach.
+        bound: (f64, f64),
+        /// Whether the file is quantised (the S4 gate's looser class).
+        quant: bool,
+    }
+    let cases = [
+        // gte-modernbert-base F16: the F16-class bound against llama.cpp itself.
+        Case {
+            file: "gte-modernbert-base-F16.gguf",
+            llama: "gte_f16_llama.f32",
+            reference: "gte_f16_llama.f32",
+            dim: 768,
+            bound: (0.9999, 0.9999),
+            quant: false,
+        },
+        // Q8_0 against the F16 conversion llama.cpp produced; the bounds are the
+        // measured minimum and mean (docs/reference/modern-bert.md).
+        Case {
+            file: "gte-modernbert-base-Q8_0.gguf",
+            llama: "gte_q8_0_llama.f32",
+            reference: "gte_f16_llama.f32",
+            dim: 768,
+            bound: (0.996, 0.9996),
+            quant: true,
+        },
+        Case {
+            file: "granite-embedding-small-english-r2.f16.gguf",
+            llama: "granite_f16_llama.f32",
+            reference: "granite_f16_llama.f32",
+            dim: 384,
+            bound: (0.9999, 0.9999),
+            quant: false,
+        },
+        Case {
+            file: "granite-embedding-small-english-r2.Q8_0.gguf",
+            llama: "granite_q8_0_llama.f32",
+            reference: "granite_f16_llama.f32",
+            dim: 384,
+            bound: (0.9998, 0.9999),
+            quant: true,
+        },
+    ];
+
+    for case in cases {
+        let mut candidates = vec![
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../models")
+                .join(case.file),
+            std::path::Path::new("/var/tmp/s47-models").join(case.file),
+        ];
+        if let Ok(h) = std::env::var("HOME") {
+            candidates.push(std::path::Path::new(&h).join("models").join(case.file));
+        }
+        let Some(path) = candidates.into_iter().find(|p| p.is_file()) else {
+            eprintln!("{} is not on this machine; skipped", case.file);
+            continue;
+        };
+        let model = load(&path);
+        assert_eq!(
+            model.causality(),
+            peregrine_core::arch::Causality::Bidirectional
+        );
+        let llama = read_fixture_vectors(&dir.join(case.llama), case.dim);
+        let reference = read_fixture_vectors(&dir.join(case.reference), case.dim);
+        assert_eq!(llama.len(), texts.len(), "{case:?}");
+
+        // 1. The tokenizer: identical ids to llama.cpp on every text.
+        let tokens: Vec<Vec<u32>> = texts.iter().map(|t| model.tk.encode_special(t)).collect();
+        for (i, (ours, theirs)) in tokens.iter().zip(&ids).enumerate() {
+            assert_eq!(ours, theirs, "{}: text {i} token ids", case.file);
+        }
+
+        // 2. The vectors, one engine, batches of 16 texts.
+        let pooling = model.pooling().unwrap().unwrap();
+        let mut ours: Vec<Vec<f32>> = Vec::new();
+        for chunk in tokens.chunks(16) {
+            let run = embed_batch(&model, chunk, pooling, 8, 1024, 8192, None);
+            for mut v in run.vectors {
+                embed::finish(&mut v, None).unwrap();
+                ours.push(v);
+            }
+        }
+        let cos_to = |other: &[Vec<f32>]| -> Vec<f64> {
+            ours.iter()
+                .zip(other)
+                .map(|(a, b)| bert_cosine(a, b))
+                .collect()
+        };
+        let min_mean = |v: &[f64]| {
+            (
+                v.iter().copied().fold(f64::INFINITY, f64::min),
+                v.iter().sum::<f64>() / v.len() as f64,
+            )
+        };
+        let (min_l, mean_l) = min_mean(&cos_to(&llama));
+        let (min_r, mean_r) = min_mean(&cos_to(&reference));
+        eprintln!(
+            "{}: {} texts, {}-d, vs llama.cpp min {min_l:.7} mean {mean_l:.7}; \
+             vs the F16 reference min {min_r:.7} mean {mean_r:.7}",
+            case.file,
+            ours.len(),
+            case.dim
+        );
+        // The F16-class bound against llama.cpp itself.
+        if !case.quant {
+            assert!(
+                min_l >= case.bound.0 && mean_l >= case.bound.1,
+                "{}: vs llama.cpp min {min_l:.6} mean {mean_l:.6}, bound {:?}",
+                case.file,
+                case.bound
+            );
+        }
+        // The quantised file's distance to the full-precision reference, set from
+        // measurement; and it must not be further than llama.cpp's own Q8_0.
+        assert!(
+            min_r >= case.bound.0 && mean_r >= case.bound.1,
+            "{}: vs the reference min {min_r:.6} mean {mean_r:.6}, bound {:?}",
+            case.file,
+            case.bound
+        );
+        if case.quant {
+            let (min_rl, mean_rl) = min_mean(&{
+                let lm: Vec<Vec<f32>> = llama.clone();
+                let rf: Vec<Vec<f32>> = reference.clone();
+                lm.iter()
+                    .zip(&rf)
+                    .map(|(a, b)| bert_cosine(a, b))
+                    .collect::<Vec<f64>>()
+            });
+            eprintln!(
+                "{}: llama.cpp's own Q8_0 vs the reference min {min_rl:.7} mean {mean_rl:.7}",
+                case.file
+            );
+            // The S4 gate's Q8_0 clause is on the **mean**: "no further from the
+            // full-precision reference than llama.cpp's Q8_0 is, within 1e-4 on the
+            // mean". A single text's int8 activation quantisation can sit further
+            // out on either engine (llama.cpp's own worst text here is 0.9981),
+            // which is why the per-text minimum is printed, not bounded by this.
+            assert!(
+                mean_r >= mean_rl - 1e-4,
+                "{}: ours vs the reference mean {mean_r:.6}; llama.cpp {mean_rl:.6}",
+                case.file
+            );
+        }
+    }
+}
