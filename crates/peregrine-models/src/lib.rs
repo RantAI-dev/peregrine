@@ -20,6 +20,8 @@
     feature = "arch-phi3"
 ))]
 pub mod dense;
+#[cfg(feature = "arch-bert")]
+pub mod bert;
 #[cfg(any(feature = "arch-gemma3", feature = "arch-gemma-embedding"))]
 pub mod gemma3;
 #[cfg(feature = "arch-gpt-oss")]
@@ -52,6 +54,8 @@ pub use dense::QwenFamily;
 pub use gemma3::Gemma3Family;
 #[cfg(feature = "arch-gemma-embedding")]
 pub use gemma3::GemmaEmbeddingFamily;
+#[cfg(feature = "arch-bert")]
+pub use bert::BertFamily;
 #[cfg(feature = "arch-gpt-oss")]
 pub use gptoss::GptOssFamily;
 #[cfg(feature = "arch-qwen35")]
@@ -91,6 +95,8 @@ pub const ARCHS: &[&str] = &[
     "gemma3",
     #[cfg(feature = "arch-gemma-embedding")]
     "gemma-embedding",
+    #[cfg(feature = "arch-bert")]
+    "bert",
     #[cfg(feature = "arch-qwen3moe")]
     "qwen3moe",
     #[cfg(feature = "arch-gpt-oss")]
@@ -111,6 +117,8 @@ pub static FAMILIES: &[&dyn Family] = &[
     &Gemma3Family,
     #[cfg(feature = "arch-gemma-embedding")]
     &GemmaEmbeddingFamily,
+    #[cfg(feature = "arch-bert")]
+    &BertFamily,
     #[cfg(feature = "arch-qwen3moe")]
     &Qwen3MoeFamily,
     #[cfg(feature = "arch-gpt-oss")]

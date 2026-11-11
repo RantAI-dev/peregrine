@@ -1324,3 +1324,402 @@ fn embeddinggemma_real_file_is_within_the_bound_of_llama_cpp() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// S4.6a: the `bert` family (MiniLM, BGE, E5, GTE and the XLM-R models)
+// ---------------------------------------------------------------------------
+
+/// A synthetic `bert` file: post-norm blocks, absolute positions, token types,
+/// biases on every projection, LayerNorm and the exact GELU.
+fn bert_model(dir: &std::path::Path, fmt: Format, seed: u64, pooling: u32) -> Arc<Model> {
+    let path = support::models::write_bert(
+        dir,
+        fmt,
+        seed,
+        support::models::BertConfig {
+            pooling_type: pooling,
+            ..Default::default()
+        },
+    );
+    load(&path)
+}
+
+/// A text of token ids inside the synthetic vocabulary (all ids are valid).
+fn bert_text(seed: u32, n: usize) -> Vec<u32> {
+    (0..n)
+        .map(|i| 6 + (seed.wrapping_mul(59).wrapping_add(i as u32 * 19)) % 300)
+        .collect()
+}
+
+#[test]
+fn a_bert_file_reports_itself_as_an_encoder_with_its_pooling() {
+    let dir = tmpdir("bert-encoder");
+    for (id, want) in [(2u32, Pooling::Cls), (1, Pooling::Mean)] {
+        let model = bert_model(&dir, Format::F32, 41, id);
+        assert_eq!(
+            model.causality(),
+            peregrine_core::arch::Causality::Bidirectional
+        );
+        assert_eq!(model.pooling().unwrap(), Some(want), "pooling_type {id}");
+        assert_eq!(model.embedding_width(), model.cfg.d_model);
+        // The position table is the context: the text limit is the file's.
+        assert_eq!(model.cfg.ctx_train, support::models::BertConfig::default().ctx);
+    }
+}
+
+#[test]
+fn the_bert_pooled_vector_is_the_exact_scalar_reference_forward() {
+    let dir = tmpdir("bert-reference");
+    let model = bert_model(&dir, Format::F32, 42, 2);
+    for pooling in [Pooling::Cls, Pooling::Mean, Pooling::Last] {
+        for (i, len) in [1usize, 2, 7, 31, 64].into_iter().enumerate() {
+            let text = bert_text(1 + i as u32, len);
+            let want = support::bert_ref::reference_embedding(&model, &text, pooling);
+            let got = embed_batch(
+                &model,
+                std::slice::from_ref(&text),
+                pooling,
+                1,
+                64,
+                model.cfg.ctx_train,
+                None,
+            )
+            .vectors;
+            assert_eq!(
+                bits(&got[0]),
+                bits(&want),
+                "{pooling:?} len {len}: the engine differs from the reference"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_berts_vector_is_bit_identical_alone_in_batches_and_in_any_order() {
+    let dir = tmpdir("bert-invariance");
+    for (fmt, seed) in [(Format::F32, 43u64), (Format::Q8_0, 44)] {
+        let model = bert_model(&dir, fmt, seed, 2);
+        let pooling = Pooling::Cls;
+        let probe = bert_text(9, 37);
+        let alone = embed_batch(
+            &model,
+            std::slice::from_ref(&probe),
+            pooling,
+            1,
+            64,
+            model.cfg.ctx_train,
+            None,
+        )
+        .vectors[0]
+            .clone();
+        // A mean-pooled text beside it is a different reduction over the same rows.
+        let _ = embed_batch(
+            &model,
+            std::slice::from_ref(&bert_text(3, 5)),
+            Pooling::Mean,
+            1,
+            64,
+            model.cfg.ctx_train,
+            None,
+        );
+
+        for (n, threads) in [(2usize, 1usize), (7, 2), (64, 4), (7, 1), (64, 8)] {
+            let mut texts = Vec::with_capacity(n);
+            for i in 0..n {
+                texts.push(if i == n / 2 {
+                    probe.clone()
+                } else {
+                    bert_text(100 + i as u32, 1 + (i * 11) % 53)
+                });
+            }
+            // Both admission orders: the probe first in one arrangement, last in another.
+            if n % 2 == 0 {
+                texts.swap(0, n / 2);
+            }
+            let run = embed_batch(
+                &model,
+                &texts,
+                pooling,
+                threads,
+                64,
+                model.cfg.ctx_train,
+                None,
+            );
+            let probe_at = texts.iter().position(|t| t == &probe).unwrap();
+            assert_eq!(
+                bits(&run.vectors[probe_at]),
+                bits(&alone),
+                "{}: probe in a batch of {n}, {threads} threads, admitted at {probe_at}",
+                fmt.label()
+            );
+        }
+
+        // Short texts too: a one- or two-row pass can take a different matmul kernel.
+        for len in [1usize, 2, 3] {
+            let short = bert_text(31 + len as u32, len);
+            let short_alone = embed_batch(
+                &model,
+                std::slice::from_ref(&short),
+                pooling,
+                1,
+                64,
+                model.cfg.ctx_train,
+                None,
+            )
+            .vectors[0]
+                .clone();
+            let mut texts = vec![short.clone()];
+            for i in 0..7 {
+                texts.push(bert_text(200 + i, 13 + i as usize));
+            }
+            let run = embed_batch(&model, &texts, pooling, 4, 64, model.cfg.ctx_train, None);
+            assert_eq!(
+                bits(&run.vectors[0]),
+                bits(&short_alone),
+                "{}: a {len}-token text is the same alone and in a batch",
+                fmt.label()
+            );
+        }
+
+        // A text longer than the matmul's 128-row chunk runs in several weight
+        // passes, and must equal itself alone and in a mixed pass.
+        let long = bert_text(77, 64);
+        let long_alone = embed_batch(
+            &model,
+            std::slice::from_ref(&long),
+            pooling,
+            2,
+            64,
+            model.cfg.ctx_train,
+            None,
+        )
+        .vectors[0]
+            .clone();
+        let mixed = vec![bert_text(4, 3), bert_text(5, 5), long.clone()];
+        let run = embed_batch(&model, &mixed, pooling, 4, 64, model.cfg.ctx_train, None);
+        assert_eq!(
+            bits(&run.vectors[2]),
+            bits(&long_alone),
+            "{}: the long text is the same alone and in a mixed pass",
+            fmt.label()
+        );
+    }
+}
+
+/// The unigram (`t5`) tokenizer variant: the XLM-R models' vocabulary. The weights
+/// are the same `bert` graph, so the vector is too — only the ids differ.
+#[test]
+fn a_bert_file_with_the_unigram_tokenizer_embeds() {
+    let dir = tmpdir("bert-unigram");
+    let path = support::models::write_bert(
+        &dir,
+        Format::F32,
+        48,
+        support::models::BertConfig {
+            unigram: true,
+            ..Default::default()
+        },
+    );
+    let model = load(&path);
+    assert_eq!(model.pooling().unwrap(), Some(Pooling::Cls));
+    let text = model.tk.encode_special("hello world");
+    // `<s> … </s>`: the file's BOS and EOS, both added.
+    assert_eq!(text.first(), Some(&1u32), "{text:?}");
+    assert_eq!(text.last(), Some(&2u32), "{text:?}");
+    let want = support::bert_ref::reference_embedding(&model, &text, Pooling::Cls);
+    let got = embed_batch(
+        &model,
+        std::slice::from_ref(&text),
+        Pooling::Cls,
+        2,
+        64,
+        model.cfg.ctx_train,
+        None,
+    )
+    .vectors;
+    assert_eq!(bits(&got[0]), bits(&want), "the unigram file's vector");
+}
+
+#[test]
+fn a_bert_text_longer_than_its_position_table_is_refused_by_name() {
+    let dir = tmpdir("bert-long");
+    let model = bert_model(&dir, Format::F32, 49, 2);
+    let ctx = model.cfg.ctx_train;
+    // The engine admits one position past the file's context (a chat turn needs the
+    // last one), so a `ctx + 1`-token text reaches the family, which refuses it: the
+    // position table has exactly `ctx` rows.
+    let mut engine = Engine::new(model, 2, ctx + 1, 1, KvPrec::F16, 0);
+    let id = engine
+        .admit_pooled(bert_text(1, ctx + 1), SlotCfg::default(), Pooling::Cls)
+        .expect("admitted: the engine allows ctx + 1 rows");
+    let mut errors = Vec::new();
+    let mut steps = 0;
+    while engine.active() > 0 {
+        for em in engine.step() {
+            if em.slot == id {
+                if let Some(Finish::Error(e)) = em.finish {
+                    errors.push(e);
+                }
+            }
+        }
+        steps += 1;
+        assert!(steps < 100, "no progress");
+    }
+    assert_eq!(errors.len(), 1, "one refusal");
+    assert!(
+        errors[0].contains("position table") && errors[0].contains(&format!("{ctx}")),
+        "{errors:?}"
+    );
+    // The server/CLI rule is the file's context: `ctx + 1` is refused before admission.
+    let model = peregrine_core::Gguf::open(&support::models::write_bert(
+        &dir,
+        Format::F32,
+        50,
+        support::models::BertConfig::default(),
+    ))
+    .map(peregrine_models::load)
+    .unwrap()
+    .unwrap();
+    let mut engine = Engine::new(Arc::new(model), 2, ctx + 1, 1, KvPrec::F16, 0);
+    let err = engine
+        .admit_pooled(bert_text(1, ctx + 2), SlotCfg::default(), Pooling::Cls)
+        .unwrap_err();
+    assert!(err.1.contains("does not fit"), "{err:?}");
+}
+
+#[test]
+fn a_chat_or_label_slot_is_refused_by_a_bert_encoder() {
+    let dir = tmpdir("bert-refuse");
+    let model = bert_model(&dir, Format::F32, 45, 2);
+    let mut engine = Engine::new(model, 1, 64, 1, KvPrec::F16, 0);
+    let err = engine
+        .admit(bert_text(1, 8), SlotCfg::default())
+        .unwrap_err();
+    assert!(
+        err.1.contains("embedding model") && err.1.contains("cannot generate"),
+        "{err:?}"
+    );
+    let err = engine
+        .admit_labels(bert_text(2, 8), SlotCfg::default(), vec![1, 2])
+        .unwrap_err();
+    assert!(
+        err.1.contains("embedding model") && err.1.contains("label logits"),
+        "{err:?}"
+    );
+    let id = engine
+        .admit_pooled(bert_text(3, 8), SlotCfg::default(), Pooling::Cls)
+        .unwrap();
+    engine.cancel(id);
+}
+
+/// The synthetic `bert` encoder's golden for the current kernel tier: the whole
+/// vector's bits, for cls- and mean-pooled texts and one Matryoshka truncation.
+#[test]
+fn the_synthetic_bert_matches_its_golden_for_the_tier() {
+    let dir = tmpdir("bert-golden");
+    let model = bert_model(&dir, Format::Q8_0, 46, 2);
+    let mut out = String::new();
+    for (pooling, dims) in [(Pooling::Cls, None), (Pooling::Mean, Some(64usize))] {
+        let text = bert_text(21, 37);
+        let run = embed_batch(
+            &model,
+            std::slice::from_ref(&text),
+            pooling,
+            3,
+            64,
+            model.cfg.ctx_train,
+            None,
+        );
+        let mut v = run.vectors[0].clone();
+        embed::finish(&mut v, dims).unwrap();
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for x in &v {
+            for b in x.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        use std::fmt::Write as _;
+        writeln!(out, "{} {dims:?} len {} fnv {h:016x}", pooling.name(), v.len()).unwrap();
+    }
+    let tier = peregrine_core::cpu::tier_name();
+    let golden_tier = format!(
+        "{}{}",
+        if tier == "x86_64-avx2-vnni256" {
+            "x86_64-avx2"
+        } else {
+            tier.as_str()
+        },
+        if cfg!(target_os = "macos") { "-macos" } else { "" }
+    );
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/synthetic")
+        .join(golden_tier);
+    let gpath = dir.join("bert-Q8_0.golden");
+    let record = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record");
+    let require = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "require");
+    if record && tier != "x86_64-avx2-vnni256" {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&gpath, &out).unwrap();
+        eprintln!("synthetic: recorded bert-Q8_0 ({tier})");
+    } else if let Ok(want) = std::fs::read_to_string(&gpath) {
+        assert_eq!(want, out, "{}", gpath.display());
+    } else if require {
+        panic!(
+            "bert-Q8_0 has no golden for tier {tier} ({}); record it with PEREGRINE_GOLDEN=record",
+            gpath.display()
+        );
+    }
+}
+
+/// The Q8_0 file against the reference on the engine's *int8* path: the same graph,
+/// with the activation row quantised once per projection (`QuantAct::fill`) and the
+/// weight row dotted by `dot_scalar`, the scalar twin of the int8 kernel.
+///
+/// On the scalar tier the engine *is* `dot_scalar`, so the vector is bit for bit the
+/// reference's. On a SIMD tier the repacked eight-row tile computes the same integer
+/// sums but fuses the block scale into its accumulator (`d·d_a·Σ` in one FMA), which
+/// rounds differently by 1-2 ulp; there the check is the tight bound below, and the
+/// exact bits are the tier golden's.
+#[test]
+fn the_bert_q8_0_vector_is_the_engine_int8_path() {
+    let dir = tmpdir("bert-q8-reference");
+    let model = bert_model(&dir, Format::Q8_0, 51, 2);
+    for pooling in [Pooling::Cls, Pooling::Mean] {
+        for (i, len) in [1usize, 2, 7, 31].into_iter().enumerate() {
+            let text = bert_text(61 + i as u32, len);
+            let want = support::bert_ref::reference_embedding(&model, &text, pooling);
+            let got = embed_batch(
+                &model,
+                std::slice::from_ref(&text),
+                pooling,
+                1,
+                64,
+                model.cfg.ctx_train,
+                None,
+            )
+            .vectors;
+            let max_abs = got[0]
+                .iter()
+                .zip(&want)
+                .map(|(a, b)| (a - b).abs() as f64)
+                .fold(0.0f64, f64::max);
+            let cos = cosine_at(&got[0], &want, got[0].len());
+            eprintln!("Q8_0 {pooling:?} len {len}: max abs {max_abs:.3e}, cosine {cos:.12}");
+            let scalar_tier = peregrine_core::cpu::tier_name() == "x86_64"
+                || peregrine_core::cpu::tier_name() == "aarch64";
+            if scalar_tier {
+                assert_eq!(
+                    bits(&got[0]),
+                    bits(&want),
+                    "{pooling:?} len {len}: the scalar tier is the reference's own kernel"
+                );
+            } else {
+                assert!(
+                    max_abs < 1e-6 && cos > 0.9999999,
+                    "{pooling:?} len {len}: max abs {max_abs:.3e}, cosine {cos:.12}"
+                );
+            }
+        }
+    }
+}

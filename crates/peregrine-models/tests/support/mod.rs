@@ -5,6 +5,7 @@
 //! models into a temporary directory.
 #![allow(dead_code)]
 
+pub mod bert_ref;
 pub mod dspark;
 pub mod embed_ref;
 pub mod models;

@@ -1061,6 +1061,280 @@ unsafe fn geglu_fma(gate: &mut [f32], up: &[f32]) {
     geglu_scalar(gate, up);
 }
 
+// ---------------------------------------------------------------------------
+// The BERT family's element-wise kernels (S4.6a): erf, the exact GELU, LayerNorm
+// ---------------------------------------------------------------------------
+//
+// These three are *definitions*, not implementations of an unspecified thing:
+// the scalar reference forward in `crates/peregrine-models/tests/support/`
+// shares exactly them, so an F32 encoder reproduces one vector bit for bit. The
+// order of every operation is stated where it is used, and nothing here calls
+// the C library (the module's rule): a tier's bits depend on this file only.
+//
+// `// S4.9h:` there is no AVX2 body yet. The vector versions S4.9h adds must be
+// bit-identical lane-wise to what is below, which is why the definitions are
+// written as a fixed sequence of IEEE operations rather than as "a polynomial
+// approximation": the reduction order of `layer_norm` and the term counts of
+// `erf` are part of the result.
+
+/// `2/√π`, the series' prefactor (`0x3ff20dd750429b6d`).
+const ERF_TWO_OVER_SQRT_PI: f64 = f64::from_bits(0x3ff2_0dd7_5042_9b6d);
+/// `√π` (`0x3ffc5bf891b4ef6a`), the asymptotic `erfc`'s denominator.
+const ERF_SQRT_PI: f64 = f64::from_bits(0x3ffc_5bf8_91b4_ef6a);
+
+/// `(−1)^k / (k!·(2k+1))`: the Maclaurin series of `erf`,
+///
+/// ```text
+/// erf(x) = (2/√π) · Σ_k (−1)^k x^(2k+1) / (k! (2k+1))
+///        = (2/√π) · x · P(x²),
+/// ```
+///
+/// truncated at a term count chosen per range (see [`erf_series`]).
+const ERF_SERIES: [f64; 37] = [
+    f64::from_bits(0x3ff0_0000_0000_0000), // 1
+    f64::from_bits(0xbfd5_5555_5555_5555), // −1/3
+    f64::from_bits(0x3fb9_9999_9999_999a), // 1/10
+    f64::from_bits(0xbf98_6186_1861_8618), // −1/42
+    f64::from_bits(0x3f72_f684_bda1_2f68), // 1/216
+    f64::from_bits(0xbf48_d301_8d30_18d3), // −1/1320
+    f64::from_bits(0x3f1c_01c0_1c01_c01c), // 1/9360
+    f64::from_bits(0xbeeb_bd77_9334_ef0b), // −1/75600
+    f64::from_bits(0x3eb8_7a00_187a_0018), // 1/685440
+    f64::from_bits(0xbe83_777c_5556_8ccd), // −1/6894720
+    f64::from_bits(0x3e4c_2e30_5487_0b38), // 1/76204800
+    f64::from_bits(0xbe12_b673_10aa_9f3a), // −1/918086400
+    f64::from_bits(0x3dd6_f448_e13e_85e1), // 1/11975040000
+    f64::from_bits(0xbd9a_289e_e7e4_0f74), // −1/168129561600
+    f64::from_bits(0x3d5b_d577_e658_d020), // 1/2528270412800
+    f64::from_bits(0xbd1b_c625_0fb1_4231), // −1/40537905408000
+    f64::from_bits(0x3cda_173a_167f_ba4d), // 1/690752066304000
+    f64::from_bits(0xbc97_271c_be58_63ec), // −1/12449059983360000
+    f64::from_bits(0x3c53_77c2_110f_2083), // 1/236887827111936000
+    f64::from_bits(0xbc0f_1b40_73b3_4a68), // …
+    f64::from_bits(0x3bc7_abd7_2258_fb6e),
+    f64::from_bits(0xbb81_3246_abce_1bdd),
+    f64::from_bits(0x3b37_e6b8_1382_cd42),
+    f64::from_bits(0xbaef_d6be_bd65_107a),
+    f64::from_bits(0x3aa4_5c0a_838e_fe59),
+    f64::from_bits(0xba59_09c9_de3a_31c5),
+    f64::from_bits(0x3a0d_a746_0554_e5da),
+    f64::from_bits(0xb9c0_eef3_0fa1_0d2c),
+    f64::from_bits(0x3972_ac65_385f_79ac),
+    f64::from_bits(0xb923_e81b_b570_1ac5),
+    f64::from_bits(0x38d4_899f_cdef_0a8e),
+    f64::from_bits(0xb884_86ee_a20c_2656),
+    f64::from_bits(0x3833_e53d_efc4_e233),
+    f64::from_bits(0xb7e2_b778_acc3_dee0),
+    f64::from_bits(0x3791_1ae8_1077_a49e),
+    f64::from_bits(0xb73e_6597_092c_cbf1),
+    f64::from_bits(0x36ea_4776_7f2a_3c33),
+];
+
+/// `(2/√π)·x·P(x²)` with the first `terms` coefficients of [`ERF_SERIES`], in `f64`.
+///
+/// Horner's rule from the last term down, which is the arithmetic the definition
+/// names: `terms` multiply-adds from the top coefficient. The truncation counts
+/// below are the smallest that keep the error under 3e-9 on each range (measured
+/// from `[0, 1]` in steps of 1e-6 against the oracle in the tests):
+///
+/// | range | terms | first omitted term's worst | measured |
+/// |---|---|---|---|
+/// | `|x| ≤ 1` | 10 | `x¹⁹/19!` | 1.14e-9 |
+/// | `≤ 2` | 22 | at `x = 2` | 1.13e-10 |
+/// | `≤ 3` | 36 | at `x = 3` | 5.40e-10 |
+#[inline(always)]
+fn erf_series(x: f64, terms: usize) -> f64 {
+    let u = x * x;
+    let mut p = ERF_SERIES[terms - 1];
+    let mut k = terms - 1;
+    while k > 0 {
+        k -= 1;
+        p = p.mul_add(u, ERF_SERIES[k]);
+    }
+    x * ERF_TWO_OVER_SQRT_PI * p
+}
+
+/// `erfc(x)` for `3 < x < 4.6`: the asymptotic series
+///
+/// ```text
+/// erfc(x) = exp(−x²)/(x·√π) · Σ_{k<8} (−1)^k (2k−1)!! / (2x²)^k
+/// ```
+///
+/// eight terms, where the terms are smallest. Measured absolute error of
+/// `1 − erfc` on `(3, 4.6)`: 2.26e-9 at `x = 3`, 2.5e-12 at `x = 3.5`.
+fn erfc_tail(a: f64) -> f64 {
+    let z = 2.0 * a * a;
+    let mut t = 1.0f64;
+    let mut sum = 1.0f64;
+    let mut n = 1.0f64;
+    while n < 8.0 {
+        t *= -(2.0 * n - 1.0) / z;
+        sum += t;
+        n += 1.0;
+    }
+    exp_f64(-a * a) / (a * ERF_SQRT_PI) * sum
+}
+
+/// `erf(x)` — the exact error function the BERT family's GELU is defined with.
+///
+/// `x` is `f32`; every intermediate is `f64` and the result is rounded to `f32`
+/// once, at the end. Range splitting, all on `a = |x|`:
+///
+/// * `a ≤ 1`: 10 terms of the Maclaurin series ([`erf_series`]);
+/// * `1 < a ≤ 2`: 22 terms of the same series;
+/// * `2 < a ≤ 3`: 36 terms;
+/// * `3 < a < 4.6`: `1 − erfc_tail(a)`, the asymptotic `erfc`;
+/// * `a ≥ 4.6`: `1` (`erfc(4.6) = 1.7e-10`, a thousandth of an `f32` ulp of 1).
+///
+/// Measured against `libm`'s `f64` `erf` over 1 000 001 points in `[−6, 6]`
+/// (`erf_agrees_with_an_independent_oracle`): **max absolute error 5.96e-8, max
+/// 1 ulp** of the `f32` result — the error is entirely the final rounding
+/// wherever `erf` is near ±1, and the series is ~1e-15 relative near 0.
+///
+/// # The FMA split
+///
+/// Like [`gelu_tanh`], the arithmetic is compiled twice: once for a plain
+/// x86-64 target (`fmaf` from the C library, one IEEE result) and once inside a
+/// `#[target_feature(enable = "fma")]` function (the hardware instruction, the
+/// same IEEE result), so every kernel tier produces the same bits.
+pub fn erf(x: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::cpu::have_fma() {
+            // SAFETY: FMA checked.
+            return unsafe { erf_fma(x) };
+        }
+    }
+    erf_scalar(x)
+}
+
+/// The portable [`erf`]; see it for the range split and the measured error.
+#[inline(always)]
+fn erf_scalar(x: f32) -> f32 {
+    if x.is_nan() {
+        return x;
+    }
+    let a = x.abs() as f64;
+    let y = if a <= 1.0 {
+        erf_series(a, 10)
+    } else if a <= 2.0 {
+        erf_series(a, 22)
+    } else if a <= 3.0 {
+        erf_series(a, 36)
+    } else if a < 4.6 {
+        1.0 - erfc_tail(a)
+    } else {
+        1.0
+    };
+    (y as f32).copysign(x)
+}
+
+/// [`erf_scalar`] compiled for a CPU with the FMA instruction.
+///
+/// # Safety
+///
+/// FMA must be available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn erf_fma(x: f32) -> f32 {
+    erf_scalar(x)
+}
+
+/// `1/√2`, the GELU's `erf` argument scale (`0x3f3504f3`).
+const GELU_INV_SQRT_2: f32 = f32::from_bits(0x3f35_04f3);
+
+/// The exact GELU: `gelu(x) = 0.5·x·(1 + erf(x/√2))`.
+///
+/// This is the BERT family's activation, and the model's own arithmetic: a
+/// BERT checkpoint trains with `torch.nn.functional.gelu` (the erf form), not
+/// with the `tanh` approximation [`gelu_tanh`] evaluates. The order is fixed:
+/// `t = x · (1/√2)`, `e = erf(t)`, then `(0.5·x) · (1 + e)` — three `f32`
+/// roundings plus [`erf`]'s own.
+pub fn gelu_erf(x: f32) -> f32 {
+    let t = x * GELU_INV_SQRT_2;
+    (0.5 * x) * (1.0 + erf(t))
+}
+
+/// [`gelu_erf`] over a row, four elements at a time so the four `erf` chains
+/// interleave (each element's arithmetic and its bits are unchanged).
+///
+/// // S4.9h: a vector body goes here; it must evaluate the same sequence per lane.
+pub fn gelu_erf_rows(x: &mut [f32]) {
+    let mut i = 0;
+    while i + 4 <= x.len() {
+        let a = gelu_erf(x[i]);
+        let b = gelu_erf(x[i + 1]);
+        let c = gelu_erf(x[i + 2]);
+        let d = gelu_erf(x[i + 3]);
+        x[i] = a;
+        x[i + 1] = b;
+        x[i + 2] = c;
+        x[i + 3] = d;
+        i += 4;
+    }
+    while i < x.len() {
+        x[i] = gelu_erf(x[i]);
+        i += 1;
+    }
+}
+
+/// [`layer_norm_row`] over `nb` rows of `dim` floats — the batch form the encoder
+/// calls once per norm. A row's bits are [`layer_norm_row`]'s, whatever the batch.
+pub fn layer_norm_rows(x: &[f32], weight: &[f32], bias: &[f32], eps: f32, dim: usize, nb: usize, out: &mut [f32]) {
+    for r in 0..nb {
+        layer_norm_row(
+            &x[r * dim..(r + 1) * dim],
+            weight,
+            bias,
+            eps,
+            &mut out[r * dim..(r + 1) * dim],
+        );
+    }
+}
+
+/// LayerNorm of one row, with a defined reduction order.
+///
+/// ```text
+/// m   = (Σ_{i<n} x_i) / n                       f64, index order, one rounding
+/// v   = (Σ_{i<n} (x_i − m)²) / n                f64, index order, m unrounded
+/// inv = 1 / √(v + eps)                          f64, rounded to f32 once
+/// out_i = ((x_i − m_f32) · inv) · w_i + b_i      f32, in that order
+/// ```
+///
+/// The mean and the variance are two independent walks over the row in index
+/// order with one `f64` accumulator each (a vector version must add into a
+/// single accumulator in index order, not into per-lane partials, or the bits
+/// move). `m` is rounded to `f32` once for the shift, while the variance uses
+/// the unrounded `m`, which is the two-pass form and the more accurate one.
+/// The scale-and-shift is three plain `f32` operations, deliberately not fused:
+/// `mul` then `add`, so a machine with FMA produces the same bits.
+///
+/// `eps` is the file's `attention.layer_norm_epsilon`, added before the square
+/// root, as llama.cpp's `ggml_norm` does.
+///
+/// // S4.9h: the AVX2 body must reproduce this order exactly.
+pub fn layer_norm_row(x: &[f32], weight: &[f32], bias: &[f32], eps: f32, out: &mut [f32]) {
+    let n = x.len();
+    debug_assert!(out.len() >= n && weight.len() >= n && bias.len() >= n);
+    let mut sum = 0.0f64;
+    for &v in &x[..n] {
+        sum += v as f64;
+    }
+    let nf = n as f64;
+    let mean64 = sum / nf;
+    let mean = mean64 as f32;
+    let mut var = 0.0f64;
+    for &v in &x[..n] {
+        let d = v as f64 - mean64;
+        var += d * d;
+    }
+    let inv = (1.0 / (var / nf + eps as f64).sqrt()) as f32;
+    for i in 0..n {
+        let t = (x[i] - mean) * inv;
+        out[i] = t * weight[i] + bias[i];
+    }
+}
+
 // `Σ x²` accumulated in f64, four lanes at a time (the norms' sums; was a serial f64 loop).
 pub fn sumsq_f64(x: &[f32]) -> f64 {
     #[cfg(target_arch = "x86_64")]
@@ -1313,13 +1587,10 @@ fn fwht(x: &mut [f32]) {
 
 /// `ln 2`, high part: 32 significant bits, so `k·ln2_hi` is exact for every `k`
 /// the `exp` reduction produces.
-#[cfg(any(target_arch = "aarch64", test))]
 const DET_LN2_HI: f64 = f64::from_bits(0x3fe6_2e42_fee0_0000);
 /// `ln 2` minus `DET_LN2_HI`.
-#[cfg(any(target_arch = "aarch64", test))]
 const DET_LN2_LO: f64 = f64::from_bits(0x3dea_39ef_3579_3c76);
 /// `log2(e)`: the `exp` reduction counts whole multiples of `ln 2`.
-#[cfg(any(target_arch = "aarch64", test))]
 const DET_LOG2E: f64 = f64::from_bits(0x3ff7_1547_652b_82fe);
 /// `2/π`: the sine's quadrant count.
 #[cfg(any(target_arch = "aarch64", test))]
@@ -1336,7 +1607,6 @@ const DET_PIO2_2: f64 = f64::from_bits(0x3dd0_b461_1a62_6331);
 const DET_PIO2_3: f64 = f64::from_bits(0x3a71_701b_839a_2520);
 
 /// `2^k` for an integer `k`, subnormals included.
-#[cfg(any(target_arch = "aarch64", test))]
 fn pow2(k: i32) -> f64 {
     if (-1022..=1023).contains(&k) {
         f64::from_bits(((k + 1023) as u64) << 52)
@@ -1351,7 +1621,11 @@ fn pow2(k: i32) -> f64 {
 }
 
 /// `exp(x)`: the reduction `x = k·ln2 + r`, then a degree-14 series on `r`.
-#[cfg(any(target_arch = "aarch64", test))]
+///
+/// Pure IEEE arithmetic, so it is one function on every tier and every C library.
+/// The BERT family's `erf` reads it (the tail of `erfc` is `exp(−x²)`); the
+/// [`det_exp`] dispatcher below deliberately keeps libm on x86, because the
+/// logits goldens recorded there were made against it.
 fn exp_f64(x: f64) -> f64 {
     if x.is_nan() {
         return x;
@@ -2351,5 +2625,140 @@ mod tests {
         assert!(ln_f64(-1.0).is_nan());
         assert_eq!(pow_f64(2.0, 0.0), 1.0);
         assert_eq!(pow_f64(2.0, 1.0), 2.0);
+    }
+
+    /// An oracle for `erf` that shares no arithmetic with the implementation:
+    ///
+    /// ```text
+    /// erf(x) = (2/√π) · exp(−x²) · Σ_n (2x²)^n·x / (1·3·5···(2n+1))
+    /// ```
+    ///
+    /// every term positive, so there is no cancellation at any `x`; it is summed
+    /// until a term is below `1e-17` of the sum. `exp` is the C library's, not the
+    /// module's, so the check does not share that implementation either.
+    fn erf_oracle(x: f64) -> f64 {
+        if x == 0.0 {
+            return 0.0;
+        }
+        let x2 = 2.0 * x * x;
+        let mut term = x;
+        let mut sum = x;
+        let mut n = 1.0f64;
+        loop {
+            term *= x2 / (2.0 * n + 1.0);
+            sum += term;
+            if term.abs() <= sum.abs() * 1e-18 {
+                break;
+            }
+            n += 1.0;
+            assert!(n < 10_000.0);
+        }
+        let v = 2.0 / std::f64::consts::PI.sqrt() * (-x * x).exp() * sum;
+        v
+    }
+
+    fn ulp_distance(a: f32, b: f32) -> u32 {
+        a.to_bits().abs_diff(b.to_bits())
+    }
+
+    #[test]
+    fn erf_agrees_with_an_independent_oracle() {
+        let mut max_abs = 0.0f64;
+        let mut max_ulp = 0u32;
+        let mut at = 0.0f64;
+        let n = 400_000;
+        for i in 0..=n {
+            let x = -6.0 + 12.0 * i as f64 / n as f64;
+            let want = erf_oracle(x);
+            let got = erf(x as f32) as f64;
+            let e = (got - want).abs();
+            if e > max_abs {
+                max_abs = e;
+                at = x;
+            }
+            max_ulp = max_ulp.max(ulp_distance(erf(x as f32), want as f32));
+        }
+        eprintln!("erf: max abs {max_abs:.3e} at {at}, max {max_ulp} ulp");
+        // The definition's stated bound: one f32 ulp of the result, everywhere.
+        // (Measured: 5.96e-8 at |erf| ≈ 0.5 — that is the final rounding, not the
+        // series; the series itself is under 3e-9 absolute.)
+        assert!(max_abs <= 6e-8, "max abs error {max_abs:.3e} at {at}");
+        assert!(max_ulp <= 1, "max {max_ulp} ulp at {at}");
+        // The corners, and the odd symmetry.
+        assert_eq!(erf(0.0), 0.0);
+        assert_eq!(erf(6.0), 1.0);
+        assert_eq!(erf(-6.0), -1.0);
+        assert_eq!(erf(f32::INFINITY), 1.0);
+        assert_eq!(erf(f32::NEG_INFINITY), -1.0);
+        assert!(erf(f32::NAN).is_nan());
+        for i in 0..2000 {
+            let x = -5.0 + 10.0 * i as f32 / 2000.0;
+            assert_eq!(erf(-x), -erf(x), "odd symmetry at {x}");
+        }
+    }
+
+    #[test]
+    fn gelu_erf_is_half_x_one_plus_erf_of_x_over_root_two() {
+        let mut max_abs = 0.0f64;
+        let mut at = 0.0f64;
+        // The rows path must be the single-element function element by element.
+        let mut row: Vec<f32> = (0..1001).map(|i| -12.0 + 24.0 * i as f32 / 1000.0).collect();
+        let single: Vec<f32> = row.iter().map(|&x| gelu_erf(x)).collect();
+        gelu_erf_rows(&mut row);
+        assert_eq!(
+            row.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            single.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "the row loop must not change an element's bits"
+        );
+        for (i, &x) in row.iter().enumerate() {
+            let xf = -12.0 + 24.0 * i as f64 / 1000.0;
+            let want = 0.5 * xf * (1.0 + erf_oracle(xf / 2.0f64.sqrt()));
+            let e = (x as f64 - want).abs();
+            if e > max_abs {
+                max_abs = e;
+                at = xf;
+            }
+        }
+        eprintln!("gelu_erf: max abs {max_abs:.3e} at {at}");
+        // Three f32 roundings of a value up to 12: under three ulps of the result,
+        // which at the measured point (|gelu| ≈ 5) is 1.4e-6.
+        assert!(max_abs < 2e-6, "max abs error {max_abs:.3e} at {at}");
+        // Saturation: the two tails are exactly x and 0 at f32 precision.
+        assert_eq!(gelu_erf(0.0), 0.0);
+        assert_eq!(gelu_erf(12.0), 12.0);
+        assert_eq!(gelu_erf(-12.0), 0.0);
+    }
+
+    #[test]
+    fn layer_norm_row_is_the_defined_two_pass_norm() {
+        // A hand case: mean 2.5, population variance 1.25.
+        let x = [1.0f32, 2.0, 3.0, 4.0];
+        let w = [1.0f32; 4];
+        let b = [0.0f32; 4];
+        let mut out = [0.0f32; 4];
+        layer_norm_row(&x, &w, &b, 1e-5, &mut out);
+        // The scale is one f32 rounding of `1/sqrt(var + eps)`, then `(x − m)·inv`
+        // in f32 — the definition's order.
+        let inv = (1.0 / (1.25f64 + 1e-5).sqrt()) as f32;
+        for (i, &xi) in x.iter().enumerate() {
+            let want = (xi - 2.5) * inv;
+            assert_eq!(out[i].to_bits(), want.to_bits(), "{i}");
+        }
+        // The affine part is applied in f32 after the scale, as the definition says.
+        let w = [2.0f32, -1.0, 0.5, 3.0];
+        let b = [0.25f32, -0.5, 1.0, 0.0];
+        let inv = (1.0 / 1.25f64.sqrt()) as f32;
+        layer_norm_row(&x, &w, &b, 0.0, &mut out);
+        for i in 0..4 {
+            let want = (x[i] - 2.5) * inv * w[i] + b[i];
+            assert_eq!(out[i].to_bits(), want.to_bits(), "{i}");
+        }
+        // A row with a constant value is all bias.
+        let flat = [7.0f32; 3];
+        let w = [1.0f32; 3];
+        let b = [0.0f32; 3];
+        let mut out = [1.0f32; 3];
+        layer_norm_row(&flat, &w, &b, 1e-5, &mut out);
+        assert_eq!(out, [0.0, 0.0, 0.0]);
     }
 }
