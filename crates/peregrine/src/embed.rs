@@ -16,12 +16,6 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-/// The most slots one `embed` call keeps busy (a batch bigger than this is admitted in waves).
-const MAX_EMBED_SLOTS: usize = 64;
-
-/// KV-cache memory the batches may hold at once (each slot owns a cache for the whole context).
-const KV_BUDGET_BYTES: usize = 1 << 30;
-
 /// Arguments for `peregrine embed`.
 #[derive(Args, Debug, Clone)]
 pub struct EmbedArgs {
@@ -42,8 +36,8 @@ pub struct EmbedArgs {
     #[arg(long)]
     pub pooling: Option<String>,
     /// Context length in tokens (clamped to the model's training context). A text longer than
-    /// the limit is an error unless `--truncate` is given. The batch's caches are sized to the
-    /// longest text, not to this limit.
+    /// the limit is an error unless `--truncate` is given. A pooled slot's cache is sized to its
+    /// own text, not to this limit (S4.9b).
     #[arg(short = 'c', long, default_value_t = 8192)]
     pub ctx: usize,
     /// Truncate an over-length text to the context instead of refusing it.
@@ -125,30 +119,11 @@ pub fn run(args: &EmbedArgs) -> Result<(), String> {
         tokens.push(v);
     }
 
-    // All texts are slots at once when they fit: the engine batches whatever it has room for
-    // and admits the rest as earlier ones finish. Each slot owns a KV cache of the engine's
-    // context, and a pooled slot never decodes, so the engine's context is the longest text's
-    // length (at most `--ctx`): a batch of short texts can then take many slots inside the KV
-    // budget instead of one full-8k cache per text.
-    let ctx = tokens
-        .iter()
-        .map(Vec::len)
-        .max()
-        .unwrap_or(1)
-        .clamp(32, max_ctx);
-    let slots = if bidirectional {
-        // An encoder's slots hold no cache: one text costs its own rows, not a
-        // `max_ctx`-position cache each.
-        tokens.len().clamp(1, MAX_EMBED_SLOTS)
-    } else {
-        let per_slot = model.new_cache(KvPrec::F16, 1).bytes_per_position() as usize * ctx;
-        tokens
-            .len()
-            .clamp(1, MAX_EMBED_SLOTS)
-            .min(KV_BUDGET_BYTES / per_slot.max(1))
-            .max(1)
-    };
-    let mut engine = Engine::new(model.clone(), threads, ctx, slots, KvPrec::F16, 0);
+    // Every text is a slot when the engine's work budget admits it; the rest wait and are
+    // admitted as the earlier ones finish (S4.9b). A pooled slot's cache is sized to its own
+    // prompt, so the batch's memory is its text tokens, not one context per text; the budget
+    // (`PEREGRINE_WORK_CACHE_MB`) bounds how many run at once.
+    let mut engine = Engine::new(model.clone(), threads, max_ctx, 1, KvPrec::F16, 0);
     let mut by_slot: HashMap<u64, usize> = HashMap::new();
     let mut next = 0usize;
     let mut done: Vec<Option<Vec<f32>>> = vec![None; tokens.len()];
@@ -163,7 +138,7 @@ pub fn run(args: &EmbedArgs) -> Result<(), String> {
         by_slot.insert(id, i);
         Ok::<(), String>(())
     };
-    while next < tokens.len() && engine.has_room() {
+    while next < tokens.len() && engine.work_room_for(tokens[next].len()) {
         admit(&mut engine, &mut by_slot, next)?;
         next += 1;
     }
@@ -183,7 +158,7 @@ pub fn run(args: &EmbedArgs) -> Result<(), String> {
             done[i] = Some(v);
             remaining -= 1;
         }
-        while next < tokens.len() && engine.has_room() {
+        while next < tokens.len() && engine.work_room_for(tokens[next].len()) {
             admit(&mut engine, &mut by_slot, next)?;
             next += 1;
         }

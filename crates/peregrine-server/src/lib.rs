@@ -317,6 +317,14 @@ pub async fn run(a: Args) {
         a.prefix_cache_mb << 20,
     );
     let cache_mb = engine.cache_bytes_per_slot() >> 20;
+    // S4.9b: embedding and decision slots are admitted by their own memory budget and their
+    // caches are sized to their prompts, so they cost the prompt, not a context each.
+    tracing::info!(
+        "peregrine-core: embedding and decision slots: {} rows per pass, {} MB of prompt-sized caches, prompt cache {} KB per position",
+        engine.pass_rows(),
+        peregrine_core::options::get().work_cache_mb.unwrap_or(512),
+        engine.cache_bytes_per_position().div_ceil(1024),
+    );
     let (jobs, rx) = std::sync::mpsc::channel::<EngineMsg>();
     let shared = Arc::new(EngineShared::default());
     {
@@ -375,7 +383,7 @@ pub async fn run(a: Args) {
         None => "dense".to_string(),
     };
     tracing::info!(
-        "peregrine-core: {} loaded in {:.1} s, {} threads, {}, ctx {}, {} slots ({} MB of cache each), {} weights, {} chat template, think tokens {:?}/{:?}",
+        "peregrine-core: {} loaded in {:.1} s, {} threads, {}, ctx {}, {} chat slots ({} MB of cache each), {} weights, {} chat template, think tokens {:?}/{:?}",
         a.model.display(),
         t0.elapsed().as_secs_f64(),
         threads,
@@ -1199,12 +1207,27 @@ fn engine_thread(
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
             }
         }
-        while engine.has_room() {
-            let Some(q) = waiting.pop_front() else { break };
+        // Admitting is zero-wait: whatever is queued when the engine is free runs together. Chat
+        // requests are bounded by `--slots`; embedding texts and decision questions have their own
+        // admission (a memory budget, not a slot count), so the queue is scanned rather than taken
+        // head-first: a chat request blocked on its slots never holds an embedding batch behind it,
+        // and a batch wider than the budget leaves only its tail queued (S4.9b).
+        let mut i = 0;
+        while i < waiting.len() {
+            let q = waiting.remove(i).expect("an index below the length");
             match q {
                 Queued::One(j) => {
                     // A caller that has gone is not worth a prefill.
                     if j.out.is_closed() {
+                        continue;
+                    }
+                    let fits = match j.want {
+                        Want::Tokens => engine.has_room(),
+                        _ => engine.work_room_for(j.prompt.len()),
+                    };
+                    if !fits {
+                        waiting.insert(i, Queued::One(j));
+                        i += 1;
                         continue;
                     }
                     let admitted = match j.want {
@@ -1240,13 +1263,14 @@ fn engine_thread(
                     if g.prompts.is_empty() {
                         continue;
                     }
-                    // As many questions as there are free slots: each group forwards its shared
-                    // beginning once (the rest of the request waits for the next group).
-                    let free = engine.max_slots() - engine.active();
-                    let k = free.min(g.prompts.len());
+                    // As many questions as the non-decoding budget admits: each group forwards its
+                    // shared beginning once (the rest of the request waits for the next group).
+                    let lens: Vec<usize> = g.prompts.iter().map(Vec::len).collect();
+                    let k = engine.work_room_prefix(&lens).min(g.prompts.len());
                     if k == 0 {
-                        waiting.push_front(Queued::Group(g));
-                        break;
+                        waiting.insert(i, Queued::Group(g));
+                        i += 1;
+                        continue;
                     }
                     let tail = k < g.prompts.len();
                     let (tail_prompts, tail_labels, tail_outs) = if tail {
@@ -1260,11 +1284,14 @@ fn engine_thread(
                     };
                     let (prompts, labels, outs) = (g.prompts, g.labels, g.outs);
                     if tail {
-                        waiting.push_front(Queued::Group(Box::new(GroupJob {
-                            prompts: tail_prompts,
-                            labels: tail_labels,
-                            outs: tail_outs,
-                        })));
+                        waiting.insert(
+                            i,
+                            Queued::Group(Box::new(GroupJob {
+                                prompts: tail_prompts,
+                                labels: tail_labels,
+                                outs: tail_outs,
+                            })),
+                        );
                     }
                     match engine.admit_labels_group(prompts, SlotCfg::default(), labels) {
                         Ok(ids) => {

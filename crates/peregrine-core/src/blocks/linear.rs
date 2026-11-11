@@ -76,10 +76,49 @@ pub fn matmul_group(
     kq: &mut peregrine_kernels::kq::KqActs,
 ) {
     assert!(
+        !acts.is_empty() && nb <= acts.len(),
+        "batch of {nb} exceeds the activations it was given"
+    );
+    // A pass may be wider than one kernel call (S4.9b: a non-decoding pass carries up to
+    // `PEREGRINE_PASS_ROWS` rows). The kernel's row limit is a property of its stack scratch,
+    // not of the result: every output element is a function of one activation row and one
+    // weight row, so the batch is split into blocks of `MAX_BATCH` rows and the results are
+    // the same bits. The weight traffic is counted once per matrix, not once per block.
+    let t0 = Instant::now();
+    // The weight traffic is counted once per matrix, however many blocks the batch is split
+    // into: the bytes crossed the memory interface once per block, but a pass's cost is reported
+    // per matrix with the format's row size, as before.
+    for j in jobs {
+        let n = j.w.dims[0] as usize;
+        st.bytes_weights += (j.rows() * row_bytes(j.w.kind, n)) as u64;
+    }
+    let mut b0 = 0usize;
+    while b0 < nb {
+        let n = MAX_BATCH.min(nb - b0);
+        matmul_block(w, jobs, &acts[b0..b0 + n], n, b0, pool, st, kq);
+        b0 += n;
+    }
+    st.ns_matmul += t0.elapsed().as_nanos() as u64;
+}
+
+/// [`matmul_group`] for one block of at most `MAX_BATCH` activation rows, starting at batch row
+/// `b0` of the caller's batch. `b0` only shifts where the results are written: a row's value is
+/// a function of the activation row and the weight row alone.
+#[allow(clippy::too_many_arguments)]
+fn matmul_block(
+    w: &Weights,
+    jobs: &[MatJob],
+    acts: &[QuantAct],
+    nb: usize,
+    b0: usize,
+    pool: &Pool,
+    st: &mut StepStats,
+    kq: &mut peregrine_kernels::kq::KqActs,
+) {
+    assert!(
         nb <= MAX_BATCH,
         "batch of {nb} exceeds the matmul scratch of {MAX_BATCH}"
     );
-    let t0 = Instant::now();
     let total: usize = jobs.iter().map(|j| j.rows()).sum();
     let acts = &acts[..nb];
     // Each matrix's kernel is chosen once, from the kernel table: by format, storage (tiles or rows),
@@ -142,7 +181,7 @@ pub fn matmul_group(
                         for i in 0..16 * nt {
                             for b in 0..nb {
                                 // SAFETY: row `r + i` of this job belongs to this worker (tile-aligned ranges).
-                                unsafe { j.out.set(b * rows + r + i, blk[i * nb + b]) };
+                                unsafe { j.out.set((b0 + b) * rows + r + i, blk[i * nb + b]) };
                             }
                         }
                         r += 16 * nt;
@@ -164,7 +203,7 @@ pub fn matmul_group(
                         for i in 0..k {
                             for b in 0..nb {
                                 // SAFETY: row `r + i` of this job belongs to this worker.
-                                unsafe { j.out.set(b * rows + r + i, blk[i * nb + b]) };
+                                unsafe { j.out.set((b0 + b) * rows + r + i, blk[i * nb + b]) };
                             }
                         }
                         r += k;
@@ -244,7 +283,9 @@ pub fn matmul_group(
                                     // `share` range, or a chunk claimed from
                                     // the counter), and the tile's rows are the
                                     // job's rows.
-                                    unsafe { j.out.set(b * rows + row, out[b * KQ_TILE_ROWS + i]) };
+                                    unsafe {
+                                        j.out.set((b0 + b) * rows + row, out[b * KQ_TILE_ROWS + i])
+                                    };
                                 }
                             }
                         }
@@ -264,7 +305,7 @@ pub fn matmul_group(
                             for (b, &v) in tmp[..nb].iter().enumerate() {
                                 // SAFETY: the row of the concatenated row space
                                 // is taken by exactly one worker.
-                                unsafe { j.out.set(b * rows + rr, v) };
+                                unsafe { j.out.set((b0 + b) * rows + rr, v) };
                             }
                         }
                     }
@@ -290,7 +331,7 @@ pub fn matmul_group(
                             );
                             for (i, &v) in eight.iter().enumerate() {
                                 // SAFETY: row `r + i` is in this worker's range.
-                                unsafe { j.out.set(r + i, v) };
+                                unsafe { j.out.set(b0 + r + i, v) };
                             }
                             r += 8;
                         }
@@ -301,7 +342,7 @@ pub fn matmul_group(
                             // SAFETY: each row of the concatenated row space is taken by exactly one worker
                             // (a `share` range, or a chunk claimed from the counter), so `(job, r)` — hence the
                             // index `b*rows + r` within this job's output — is written once.
-                            unsafe { j.out.set(b * rows + r, v) };
+                            unsafe { j.out.set((b0 + b) * rows + r, v) };
                         }
                     }
                 }
@@ -346,12 +387,11 @@ pub fn matmul_group(
             rows_range(lo, hi, &mut tmp);
         });
     }
-    // Counted once per matrix: the bytes crossed the memory interface once,
-    // however many activations reused them.
+    // The activation's traffic, per block; the weight traffic is counted once by
+    // `matmul_group`, and the MACs here sum over blocks to the batch's whole.
     for (j, &path) in jobs.iter().zip(paths) {
         let n = j.w.dims[0] as usize;
         let rows = j.rows();
-        st.bytes_weights += (rows * row_bytes(j.w.kind, n)) as u64;
         st.macs += (rows * n * nb) as u64;
         // The activation's traffic: how many times the activation crossed the
         // memory interface, and how many bytes it was. The repacked tile reads
@@ -366,7 +406,6 @@ pub fn matmul_group(
         st.bytes_acts += (reads * nb * per_row) as u64;
     }
     st.barriers += 1;
-    st.ns_matmul += t0.elapsed().as_nanos() as u64;
 }
 
 /// Several matrices that share one activation, each dense or LittleBit.
@@ -449,11 +488,60 @@ pub fn lb_group(
     st: &mut StepStats,
 ) {
     assert!(
+        !xs.is_empty() && nb <= xs.len() / xstride.max(1),
+        "batch of {nb} exceeds the activations it was given"
+    );
+    let t0 = Instant::now();
+    let slb0 = slb.expect("a LittleBit job without a sidecar");
+    // A wide pass is split into blocks of at most `MAX_BATCH` rows, like the dense path: a row's
+    // value is a function of its activation row and the weights alone. The weight traffic is
+    // counted once, in the loop after the blocks.
+    let mut b0 = 0usize;
+    while b0 < nb {
+        let n = MAX_BATCH.min(nb - b0);
+        lb_block(
+            slb0,
+            jobs,
+            &xs[b0 * xstride..],
+            xstride,
+            n,
+            b0,
+            lbx,
+            lbt,
+            pool,
+            st,
+        );
+        b0 += n;
+    }
+    for &(ti, _) in jobs {
+        st.bytes_weights += slb0.tensors[ti].bytes_per_use;
+    }
+    st.ns_matmul += t0.elapsed().as_nanos() as u64;
+}
+
+/// [`lb_group`] for one block of at most `MAX_BATCH` activation rows starting at batch row `b0`.
+#[cfg(feature = "littlebit")]
+#[allow(clippy::too_many_arguments)]
+fn lb_block(
+    slb: &Slb,
+    jobs: &[(usize, OutPtr<'_>)],
+    xs: &[f32],
+    xstride: usize,
+    nb: usize,
+    b0: usize,
+    lbx: SharedBuf<'_>,
+    lbt: SharedBuf<'_>,
+    pool: &Pool,
+    st: &mut StepStats,
+) {
+    assert!(
         nb <= MAX_BATCH,
         "batch of {nb} exceeds the matmul scratch of {MAX_BATCH}"
     );
-    let t0 = Instant::now();
-    let slb = slb.expect("a LittleBit job without a sidecar");
+    assert!(
+        nb <= xs.len() / xstride.max(1),
+        "batch of {nb} exceeds the activations it was given"
+    );
     #[derive(Clone, Copy, Default)]
     struct Slot {
         ti: usize,
@@ -606,7 +694,7 @@ pub fn lb_group(
                     }
                     for (b, &v) in acc[..nb].iter().enumerate() {
                         // SAFETY: output row `i` of job `ji` belongs to this worker.
-                        unsafe { out.set(b * t.d_out + i, v) };
+                        unsafe { out.set((b0 + b) * t.d_out + i, v) };
                     }
                 }
             }
@@ -616,8 +704,6 @@ pub fn lb_group(
     st.barriers += 1;
     for &(ti, _) in jobs {
         let t = &slb.tensors[ti];
-        st.bytes_weights += t.bytes_per_use;
         st.macs += t.macs_per_row() * nb as u64;
     }
-    st.ns_matmul += t0.elapsed().as_nanos() as u64;
 }

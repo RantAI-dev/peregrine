@@ -19,12 +19,6 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-/// The most slots one `decide` call keeps busy (more questions are admitted in waves).
-const MAX_DECIDE_SLOTS: usize = 64;
-
-/// KV-cache memory the batches may hold at once (each slot owns a cache for the whole context).
-const KV_BUDGET_BYTES: usize = 1 << 30;
-
 /// Arguments for `peregrine decide`.
 #[derive(Args, Debug, Clone)]
 pub struct DecideArgs {
@@ -94,19 +88,9 @@ pub fn run(args: &DecideArgs) -> Result<(), String> {
         prompts.push(tokens);
     }
 
-    let ctx = prompts
-        .iter()
-        .map(Vec::len)
-        .max()
-        .unwrap_or(1)
-        .clamp(32, max_ctx);
-    let per_slot = model.new_cache(KvPrec::F16, 1).bytes_per_position() as usize * ctx;
-    let slots = prompts
-        .len()
-        .clamp(1, MAX_DECIDE_SLOTS)
-        .min(KV_BUDGET_BYTES / per_slot.max(1))
-        .max(1);
-    let mut engine = Engine::new(model.clone(), threads, ctx, slots, KvPrec::F16, 0);
+    // Every question is a label slot; S4.9b sizes each one's cache to its own prompt and admits
+    // the request by the non-decoding memory budget, not by a slot count.
+    let mut engine = Engine::new(model.clone(), threads, max_ctx, 1, KvPrec::F16, 0);
     let labels = decider.labels();
     let question_labels: Vec<Vec<u32>> = questions
         .iter()
@@ -120,9 +104,12 @@ pub fn run(args: &DecideArgs) -> Result<(), String> {
     // several groups, each forked from one evaluation (or a prefix-store restore) of it.
     let mut remaining = prompts.len();
     loop {
-        while next < prompts.len() && engine.has_room() {
-            let free = engine.max_slots() - engine.active();
-            let k = free.min(prompts.len() - next);
+        while next < prompts.len() {
+            let lens: Vec<usize> = prompts[next..].iter().map(Vec::len).collect();
+            let k = engine.work_room_prefix(&lens);
+            if k == 0 {
+                break;
+            }
             let ids = engine.admit_labels_group(
                 prompts[next..next + k].to_vec(),
                 SlotCfg::default(),

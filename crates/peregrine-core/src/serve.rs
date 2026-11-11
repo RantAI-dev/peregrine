@@ -77,6 +77,31 @@ const SCRATCH_CHUNK: usize = 64;
 const LONG_PROMPT: usize = 1024;
 const LONG_PROMPT_CHUNK: usize = 64;
 
+/// The most non-decoding slots one engine admits at once (S4.9b): a bound on bookkeeping, not on
+/// the work. The memory bound is the caches themselves (`WORK_CACHE_BYTES`).
+pub const MAX_WORK_SLOTS: usize = 1024;
+
+/// The non-decoding caches one engine may hold at once: a pooled or labels slot's cache is sized
+/// to its prompt (S4.9b), so a request's memory is its texts' tokens, not `slots × context`.
+///
+/// 512 MiB admits 128 short texts whole on a 0.6B model (128 × 16 positions) and still keeps a
+/// long batch to a few waves. `PEREGRINE_WORK_CACHE_MB` overrides it.
+pub const WORK_CACHE_BYTES: usize = 512 << 20;
+
+/// The rounding of a non-decoding slot's cache: whole prefill chunks, so a short text does not
+/// pay for a whole context and a long one does not pay for a second chunk of slack.
+fn round_up_prompt(len: usize) -> usize {
+    len.max(1).div_ceil(16) * 16
+}
+
+/// The memory budget of non-decoding caches: `PEREGRINE_WORK_CACHE_MB`, or
+/// [`WORK_CACHE_BYTES`].
+fn work_cache_budget() -> u64 {
+    crate::options::get()
+        .work_cache_mb
+        .map_or(WORK_CACHE_BYTES as u64, |mb| (mb as u64) << 20)
+}
+
 /// Why a slot stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finish {
@@ -495,6 +520,11 @@ pub struct Engine {
     /// The prompt tokens one weight pass carries: the engine prefills a prompt in pieces of this
     /// size (`PEREGRINE_PREFILL_CHUNK`).
     prefill_chunk: usize,
+    /// The rows one weight pass carries for work that never decodes: pooled and label slots
+    /// (S4.9b, `PEREGRINE_PASS_ROWS`).
+    pass_rows: usize,
+    /// Bytes of non-decoding caches the engine admits at once (S4.9b).
+    work_cache_bytes: u64,
     /// Caches of finished requests, so a prompt that shares a beginning with one of them (the system prompt
     /// every user of a deployment sends, the transcript a code agent extends) is not prefilled again. Shared
     /// across slots, which is where it pays most: one user's work serves the next.
@@ -616,6 +646,36 @@ impl Engine {
         prefix_cache_bytes: usize,
         prefill_chunk: usize,
     ) -> Engine {
+        Self::new_with_chunk_and_pass(
+            model,
+            threads,
+            max_ctx,
+            max_slots,
+            kv_prec,
+            prefix_cache_bytes,
+            prefill_chunk,
+            None,
+        )
+    }
+
+    /// The engine with a chosen prefill chunk and pass budget (S4.9b).
+    ///
+    /// `pass_rows` is how many rows a weight pass may carry for work that never decodes: pooled
+    /// (embedding) and label (decision) slots fill a pass together up to it, instead of one
+    /// prefill chunk per slot. `None` takes `PEREGRINE_PASS_ROWS`, or the machine's default
+    /// (`crate::options::pass_rows_default_for`). It is scheduling only: a text's vector and a
+    /// question's label logits do not depend on it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_chunk_and_pass(
+        model: Arc<Model>,
+        threads: usize,
+        max_ctx: usize,
+        max_slots: usize,
+        kv_prec: KvPrec,
+        prefix_cache_bytes: usize,
+        prefill_chunk: usize,
+        pass_rows: Option<usize>,
+    ) -> Engine {
         let c = model.cfg;
         let max_slots = max_slots.max(1);
         // A bidirectional model schedules whole texts, never chunks, and writes no KV
@@ -624,19 +684,29 @@ impl Engine {
         let bidirectional = model.causality() == crate::arch::Causality::Bidirectional;
         // The prompt tokens one weight pass carries.
         let prefill_chunk = prefill_chunk.clamp(1, crate::options::MAX_PREFILL_CHUNK);
+        // The rows one non-decoding pass carries (S4.9b). A bidirectional model schedules
+        // whole texts, so its budget is the same number but a longer text still runs alone.
+        let pass_rows = pass_rows
+            .or(crate::options::get().pass_rows)
+            .unwrap_or_else(|| crate::options::pass_rows_default_for(threads, c.d_model))
+            .clamp(1, crate::options::MAX_PASS_ROWS);
+        let work_cache_bytes = work_cache_budget();
         // One position more than the model's own context is allowed: the engine
         // stops a turn one position short of a full cache, so a caller that
         // wants the whole context asks for one more (ADR 0007: a conversation
         // runs on a one-slot engine).
         let max_ctx = max_ctx.clamp(32, c.ctx_train + 1);
-        // The widest batch is a prefill chunk beside one row per slot (a mixed step); every decode row wants
-        // logits, a prefill chunk wants none. The scratch keeps the width it had before the chunk became an
-        // option, because it also holds the speculation's rows: a narrower chunk must not narrow the drafts.
-        // The matmul's row limit caps the whole thing, and a chunk beside the decode rows must fit in it.
+        // The widest step is a prefill chunk beside one row per slot (a mixed step) and, since
+        // S4.9b, a non-decoding pass of up to `pass_rows` rows beside the chat rows. Every decode
+        // row wants logits, a prefill chunk wants none. The scratch keeps the width it had before
+        // the chunk became an option, because it also holds the speculation's rows: a narrower
+        // chunk must not narrow the drafts. The matmul driver splits a batch wider than its own
+        // row limit into blocks, so this is bounded by the pass budget, not by that limit.
+        let chat_rows = prefill_chunk.max(SCRATCH_CHUNK).max(LONG_PROMPT_CHUNK) + max_slots;
         let max_batch = if bidirectional {
             max_ctx
         } else {
-            (prefill_chunk.max(SCRATCH_CHUNK) + max_slots).min(crate::blocks::linear::MAX_BATCH)
+            pass_rows + chat_rows
         };
         // An MTP verification pass wants logits for two rows, whatever the slot count. An
         // encoder never samples: one row is all its state ever needs.
@@ -677,6 +747,8 @@ impl Engine {
             max_ctx,
             kv_prec,
             prefill_chunk,
+            pass_rows,
+            work_cache_bytes,
             prefixes: PrefixStore::new(prefix_cache_bytes),
             next_id: 1,
             stats: StepStats::default(),
@@ -732,11 +804,99 @@ impl Engine {
     pub fn active(&self) -> usize {
         self.slots.len()
     }
+    /// Whether a chat (token) slot may be admitted: `--slots` bounds chat slots and only chat
+    /// slots. A pooled or label slot asks [`Self::work_room_for`] instead (S4.9b).
     pub fn has_room(&self) -> bool {
-        self.slots.len() < self.max_slots
+        self.token_slots() < self.max_slots
+    }
+    /// The chat slots in flight.
+    fn token_slots(&self) -> usize {
+        self.slots.iter().filter(|s| s.wants_tokens()).count()
+    }
+    /// The non-decoding slots in flight (pooled and label slots).
+    fn work_slots(&self) -> usize {
+        self.slots.len() - self.token_slots()
+    }
+    /// The rows of non-decoding work in flight: the tokens of every pooled and label slot's
+    /// prompt, which is what the pass budget and the caches are spent on.
+    pub fn work_rows(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|s| !s.wants_tokens())
+            .map(|s| s.prompt.len())
+            .sum()
+    }
+    /// The bytes of the non-decoding slots' caches in flight (S4.9b).
+    pub fn work_cache_used(&self) -> u64 {
+        self.slots
+            .iter()
+            .filter(|s| !s.wants_tokens())
+            .map(|s| s.kv.allocated_bytes())
+            .sum()
+    }
+    /// Whether one more non-decoding slot of `prompt_len` tokens fits the work budget.
+    ///
+    /// The budget is the memory of the slot's own prompt-sized cache, not `--slots`: a request's
+    /// texts do not consume chat slots and are not bounded by their number. An encoder's slots
+    /// allocate no cache, so only the slot cap bounds them.
+    pub fn work_room_for(&self, prompt_len: usize) -> bool {
+        if self.work_slots() >= MAX_WORK_SLOTS {
+            return false;
+        }
+        self.work_cache_used() + self.cache_bytes_for_prompt(prompt_len) <= self.work_cache_bytes
+    }
+    /// How many of `lens`, in order, fit the work budget if admitted now.
+    pub fn work_room_prefix(&self, lens: &[usize]) -> usize {
+        let mut used = self.work_cache_used();
+        let room = MAX_WORK_SLOTS.saturating_sub(self.work_slots());
+        let mut n = 0;
+        for &len in lens {
+            if n >= room {
+                break;
+            }
+            let bytes = self.cache_bytes_for_prompt(len);
+            if used + bytes > self.work_cache_bytes {
+                break;
+            }
+            used += bytes;
+            n += 1;
+        }
+        n
+    }
+    /// Bytes a pooled or label slot's cache holds for a prompt of `len` tokens: the prompt,
+    /// rounded up to whole prefill chunks, not the model's whole context (S4.9b).
+    pub fn cache_bytes_for_prompt(&self, len: usize) -> u64 {
+        if self.model.causality() == crate::arch::Causality::Bidirectional {
+            return 0;
+        }
+        let c = self.model.cfg;
+        KvCache::new(self.kv_prec, c.kv_layers(), c.n_kv_head, c.head_dim, 1).bytes_per_position()
+            * round_up_prompt(len) as u64
+            + self.model.recurrent_shape().map_or(0, |r| {
+                (r.n_layers * (r.state_floats + r.conv_floats) * 4) as u64
+            })
+    }
+    /// The bytes of one admitted slot's cache, for a test or a report (S4.9b).
+    pub fn slot_cache_bytes(&self, id: SlotId) -> Option<u64> {
+        self.slots
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.kv.allocated_bytes())
+    }
+    /// Bytes of cache one prompt position costs (0 for an encoder).
+    pub fn cache_bytes_per_position(&self) -> u64 {
+        if self.model.causality() == crate::arch::Causality::Bidirectional {
+            return 0;
+        }
+        let c = self.model.cfg;
+        KvCache::new(self.kv_prec, c.kv_layers(), c.n_kv_head, c.head_dim, 1).bytes_per_position()
     }
     pub fn max_ctx(&self) -> usize {
         self.max_ctx
+    }
+    /// The rows one non-decoding pass carries (`PEREGRINE_PASS_ROWS`, or the machine's default).
+    pub fn pass_rows(&self) -> usize {
+        self.pass_rows
     }
     /// The target layers the engine copies out of the forward pass for the
     /// attached drafters. Empty: no drafter is attached, and nothing is copied.
@@ -836,10 +996,13 @@ impl Engine {
         for (prompt, label) in prompts.iter().zip(&labels) {
             self.check_request(prompt, Want::Labels, label)?;
         }
-        let free = self.max_slots.saturating_sub(self.slots.len());
-        if n > free {
+        // A decision group is admitted by the non-decoding budget, not by `--slots`: every
+        // question is a label slot with its own prompt-sized cache (S4.9b).
+        let lens: Vec<usize> = prompts.iter().map(Vec::len).collect();
+        let room = self.work_room_prefix(&lens);
+        if n > room {
             return Err(format!(
-                "a group of {n} questions needs {n} free slots, {free} are free"
+                "a group of {n} questions needs {n} places in the embedding budget, {room} are free"
             ));
         }
         // The longest common beginning. It stops one row short of the shortest question: every
@@ -1045,8 +1208,21 @@ impl Engine {
         labels: Vec<u32>,
         forking: Option<Fork>,
     ) -> Result<SlotId, (Vec<u32>, String)> {
-        if !self.has_room() {
+        // Chat slots are bounded by `--slots`; work that never decodes is admitted by its own
+        // memory budget, so an embedding or decision request never waits for a chat slot (S4.9b).
+        if want.is_tokens() && !self.has_room() {
             return self.refuse(prompt, cache, "every slot is busy".into());
+        }
+        if !want.is_tokens() && !self.work_room_for(prompt.len()) {
+            return self.refuse(
+                prompt,
+                cache,
+                format!(
+                    "the embedding queue is full: {} slots and {} MiB of prompt caches are in flight",
+                    self.work_slots(),
+                    self.work_cache_used() >> 20
+                ),
+            );
         }
         let bidirectional = self.model.causality() == crate::arch::Causality::Bidirectional;
         if let Err(e) = self.check_request(&prompt, want, &labels) {
@@ -1090,7 +1266,15 @@ impl Engine {
                 self.model.new_cache(self.kv_prec, 0)
             }
             None => {
-                let mut kv = self.model.new_cache(self.kv_prec, self.max_ctx);
+                // A token slot may decode to the whole context. A pooled or label slot never
+                // decodes: its cache holds its own prompt, rounded to whole prefill chunks
+                // (S4.9b). It was admitted against that size, so the memory is accounted for.
+                let positions = if whole {
+                    round_up_prompt(prompt.len())
+                } else {
+                    self.max_ctx
+                };
+                let mut kv = self.model.new_cache(self.kv_prec, positions);
                 // The rotation is the engine's default; a request may ask for the
                 // family's own choice instead (ADR 0007).
                 if !cfg.kv_rotation {
@@ -1173,6 +1357,13 @@ impl Engine {
         let mut pen = crate::sample::PenaltyState::default();
         if penalized {
             pen.start(&prompt, cfg.max_tokens.min(self.max_ctx));
+        }
+        // A pass that reads several labels slots' final rows needs one logits row per label slot
+        // (plus the decode rows it may share the pass with). Admission grows it, so no step
+        // allocates.
+        if want.is_labels() {
+            let labels = self.slots.iter().filter(|s| s.want.is_labels()).count();
+            self.ensure_logit_rows(labels + self.max_slots + 1);
         }
         self.slots.push(Slot {
             drafter: drafter.map(std::sync::Mutex::new),
@@ -1643,14 +1834,18 @@ impl Engine {
     fn bidirectional_step(&mut self) -> Vec<Emission> {
         let t0 = std::time::Instant::now();
         let before = self.stats;
-        let budget = self.state.max_batch;
+        // Whole texts, up to the pass budget (S4.9b: the same `PEREGRINE_PASS_ROWS` the causal
+        // path uses). A text longer than the budget still runs alone in its own pass, as long as
+        // the scratch holds it; an encoder writes no cache, so nothing else bounds it.
+        let budget = self.pass_rows.min(self.state.max_batch);
         // (slot index, first row, length)
         let mut chosen: Vec<(usize, usize, usize)> = Vec::new();
         let mut rows = 0usize;
         for i in 0..self.slots.len() {
             let n = self.slots[i].prompt.len();
             if chosen.is_empty() {
-                if n > budget {
+                if n > self.state.max_batch {
+                    let cap = self.state.max_batch;
                     let id = self.slots.remove(i).id;
                     return vec![Emission {
                         slot: id,
@@ -1658,7 +1853,7 @@ impl Engine {
                         text: String::new(),
                         logprob: 0.0,
                         finish: Some(Finish::Error(format!(
-                            "text of {n} tokens does not fit the bidirectional pass of {budget} rows"
+                            "text of {n} tokens does not fit the bidirectional pass of {cap} rows"
                         ))),
                         cost: None,
                         embedding: None,
@@ -1781,24 +1976,37 @@ impl Engine {
         let dec: Vec<usize> = (0..self.slots.len())
             .filter(|&i| self.slots[i].ready())
             .collect();
-        // The chunk, less the rows the decoders take: the whole step is one weight pass, and the
-        // matmul scratch holds at most `MAX_BATCH` rows. A prompt longer than `LONG_PROMPT` is
-        // read in larger pieces (see `LONG_PROMPT_CHUNK`): the tokens do not depend on it.
+        // Chat slots keep today's chunk: a prompt longer than `LONG_PROMPT` is read in
+        // larger pieces (see `LONG_PROMPT_CHUNK`), and the chat rows never exceed one chunk.
+        // A prompt whose owner never decodes fills the pass up to `pass_rows` instead (S4.9b),
+        // taking whole short texts and pieces of a long one, from as many slots as fit.
         let long_waiting = self
             .slots
             .iter()
-            .any(|s| !s.prefill_done() && s.prompt.len() > LONG_PROMPT);
+            .any(|s| s.wants_tokens() && !s.prefill_done() && s.prompt.len() > LONG_PROMPT);
         let chunk = if long_waiting {
             LONG_PROMPT_CHUNK.max(self.prefill_chunk)
         } else {
             self.prefill_chunk
         };
         let mut budget = chunk.min(self.state.max_batch.saturating_sub(dec.len()));
+        // The work rows: a full pass, except that a pass which also carries a decode row is
+        // capped at one prefill chunk of work. A chat's token cadence must not wait behind a
+        // wide embedding pass; measured on bluefin, decoding chat tokens/s beside a stream of
+        // embedding texts is unchanged at this bound (S4.9b's chat-latency check).
+        let mut work_budget = self.pass_rows;
+        if !dec.is_empty() {
+            work_budget = work_budget.min(self.prefill_chunk);
+        }
+        work_budget = work_budget.min(self.state.max_batch.saturating_sub(dec.len()));
         // (slot index, tokens taken, first batch row): the rows of one prefilled slot are
         // contiguous in the pass, so a slot's start is not its index.
         let mut pre: Vec<(usize, usize, usize)> = Vec::new();
         let mut pre_rows = dec.len();
         for (i, s) in self.slots.iter().enumerate() {
+            if !s.wants_tokens() {
+                continue;
+            }
             if budget == 0 {
                 break;
             }
@@ -1808,6 +2016,22 @@ impl Engine {
                     pre.push((i, take, pre_rows));
                     pre_rows += take;
                     budget -= take;
+                }
+            }
+        }
+        for (i, s) in self.slots.iter().enumerate() {
+            if s.wants_tokens() {
+                continue;
+            }
+            if work_budget == 0 {
+                break;
+            }
+            if !s.prefill_done() {
+                let take = work_budget.min(s.prefill_len() - s.fed);
+                if take > 0 {
+                    pre.push((i, take, pre_rows));
+                    pre_rows += take;
+                    work_budget -= take;
                 }
             }
         }
@@ -2013,7 +2237,14 @@ impl Engine {
         let before = self.stats;
         let s = &mut self.slots[i];
         let last = s.prefill_len();
-        let take = self.prefill_chunk.min(last - s.fed);
+        // A chat slot keeps the prefill chunk; a slot that never decodes fills the pass up to
+        // the pass budget (S4.9b).
+        let width = if s.wants_tokens() {
+            self.prefill_chunk
+        } else {
+            self.pass_rows
+        };
+        let take = width.min(last - s.fed);
         let chunk: Vec<u32> = s.prompt[s.fed..s.fed + take].to_vec();
         let start = s.fed;
         // A labels slot reads its last prompt row: this chunk's last row, when it completes the

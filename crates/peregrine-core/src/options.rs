@@ -54,6 +54,7 @@ pub const TUNABLE: &[(&str, &str)] = &[
     ("PEREGRINE_DECODE_THREADS", "decode_threads"),
     ("PEREGRINE_PF", "prefetch_bytes"),
     ("PEREGRINE_PREFILL_CHUNK", "prefill_chunk"),
+    ("PEREGRINE_PASS_ROWS", "pass_rows"),
 ];
 
 /// The default prompt chunk on a pool no wider than the machine's physical cores: the prompt tokens one
@@ -95,6 +96,70 @@ pub fn prefill_chunk_default_for(threads: usize) -> usize {
 /// (`blocks::linear::MAX_BATCH`). The engine lowers it further when the decode rows of the
 /// other users need the room.
 pub const MAX_PREFILL_CHUNK: usize = crate::blocks::linear::MAX_BATCH;
+
+/// The row budget of a pass that carries work which never decodes (S4.9b): one weight pass
+/// carries up to this many rows of pooled or label slots, taken from as many waiting slots as
+/// fit.
+///
+/// The default is derived from the machine and the model ([`pass_rows_default_for`]): a pass's
+/// activation rows should fit in the caches a few workers write, and a batch of short texts
+/// should be one or two passes. `PEREGRINE_PASS_ROWS` overrides it.
+pub const PASS_ROWS_DEFAULT: usize = 256;
+
+/// The widest pass budget `PEREGRINE_PASS_ROWS` may ask for. The matmul driver splits a wider
+/// batch into blocks of its own row limit, so this only bounds the engine's scratch.
+pub const MAX_PASS_ROWS: usize = 512;
+
+/// The L2 cache of one core, in bytes: from sysfs, or 256 KiB when the machine does not say.
+///
+/// The pass budget keeps a pass's activation rows near the caches: no extra dependency, one
+/// small read at engine construction.
+pub fn l2_bytes() -> usize {
+    let base = std::path::Path::new("/sys/devices/system/cpu/cpu0/cache");
+    if let Ok(entries) = std::fs::read_dir(base) {
+        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        for dir in dirs {
+            let level = std::fs::read_to_string(dir.join("level"))
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok());
+            if level != Some(2) {
+                continue;
+            }
+            if let Some(n) = std::fs::read_to_string(dir.join("size"))
+                .ok()
+                .and_then(|s| parse_cache_size(s.trim()))
+            {
+                return n;
+            }
+        }
+    }
+    256 << 10
+}
+
+/// `512K` / `1M` (sysfs's cache-size spelling) in bytes.
+fn parse_cache_size(s: &str) -> Option<usize> {
+    let (digits, mult) = match s.chars().last()? {
+        'K' | 'k' => (&s[..s.len() - 1], 1 << 10),
+        'M' | 'm' => (&s[..s.len() - 1], 1 << 20),
+        _ => (s, 1),
+    };
+    digits.trim().parse::<usize>().ok().map(|n| n * mult)
+}
+
+/// The default row budget of a non-decoding pass (S4.9b), for `threads` workers and a model of
+/// width `d_model`.
+///
+/// The design rule: the activation rows of one pass should stay near the per-core L2, about
+/// `threads × L2/2 / (4 × d_model)` rows' worth, clamped to [`PASS_ROWS_DEFAULT`]'s measured
+/// range. Measured on bluefin (4 workers, 512 KiB L2/core) in the S4.9b sweep: throughput at 256
+/// rows is within noise of 512 on both embedding models and ahead of 64; the bound is
+/// [`MAX_PASS_ROWS`].
+pub fn pass_rows_default_for(threads: usize, d_model: usize) -> usize {
+    let l2 = l2_bytes();
+    let rows = threads.max(1) * (l2 / 2) / (4 * d_model.max(1));
+    rows.clamp(16, MAX_PASS_ROWS)
+}
 
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 /// The k-quant repack is on by default on every tier, the AVX-512 tier included
@@ -167,6 +232,21 @@ pub struct EngineOptions {
     /// Smaller pieces keep the activation scratch in cache and read the weights more often; the tokens
     /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that).
     pub prefill_chunk: Option<usize>,
+    /// `PEREGRINE_PASS_ROWS`: rows one weight pass carries for work that never decodes — pooled
+    /// (embedding) and label (decision) slots (default: [`pass_rows_default_for`], the machine's
+    /// L2 and the model's width).
+    ///
+    /// It is scheduling only: a text's vector and a question's label logits do not depend on it
+    /// (`crates/peregrine-models/tests/embeddings.rs` and `labels.rs` pin that for budgets 1, 16,
+    /// 64, 256 and the default).
+    pub pass_rows: Option<usize>,
+    /// `PEREGRINE_WORK_CACHE_MB`: memory for the caches of slots that never decode — pooled
+    /// (embedding) and label (decision) slots (S4.9b; default 512 MiB).
+    ///
+    /// A non-decoding slot's cache is sized to its own prompt, so this bounds how many texts of
+    /// a request are in flight at once, not how many the request may hold: the rest wait in the
+    /// engine's queue. `--slots` bounds chat slots only.
+    pub work_cache_mb: Option<usize>,
     /// `PEREGRINE_MTP=0`: no MTP speculation.
     pub mtp: bool,
     /// `PEREGRINE_MTP_VOCAB`: vocabulary rows the MTP drafter scores (default 32768).
@@ -231,6 +311,8 @@ impl Default for EngineOptions {
             kv_prec: crate::kv::KvPrec::F16,
             mix: true,
             prefill_chunk: None,
+            pass_rows: None,
+            work_cache_mb: None,
             mtp: true,
             mtp_vocab: 32768,
             dspark: DsparkOptions {
@@ -400,6 +482,8 @@ impl EngineOptions {
                 .unwrap_or(d.kv_prec),
             mix: unless("MIX", "0"),
             prefill_chunk: num("PREFILL_CHUNK").filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v)),
+            pass_rows: num("PASS_ROWS").filter(|&v| (1..=MAX_PASS_ROWS).contains(&v)),
+            work_cache_mb: num("WORK_CACHE_MB").filter(|&v| v > 0),
             mtp: unless("MTP", "0"),
             mtp_vocab: num("MTP_VOCAB").unwrap_or(d.mtp_vocab),
             dspark: DsparkOptions {
@@ -501,6 +585,8 @@ impl EngineOptions {
             ("kv_prec", self.kv_prec.name().to_string()),
             ("mix", self.mix.to_string()),
             ("prefill_chunk", opt(self.prefill_chunk)),
+            ("pass_rows", opt(self.pass_rows)),
+            ("work_cache_mb", opt(self.work_cache_mb)),
             ("mtp", self.mtp.to_string()),
             ("mtp_vocab", self.mtp_vocab.to_string()),
             ("dspark.logits_start", self.dspark.logits_start.to_string()),
@@ -561,6 +647,8 @@ pub const NAMES: &[&str] = &[
     "KV",
     "MIX",
     "PREFILL_CHUNK",
+    "PASS_ROWS",
+    "WORK_CACHE_MB",
     "MTP",
     "MTP_VOCAB",
     "DSPARK_LOGITS_START",
@@ -708,6 +796,32 @@ mod tests {
         assert_eq!(with(&[("PREFILL_CHUNK", "0")]).prefill_chunk, None);
         assert_eq!(with(&[("PREFILL_CHUNK", "1000")]).prefill_chunk, None);
         assert_eq!(with(&[("PREFILL_CHUNK", "x")]).prefill_chunk, None);
+        // The non-decoding pass budget: 1 to `MAX_PASS_ROWS`.
+        assert_eq!(with(&[("PASS_ROWS", "64")]).pass_rows, Some(64));
+        assert_eq!(with(&[("PASS_ROWS", "0")]).pass_rows, None);
+        assert_eq!(with(&[("PASS_ROWS", "513")]).pass_rows, None);
+        assert_eq!(with(&[("PASS_ROWS", "x")]).pass_rows, None);
+        // The work cache budget.
+        assert_eq!(with(&[("WORK_CACHE_MB", "128")]).work_cache_mb, Some(128));
+        assert_eq!(with(&[("WORK_CACHE_MB", "0")]).work_cache_mb, None);
+    }
+
+    #[test]
+    fn the_pass_budget_default_follows_the_machine_and_the_model() {
+        // 16 rows is the floor and `MAX_PASS_ROWS` the ceiling; a narrower model gets more rows
+        // than a wider one on the same machine.
+        assert!(pass_rows_default_for(1, 1 << 20) >= 16);
+        assert!(pass_rows_default_for(64, 16) <= MAX_PASS_ROWS);
+        if l2_bytes() >= 64 << 10 {
+            assert!(
+                pass_rows_default_for(4, 1024) >= pass_rows_default_for(4, 4096),
+                "a narrower model fits more rows in the same caches"
+            );
+        }
+        assert!(parse_cache_size("512K") == Some(512 << 10));
+        assert!(parse_cache_size("2M") == Some(2 << 20));
+        assert!(parse_cache_size("1024") == Some(1024));
+        assert_eq!(parse_cache_size("x"), None);
     }
 
     #[test]

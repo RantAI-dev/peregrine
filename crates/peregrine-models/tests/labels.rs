@@ -104,13 +104,14 @@ fn run(
     chunk: usize,
     prefix_bytes: usize,
 ) -> Run {
-    run_prec(
+    run_prec_pass(
         model,
         prompts,
         threads,
         chunk,
         prefix_bytes,
         KvPrec::F16,
+        None,
         None,
     )
 }
@@ -126,7 +127,31 @@ fn run_prec(
     prec: KvPrec,
     group: Option<usize>,
 ) -> Run {
-    let mut engine = Engine::new_with_chunk(
+    run_prec_pass(
+        model,
+        prompts,
+        threads,
+        chunk,
+        prefix_bytes,
+        prec,
+        group,
+        None,
+    )
+}
+
+/// [`run_prec`] with an explicit pass budget (S4.9b; `None`: the machine's default).
+#[allow(clippy::too_many_arguments)]
+fn run_prec_pass(
+    model: &Arc<Model>,
+    prompts: &[Vec<u32>],
+    threads: usize,
+    chunk: usize,
+    prefix_bytes: usize,
+    prec: KvPrec,
+    group: Option<usize>,
+    pass_rows: Option<usize>,
+) -> Run {
+    let mut engine = Engine::new_with_chunk_and_pass(
         model.clone(),
         threads,
         model.cfg.ctx_train,
@@ -134,6 +159,7 @@ fn run_prec(
         prec,
         prefix_bytes,
         chunk,
+        pass_rows,
     );
     let mut by_slot: HashMap<u64, usize> = HashMap::new();
     match group {
@@ -774,5 +800,58 @@ fn a_repeated_state_is_restored_across_requests() {
             hits[1] > hits[0],
             "{arch}: the repeated state was not restored from the store ({hits:?})"
         );
+    }
+}
+
+/// S4.9b: the pass budget is scheduling only for a decision too. A forked question's label logits
+/// are bit-identical at budgets 1, 16, 64, 256 and the default, at 1, 2 and 4 threads, chunks 1
+/// and 16, in groups of 3 and 10 and (for a couple of budgets) as independent slots.
+#[test]
+fn a_forked_questions_logits_are_the_same_for_every_pass_budget() {
+    let dir = tmpdir("budget");
+    for (arch, model) in models(&dir) {
+        for (shared, tails, n) in [(24usize, [2usize, 5, 9], 3usize), (16, [1, 3, 7], 10)] {
+            let asked = forked_questions(shared, &tails, n);
+            let want: Vec<Vec<f32>> = asked
+                .iter()
+                .map(|p| reference_prec(&model, p, &LABELS, 2, KvPrec::F16))
+                .collect();
+            for budget in [Some(1usize), Some(16), Some(64), Some(256), None] {
+                for threads in [1usize, 2, 4] {
+                    for chunk in [1usize, 16] {
+                        let r = run_prec_pass(
+                            &model,
+                            &asked,
+                            threads,
+                            chunk,
+                            1 << 20,
+                            KvPrec::F16,
+                            Some(1),
+                            budget,
+                        );
+                        for (i, w) in want.iter().enumerate() {
+                            assert_eq!(
+                                bits(&r.logits[i]),
+                                bits(w),
+                                "{arch}: question {i} of {n}, shared {shared}, budget {budget:?}, \
+                                 {threads} threads, chunk {chunk}"
+                            );
+                        }
+                    }
+                }
+            }
+            // The same questions as independent slots at two budgets: the budget must not matter
+            // there either.
+            for budget in [Some(16usize), None] {
+                let r = run_prec_pass(&model, &asked, 2, 16, 0, KvPrec::F16, None, budget);
+                for (i, w) in want.iter().enumerate() {
+                    assert_eq!(
+                        bits(&r.logits[i]),
+                        bits(w),
+                        "{arch}: question {i} of {n} ungrouped, budget {budget:?}"
+                    );
+                }
+            }
+        }
     }
 }
