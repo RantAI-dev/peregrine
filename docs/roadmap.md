@@ -96,6 +96,34 @@ bit-identical alone and in any batch.
 
 Ideas that are not scheduled yet are kept in the [backlog](backlog.md).
 
+## Stage 5: prompt speed on AVX-512
+
+The ik_llama.cpp fork processes prompts about twice as fast as Peregrine on the AVX-512 desktop
+([benchmark.md](benchmark.md)). The study and the list of what to build are in
+[`docs/design/s5-prefill-avx512.md`](design/s5-prefill-avx512.md).
+
+| ID | Item | pw |
+|---|---|---|
+| S5.1 | The k-quant prefill kernels on AVX-512: the Q4_K and Q5_0 epilogue per group of rows, a 512-bit Q6_K tile, a write-out that makes a wide pass pay | 2.0 |
+| S5.2 | A 512-bit attention score kernel; thread scaling past 12 threads | 1.5 |
+| S5.3 | The same questions on AVX2 and NEON; ik_llama.cpp measured on bluefin and ARM | 1.0 |
+
+## Stage 6: tool calling
+
+OpenAI's tool-calling shapes on `/v1/chat/completions`, for the models trained to call tools. The
+prompt is the one llama.cpp builds from the model's template, byte for byte. Design:
+[`docs/design/s6-tool-calling.md`](design/s6-tool-calling.md).
+
+| ID | Item | pw |
+|---|---|---|
+| S6.1 | Design | 0.2 |
+| S6.2 | The tool module: the `hermes` format (Qwen 2.5, Qwen 3, Qwen 3.5 / Bonsai 2), renderer and parser, fixtures from llama.cpp | 1.0 |
+| S6.3 | The endpoint: `tools`, `tool_choice`, `tool_calls` in requests and responses, streaming | 1.0 |
+| S6.4 | The `llama3` format (Llama 3.1 / 3.2) | 0.5 |
+| S6.5 | The `harmony` format (gpt-oss) | 0.5 |
+| S6.6 | Constrained sampling for calls: a JSON-schema matcher and a token mask; `tool_choice: "required"` and named choices | 2.0 |
+| S6.7 | The `generic` format for templates without a tool section | 0.5 |
+
 ## Open decisions
 
 1. ARM in Stage 2, or x86 only for now.
