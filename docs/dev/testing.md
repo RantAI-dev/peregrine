@@ -32,7 +32,10 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    both `Caches::Mapped` and, with `PEREGRINE_MIX=0`, `Caches::PerRow`), a shared opening must restore from
    the prefix store, and a LittleBit sidecar built in-test must give finite, deterministic logits. They
    need no model files, so they run in CI on every tier; the `x86_64-avx2` and scalar (`x86_64`) goldens
-   were recorded on an Intel host and reproduced bit for bit on an AMD host.
+   were recorded on an Intel host and reproduced bit for bit on an AMD host. Every test writes into a
+   directory of its own — `tmpdir("<test>")`, never a name two tests share: the tests of one binary run
+   in parallel threads, and `write_to_file` truncates, so a second writer would pull the file out from
+   under a test that has it memory-mapped (SIGBUS, most visibly on macOS).
    CI's pinned tiers (scalar, AVX2 and the AVX-512 tier under SDE) run with `PEREGRINE_GOLDEN=require`,
    so a new model or format must commit its goldens for all three; `PEREGRINE_GOLDEN=record` writes the
    missing ones (the AVX-512 ones on an AVX-512 machine). For the real-model goldens (`tests/golden.rs`), `require` fails a model file that is present but has no golden for the tier, and still skips a file that is absent. A golden pins one upload, byte for byte: a different upload of the same quant (the Qwen official `qwen2.5-0.5b-instruct-q4_k_m.gguf` is not bartowski's `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf`) fails at the golden's `model … bytes` line, so check the SHA-256 listed here before reading a mismatch as a regression.
