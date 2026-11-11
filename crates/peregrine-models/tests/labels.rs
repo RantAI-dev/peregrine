@@ -291,7 +291,9 @@ fn label_ids_are_validated_at_admission() {
 #[test]
 fn a_labels_slot_beside_a_chat_slot_still_reads_its_own_row() {
     // A decode row and a labels row share one weight pass; the label logits must not depend on it.
-    let dir = tmpdir("mixed");
+    // Each test writes into a directory of its own: the tests run in parallel threads, and a
+    // second writer would truncate the file another test has memory-mapped (a SIGBUS on macOS).
+    let dir = tmpdir("beside-chat");
     let path = write_dense(&dir, "llama", Format::F16, 32, Dense::default());
     let model = load(&path);
     let prompt = question(9);
@@ -380,7 +382,7 @@ fn labels_through_the_unmixed_scheduler() {
 /// server, and its answer must not depend on what else is in the batch.
 #[test]
 fn a_question_beside_an_embedding_and_a_chat_slot_is_bit_identical() {
-    let dir = tmpdir("mixed");
+    let dir = tmpdir("beside-endpoints");
     for (arch, model) in models(&dir) {
         let alone = run(&model, &[question(0)], 2, 64, 1 << 20).logits[0].clone();
         let ctx = model.cfg.ctx_train;
