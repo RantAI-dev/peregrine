@@ -10,7 +10,8 @@
 //! per-entry overhead. Eviction is insertion order (the oldest entry goes
 //! first). The default is 64 MiB (`PEREGRINE_EMBED_CACHE_MB`); `0` disables the
 //! cache. 64 MiB holds about 16,000 1024-wide f32 vectors or 21,000 768-wide
-//! ones, and the same again in keys is included in the accounting.
+//! ones of short texts; a key's tokens (4 bytes each, stored once) count too, so
+//! long texts take more.
 //!
 //! Concurrent requests share one `Mutex<Inner>`: a lookup and an insertion are
 //! two short critical sections and no lock is held while the engine computes.
@@ -19,7 +20,7 @@
 //! harmless.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use peregrine_core::embed::Pooling;
 
@@ -52,8 +53,10 @@ impl Key {
 }
 
 struct Inner {
-    map: HashMap<Key, Vec<f32>>,
-    order: VecDeque<Key>,
+    /// The map and the eviction order share one allocation per key, so a key's
+    /// tokens are stored once and the byte count below is what is held.
+    map: HashMap<Arc<Key>, Vec<f32>>,
+    order: VecDeque<Arc<Key>>,
     bytes: usize,
 }
 
@@ -116,18 +119,25 @@ impl EmbedCache {
             return;
         }
         let mut inner = self.lock();
-        if let Some(old) = inner.map.remove(&key) {
-            inner.bytes = inner.bytes.saturating_sub(key.bytes() + old.len() * 4 + 64);
+        // Already stored: two requests missed the same text at once and both computed
+        // it. Keep the entry's place in the eviction order (and its one `order` slot);
+        // the vector is the same bits, by the engine's batch invariance.
+        if let Some(old) = inner.map.get_mut(&key) {
+            let (was, now) = (old.len() * 4, vector.len() * 4);
+            *old = vector;
+            inner.bytes = inner.bytes.saturating_sub(was) + now;
+            return;
         }
         while inner.bytes + cost > self.cap_bytes {
             let Some(evict) = inner.order.pop_front() else {
                 break;
             };
-            if let Some(v) = inner.map.remove(&evict) {
+            if let Some(v) = inner.map.remove(&*evict) {
                 inner.bytes = inner.bytes.saturating_sub(evict.bytes() + v.len() * 4 + 64);
             }
         }
         inner.bytes += cost;
+        let key = Arc::new(key);
         inner.map.insert(key.clone(), vector);
         inner.order.push_back(key);
     }
@@ -210,6 +220,40 @@ mod tests {
     }
 
     #[test]
+    fn storing_a_key_twice_keeps_one_entry_and_its_place_in_the_order() {
+        // Room for two entries of 132 bytes each.
+        let c = EmbedCache {
+            cap_bytes: 270,
+            inner: Mutex::new(Inner {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+                bytes: 0,
+            }),
+        };
+        c.put(key("a"), vec![0.0; 8]);
+        c.put(key("b"), vec![0.0; 8]);
+        // A second request that missed "a" at the same time stores it again.
+        c.put(key("a"), vec![0.0; 8]);
+        {
+            let inner = c.lock();
+            assert_eq!(
+                inner.order.len(),
+                inner.map.len(),
+                "one order slot per entry"
+            );
+            assert_eq!(inner.bytes, 2 * 132);
+        }
+        // "a" is still the oldest: it goes first, and "b" stays.
+        c.put(key("c"), vec![0.0; 8]);
+        assert!(c.get(&key("a")).is_none());
+        assert!(c.get(&key("b")).is_some());
+        assert!(c.get(&key("c")).is_some());
+        let inner = c.lock();
+        assert_eq!(inner.order.len(), inner.map.len());
+        assert_eq!(inner.bytes, 2 * 132);
+    }
+
+    #[test]
     fn a_vector_bigger_than_the_cache_is_not_stored() {
         let c = EmbedCache {
             cap_bytes: 100,
@@ -225,7 +269,7 @@ mod tests {
 
     #[test]
     fn concurrent_readers_and_writers_see_complete_vectors() {
-        let c = std::sync::Arc::new(EmbedCache::new(1));
+        let c = Arc::new(EmbedCache::new(1));
         let mut hs = Vec::new();
         for t in 0..4u32 {
             let c = c.clone();
