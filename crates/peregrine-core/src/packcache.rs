@@ -189,6 +189,9 @@ impl PackCache {
         text.push_str(&format!("model_size={}\n", md.len()));
         text.push_str(&format!("model_mtime={secs}.{nanos:09}\n"));
         text.push_str(&format!("header_fnv={header_fnv:016x}\n"));
+        // The weights themselves, sampled: size, mtime and the header do not tell two files with
+        // the same tensors apart.
+        text.push_str(&format!("data_fnv={:016x}\n", g.data_sample_fnv()));
         text.push_str(&format!("tier={tier}\n"));
         text.push_str(&format!("kq={}\n", u8::from(kq_on)));
         text.push_str(&format!("fp={}\n", u8::from(fp_on)));

@@ -206,6 +206,43 @@ fn every_key_component_invalidates() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A model file replaced by another with the same tensors, the same size and the same
+/// timestamp (a fine-tune copied over the old file with its mtime kept) must not be served the
+/// old file's pack: the key samples the weights themselves.
+#[test]
+fn different_weights_under_the_same_name_size_and_mtime_do_not_share_a_pack() {
+    let root = tmpdir("same-identity");
+    let models = root.join("models");
+    let other_models = root.join("other-models");
+    let packs = root.join("packs");
+    std::fs::create_dir_all(&models).unwrap();
+    std::fs::create_dir_all(&other_models).unwrap();
+    let path = write_dense(&models, "llama", Format::Q4_K, 61, Dense::default());
+    let other = write_dense(&other_models, "llama", Format::Q4_K, 62, Dense::default());
+    let cache = PackCache::new(&packs, u64::MAX);
+
+    let first = logits(&load(&path, &cache, true, true));
+    let want = logits(&load_plain(&other, true, true));
+    assert_ne!(first, want, "the two seeds give the same model");
+
+    // Put the other weights under the first file's name, size and mtime.
+    let meta = std::fs::metadata(&path).unwrap();
+    assert_eq!(meta.len(), std::fs::metadata(&other).unwrap().len());
+    let mtime = meta.modified().unwrap();
+    std::fs::copy(&other, &path).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+
+    let got = logits(&load(&path, &cache, true, true));
+    assert_eq!(got, want, "the old file's pack was served for new weights");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn truncated_corrupted_and_foreign_files_are_rejected() {
     let _ = peregrine_core::options::init(peregrine_core::options::EngineOptions::default());
