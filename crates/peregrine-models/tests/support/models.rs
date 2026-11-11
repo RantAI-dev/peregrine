@@ -118,6 +118,23 @@ impl DecisionSpec {
         }
     }
 
+    /// A spec for a real `openjev` model: the type, the temperatures the published file carries and
+    /// the template the renderer was written from (as bytes, never printed). The template comes
+    /// from [`peregrine_core::systemone::OPENJEV_TEMPLATE`], so the synthetic file passes the same
+    /// load-time check a real file does.
+    pub fn openjev() -> DecisionSpec {
+        DecisionSpec {
+            type_name: Some("openjev".to_string()),
+            temperatures: vec![
+                ("choice".to_string(), 0.85),
+                ("score".to_string(), 0.85),
+                ("noul".to_string(), 1.554_713),
+            ],
+            template: Some(peregrine_core::systemone::OPENJEV_TEMPLATE.to_string()),
+            ..Default::default()
+        }
+    }
+
     /// The GGUF entries this spec writes for architecture `arch`.
     pub fn keys(&self, arch: &str) -> Vec<(String, MetaValue)> {
         let mut out = Vec::new();
@@ -567,7 +584,7 @@ pub fn write_gemma3_named(
 /// `block_count`), in Q8_0 as the 4B Bonsai file stores it. The main layers are written first from the
 /// same RNG stream, so `mtp = false` files stay byte-identical.
 pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64, mtp: bool) -> PathBuf {
-    write_hybrid_impl(dir, fmt, seed, mtp, false, true)
+    write_hybrid_impl(dir, fmt, seed, mtp, false, true, &[])
 }
 
 /// A plain Qwen 3.5 file: the same hybrid model, without the Hadamard rotation and with
@@ -577,22 +594,34 @@ pub fn write_hybrid(dir: &Path, fmt: Format, seed: u64, mtp: bool) -> PathBuf {
 /// `conversion/qwen.py`, `Qwen3_5TextModel`): no `prism.hadamard.*` metadata at all, the
 /// value heads already in the tiled order, and the MRoPE sections the loader requires.
 pub fn write_hybrid_plain(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
-    write_hybrid_impl(dir, fmt, seed, false, false, false)
+    write_hybrid_impl(dir, fmt, seed, false, false, false, &[])
+}
+
+/// A plain Qwen 3.5 file carrying extra GGUF metadata, for a decision model whose prompt renderer
+/// is checked with the real `systemone` template (S4.3c).
+pub fn write_hybrid_decision(
+    dir: &Path,
+    fmt: Format,
+    seed: u64,
+    extra: &[(String, MetaValue)],
+) -> PathBuf {
+    write_hybrid_impl(dir, fmt, seed, false, false, false, extra)
 }
 
 /// A plain Qwen 3.5 file with one MTP (NextN) block, as upstream's converter writes it
 /// when the checkpoint carries one (`mtp_num_hidden_layers`).
 pub fn write_hybrid_plain_mtp(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
-    write_hybrid_impl(dir, fmt, seed, true, false, false)
+    write_hybrid_impl(dir, fmt, seed, true, false, false, &[])
 }
 
 /// The MTP variant whose drafts are accepted: every output-head row is identical, so all logits tie and
 /// both the main model and the MTP block's shared head argmax to token 0; a draft then always matches what
 /// the main model sampled. Random weights otherwise (the ordinary MTP model rejects every draft).
 pub fn write_hybrid_accepting(dir: &Path, fmt: Format, seed: u64) -> PathBuf {
-    write_hybrid_impl(dir, fmt, seed, true, true, true)
+    write_hybrid_impl(dir, fmt, seed, true, true, true, &[])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_hybrid_impl(
     dir: &Path,
     fmt: Format,
@@ -600,6 +629,7 @@ fn write_hybrid_impl(
     mtp: bool,
     accept: bool,
     rotated: bool,
+    extra: &[(String, MetaValue)],
 ) -> PathBuf {
     if rotated {
         assert!(matches!(fmt, Format::PQ2_0 | Format::PTQ1_0));
@@ -660,6 +690,9 @@ fn write_hybrid_impl(
         // (conversion/qwen.py, `_Qwen35MRopeMixin`). The sum is `rope_dim / 2`, the number
         // of rotary pairs.
         w.arr_i32(&k("rope.dimension_sections"), &[11, 11, 10, 0]);
+    }
+    for (key, value) in extra {
+        w.add_meta(key, value.clone());
     }
     vocab::add_tokenizer_metadata(&mut w, "qwen35");
     w.str(

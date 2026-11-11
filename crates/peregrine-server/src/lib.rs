@@ -31,13 +31,15 @@
 //! One session per process (one stream at a time; requests queue): run one process per model, as with llama-server.
 use axum::{
     extract::{FromRequest, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{sse::Event, IntoResponse, Response, Sse},
     routing::{get, post},
     Json, Router,
 };
 use clap::Parser;
+use peregrine_core::decision::Decider;
 use peregrine_core::embed::Pooling;
+use peregrine_core::json::Value as OrderedValue;
 use peregrine_core::model::Model;
 use peregrine_core::sample::Penalties;
 use peregrine_core::serve::{Emission, Engine, Finish, SlotCfg, SlotId, Want};
@@ -155,6 +157,8 @@ struct App {
     pooling: Option<Pooling>,
     /// The width of one embedding vector (the final hidden state's width).
     embedding_width: usize,
+    /// The decision front end, when the file is a decision model (`/v1/systemone`).
+    decider: Option<Decider>,
     think_open: Option<u32>,
     think_close: Option<u32>,
     /// The server's default reasoning format, overridden by a request's `reasoning_format`.
@@ -316,6 +320,13 @@ pub async fn run(a: Args) {
             .spawn(move || engine_thread(engine, rx, shared))
             .expect("spawn the engine thread");
     }
+    let decider = match Decider::from_model(&model) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("cannot serve {}: {e}", a.model.display());
+            std::process::exit(2);
+        }
+    };
     let pooling = match model.pooling() {
         Ok(p) => p,
         Err(e) => {
@@ -328,6 +339,7 @@ pub async fn run(a: Args) {
         option_metrics,
         pooling,
         embedding_width,
+        decider,
         think_open: model.tk.id_of("<think>"),
         think_close: model.tk.id_of("</think>"),
         reasoning_format,
@@ -376,6 +388,7 @@ pub async fn run(a: Args) {
         .route("/metrics", get(metrics))
         .route("/v1/chat/completions", post(chat))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/systemone", post(systemone))
         .with_state(app);
     let addr = format!("{}:{}", a.host, a.port);
     let listener = match bind(&a.host, a.port, a.reuse_port).await {
@@ -634,9 +647,21 @@ async fn health() -> Json<Value> {
 }
 
 async fn models(State(s): State<Arc<App>>) -> Json<Value> {
-    Json(
-        json!({"object": "list", "data": [{"id": s.alias, "object": "model", "owned_by": "peregrine-core", "weights": s.weights}]}),
-    )
+    // What llama.cpp advertises for the file (`server_model_output_modalities`,
+    // `server-common.cpp:207-241`): a native decision model answers decisions, not text, and an
+    // `openjev` file has no text generation even though it carries an LM head.
+    let output_modalities = if s.decider.is_some() {
+        json!(["decisions"])
+    } else {
+        json!(["text"])
+    };
+    Json(json!({"object": "list", "data": [{
+        "id": s.alias,
+        "object": "model",
+        "owned_by": "peregrine-core",
+        "weights": s.weights,
+        "architecture": {"input_modalities": ["text"], "output_modalities": output_modalities},
+    }]}))
 }
 
 async fn metrics(State(s): State<Arc<App>>) -> String {
@@ -717,6 +742,38 @@ where
                 "the request body is not valid JSON: {rejection}"
             ))),
         }
+    }
+}
+
+/// A `/v1/systemone` body, parsed with the order-keeping JSON value.
+///
+/// The order of the `questions` object is the order of the answers, and the order of each
+/// `criteria` object is the order of the options and their probabilities: llama.cpp parses the
+/// body into `nlohmann::ordered_json`, which `serde_json` in this workspace does not preserve.
+struct OrderedJson(OrderedValue);
+
+impl<S> FromRequest<S> for OrderedJson
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = match axum::body::Bytes::from_request(req, state).await {
+            Ok(b) => b,
+            Err(rejection) => {
+                return Err(bad(format!(
+                    "the request body is not valid JSON: {rejection}"
+                )))
+            }
+        };
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(t) => t,
+            Err(_) => return Err(bad("the request body is not valid UTF-8")),
+        };
+        OrderedValue::parse(text)
+            .map(OrderedJson)
+            .map_err(|e| bad(format!("the request body is not valid JSON: {e}")))
     }
 }
 
@@ -1068,8 +1125,11 @@ fn push_reply(
 struct Job {
     prompt: Vec<u32>,
     cfg: SlotCfg,
-    /// Tokens sample and stream; `Pooled` pools one vector (S4.1).
+    /// Tokens sample and stream; `Pooled` pools one vector (S4.1); `Labels` reads the last prompt
+    /// row's logits at `labels` (S4.3).
     want: Want,
+    /// The token ids a labels slot reads; empty for every other want.
+    labels: Vec<u32>,
     out: tokio::sync::mpsc::UnboundedSender<Emission>,
 }
 
@@ -1125,8 +1185,7 @@ fn engine_thread(
             let admitted = match j.want {
                 Want::Tokens => engine.admit(j.prompt, j.cfg),
                 Want::Pooled(pooling) => engine.admit_pooled(j.prompt, j.cfg, pooling),
-                // The label read-out belongs to the decision endpoint, which S4.3 does not add.
-                Want::Labels => Err((j.prompt, "the labels read-out is not served yet".into())),
+                Want::Labels => engine.admit_labels(j.prompt, j.cfg, j.labels),
             };
             match admitted {
                 Ok(id) => {
@@ -1304,6 +1363,7 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
                 prompt,
                 cfg,
                 want: Want::Tokens,
+                labels: Vec::new(),
                 out: etx,
             })))
             .is_err()
@@ -1557,6 +1617,72 @@ impl Drop for BusyGuard {
     }
 }
 
+/// One engine slot a request asks for: all of them are sent before any result is awaited, so they
+/// share weight passes, and the answers come back in submission order.
+struct SlotJob {
+    prompt: Vec<u32>,
+    want: Want,
+    labels: Vec<u32>,
+}
+
+/// Submit one job per slot and collect their emissions in order.
+///
+/// A request with more slots than the server has busy waits in the engine's own queue (each
+/// `EngineMsg::Run` is queued, not refused), so a decision with ten questions answers on a
+/// four-slot server and an embedding of thirty texts answers on a four-slot one. The caller has
+/// already reserved the request's place in the wait queue.
+async fn run_jobs(app: &Arc<App>, jobs: Vec<SlotJob>) -> Result<Vec<Emission>, Response> {
+    let mut rxs = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let (etx, erx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
+        if app
+            .jobs
+            .send(EngineMsg::Run(Box::new(Job {
+                prompt: job.prompt,
+                // A pooled or labels slot samples nothing; the rest of the config is the
+                // engine's default.
+                cfg: SlotCfg::default(),
+                want: job.want,
+                labels: job.labels,
+                out: etx,
+            })))
+            .is_err()
+        {
+            return Err(internal("the engine is not running"));
+        }
+        rxs.push(erx);
+    }
+    let mut out = Vec::with_capacity(rxs.len());
+    for mut rx in rxs {
+        let Some(em) = rx.recv().await else {
+            return Err(internal("the engine ended without a result"));
+        };
+        if let Some(Finish::Error(e)) = &em.finish {
+            return Err(bad(e.clone()));
+        }
+        out.push(em);
+    }
+    Ok(out)
+}
+
+/// A 500 with the OpenAI error shape.
+fn internal(message: impl Into<String>) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": {"message": message.into(), "type": "server_error", "code": 500}})),
+    )
+        .into_response()
+}
+
+/// A 501 with llama.cpp's `not_supported_error` type.
+fn not_supported(message: impl Into<String>) -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": {"message": message.into(), "type": "not_supported_error", "code": 501}})),
+    )
+        .into_response()
+}
+
 /// One input of an embedding request: text to tokenize, or token ids the caller already has.
 #[derive(Debug, Clone, PartialEq)]
 enum EmbedInput {
@@ -1789,48 +1915,24 @@ async fn embeddings(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -
     }
     let _busy = BusyGuard(app.clone());
     app.requests.fetch_add(1, Ordering::SeqCst);
-    let mut rxs = Vec::with_capacity(texts.len());
-    for tokens in texts {
-        let (etx, erx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
-        if app
-            .jobs
-            .send(EngineMsg::Run(Box::new(Job {
-                prompt: tokens,
-                // A pooled slot samples nothing; the rest of the config is the engine's default.
-                cfg: SlotCfg::default(),
-                want: Want::Pooled(pooling),
-                out: etx,
-            })))
-            .is_err()
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "the engine is not running", "type": "server_error", "code": 500}})),
-            )
-                .into_response();
-        }
-        rxs.push(erx);
-    }
-    let mut vectors = Vec::with_capacity(rxs.len());
+    let jobs = texts
+        .into_iter()
+        .map(|prompt| SlotJob {
+            prompt,
+            want: Want::Pooled(pooling),
+            labels: Vec::new(),
+        })
+        .collect();
+    let emissions = match run_jobs(&app, jobs).await {
+        Ok(e) => e,
+        Err(response) => return response,
+    };
+    let mut vectors = Vec::with_capacity(emissions.len());
     let mut prompt_tokens = 0u64;
-    for mut rx in rxs {
-        let Some(em) = rx.recv().await else {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "the engine ended without a result", "type": "server_error", "code": 500}})),
-            )
-                .into_response();
-        };
-        if let Some(Finish::Error(e)) = &em.finish {
-            return bad(e.clone());
-        }
+    for em in emissions {
         prompt_tokens += em.cost.as_ref().map_or(0, |c| c.prompt_tokens as u64);
         let Some(mut v) = em.embedding else {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "the engine returned no embedding", "type": "server_error", "code": 500}})),
-            )
-                .into_response();
+            return internal("the engine returned no embedding");
         };
         if let Err(e) = peregrine_core::embed::finish(&mut v, spec.dimensions) {
             return bad(e);
@@ -1862,7 +1964,115 @@ async fn embeddings(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -
     .into_response()
 }
 
+/// A response whose bytes are the order-keeping value's JSON text: `answers` keeps request order.
+fn ordered_json(value: &OrderedValue) -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        value.to_jinja_json(),
+    )
+        .into_response()
+}
+
+/// `POST /v1/systemone` (S4.3c): every question is one labels slot in the engine, so they share
+/// weight passes, and the answers come back in request order.
+///
+/// The request and its validation are [`Decider`]'s; the answer math is
+/// [`peregrine_core::decision::format_answer`]. Image input is not supported in this stage, so
+/// media is a 501 as llama.cpp answers without `--mmproj`.
+async fn systemone(State(app): State<Arc<App>>, OrderedJson(body): OrderedJson) -> Response {
+    let Some(decider) = app.decider.as_ref() else {
+        return not_supported("This model is not a decision model");
+    };
+    let (state, questions) = match decider.parse_request(&body) {
+        Ok(q) => q,
+        Err(e) => return bad(e),
+    };
+    let media = match peregrine_core::decision::parse_media(&body) {
+        Ok(m) => m,
+        Err(e) => return bad(e),
+    };
+    if media {
+        return not_supported(
+            "This server does not support image input for decisions. For a model that supports it, start it with `--mmproj`",
+        );
+    }
+    // Render and tokenize before reserving a place: an over-length prompt is the caller's error
+    // and must not hold the engine.
+    let mut prompts = Vec::with_capacity(questions.len());
+    for (_, question) in &questions {
+        let tokens = match decider.prompt_tokens(question, &state, &app.model.tk) {
+            Ok(t) => t,
+            Err(e) => return bad(e),
+        };
+        if tokens.len() >= app.max_ctx {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!(
+                    "request ({} tokens) exceeds the available context size ({} tokens), try increasing it",
+                    tokens.len(), app.max_ctx), "type": "exceed_context_size_error", "code": 400}})),
+            )
+                .into_response();
+        }
+        prompts.push(tokens);
+    }
+    // One place for the whole request, as `/v1/embeddings`: questions beyond the free slots wait
+    // in the engine's queue and are admitted in order.
+    if !try_reserve_n(&app.busy, 1, MIN_WAITING.max(2 * app.max_slots)) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "too many requests are waiting for this model", "type": "overloaded_error", "code": 503}})),
+        )
+            .into_response();
+    }
+    let _busy = BusyGuard(app.clone());
+    app.requests.fetch_add(1, Ordering::SeqCst);
+    let labels = decider.labels();
+    let jobs = prompts
+        .into_iter()
+        .zip(&questions)
+        .map(|(prompt, (_, question))| SlotJob {
+            prompt,
+            want: Want::Labels,
+            // Option `i` is read at letter `i`; a question with fewer options reads fewer.
+            labels: labels[..question.options.len()].to_vec(),
+        })
+        .collect();
+    let emissions = match run_jobs(&app, jobs).await {
+        Ok(e) => e,
+        Err(response) => return response,
+    };
+    let mut answers = Vec::with_capacity(questions.len());
+    let mut input_tokens = 0usize;
+    for ((id, question), em) in questions.iter().zip(emissions) {
+        input_tokens += em.cost.as_ref().map_or(0, |c| c.prompt_tokens);
+        let Some(scores) = em.label_logits else {
+            return internal("the engine returned no label logits");
+        };
+        let info = decider.info();
+        match peregrine_core::decision::format_answer(
+            info.kind(),
+            question,
+            &[scores],
+            info.temperatures(),
+            info.score_bias(),
+        ) {
+            Ok(answer) => answers.push((id.clone(), answer)),
+            Err(e) => return bad(e),
+        }
+    }
+    ordered_json(&peregrine_core::decision::response_json(
+        &app.alias,
+        &answers,
+        input_tokens,
+    ))
+}
+
 async fn chat(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -> Response {
+    if app.decider.is_some() {
+        return not_supported(
+            "This model is a decision model without text generation, use /v1/systemone",
+        );
+    }
     let mut p = match plan(&body) {
         Ok(p) => p,
         Err(e) => return bad(e),
