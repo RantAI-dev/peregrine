@@ -1,0 +1,116 @@
+{
+ "comment": "Embedding benchmark model registry (S4.2). Paths are relative to $EMBED_MODEL_DIR (~/models/embed); files are not committed.",
+ "models": {
+  "minilm": {
+   "max_batch_tokens": 65536,
+   "hf": "sentence-transformers/all-MiniLM-L6-v2",
+   "pooling": "mean",
+   "max_tokens": 512,
+   "dim": 384,
+   "tokenizer_dir": "minilm/ref",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "f16", "path": "minilm/minilm-f16.gguf",
+     "notes": "GGUF from second-state/All-MiniLM-L6-v2-Embedding-GGUF"},
+    {"engine": "llama_cpp", "precision": "q8_0", "path": "minilm/minilm-q8_0.gguf",
+     "notes": "GGUF Q8_0 from second-state/All-MiniLM-L6-v2-Embedding-GGUF"},
+    {"engine": "tei", "precision": "fp32", "path": "minilm/ref",
+     "notes": "safetensors fp32, TEI CPU container (candle backend)"},
+    {"engine": "fastembed", "precision": "fp32", "path": "prepared/minilm-onnx-fp32",
+     "fastembed_name": "sentence-transformers/all-MiniLM-L6-v2",
+     "notes": "onnx/model.onnx fp32 from the sentence-transformers repo"},
+    {"engine": "fastembed", "precision": "int8", "path": "prepared/minilm-onnx-int8",
+     "fastembed_name": "sentence-transformers/all-MiniLM-L6-v2",
+     "notes": "onnx/model_quint8_avx2.onnx from the sentence-transformers repo"},
+    {"engine": "openvino", "precision": "fp32", "path": "prepared/minilm-st",
+     "notes": "sentence-transformers, OpenVINO backend (exported IR)"}
+   ]
+  },
+  "bge-small": {
+   "max_batch_tokens": 65536,
+   "hf": "BAAI/bge-small-en-v1.5",
+   "pooling": "cls",
+   "max_tokens": 512,
+   "dim": 384,
+   "tokenizer_dir": "bge-small/ref",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "f32", "path": "bge-small/bge-small-f32.gguf",
+     "notes": "GGUF F32 from CompendiumLabs/bge-small-en-v1.5-gguf"},
+    {"engine": "llama_cpp", "precision": "q8_0", "path": "bge-small/bge-small-q8_0.gguf",
+     "notes": "GGUF Q8_0 from CompendiumLabs/bge-small-en-v1.5-gguf"},
+    {"engine": "tei", "precision": "fp32", "path": "bge-small/ref",
+     "notes": "safetensors fp32, TEI CPU container (candle backend)"},
+    {"engine": "fastembed", "precision": "fp32", "path": "prepared/bge-small-onnx-fp32",
+     "fastembed_name": "BAAI/bge-small-en-v1.5",
+     "notes": "Xenova/bge-small-en-v1.5 onnx/model.onnx fp32"},
+    {"engine": "fastembed", "precision": "int8", "path": "prepared/bge-small-onnx-int8",
+     "fastembed_name": "BAAI/bge-small-en-v1.5",
+     "notes": "Xenova/bge-small-en-v1.5 onnx/model_int8.onnx"},
+    {"engine": "openvino", "precision": "fp32", "path": "prepared/bge-small-st",
+     "notes": "sentence-transformers, OpenVINO backend (exported IR)"}
+   ]
+  },
+  "bge-base": {
+   "max_batch_tokens": 32768,
+   "hf": "BAAI/bge-base-en-v1.5",
+   "pooling": "cls",
+   "max_tokens": 512,
+   "dim": 768,
+   "tokenizer_dir": "bge-base/ref",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "f32", "path": "bge-base/bge-base-f32.gguf",
+     "notes": "GGUF F32 from CompendiumLabs/bge-base-en-v1.5-gguf"},
+    {"engine": "llama_cpp", "precision": "q8_0", "path": "bge-base/bge-base-q8_0.gguf",
+     "notes": "GGUF Q8_0 from CompendiumLabs/bge-base-en-v1.5-gguf"},
+    {"engine": "tei", "precision": "fp32", "path": "bge-base/ref",
+     "notes": "safetensors fp32, TEI CPU container (candle backend)"},
+    {"engine": "fastembed", "precision": "fp32", "path": "prepared/bge-base-onnx-fp32",
+     "fastembed_name": "BAAI/bge-base-en-v1.5",
+     "notes": "Xenova/bge-base-en-v1.5 onnx/model.onnx fp32"},
+    {"engine": "fastembed", "precision": "int8", "path": "prepared/bge-base-onnx-int8",
+     "fastembed_name": "BAAI/bge-base-en-v1.5",
+     "notes": "Xenova/bge-base-en-v1.5 onnx/model_int8.onnx"},
+    {"engine": "openvino", "precision": "fp32", "path": "prepared/bge-base-st",
+     "notes": "sentence-transformers, OpenVINO backend (exported IR)"}
+   ]
+  },
+  "bge-m3": {
+   "max_batch_tokens": 16384,
+   "hf": "BAAI/bge-m3",
+   "pooling": "cls",
+   "max_tokens": 1024,
+   "dim": 1024,
+   "tokenizer_dir": "bge-m3/ref",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "q8_0", "path": "bge-m3-Q8_0.gguf",
+     "notes": "GGUF Q8_0; server context capped at 2048 tokens/slot because this model's KV is 2 GB at 32k"}
+   ]
+  },
+  "qwen3-embed-0.6b": {
+   "max_batch_tokens": 32768,
+   "hf": "Qwen/Qwen3-Embedding-0.6B",
+   "pooling": "last",
+   "max_tokens": 512,
+   "dim": 1024,
+   "tokenizer_dir": "qwen3-embed-0.6b",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "q8_0", "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+     "notes": "GGUF Q8_0 from Qwen/Qwen3-Embedding-0.6B-GGUF"},
+    {"engine": "peregrine", "precision": "q8_0",
+     "path": "qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+     "notes": "pre-merge branch build of origin/s4.1-embeddings (63288ec), PR #158; not on main yet"}
+   ]
+  },
+  "embeddinggemma": {
+   "max_batch_tokens": 32768,
+   "hf": "google/embeddinggemma-300m",
+   "pooling": "mean",
+   "max_tokens": 2048,
+   "dim": 768,
+   "tokenizer_dir": "embeddinggemma/ref",
+   "rows": [
+    {"engine": "llama_cpp", "precision": "q8_0", "path": "embeddinggemma/embeddinggemma-Q8_0.gguf",
+     "notes": "GGUF Q8_0 from ggml-org/embeddinggemma-300M-GGUF; the google/ PyTorch repo is licence-gated"}
+   ]
+  }
+ }
+}

@@ -214,3 +214,52 @@ reader can tell which setting produced the numbers.
 python3 benchmarks/report.py benchmarks/results/*.json --output report.md
 cat report.md
 ```
+
+---
+
+## 6. Embedding Mode (S4.2)
+
+`embed.py` measures the embedding path: texts per second, tokens per second and
+request latency for `POST /v1/embeddings`, against the same pinned competitors.
+
+```sh
+# deterministic, per-model tokenizer-calibrated texts (needs a venv with transformers)
+python3 benchmarks/embed_texts.py --tokenizer-dir ~/models/embed/minilm/ref \
+    --lengths 16,128,512 --per-length 128 --max-tokens 510 \
+    --out /var/tmp/embed-texts/minilm.json
+
+# fp32 reference vectors for the accuracy column
+python3 benchmarks/embed_ref.py --model-dir ~/models/embed/minilm/ref \
+    --texts /var/tmp/embed-texts/minilm-acc.json --out /var/tmp/embed-texts/ref/minilm-torch-fp32.json
+
+# one round over one row (grid: 16/128/512 tokens x batches 1/8/32/128 x 1 and 10 clients)
+python3 benchmarks/embed.py --select minilm:llama_cpp:f16 --round 1 \
+    --output-dir benchmarks/results/<run> --texts-dir /var/tmp/embed-texts
+
+# accuracy for that row
+python3 benchmarks/embed.py --mode accuracy --select minilm:llama_cpp:f16 \
+    --output-dir benchmarks/results/<run> --texts-dir /var/tmp/embed-texts
+
+# merge rounds into medians/spreads and Markdown tables
+python3 benchmarks/embed_report.py --results-dir benchmarks/results/<run>
+```
+
+Rows live in `embed_models.json` (engine, precision, path under `$EMBED_MODEL_DIR`,
+pooling, `max_batch_tokens`). Engines are adapters in `benchmarks/engines/`:
+`llama_embed.py`, `tei_embed.py`, `fastembed_embed.py`, `openvino_embed.py` and
+`peregrine_embed.py`, the last of which posts the OpenAI request shape and only needs
+`PEREGRINE_BIN`/`--peregrine-worktree` once `/v1/embeddings` is on `main`.
+
+Rules the runner enforces, because they change the numbers:
+
+- **One request per text on llama.cpp.** `llama-server` feeds embedding inputs one task at
+  a time even inside one request, and caps `n_ctx_slot` at the training context, so `-c` is
+  `(max_tokens + 8) x slots` and `-b`/`-ub` must stay inside it (a larger batch aborts in
+  `build_pooling`). Some GGUFs abort with `-np > 1`; the adapter retries with one slot and
+  records `engine.slots_fallback`.
+- **A per-model batch-token cap** (`max_batch_tokens`) skips cells whose padded attention
+  buffers would not fit the host's memory. Skips are recorded with their reason.
+- **A per-cell time cap** (`--max-cell-seconds`, default 120 s) skips cells that a single
+  request would blow past; the decision is made in round 1 and reused by later rounds.
+- **A quiescence preflight** (`load average < 0.5`, `MemAvailable >= 5 GB`) before every
+  timed invocation; both values are recorded before and after each row.
