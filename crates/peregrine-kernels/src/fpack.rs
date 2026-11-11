@@ -158,7 +158,6 @@ pub fn gemm_scalar(
     bias: Option<&[f32]>,
     out: &mut [f32],
 ) {
-    let eb = elem_bytes(fmt);
     let pb = panel_bytes(fmt, n_in);
     debug_assert!(packed.len() >= panels * pb);
     debug_assert!(out.len() >= panels * PANEL * acts.len());
@@ -179,7 +178,6 @@ pub fn gemm_scalar(
                 out[b * panels * PANEL + r] = acc;
             }
         }
-        debug_assert_eq!(eb, elem_bytes(fmt));
     }
 }
 

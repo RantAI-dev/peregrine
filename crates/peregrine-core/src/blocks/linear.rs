@@ -420,6 +420,19 @@ pub fn matmul_group(
     st.ns_matmul += t0.elapsed().as_nanos() as u64;
 }
 
+/// The activation rows one packed-float unit covers.
+///
+/// At most [`peregrine_kernels::fpack::row_block`] (half of L2), and few enough rows
+/// that a matrix with too few panels still fills the pool: a group of one panel pair
+/// (a router, the MTP head's slice) would otherwise be one unit, one thread. The
+/// block only changes how often a panel is read, never a result.
+fn fp_row_block(n_in: usize, nb: usize, per: usize, width: usize) -> usize {
+    let want = (width / per.max(1)).max(1);
+    nb.div_ceil(want)
+        .min(peregrine_kernels::fpack::row_block(n_in))
+        .max(1)
+}
+
 /// The packed float panels of a group, one work unit at a time (S4.9f).
 ///
 /// A unit is [`FP_UNIT_PANELS`] panels against one [`row_block`](peregrine_kernels::fpack::row_block)
@@ -439,15 +452,21 @@ fn fp_group(
 ) {
     let t0 = Instant::now();
     let store = w.fp();
-    // Units per job, and the running base of each job's units.
+    // Units per job, the running base of each job's units, and the block size each
+    // job's units were laid out with (the accounting below reads the same numbers).
     let mut bases = [0usize; 4];
+    let mut per_of = [0usize; 4];
+    let mut bs_of = [0usize; 4];
     let mut total = 0usize;
     for (ji, j) in jobs.iter().enumerate() {
         bases[ji] = total;
         let n = j.w.dims[0] as usize;
         let panels = j.rows().div_ceil(16);
-        let blocks = nb.div_ceil(peregrine_kernels::fpack::row_block(n));
-        total += panels.div_ceil(FP_UNIT_PANELS) * blocks;
+        let per = panels.div_ceil(FP_UNIT_PANELS).max(1);
+        let bs = fp_row_block(n, nb, per, pool.width());
+        per_of[ji] = per;
+        bs_of[ji] = bs;
+        total += per * nb.div_ceil(bs);
     }
     let unit = |u: usize| {
         // The job whose units hold `u`.
@@ -459,8 +478,8 @@ fn fp_group(
         let n = j.w.dims[0] as usize;
         let rows = j.rows();
         let panels = rows.div_ceil(16);
-        let bs = peregrine_kernels::fpack::row_block(n);
-        let per = panels.div_ceil(FP_UNIT_PANELS);
+        let bs = bs_of[ji];
+        let per = per_of[ji];
         let local = u - bases[ji];
         let first_panel = (local % per) * FP_UNIT_PANELS;
         let b0 = (local / per) * bs;
@@ -520,12 +539,12 @@ fn fp_group(
     // The same accounting `matmul_group` does: the weight bytes of every row once,
     // the multiply count, and the activation's traffic (one pass per 16-row panel
     // and L2-sized block).
-    for j in jobs {
+    for (ji, j) in jobs.iter().enumerate() {
         let n = j.w.dims[0] as usize;
         let rows = j.rows();
         st.bytes_weights += (rows * row_bytes(j.w.kind, n)) as u64;
         st.macs += (rows * n * nb) as u64;
-        let blocks = nb.div_ceil(peregrine_kernels::fpack::row_block(n));
+        let blocks = nb.div_ceil(bs_of[ji].max(1));
         st.bytes_acts += (rows.div_ceil(16) * blocks * nb * act_bytes(&acts[0])) as u64;
     }
     st.ns_matmul += t0.elapsed().as_nanos() as u64;
