@@ -33,6 +33,12 @@ All notable changes to this project are documented here. The format follows
   keeps Q6_K on the row path there; the kernels are ready for a tier whose GEMV wins. Goldens:
   the synthetic Q5_K files (AVX2 and AVX-512) and Qwen3.5-2B's real-model golden (both tiers)
   move; nothing without a Q5_K matmul changes.
+- **The Tekken pre-tokenizer (S4.14a)**: `tokenizer.ggml.pre = "pixtral"` / `"tekken"`,
+  `"tekken-num3"` and `"nemotron-3.5-embed"` are pre-types of their own, with `ignore_merges` and the
+  case-sensitive pattern evaluated exactly as llama.cpp's `std::regex` over collapsed text does, so
+  NVIDIA's Nemotron 3.5 Embed vocabulary tokenizes to the same ids (361 strings, plus 22 for the
+  zero-width-non-joiner rule). `encode_unparsed` is llama.cpp's `parse_special = false`, which the
+  byte-level BPE path previously ignored.
 - **A decision computes only its label rows of the output head (S4.9d)**: a `Want::Labels` slot used
   to evaluate the whole vocabulary row of its last prompt position and gather the handful of token
   ids it reads. The head now evaluates those ids alone: one dot product of the already-quantised

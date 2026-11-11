@@ -23,8 +23,8 @@
 //! a regex engine: the crate has one dependency and this pattern is a fixed,
 //! six-way alternation that a scanner expresses more directly than a regex would.
 //!
-//! Two more pre-tokenizers are implemented the same way, because the supported models'
-//! Llama 3.2 and Qwen2.5 files use them:
+//! More pre-tokenizers are implemented the same way, because the supported models'
+//! files use them (Llama 3.2, Qwen 2.5/3.5, gpt-oss, Phi-4/DBRX, Mistral's Tekken):
 //!
 //! ```text
 //!   llama-bpe: (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}
@@ -37,6 +37,35 @@
 //! what produced the golden fixtures. A model whose `tokenizer.ggml.pre` names
 //! anything else is refused at load, never approximated.
 //!
+//! # Tekken (`tekken`, `pixtral`, `nemotron-3.5-embed`)
+//!
+//! Mistral's Tekken vocabulary (Nemotron 3.5 Embed among them) uses the case-sensitive
+//! pattern llama.cpp carries at `src/llama-vocab.cpp` lines 425-431:
+//!
+//! ```text
+//! [^\r\n\p{L}\p{N}]?((?=[\p{L}\p{M}])([^a-z]))*((?=[\p{L}\p{M}])([^A-Z]))+
+//! [^\r\n\p{L}\p{N}]?((?=[\p{L}\p{M}])([^a-z]))+((?=[\p{L}\p{M}])([^A-Z]))*
+//! \p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+
+//! ```
+//!
+//! This pre-type is special in one way the others are not: llama.cpp has **no
+//! hand-written splitter for it**. It reaches `unicode_regex_split`'s generic path,
+//! which collapses every non-ASCII code point to one byte standing for its Unicode
+//! class (`src/unicode.cpp`, `unicode_regex_split`) and runs `std::regex` over that.
+//! The pattern as written and the pattern as evaluated therefore differ: inside the
+//! collapsed text every category class is one byte, so the `\p{Lu}` / `\p{Ll}` of the
+//! original (which the comment above llama.cpp's rewrite quotes) would both match
+//! every non-ASCII letter, and the rewrite's `[^a-z]` / `[^A-Z]` do the same. Only
+//! ASCII case decides where a word splits. [`split_tekken`] reproduces the collapsed
+//! classes from the same Unicode tables (`cpt_flags`) and the alternation in order
+//! with regex backtracking, so the pieces are what `std::regex` produced — which is
+//! what the goldens are checked against.
+//!
+//! `nemotron-3.5-embed` is that pattern plus one normalization applied before
+//! splitting: every `[` or `<` followed by U+200C (zero-width non-joiner) drops the
+//! joiner (`src/llama-vocab.cpp` lines 652-680). `tekken-num3` is the same pattern
+//! with digits in right-aligned groups of three.
+//!
 //! # Known divergence
 //!
 //! `\p{L}` is approximated by `char::is_alphabetic()`, which is the Unicode
@@ -46,7 +75,9 @@
 //! exactly onto `char::is_numeric()`. Rust's standard library does not expose
 //! General_Category, and shipping a category table to close a gap this narrow would
 //! cost more than it buys — but it is a real difference and it is recorded here
-//! rather than discovered later.
+//! rather than discovered later. It applies to the SmolLM, Llama 3, Qwen and GPT-4o
+//! splitters; the Tekken splitter reads the generated category tables (`cpt_flags`),
+//! because llama.cpp evaluates that pattern over its own collapsed classes.
 //!
 //! # SPM (SentencePiece)
 //!
@@ -125,6 +156,16 @@ pub enum PreType {
     /// llama.cpp v0.9.0 src/llama-vocab.cpp lines 310-315 map LLM_PRE_TOKENIZER_TYPE_DBRX
     /// to the Llama 3 regex split pattern.
     Dbrx,
+    /// `tekken` / `pixtral`: Mistral's case-sensitive pattern, digits one at a time.
+    /// llama.cpp v0.9.0 maps both names to `LLAMA_VOCAB_PRE_TYPE_TEKKEN`
+    /// (`src/llama-vocab.cpp` lines 2619-2634) with `ignore_merges`.
+    Tekken,
+    /// `tekken-num3`: `tekken` with digits in right-aligned groups of three
+    /// (`src/llama-vocab.cpp` lines 432-437).
+    TekkenNum3,
+    /// `nemotron-3.5-embed`: the Tekken pattern plus the zero-width-non-joiner rule,
+    /// with `ignore_merges` (`src/llama-vocab.cpp` lines 2764-2769).
+    Nemotron35Embed,
     /// `default`: SentencePiece (SPM) or models without a custom BPE pre-tokenizer.
     Default,
 }
@@ -138,6 +179,9 @@ impl PreType {
             "qwen35" => PreType::Qwen35,
             "gpt-4o" => PreType::Gpt4o,
             "dbrx" => PreType::Dbrx,
+            "tekken" | "pixtral" => PreType::Tekken,
+            "tekken-num3" => PreType::TekkenNum3,
+            "nemotron-3.5-embed" => PreType::Nemotron35Embed,
             "default" => PreType::Default,
             _ => return None,
         })
@@ -150,12 +194,16 @@ impl PreType {
             PreType::Qwen35 => "qwen35",
             PreType::Gpt4o => "gpt-4o",
             PreType::Dbrx => "dbrx",
+            PreType::Tekken => "tekken",
+            PreType::TekkenNum3 => "tekken-num3",
+            PreType::Nemotron35Embed => "nemotron-3.5-embed",
             PreType::Default => "default",
         }
     }
 }
 
 /// Pre-tokenizer names this crate implements, for the compatibility probe's message.
+/// `pixtral` is a second name for `tekken`, as it is in llama.cpp.
 pub const PRE_TYPES: &[&str] = &[
     "smollm",
     "llama-bpe",
@@ -163,6 +211,10 @@ pub const PRE_TYPES: &[&str] = &[
     "qwen35",
     "gpt-4o",
     "dbrx",
+    "tekken",
+    "pixtral",
+    "tekken-num3",
+    "nemotron-3.5-embed",
     "default",
 ];
 
@@ -437,6 +489,10 @@ pub struct Tokenizer {
     specials: Vec<(String, u32)>,
     /// `specials` indexed by first byte: the raw-text scan's lookup (S4.9c).
     special_index: SpecialIndex,
+    /// The user-defined subset of `specials`, and its index: llama.cpp's
+    /// `tokenizer_st_partition` still matches those when `parse_special` is false.
+    user_specials: Vec<(String, u32)>,
+    user_index: SpecialIndex,
     pub bos: u32,
     pub eos: u32,
     /// `tokenizer.ggml.add_bos_token`: whether a prompt starts with `bos`. Llama 3
@@ -486,6 +542,20 @@ fn collect_specials(pieces: &[String], types: &[i32]) -> Vec<(String, u32)> {
         .zip(types.iter())
         .enumerate()
         .filter(|(_, (_, &t))| t == TYPE_CONTROL || t == TYPE_USER_DEFINED || t == TYPE_UNKNOWN)
+        .map(|(i, (p, _))| (p.clone(), i as u32))
+        .collect();
+    specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+    specials
+}
+
+/// The user-defined tokens only: the ones `tokenizer_st_partition` keeps matching
+/// when `parse_special` is false, in the same order as [`collect_specials`].
+fn collect_user_specials(pieces: &[String], types: &[i32]) -> Vec<(String, u32)> {
+    let mut specials: Vec<(String, u32)> = pieces
+        .iter()
+        .zip(types.iter())
+        .enumerate()
+        .filter(|(_, (_, &t))| t == TYPE_USER_DEFINED)
         .map(|(i, (p, _))| (p.clone(), i as u32))
         .collect();
     specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
@@ -553,6 +623,28 @@ impl SpecialIndex {
     }
 }
 
+/// The first position at or after `p` where one of `specials` starts, or the text's
+/// length when there is none: the end of the plain run before the next special.
+fn next_special_in(
+    text: &str,
+    p: usize,
+    index: &SpecialIndex,
+    specials: &[(String, u32)],
+) -> usize {
+    let bytes = text.as_bytes();
+    let mut q = p;
+    while q < bytes.len() {
+        if index.may_start(bytes[q])
+            && text.is_char_boundary(q)
+            && index.hit(text, q, specials).is_some()
+        {
+            return q;
+        }
+        q += 1;
+    }
+    bytes.len()
+}
+
 /// A special-token id from the file, falling back to llama.cpp's per-type default.
 ///
 /// llama.cpp disables a default that is outside the vocabulary and ignores an
@@ -612,6 +704,7 @@ fn build_wpm(
     strip_accents: bool,
 ) -> Tokenizer {
     let specials = collect_specials(&pieces, &types);
+    let user_specials = collect_user_specials(&pieces, &types);
     let items: Vec<(&str, u32)> = pieces
         .iter()
         .enumerate()
@@ -625,6 +718,8 @@ fn build_wpm(
         ids,
         special_index: SpecialIndex::build(&specials),
         specials,
+        user_index: SpecialIndex::build(&user_specials),
+        user_specials,
         bos: cfg.bos.unwrap_or(u32::MAX),
         eos: cfg.eos.unwrap_or(u32::MAX),
         add_bos: cfg.add_bos,
@@ -679,6 +774,7 @@ fn build_ugm(
         }
     }
     let specials = collect_specials(&pieces, &types);
+    let user_specials = collect_user_specials(&pieces, &types);
     let n_vocab = pieces.len();
     let trie = Trie::build(&trie_items);
     let user_trie = Trie::build(&user_items);
@@ -689,6 +785,8 @@ fn build_ugm(
         ids,
         special_index: SpecialIndex::build(&specials),
         specials,
+        user_index: SpecialIndex::build(&user_specials),
+        user_specials,
         bos: cfg.bos.unwrap_or(u32::MAX),
         eos: cfg.eos.unwrap_or(u32::MAX),
         add_bos: cfg.add_bos,
@@ -840,6 +938,7 @@ impl Tokenizer {
                 .collect();
             // Longest first, so `<|im_start|>` is preferred over a shorter prefix.
             specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+            let user_specials = collect_user_specials(&pieces, types);
 
             let (byte_enc, byte_dec) = byte_alphabet();
             let n_vocab = pieces.len();
@@ -848,14 +947,21 @@ impl Tokenizer {
                 ids,
                 special_index: SpecialIndex::build(&specials),
                 specials,
+                user_index: SpecialIndex::build(&user_specials),
+                user_specials,
                 bos: g.u32("tokenizer.ggml.bos_token_id").unwrap_or(1),
                 eos: g.u32("tokenizer.ggml.eos_token_id").unwrap_or(2),
                 // llama.cpp turns `add_bos` on for `llama-bpe` whatever the file says
-                // (`llama-vocab.cpp`, the LLAMA3 pre-type branch), and the Llama 3
-                // template writes the token itself; the flag is reported, not acted on.
-                add_bos: g
-                    .bool("tokenizer.ggml.add_bos_token")
-                    .unwrap_or(pre == PreType::Llama3),
+                // (`llama-vocab.cpp`, the LLAMA3 pre-type branch), and for the Tekken
+                // and Nemotron pre-types as a default the file's `add_bos_token` then
+                // overrides — Nemotron 3.5 Embed says false, so it gets none.
+                add_bos: g.bool("tokenizer.ggml.add_bos_token").unwrap_or(matches!(
+                    pre,
+                    PreType::Llama3
+                        | PreType::Tekken
+                        | PreType::TekkenNum3
+                        | PreType::Nemotron35Embed
+                )),
                 add_eos: g.bool("tokenizer.ggml.add_eos_token").unwrap_or(false),
                 add_sep: g.bool("tokenizer.ggml.add_sep_token").unwrap_or(false),
                 sep: special_id(g, "tokenizer.ggml.seperator_token_id", None, n_vocab),
@@ -947,11 +1053,14 @@ impl Tokenizer {
                 .collect();
 
             let n_vocab = pieces.len();
+            let user_specials = collect_user_specials(&pieces, &types);
             Ok(Tokenizer {
                 pieces,
                 ids,
                 special_index: SpecialIndex::build(&specials),
                 specials,
+                user_index: SpecialIndex::build(&user_specials),
+                user_specials,
                 bos,
                 eos,
                 add_bos,
@@ -1212,6 +1321,7 @@ impl Tokenizer {
             .map(|(i, (p, _))| (p.clone(), i as u32))
             .collect();
         specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+        let user_specials = collect_user_specials(&pieces, &token_types);
 
         let mut byte_tokens = [unk_id; 256];
         for b in 0..=255u8 {
@@ -1248,6 +1358,8 @@ impl Tokenizer {
             ids,
             special_index: SpecialIndex::build(&specials),
             specials,
+            user_index: SpecialIndex::build(&user_specials),
+            user_specials,
             bos,
             eos,
             add_bos: true,
@@ -1273,6 +1385,23 @@ impl Tokenizer {
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut out = Vec::new();
         self.encode_into(text, &mut out);
+        out
+    }
+
+    /// Encodes one text with llama.cpp's `parse_special = false`: the vocabulary's
+    /// control-token spellings (`[INST]`, `<s>`) are ordinary text, not tokens.
+    /// User-defined tokens are still matched, as `tokenizer_st_partition` does.
+    ///
+    /// [`Self::encode`] is this with `parse_special = true`, which is what the
+    /// server's `/tokenize` does by default and what a chat prompt needs.
+    pub fn encode_unparsed(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        match &self.algo {
+            TokenizerAlgo::Bpe(bpe) => self.encode_bpe_into(text, bpe, false, &mut out),
+            TokenizerAlgo::Spm(spm) => self.encode_spm_into(text, spm, false, &mut out),
+            TokenizerAlgo::Wpm(wpm) => self.encode_wpm(text, wpm, false, &mut out),
+            TokenizerAlgo::Ugm(ugm) => self.encode_ugm(text, ugm, false, &mut out),
+        }
         out
     }
 
@@ -1414,75 +1543,65 @@ impl Tokenizer {
 
     pub fn encode_into(&self, text: &str, out: &mut Vec<u32>) {
         match &self.algo {
-            TokenizerAlgo::Bpe(bpe) => {
-                let mut p = 0usize;
-                while p < text.len() {
-                    // Atomic special tokens first.
-                    if let Some((len, id)) = self.special_at(text, p) {
-                        out.push(id);
-                        p += len;
-                        continue;
-                    }
-                    // Otherwise accumulate a plain run up to the next special, and split it.
-                    let q = self.next_special(text, p);
-                    self.encode_plain_bpe(&text[p..q], bpe, out);
-                    p = q;
-                }
-            }
-            TokenizerAlgo::Spm(spm) => {
-                let mut p = 0usize;
-                let mut is_prev_special = true;
-                let mut scratch = SpmScratch::default();
-                let mut buf = String::new();
-                while p < text.len() {
-                    if let Some((len, id)) = self.special_at(text, p) {
-                        out.push(id);
-                        p += len;
-                        is_prev_special = true;
-                        continue;
-                    }
-                    let q = self.next_special(text, p);
-                    self.encode_fragment_spm(
-                        &text[p..q],
-                        spm,
-                        is_prev_special,
-                        &mut buf,
-                        &mut scratch,
-                        out,
-                    );
-                    is_prev_special = false;
-                    p = q;
-                }
-            }
+            TokenizerAlgo::Bpe(bpe) => self.encode_bpe_into(text, bpe, true, out),
+            TokenizerAlgo::Spm(spm) => self.encode_spm_into(text, spm, true, out),
             TokenizerAlgo::Wpm(wpm) => self.encode_wpm(text, wpm, true, out),
             TokenizerAlgo::Ugm(ugm) => self.encode_ugm(text, ugm, true, out),
         }
     }
 
-    /// The special token that starts at `p`, if any: the first of `specials` that
-    /// matches there (longest text first, then lowest id), through the first-byte
-    /// index. `p` must be a char boundary.
-    #[inline]
-    fn special_at(&self, text: &str, p: usize) -> Option<(usize, u32)> {
-        self.special_index.hit(text, p, &self.specials)
+    /// Byte-level BPE over the whole input. `parse_special` decides which specials
+    /// are pulled out atomically: all of them, or only the user-defined ones.
+    fn encode_bpe_into(&self, text: &str, bpe: &BpeData, parse_special: bool, out: &mut Vec<u32>) {
+        let (specials, index) = if parse_special {
+            (&self.specials, &self.special_index)
+        } else {
+            (&self.user_specials, &self.user_index)
+        };
+        let mut p = 0usize;
+        while p < text.len() {
+            // Atomic special tokens first.
+            if let Some((len, id)) = index.hit(text, p, specials) {
+                out.push(id);
+                p += len;
+                continue;
+            }
+            // Otherwise accumulate a plain run up to the next special, and split it.
+            let q = next_special_in(text, p, index, specials);
+            self.encode_plain_bpe(&text[p..q], bpe, out);
+            p = q;
+        }
     }
 
-    /// The first position at or after `p` where a special token starts, or the
-    /// text's length when there is none: the end of the plain run before the next
-    /// special.
-    fn next_special(&self, text: &str, p: usize) -> usize {
-        let bytes = text.as_bytes();
-        let mut q = p;
-        while q < bytes.len() {
-            if self.special_index.may_start(bytes[q])
-                && text.is_char_boundary(q)
-                && self.special_at(text, q).is_some()
-            {
-                return q;
+    fn encode_spm_into(&self, text: &str, spm: &SpmData, parse_special: bool, out: &mut Vec<u32>) {
+        let (specials, index) = if parse_special {
+            (&self.specials, &self.special_index)
+        } else {
+            (&self.user_specials, &self.user_index)
+        };
+        let mut p = 0usize;
+        let mut is_prev_special = true;
+        let mut scratch = SpmScratch::default();
+        let mut buf = String::new();
+        while p < text.len() {
+            if let Some((len, id)) = index.hit(text, p, specials) {
+                out.push(id);
+                p += len;
+                is_prev_special = true;
+                continue;
             }
-            q += 1;
+            let q = next_special_in(text, p, index, specials);
+            self.encode_fragment_spm(
+                &text[p..q],
+                spm,
+                is_prev_special,
+                &mut buf,
+                &mut scratch,
+                out,
+            );
+            is_prev_special = false;
+            p = q;
         }
-        bytes.len()
     }
 
     /// `llama_vocab::impl::tokenizer_st_partition`: every special token's text is
@@ -2002,6 +2121,31 @@ impl Tokenizer {
                     self.bpe(piece, bpe, out);
                 }
             }
+            PreType::Tekken => {
+                for piece in split_tekken(text) {
+                    self.bpe(piece, bpe, out);
+                }
+            }
+            PreType::TekkenNum3 => {
+                for piece in split_tekken_num3(text) {
+                    self.bpe(piece, bpe, out);
+                }
+            }
+            PreType::Nemotron35Embed => {
+                // `[` + U+200C and `<` + U+200C lose the joiner before splitting
+                // (`src/llama-vocab.cpp` lines 652-680). Borrow the text as it is
+                // when there is nothing to rewrite.
+                if text.contains("[\u{200c}") || text.contains("<\u{200c}") {
+                    let normalized = strip_zwnj_after_bracket(text);
+                    for piece in split_tekken(&normalized) {
+                        self.bpe(piece, bpe, out);
+                    }
+                } else {
+                    for piece in split_tekken(text) {
+                        self.bpe(piece, bpe, out);
+                    }
+                }
+            }
             PreType::Default => {}
         }
     }
@@ -2018,11 +2162,15 @@ impl Tokenizer {
             .map(|&b| bpe.byte_enc[b as usize].to_string())
             .collect();
 
-        // `ignore_merges` (llama.cpp, Llama 3 only): a piece that is itself a
-        // vocabulary entry is emitted whole. Llama 3's tiktoken vocabulary holds
-        // tokens its merge list cannot reach, so running the merges would split
-        // "Hello" into pieces the model never saw as a word.
-        if self.pre == PreType::Llama3 {
+        // `ignore_merges` (llama.cpp, Llama 3 and the Tekken family): a piece that is
+        // itself a vocabulary entry is emitted whole. Llama 3's tiktoken vocabulary
+        // holds tokens its merge list cannot reach, so running the merges would split
+        // "Hello" into pieces the model never saw as a word; Tekken's vocabulary does
+        // the same with multi-byte and rare tokens.
+        if matches!(
+            self.pre,
+            PreType::Llama3 | PreType::Tekken | PreType::TekkenNum3 | PreType::Nemotron35Embed
+        ) {
             let whole: String = syms.concat();
             if let Some(&id) = self.ids.get(&whole) {
                 out.push(id);
@@ -2540,8 +2688,9 @@ pub fn split_llama3(s: &str, max_digits: usize) -> Vec<&str> {
 
 /// Combining marks (`\p{M}`) that `char::is_alphabetic` does not already cover: the
 /// general-purpose combining blocks. Indic and other script-specific marks are mostly
-/// `Other_Alphabetic`, hence already letters here. An approximation, like the rest of
-/// this splitter's Unicode classes (the crate carries no Unicode tables).
+/// `Other_Alphabetic`, hence already letters here. An approximation of this
+/// splitter's Unicode classes, like the rest of them; the Tekken splitter uses the
+/// generated tables (`cpt_flags`) instead, because llama.cpp's `std::regex` path does.
 fn is_mark(c: char) -> bool {
     matches!(c as u32,
         0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05BD | 0x0610..=0x061A | 0x064B..=0x065F
@@ -2873,6 +3022,263 @@ pub fn split_gpt4o(s: &str) -> Vec<&str> {
     out
 }
 
+// The classes llama.cpp's collapsed text gives a code point for the Tekken pattern.
+const TK_LETTER: u8 = 1 << 0;
+const TK_MARK: u8 = 1 << 1;
+const TK_NUMBER: u8 = 1 << 2;
+const TK_SPACE: u8 = 1 << 3;
+const TK_NEWLINE: u8 = 1 << 4;
+const TK_LOWER: u8 = 1 << 5;
+const TK_UPPER: u8 = 1 << 6;
+
+/// One code point's classes as llama.cpp's `unicode_regex_split` sees them.
+///
+/// That function has no hand-written Tekken splitter: it collapses every code point
+/// to one byte and runs `std::regex` over the result (`src/unicode.cpp`). ASCII stays
+/// itself, and the collapsed regex spells `\p{L}` as `[A-Za-z]`, `\p{N}` as `[0-9]`;
+/// every non-ASCII code point becomes one byte standing for its category, with
+/// whitespace collapsing to a vertical tab. So the classes below are the collapsed
+/// ones, from the same tables switch (`cpt_flags`) — not Rust's `is_alphabetic`,
+/// which is a different property.
+fn tekken_class(c: char) -> u8 {
+    let cp = c as u32;
+    if cp < 128 {
+        let mut f = 0u8;
+        if c.is_ascii_alphabetic() {
+            f |= TK_LETTER;
+        }
+        if c.is_ascii_digit() {
+            f |= TK_NUMBER;
+        }
+        // ECMAScript `\s` over a byte string: these six, and nothing else.
+        if matches!(c, '\t' | '\n' | '\x0b' | '\x0c' | '\r' | ' ') {
+            f |= TK_SPACE;
+        }
+        if matches!(c, '\r' | '\n') {
+            f |= TK_NEWLINE;
+        }
+        if c.is_ascii_lowercase() {
+            f |= TK_LOWER;
+        }
+        if c.is_ascii_uppercase() {
+            f |= TK_UPPER;
+        }
+        return f;
+    }
+    let flags = cpt_flags(cp);
+    let mut f = 0u8;
+    if flags & unicode_data::LETTER != 0 {
+        f |= TK_LETTER;
+    }
+    if flags & unicode_data::ACCENT_MARK != 0 {
+        f |= TK_MARK;
+    }
+    if flags & unicode_data::NUMBER != 0 {
+        f |= TK_NUMBER;
+    }
+    if flags & unicode_data::WHITESPACE != 0 {
+        f |= TK_SPACE;
+    }
+    f
+}
+
+/// The Tekken splitter: `LLAMA_VOCAB_PRE_TYPE_TEKKEN` (`src/llama-vocab.cpp`
+/// lines 425-431) as llama.cpp's generic `unicode_regex_split` evaluates it.
+///
+/// ```text
+/// [^\r\n\p{L}\p{N}]?((?=[\p{L}\p{M}])([^a-z]))*((?=[\p{L}\p{M}])([^A-Z]))+
+/// [^\r\n\p{L}\p{N}]?((?=[\p{L}\p{M}])([^a-z]))+((?=[\p{L}\p{M}])([^A-Z]))*
+/// \p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+
+/// ```
+///
+/// llama.cpp has no custom implementation of this pattern, so `std::regex` sees a
+/// collapsed text in which only ASCII case is real case: a non-ASCII letter matches
+/// both `[^a-z]` and `[^A-Z]`, so a Greek or Cyrillic word never splits on case and
+/// only ASCII boundaries do. A word run is therefore "any letter or mark that is not
+/// an ASCII lowercase letter" followed by one that is not an ASCII capital.
+///
+/// The alternation is tried in the pattern's order, and the greedy groups backtrack
+/// as `std::regex` does: `U* L+` gives back letters until `L+` has one to start on,
+/// which is why an all-caps run before a lowercase tail (`HTMLParser`) stays one
+/// piece while `iPhone` splits after the first letter. No alternative fails for any
+/// code point (letter, mark, number, whitespace, punctuation covers everything); the
+/// one-character fallback mirrors llama.cpp's for the theoretically unreachable case.
+pub fn split_tekken(s: &str) -> Vec<&str> {
+    tekken_pieces(s, false)
+}
+
+/// `tekken-num3`: the same pattern with
+/// `\p{N}{1,3}(?=(\p{N}{3})*(?!\p{N}))|\p{N}{1,2}` in place of `\p{N}`, grouping a
+/// digit run in threes from the right (`src/llama-vocab.cpp` lines 432-437).
+pub fn split_tekken_num3(s: &str) -> Vec<&str> {
+    tekken_pieces(s, true)
+}
+
+fn tekken_pieces(s: &str, digits_in_threes: bool) -> Vec<&str> {
+    let cps: Vec<(usize, char)> = s.char_indices().collect();
+    let n = cps.len();
+    let cls: Vec<u8> = cps.iter().map(|&(_, c)| tekken_class(c)).collect();
+    let at = |i: usize| -> u8 { cls.get(i).copied().unwrap_or(0) };
+    let has = |i: usize, bits: u8| at(i) & bits != 0;
+    let word = |i: usize| has(i, TK_LETTER | TK_MARK);
+    let upper = |i: usize| word(i) && !has(i, TK_LOWER);
+    let lower = |i: usize| word(i) && !has(i, TK_UPPER);
+    // `[^\r\n\p{L}\p{N}]`, the optional character that attaches to a word.
+    let prefix = |i: usize| i < n && !has(i, TK_NEWLINE | TK_LETTER | TK_NUMBER);
+    // `[^\s\p{L}\p{N}]`.
+    let punctuation = |i: usize| i < n && !has(i, TK_SPACE | TK_LETTER | TK_NUMBER);
+    let byte = |i: usize| if i < n { cps[i].0 } else { s.len() };
+
+    // Alternative 1: `P? U* L+`, prefix first when there is one.
+    let upper_then_lower = |p: usize| -> Option<usize> {
+        let mut q = p;
+        while upper(q) {
+            q += 1;
+        }
+        // Greedy `U*` gives its last character back until `L+` can start.
+        let mut e = q;
+        loop {
+            if e < n && lower(e) {
+                let mut end = e;
+                while lower(end) {
+                    end += 1;
+                }
+                return Some(end);
+            }
+            if e == p {
+                return None;
+            }
+            e -= 1;
+        }
+    };
+    let alt1 = |pos: usize| -> Option<usize> {
+        if prefix(pos) {
+            if let Some(end) = upper_then_lower(pos + 1) {
+                return Some(end);
+            }
+        }
+        upper_then_lower(pos)
+    };
+
+    // Alternative 2: `P? U+ L*`.
+    let upper_run = |p: usize| -> Option<usize> {
+        if !upper(p) {
+            return None;
+        }
+        let mut end = p;
+        while upper(end) {
+            end += 1;
+        }
+        while lower(end) {
+            end += 1;
+        }
+        Some(end)
+    };
+    let alt2 = |pos: usize| -> Option<usize> {
+        if prefix(pos) {
+            if let Some(end) = upper_run(pos + 1) {
+                return Some(end);
+            }
+        }
+        upper_run(pos)
+    };
+
+    // Alternative 3: `\p{N}`, or the right-aligned groups of `tekken-num3`.
+    let alt3 = |pos: usize| -> Option<usize> {
+        if !has(pos, TK_NUMBER) {
+            return None;
+        }
+        if !digits_in_threes {
+            return Some(pos + 1);
+        }
+        let mut q = pos;
+        while has(q, TK_NUMBER) {
+            q += 1;
+        }
+        // `\p{N}{1,3}` with the lookahead "what follows is a multiple of three".
+        Some(pos + (q - pos - 1) % 3 + 1)
+    };
+
+    // Alternative 4: ` ?[^\s\p{L}\p{N}]+[\r\n/]*`.
+    let alt4 = |pos: usize| -> Option<usize> {
+        let space = cps[pos].1 == ' ' && punctuation(pos + 1);
+        let start = if space { pos + 1 } else { pos };
+        if !punctuation(start) {
+            return None;
+        }
+        let mut end = start;
+        while punctuation(end) {
+            end += 1;
+        }
+        while end < n && matches!(cps[end].1, '\r' | '\n' | '/') {
+            end += 1;
+        }
+        Some(end)
+    };
+
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < n {
+        let mut end = alt1(pos)
+            .or_else(|| alt2(pos))
+            .or_else(|| alt3(pos))
+            .or_else(|| alt4(pos));
+
+        if end.is_none() {
+            let mut ws = 0usize;
+            while has(pos + ws, TK_SPACE) {
+                ws += 1;
+            }
+            if ws > 0 {
+                // `\s*[\r\n]+`: keep everything up to and including the run of
+                // newlines around the whitespace run's *last* newline.
+                let mut newline = None;
+                for k in (0..ws).rev() {
+                    if has(pos + k, TK_NEWLINE) {
+                        newline = Some(pos + k);
+                        break;
+                    }
+                }
+                end = if let Some(r) = newline {
+                    let mut e = r;
+                    while has(e, TK_NEWLINE) {
+                        e += 1;
+                    }
+                    Some(e)
+                } else if ws > 1 && pos + ws < n {
+                    // `\s+(?!\S)`: the run gives back one character when a
+                    // non-space follows, so it can prefix the next word.
+                    Some(pos + ws - 1)
+                } else {
+                    // `\s+`.
+                    Some(pos + ws)
+                };
+            }
+        }
+
+        // No alternative matched: one character (llama.cpp's own fallback).
+        let end = end.unwrap_or(pos + 1);
+        out.push(&s[byte(pos)..byte(end)]);
+        pos = end;
+    }
+    out
+}
+
+/// `nemotron-3.5-embed` only: llama.cpp rewrites `[` + U+200C and `<` + U+200C to
+/// the bare bracket before splitting (`src/llama-vocab.cpp` lines 652-680). One
+/// joiner per bracket goes, and the scan does not revisit a joiner it kept.
+fn strip_zwnj_after_bracket(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev: Option<char> = None;
+    for c in text.chars() {
+        if !(c == '\u{200c}' && matches!(prev, Some('[') | Some('<'))) {
+            out.push(c);
+        }
+        prev = Some(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2906,6 +3312,151 @@ mod tests {
         assert_eq!(split_gpt4o("héllo"), vec!["héllo"]);
         assert_eq!(split_gpt4o("中文"), vec!["中文"]);
         assert_eq!(split_gpt4o("Ⅻfoo"), vec!["Ⅻ", "foo"]);
+    }
+
+    /// The Tekken splitter, against llama.cpp v0.9.0's own `unicode_regex_split` with
+    /// the `LLAMA_VOCAB_PRE_TYPE_TEKKEN` pattern (`src/llama-vocab.cpp` lines 425-431).
+    /// Unlike the other pre-types there is no hand-written implementation there, so
+    /// every expectation below is what `std::regex` returned over llama.cpp's
+    /// collapsed text — including the pieces that surprised: `HTMLParser` stays one
+    /// piece because the first alternative's `U* L+` matches the whole run, while
+    /// `iPhone` splits after the first letter.
+    #[test]
+    fn the_tekken_splitter_matches_llama_cpp() {
+        // Alternative 1: `P? U* L+`. An all-caps run followed by a lowercase tail is
+        // one piece, because the regex does not prefer the shorter `L+`.
+        assert_eq!(split_tekken("HTMLParser"), vec!["HTMLParser"]);
+        assert_eq!(split_tekken("HTTPServer"), vec!["HTTPServer"]);
+        assert_eq!(split_tekken("ABc"), vec!["ABc"]);
+        // Alternative 2: `P? U+ L*`. A lowercase first letter leaves `U+` to the
+        // capitalised tail, which is where `camelCase` splits.
+        assert_eq!(split_tekken("iPhone"), vec!["i", "Phone"]);
+        assert_eq!(split_tekken("macOS"), vec!["mac", "OS"]);
+        assert_eq!(split_tekken("abcDEF"), vec!["abc", "DEF"]);
+        // The optional prefix: one non-letter character attaches to the word.
+        assert_eq!(split_tekken(" hello"), vec![" hello"]);
+        assert_eq!(split_tekken("(hello"), vec!["(hello"]);
+        assert_eq!(split_tekken("-hello"), vec!["-hello"]);
+        assert_eq!(split_tekken("\thello"), vec!["\thello"]);
+        assert_eq!(split_tekken("1hello"), vec!["1", "hello"]);
+        // A quote is not part of a word, but the space before it is its prefix.
+        assert_eq!(split_tekken(" \"hello"), vec![" \"", "hello"]);
+        assert_eq!(split_tekken("it's"), vec!["it", "'s"]);
+        assert_eq!(split_tekken("don't"), vec!["don", "'t"]);
+        assert_eq!(split_tekken("I'LL"), vec!["I", "'LL"]);
+        // Alternative 3: `\p{N}`, one digit at a time.
+        assert_eq!(split_tekken("1"), vec!["1"]);
+        assert_eq!(split_tekken("42"), vec!["4", "2"]);
+        assert_eq!(split_tekken("2026"), vec!["2", "0", "2", "6"]);
+        assert_eq!(split_tekken("12345"), vec!["1", "2", "3", "4", "5"]);
+        assert_eq!(split_tekken("3.14"), vec!["3", ".", "1", "4"]);
+        // Alternative 4: ` ?[^\s\p{L}\p{N}]+[\r\n/]*` — punctuation takes the slash
+        // and newlines that follow it.
+        assert_eq!(split_tekken("a.../b"), vec!["a", ".../", "b"]);
+        assert_eq!(split_tekken("a//b"), vec!["a", "//", "b"]);
+        assert_eq!(split_tekken("///"), vec!["///"]);
+        assert_eq!(split_tekken("x!?\n\ny"), vec!["x", "!?\n\n", "y"]);
+        assert_eq!(split_tekken("x !?\n\ny"), vec!["x", " !?\n\n", "y"]);
+        assert_eq!(split_tekken("a/\n/b"), vec!["a", "/\n/", "b"]);
+        // Alternative 5: `\s*[\r\n]+` — a whitespace run ends at its last newline.
+        assert_eq!(split_tekken("a\n\nb"), vec!["a", "\n\n", "b"]);
+        assert_eq!(split_tekken("a\r\nb"), vec!["a", "\r\n", "b"]);
+        assert_eq!(split_tekken("a\r\rb"), vec!["a", "\r\r", "b"]);
+        assert_eq!(split_tekken("\n"), vec!["\n"]);
+        assert_eq!(split_tekken("\n\n\n"), vec!["\n\n\n"]);
+        assert_eq!(split_tekken(" \n "), vec![" \n", " "]);
+        assert_eq!(split_tekken("a \n \n b"), vec!["a", " \n \n", " b"]);
+        // Alternatives 6 and 7: `\s+(?!\S)` gives back one whitespace character when
+        // a non-space follows, `\s+` keeps a trailing run whole.
+        assert_eq!(split_tekken("a b"), vec!["a", " b"]);
+        assert_eq!(split_tekken("a  b"), vec!["a", " ", " b"]);
+        assert_eq!(split_tekken("  word"), vec![" ", " word"]);
+        assert_eq!(split_tekken("a \tb"), vec!["a", " ", "\tb"]);
+        assert_eq!(split_tekken("a\t b"), vec!["a", "\t", " b"]);
+        assert_eq!(split_tekken("abc "), vec!["abc", " "]);
+        assert_eq!(split_tekken("abc  "), vec!["abc", "  "]);
+        assert_eq!(split_tekken("abc\t"), vec!["abc", "\t"]);
+        assert_eq!(split_tekken("abc \t\n"), vec!["abc", " \t\n"]);
+        // Only ASCII case splits: a non-ASCII letter is both `[^a-z]` and `[^A-Z]` in
+        // llama.cpp's collapsed text, so Greek and Cyrillic runs stay whole.
+        assert_eq!(split_tekken("Привет"), vec!["Привет"]);
+        assert_eq!(split_tekken("Γειά"), vec!["Γειά"]);
+        assert_eq!(split_tekken("中文"), vec!["中文"]);
+        assert_eq!(split_tekken("café"), vec!["café"]);
+        // A combining mark is a letter for this pattern and stays with its base.
+        assert_eq!(split_tekken("e\u{301}"), vec!["e\u{301}"]);
+        assert_eq!(split_tekken("x\u{301}y"), vec!["x\u{301}y"]);
+        // Symbols are punctuation, and can prefix the word after them.
+        assert_eq!(split_tekken("a🙂b"), vec!["a", "🙂b"]);
+        assert_eq!(split_tekken("🙂 a"), vec!["🙂", " a"]);
+        assert_eq!(split_tekken("🙂"), vec!["🙂"]);
+        // The embedding prefixes: the colon is punctuation, the trailing space is a
+        // run of its own because nothing follows it.
+        assert_eq!(split_tekken("query: "), vec!["query", ":", " "]);
+        assert_eq!(split_tekken("passage: "), vec!["passage", ":", " "]);
+        assert_eq!(
+            split_tekken("query: the capital"),
+            vec!["query", ":", " the", " capital"]
+        );
+        // Empty input has no pieces; the tokenizer emits no ids for it.
+        assert!(split_tekken("").is_empty());
+    }
+
+    /// `tekken-num3`: digits in right-aligned groups of three, the same in everything
+    /// else (`src/llama-vocab.cpp` lines 432-437).
+    #[test]
+    fn the_tekken_num3_splitter_matches_llama_cpp() {
+        assert_eq!(split_tekken_num3("1234567"), vec!["1", "234", "567"]);
+        assert_eq!(split_tekken_num3("12345"), vec!["12", "345"]);
+        assert_eq!(split_tekken_num3("1234"), vec!["1", "234"]);
+        assert_eq!(split_tekken_num3("123"), vec!["123"]);
+        assert_eq!(split_tekken_num3("12"), vec!["12"]);
+        assert_eq!(split_tekken_num3("1"), vec!["1"]);
+        assert_eq!(split_tekken_num3("0"), vec!["0"]);
+        assert_eq!(split_tekken_num3("2026"), vec!["2", "026"]);
+        assert_eq!(split_tekken_num3("12.345"), vec!["12", ".", "345"]);
+        assert_eq!(
+            split_tekken_num3("a1234567b"),
+            vec!["a", "1", "234", "567", "b"]
+        );
+        assert_eq!(
+            split_tekken_num3("1 22 333"),
+            vec!["1", " ", "22", " ", "333"]
+        );
+        // Everything that is not a digit splits exactly as `tekken` does.
+        assert_eq!(split_tekken_num3("HTMLParser"), vec!["HTMLParser"]);
+        assert_eq!(split_tekken_num3("iPhone"), vec!["i", "Phone"]);
+        assert_eq!(split_tekken_num3("a  b"), vec!["a", " ", " b"]);
+    }
+
+    /// `nemotron-3.5-embed` drops the zero-width non-joiner after `[` and `<` before
+    /// splitting (`src/llama-vocab.cpp` lines 652-680); `pixtral`/`tekken` does not.
+    #[test]
+    fn the_tekken_joiner_rule_is_nemotron_only() {
+        assert_eq!(strip_zwnj_after_bracket("[\u{200c}INST]"), "[INST]");
+        assert_eq!(strip_zwnj_after_bracket("<\u{200c}s>"), "<s>");
+        assert_eq!(strip_zwnj_after_bracket("x[\u{200c}y"), "x[y");
+        // Not after a bracket: untouched.
+        assert_eq!(strip_zwnj_after_bracket("a\u{200c}b"), "a\u{200c}b");
+        assert_eq!(strip_zwnj_after_bracket("\u{200c}["), "\u{200c}[");
+        // One joiner per bracket, and the scan does not revisit what it rewrote.
+        assert_eq!(strip_zwnj_after_bracket("[\u{200c}\u{200c}"), "[\u{200c}");
+        assert_eq!(
+            strip_zwnj_after_bracket("[[\u{200c}\u{200c}x"),
+            "[[\u{200c}x"
+        );
+        // Without the rule the joiner is a character of its own: llama.cpp splits
+        // `[` + U+200C into a piece of its own and `INST` into another.
+        assert_eq!(
+            split_tekken("[\u{200c}INST]"),
+            vec!["[\u{200c}", "INST", "]"]
+        );
+        // With the rule the text is `[INST]`, which the splitter also cuts apart —
+        // the control token is matched before the splitter ever sees it.
+        assert_eq!(
+            split_tekken(&strip_zwnj_after_bracket("[\u{200c}INST]")),
+            vec!["[INST", "]"]
+        );
     }
 
     #[test]
@@ -3127,8 +3678,17 @@ abc", 3
     #[test]
     fn pre_types_round_trip_their_names() {
         for n in PRE_TYPES {
-            assert_eq!(PreType::from_name(n).unwrap().name(), *n);
+            let pre = PreType::from_name(n).unwrap_or_else(|| panic!("{n} is not accepted"));
+            // Every accepted name maps to a type whose canonical name is also
+            // accepted: `pixtral` is the second name of `tekken`, as in llama.cpp.
+            assert!(PreType::from_name(pre.name()).is_some());
+            assert_eq!(PreType::from_name(pre.name()).unwrap().name(), pre.name());
         }
+        assert_eq!(PreType::from_name("pixtral"), Some(PreType::Tekken));
+        assert_eq!(
+            PreType::from_name("nemotron-3.5-embed"),
+            Some(PreType::Nemotron35Embed)
+        );
         assert!(PreType::from_name("gpt2").is_none());
     }
 
@@ -3256,6 +3816,8 @@ abc", 3
             ids,
             specials: Vec::new(),
             special_index: SpecialIndex::default(),
+            user_specials: Vec::new(),
+            user_index: SpecialIndex::default(),
             bos: 1,
             eos: 1,
             add_bos: false,
