@@ -68,9 +68,14 @@ Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD 
    `tests/labels.rs` covers `Want::Labels`: its emission's values are bit-identical to the same
    entries of the full logits row a reference forward computes for that position, alone, after a
    sibling question with the same prompt prefix (which the prefix store restores on dense `llama`
-   files, while a hybrid `qwen35` recomputes because a snapshot carries no recurrent state) and in a
-   batch of questions, at prefill chunks 1/16/64 and 1/2/4 threads, through both scheduling paths
-   (the mixed engine and a `PEREGRINE_MIX=0` child). The read-out computes the full row and gathers:
+   files; a hybrid `qwen35` snapshot now carries its recurrent state and restores at that snapshot's
+   own length) and in a batch of questions, at prefill chunks 1/16/64 and 1/2/4 threads, through both
+   scheduling paths (the mixed engine and a `PEREGRINE_MIX=0` child). S4.9j's fork is pinned the same
+   way: a question forked from a group's one evaluation of the shared beginning equals the same
+   question computed alone, for groups of 2/3/10 with different tail lengths, the fork at 1, at a
+   chunk boundary, mid-chunk and one row before the end, in the f16 and f32 caches, on both synthetic
+   families; a count test pins rows forwarded at `prefix + Σ tail`, and a repeated-state test pins the
+   store's restore across requests. The read-out computes the full row and gathers:
    the output head has no cheaper path that would stay bit-identical. The same file checks that a
    question's logits are bit-identical beside an embedding slot and a decoding chat slot, which is
    what one server serving all three endpoints asks the engine for.

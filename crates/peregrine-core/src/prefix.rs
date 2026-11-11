@@ -69,7 +69,13 @@ impl PrefixStore {
         let mut i = 0;
         while i < self.entries.len() {
             let e = &self.entries[i];
-            if e.tokens.len() <= tokens.len() && tokens[..e.tokens.len()] == *e.tokens {
+            // A dense snapshot of a longer beginning serves the shorter one too (it restores any
+            // length up to its own). A hybrid snapshot carries the recurrent state after *its*
+            // length, so it cannot: the shorter entry stays (S4.9j).
+            if e.tokens.len() <= tokens.len()
+                && tokens[..e.tokens.len()] == *e.tokens
+                && !e.snap.has_recurrent()
+            {
                 self.bytes -= self.entries.swap_remove(i).snap.bytes();
             } else {
                 i += 1;
@@ -93,16 +99,41 @@ impl PrefixStore {
     /// The entry that shares the longest beginning with `prompt` (at most `limit` tokens of it, at least [`MIN_PREFIX`]),
     /// with that length.
     pub fn best(&mut self, prompt: &[u32], limit: usize) -> Option<(&KvSnapshot, usize)> {
+        self.best_where(prompt, limit, |_, _| true)
+    }
+
+    /// The entry that shares the longest beginning with `prompt` that `usable` accepts at that length.
+    ///
+    /// A hybrid model's snapshot carries its recurrent state, which describes exactly the snapshot's length:
+    /// it can be restored at that length only. Asking for an entry this cache can actually use keeps a
+    /// longer entry that only shares a shorter beginning from hiding the state snapshot behind it (S4.9j).
+    pub fn best_where(
+        &mut self,
+        prompt: &[u32],
+        limit: usize,
+        usable: impl Fn(&KvSnapshot, usize) -> bool,
+    ) -> Option<(&KvSnapshot, usize)> {
         let (idx, lcp) = self
             .entries
             .iter()
             .enumerate()
             .map(|(i, e)| (i, common_prefix(prompt, &e.tokens).min(limit)))
-            .max_by_key(|&(_, l)| l)
-            .filter(|&(_, l)| l >= MIN_PREFIX)?;
+            .filter(|&(i, l)| l >= MIN_PREFIX && usable(&self.entries[i].snap, l))
+            .max_by_key(|&(_, l)| l)?;
         self.tick += 1;
         self.entries[idx].used = self.tick;
         Some((&self.entries[idx].snap, lcp))
+    }
+
+    /// Bytes the store may hold.
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// Make room for `n` more entries, so that a later [`PrefixStore::insert`] does not allocate (the
+    /// engine reserves its group fork's entry when the group is admitted; S4.9j).
+    pub fn reserve(&mut self, n: usize) {
+        self.entries.reserve(n);
     }
 
     /// Book a restore that skipped `positions` positions of prefill.

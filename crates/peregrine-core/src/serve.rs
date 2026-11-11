@@ -364,6 +364,19 @@ struct Slot {
     /// The cache belongs to the caller, not to the engine: a conversation lends
     /// it for its turn and takes it back when the turn ends.
     owned_cache: bool,
+    /// S4.9j: the slots this slot's state is copied into once it has forwarded the group's shared
+    /// beginning (it leads a decision request's questions). Empty for an ordinary slot.
+    fork_to: Vec<SlotId>,
+    /// S4.9j: the position the group's shared beginning ends at, and its state is forked there.
+    /// 0 for an ordinary slot.
+    fork_at: usize,
+    /// S4.9j: this slot waits for its group's leader to reach `fork_at` and forwards nothing until
+    /// then: its cache is empty, and the fork fills it.
+    fork_wait: bool,
+    /// S4.9j: room for the shared prefix's snapshot, reserved when the group is admitted so the fork
+    /// can hand it to the prefix store without allocating, and the tokens it is kept under.
+    fork_snap: Option<crate::kv::KvSnapshot>,
+    fork_tokens: Vec<u32>,
 }
 
 /// MTP speculation for a lone user; `PEREGRINE_MTP=0` turns it off.
@@ -379,10 +392,21 @@ impl Slot {
 
     /// The prompt positions this slot forwards in prefill: a token slot leaves its last token for the
     /// first decode step; a pooled or labels slot forwards all of them.
+    ///
+    /// A group's leader forwards only the shared beginning first: its slot stops at `fork_at`, the state
+    /// is copied into the other questions' slots there, and its own tail follows (S4.9j).
     fn prefill_len(&self) -> usize {
-        match self.want {
+        if self.fork_wait {
+            return 0;
+        }
+        let full = match self.want {
             Want::Tokens => self.prompt.len() - 1,
             Want::Pooled(_) | Want::Labels => self.prompt.len(),
+        };
+        if self.fed < self.fork_at {
+            self.fork_at
+        } else {
+            full
         }
     }
 
@@ -545,6 +569,15 @@ pub struct Engine {
     draft_rate: Option<f64>,
     /// The drafting rounds measured.
     drafted_rounds: u64,
+}
+
+/// S4.9j: what a group admission asks of one question's slot.
+#[derive(Clone, Copy)]
+struct Fork {
+    /// The position the group's shared beginning ends at (the state is forked there).
+    at: usize,
+    /// The slot waits for the leader to reach `at` and forwards nothing until then.
+    wait: bool,
 }
 
 impl Engine {
@@ -725,7 +758,7 @@ impl Engine {
 
     /// Take a request, or give it back when every slot is busy or the prompt cannot fit.
     pub fn admit(&mut self, prompt: Vec<u32>, cfg: SlotCfg) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, Want::Tokens, None, Vec::new())
+        self.admit_inner(prompt, cfg, Want::Tokens, None, Vec::new(), None)
     }
 
     /// Admit an embedding request (S4.1): the slot is prefilled like any prompt, beside the
@@ -739,7 +772,7 @@ impl Engine {
         cfg: SlotCfg,
         pooling: Pooling,
     ) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, Want::Pooled(pooling), None, Vec::new())
+        self.admit_inner(prompt, cfg, Want::Pooled(pooling), None, Vec::new(), None)
     }
 
     /// Admit a decision model's label read-out (S4.3): the slot is prefilled like a pooled slot
@@ -755,7 +788,135 @@ impl Engine {
         cfg: SlotCfg,
         labels: Vec<u32>,
     ) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, Want::Labels, None, labels)
+        self.admit_inner(prompt, cfg, Want::Labels, None, labels, None)
+    }
+
+    /// Admit a decision request's questions as one group (S4.9j): the longest common beginning of
+    /// their prompts is forwarded **once**, in the first question's slot, and its state is copied
+    /// into every other question's slot at that position. Each then forwards only its own tail, and
+    /// all tails share weight passes.
+    ///
+    /// `prompts` are the questions' token ids and `labels` their read-out ids, in request order. The
+    /// group needs a free slot per question; a request with more questions than slots is admitted in
+    /// several groups (each re-evaluates — or restores — the shared beginning). When the common
+    /// beginning is shorter than [`crate::prefix::MIN_PREFIX`], the questions are admitted
+    /// independently, exactly as [`Self::admit_labels`] does, because the fork would buy nothing.
+    ///
+    /// The shared beginning is also offered to the prefix store when the group forks (if the store
+    /// has a budget), so the next request with the same state restores it instead of forwarding it.
+    ///
+    /// On `Err` no slot has been admitted.
+    pub fn admit_labels_group(
+        &mut self,
+        prompts: Vec<Vec<u32>>,
+        cfg: SlotCfg,
+        labels: Vec<Vec<u32>>,
+    ) -> Result<Vec<SlotId>, String> {
+        self.admit_labels_group_from(prompts, cfg, labels, crate::prefix::MIN_PREFIX)
+    }
+
+    /// [`Self::admit_labels_group`] with the shortest common beginning worth a fork.
+    ///
+    /// The endpoint keeps the store's threshold; a test (or a measurement) that pins the fork at a
+    /// position below it passes 1 here.
+    pub fn admit_labels_group_from(
+        &mut self,
+        prompts: Vec<Vec<u32>>,
+        cfg: SlotCfg,
+        labels: Vec<Vec<u32>>,
+        min_prefix: usize,
+    ) -> Result<Vec<SlotId>, String> {
+        let n = prompts.len();
+        if n == 0 {
+            return Err("a group needs at least one question".into());
+        }
+        if labels.len() != n {
+            return Err(format!("{n} prompts but {} label lists", labels.len()));
+        }
+        for (prompt, label) in prompts.iter().zip(&labels) {
+            self.check_request(prompt, Want::Labels, label)?;
+        }
+        let free = self.max_slots.saturating_sub(self.slots.len());
+        if n > free {
+            return Err(format!(
+                "a group of {n} questions needs {n} free slots, {free} are free"
+            ));
+        }
+        // The longest common beginning. It stops one row short of the shortest question: every
+        // question must keep a row of its own to perform the read-out (a labels slot's answer is its
+        // last prompt row's logits).
+        let mut at = prompts
+            .iter()
+            .map(Vec::len)
+            .min()
+            .unwrap_or(0)
+            .saturating_sub(1);
+        for q in &prompts[1..] {
+            at = at.min(crate::prefix::common_prefix(&prompts[0], q));
+        }
+        if n == 1 || at < min_prefix {
+            // Too little is shared to be worth a fork: admit them as separate slots, as before.
+            let mut ids = Vec::with_capacity(n);
+            for (prompt, label) in prompts.into_iter().zip(labels) {
+                match self.admit_labels(prompt, cfg.clone(), label) {
+                    Ok(id) => ids.push(id),
+                    Err((_, e)) => {
+                        self.slots.retain(|s| !ids.contains(&s.id));
+                        return Err(e);
+                    }
+                }
+            }
+            return Ok(ids);
+        }
+        let leader_idx = self.slots.len();
+        let mut ids: Vec<SlotId> = Vec::with_capacity(n);
+        let mut questions = prompts.into_iter().zip(labels);
+        let (first, first_labels) = questions.next().expect("a non-empty group");
+        let leader = match self.admit_inner(
+            first,
+            cfg.clone(),
+            Want::Labels,
+            None,
+            first_labels,
+            Some(Fork { at, wait: false }),
+        ) {
+            Ok(id) => id,
+            Err((_, e)) => return Err(e),
+        };
+        ids.push(leader);
+        for (prompt, label) in questions {
+            match self.admit_inner(
+                prompt,
+                cfg.clone(),
+                Want::Labels,
+                None,
+                label,
+                Some(Fork { at, wait: true }),
+            ) {
+                Ok(id) => ids.push(id),
+                Err((_, e)) => {
+                    self.slots.retain(|s| !ids.contains(&s.id));
+                    return Err(e);
+                }
+            }
+        }
+        // Keep the shared beginning for the next request, if it is not there already. The snapshot's
+        // room is taken now, so the fork itself copies into buffers the admission allocated.
+        let uncovered = !self.prefixes.covers(&self.slots[leader_idx].prompt[..at]);
+        let bytes = self.slots[leader_idx].kv.snapshot_bytes(at);
+        if at >= crate::prefix::MIN_PREFIX && uncovered && bytes <= self.prefixes.budget() {
+            let snap = self.slots[leader_idx].kv.snapshot_reserve(at);
+            let tokens = self.slots[leader_idx].prompt[..at].to_vec();
+            self.slots[leader_idx].fork_snap = Some(snap);
+            self.slots[leader_idx].fork_tokens = tokens;
+            // Both the snapshot's buffers and the store's next entry are made here, so the fork
+            // itself (in a step) allocates nothing.
+            self.prefixes.reserve(1);
+        }
+        self.slots[leader_idx].fork_to = ids[1..].to_vec();
+        // A leader that restored the whole beginning from the store is already at the fork position.
+        self.fork_groups();
+        Ok(ids)
     }
 
     /// Admit a slot that runs on the caller's own cache (ADR 0007).
@@ -775,7 +936,7 @@ impl Engine {
         cfg: SlotCfg,
         kv: KvCache,
     ) -> Result<SlotId, (Vec<u32>, String)> {
-        self.admit_inner(prompt, cfg, Want::Tokens, Some(kv), Vec::new())
+        self.admit_inner(prompt, cfg, Want::Tokens, Some(kv), Vec::new(), None)
     }
 
     /// What a conversation's slot left behind when its turn ended: the cache it
@@ -817,6 +978,64 @@ impl Engine {
         Err((prompt, e))
     }
 
+    /// The checks every request passes before a slot exists (S4.9j: a group checks every question
+    /// first, so it either starts all of them or none).
+    fn check_request(&self, prompt: &[u32], want: Want, labels: &[u32]) -> Result<(), String> {
+        if prompt.is_empty() {
+            return Err("the prompt is empty".into());
+        }
+        let bidirectional = self.model.causality() == crate::arch::Causality::Bidirectional;
+        // An encoder has no decode path at all: a chat request on it is refused by name
+        // (design §3). Everything it serves is a whole text, so it is pooled.
+        if bidirectional && want.is_tokens() {
+            return Err(format!(
+                "{} is an embedding model and cannot generate text; use /v1/embeddings (or `peregrine embed`)",
+                self.model.cfg.arch_name
+            ));
+        }
+        // A labels slot reads one prompt row's logits at a few token ids (S4.3). That is a
+        // decoder's read-out; an encoder has no decode path and no such rows, so it is refused
+        // by name, as a token slot is above (design §3).
+        if bidirectional && want.is_labels() {
+            return Err(format!(
+                "{} is an embedding model and cannot read label logits; use /v1/embeddings (or `peregrine embed`)",
+                self.model.cfg.arch_name
+            ));
+        }
+        // A pooled slot pools the rows the model computed; `Cls` needs an encoder (S4.4 onward),
+        // and a causal decoder's row 0 is one token's view, not a text's vector.
+        if let Want::Pooled(Pooling::Cls) = want {
+            if !bidirectional {
+                return Err("cls pooling is not implemented for causal models".into());
+            }
+        }
+        if want.is_labels() {
+            if labels.is_empty() {
+                return Err("a labels slot needs a label token".into());
+            }
+            if let Some(&l) = labels
+                .iter()
+                .find(|&&l| l as usize >= self.model.cfg.n_vocab)
+            {
+                return Err(format!(
+                    "label token {l} is outside the vocabulary of {}",
+                    self.model.cfg.n_vocab
+                ));
+            }
+        }
+        // A token slot needs one position after its prompt for the first decode step; a pooled or
+        // labels slot forwards the prompt itself and needs no more.
+        let extra = usize::from(!want.whole_prompt());
+        if prompt.len() + extra > self.max_ctx {
+            return Err(format!(
+                "prompt of {} tokens does not fit in {} positions",
+                prompt.len(),
+                self.max_ctx
+            ));
+        }
+        Ok(())
+    }
+
     fn admit_inner(
         &mut self,
         prompt: Vec<u32>,
@@ -824,86 +1043,19 @@ impl Engine {
         want: Want,
         cache: Option<KvCache>,
         labels: Vec<u32>,
+        forking: Option<Fork>,
     ) -> Result<SlotId, (Vec<u32>, String)> {
         if !self.has_room() {
             return self.refuse(prompt, cache, "every slot is busy".into());
         }
-        if prompt.is_empty() {
-            return self.refuse(prompt, cache, "the prompt is empty".into());
-        }
         let bidirectional = self.model.causality() == crate::arch::Causality::Bidirectional;
-        // An encoder has no decode path at all: a chat request on it is refused by name
-        // (design §3). Everything it serves is a whole text, so it is pooled.
-        if bidirectional && want.is_tokens() {
-            return self.refuse(
-                prompt,
-                cache,
-                format!(
-                    "{} is an embedding model and cannot generate text; use /v1/embeddings (or `peregrine embed`)",
-                    self.model.cfg.arch_name
-                ),
-            );
-        }
-        // A labels slot reads one prompt row's logits at a few token ids (S4.3). That is a
-        // decoder's read-out; an encoder has no decode path and no such rows, so it is refused
-        // by name, as a token slot is above (design §3).
-        if bidirectional && want.is_labels() {
-            return self.refuse(
-                prompt,
-                cache,
-                format!(
-                    "{} is an embedding model and cannot read label logits; use /v1/embeddings (or `peregrine embed`)",
-                    self.model.cfg.arch_name
-                ),
-            );
-        }
-        if want.is_labels() {
-            if labels.is_empty() {
-                return self.refuse(prompt, cache, "a labels slot needs a label token".into());
-            }
-            if let Some(&l) = labels
-                .iter()
-                .find(|&&l| l as usize >= self.model.cfg.n_vocab)
-            {
-                return self.refuse(
-                    prompt,
-                    cache,
-                    format!(
-                        "label token {l} is outside the vocabulary of {}",
-                        self.model.cfg.n_vocab
-                    ),
-                );
-            }
-        }
-        // A pooled slot pools the rows the model computed; `Cls` needs an encoder (S4.4 onward),
-        // and a causal decoder's row 0 is one token's view, not a text's vector.
-        if let Want::Pooled(Pooling::Cls) = want {
-            if !bidirectional {
-                return self.refuse(
-                    prompt,
-                    cache,
-                    "cls pooling is not implemented for causal models".into(),
-                );
-            }
+        if let Err(e) = self.check_request(&prompt, want, &labels) {
+            return self.refuse(prompt, cache, e);
         }
         let whole = want.whole_prompt();
-        // A token slot needs one position after its prompt for the first decode step; a pooled or
-        // labels slot forwards the prompt itself and needs no more.
-        let extra = usize::from(!whole);
-        if prompt.len() + extra > self.max_ctx {
-            let n = prompt.len();
-            return self.refuse(
-                prompt,
-                cache,
-                format!(
-                    "prompt of {n} tokens does not fit in {} positions",
-                    self.max_ctx
-                ),
-            );
-        }
         // The last prompt token is never prefilled (it is what the first decode step feeds), so a prefix may
-        // cover everything before it.
-        let cap = prompt.len() - 1;
+        // cover everything before it. A group's leader may only restore what the whole group shares.
+        let cap = forking.map_or(prompt.len() - 1, |f| f.at);
         // The drafter the slot asks for, built for this slot. It is built
         // before the prefix store is consulted: a drafter's corpus and context
         // start at position 0, so a restored prefix would leave them short.
@@ -949,6 +1101,10 @@ impl Engine {
         };
         let fed = if given {
             kv.filled()
+        } else if forking.is_some_and(|f| f.wait) {
+            // S4.9j: a group's follower forwards nothing of its own: its leader forwards the shared
+            // beginning and the state is copied in at `fork_at`.
+            0
         } else if asked.is_some() || matches!(want, Want::Pooled(_)) {
             // A pooled slot starts at position 0: `Mean` needs every row of the text, and a
             // restored prefix would leave its rows uncomputed.
@@ -959,7 +1115,12 @@ impl Engine {
             // slot has always reused a prefix the same way.)
             0
         } else {
-            match self.prefixes.best(&prompt, cap) {
+            // A hybrid snapshot carries the recurrent state after its own length: the store is asked
+            // for the longest beginning this cache can actually restore (S4.9j).
+            match self
+                .prefixes
+                .best_where(&prompt, cap, |snap, lcp| kv.can_restore(snap, lcp))
+            {
                 Some((snap, lcp)) if kv.restore(snap, lcp) => {
                     self.prefixes.note_hit(lcp);
                     lcp
@@ -1041,6 +1202,11 @@ impl Engine {
             decode_s: 0.0,
             pen,
             owned_cache: given,
+            fork_to: Vec::new(),
+            fork_at: forking.map_or(0, |f| f.at),
+            fork_wait: forking.is_some_and(|f| f.wait),
+            fork_snap: None,
+            fork_tokens: Vec::new(),
         });
         if speculating {
             self.spec_slot = Some(id);
@@ -1265,6 +1431,18 @@ impl Engine {
             if self.spec_slot == Some(id) {
                 self.spec_slot = None;
             }
+            // S4.9j: a group whose leader went away before its fork leaves its questions with an
+            // empty cache. They forward their own prompts instead of waiting for a prefix that will
+            // never be copied in.
+            for fid in &s.fork_to {
+                if let Some(fi) = self.slots.iter().position(|x| x.id == *fid) {
+                    let f = &mut self.slots[fi];
+                    f.fork_wait = false;
+                    f.fed = 0;
+                    f.pos = 0;
+                    f.prefilled = 0;
+                }
+            }
             // A conversation's cache is the conversation's: it goes back to the
             // caller, which decides what to keep of it.
             if s.owned_cache {
@@ -1309,13 +1487,88 @@ impl Engine {
         tokens.extend(&s.fed_back);
         let n = tokens.len().min(s.kv.filled());
         tokens.truncate(n);
-        // a hybrid model's snapshot would hold no recurrent state, so it could never be restored.
-        if n < crate::prefix::MIN_PREFIX || self.prefixes.covers(&tokens) || s.kv.has_recurrent() {
+        // S4.9j: a hybrid snapshot carries the recurrent state too, so it is kept like a dense one; it is
+        // restorable at its own length only, which is what the store's lookup asks for. A group question's
+        // full prompt is an exception: the beginning it shares with its siblings is kept once, when the
+        // group forks, and a second snapshot of the same 20 MB state per question would only evict it.
+        if n < crate::prefix::MIN_PREFIX || self.prefixes.covers(&tokens) {
+            return;
+        }
+        if s.kv.has_recurrent() && s.fork_at > 0 {
             return;
         }
         let snap = s.kv.snapshot(n);
         debug_assert_eq!(snap.len(), tokens.len());
         self.prefixes.insert(tokens, snap);
+    }
+
+    /// S4.9j: copy a decision group's shared state from its leader into the question slots that wait
+    /// for it.
+    ///
+    /// The leader is the group's first question: it forwarded rows `0..fork_at` once, and every
+    /// follower continues at `fork_at` from a byte-for-byte copy of what the leader stored (attention
+    /// K/V, and a hybrid model's recurrent state and convolution history). Nothing is recomputed and
+    /// nothing allocates: the followers' caches were allocated at admission.
+    ///
+    /// Also offers the shared beginning to the prefix store, so a later request with the same state
+    /// restores it instead of forwarding it. The snapshot's buffers were reserved at admission.
+    fn fork_groups(&mut self) {
+        let mut li = 0;
+        while li < self.slots.len() {
+            if self.slots[li].fork_to.is_empty() || self.slots[li].fed < self.slots[li].fork_at {
+                li += 1;
+                continue;
+            }
+            let at = self.slots[li].fork_at;
+            let ids = std::mem::take(&mut self.slots[li].fork_to);
+            self.keep_forked_prefix(li);
+            for id in ids {
+                let Some(fi) = self.slots.iter().position(|s| s.id == id) else {
+                    continue;
+                };
+                let forked = if fi > li {
+                    let (left, right) = self.slots.split_at_mut(fi);
+                    right[0].kv.fork_from(&left[li].kv, at)
+                } else if fi < li {
+                    let (left, right) = self.slots.split_at_mut(li);
+                    left[fi].kv.fork_from(&right[0].kv, at)
+                } else {
+                    false
+                };
+                let f = &mut self.slots[fi];
+                if forked {
+                    f.fork_wait = false;
+                    f.fed = at;
+                    f.pos = at;
+                    // The shared rows were forwarded once for the whole group: they are not owed
+                    // again, but this question did not compute them either. `prefilled` counts what
+                    // the request paid for, and it paid for the group's one evaluation.
+                    f.prefilled = at;
+                } else {
+                    // Cannot happen with caches of one engine (same geometry, same precision). If it
+                    // ever did, the question would forward its own prompt rather than wait forever.
+                    f.fork_wait = false;
+                    f.fed = 0;
+                    f.pos = 0;
+                    f.prefilled = 0;
+                }
+            }
+            li += 1;
+        }
+    }
+
+    /// Keep a group's shared beginning under its tokens, if the store has room for it and does not
+    /// hold it already.
+    fn keep_forked_prefix(&mut self, li: usize) {
+        let Some(mut snap) = self.slots[li].fork_snap.take() else {
+            return;
+        };
+        let at = self.slots[li].fork_at;
+        let tokens = std::mem::take(&mut self.slots[li].fork_tokens);
+        self.slots[li].kv.snapshot_into(&mut snap, at);
+        if tokens.len() == at {
+            self.prefixes.insert(tokens, snap);
+        }
     }
 
     /// Where the engine's time has gone, in milliseconds: matmul, output head, attention, other, sampling,
@@ -1718,6 +1971,9 @@ impl Engine {
                 label_logits,
             });
         }
+        // S4.9j: a group's leader may have just reached the shared beginning's end; the other
+        // questions continue from its state from the next pass on.
+        self.fork_groups();
         // The decode slots are reaped by `finish_decode` after it reads them; the pooled ones
         // are reaped here, after `finish_decode` has used its slot indices (`reap` compacts
         // the slot list, so it must not run while an index into it is still live).
@@ -1833,6 +2089,8 @@ impl Engine {
                 });
             }
         }
+        // S4.9j: this chunk may have completed a group's shared beginning.
+        self.fork_groups();
         // What the chunk cost: a conversation reports the prompt's own time
         // apart from the decode steps'.
         self.last_step = StepReport {

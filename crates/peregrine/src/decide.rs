@@ -108,26 +108,35 @@ pub fn run(args: &DecideArgs) -> Result<(), String> {
         .max(1);
     let mut engine = Engine::new(model.clone(), threads, ctx, slots, KvPrec::F16, 0);
     let labels = decider.labels();
+    let question_labels: Vec<Vec<u32>> = questions
+        .iter()
+        .map(|(_, question)| labels[..question.options.len()].to_vec())
+        .collect();
     let mut by_slot: HashMap<u64, usize> = HashMap::new();
     let mut next = 0usize;
     let mut done: Vec<Option<Vec<f32>>> = vec![None; prompts.len()];
-    let admit = |engine: &mut Engine, by_slot: &mut HashMap<u64, usize>, i: usize| {
-        let id = engine
-            .admit_labels(
-                prompts[i].clone(),
-                SlotCfg::default(),
-                labels[..questions[i].1.options.len()].to_vec(),
-            )
-            .map_err(|(_, e)| e)?;
-        by_slot.insert(id, i);
-        Ok::<(), String>(())
-    };
-    while next < prompts.len() && engine.has_room() {
-        admit(&mut engine, &mut by_slot, next)?;
-        next += 1;
-    }
+    // S4.9j: one group per pass over the free slots. The questions' shared beginning is forwarded
+    // once and forked into each question's slot; a request wider than the engine is admitted in
+    // several groups, each forked from one evaluation (or a prefix-store restore) of it.
     let mut remaining = prompts.len();
-    while remaining > 0 {
+    loop {
+        while next < prompts.len() && engine.has_room() {
+            let free = engine.max_slots() - engine.active();
+            let k = free.min(prompts.len() - next);
+            let ids = engine.admit_labels_group(
+                prompts[next..next + k].to_vec(),
+                SlotCfg::default(),
+                question_labels[next..next + k].to_vec(),
+            )?;
+            debug_assert_eq!(ids.len(), k);
+            for (j, id) in ids.into_iter().enumerate() {
+                by_slot.insert(id, next + j);
+            }
+            next += k;
+        }
+        if remaining == 0 {
+            break;
+        }
         for em in engine.step() {
             let Some(i) = by_slot.remove(&em.slot) else {
                 continue;
@@ -140,10 +149,6 @@ pub fn run(args: &DecideArgs) -> Result<(), String> {
             };
             done[i] = Some(scores);
             remaining -= 1;
-        }
-        while next < prompts.len() && engine.has_room() {
-            admit(&mut engine, &mut by_slot, next)?;
-            next += 1;
         }
     }
 

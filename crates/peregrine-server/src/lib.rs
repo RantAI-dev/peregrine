@@ -1139,8 +1139,24 @@ struct Job {
     out: tokio::sync::mpsc::UnboundedSender<Emission>,
 }
 
+/// A decision request's questions, admitted as one group (S4.9j): their shared beginning is
+/// forwarded once and forked into each question's slot.
+struct GroupJob {
+    prompts: Vec<Vec<u32>>,
+    /// Each question's read-out ids, in request order.
+    labels: Vec<Vec<u32>>,
+    outs: Vec<tokio::sync::mpsc::UnboundedSender<Emission>>,
+}
+
+/// What the engine thread's queue holds: one request, or a decision group of several.
+enum Queued {
+    One(Box<Job>),
+    Group(Box<GroupJob>),
+}
+
 enum EngineMsg {
     Run(Box<Job>),
+    RunGroup(Box<GroupJob>),
     Cancel(SlotId),
 }
 
@@ -1154,7 +1170,7 @@ fn engine_thread(
     shared: Arc<EngineShared>,
 ) {
     let mut routes: HashMap<SlotId, tokio::sync::mpsc::UnboundedSender<Emission>> = HashMap::new();
-    let mut waiting: VecDeque<Job> = VecDeque::new();
+    let mut waiting: VecDeque<Queued> = VecDeque::new();
     // `PEREGRINE_PROF2=1`: a periodic breakdown of the engine thread's step, on stderr.
     // The engine's own phase counters are caller-thread timers, so this is where they
     // can be read without touching the hot path. `=full` adds the inner-loop buckets.
@@ -1165,10 +1181,11 @@ fn engine_thread(
     let mut prof_wall = Duration::ZERO;
     let mut prof_at = Instant::now();
     let take = |msg,
-                waiting: &mut VecDeque<Job>,
+                waiting: &mut VecDeque<Queued>,
                 engine: &mut Engine,
                 routes: &mut HashMap<_, _>| match msg {
-        EngineMsg::Run(j) => waiting.push_back(*j),
+        EngineMsg::Run(j) => waiting.push_back(Queued::One(j)),
+        EngineMsg::RunGroup(g) => waiting.push_back(Queued::Group(g)),
         EngineMsg::Cancel(id) => {
             engine.cancel(id);
             routes.remove(&id);
@@ -1183,31 +1200,93 @@ fn engine_thread(
             }
         }
         while engine.has_room() {
-            let Some(j) = waiting.pop_front() else { break };
-            // A caller that has gone is not worth a prefill.
-            if j.out.is_closed() {
-                continue;
-            }
-            let admitted = match j.want {
-                Want::Tokens => engine.admit(j.prompt, j.cfg),
-                Want::Pooled(pooling) => engine.admit_pooled(j.prompt, j.cfg, pooling),
-                Want::Labels => engine.admit_labels(j.prompt, j.cfg, j.labels),
-            };
-            match admitted {
-                Ok(id) => {
-                    routes.insert(id, j.out);
+            let Some(q) = waiting.pop_front() else { break };
+            match q {
+                Queued::One(j) => {
+                    // A caller that has gone is not worth a prefill.
+                    if j.out.is_closed() {
+                        continue;
+                    }
+                    let admitted = match j.want {
+                        Want::Tokens => engine.admit(j.prompt, j.cfg),
+                        Want::Pooled(pooling) => engine.admit_pooled(j.prompt, j.cfg, pooling),
+                        Want::Labels => engine.admit_labels(j.prompt, j.cfg, j.labels),
+                    };
+                    match admitted {
+                        Ok(id) => {
+                            routes.insert(id, j.out);
+                        }
+                        Err((_, why)) => {
+                            let _ = j.out.send(Emission {
+                                slot: 0,
+                                token: 0,
+                                text: String::new(),
+                                logprob: 0.0,
+                                finish: Some(Finish::Error(why)),
+                                cost: None,
+                                embedding: None,
+                                label_logits: None,
+                            });
+                        }
+                    }
                 }
-                Err((_, why)) => {
-                    let _ = j.out.send(Emission {
-                        slot: 0,
-                        token: 0,
-                        text: String::new(),
-                        logprob: 0.0,
-                        finish: Some(Finish::Error(why)),
-                        cost: None,
-                        embedding: None,
-                        label_logits: None,
-                    });
+                Queued::Group(mut g) => {
+                    // A question's caller that has gone takes its question with it.
+                    while let Some(pos) = (0..g.outs.len()).find(|&i| g.outs[i].is_closed()) {
+                        g.prompts.remove(pos);
+                        g.labels.remove(pos);
+                        g.outs.remove(pos);
+                    }
+                    if g.prompts.is_empty() {
+                        continue;
+                    }
+                    // As many questions as there are free slots: each group forwards its shared
+                    // beginning once (the rest of the request waits for the next group).
+                    let free = engine.max_slots() - engine.active();
+                    let k = free.min(g.prompts.len());
+                    if k == 0 {
+                        waiting.push_front(Queued::Group(g));
+                        break;
+                    }
+                    let tail = k < g.prompts.len();
+                    let (tail_prompts, tail_labels, tail_outs) = if tail {
+                        (
+                            g.prompts.split_off(k),
+                            g.labels.split_off(k),
+                            g.outs.split_off(k),
+                        )
+                    } else {
+                        (Vec::new(), Vec::new(), Vec::new())
+                    };
+                    let (prompts, labels, outs) = (g.prompts, g.labels, g.outs);
+                    if tail {
+                        waiting.push_front(Queued::Group(Box::new(GroupJob {
+                            prompts: tail_prompts,
+                            labels: tail_labels,
+                            outs: tail_outs,
+                        })));
+                    }
+                    match engine.admit_labels_group(prompts, SlotCfg::default(), labels) {
+                        Ok(ids) => {
+                            for (id, out) in ids.into_iter().zip(outs) {
+                                routes.insert(id, out);
+                            }
+                        }
+                        Err(why) => {
+                            for out in outs {
+                                let _ = out.send(Emission {
+                                    slot: 0,
+                                    token: 0,
+                                    text: String::new(),
+                                    logprob: 0.0,
+                                    finish: Some(Finish::Error(why.clone())),
+                                    cost: None,
+                                    embedding: None,
+                                    label_logits: None,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1658,6 +1737,45 @@ async fn run_jobs(app: &Arc<App>, jobs: Vec<SlotJob>) -> Result<Vec<Emission>, B
         }
         rxs.push(erx);
     }
+    collect(rxs).await
+}
+
+/// Submit a decision request's questions as one group (S4.9j) and collect their emissions in
+/// request order.
+///
+/// The engine forwards their shared beginning once, forks its state into one slot per question
+/// and runs the tails together; a request with more questions than slots is split into groups by
+/// the engine thread, each group forked from one evaluation of the shared beginning.
+async fn run_group_jobs(
+    app: &Arc<App>,
+    prompts: Vec<Vec<u32>>,
+    labels: Vec<Vec<u32>>,
+) -> Result<Vec<Emission>, Box<Response>> {
+    let mut rxs = Vec::with_capacity(prompts.len());
+    let mut outs = Vec::with_capacity(prompts.len());
+    for _ in 0..prompts.len() {
+        let (etx, erx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
+        outs.push(etx);
+        rxs.push(erx);
+    }
+    if app
+        .jobs
+        .send(EngineMsg::RunGroup(Box::new(GroupJob {
+            prompts,
+            labels,
+            outs,
+        })))
+        .is_err()
+    {
+        return Err(Box::new(internal("the engine is not running")));
+    }
+    collect(rxs).await
+}
+
+/// The emissions of one submitted job per receiver, in submission order.
+async fn collect(
+    rxs: Vec<tokio::sync::mpsc::UnboundedReceiver<Emission>>,
+) -> Result<Vec<Emission>, Box<Response>> {
     let mut out = Vec::with_capacity(rxs.len());
     for mut rx in rxs {
         let Some(em) = rx.recv().await else {
@@ -2033,17 +2151,15 @@ async fn systemone(State(app): State<Arc<App>>, OrderedJson(body): OrderedJson) 
     let _busy = BusyGuard(app.clone());
     app.requests.fetch_add(1, Ordering::SeqCst);
     let labels = decider.labels();
-    let jobs = prompts
-        .into_iter()
-        .zip(&questions)
-        .map(|(prompt, (_, question))| SlotJob {
-            prompt,
-            want: Want::Labels,
-            // Option `i` is read at letter `i`; a question with fewer options reads fewer.
-            labels: labels[..question.options.len()].to_vec(),
-        })
+    // S4.9j: one group for the whole request — the questions' shared beginning is forwarded once
+    // and forked into each question's slot; the engine splits a request wider than its slots into
+    // several groups, each forked from one evaluation (or a prefix-store restore) of it.
+    let labels: Vec<Vec<u32>> = questions
+        .iter()
+        // Option `i` is read at letter `i`; a question with fewer options reads fewer.
+        .map(|(_, question)| labels[..question.options.len()].to_vec())
         .collect();
-    let emissions = match run_jobs(&app, jobs).await {
+    let emissions = match run_group_jobs(&app, prompts, labels).await {
         Ok(e) => e,
         Err(response) => return *response,
     };

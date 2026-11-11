@@ -634,11 +634,13 @@ fn batching_failures(model: &Arc<Model>, label: &str, perrow: bool) -> Vec<Strin
         ));
     }
     if model.is_hybrid() {
-        // The prefix store deliberately keeps nothing for a hybrid model: a KvSnapshot holds
-        // no recurrent state, so restoring it could never be correct.
-        if entries != 0 || hits != 0 || saved != 0 {
+        // A hybrid snapshot now carries the recurrent state, but that state describes exactly the
+        // snapshot's length: the first prompt's longer snapshot cannot restore this shorter
+        // opening, so there is no hit. (A decision group's shared beginning, kept at exactly its
+        // own length, does restore; `tests/labels.rs` pins that.)
+        if hits != 0 || saved != 0 {
             failures.push(format!(
-                "{label}: the hybrid prefix store kept a snapshot ({entries} entries, {hits} hits)"
+                "{label}: a hybrid speculatively restored a shorter opening ({entries} entries, {hits} hits, {saved} saved)"
             ));
         }
     } else {
