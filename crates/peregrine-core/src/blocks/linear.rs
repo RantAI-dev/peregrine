@@ -56,6 +56,7 @@ fn act_bytes(a: &QuantAct) -> usize {
 }
 
 /// One matrix of a fused group, dense or LittleBit. `linear_group` dispatches.
+#[derive(Clone, Copy)]
 pub struct LinJob<'a> {
     pub lin: &'a Linear,
     pub out: OutPtr<'a>,

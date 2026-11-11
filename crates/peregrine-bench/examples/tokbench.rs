@@ -9,6 +9,7 @@
 //! ```text
 //! cargo run --release -p peregrine-bench --example tokbench
 //! cargo run --release -p peregrine-bench --example tokbench -- path/to/model.gguf
+//! cargo run --release -p peregrine-bench --example tokbench -- --bytes 65536 --reps 5 model.gguf
 //! ```
 //!
 //! With no argument it uses the two vocabularies the tokenizer tests carry
@@ -86,7 +87,28 @@ fn main() {
             return;
         }
     }
-    let paths: Vec<PathBuf> = args.map(PathBuf::from).collect();
+    let mut target_bytes = TARGET_BYTES;
+    let mut reps = 20;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--bytes" => {
+                target_bytes = args
+                    .next()
+                    .expect("--bytes takes a byte count")
+                    .parse()
+                    .expect("--bytes takes a byte count");
+            }
+            "--reps" => {
+                reps = args
+                    .next()
+                    .expect("--reps takes a count")
+                    .parse()
+                    .expect("--reps takes a count");
+            }
+            other => paths.push(PathBuf::from(other)),
+        }
+    }
     let paths = if paths.is_empty() {
         vec![
             root.join("crates/peregrine-core/tests/fixtures/tokenize-vocab-wpm-minilm.bin"),
@@ -95,23 +117,23 @@ fn main() {
     } else {
         paths
     };
-    let text = corpus(TARGET_BYTES);
+    let text = corpus(target_bytes);
     let mb = text.len() as f64 / 1e6;
-    let reps = 20;
     println!(
-        "{:<32} {:>9} {:>10} {:>12} {:>10}",
-        "vocabulary", "tokens", "MB/s", "tokens/s", "MB"
+        "{:<32} {:>9} {:>10} {:>12} {:>11} {:>10}",
+        "vocabulary", "tokens", "MB/s", "tokens/s", "µs/token", "MB"
     );
     for path in paths {
         let tk = load(&path);
         let (dt, n_tokens) = bench(&tk, &text, reps);
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         println!(
-            "{:<32} {:>9} {:>10.1} {:>12.0} {:>10.2}",
+            "{:<32} {:>9} {:>10.1} {:>12.0} {:>11.2} {:>10.2}",
             name,
             n_tokens,
             mb / dt,
             n_tokens as f64 / dt,
+            dt * 1e6 / n_tokens as f64,
             mb
         );
     }

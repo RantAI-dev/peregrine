@@ -435,6 +435,8 @@ pub struct Tokenizer {
     pieces: Vec<String>,
     ids: HashMap<String, u32>,
     specials: Vec<(String, u32)>,
+    /// `specials` indexed by first byte: the raw-text scan's lookup (S4.9c).
+    special_index: SpecialIndex,
     pub bos: u32,
     pub eos: u32,
     /// `tokenizer.ggml.add_bos_token`: whether a prompt starts with `bos`. Llama 3
@@ -488,6 +490,67 @@ fn collect_specials(pieces: &[String], types: &[i32]) -> Vec<(String, u32)> {
         .collect();
     specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
     specials
+}
+
+/// A first-byte index over `specials`, so the raw-text scan costs one lookup per
+/// byte instead of one `starts_with` per special per byte.
+///
+/// `collect_specials` sorts the list longest text first (then lowest id), and the
+/// scan takes the first entry that matches at a position. [`Self::hit`] tries a
+/// byte's candidates in that same order, so the token a position yields — and the
+/// text between two tokens — is exactly what the per-special scan produced.
+struct SpecialIndex {
+    /// Bit `b % 64` of `first[b / 64]`: some special starts with byte `b`.
+    first: [u64; 4],
+    /// The `specials` indices whose text starts with byte `b`, in `specials` order.
+    by_byte: [Vec<u32>; 256],
+}
+
+impl Default for SpecialIndex {
+    fn default() -> Self {
+        Self {
+            first: [0; 4],
+            by_byte: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+}
+
+impl SpecialIndex {
+    fn build(specials: &[(String, u32)]) -> SpecialIndex {
+        let mut ix = SpecialIndex::default();
+        for (i, (s, _)) in specials.iter().enumerate() {
+            let Some(&b) = s.as_bytes().first() else {
+                continue;
+            };
+            ix.first[(b / 64) as usize] |= 1u64 << (b % 64);
+            ix.by_byte[b as usize].push(i as u32);
+        }
+        ix
+    }
+
+    /// Whether some special token's text starts with `b`.
+    #[inline(always)]
+    fn may_start(&self, b: u8) -> bool {
+        self.first[(b / 64) as usize] & (1u64 << (b % 64)) != 0
+    }
+
+    /// The first special of `specials` that matches at `p`, as `(byte length, id)`.
+    ///
+    /// `p` must be a char boundary (the scan only ever stops on one).
+    #[inline]
+    fn hit(&self, text: &str, p: usize, specials: &[(String, u32)]) -> Option<(usize, u32)> {
+        let b = *text.as_bytes().get(p)?;
+        if !self.may_start(b) {
+            return None;
+        }
+        for &i in &self.by_byte[b as usize] {
+            let (s, id) = &specials[i as usize];
+            if text[p..].starts_with(s.as_str()) {
+                return Some((s.len(), *id));
+            }
+        }
+        None
+    }
 }
 
 /// A special-token id from the file, falling back to llama.cpp's per-type default.
@@ -560,6 +623,7 @@ fn build_wpm(
     Tokenizer {
         pieces,
         ids,
+        special_index: SpecialIndex::build(&specials),
         specials,
         bos: cfg.bos.unwrap_or(u32::MAX),
         eos: cfg.eos.unwrap_or(u32::MAX),
@@ -623,6 +687,7 @@ fn build_ugm(
     Tokenizer {
         pieces,
         ids,
+        special_index: SpecialIndex::build(&specials),
         specials,
         bos: cfg.bos.unwrap_or(u32::MAX),
         eos: cfg.eos.unwrap_or(u32::MAX),
@@ -781,6 +846,7 @@ impl Tokenizer {
             Ok(Tokenizer {
                 pieces,
                 ids,
+                special_index: SpecialIndex::build(&specials),
                 specials,
                 bos: g.u32("tokenizer.ggml.bos_token_id").unwrap_or(1),
                 eos: g.u32("tokenizer.ggml.eos_token_id").unwrap_or(2),
@@ -884,6 +950,7 @@ impl Tokenizer {
             Ok(Tokenizer {
                 pieces,
                 ids,
+                special_index: SpecialIndex::build(&specials),
                 specials,
                 bos,
                 eos,
@@ -1179,6 +1246,7 @@ impl Tokenizer {
         Tokenizer {
             pieces,
             ids,
+            special_index: SpecialIndex::build(&specials),
             specials,
             bos,
             eos,
@@ -1350,34 +1418,13 @@ impl Tokenizer {
                 let mut p = 0usize;
                 while p < text.len() {
                     // Atomic special tokens first.
-                    let mut hit = None;
-                    for (s, id) in &self.specials {
-                        if !s.is_empty() && text[p..].starts_with(s.as_str()) {
-                            hit = Some((s.len(), *id));
-                            break;
-                        }
-                    }
-                    if let Some((len, id)) = hit {
+                    if let Some((len, id)) = self.special_at(text, p) {
                         out.push(id);
                         p += len;
                         continue;
                     }
                     // Otherwise accumulate a plain run up to the next special, and split it.
-                    let mut q = p;
-                    while q < text.len() {
-                        if text.is_char_boundary(q)
-                            && self
-                                .specials
-                                .iter()
-                                .any(|(s, _)| !s.is_empty() && text[q..].starts_with(s.as_str()))
-                        {
-                            break;
-                        }
-                        q += 1;
-                        while q < text.len() && !text.is_char_boundary(q) {
-                            q += 1;
-                        }
-                    }
+                    let q = self.next_special(text, p);
                     self.encode_plain_bpe(&text[p..q], bpe, out);
                     p = q;
                 }
@@ -1388,34 +1435,13 @@ impl Tokenizer {
                 let mut scratch = SpmScratch::default();
                 let mut buf = String::new();
                 while p < text.len() {
-                    let mut hit = None;
-                    for (s, id) in &self.specials {
-                        if !s.is_empty() && text[p..].starts_with(s.as_str()) {
-                            hit = Some((s.len(), *id));
-                            break;
-                        }
-                    }
-                    if let Some((len, id)) = hit {
+                    if let Some((len, id)) = self.special_at(text, p) {
                         out.push(id);
                         p += len;
                         is_prev_special = true;
                         continue;
                     }
-                    let mut q = p;
-                    while q < text.len() {
-                        if text.is_char_boundary(q)
-                            && self
-                                .specials
-                                .iter()
-                                .any(|(s, _)| !s.is_empty() && text[q..].starts_with(s.as_str()))
-                        {
-                            break;
-                        }
-                        q += 1;
-                        while q < text.len() && !text.is_char_boundary(q) {
-                            q += 1;
-                        }
-                    }
+                    let q = self.next_special(text, p);
                     self.encode_fragment_spm(
                         &text[p..q],
                         spm,
@@ -1431,6 +1457,32 @@ impl Tokenizer {
             TokenizerAlgo::Wpm(wpm) => self.encode_wpm(text, wpm, true, out),
             TokenizerAlgo::Ugm(ugm) => self.encode_ugm(text, ugm, true, out),
         }
+    }
+
+    /// The special token that starts at `p`, if any: the first of `specials` that
+    /// matches there (longest text first, then lowest id), through the first-byte
+    /// index. `p` must be a char boundary.
+    #[inline]
+    fn special_at(&self, text: &str, p: usize) -> Option<(usize, u32)> {
+        self.special_index.hit(text, p, &self.specials)
+    }
+
+    /// The first position at or after `p` where a special token starts, or the
+    /// text's length when there is none: the end of the plain run before the next
+    /// special.
+    fn next_special(&self, text: &str, p: usize) -> usize {
+        let bytes = text.as_bytes();
+        let mut q = p;
+        while q < bytes.len() {
+            if self.special_index.may_start(bytes[q])
+                && text.is_char_boundary(q)
+                && self.special_at(text, q).is_some()
+            {
+                return q;
+            }
+            q += 1;
+        }
+        bytes.len()
     }
 
     /// `llama_vocab::impl::tokenizer_st_partition`: every special token's text is
@@ -3203,6 +3255,7 @@ abc", 3
             pieces,
             ids,
             specials: Vec::new(),
+            special_index: SpecialIndex::default(),
             bos: 1,
             eos: 1,
             add_bos: false,
@@ -3279,5 +3332,213 @@ abc", 3
         let three = dbrx.ids.get("3").copied().unwrap();
         assert_eq!(dbrx.encode("123"), vec![twelve, three]);
         assert_ne!(smollm.encode("123"), dbrx.encode("123"));
+    }
+
+    /// The raw-text scan S4.9c replaced, kept as the differential test's reference:
+    /// every special's text tested at every position, in `specials` order, and the
+    /// plain run between two specials found by the same per-byte test.
+    fn encode_with_per_special_scan(tk: &Tokenizer, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        match &tk.algo {
+            TokenizerAlgo::Bpe(bpe) => {
+                let mut p = 0usize;
+                while p < text.len() {
+                    let mut hit = None;
+                    for (s, id) in &tk.specials {
+                        if !s.is_empty() && text[p..].starts_with(s.as_str()) {
+                            hit = Some((s.len(), *id));
+                            break;
+                        }
+                    }
+                    if let Some((len, id)) = hit {
+                        out.push(id);
+                        p += len;
+                        continue;
+                    }
+                    let mut q = p;
+                    while q < text.len() {
+                        if text.is_char_boundary(q)
+                            && tk
+                                .specials
+                                .iter()
+                                .any(|(s, _)| !s.is_empty() && text[q..].starts_with(s.as_str()))
+                        {
+                            break;
+                        }
+                        q += 1;
+                        while q < text.len() && !text.is_char_boundary(q) {
+                            q += 1;
+                        }
+                    }
+                    tk.encode_plain_bpe(&text[p..q], bpe, &mut out);
+                    p = q;
+                }
+            }
+            TokenizerAlgo::Spm(spm) => {
+                let mut p = 0usize;
+                let mut is_prev_special = true;
+                let mut scratch = SpmScratch::default();
+                let mut buf = String::new();
+                while p < text.len() {
+                    let mut hit = None;
+                    for (s, id) in &tk.specials {
+                        if !s.is_empty() && text[p..].starts_with(s.as_str()) {
+                            hit = Some((s.len(), *id));
+                            break;
+                        }
+                    }
+                    if let Some((len, id)) = hit {
+                        out.push(id);
+                        p += len;
+                        is_prev_special = true;
+                        continue;
+                    }
+                    let mut q = p;
+                    while q < text.len() {
+                        if text.is_char_boundary(q)
+                            && tk
+                                .specials
+                                .iter()
+                                .any(|(s, _)| !s.is_empty() && text[q..].starts_with(s.as_str()))
+                        {
+                            break;
+                        }
+                        q += 1;
+                        while q < text.len() && !text.is_char_boundary(q) {
+                            q += 1;
+                        }
+                    }
+                    tk.encode_fragment_spm(
+                        &text[p..q],
+                        spm,
+                        is_prev_special,
+                        &mut buf,
+                        &mut scratch,
+                        &mut out,
+                    );
+                    is_prev_special = false;
+                    p = q;
+                }
+            }
+            _ => panic!("the differential test covers the BPE and SentencePiece scans only"),
+        }
+        out
+    }
+
+    /// A SentencePiece vocabulary whose specials overlap each other and are
+    /// prefixes of one another (`abc`/`ab`/`bc`/`a`, `<s>`/`<s`, `\n\n`/`\n`).
+    fn toy_spm_with_specials() -> Tokenizer {
+        let specials = [
+            "<s>", "</s>", "[MASK]", "<s", "abc", "ab", "bc", "a", "\n\n", "\n", "▁x",
+        ];
+        let normal = [
+            "▁", "b", "c", "x", "y", " ", "é", "你", "s", ">", "[", "]", "M", "A", "S", "K", "<",
+            "/",
+        ];
+        let mut pieces: Vec<String> = Vec::new();
+        let mut types: Vec<i32> = Vec::new();
+        let mut scores: Vec<f32> = Vec::new();
+        for s in specials {
+            pieces.push(s.to_string());
+            types.push(TYPE_CONTROL);
+            scores.push(0.0);
+        }
+        pieces.push("<unk>".to_string());
+        types.push(TYPE_UNKNOWN);
+        scores.push(0.0);
+        for (i, p) in normal.iter().enumerate() {
+            pieces.push(p.to_string());
+            types.push(TYPE_NORMAL);
+            scores.push(1.0 + i as f32);
+        }
+        let unk = (pieces.len() - normal.len() - 1) as u32;
+        Tokenizer::from_spm_parts(pieces, scores, types, 0, 1, unk, false)
+    }
+
+    /// A byte-level BPE with the same overlapping specials, and every byte in the
+    /// vocabulary so a plain run always encodes.
+    fn toy_bpe_with_specials() -> Tokenizer {
+        let mut tk = toy_bpe(PreType::Qwen2);
+        for s in [
+            "<s>", "</s>", "[MASK]", "<s", "abc", "ab", "bc", "a", "\n\n", "\n", "▁x",
+        ] {
+            let id = tk.pieces.len() as u32;
+            tk.pieces.push(s.to_string());
+            tk.ids.insert(s.to_string(), id);
+            tk.specials.push((s.to_string(), id));
+        }
+        tk.specials
+            .sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+        tk.special_index = SpecialIndex::build(&tk.specials);
+        tk.n_vocab = tk.pieces.len();
+        tk
+    }
+
+    /// The first-byte lookup against the per-special scan on random strings built
+    /// from the specials' own texts, their prefixes and their overlaps (S4.9c).
+    #[test]
+    fn the_special_lookup_matches_the_per_special_scan() {
+        let spm = toy_spm_with_specials();
+        let bpe = toy_bpe_with_specials();
+        // Each atom is a whole special, a prefix of one, or a byte that can begin
+        // one; concatenating them produces the overlaps the scan must resolve.
+        let mut atoms: Vec<String> = spm.specials.iter().map(|(s, _)| s.clone()).collect();
+        for s in &spm.specials.clone() {
+            for cut in 1..s.0.len() {
+                if s.0.is_char_boundary(cut) {
+                    atoms.push(s.0[..cut].to_string());
+                }
+            }
+        }
+        atoms.extend(
+            [
+                "a", "b", "c", "x", " ", "é", "你", "\n", "s", ">", "<", "[", "]", "M", "▁", "/",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut checked = 0usize;
+        let mut with_special = 0usize;
+        for _ in 0..4000 {
+            let n = 1 + (next() % 8) as usize;
+            let mut text = String::new();
+            let mut saw_special = false;
+            for _ in 0..n {
+                let atom = &atoms[(next() % atoms.len() as u64) as usize];
+                if atom.len() > 1 {
+                    saw_special = true;
+                }
+                text.push_str(atom);
+            }
+            for tk in [&spm, &bpe] {
+                let mut want = Vec::new();
+                tk.encode_into(&text, &mut want);
+                let got = encode_with_per_special_scan(tk, &text);
+                assert_eq!(want, got, "special scan differs on {text:?}");
+            }
+            checked += 1;
+            with_special += saw_special as usize;
+        }
+        assert_eq!(checked, 4000);
+        assert!(
+            with_special > 3000,
+            "only {with_special} strings carried a special token's text"
+        );
+        // Every whole special text is one token of its own.
+        for (s, id) in &spm.specials {
+            let mut out = Vec::new();
+            spm.encode_into(s, &mut out);
+            assert_eq!(out, vec![*id], "{s:?} is not one token");
+            let mut out = Vec::new();
+            spm.encode_into(&format!("{s}{s}"), &mut out);
+            assert!(!out.is_empty(), "{} twice encodes to nothing", s);
+        }
     }
 }
