@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use support::models::{
-    write_bert, write_dense, write_gemma_embedding, write_hybrid, write_moe, BertConfig, Dense,
-    GemmaEmbeddingConfig, MoeShape,
+    write_bert, write_dense, write_gemma_embedding, write_hybrid, write_mistral3, write_moe,
+    BertConfig, Dense, GemmaEmbeddingConfig, Mistral3Config, MoeShape,
 };
 
 /// Allocations counted while `COUNTING` was set.
@@ -323,6 +323,23 @@ fn a_decode_step_allocates_nothing() {
         if n != 0 {
             failures.push(format!(
                 "gemma-embedding whole-text pass, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
+    // The second encoder: mistral3's wider queries, YaRN table, attention temperature
+    // and mean pooling, over the same shared whole-text pass.
+    let mistral = load(&write_mistral3(
+        &dir,
+        Format::Q8_0,
+        7008,
+        Mistral3Config::default(),
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&mistral, threads);
+        if n != 0 {
+            failures.push(format!(
+                "mistral3 whole-text pass, {threads} threads: {n} allocations per pass"
             ));
         }
     }

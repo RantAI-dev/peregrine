@@ -113,7 +113,16 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    tests are EmbeddingGemma 300M (batch invariance, and the 200-text cosine bound against
    llama.cpp's vectors in `tests/fixtures/embeddinggemma/`, which states the per-format bound
    from `docs/design/s4-embeddings-decisions.md` §5); `peregrine-tests` cover the server and CLI
-   refusal of chat on an encoder.
+   refusal of chat on an encoder. S4.14b adds the same for `mistral3` (Nemotron 3.5 Embed 1B): a
+   synthetic non-causal file whose original context is 32 tokens, so the YaRN ramp and the
+   attention temperature's steps run; the vector against its own reference forward; the invariance
+   matrix; the tier golden
+   (`tests/golden/synthetic/<tier>/mistral3-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
+   under SDE, no aarch64 golden); no-allocation coverage; and an ignored real-file test that feeds
+   the 64 token-id lists from `tests/fixtures/nemotron/` and checks the F16 and Q8_0 cosines
+   against llama.cpp's vectors; a second ignored test encodes the fixture texts with the file's
+   Tekken tokenizer (S4.14a), checks all 64 id lists against llama.cpp's, and checks that a text
+   embedded by its ids and by its own encoding is the same vector bit for bit.
 3. **Real model tests** (`tests/engine.rs`, `batch.rs`, `bonsai.rs`, `oracle.rs`, `dspark.rs`, ...): real
    GGUF files, checking tokens against reference outputs. They skip, with a message, when the file is
    missing. They are the release gate.
