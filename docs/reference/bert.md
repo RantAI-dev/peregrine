@@ -233,6 +233,45 @@ are roadmap S4.8 and `modern-bert` is S4.7:
 - `jina-bert-v3`: pre-norm, RMSNorm, RoPE, no `attn_output_norm`, GELU FFN with biases
   (`src/models/bert.cpp`, the `JINA_BERT_V3` branch).
 
+## Speed, and where it goes
+
+`/v1/embeddings` on H0 (8 vCPU Xeon E5-2680 v4, AVX2+FMA, **shared host**: load average 9–12
+during the runs), text of ~16/128/512 tokens, medians of three, llama.cpp v0.9.0 on the same file
+and thread count:
+
+| model, threads | tokens | texts/s (ours vs llama.cpp) |
+|---|---|---|
+| MiniLM F16, 4 | 16 | 33.0 vs 22.0 |
+| | 128 | 6.0 vs 17.8 |
+| | 512 | 1.70 vs 5.37 |
+| bge-small Q8_0, 4 | 16 | 39.7 vs 10.3 (llama's first requests were cold) |
+| | 128 | 5.5 vs 10.3 |
+| | 512 | 0.76 vs 2.21 |
+| bge-small Q8_0, 8 | 16 | 16.5 vs 4.3 (p50 9.3 ms vs 11 ms at batch 1) |
+| | 512 | 1.24 vs 3.12 |
+
+Batches of 8/32/128 change the picture only a little: parity at 16 tokens (105/179/156 texts/s
+vs llama's 133/182/161), 1.8× behind at 128 and 2.5–3.6× at 512, at every batch size. The gap is
+**length**, not batch, which is the signature of the two `n²`/element-wise pieces this step does
+not contain: the bidirectional attention strip (S4.9g) and the vector erf-GELU/LayerNorm (S4.9h).
+
+Temporary per-phase timers on one 420-token MiniLM text (4 threads, 636 ms):
+
+| phase | ms | share |
+|---|---|---|
+| attention + Q scale + bias adds | 348 | 55 % |
+| q/k/v + embedding lookup + embedding LayerNorm | 124 | 19 % |
+| `attn_output` + `attn_output_norm` | 64 | 10 % |
+| `ffn_up` (+ bias) | 54 | 8 % |
+| the scalar GELU (420 × 1536 × 6) | 30 | 5 % |
+| `ffn_down` + `layer_output_norm` | 18 | 3 % |
+| pooling | 0.1 | — |
+
+Single-threaded the same text is 1321 ms with attention at 74 %. That is what the S4.9 design
+predicted for this family ("35 % of the pass at 128 tokens, 60 % at 512" on the attention loop,
+"a scalar erf would cost half the matrix time"), and the two kernels that remove it are S4.9g
+and S4.9h.
+
 ## What Peregrine does
 
 - `Bert::forward_texts` runs one whole text per unit (never chunked, no KV cache), with all
