@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Fewer passes over the activations on the float path (S4.9m, part b)**: the packed float GEMM
+  now takes the caller's output stride (`fpack::gemm_strided`), so a projection's panels are
+  written straight into its row-major `[row][out]` buffer instead of a 16-row stack block and a
+  second copy. The copy was 19.5% of the matmul wall on an encoder pass; the matmul falls 19-21%
+  and the pass 16-18% on every measured cell, with the scalar twin, NEON, AVX2 and AVX-512
+  kernels bit-identical (a synthetic shape whose output rows are not whole panels keeps the
+  block-and-copy path). all-MiniLM-L6-v2 F16, 4 threads, medians of three: 16 tokens × 32
+  543 → 631 texts/s, 128 tokens × 8 79.7 → 90.9, 512 tokens × 1 15.9 → 17.8; bge-small-en-v1.5
+  F32 281.9 → 324.9, 41.9 → 49.5 and 8.2 → 9.5. No golden changed. See
+  `docs/design/s4.9-sota.md` §12.
+
 - **The `bert` family: MiniLM, BGE, E5, GTE and bge-m3 embeddings (roadmap S4.6, part a)**:
   `architecture = "bert"` is the post-norm encoder every encoder-only embedding file in
   llama.cpp's format ships as — token + token-type + learned absolute-position embeddings and one

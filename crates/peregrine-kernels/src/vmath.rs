@@ -1263,7 +1263,7 @@ pub fn gelu_erf(x: f32) -> f32 {
 /// `f64` lanes each. The per-element arithmetic is the scalar definition's, in
 /// the same order — three Maclaurin polynomials (10, 22 and 36 terms) are
 /// evaluated for the lanes that need them and selected by `|x|`, the `erfc`
-/// tail is evaluated by the same scalar [`erfc_tail`] for the rare lane in
+/// tail is evaluated by the same scalar `erfc_tail` for the rare lane in
 /// `(3, 4.6)`, and a NaN keeps its own bits. The tests pin the two paths equal
 /// on every input class.
 pub fn gelu_erf_rows(x: &mut [f32]) {
