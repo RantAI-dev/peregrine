@@ -49,7 +49,7 @@ pub enum Rope {
 /// Write a dense `arch` model ("llama", "qwen2" or "qwen3") whose matrices are all `fmt`, seeded by
 /// `seed`. `qwen2` carries the attention biases and NeoX rotary pairing its loader requires.
 pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None, &[])
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None, &[], None)
 }
 
 /// A dense `arch` file that declares the pooling type an embedder was trained with
@@ -72,6 +72,7 @@ pub fn write_dense_pooled(
         false,
         Some(pooling),
         &[],
+        None,
     )
 }
 
@@ -80,7 +81,7 @@ pub fn write_dense_pooled(
 /// zeros is what the suffix index needs to find a match in (the same n-gram twice), and what makes the
 /// draft it proposes the token the target draws.
 pub fn write_dense_accepting(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true, None, &[])
+    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, true, None, &[], None)
 }
 
 /// A dense model carrying extra GGUF metadata (the decision keys of S4.3, or one deliberately
@@ -93,7 +94,43 @@ pub fn write_dense_extra(
     s: Dense,
     extra: &[(String, MetaValue)],
 ) -> PathBuf {
-    write_dense_impl(dir, arch, fmt, seed, s, Rope::None, false, None, extra)
+    write_dense_impl(
+        dir,
+        arch,
+        fmt,
+        seed,
+        s,
+        Rope::None,
+        false,
+        None,
+        extra,
+        None,
+    )
+}
+
+/// A dense `arch` file with a chosen `tokenizer.chat_template`. The weights and the
+/// vocabulary are [`write_dense`]'s; only the template string differs, which is how a
+/// synthetic file can carry a tool format's template.
+pub fn write_dense_with_template(
+    dir: &Path,
+    arch: &str,
+    fmt: Format,
+    seed: u64,
+    s: Dense,
+    template: &str,
+) -> PathBuf {
+    write_dense_impl(
+        dir,
+        arch,
+        fmt,
+        seed,
+        s,
+        Rope::None,
+        false,
+        None,
+        &[],
+        Some(template),
+    )
 }
 
 /// The decision metadata a synthetic decision model carries: `<arch>.decision.type`, the
@@ -184,6 +221,7 @@ pub fn write_rope_dense(dir: &Path, rope: Rope, seed: u64) -> PathBuf {
         false,
         None,
         &[],
+        None,
     )
 }
 
@@ -198,6 +236,7 @@ fn write_dense_impl(
     accept: bool,
     pooling: Option<u32>,
     extra: &[(String, MetaValue)],
+    chat_template: Option<&str>,
 ) -> PathBuf {
     let mut rng = Rng::new(seed);
     let mut w = GgufWriter::new();
@@ -236,7 +275,10 @@ fn write_dense_impl(
         ("qwen2", TemplateKind::Qwen3)
     };
     vocab::add_tokenizer_metadata(&mut w, pre);
-    w.str("tokenizer.chat_template", vocab::chat_template(tpl));
+    w.str(
+        "tokenizer.chat_template",
+        chat_template.unwrap_or_else(|| vocab::chat_template(tpl)),
+    );
 
     let kv = s.n_head_kv * head_dim;
     let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {

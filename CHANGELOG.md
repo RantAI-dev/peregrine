@@ -8,6 +8,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Tool calling on the chat endpoint (S6.3)**: `POST /v1/chat/completions` reads OpenAI's `tools`,
+  `tool_choice` and `parallel_tool_calls`, conversations with assistant `tool_calls` and `tool`
+  messages, and answers with `message.tool_calls` and `finish_reason: "tool_calls"`, streamed or
+  not. It works for files whose chat template has a tool format, today Qwen 2.5's; other files
+  answer a request with tools with a 400 that names the model. On
+  `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf` at temperature 0, 15 of 16 replies are identical to
+  llama.cpp v0.9.0's (same calls, same arguments), and a two-step exchange gives the same answer
+  (`scripts/tool-e2e.py`). `tool_choice: "required"`, a named function, `functions` and
+  `function_call` are refused by name; a call the model writes badly comes back as text. A request
+  without tools builds the prompt it built before.
 - **Tool calling, first part: the tool module and the `hermes` format for Qwen 2.5 (S6.2)**:
   `peregrine_core::tools` holds what tool calling needs outside the forward pass. The renderer
   writes a conversation with tools (tool definitions, earlier calls, tool results) into the prompt
