@@ -420,12 +420,12 @@ impl Model {
         fp: bool,
         cache: Option<&crate::packcache::PackCache>,
     ) -> Result<Model, String> {
-        let arch_name = g.str("general.architecture")?;
+        let arch_name = g.str("general.architecture")?.to_string();
         let family = families
             .iter()
-            .find(|f| f.names().contains(&arch_name))
+            .find(|f| f.names().contains(&arch_name.as_str()))
             .ok_or_else(|| {
-                let feat = match arch_name {
+                let feat = match arch_name.as_str() {
                     "llama" => Some("arch-llama"),
                     "qwen2" | "qwen3" => Some("arch-qwen"),
                     "qwen25" | "qwen35" => Some("arch-qwen35"),
@@ -450,16 +450,26 @@ impl Model {
                 }
             })?;
         let mut g = g;
+        // S4.9m: a small Q8_0 `bert` encoder is dequantised once into the float kernel's
+        // f32 panels (decision 2 of the S4.9 design). Its Q8_0 linears then take the
+        // float path, with no activation quantisation, at four times the weight bytes;
+        // the size rule keeps that a small-model choice. `PEREGRINE_Q8_FLOAT=0` turns
+        // it off, and it needs the float pack.
+        let q8_as_f32 = fp
+            && crate::options::get().q8_float
+            && arch_name == "bert"
+            && g.total_weight_bytes() <= crate::options::Q8_FLOAT_MAX_BYTES;
         // The k-quant repack (S3.4): the Q4_K and Q6_K matrices, and Q5_0, are
         // rewritten into eight-row tiles before the family reads the file, so every matrix the
-        // family holds knows where its repacked bytes are.
+        // family holds knows where its repacked bytes are. A converted Q8_0 matrix is not
+        // among them (its f32 panels replace the tiles).
         let kq_layout = if kq {
-            crate::kq::layout(&g)
+            crate::kq::layout_with(&g, q8_as_f32)
         } else {
             Vec::new()
         };
         let fp_layout = if fp {
-            crate::fpack::layout(&g)
+            crate::fpack::layout_with(&g, q8_as_f32)
         } else {
             Vec::new()
         };
@@ -483,6 +493,7 @@ impl Model {
                 for e in &fp_layout {
                     if let Some(t) = g.tensors.get_mut(&e.name) {
                         t.fp_off = Some(e.offset);
+                        t.fp_kind = (e.kind != e.source).then_some(e.kind);
                     }
                 }
                 kq_store = h.kq.map(KqStore::from_map);
@@ -491,14 +502,14 @@ impl Model {
         }
         let kq = match kq_store {
             Some(s) => s,
-            None if kq => crate::kq::repack(&mut g),
+            None if kq => crate::kq::repack_with(&mut g, q8_as_f32),
             None => KqStore::default(),
         };
         // The float pack (S4.9f): every F32, F16 and BF16 matrix into 16-row panels,
         // before the family reads the file, so each matrix knows where its panels are.
         let fp = match fp_store {
             Some(s) => s,
-            None if fp => crate::fpack::repack(&mut g),
+            None if fp => crate::fpack::repack_with(&mut g, q8_as_f32),
             None => FpStore::default(),
         };
         // A miss packed the stores above: write them beside the model cache so the

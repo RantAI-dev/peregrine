@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Small Q8_0 encoders run on the float path (S4.9m, part c)**: a `bert` file of at most 64 MiB
+  whose matrices are Q8_0 is dequantised once at load into the packed float kernel's f32 panels
+  (`scale × code` is exact in f32), so its projections take the float path with no activation
+  quantisation (15.5-17.5% of the old Q8_0 bert pass) and no int8 tile store. The tensor keeps its
+  file format and gains `TensorInfo::fp_kind`, so readers of the file's own bytes are unaffected;
+  the k-quant store leaves the converted matrices out, and the pack cache keys the new form
+  (`FORMAT_VERSION` 2). `PEREGRINE_Q8_FLOAT=0` turns it off. The rule is measured: bge-m3 Q8_0
+  (604 MiB) loses 22% at 16 tokens on the f32 stream, MiniLM (23 MiB) and bge-small (34 MiB) win
+  or are neutral. Medians of three, 4 threads, on top of (b) and (a): all-MiniLM-L6-v2 Q8_0 16
+  tokens × 32 559 → 725 texts/s, 128 tokens × 8 74.1 → 96.8, 512 tokens × 1 15.0 → 18.2;
+  bge-small-en-v1.5 Q8_0 295 → 392, 36.6 → 49.4, 7.5 → 9.3. Accuracy improves against the fp32
+  PyTorch fixtures: MiniLM Q8_0 cosine min/mean 0.9991371/0.9994906 →
+  0.9995210/0.9997640, bge-small Q8_0 0.9997426/0.9998402 → 0.9998790/0.9999280. The synthetic
+  Q8_0 `bert` golden changes once; the scalar, AVX2 and AVX-512-under-SDE goldens were
+  re-recorded and agree bit for bit. See `docs/design/s4.9-sota.md` §14.
+
 - **Whole texts in one weight pass for small float encoders (S4.9m, part a)**: a `bert` file whose
   every matrix is float and whose weights are at most 256 MiB now takes passes of 128 rows instead
   of the 32-row bidirectional floor, so a 32-text batch of 16-token texts is four weight passes

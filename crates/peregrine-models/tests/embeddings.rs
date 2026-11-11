@@ -1725,15 +1725,17 @@ fn the_synthetic_bert_matches_its_golden_for_the_tier() {
     }
 }
 
-/// The Q8_0 file against the reference on the engine's *int8* path: the same graph,
-/// with the activation row quantised once per projection (`QuantAct::fill`) and the
-/// weight row dotted by `dot_scalar`, the scalar twin of the int8 kernel.
+/// The Q8_0 file against the reference forward of the path it actually takes.
 ///
-/// On the scalar tier the engine *is* `dot_scalar`, so the vector is bit for bit the
-/// reference's. On a SIMD tier the repacked eight-row tile computes the same integer
-/// sums but fuses the block scale into its accumulator (`d·d_a·Σ` in one FMA), which
-/// rounds differently by 1-2 ulp; there the check is the tight bound below, and the
-/// exact bits are the tier golden's.
+/// A small Q8_0 `bert` file is dequantised into f32 panels at load (S4.9m), so its
+/// reference is the float path on the dequantised rows and the vector is bit for bit
+/// the reference's on every tier. With `PEREGRINE_Q8_FLOAT=0` (or a file past the size
+/// rule) the engine takes the *int8* path: the activation row quantised once per
+/// projection (`QuantAct::fill`) and the weight row dotted by `dot_scalar`, the scalar
+/// twin of the int8 kernel. There the scalar tier is the reference's own kernel, while
+/// a SIMD tier's repacked eight-row tile fuses the block scale into its accumulator
+/// (`d·d_a·Σ` in one FMA) and rounds by 1-2 ulp; the tight bound below covers that and
+/// the exact bits are the tier golden's.
 #[test]
 fn the_bert_q8_0_vector_is_the_engine_int8_path() {
     let dir = tmpdir("bert-q8-reference");
