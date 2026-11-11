@@ -122,6 +122,50 @@ file without the two dense tensors (some converters omit them) is
 `normalise(mean_rows(output_norm(x)))` — a different vector space, as the measurements in
 the S4.4 PR show.
 
+## Accuracy: against llama.cpp and against the truth
+
+The Q8_0 upload is quantised: its weights differ from the unquantised model, so the meaningful
+question is which engine is closer to the unquantised vectors, not which two engines agree. The
+F32/F16/BF16 uploads on Hugging Face (`unsloth/embeddinggemma-300m-GGUF`,
+`second-state/embeddinggemma-300m-GGUF`, `gaianet/embeddinggemma-300m-GGUF`) were converted
+without `--sentence-transformers-dense-modules` and carry no `dense_2`/`dense_3`, so they cannot
+be the reference for the full pipeline. The reference here is converted from the ungated mirror
+of the original weights (`unsloth/embeddinggemma-300m`, commit `bfa3c84`) with llama.cpp
+`cd959ba`:
+
+```sh
+python3 convert_hf_to_gguf.py <unsloth-embeddinggemma-300m> \
+    --outtype f16 --sentence-transformers-dense-modules --outfile embeddinggemma-f16.gguf
+```
+
+That file has 316 tensors (including `dense_2` and `dense_3`), 621,867,232 bytes, SHA-256
+`eeccb769249a2bac5e23b3e408c6ea17d016d6d8c273c3b5bdb23b7fdd955d44`; its tensors agree with the
+Q8_0 upload's to cosine 0.99997, so the two are the same model at two precisions. The vectors
+below are llama.cpp v0.9.0's (`llama-server --embedding --pooling mean`, one text per request)
+on 200 mixed-length texts (16–451 tokens), cosine of L2-normalised vectors, 256 d =
+truncate-then-normalise:
+
+| Engine | Width | min | mean | max |
+|---|---|---|---|---|
+| llama.cpp Q8_0 | 768 | 0.998013 | 0.9994734 | 0.9996802 |
+| Peregrine Q8_0 | 768 | 0.998747 | 0.9994728 | 0.9996988 |
+| Peregrine F16 | 768 | 0.999983 | 0.9999997 | 0.9999999 |
+| llama.cpp Q8_0 | 256 | 0.998398 | 0.9995551 | 0.9997291 |
+| Peregrine Q8_0 | 256 | 0.998900 | 0.9995524 | 0.9997827 |
+| Peregrine F16 | 256 | 0.999987 | 0.9999997 | 0.9999999 |
+
+Against the F16 reference: Peregrine's Q8_0 minimum is 7.3e-4 **higher** than llama.cpp's at
+768 d and 5.0e-4 higher at 256 d; the means differ by 6e-7 and 2.7e-6 (within the 1e-4 slack).
+The same-engine F16 row (0.99998) shows the forward graph itself is right; the Q8_0 gap is the
+two engines' int8 activation arithmetic, not the mask, the head or the pooling. Cross-engine
+Q8_0 against Q8_0 on these texts is min 0.998168 / mean 0.999639 at 768 d (min 0.998583 /
+mean 0.999701 at 256 d). The worst text at 768 d is a 64-token text (not the longest): both
+engines' error to the reference peaks there, llama.cpp at 0.998013 and Peregrine at 0.999153.
+
+The fixtures (`texts.txt`, `llama_q8_0.f32`, `llama_f16.f32`) and the ignored test that enforces
+the bound are in `crates/peregrine-models/tests/fixtures/embeddinggemma/` and
+`crates/peregrine-models/tests/embeddings.rs`.
+
 ## What Peregrine does
 
 - `Gemma3::forward_texts` runs the projections over every row of every text in matmul-sized

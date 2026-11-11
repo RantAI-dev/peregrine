@@ -63,7 +63,10 @@ All notable changes to this project are documented here. The format follows
   llama.cpp's `dense_2`/`dense_3` pair, mean pooling over a text's own rows (f64 accumulator, one
   rounding) and `cls` pooling; `peregrine embed`, `peregrine inspect` and `POST /v1/embeddings`
   work unchanged. Synthetic encoders, an exact scalar reference forward, batch invariance and
-  three kernel-tier goldens are in CI.
+  three kernel-tier goldens are in CI. Against llama.cpp's vectors on 200 texts, Peregrine's
+  Q8_0 is no further from a full-precision F16 conversion of the same weights than llama.cpp's
+  Q8_0 is (min 0.99875 vs 0.99801 at 768 d, means within 6e-7), and the per-format bound is
+  measured and encoded with the reference vectors under `tests/fixtures/embeddinggemma/`.
 - **WordPiece and SentencePiece-unigram tokenizers** (roadmap S4.5), the two vocabularies
   encoder models ship: `tokenizer.ggml.model = "bert"` (all-MiniLM, bge, e5, gte) and
   `"t5"` (T5 and the XLM-R vocabulary: bge-m3, multilingual-e5, bge-reranker). Both are

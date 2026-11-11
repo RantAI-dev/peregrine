@@ -806,3 +806,136 @@ fn norm(v: &[f32]) -> f64 {
         .sum::<f64>()
         .sqrt()
 }
+
+/// Cosine similarity to the same vector truncated to `dims` and normalised again (Matryoshka).
+fn cosine_at(a: &[f32], b: &[f32], dims: usize) -> f64 {
+    let dot = |x: &[f32], y: &[f32]| {
+        x[..dims]
+            .iter()
+            .zip(&y[..dims])
+            .map(|(&p, &q)| (p as f64) * (q as f64))
+            .sum::<f64>()
+    };
+    let n = |x: &[f32]| {
+        x[..dims]
+            .iter()
+            .map(|&p| (p as f64) * (p as f64))
+            .sum::<f64>()
+            .sqrt()
+    };
+    dot(a, b) / (n(a) * n(b))
+}
+
+fn read_vectors(path: &std::path::Path) -> Vec<Vec<f32>> {
+    let bytes = std::fs::read(path).unwrap();
+    let (rows, rest) = bytes.as_chunks::<3072>();
+    assert!(
+        rest.is_empty(),
+        "{}: not a whole number of 768-d rows",
+        path.display()
+    );
+    rows.iter()
+        .map(|row| {
+            let (words, rest) = row.as_chunks::<4>();
+            assert!(rest.is_empty());
+            words.iter().map(|b| f32::from_le_bytes(*b)).collect()
+        })
+        .collect()
+}
+
+/// The cross-engine half of the gate: against llama.cpp's vectors for the same 200 texts.
+///
+/// `llama_q8_0.f32` is llama.cpp v0.9.0's output on `embeddinggemma-300M-Q8_0.gguf` (the file
+/// this test loads) and `llama_f16.f32` is its output on the F16 conversion of the same weights
+/// — the full-precision reference with `dense_2`/`dense_3`. The per-format bound is the one
+/// measured for this file and written into the design note §5 item 2: Peregrine's Q8_0 is within
+/// 0.998 (min) / 0.9995 (mean) of llama.cpp's Q8_0 at 768 dimensions and 0.9985 / 0.9996 at 256,
+/// and no further from the F16 reference than llama.cpp's Q8_0 is (1e-4 slack). The fixtures and
+/// their provenance are in `tests/fixtures/embeddinggemma/`.
+#[test]
+#[ignore = "needs embeddinggemma-300M-Q8_0.gguf in models/, ~/models/ or the peregrine cache"]
+fn embeddinggemma_real_file_is_within_the_bound_of_llama_cpp() {
+    const FILE: &str = "embeddinggemma-300M-Q8_0.gguf";
+    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../models")
+        .join(FILE)];
+    if let Ok(h) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(&h).join("models").join(FILE));
+        candidates.push(
+            PathBuf::from(&h)
+                .join(".cache/peregrine/models/ggml-org/embeddinggemma-300M-GGUF")
+                .join(FILE),
+        );
+    }
+    let Some(path) = candidates.into_iter().find(|p| p.is_file()) else {
+        eprintln!("{FILE} is not on this machine; skipped");
+        return;
+    };
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/embeddinggemma");
+    let texts: Vec<String> = std::fs::read_to_string(dir.join("texts.txt"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(texts.len(), 200);
+    let llama_q8 = read_vectors(&dir.join("llama_q8_0.f32"));
+    let llama_f16 = read_vectors(&dir.join("llama_f16.f32"));
+    assert_eq!(llama_q8.len(), texts.len());
+    assert_eq!(llama_f16.len(), texts.len());
+
+    let model = load(&path);
+    let tokens: Vec<Vec<u32>> = texts.iter().map(|t| model.tk.encode_special(t)).collect();
+    let run = embed_batch(&model, &tokens, Pooling::Mean, 8, 512, 512, None);
+    let mut ours = run.vectors;
+    for v in &mut ours {
+        embed::finish(v, None).unwrap();
+    }
+
+    for dims in [768usize, 256] {
+        let to_llama: Vec<f64> = ours
+            .iter()
+            .zip(&llama_q8)
+            .map(|(a, b)| cosine_at(a, b, dims))
+            .collect();
+        let to_ref: Vec<f64> = ours
+            .iter()
+            .zip(&llama_f16)
+            .map(|(a, b)| cosine_at(a, b, dims))
+            .collect();
+        let llama_to_ref: Vec<f64> = llama_q8
+            .iter()
+            .zip(&llama_f16)
+            .map(|(a, b)| cosine_at(a, b, dims))
+            .collect();
+        let min_mean = |v: &[f64]| {
+            (
+                v.iter().copied().fold(f64::INFINITY, f64::min),
+                v.iter().sum::<f64>() / v.len() as f64,
+            )
+        };
+        let (min_l, mean_l) = min_mean(&to_llama);
+        let (min_r, mean_r) = min_mean(&to_ref);
+        let (min_rl, mean_rl) = min_mean(&llama_to_ref);
+        let (want_min, want_mean) = if dims == 768 {
+            (0.998, 0.9995)
+        } else {
+            (0.9985, 0.9996)
+        };
+        assert!(
+            min_l >= want_min && mean_l >= want_mean,
+            "{dims}-d: Peregrine Q8_0 vs llama.cpp Q8_0 min {min_l:.6} mean {mean_l:.6}, \
+             bound {want_min} / {want_mean}"
+        );
+        assert!(
+            min_r >= min_rl - 1e-4 && mean_r >= mean_rl - 1e-4,
+            "{dims}-d: Peregrine Q8_0 vs the F16 reference min {min_r:.6} mean {mean_r:.6}, \
+             llama.cpp's Q8_0 min {min_rl:.6} mean {mean_rl:.6}"
+        );
+        eprintln!(
+            "{dims}-d: vs llama.cpp Q8_0 min {min_l:.6} mean {mean_l:.7}; \
+             vs the F16 reference Peregrine min {min_r:.6} mean {mean_r:.7}, \
+             llama.cpp min {min_rl:.6} mean {mean_rl:.7}"
+        );
+    }
+}
