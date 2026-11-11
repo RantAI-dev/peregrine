@@ -265,6 +265,28 @@ checks that its `.bin` is byte-identical to what the file yields. A 2,400-input 
 against `llama-tokenize`/the oracle on the T5 vocabulary (bare ids, ids with specials, and
 detokenisation: 7,200 comparisons) found no divergence.
 
+### System One prompts: fixtures rendered by llama.cpp
+
+`crates/peregrine-core/tests/systemone_render.rs` rebuilds the prompt of every case in
+`tests/fixtures/systemone-openjev.jsonl` from the request alone and compares it byte for byte with
+the prompt llama.cpp rendered. It needs no model file and runs in CI. Each fixture line also holds
+the prompt's token ids and the server's answer; with `tinyopenjev-for-testing-Q8_0.gguf`
+(`ggml-org/tinyopenjev-for-testing-gguf`, 46 MB, SHA-256 `bb451e6f…3b15a7`) under `models/` or
+`~/models/`, a third test checks that the file's `systemone` template is the one the renderer was
+written from and that Peregrine's tokenizer gives the same ids; without the file it prints
+`SKIPPED`.
+
+The fixtures come from llama.cpp itself: `scripts/systemone-fixtures.py` sends each case of
+`scripts/systemone-cases.json` to a `llama-server` built at v0.9.0 (`cd959ba`) with
+`scripts/systemone-dump.patch`, which makes the server append each rendered prompt and its tokens
+to a file and changes nothing else. A new decision type gets its own cases, fixture and renderer
+the same way.
+
+`crates/peregrine-models/tests/systemone_openjev.rs` goes the whole way with the same model
+file: it answers every fixture request with the renderer, the tokenizer, a labels slot and the
+answer math, and compares with the answer llama.cpp gave (same option chosen; probabilities, score
+and noul within 5e-3). It prints `SKIPPED` without the file.
+
 ### Gemma 3 1B Instruct
 
 Gemma 3 1B is checked end to end against llama.cpp v0.9.0 on the bartowski Q4_K_M upload:

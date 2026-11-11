@@ -25,6 +25,16 @@ All notable changes to this project are documented here. The format follows
   a snapshot), so it recomputes. The label logits are bit-identical alone, after a sibling and in a
   batch, at chunks 1/16/64 and 1/2/4 threads on synthetic llama and qwen35 files, through both
   scheduling paths.
+- **Groundwork for System One decision models** (roadmap S4.3): the prompt a native decision
+  model reads. `peregrine_core::systemone` renders the `openjev` type's prompt for a `choice`,
+  `score` or `noul` question about a state, and `peregrine_core::json` is the order-keeping JSON
+  value that writes a non-string state, instruction or description exactly as llama.cpp's Jinja
+  `tojson` does (key order kept, integers as integers, other numbers as Python's `repr`, llama.cpp's
+  string escapes). There is no Jinja engine: the renderer is written from the model's template,
+  refuses any other template, and is checked byte for byte against 48 prompts rendered by
+  llama.cpp v0.9.0 itself; with the model file present the token ids match too, and the renderer,
+  the tokenizer, a labels slot and the answer math together give llama.cpp's answers on all 48
+  requests (the same option chosen, probabilities within 2.5e-3). No endpoint yet.
 - **WordPiece and SentencePiece-unigram tokenizers** (roadmap S4.5), the two vocabularies
   encoder models ship: `tokenizer.ggml.model = "bert"` (all-MiniLM, bge, e5, gte) and
   `"t5"` (T5 and the XLM-R vocabulary: bge-m3, multilingual-e5, bge-reranker). Both are

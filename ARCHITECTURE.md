@@ -57,6 +57,7 @@ prompt, keeps the chat history and lends the slot the cache the conversation has
 |---|---|
 | `gguf.rs`, `safetensors.rs` | Read model files by memory map. `gguf::Format` lists every weight format the engine knows. |
 | `tokenizer.rs`, `template.rs` | Byte-level BPE with the pre-tokenizers transcribed from llama.cpp; chat templates rendered in Rust so the token stream equals llama.cpp's `--jinja` output. |
+| `systemone.rs`, `json.rs` | System One prompts: one renderer per decision type, written from the type's `systemone` template and checked byte for byte against prompts llama.cpp rendered (`openjev` so far); and the order-keeping JSON value whose text is the one llama.cpp's Jinja `tojson` writes. |
 | `arch.rs` | The `Architecture`, `MtpHead` and `Family` traits (ADR 0006). |
 | `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, LittleBit accounting, and parameterized loading via family table. |
 | `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
