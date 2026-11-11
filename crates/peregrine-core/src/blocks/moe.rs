@@ -301,6 +301,7 @@ pub fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
         offset: t.offset + e as u64 * bytes,
         tile_off: None,
         kq_off: None,
+        fp_off: None,
     })
 }
 
@@ -837,6 +838,7 @@ mod tests {
             offset: 1024,
             tile_off: None,
             kq_off: None,
+            fp_off: None,
         };
         let v = expert_view(&t, 2).unwrap();
         assert_eq!(v.dims, vec![64, 32], "a 2D matrix");
@@ -1031,6 +1033,7 @@ mod tests {
                     g,
                     tiles: TileStore::default(),
                     kq: KqStore::default(),
+                    fp: crate::model::FpStore::default(),
                     #[cfg(feature = "littlebit")]
                     lb: None,
                 },

@@ -133,6 +133,11 @@ pub struct EngineOptions {
     /// Whether `PEREGRINE_KREPACK` was given, so [`EngineOptions::kq_repack_note`] can say why the
     /// switch has its value.
     pub kq_repack_switch: bool,
+    /// `PEREGRINE_FPACK=0`: keep the F32, F16 and BF16 matrices in the file's own rows and
+    /// multiply them with the pre-S4.9f float tile (S4.9f's A/B switch).
+    pub fpack: bool,
+    /// Whether `PEREGRINE_FPACK` was given, for the same reason as `kq_repack_switch`.
+    pub fpack_switch: bool,
     /// `PEREGRINE_DYNAMIC=0` uses the static row partition instead of dynamic work splitting.
     pub dynamic_rows: bool,
     /// `PEREGRINE_PF`: software prefetch distance in bytes (0 = off).
@@ -220,6 +225,8 @@ impl Default for EngineOptions {
                 None,
             )),
             kq_repack_switch: false,
+            fpack: true,
+            fpack_switch: false,
             dynamic_rows: true,
             prefetch_bytes: PF_DEFAULT,
             tq_span: 16,
@@ -383,6 +390,8 @@ impl EngineOptions {
                 crate::cpu::resolved_under(isa),
             ),
             kq_repack_switch: krepack.is_some(),
+            fpack: unless("FPACK", "0"),
+            fpack_switch: s("FPACK").is_some(),
             dynamic_rows: unless("DYNAMIC", "0"),
             prefetch_bytes: num("PF").unwrap_or(d.prefetch_bytes),
             tq_span: num("TQ_SPAN")
@@ -459,6 +468,18 @@ impl EngineOptions {
         format!("{state} ({why})")
     }
 
+    /// The float pack setting and why, for `peregrine tier`: `on`, or
+    /// `off (PEREGRINE_FPACK)` when the switch turned it off.
+    pub fn fpack_note(&self) -> String {
+        let state = if self.fpack { "on" } else { "off" };
+        let why = if self.fpack_switch {
+            "PEREGRINE_FPACK"
+        } else {
+            "default"
+        };
+        format!("{state} ({why})")
+    }
+
     /// The options that differ from the defaults, as `name=value` pairs.
     pub fn non_default(&self) -> Vec<(&'static str, String)> {
         let d = EngineOptions::default().pairs();
@@ -490,6 +511,7 @@ impl EngineOptions {
             ("wide", self.wide.to_string()),
             ("tiles", self.tiles.to_string()),
             ("kq_repack", self.kq_repack.to_string()),
+            ("fpack", self.fpack.to_string()),
             ("dynamic_rows", self.dynamic_rows.to_string()),
             ("prefetch_bytes", self.prefetch_bytes.to_string()),
             ("tq_span", self.tq_span.to_string()),
@@ -550,6 +572,7 @@ pub const NAMES: &[&str] = &[
     "NO_WIDE",
     "TILES",
     "KREPACK",
+    "FPACK",
     "DYNAMIC",
     "PF",
     "TQ_SPAN",
@@ -588,6 +611,7 @@ impl EngineOptions {
             tq_span: self.tq_span,
             exact: self.exact,
             kq_repack: self.kq_repack,
+            fpack: self.fpack,
         }
     }
 }
@@ -656,6 +680,17 @@ mod tests {
         assert!(!with(&[("KREPACK", "0")]).kq_repack);
         assert!(with(&[("KREPACK", "yes")]).kq_repack);
         assert!(with(&[("KREPACK", "1")]).kq_repack);
+        // The float pack (S4.9f) is the same rule, and its note says which it was.
+        assert!(with(&[]).fpack);
+        assert!(!with(&[("FPACK", "0")]).fpack);
+        assert!(with(&[("FPACK", "1")]).fpack);
+        assert!(!with(&[]).fpack_switch);
+        assert!(with(&[("FPACK", "0")]).fpack_switch);
+        assert_eq!(with(&[]).fpack_note(), "on (default)");
+        assert_eq!(
+            with(&[("FPACK", "0")]).fpack_note(),
+            "off (PEREGRINE_FPACK)"
+        );
         // Off only with "1".
         assert!(with(&[("EXACT", "1")]).exact);
         assert!(!with(&[("EXACT", "yes")]).exact);

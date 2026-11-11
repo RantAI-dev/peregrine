@@ -148,10 +148,11 @@ pub fn describe_runtime() -> String {
         .prefill_chunk
         .unwrap_or_else(|| peregrine_core::options::prefill_chunk_default_for(threads));
     format!(
-        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nprefill chunk {chunk} (for {threads} workers)\noptions:\n{}",
+        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\nprefill chunk {chunk} (for {threads} workers)\noptions:\n{}",
         peregrine_kernels::cpu::tier_name(),
         peregrine_core::simd_name(),
         o.kq_repack_note(),
+        o.fpack_note(),
         o.describe()
             .lines()
             .map(|l| format!("  {l}\n"))

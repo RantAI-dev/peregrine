@@ -56,6 +56,7 @@ pub mod dspark {
         }
     }
 }
+pub mod fpack;
 pub mod gguf;
 pub mod json;
 pub mod kq;

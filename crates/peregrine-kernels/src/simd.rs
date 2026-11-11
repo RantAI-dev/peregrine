@@ -550,7 +550,7 @@ unsafe fn f16_at4(p: *const u8) -> f32 {
 /// DRAM round trip that the core spends waiting (the hot instructions in a
 /// profile were the loads, and one core streamed 7.4 GB/s against llama.cpp's 10.7).
 /// `PEREGRINE_PF` (bytes, 0 = off) is the A/B switch it was tuned with.
-fn prefetch_distance() -> usize {
+pub(crate) fn prefetch_distance() -> usize {
     static PF: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *PF.get_or_init(|| crate::options::get().prefetch_bytes)
 }

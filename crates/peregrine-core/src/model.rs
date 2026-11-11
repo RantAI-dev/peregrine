@@ -135,6 +135,9 @@ pub struct Weights {
     // The k-quant matrices repacked into eight-row tiles at load (`TensorInfo::kq_off` points
     // here); empty when the repack is off (`PEREGRINE_KREPACK=0`).
     pub(crate) kq: KqStore,
+    // The float matrices packed into 16-row panels at load (`TensorInfo::fp_off` points here);
+    // empty when the pack is off (`PEREGRINE_FPACK=0`) or the target has no packed kernel.
+    pub(crate) fp: FpStore,
     #[cfg(feature = "littlebit")]
     pub(crate) lb: Option<Slb>,
 }
@@ -155,6 +158,11 @@ impl Weights {
     #[inline]
     pub fn kq(&self) -> &[u8] {
         self.kq.bytes()
+    }
+    /// The packed float store (see `TensorInfo::fp_off`).
+    #[inline]
+    pub fn fp(&self) -> &[u8] {
+        self.fp.bytes()
     }
     #[cfg(feature = "littlebit")]
     pub fn lb(&self) -> Option<&Slb> {
@@ -256,6 +264,56 @@ impl KqStore {
     }
 }
 
+/// The packed float weights: the F32, F16 and BF16 matrices in 16-output-row
+/// panels (`TensorInfo::fp_off` points here), built like the [`TileStore`] — an
+/// anonymous mapping that asks for transparent huge pages, since a decode step
+/// streams all of it every token — and `PEREGRINE_TILE_HUGEPAGES=0` uses a plain
+/// heap buffer, for the A/B.
+///
+/// The store is empty when the pack is off — `PEREGRINE_FPACK=0` — and it is not
+/// built at all where the kernel table has no packed float kernel, so it never
+/// costs resident memory that nothing reads. Its size is one copy of every packed
+/// matrix in the file's own element type, plus the zero padding of each matrix's
+/// last panel (see `crate::fpack`).
+#[derive(Default)]
+pub struct FpStore {
+    map: Option<memmap2::MmapMut>,
+    heap: Vec<u8>,
+}
+
+impl FpStore {
+    pub fn new(len: usize) -> FpStore {
+        let huge = crate::options::get().tile_hugepages;
+        if huge && len > 0 {
+            if let Ok(m) = memmap2::MmapMut::map_anon(len) {
+                #[cfg(target_os = "linux")]
+                let _ = m.advise(memmap2::Advice::HugePage);
+                return FpStore {
+                    map: Some(m),
+                    heap: Vec::new(),
+                };
+            }
+        }
+        FpStore {
+            map: None,
+            heap: vec![0u8; len],
+        }
+    }
+    #[inline]
+    pub fn bytes(&self) -> &[u8] {
+        self.map.as_deref().unwrap_or(&self.heap)
+    }
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        match &mut self.map {
+            Some(m) => m,
+            None => &mut self.heap,
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bytes().is_empty()
+    }
+}
+
 impl Model {
     /// Load a model from a parsed GGUF file, with the k-quant repack as
     /// `PEREGRINE_KREPACK` says — and only where the kernel table has a kernel
@@ -265,9 +323,11 @@ impl Model {
         // built only where a kernel multiplies from it. With the switch on but the
         // repacked kernel unavailable (a `PEREGRINE_ISA` cap below AVX2, a build with
         // the k-quant kernels off) the store would be RSS nothing reads.
-        let kq = crate::options::get().kq_repack
-            && peregrine_kernels::table::MatKernels::get().kq_tiles();
-        Self::load_with_kq(g, families, kq)
+        let mk = peregrine_kernels::table::MatKernels::get();
+        let kq = crate::options::get().kq_repack && mk.kq_tiles();
+        // Same rule for the float pack (S4.9f): on where the packed kernel runs.
+        let fp = crate::options::get().fpack && mk.fp_panels();
+        Self::load_with_kq_fp(g, families, kq, fp)
     }
 
     /// Load a model from a parsed GGUF file, with the k-quant repack forced on or
@@ -281,6 +341,22 @@ impl Model {
         g: Gguf,
         families: &[&dyn crate::arch::Family],
         kq: bool,
+    ) -> Result<Model, String> {
+        let fp =
+            crate::options::get().fpack && peregrine_kernels::table::MatKernels::get().fp_panels();
+        Self::load_with_kq_fp(g, families, kq, fp)
+    }
+
+    /// Load a model from a parsed GGUF file with both load-time packs chosen
+    /// explicitly (S3.4's k-quant eight-row tiles, S4.9f's float panels).
+    ///
+    /// This is the switch an A/B needs: the same file, loaded both ways, and the
+    /// two compared.
+    pub fn load_with_kq_fp(
+        g: Gguf,
+        families: &[&dyn crate::arch::Family],
+        kq: bool,
+        fp: bool,
     ) -> Result<Model, String> {
         let arch_name = g.str("general.architecture")?;
         let family = families
@@ -320,6 +396,13 @@ impl Model {
         } else {
             KqStore::default()
         };
+        // The float pack (S4.9f): every F32, F16 and BF16 matrix into 16-row panels,
+        // before the family reads the file, so each matrix knows where its panels are.
+        let fp = if fp {
+            crate::fpack::repack(&mut g)
+        } else {
+            FpStore::default()
+        };
         let tk = Tokenizer::from_gguf(&g)?;
         let loaded = family.load(&g, &tk)?;
         Ok(Model {
@@ -327,6 +410,7 @@ impl Model {
                 g,
                 tiles: loaded.tiles,
                 kq,
+                fp,
                 #[cfg(feature = "littlebit")]
                 lb: None,
             },
@@ -569,6 +653,13 @@ impl Model {
     /// where the kernel table has no kernel to read it.
     pub fn kq(&self) -> &[u8] {
         self.w.kq.bytes()
+    }
+
+    /// The packed float store: the F32, F16 and BF16 matrices, in 16-row panels
+    /// (S4.9f). Empty when the pack is off, and empty where the kernel table has no
+    /// packed kernel to read it.
+    pub fn fp(&self) -> &[u8] {
+        self.w.fp.bytes()
     }
 
     /// `general.name`, or an empty string.
