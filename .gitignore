@@ -13,3 +13,7 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Local credentials and machine settings: never committed.
+.env
+.env.*
