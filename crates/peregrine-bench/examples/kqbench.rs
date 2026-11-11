@@ -239,7 +239,7 @@ fn main() {
             repack_q4k8(&blocks, &mut tile[sb * Q4K8::SIZE..(sb + 1) * Q4K8::SIZE]);
         }
         let mut o = vec![0.0f32; 8 * 128];
-        for &nb in &[1usize, 16, 64, 128] {
+        for &nb in &[1usize, 4, 16, 64, 128] {
             let mut row = Vec::new();
             let mut tl = Vec::new();
             let mut tz = Vec::new();
@@ -316,54 +316,34 @@ fn main() {
     let n_blk = n / 32;
     let t5 = tile5(n_blk, 0x5EED_5A5A);
     unsafe { q5_08_gemm(&t5, n_blk, &batch[..4], 4, &mut out) };
-    let mut q4 = Vec::new();
-    let mut q64 = Vec::new();
-    for _ in 0..5 {
-        let t0 = Instant::now();
-        for _ in 0..reps {
-            unsafe { q5_08_gemm(&t5, n_blk, &batch[..4], 4, &mut out) };
-        }
-        q4.push(t0.elapsed().as_secs_f64());
-        let t0 = Instant::now();
-        for _ in 0..reps {
-            unsafe { q5_08_gemm(&t5, n_blk, &batch[..64], 64, &mut out) };
-        }
-        q64.push(t0.elapsed().as_secs_f64());
-    }
-    for (name, v, rows) in [
-        ("q5 gemm(4)", &mut q4, 4usize),
-        ("q5 gemm(64)", &mut q64, 64),
-    ] {
-        let ns = per(best(v), rows) / 8.0; // per block: one block is 1/8 of a super-block
-        println!(
-            "{name}: {ns:.2} ns/(tile*act*blk)  {:.1} GMAC/s/core",
-            256.0 / ns
-        );
-    }
-    if zmm {
-        let mut q4z = Vec::new();
-        let mut q64z = Vec::new();
+    for &nb in &[1usize, 4, 16, 64, 128] {
+        let mut q = Vec::new();
+        let mut qz = Vec::new();
         for _ in 0..5 {
             let t0 = Instant::now();
             for _ in 0..reps {
-                unsafe { q5_08_gemm_zmm(&t5, n_blk, &batch[..4], 4, &mut out) };
+                unsafe { q5_08_gemm(&t5, n_blk, &batch[..nb], nb, &mut out) };
             }
-            q4z.push(t0.elapsed().as_secs_f64());
-            let t0 = Instant::now();
-            for _ in 0..reps {
-                unsafe { q5_08_gemm_zmm(&t5, n_blk, &batch[..64], 64, &mut out) };
+            q.push(t0.elapsed().as_secs_f64());
+            if zmm {
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    unsafe { q5_08_gemm_zmm(&t5, n_blk, &batch[..nb], nb, &mut out) };
+                }
+                qz.push(t0.elapsed().as_secs_f64());
             }
-            q64z.push(t0.elapsed().as_secs_f64());
         }
-        for (name, v, rows) in [
-            ("q5 zmm gemm(4)", &mut q4z, 4usize),
-            ("q5 zmm gemm(64)", &mut q64z, 64),
-        ] {
-            let ns = per(best(v), rows) / 8.0;
+        let ns = per(best(&mut q), nb) / 8.0; // per block: one block is 1/8 of a super-block
+        if zmm {
+            let zns = per(best(&mut qz), nb) / 8.0;
             println!(
-                "{name}: {ns:.2} ns/(tile*act*blk)  {:.1} GMAC/s/core",
-                256.0 / ns
+                "q5 {nb:>3} acts: avx2 {:.1} G  zmm {:.1} G MAC/s/core  ({:+.0}%)",
+                256.0 / ns,
+                256.0 / zns,
+                (ns / zns - 1.0) * 100.0
             );
+        } else {
+            println!("q5 {nb:>3} acts: avx2 {:.1} G MAC/s/core", 256.0 / ns);
         }
     }
 

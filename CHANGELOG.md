@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The AVX-512 Q4_K and Q5_0 kernels work eight activation rows per pass (S5.1).** The prefill
+  group was four rows, and each super-block's weight windows, scale decode and min term were
+  re-done for each of them; a super-block is now decoded once for eight, with the window loop
+  outside the row loop so sixteen `vpdpbusd` chains overlap. The Q4_K min term sums two sub-blocks
+  per `vpdpwssd` against paired sums kept in the interleaved activation (`KqActs::bsp`) instead of
+  eight scalar broadcasts and eight int32 multiplies per row, and both kernels work out a row's
+  activation addressing once per call. All of it is bit-identical: the integer sums are
+  order-free and the fold is unchanged, so no golden moves. One core, L1-resident: Q4_K 76.8 →
+  80.8 GMAC/s at sixteen activation rows and 74.6 → 79.3 at sixty-four, Q5_0 48.4 → 54.2 and
+  47.8 → 54.3; the one-row decode kernel 43.5 → 44.0. End to end at 512 tokens: +6.0 % (Qwen 2.5
+  0.5B) and +2.1 % (Llama 3.2 1B) prefill at twelve threads, +5.8 % / +4.7 % at one, decode
+  unchanged. The kernel was not the engine's limit at a sixteen-token pass — the weights stream
+  from DRAM per pass — which is what the wider-pass work is for. See
+  `docs/design/s5.1-kq-epilogue.md`.
+
 ### Added
 
 - **Tool calling, first part: the tool module and the `hermes` format for Qwen 2.5 (S6.2)**:
