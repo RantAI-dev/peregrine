@@ -11,6 +11,7 @@
 use peregrine_core::decision::{
     format_answer, Answer, DecisionType, Question, QuestionOption, QuestionType,
 };
+use peregrine_core::json::Value as JsonValue;
 use std::collections::HashMap;
 
 fn fixture() -> String {
@@ -266,12 +267,13 @@ fn question(v: &Json) -> Question {
     let descriptions = v.get("descriptions").arr();
     Question {
         kind,
+        instructions: JsonValue::Null,
         options: keys
             .iter()
             .zip(descriptions)
             .map(|(k, d)| QuestionOption {
                 key: k.str().to_string(),
-                description: d.str().to_string(),
+                description: JsonValue::Str(d.str().to_string()),
             })
             .collect(),
     }
@@ -366,7 +368,7 @@ fn the_answer_math_agrees_with_the_python_reference_to_1e_12() {
                 assert_eq!(legend.len(), want_legend.len(), "line {}", i + 1);
                 for (got, (key, description)) in legend.iter().zip(&want_legend) {
                     assert_eq!(&got.0, key, "line {}", i + 1);
-                    assert_eq!(&got.1, description, "line {}", i + 1);
+                    assert_eq!(got.1, JsonValue::Str(description.clone()), "line {}", i + 1);
                 }
                 compare_probs(probabilities, &want.get("probabilities").pairs(), i + 1);
                 close(

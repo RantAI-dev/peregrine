@@ -9,9 +9,16 @@
 //! The prompts themselves, the chat template named `systemone` and the endpoint are deliberately not
 //! here. The template is only stored, as an opaque string whose bytes are never printed.
 
-use crate::gguf::{Gguf, Value};
+use crate::gguf::{Gguf, Value as MetaValue};
+use crate::json::Value;
 use std::collections::HashMap;
 use std::fmt;
+
+/// The question vocabulary is [`crate::systemone`]'s: one set of types for the prompt a decision
+/// model reads and for the answer its scores produce.
+pub use crate::systemone::{
+    PromptOption as QuestionOption, PromptQuestion as Question, QuestionKind as QuestionType,
+};
 
 /// The nine-point rating scale a Lev `noul` question is read over
 /// (`DECISION_LEV_N_RATINGS`, `server-decision.cpp:20`).
@@ -110,59 +117,6 @@ impl DecisionType {
             DecisionType::VllmDecision2 | DecisionType::VllmD3 => ConfidenceFormula::Entropy,
             t if t.is_lfm3_d1() => ConfidenceFormula::MaxProbability,
             _ => ConfidenceFormula::Default,
-        }
-    }
-}
-
-/// A question's type (`SERVER_DECISION_QUESTION_*`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuestionType {
-    Choice,
-    Score,
-    Noul,
-}
-
-impl QuestionType {
-    /// The name the answer's `type` field carries (`decision_question_type_name`).
-    pub fn name(self) -> &'static str {
-        match self {
-            QuestionType::Choice => "choice",
-            QuestionType::Score => "score",
-            QuestionType::Noul => "noul",
-        }
-    }
-}
-
-/// One option of a question: its key and the description the answer's legend echoes.
-///
-/// llama.cpp keeps a description as JSON (a string, object or array); the answer math only echoes it,
-/// so a caller that has already rendered it as text passes that text. The engine's endpoint is not
-/// part of this stage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuestionOption {
-    pub key: String,
-    pub description: String,
-}
-
-/// One question of a request, as far as the answer math needs it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Question {
-    pub kind: QuestionType,
-    pub options: Vec<QuestionOption>,
-}
-
-impl Question {
-    /// A question whose options are keys with empty descriptions.
-    pub fn new(kind: QuestionType, keys: &[&str]) -> Question {
-        Question {
-            kind,
-            options: keys
-                .iter()
-                .map(|k| QuestionOption {
-                    key: (*k).to_string(),
-                    description: String::new(),
-                })
-                .collect(),
         }
     }
 }
@@ -380,8 +334,10 @@ pub enum Answer {
     /// `{"type":"score","score":...,"legend":...,"probabilities":...,"confidence":...}`
     Score {
         score: f64,
-        /// `(key, description)` in level order.
-        legend: Vec<(String, String)>,
+        /// `(key, description)` in level order. The description is the request's value as given:
+        /// a string stays a string, `null` stays `null`, an object or array is echoed as JSON
+        /// (`format_answer`, `server-decision.cpp:1728-1745`).
+        legend: Vec<(String, Value)>,
         probabilities: Vec<(String, f64)>,
         confidence: f64,
     },
@@ -461,7 +417,7 @@ pub fn format_answer(
         for (i, &p) in probs.iter().enumerate() {
             expected += i as f64 * p;
         }
-        let legend: Vec<(String, String)> = question
+        let legend: Vec<(String, Value)> = question
             .options
             .iter()
             .take(n)
@@ -501,13 +457,13 @@ impl DecisionInfo {
     /// a malformed score bias and a decision model without the `systemone` template are refused.
     pub fn from_gguf(g: &Gguf) -> Result<Option<DecisionInfo>, String> {
         let arch = match g.meta.get("general.architecture") {
-            Some(Value::Str(s)) => s.clone(),
+            Some(MetaValue::Str(s)) => s.clone(),
             _ => return Ok(None),
         };
         let type_key = format!("{arch}.decision.type");
         let type_name = match g.meta.get(&type_key) {
             None => return Ok(None),
-            Some(Value::Str(s)) => s.clone(),
+            Some(MetaValue::Str(s)) => s.clone(),
             Some(_) => return Err(format!("gguf: metadata {type_key:?} is not a string")),
         };
         let kind = DecisionType::from_name(&type_name);
@@ -516,7 +472,7 @@ impl DecisionInfo {
         }
 
         let template = match g.meta.get(SYSTEMONE_TEMPLATE) {
-            Some(Value::Str(s)) => Some(s.clone()),
+            Some(MetaValue::Str(s)) => Some(s.clone()),
             Some(_) => {
                 return Err(format!(
                     "gguf: metadata {SYSTEMONE_TEMPLATE:?} is not a string"
@@ -569,7 +525,7 @@ impl DecisionInfo {
         }
 
         let labels = match g.meta.get(&format!("{arch}.decision.labels")) {
-            Some(Value::ArrStr(v)) => v.clone(),
+            Some(MetaValue::ArrStr(v)) => v.clone(),
             Some(_) => {
                 let key = format!("{arch}.decision.labels");
                 return Err(format!("gguf: metadata {key:?} is not a string array"));
@@ -611,6 +567,11 @@ impl DecisionInfo {
     pub fn template_len(&self) -> usize {
         self.template.as_ref().map_or(0, String::len)
     }
+
+    /// The `systemone` template, for the renderer check. The bytes are never printed.
+    pub(crate) fn template(&self) -> Option<&str> {
+        self.template.as_deref()
+    }
 }
 
 impl fmt::Debug for DecisionInfo {
@@ -625,13 +586,269 @@ impl fmt::Debug for DecisionInfo {
     }
 }
 
+/// A loaded model's decision front end: the file's decision metadata, the option labels, and the
+/// request and prompt translation for the type this build renders (`openjev`).
+///
+/// The type's prompt renderer is written from one template, so a file is refused at load when its
+/// `systemone` template is not that one: an approximate render would answer a question the model
+/// never read.
+pub struct Decider {
+    info: DecisionInfo,
+    /// The token id of every [`crate::systemone::OPENJEV_LETTERS`] letter, in letter order.
+    labels: Vec<u32>,
+    n_options_max: usize,
+}
+
+impl Decider {
+    /// Build the front end from a loaded model, or `None` when the file is not a decision model.
+    ///
+    /// A decision type this build does not render, a `systemone` template that is not the
+    /// supported type's, and a letter that is not exactly one token are load-time errors naming
+    /// the type, as llama.cpp's `server_decision_context::init` refuses them.
+    pub fn from_model(model: &crate::model::Model) -> Result<Option<Decider>, String> {
+        let Some(info) = DecisionInfo::from_gguf(model.gguf())? else {
+            return Ok(None);
+        };
+        if info.kind() != &DecisionType::OpenJev {
+            return Err(format!(
+                "unsupported decision model type: {} (this build renders openjev)",
+                info.kind().name()
+            ));
+        }
+        if !crate::systemone::is_openjev_template(info.template().unwrap_or_default()) {
+            return Err(format!(
+                "decision model type {}: its \"systemone\" template is not the openjev template this build renders",
+                info.kind().name()
+            ));
+        }
+        let mut labels = Vec::with_capacity(crate::systemone::OPENJEV_LETTERS.len());
+        for c in crate::systemone::OPENJEV_LETTERS.chars() {
+            let ids = model.tk.encode(&c.to_string());
+            if ids.len() != 1 {
+                return Err(format!("decision label '{c}' is not a single token"));
+            }
+            labels.push(ids[0]);
+        }
+        let n_options_max = labels.len();
+        Ok(Some(Decider {
+            info,
+            labels,
+            n_options_max,
+        }))
+    }
+
+    /// The file's decision metadata.
+    pub fn info(&self) -> &DecisionInfo {
+        &self.info
+    }
+
+    /// The token id of each option letter, in option order.
+    pub fn labels(&self) -> &[u32] {
+        &self.labels
+    }
+
+    /// The most options one question may offer (`n_options_max`).
+    pub fn n_options_max(&self) -> usize {
+        self.n_options_max
+    }
+
+    /// Read a `/v1/systemone` body: the `state` and each question's id and prompt question, in
+    /// request order (`parse_questions`, `server-decision.cpp:245-383`).
+    ///
+    /// The messages are llama.cpp's, including the `questions.<id>: ` prefix and the option
+    /// limit, so a client sees the same 400 text from either engine.
+    pub fn parse_request(
+        &self,
+        body: &Value,
+    ) -> Result<(Value, Vec<(String, Question)>), String> {
+        let state = match body.get("state") {
+            Some(v) if !v.is_null() => v.clone(),
+            _ => return Err("\"state\" must be provided".into()),
+        };
+        let questions = body
+            .get("questions")
+            .and_then(Value::as_object)
+            .filter(|o| !o.is_empty())
+            .ok_or("\"questions\" must be a non-empty object")?;
+        let mut out = Vec::with_capacity(questions.len());
+        for (id, q) in questions {
+            let err = |msg: String| format!("questions.{id}: {msg}");
+            if q.as_object().is_none() {
+                return Err(err("must be an object".into()));
+            }
+            let instructions = match q.get("instructions") {
+                Some(v) if !v.is_null() => v.clone(),
+                _ => return Err(err("\"instructions\" must be provided".into())),
+            };
+            let kind = match q.get("type").and_then(Value::as_str) {
+                Some("choice") => QuestionType::Choice,
+                Some("score") => QuestionType::Score,
+                Some("noul") => QuestionType::Noul,
+                _ => return Err(err("\"type\" must be one of: choice, score, noul".into())),
+            };
+            let criteria = q.get("criteria").cloned().unwrap_or(Value::Null);
+            let options = crate::systemone::options_from_criteria(
+                kind,
+                &criteria,
+                crate::systemone::OPENJEV_RULES,
+            )
+            .map_err(err)?;
+            if options.len() > self.n_options_max {
+                return Err(err(format!(
+                    "too many options ({}), this model supports at most {}",
+                    options.len(),
+                    self.n_options_max
+                )));
+            }
+            out.push((
+                id.clone(),
+                Question {
+                    kind,
+                    instructions,
+                    options,
+                },
+            ));
+        }
+        Ok((state, out))
+    }
+
+    /// One question's prompt as token ids: the type's renderer, then the model's tokenizer.
+    pub fn prompt_tokens(
+        &self,
+        question: &Question,
+        state: &Value,
+        tk: &crate::tokenizer::Tokenizer,
+    ) -> Result<Vec<u32>, String> {
+        let prompt = crate::systemone::render_openjev(question, state)?;
+        Ok(tk.encode(&prompt))
+    }
+}
+
+/// The media a decision request carries (`parse_state`, `server-decision.cpp:413-437`), with
+/// llama.cpp's messages.
+///
+/// This build has no image input, so any media is answered with a 501 by the caller; the errors
+/// here are the 400s llama.cpp raises before it gets to that check. `videos` is not supported by
+/// any type.
+pub fn parse_media(body: &Value) -> Result<bool, String> {
+    if let Some(v) = body.get("videos") {
+        // `!is_null() && !empty()`: an empty array, object or string is no media, anything else is.
+        let empty = match v {
+            Value::Null => true,
+            Value::Arr(a) => a.is_empty(),
+            Value::Obj(o) => o.is_empty(),
+            Value::Str(s) => s.is_empty(),
+            _ => false,
+        };
+        if !empty {
+            return Err("\"videos\" is not supported".into());
+        }
+    }
+    let mut count = 0usize;
+    for key in ["files", "images"] {
+        let Some(v) = body.get(key) else { continue };
+        if v.is_null() {
+            continue;
+        }
+        let Some(items) = v.as_array() else {
+            return Err(format!("\"{key}\" must be an array"));
+        };
+        for url in items {
+            match url.as_str() {
+                Some(url) if url.starts_with("data:") => {}
+                _ => {
+                    return Err(
+                        "media must be data URLs (data:image/..., data:audio/... or data:video/...;base64,...)"
+                            .into(),
+                    )
+                }
+            }
+            if count >= 8 {
+                return Err("too many images, the maximum is 8".into());
+            }
+            count += 1;
+        }
+    }
+    Ok(count > 0)
+}
+
+impl Answer {
+    /// The answer as the API writes it, field names and order as `format_answer` builds them.
+    pub fn to_value(&self) -> Value {
+        match self {
+            Answer::Choice {
+                choice,
+                probabilities,
+                confidence,
+            } => Value::Obj(vec![
+                ("type".into(), Value::Str("choice".into())),
+                ("choice".into(), Value::Str(choice.clone())),
+                ("probabilities".into(), probabilities_value(probabilities)),
+                ("confidence".into(), Value::Float(*confidence)),
+            ]),
+            Answer::Score {
+                score,
+                legend,
+                probabilities,
+                confidence,
+            } => Value::Obj(vec![
+                ("type".into(), Value::Str("score".into())),
+                ("score".into(), Value::Float(*score)),
+                (
+                    "legend".into(),
+                    Value::Obj(legend.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+                ),
+                ("probabilities".into(), probabilities_value(probabilities)),
+                ("confidence".into(), Value::Float(*confidence)),
+            ]),
+            Answer::Noul { noul } => Value::Obj(vec![
+                ("type".into(), Value::Str("noul".into())),
+                ("noul".into(), Value::Float(*noul)),
+            ]),
+        }
+    }
+}
+
+fn probabilities_value(probabilities: &[(String, f64)]) -> Value {
+    Value::Obj(
+        probabilities
+            .iter()
+            .map(|(k, p)| (k.clone(), Value::Float(*p)))
+            .collect(),
+    )
+}
+
+/// The whole `POST /v1/systemone` response: `model`, the answers in request order, and the token
+/// usage (`server-context.cpp:6706-6721`).
+pub fn response_json(model: &str, answers: &[(String, Answer)], input_tokens: usize) -> Value {
+    Value::Obj(vec![
+        ("model".into(), Value::Str(model.to_string())),
+        (
+            "answers".into(),
+            Value::Obj(
+                answers
+                    .iter()
+                    .map(|(id, answer)| (id.clone(), answer.to_value()))
+                    .collect(),
+            ),
+        ),
+        (
+            "usage".into(),
+            Value::Obj(vec![
+                ("input_tokens".into(), Value::Int(input_tokens as i64)),
+                ("output_tokens".into(), Value::Int(0)),
+            ]),
+        ),
+    ])
+}
+
 // A metadata value as the number llama.cpp's `strtof`/`strtoul` would read out of its text.
-fn number(v: &Value) -> Option<f32> {
+fn number(v: &MetaValue) -> Option<f32> {
     match v {
-        Value::F32(x) => Some(*x),
-        Value::U32(x) => Some(*x as f32),
-        Value::I32(x) => Some(*x as f32),
-        Value::U64(x) => Some(*x as f32),
+        MetaValue::F32(x) => Some(*x),
+        MetaValue::U32(x) => Some(*x as f32),
+        MetaValue::I32(x) => Some(*x as f32),
+        MetaValue::U64(x) => Some(*x as f32),
         _ => None,
     }
 }
@@ -993,5 +1210,259 @@ mod tests {
         ] {
             assert_eq!(DecisionType::from_name(name).name(), name);
         }
+    }
+
+    /// An `openjev` front end without a tokenizer: the request and answer paths, which need no
+    /// label ids.
+    fn openjev() -> Decider {
+        Decider {
+            info: DecisionInfo {
+                kind: DecisionType::OpenJev,
+                temperatures: HashMap::new(),
+                score_bias: HashMap::new(),
+                labels: Vec::new(),
+                template: Some(crate::systemone::OPENJEV_TEMPLATE.to_string()),
+            },
+            labels: Vec::new(),
+            n_options_max: crate::systemone::OPENJEV_LETTERS.len(),
+        }
+    }
+
+    fn request(text: &str) -> Value {
+        Value::parse(text).expect("a request")
+    }
+
+    /// The message of a body that must be refused.
+    fn refused(body: &str) -> String {
+        openjev().parse_request(&request(body)).expect_err("refused")
+    }
+
+    #[test]
+    fn the_request_messages_are_llama_cpps() {
+        // `server_decision_context::parse_questions`, `server-decision.cpp:245-383`.
+        assert_eq!(
+            refused("{\"questions\":{\"a\":{\"type\":\"noul\",\"instructions\":\"x\"}}}"),
+            "\"state\" must be provided"
+        );
+        assert_eq!(
+            refused("{\"state\":null,\"questions\":{\"a\":{\"type\":\"noul\",\"instructions\":\"x\"}}}"),
+            "\"state\" must be provided"
+        );
+        for body in [
+            "{\"state\":\"s\"}",
+            "{\"state\":\"s\",\"questions\":[]}",
+            "{\"state\":\"s\",\"questions\":{}}",
+        ] {
+            assert_eq!(refused(body), "\"questions\" must be a non-empty object");
+        }
+        assert_eq!(
+            refused("{\"state\":\"s\",\"questions\":{\"a\":5}}"),
+            "questions.a: must be an object"
+        );
+        assert_eq!(
+            refused("{\"state\":\"s\",\"questions\":{\"a\":{\"type\":\"noul\"}}}"),
+            "questions.a: \"instructions\" must be provided"
+        );
+        assert_eq!(
+            refused(
+                "{\"state\":\"s\",\"questions\":{\"a\":{\"type\":\"noul\",\"instructions\":null}}}"
+            ),
+            "questions.a: \"instructions\" must be provided"
+        );
+        assert_eq!(
+            refused(
+                "{\"state\":\"s\",\"questions\":{\"a\":{\"type\":\"other\",\"instructions\":\"x\"}}}"
+            ),
+            "questions.a: \"type\" must be one of: choice, score, noul"
+        );
+        assert_eq!(
+            refused(
+                "{\"state\":\"s\",\"questions\":{\"a\":{\"type\":\"choice\",\"instructions\":\"x\"}}}"
+            ),
+            "questions.a: \"criteria\" must be a non-empty object"
+        );
+        assert_eq!(
+            refused(
+                "{\"state\":\"s\",\"questions\":{\"a\":{\"type\":\"choice\",\"instructions\":\"x\",\"criteria\":{}}}}"
+            ),
+            "questions.a: \"criteria\" must be a non-empty object"
+        );
+        for levels in ["[1]", "[0,1,2,3,4,5,6,7,8,9,10]"] {
+            let body = format!(
+                "{{\"state\":\"s\",\"questions\":{{\"a\":{{\"type\":\"score\",\"instructions\":\"x\",\"criteria\":{levels}}}}}}}"
+            );
+            assert_eq!(
+                refused(&body),
+                "questions.a: \"criteria\" must be an array of 2 to 10 levels"
+            );
+        }
+        assert_eq!(
+            refused(
+                "{\"state\":\"s\",\"questions\":{\"a\":{\"type\":\"noul\",\"instructions\":\"x\",\"criteria\":[]}}}"
+            ),
+            "questions.a: \"criteria\" must be an object"
+        );
+    }
+
+    #[test]
+    fn too_many_options_names_the_limit() {
+        let criteria: Vec<String> = (0..53).map(|i| format!("\"{i}\": null")).collect();
+        let body = format!(
+            "{{\"state\":\"s\",\"questions\":{{\"a\":{{\"type\":\"choice\",\"instructions\":\"x\",\"criteria\":{{{}}}}}}}}}",
+            criteria.join(",")
+        );
+        assert_eq!(
+            refused(&body),
+            "questions.a: too many options (53), this model supports at most 52"
+        );
+        // 52 is accepted.
+        let criteria: Vec<String> = (0..52).map(|i| format!("\"{i}\": null")).collect();
+        let body = format!(
+            "{{\"state\":\"s\",\"questions\":{{\"a\":{{\"type\":\"choice\",\"instructions\":\"x\",\"criteria\":{{{}}}}}}}}}",
+            criteria.join(",")
+        );
+        let (_, questions) = openjev().parse_request(&request(&body)).expect("52 options");
+        assert_eq!(questions[0].1.options.len(), 52);
+    }
+
+    #[test]
+    fn request_order_and_option_defaults_are_llama_cpps() {
+        let body = request(
+            "{\"state\":{\"text\":\"s\"},\"questions\":{\
+               \"first\":{\"type\":\"choice\",\"instructions\":\"pick\",\"criteria\":{\"z\":null,\"a\":{\"k\":1}}},\
+               \"second\":{\"type\":\"score\",\"instructions\":\"rate\",\"criteria\":[\"low\",null]},\
+               \"third\":{\"type\":\"noul\",\"instructions\":\"yes?\",\"criteria\":{\"true\":\"yes\",\"false\":\"no\"}}}}",
+        );
+        let (state, questions) = openjev().parse_request(&body).expect("a request");
+        assert_eq!(state, body.get("state").unwrap().clone());
+        let ids: Vec<&str> = questions.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["first", "second", "third"]);
+
+        // A choice keeps request order, byte for byte, and its descriptions.
+        let choice = &questions[0].1;
+        assert_eq!(choice.kind, QuestionType::Choice);
+        let keys: Vec<&str> = choice.options.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, ["z", "a"]);
+        assert_eq!(choice.options[0].description, Value::Null);
+        assert_eq!(choice.options[1].description, request("{\"k\":1}"));
+
+        // A score's keys are the level indices, its descriptions the request's values.
+        let score = &questions[1].1;
+        assert_eq!(
+            score
+                .options
+                .iter()
+                .map(|o| (o.key.as_str(), &o.description))
+                .collect::<Vec<_>>(),
+            [
+                ("0", &Value::Str("low".into())),
+                ("1", &Value::Null),
+            ]
+        );
+
+        // A noul is [true, false] for openjev, described by the criteria object.
+        let noul = &questions[2].1;
+        let keys: Vec<&str> = noul.options.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, ["true", "false"]);
+        assert_eq!(noul.options[0].description, Value::Str("yes".into()));
+        assert_eq!(noul.options[1].description, Value::Str("no".into()));
+
+        // A noul without criteria has two null descriptions.
+        let body = request(
+            "{\"state\":\"s\",\"questions\":{\"a\":{\"type\":\"noul\",\"instructions\":\"x\"}}}",
+        );
+        let (_, questions) = openjev().parse_request(&body).expect("a request");
+        assert_eq!(questions[0].1.options.len(), 2);
+        assert!(questions[0].1.options.iter().all(|o| o.description.is_null()));
+    }
+
+    #[test]
+    fn media_errors_are_llama_cpps_and_empty_media_is_no_media() {
+        let body = request("{\"state\":\"s\",\"questions\":{}}");
+        assert!(!parse_media(&body).unwrap());
+        let with_empty = request("{\"state\":\"s\",\"files\":[],\"images\":null,\"videos\":[]}");
+        assert!(!parse_media(&with_empty).unwrap());
+        assert_eq!(
+            parse_media(&request("{\"videos\":[\"data:video/mp4;base64,AA\"]}")).unwrap_err(),
+            "\"videos\" is not supported"
+        );
+        assert_eq!(
+            parse_media(&request("{\"files\":\"data:image/png;base64,AA\"}")).unwrap_err(),
+            "\"files\" must be an array"
+        );
+        assert_eq!(
+            parse_media(&request("{\"files\":[\"http://example.test/a.png\"]}")).unwrap_err(),
+            "media must be data URLs (data:image/..., data:audio/... or data:video/...;base64,...)"
+        );
+        let nine: Vec<&str> = (0..9).map(|_| "\"data:image/png;base64,AA\"").collect();
+        let body = format!("{{\"files\":[{}]}}", nine.join(","));
+        assert_eq!(
+            parse_media(&request(&body)).unwrap_err(),
+            "too many images, the maximum is 8"
+        );
+        assert!(parse_media(&request("{\"images\":[\"data:image/png;base64,AA\"]}")).unwrap());
+    }
+
+    #[test]
+    fn the_response_has_llama_cpps_fields_in_order() {
+        let answers = vec![
+            (
+                "choose".to_string(),
+                Answer::Choice {
+                    choice: "b".into(),
+                    probabilities: vec![("a".into(), 0.25), ("b".into(), 0.75)],
+                    confidence: 0.5,
+                },
+            ),
+            (
+                "rate".to_string(),
+                Answer::Score {
+                    score: 1.5,
+                    legend: vec![
+                        ("0".into(), Value::Str("low".into())),
+                        ("1".into(), Value::Null),
+                    ],
+                    probabilities: vec![("0".into(), 0.5), ("1".into(), 0.5)],
+                    confidence: 0.0,
+                },
+            ),
+            (
+                "yes".to_string(),
+                Answer::Noul { noul: 0.25 },
+            ),
+        ];
+        let out = response_json("m", &answers, 42);
+        let obj = out.as_object().expect("an object");
+        let keys: Vec<&str> = obj.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["model", "answers", "usage"]);
+        let answers = out.get("answers").unwrap().as_object().unwrap();
+        let ids: Vec<&str> = answers.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(ids, ["choose", "rate", "yes"]);
+        let choice = out.get("answers").unwrap().get("choose").unwrap();
+        let keys: Vec<&str> = choice
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(keys, ["type", "choice", "probabilities", "confidence"]);
+        let score = out.get("answers").unwrap().get("rate").unwrap();
+        let keys: Vec<&str> = score
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            ["type", "score", "legend", "probabilities", "confidence"]
+        );
+        assert_eq!(score.get("legend").unwrap().get("1").unwrap(), &Value::Null);
+        let text = out.to_jinja_json();
+        assert!(text.contains("\"input_tokens\": 42"), "{text}");
+        assert!(text.contains("\"output_tokens\": 0"));
+        // Shortest round-tripping floats.
+        assert!(text.contains("\"confidence\": 0.5"), "{text}");
+        assert!(text.contains("\"noul\": 0.25"), "{text}");
     }
 }
