@@ -48,7 +48,9 @@
 #![cfg(target_arch = "x86_64")]
 #![cfg_attr(not(feature = "fmt-kquant"), allow(dead_code))]
 
-use crate::kq::{KqActs, ACT_GROUP, Q4K8, Q5_08, Q8_08};
+use crate::kq::{KqActs, ACT_GROUP, Q4K8};
+#[cfg(feature = "fmt-legacy")]
+use crate::kq::{Q5_08, Q8_08};
 use crate::quant::QuantAct;
 use std::arch::x86_64::*;
 
