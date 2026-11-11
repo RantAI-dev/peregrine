@@ -93,6 +93,24 @@ pub fn inspect(path: &std::path::Path) -> Result<String, String> {
         };
         let _ = writeln!(out, "pooling       {name} ({v}){use_for}");
     }
+    // What a decision model declares (`docs/reference/systemone.md` §1.1): the type, how many
+    // temperatures the file carries and the length of its `systemone` template. The template's
+    // bytes are never printed.
+    match peregrine_core::decision::DecisionInfo::from_gguf(&g) {
+        Ok(Some(d)) => {
+            let _ = writeln!(
+                out,
+                "decision      {} ({} temperatures, template {} bytes)",
+                d.kind().name(),
+                d.temperatures().len(),
+                d.template_len()
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let _ = writeln!(out, "decision      invalid: {e}");
+        }
+    }
     let mut by_fmt: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
     for t in g.tensors.values() {
         let e = by_fmt.entry(t.kind.label()).or_default();
