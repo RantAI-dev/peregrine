@@ -642,3 +642,138 @@ quantiser, because that is the accuracy gate.
 - **No accuracy run was made**: no engine code changed. The KL gate (`docs/targets.md` §1) has
   to be re-run for whichever kernel of §6 is built, on the reference hosts, as `s3.4.md` §10
   decision 4 requires.
+
+---
+
+## 8. As built: a wide pass when nobody is decoding (S5.1a)
+
+- Status: built and measured, no result moved
+- Date: 2026-11-12
+- Host: AMD Ryzen AI 9 HX 370 (Zen 5, 12 cores / 24 threads, AVX-512 F/BW/VL/VNNI/VBMI), WSL2
+- Baseline for this change: the S5.1 stack (`s5.1-kq-epilogue`, PR #199)
+- Raw measurements and the two drivers: `benchmarks/results/desktop-zen5-2026-11-12-s5.1-adaptive-chunk/`
+
+Item 3 of §6 made a wide pass pay (PR #209), but the default chunk stayed 16 because the chunk
+is also what a *decoding* user waits for while another user's prompt is read. This change stops
+paying that price when nobody is waiting.
+
+### 8.1 What was built
+
+The chunk is now decided per pass, at the two places that pick one:
+
+- `mixed_step` (the default schedule): if no slot is ready to decode (`dec.is_empty()`), the
+  pass takes the **wide chunk**; otherwise today's rule (the chunk, or `LONG_PROMPT_CHUNK` = 64
+  for a prompt over 1024 tokens). A long prompt keeps its 64-token pieces in both branches.
+- the alternating schedule (`PEREGRINE_MIX=0`): a prefill pass widens unless another slot is
+  waiting to decode (`slot.ready()`), where the narrow chunk still bounds that user's wait.
+
+`PEREGRINE_PREFILL_CHUNK` still forces one chunk: when it is set, the wide chunk is that same
+number, so the switch reproduces the old behaviour exactly (that is how the "before" rows below
+were taken, on the same binary).
+
+The wide chunk is **64 on both measured tiers** (`options::wide_chunk_default_for`). At 512
+tokens, medians of three interleaved rounds, `peregrine bench --prompt-tokens 512`, prompt tok/s:
+
+| model | tier | 16 | 64 | 128 |
+|---|---|---|---|---|
+| Llama 3.2 1B | avx512 | 301.9 | **336.4** | 327.8 |
+| Qwen 2.5 0.5B | avx512 | 487.6 | 588.9 | **619.9** |
+| Gemma 3 1B | avx512 | 268.8 | **329.8** | 322.4 |
+| Llama 3.2 1B | avx2 | 244.9 | **272.1** | 263.3 |
+| Qwen 2.5 0.5B | avx2 | 371.2 | 456.5 | **459.6** |
+| Gemma 3 1B | avx2 | 229.6 | **261.4** | 260.5 |
+
+64 wins on both 1B models on both tiers; 128 wins on Qwen by 5 % (avx512) and 1 % (avx2). The
+two are within noise of each other overall, and 64 is free in memory (below), so 64 it is. The
+embedding path's pass-size rule (`options::pass_rows_default_for`) returns 16 for both models
+here — the L2 bound gives 32 and 73 rows, but the ridge bound (0.56 bytes per weight × 10.8) is
+6, clamped to 16 — so that rule is today's chunk and not a wide one.
+
+**Memory.** The pass's scratch is sized once, in `Engine::build`, and nothing allocates in the
+pass: `chat_rows` is `max(chunk, wide_chunk, 64, 64) + max_slots`, so a wide chunk of 64 needs
+exactly the rows the engine already reserved (`SCRATCH_CHUNK` = 64, for speculation's rows) and
+the change costs **zero bytes**. 128 would have cost 64 more rows, measured as a peak-RSS
+difference of 17.6 MiB on the 1B and 2.3 MiB on Qwen 0.5B — one of the reasons 64 was chosen.
+
+### 8.2 Single user, before and after
+
+`peregrine bench`, 12 threads, before = `PEREGRINE_PREFILL_CHUNK=16`, after = the new default;
+three interleaved rounds, medians; host load average 0.1–0.6. The time to first token is the
+prefill time the bench reports (the first token is one row after it).
+
+| model | tier | prompt | before tok/s | after tok/s | ratio | before TTFT s | after TTFT s |
+|---|---|---|---|---|---|---|---|
+| Llama 3.2 1B | avx512 | 512 | 305.5 | 338.4 | 1.11 | 1.676 | 1.513 |
+| Llama 3.2 1B | avx512 | 4096 | 236.9 | 238.2 | 1.01 | 17.29 | 17.20 |
+| Qwen 2.5 0.5B | avx512 | 512 | 488.0 | 594.0 | 1.22 | 1.049 | 0.862 |
+| Qwen 2.5 0.5B | avx512 | 4096 | 397.9 | 394.4 | 0.99 | 10.30 | 10.39 |
+| Gemma 3 1B | avx512 | 512 | 277.2 | 326.8 | 1.18 | 1.847 | 1.567 |
+| Gemma 3 1B | avx512 | 4096 | 311.6 | 312.6 | 1.00 | 13.14 | 13.10 |
+| Llama 3.2 1B | avx2 | 512 | 245.2 | 275.0 | 1.12 | 2.088 | 1.862 |
+| Llama 3.2 1B | avx2 | 4096 | 211.7 | 214.3 | 1.01 | 19.35 | 19.12 |
+| Qwen 2.5 0.5B | avx2 | 512 | 412.5 | 462.9 | 1.12 | 1.241 | 1.106 |
+| Qwen 2.5 0.5B | avx2 | 4096 | 349.2 | 350.4 | 1.00 | 11.73 | 11.69 |
+| Gemma 3 1B | avx2 | 512 | 235.5 | 268.7 | 1.14 | 2.174 | 1.905 |
+| Gemma 3 1B | avx2 | 4096 | 254.3 | 254.3 | 1.00 | 16.11 | 16.11 |
+
+The 512-token rows are the gain; the 4096 rows are flat because a prompt that long was already
+read in 64-token pieces (`LONG_PROMPT_CHUNK`), so the wide chunk changes nothing there. The
+Qwen 4096 row is 1 % down, inside its 3.5 tok/s spread. The noisiest row is Qwen on avx2 at
+512: its narrow samples spread 64 tok/s (291.9, 412.5, 420.1) against 9 at the wide chunk
+(461.8, 462.9, 479.1), so its ratio is 1.12 by median and 1.25 against the 371.2 the same
+narrow setting measured in §8.1.
+
+Decode alone is unchanged, as it must be (a decode step carries no prompt rows): 62.8 against
+63.3 tok/s for the 1B and 98.9 against 97.0 for Qwen at 512/16 on avx512, 65.0/65.6 and
+98.1/102.9 on avx2.
+
+### 8.3 Four and ten users, before and after
+
+`benchmarks/run.py --mode server --contexts 512 --tokens 64 --threads 12 --user-counts 4,10`,
+three interleaved rounds per invocation, four invocations per variant, so twelve samples per
+row; medians, with the observed range in brackets. "Per-user decode" is the harness's
+decode-window aggregate divided by the user count: the rate one user gets while the others
+decode.
+
+| model | users | metric | before | after |
+|---|---|---|---|---|
+| Llama 3.2 1B | 4 | total tok/s | 30.85 [29.8, 41.7] | 30.93 [29.8, 31.3] |
+| Llama 3.2 1B | 4 | per-user decode tok/s | 53.1 [45.3, 57.2] | 53.4 [49.7, 56.3] |
+| Llama 3.2 1B | 4 | TTFT s | 5.23 [3.09, 5.45] | 5.21 [5.05, 5.42] |
+| Llama 3.2 1B | 10 | total tok/s | 31.87 [31.5, 36.0] | 35.57 [31.8, 36.5] |
+| Llama 3.2 1B | 10 | per-user decode tok/s | 52.8 [48.1, 54.6] | 54.4 [48.9, 67.4] |
+| Llama 3.2 1B | 10 | TTFT s | 11.28 [11.21, 11.49] | 11.04 [9.09, 11.35] |
+| Qwen 2.5 0.5B | 4 | total tok/s | 47.90 [46.3, 72.7] | 50.03 [48.2, 51.0] |
+| Qwen 2.5 0.5B | 4 | per-user decode tok/s | 78.7 [73.1, 83.2] | 77.1 [74.8, 83.1] |
+| Qwen 2.5 0.5B | 4 | TTFT s | 3.36 [1.53, 3.58] | 3.14 [3.11, 3.26] |
+| Qwen 2.5 0.5B | 10 | total tok/s | 60.05 [49.0, 61.9] | 57.25 [50.8, 64.0] |
+| Qwen 2.5 0.5B | 10 | per-user decode tok/s | 79.9 [75.6, 83.8] | 82.9 [72.6, 84.9] |
+| Qwen 2.5 0.5B | 10 | TTFT s | 7.13 [4.87, 7.29] | 6.81 [4.53, 6.90] |
+
+Two things to read. The quantity the change is meant to protect — a decoding user's rate while
+somebody else's prompt is being read — is flat at four users (53.1 → 53.4, 78.7 → 77.1) and
+slightly up at ten (52.8 → 54.4, 79.9 → 82.9): the chunk falls back while anyone decodes, so no
+decoder gets a wider pass in front of it. And total throughput does not drop: flat at four
+users, +11.6 % and −4.7 % at ten (both inside the spread of the "before" samples, whose upper
+half is bimodal — WSL2 guest-clock jumps, which this harness has hit before, make single
+invocations read up to 1.5× high; the medians are of twelve samples for that reason).
+
+At ten users the median TTFT is 0.2 s (1B) and 0.3 s (Qwen) earlier: the first slots' prompts
+are read wide while nobody decodes yet, and only the passes after the first decoder exist are
+bounded by the narrow chunk.
+
+### 8.4 Bits
+
+Nothing allocates in the pass and no golden moved: the chunk is how a prompt is *read*.
+`crates/peregrine-models/tests/prefill_chunk.rs` gains two tests:
+
+- `a_prompt_read_in_two_widths_says_the_same` reads the same prompt narrow-then-wide and
+  wide-then-narrow and compares the KV cache and the last position's logits with a uniform read;
+- `the_engine_widens_the_pass_when_no_slot_is_decoding` runs the scenario the change is for — a
+  short prompt that starts decoding half way through a long one and stops before it ends — and
+  pins three things: the first pass carries the wide chunk, every pass that carried a decode row
+  is bounded by the narrow chunk plus that row, and the pass widens again after the decoder
+  stops. The tokens per slot are identical to the same run with one chunk.
+
+Goldens pass unchanged on `x86_64-avx2-avx512-vnni-gfni-vbmi`, `x86_64-avx2` and `x86_64`
+(scalar) for Llama 3.2 1B, Qwen 2.5 0.5B and Gemma 3 1B.

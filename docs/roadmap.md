@@ -105,6 +105,8 @@ The ik_llama.cpp fork processes prompts about twice as fast as Peregrine on the 
 | ID | Item | pw |
 |---|---|---|
 | S5.1 | The k-quant prefill kernels on AVX-512: the Q4_K and Q5_0 epilogue per group of rows, a 512-bit Q6_K tile, a write-out that makes a wide pass pay | 2.0 |
+| S5.1a | A wide prefill pass when no slot is decoding: the chunk is chosen per pass, 64 wide on both measured tiers | 0.3 |
+| S5.1b | The Q4_K and Q6_K kernels at ik_llama.cpp's instruction mix: int16 scales, four weight rows per load | 1.0 |
 | S5.2 | A 512-bit attention score kernel; thread scaling past 12 threads | 1.5 |
 | S5.3 | The same questions on AVX2 and NEON; ik_llama.cpp measured on bluefin and ARM | 1.0 |
 

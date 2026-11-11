@@ -92,6 +92,40 @@ pub fn prefill_chunk_default_for(threads: usize) -> usize {
     }
 }
 
+/// The prompt tokens one pass carries when no slot is decoding: 64, on both x86 tiers measured.
+///
+/// The narrow chunk ([`prefill_chunk_default_for`]) exists to bound what a *decoding* user waits
+/// for while somebody else's prompt is read. When nobody is decoding there is no such user, and a
+/// wider pass is simply faster: it reads the weights once for more rows.
+///
+/// Measured on the desktop (Ryzen AI 9 HX 370, 12 threads, `peregrine bench --prompt-tokens 512`
+/// and `4096`, medians of three interleaved rounds; the narrow chunk is 16 and a long prompt is
+/// already read in 64-token pieces, so the 4096 rows are flat):
+///
+/// | model | tier | 16 | 64 | 128 |
+/// |---|---|---|---|---|
+/// | Llama 3.2 1B | avx512 | 301.9 | **336.4** | 327.8 |
+/// | Qwen 2.5 0.5B | avx512 | 487.6 | 588.9 | **619.9** |
+/// | Gemma 3 1B | avx512 | 268.8 | **329.8** | 322.4 |
+/// | Llama 3.2 1B | avx2 | 244.9 | **272.1** | 263.3 |
+/// | Qwen 2.5 0.5B | avx2 | 371.2 | 456.5 | **459.6** |
+/// | Gemma 3 1B | avx2 | 229.6 | **261.4** | 260.5 |
+///
+/// 64 wins on both 1B models on both tiers and loses 5 % (avx512) and 1 % (avx2) to 128 on Qwen,
+/// so the two are within noise of each other overall; 64 is also free in memory, because the
+/// scratch already holds 64 prompt rows for speculation (`SCRATCH_CHUNK` in `serve`). The
+/// embedding path's pass-size rule ([`pass_rows_default_for`]) returns 16 here, i.e. today's
+/// chunk, so it is not the wide one.
+pub const WIDE_CHUNK_DEFAULT: usize = 64;
+
+/// [`WIDE_CHUNK_DEFAULT`] on the process's kernel tier.
+///
+/// Both measured tiers chose the same number; the parameter is here because the choice is made per
+/// tier from measurement, and a future tier may disagree.
+pub fn wide_chunk_default_for(_tier: crate::cpu::Tier) -> usize {
+    WIDE_CHUNK_DEFAULT
+}
+
 /// The largest prompt chunk one weight pass may carry: the matmul scratch's row limit
 /// (`blocks::linear::MAX_BATCH`). The engine lowers it further when the decode rows of the
 /// other users need the room.
@@ -312,7 +346,9 @@ pub struct EngineOptions {
     ///
     /// The engine prefills a prompt in pieces of this size, so a long prompt is read in several passes.
     /// Smaller pieces keep the activation scratch in cache and read the weights more often; the tokens
-    /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that).
+    /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that). A pass with no
+    /// decoding slot beside it widens to [`wide_chunk_default_for`]; setting this switch forces one
+    /// chunk, the wide one included.
     pub prefill_chunk: Option<usize>,
     /// `PEREGRINE_PASS_ROWS`: rows one weight pass carries for work that never decodes — pooled
     /// (embedding) and label (decision) slots (default: [`pass_rows_default_for`], the machine's
@@ -878,6 +914,22 @@ mod tests {
         assert_eq!(prefill_chunk_default_for(1), PREFILL_CHUNK_DEFAULT);
         assert_eq!(prefill_chunk_default_for(cores), PREFILL_CHUNK_DEFAULT);
         assert_eq!(prefill_chunk_default_for(cores + 1), PREFILL_CHUNK_SMT);
+    }
+
+    #[test]
+    fn the_wide_chunk_is_wider_than_the_narrow_one() {
+        // The wide pass of a step with no decoder (S5.1) may not be narrower than the chunk a
+        // pass beside a decoder takes, and it fits the scratch's row limit.
+        for tier in [
+            crate::cpu::Tier::Scalar,
+            crate::cpu::Tier::Avx2,
+            crate::cpu::Tier::Avx512,
+        ] {
+            let wide = wide_chunk_default_for(tier);
+            assert_eq!(wide, WIDE_CHUNK_DEFAULT, "{tier}");
+            assert!(wide >= PREFILL_CHUNK_DEFAULT, "{tier}");
+            assert!(wide <= MAX_PREFILL_CHUNK, "{tier}");
+        }
     }
 
     #[test]

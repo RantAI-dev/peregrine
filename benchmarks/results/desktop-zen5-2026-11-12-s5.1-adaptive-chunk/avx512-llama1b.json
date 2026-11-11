@@ -1,0 +1,370 @@
+{
+ "host": "AMD Ryzen AI 9 HX 370, WSL2",
+ "isa": "native",
+ "threads": 12,
+ "rounds": 3,
+ "rows": [
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 294.5127373848305,
+   "prefill_s": 1.738464708,
+   "decode_tok_s": 47.76748236937305,
+   "wall_s": 5.78,
+   "load": [
+    "0.81",
+    "0.76",
+    "2.42"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 336.4423170554225,
+   "prefill_s": 1.5218061880000002,
+   "decode_tok_s": 62.66372317404196,
+   "wall_s": 2.5,
+   "load": [
+    "1.71",
+    "0.95",
+    "2.47"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 333.8946791983191,
+   "prefill_s": 1.5334176670000002,
+   "decode_tok_s": 62.54691751785529,
+   "wall_s": 2.53,
+   "load": [
+    "1.71",
+    "0.95",
+    "2.47"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 241.6141652692063,
+   "prefill_s": 16.952648432000004,
+   "decode_tok_s": 45.4713458250282,
+   "wall_s": 16.14,
+   "load": [
+    "4.54",
+    "1.65",
+    "2.67"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 237.93485156599556,
+   "prefill_s": 17.214796289999995,
+   "decode_tok_s": 51.083071258553744,
+   "wall_s": 18.28,
+   "load": [
+    "7.03",
+    "2.40",
+    "2.90"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 236.63261875901532,
+   "prefill_s": 17.309532478999998,
+   "decode_tok_s": 45.56563719643485,
+   "wall_s": 16.57,
+   "load": [
+    "7.81",
+    "2.81",
+    "3.02"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 301.89331982785257,
+   "prefill_s": 1.6959633300000003,
+   "decode_tok_s": 63.67347604748091,
+   "wall_s": 2.68,
+   "load": [
+    "8.15",
+    "2.96",
+    "3.07"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 338.3336820207749,
+   "prefill_s": 1.5132989330000002,
+   "decode_tok_s": 62.07698704128929,
+   "wall_s": 2.46,
+   "load": [
+    "8.15",
+    "2.96",
+    "3.07"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 327.81912790651324,
+   "prefill_s": 1.5618368679999999,
+   "decode_tok_s": 64.93059621326873,
+   "wall_s": 2.52,
+   "load": [
+    "8.45",
+    "3.11",
+    "3.12"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 242.92586198627598,
+   "prefill_s": 16.861111314,
+   "decode_tok_s": 50.524220683000436,
+   "wall_s": 15.94,
+   "load": [
+    "9.31",
+    "3.56",
+    "3.27"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 238.8439830492248,
+   "prefill_s": 17.149270196,
+   "decode_tok_s": 50.00893362715874,
+   "wall_s": 18.22,
+   "load": [
+    "10.06",
+    "4.11",
+    "3.46"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 239.51696091484573,
+   "prefill_s": 17.101085385999994,
+   "decode_tok_s": 49.717262897627485,
+   "wall_s": 16.29,
+   "load": [
+    "10.61",
+    "4.62",
+    "3.64"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 308.62301380596114,
+   "prefill_s": 1.6589819200000002,
+   "decode_tok_s": 60.34338584746659,
+   "wall_s": 2.66,
+   "load": [
+    "10.61",
+    "4.62",
+    "3.64"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 323.5462507226337,
+   "prefill_s": 1.5824630910000002,
+   "decode_tok_s": 61.305173190294475,
+   "wall_s": 2.54,
+   "load": [
+    "10.72",
+    "4.74",
+    "3.68"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 325.5537189648797,
+   "prefill_s": 1.572705118,
+   "decode_tok_s": 57.00281080503813,
+   "wall_s": 2.58,
+   "load": [
+    "10.72",
+    "4.74",
+    "3.68"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 241.10491877739227,
+   "prefill_s": 16.988454739,
+   "decode_tok_s": 49.79926554113458,
+   "wall_s": 16.19,
+   "load": [
+    "11.09",
+    "5.21",
+    "3.86"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 232.93417596644414,
+   "prefill_s": 17.584366841,
+   "decode_tok_s": 48.59612270853868,
+   "wall_s": 18.65,
+   "load": [
+    "11.06",
+    "5.59",
+    "4.02"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "native",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 241.3508712924575,
+   "prefill_s": 16.971142379,
+   "decode_tok_s": 51.90625645736133,
+   "wall_s": 16.09,
+   "load": [
+    "11.27",
+    "5.90",
+    "4.14"
+   ]
+  }
+ ],
+ "summary": {
+  "chunk128-p4096": {
+   "prefill_tok_s": 239.5,
+   "prefill_s": 17.101,
+   "n": 3,
+   "spread_tok_s": 2.4
+  },
+  "chunk128-p512": {
+   "prefill_tok_s": 327.8,
+   "prefill_s": 1.562,
+   "n": 3,
+   "spread_tok_s": 4.2
+  },
+  "chunk16-p4096": {
+   "prefill_tok_s": 241.6,
+   "prefill_s": 16.953,
+   "n": 3,
+   "spread_tok_s": 0.9
+  },
+  "chunk16-p512": {
+   "prefill_tok_s": 301.9,
+   "prefill_s": 1.696,
+   "n": 3,
+   "spread_tok_s": 7.1
+  },
+  "chunk64-p4096": {
+   "prefill_tok_s": 237.9,
+   "prefill_s": 17.215,
+   "n": 3,
+   "spread_tok_s": 3.0
+  },
+  "chunk64-p512": {
+   "prefill_tok_s": 336.4,
+   "prefill_s": 1.522,
+   "n": 3,
+   "spread_tok_s": 7.4
+  }
+ }
+}
