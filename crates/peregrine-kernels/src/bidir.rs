@@ -49,16 +49,27 @@
 //! the NEON kernels go (`simd.rs`/`neon.rs` style: `vfmaq_f32` with the same lane
 //! meaning, and `exp4` from `vmath`).
 
-use crate::vmath::{exp8, exp_scalar};
+use crate::vmath::exp_scalar;
 
+#[cfg(target_arch = "x86_64")]
+use crate::vmath::exp8;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-/// Keys per strip block. The block is what keeps a head's keys in L1 while every row
-/// of the strip scores against them: `head_dim × SCORE_BLOCK × 4` bytes is 32 KiB at
-/// the widest head this engine supports (256), so a block of keys stays in L1 across
-/// the strip's rows instead of being re-read from L2 or L3 for every row.
-pub const SCORE_BLOCK: usize = 32;
+/// Keys per strip block: what bounds the panel slice one row of a strip walks, so a
+/// strip of 32 rows re-walks an L2-sized slice instead of the whole panel.
+/// `head_dim × SCORE_BLOCK × 4` bytes is 128 KiB at the widest head this engine
+/// supports (256) — a quarter of this machine's 256 KiB L2 — and 32 KiB at a 64-wide
+/// head, which is L1. A block is a whole number of 32-key groups, so an interior block
+/// of a band costs no overlap.
+///
+/// Measured on H0 at a 512-token text and a 256-wide head, the block changes the score
+/// rate by under 1 % (7.8 GFLOP/s blocked and unblocked): what limits the score kernel
+/// is the *stride* of the panel read (one 128-byte slice per head dimension, `n × 4`
+/// bytes apart), not the slice's residency. The block stays because it bounds the
+/// working set on smaller caches and wider texts; the next step is a key-major tiled
+/// panel, which would make each row's traversal sequential.
+pub const SCORE_BLOCK: usize = 128;
 
 /// Query rows per strip, at most. A strip's scores are `strip × n` f32 — 64 KiB at a
 /// 512-token text and 128 KiB at 2 000 — and the strip is what makes the mix read the
@@ -74,25 +85,24 @@ pub const STRIP_AREA: usize = 32 * 1024;
 pub const STRIP_SLOT: usize = STRIP_AREA + STRIP_MAX;
 
 /// Keys per vector pass in a score row (four eight-lane accumulators).
+#[cfg(target_arch = "x86_64")]
 const KEYS_PER_GROUP: usize = 4 * LANES;
 /// Value rows the mix shares one value load between.
+#[cfg(target_arch = "x86_64")]
 const MIX_ROWS: usize = 4;
 /// Head-dimension lanes per mix accumulator (two vectors).
+#[cfg(target_arch = "x86_64")]
 const MIX_D: usize = 16;
 
 /// Keys per vector accumulator — one `__m256` lane per key, so a lane is one score.
+#[cfg(target_arch = "x86_64")]
 const LANES: usize = 8;
 
+/// Whether the AVX2 kernels may run on this machine and tier.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn vector_ok() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        crate::simd::have_batched()
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    crate::simd::have_batched()
 }
 
 /// The window of query row `i` of a text of `n` keys: `lo..hi`.
@@ -178,6 +188,9 @@ pub fn scores_row(
             return;
         }
     }
+    // S4.9g: the NEON kernel goes here — `vfmaq_f32` with the same lane meaning (one key
+    // per lane, the head dimension folded inside it) and `vmath`'s `exp4` for the weights,
+    // beside `scores_row_scalar` as the reference, exactly as the AVX2 one does on x86.
     scores_row_scalar(q, panel, n, hd, lo, hi, scale, out)
 }
 

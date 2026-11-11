@@ -43,20 +43,21 @@ pub struct TextSpan {
     pub len: usize,
 }
 
-/// Query rows per strip: the largest strip whose scores fit the per-worker budget,
-/// capped at [`k::STRIP_MAX`]. A 512-token text takes 32 rows (a 64 KiB score buffer,
-/// L2); a 2 000-token text 16 (128 KiB); a 16-token text 32 (2 KiB).
+/// Query rows per strip: the widest strip whose scores fit the per-worker budget
+/// ([`k::STRIP_AREA`]), at most [`k::STRIP_MAX`]. A 512-token text takes 32 rows
+/// (a 64 KiB score buffer, L2); a 2 000-token text 16 (128 KiB); a 16-token text 16
+/// (1 KiB, and one strip for the whole text — a short text is not cut up).
 ///
-/// When the pass has fewer strips than workers the strip is halved down to 1 row, so a
-/// single long text still fills the pool. The strip size changes only how much of a
-/// head's panel is re-read, never a row's bits (the kernel tests hold strips of 1, 7,
-/// 16, 32 and `n` to the same output).
-pub fn strip_rows(max_len: usize, strips_wanted: usize, width: usize) -> usize {
-    let mut strip = (k::STRIP_AREA / max_len.max(1)).clamp(1, k::STRIP_MAX);
-    while strip > 1 && strips_wanted < width {
-        strip /= 2;
-    }
-    strip
+/// A pass with fewer strips than workers halves the strip down to [`STRIP_MIN`] so one
+/// long text still fills the pool; the work is then split by rows anyway, so a text is
+/// never fanned out pointlessly. The strip size changes only how much of a head's panel
+/// is re-read, never a row's bits (the kernel tests hold strips of 1, 7, 16, 32 and `n`
+/// to the same output).
+pub const STRIP_MIN: usize = 16;
+
+/// Rows per strip for a pass whose longest text is `max_len`, before the fan-out rule.
+pub fn strip_rows(max_len: usize) -> usize {
+    (k::STRIP_AREA / max_len.max(1)).clamp(1, k::STRIP_MAX)
 }
 
 /// One layer's bidirectional attention over every text of the pass.
@@ -96,21 +97,31 @@ pub fn attend_texts(
         return;
     }
     let max_len = spans.iter().map(|s| s.len).max().unwrap_or(0);
-    // The strip the budget allows, then the count of strips it makes of this pass: a
-    // pass with fewer strips than workers halves the strip so the pool is used.
-    let widest = (k::STRIP_AREA / max_len.max(1)).clamp(1, k::STRIP_MAX);
-    let wanted = spans.iter().map(|s| s.len.div_ceil(widest)).sum::<usize>();
-    let strip = strip_rows(max_len, wanted, pool.width());
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    // The budget's strip, then: a pass with fewer strips than workers halves it (never
+    // below `STRIP_MIN`) so one long text still fills the pool.
+    let mut strip = strip_rows(max_len);
+    if parallel {
+        while strip > STRIP_MIN {
+            let units: usize = spans.iter().map(|s| s.len.div_ceil(strip)).sum();
+            if units >= pool.width() {
+                break;
+            }
+            strip /= 2;
+        }
+    }
     let area = strip * max_len;
     debug_assert!(area <= k::STRIP_AREA);
-    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    // The panel build is a copy, not arithmetic: below a few tens of KiB of it a second
+    // fork-join costs more than it saves (a 16-token text's panel is 4 Ki copies).
+    let panel_par = parallel && nb * hd >= 32 * 1024;
     let t0 = std::time::Instant::now();
     let panel = Disjoint::new(&mut scratch.panel);
     let strips_buf = Disjoint::new(&mut scratch.strips);
 
     for kh in 0..c.n_kv_head {
         // ---- the head's keys, once, for every query head that reads them ----
-        if parallel {
+        if panel_par {
             pool.run(|wk, nw| {
                 let (rlo, rhi) = crate::pool::share(nb, wk, nw);
                 build_panels(spans, rlo..rhi, k, kvd, kh * hd, hd, &panel);
@@ -157,21 +168,38 @@ pub fn attend_texts(
                         let local0 = g0 - span.row0;
                         let rows_out = &mut out_chunk[(g0 - rows.start) * qd..];
                         for h in h_lo..h_hi {
-                            // scores, softmax and denominator, a strip at a time
+                            // Scores in blocks of keys: the block's panel slice stays in
+                            // cache while every row of the strip walks it, which is what
+                            // makes a head's keys read once per strip instead of once per
+                            // row. Only the keys inside a row's window are computed.
+                            let mut j0 = 0;
+                            while j0 < n {
+                                let j1 = (j0 + k::SCORE_BLOCK).min(n);
+                                for r in 0..cnt {
+                                    let i = local0 + r;
+                                    let (lo, hi) = k::band(i, n, half_window);
+                                    let a = lo.max(j0);
+                                    let b = hi.min(j1);
+                                    if a < b {
+                                        k::scores_row(
+                                            &q[(span.row0 + i) * qd + h * hd..],
+                                            p,
+                                            n,
+                                            hd,
+                                            a,
+                                            b,
+                                            scale,
+                                            &mut buf[r * n..(r + 1) * n],
+                                        );
+                                    }
+                                }
+                                j0 = j1;
+                            }
+                            // Then the row's maximum, weights and denominator, once per
+                            // row over its exact band.
                             for r in 0..cnt {
-                                let i = local0 + r;
-                                let (lo, hi) = k::band(i, n, half_window);
+                                let (lo, hi) = k::band(local0 + r, n, half_window);
                                 let s = &mut buf[r * n..(r + 1) * n];
-                                k::scores_row(
-                                    &q[(span.row0 + i) * qd + h * hd..],
-                                    p,
-                                    n,
-                                    hd,
-                                    lo,
-                                    hi,
-                                    scale,
-                                    s,
-                                );
                                 let max =
                                     s[lo..hi].iter().copied().fold(f32::NEG_INFINITY, f32::max);
                                 let l = k::exp_row(s, lo, hi, max);
