@@ -170,7 +170,10 @@ the bound are in `crates/peregrine-models/tests/fixtures/embeddinggemma/` and
 
 - `Gemma3::forward_texts` runs the projections over every row of every text in matmul-sized
   chunks (the shared GEMM takes at most 128 rows per call), keeps f32 Q/K/V for the whole
-  pass, and computes attention one text at a time with the transcribed symmetric mask.
+  pass, and computes attention one text at a time with the transcribed symmetric mask. A
+  layer's activation is quantised once per distinct input — the normed rows for q/k/v, the
+  same rows for gate/up, the GeGLU output for down — and the matrices that share it run in
+  one fork-join (S4.9a).
 - Pooling is the text's own rows, in position order, with an f64 accumulator and one
   rounding (`embed::pool_rows_into`).
 - `dense_2` then `dense_3`, both pure matmuls, then the caller's `dimensions` truncation and

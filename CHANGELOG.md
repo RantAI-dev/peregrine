@@ -130,6 +130,34 @@ All notable changes to this project are documented here. The format follows
   reads stdin lines, and `peregrine inspect` reports the file's pooling type.
 - `peregrine support` lists embeddings in the support table.
 
+### Changed
+
+- **The encoder quantises each input once, and only the layouts its kernels read (S4.9a).**
+  A Gemma 3 encoder layer filled the int8 activation of every projection separately, serially,
+  while the matmuls ran in parallel: q/k/v read the same normed rows and gate/up read the same
+  rows, so five of the fills were the same bytes again, and the two post-norms (whose output only
+  a residual add reads) quantised for nothing. `linear_rows_shared` fills the group's activation
+  once and runs the projections as one fork-join, as the causal families already did; the post
+  norms use `norm_rows_f32`; the down projection reuses the activation `geglu_rows` produced. The
+  per-256 activation layout (`qk`/`dk`/`bsums`, a second quantisation of the whole row) is built
+  only when some matrix of the model reads it (`Format::reads_k_layout`), which a Q8_0/F16 model
+  such as EmbeddingGemma never does. Every vector is bit-identical: the encoder's three tier
+  goldens, the exact scalar reference forward and the batch-invariance tests are unchanged, and
+  the Q8_0 model's vectors hash the same as `main`'s on all four measured text shapes. Measured on
+  H0 (Xeon E5-2680 v4 VM, 8 vCPU, AVX2), EmbeddingGemma 300M Q8_0 through `/v1/embeddings`, median
+  of five before/after rounds at 4 threads: 16-token text 21.7 → 33.9 texts/s, 128-token 2.49 →
+  3.33, 512-token 0.37 → 0.46, a batch of 32×16 26.0 → 39.5, 32×128 2.06 → 3.49 (1.24-1.69×).
+- **The tokenizer finds special tokens with a first-byte index instead of testing every special
+  at every byte (S4.9c).** The SentencePiece and byte-level BPE paths ran `starts_with` for each
+  of a vocabulary's control/user-defined/unknown tokens at every position — 163 of them on
+  EmbeddingGemma, 87 µs per token. `SpecialIndex` keys them by first byte and tests a byte's
+  candidates in `specials` order (longest text first, then lowest id), which is exactly the order
+  the per-special scan took the first match in, so the ids do not change; the "next special"
+  search is one bitmap test per byte. 87.9 → 1.17 µs per token on a 1 MB text (75×) with that
+  vocabulary. A differential test keeps the old scan as its reference and compares 4000 random
+  strings built from the specials' texts, their prefixes and their overlaps on the BPE and
+  SentencePiece paths.
+
 ## [0.1.2] - 2026-11-10
 
 ### Fixed

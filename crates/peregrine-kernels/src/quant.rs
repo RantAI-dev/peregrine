@@ -46,7 +46,7 @@ use crate::format::{f16, Format};
 ///
 /// Built once per matmul and shared across every output row — that sharing is what
 /// makes the bias correction in the module docs O(1) rather than O(n).
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct QuantAct {
     pub n: usize,
     /// int8 codes, `n` of them.
@@ -116,6 +116,12 @@ pub struct QuantAct {
     pub xf: Vec<f32>,
     /// Keep unquantised f32 activations in `xf` during `fill`.
     pub keep_f32: bool,
+    /// Build the per-256 layout (`qk`, `dk`, `bsums`) in `fill`. Set from the model's
+    /// weight formats ([`Format::reads_k_layout`]): a model whose matmuls are all
+    /// 32- or 128-weight formats never reads it, and the fill is a second, serial
+    /// quantisation of the same row (S4.9a). Default on, so a bare `QuantAct` keeps
+    /// the full layout every kernel table entry can be given.
+    pub k_layout: bool,
 }
 
 /// `PEREGRINE_TQ_SPAN` (16, 32, 64 or 128): values sharing one activation scale in the ternary layout.
@@ -136,6 +142,12 @@ pub fn exact_ternary() -> bool {
 #[inline(always)]
 pub fn tp_off(g: usize) -> usize {
     (g / 2) * 256 + (g % 2) * 32
+}
+
+impl Default for QuantAct {
+    fn default() -> Self {
+        QuantAct::with_capacity(0)
+    }
 }
 
 impl QuantAct {
@@ -165,7 +177,16 @@ impl QuantAct {
             t1init: Vec::new(),
             t1sc: Vec::new(),
             keep_f32: false,
+            k_layout: true,
         }
+    }
+
+    /// Whether later fills build the per-256 layout (`qk`, `dk`, `bsums`).
+    ///
+    /// A model whose matrices are all 32- or 128-weight formats never reads it
+    /// ([`Format::reads_k_layout`]), so it is turned off once per model.
+    pub fn set_k_layout(&mut self, on: bool) {
+        self.k_layout = on;
     }
 
     // the per-128 ternary layout. Same rounding as the 32-block path (round half away from zero,
@@ -418,7 +439,7 @@ impl QuantAct {
         self.dk.clear();
         self.bsums.clear();
         let mut codes = [0i8; 32];
-        if x.len().is_multiple_of(256) {
+        if self.k_layout && x.len().is_multiple_of(256) {
             for blk in x.chunks_exact(256) {
                 let amax = crate::simd::absmax(blk);
                 let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
@@ -474,7 +495,7 @@ impl QuantAct {
         self.dk.clear();
         self.bsums.clear();
         let mut codes = [0i8; 32];
-        if x.len().is_multiple_of(256) {
+        if self.k_layout && x.len().is_multiple_of(256) {
             for blk in x.chunks_exact(256) {
                 let amax = crate::neon::absmax(blk);
                 let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
@@ -530,7 +551,7 @@ impl QuantAct {
         self.qk.clear();
         self.dk.clear();
         self.bsums.clear();
-        if n.is_multiple_of(256) {
+        if self.k_layout && n.is_multiple_of(256) {
             self.qk.resize(n, 0);
             self.dk.resize(n / 256, 0.0);
             self.bsums.resize(n / 16, 0);
@@ -573,7 +594,7 @@ impl QuantAct {
     #[target_feature(enable = "avx2")]
     unsafe fn fill_range_avx2(&mut self, x: &[f32], lo: usize) {
         let mut codes = [0i8; 32];
-        if self.n.is_multiple_of(256) {
+        if self.k_layout && self.n.is_multiple_of(256) {
             assert_eq!(lo % 256, 0, "the per-256 layout needs 256-aligned ranges");
             for (s, blk) in x.chunks_exact(256).enumerate() {
                 let sb = lo / 256 + s;
@@ -612,7 +633,7 @@ impl QuantAct {
 
     /// The scalar specification of [`QuantAct::fill_range`].
     fn fill_range_scalar(&mut self, x: &[f32], lo: usize) {
-        if self.n.is_multiple_of(256) {
+        if self.k_layout && self.n.is_multiple_of(256) {
             assert_eq!(lo % 256, 0, "the per-256 layout needs 256-aligned ranges");
             for (s, blk) in x.chunks_exact(256).enumerate() {
                 let sb = lo / 256 + s;
@@ -678,7 +699,7 @@ impl QuantAct {
         self.dk.clear();
         self.bsums.clear();
 
-        if x.len().is_multiple_of(256) {
+        if self.k_layout && x.len().is_multiple_of(256) {
             for blk in x.chunks_exact(256) {
                 let amax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
                 let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
