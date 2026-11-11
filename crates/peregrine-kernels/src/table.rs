@@ -369,10 +369,15 @@ impl MatKernels {
             "the output holds fewer than eight rows per activation"
         );
         #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
-        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); the tile holds
-        // `n_sb` tiles and the activation the rows the caller says.
+        // SAFETY: `kq_tiles` is `have_batched()` (AVX2, FMA, F16C); `kq_zmm` is
+        // `have_zmm512()`, which is a superset of those. The tile holds `n_sb`
+        // tiles and the activation the rows the caller says.
         unsafe {
-            crate::kqsimd::q6k8_gemm(tile, n_sb, acts, nb, out)
+            if self.kq_zmm {
+                crate::kqsimd::q6k8_gemm_zmm(tile, n_sb, acts, nb, out)
+            } else {
+                crate::kqsimd::q6k8_gemm(tile, n_sb, acts, nb, out)
+            }
         }
         #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
         // SAFETY: `kq_tiles` is `have_dotprod()`; `kq_i8mm` is `have_i8mm()`. The

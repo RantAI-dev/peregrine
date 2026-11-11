@@ -17,7 +17,7 @@ use peregrine_kernels::kq::{
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kqsimd::{
     q4k8_gemm, q4k8_gemm_zmm, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm, q5_08_gemm_zmm, q5k8_gemm,
-    q5k8_gemv, q6k8_gemm, q6k8_gemv,
+    q5k8_gemv, q6k8_gemm, q6k8_gemm_zmm, q6k8_gemv,
 };
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::quant::QuantAct;
@@ -405,6 +405,7 @@ fn main() {
         for &nb in &[1usize, 4, 16, 64, 128] {
             let mut old = Vec::new();
             let mut new = Vec::new();
+            let mut wide = Vec::new();
             let mut o = vec![0.0f32; 8 * nb];
             for _ in 0..5 {
                 let t0 = Instant::now();
@@ -439,14 +440,29 @@ fn main() {
                     }
                 }
                 new.push(t0.elapsed().as_secs_f64());
+                if zmm && fmt == peregrine_kernels::format::Format::Q6_K {
+                    let t0 = Instant::now();
+                    for _ in 0..reps {
+                        unsafe { q6k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o) };
+                    }
+                    wide.push(t0.elapsed().as_secs_f64());
+                }
             }
             let macs = 8.0 * 256.0 * n_sb as f64 * nb as f64 * reps as f64;
             let old_g = macs / best(&mut old) / 1e9;
             let new_g = macs / best(&mut new) / 1e9;
-            println!(
-                "{label} {nb:>2} acts: row {old_g:6.1} G  tile {new_g:6.1} G MAC/s/core  ({:+.0}%)",
-                (new_g / old_g - 1.0) * 100.0
-            );
+            if wide.is_empty() {
+                println!(
+                    "{label} {nb:>3} acts: row {old_g:6.1} G  tile {new_g:6.1} G MAC/s/core  ({:+.0}%)",
+                    (new_g / old_g - 1.0) * 100.0
+                );
+            } else {
+                let wide_g = macs / best(&mut wide) / 1e9;
+                println!(
+                    "{label} {nb:>3} acts: row {old_g:6.1} G  tile {new_g:6.1} G  zmm {wide_g:6.1} G MAC/s/core  (zmm {:+.0}%)",
+                    (wide_g / new_g - 1.0) * 100.0
+                );
+            }
         }
     }
 }
