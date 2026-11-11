@@ -114,6 +114,9 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=510,
                     help="cap including special tokens (BERT models train at 512)")
     ap.add_argument("--corpus", type=Path, default=CORPUS)
+    ap.add_argument("--stream-words", type=int, default=4000,
+                    help="length of the corpus stream windows are cut from; a "
+                         "2 000-token length needs more than the 4 000-word default")
     ap.add_argument("--out", required=True)
     ap.add_argument("--mixed", action="store_true",
                     help="cycle lengths across texts instead of a fixed block per length")
@@ -130,8 +133,8 @@ def main():
         raise SystemExit(f"corpus too short: {len(words)} words")
     # A long stream of the same public corpus, so 512-token texts still have room
     # to start at 128 different offsets; every window is then a distinct text.
-    reps = max(1, 4000 // len(words) + 1)
-    stream = (words * reps)[:4000]
+    reps = max(1, args.stream_words // len(words) + 1)
+    stream = (words * reps)[:args.stream_words]
     span = max(1, len(stream) - 600)
 
     out = {

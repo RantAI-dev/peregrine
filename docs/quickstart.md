@@ -211,13 +211,14 @@ decodes: a pooled slot's cache is sized to its own text, not to the context, and
 `PEREGRINE_WORK_CACHE_MB` (512 MiB by default). Embedding and decision work never takes a chat
 slot (`--slots` bounds chat only), and the response lists the vectors in input order.
 
-Two engine options matter for this work; `peregrine tier` prints the resolved pass budget, and
-`serve --opt NAME=VALUE` sets either:
+Three engine options matter for this work; `peregrine tier` prints the resolved pass budget, and
+`serve --opt NAME=VALUE` sets any of them:
 
 | Option | Default | Meaning |
 |---|---|---|
 | `PEREGRINE_PASS_ROWS` | from the machine and the file | rows one weight pass carries for embedding and decision slots. More rows means fewer passes but a compute-bound pass; the default keeps a pass at the measured ridge (16 for Q8_0, ~22 for F16, 32 for an encoder) |
 | `PEREGRINE_WORK_CACHE_MB` | `512` | memory for the prompt-sized caches of slots that never decode, i.e. how many texts of a request are in flight at once |
+| `PEREGRINE_EMBED_CACHE_MB` | `64` | memory for the exact cache of finished embedding vectors, keyed by token ids, pooling and dimensions; `0` disables it. A repeated text returns the same bits without a forward pass, and a duplicate inside one batch is computed once. 64 MiB is about 16 300 vectors of 1024 f32 |
 
 Without a server, one process embeds every text it is given:
 
@@ -239,6 +240,34 @@ embedding model:
 peregrine embed -m hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf \
   "task: search result | query: What is the capital of France?"
 ```
+
+The BERT family (`bert` in the file) is served the same way: all-MiniLM, bge-small/base/large,
+e5, gte and the XLM-R models (bge-m3, multilingual-e5). Their blocks are post-norm with biases on
+every projection, learned absolute positions and LayerNorm, and pooling is the file's `cls` or
+`mean`. The text limit is the model's position table — 512 for MiniLM and BGE, 8192 for bge-m3 —
+and an over-length text is a 400 that names it unless `truncate` (API) or `--truncate` (CLI) is
+given:
+
+```sh
+peregrine embed -m hf:second-state/All-MiniLM-L6-v2-Embedding-GGUF/all-MiniLM-L6-v2-Q8_0.gguf \
+  "What is the capital of France?" "Paris is the capital of France."
+peregrine serve -m hf:CompendiumLabs/bge-small-en-v1.5-gguf/bge-small-en-v1.5-q8_0.gguf --port 8202
+```
+
+Nemotron 3.5 Embed 1B (`mistral3`, licence OpenMDW 1.1) is another encoder, the first from
+the Mistral 3 family: 16 blocks without the causal mask, 24 query heads of 128 over 8 key/value
+heads, YaRN positions, an attention temperature that steps up at position 16384, then the mean over
+the text and 2048 dimensions. It was trained with a role prefix, so a question starts with
+`query: ` and a document with `passage: `:
+
+```sh
+peregrine embed -m hf:W4D/Nemotron-3.5-Embed-1B-GGUF/Nemotron-3.5-Embed-1B-Q8_0.gguf \
+  "query: What is the capital of France?" \
+  "passage: Paris is the capital of France."
+```
+
+Its file says `context_length 262144`, but the model is trained for 32768 tokens; a longer text is
+refused with the position limit, not attempted.
 
 ## 7. Decisions (System One)
 

@@ -70,7 +70,7 @@ pub fn support_text() -> String {
     let _ = writeln!(out, "embeddings:");
     let _ = writeln!(
         out,
-        "  causal decoders (last / mean pooling) and bidirectional encoders (mean / cls; EmbeddingGemma), POST /v1/embeddings, peregrine embed"
+        "  causal decoders (last / mean pooling) and bidirectional encoders (mean / cls; EmbeddingGemma, and Mistral 3 / Nemotron 3.5 Embed), POST /v1/embeddings, peregrine embed"
     );
 
     let _ = writeln!(out, "decisions:");
@@ -97,6 +97,8 @@ pub fn support_markdown() -> String {
                 "qwen35" => "Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP)",
                 "gemma3" => "Gemma 3",
                 "gemma-embedding" => "Gemma 3 embedding (EmbeddingGemma)",
+                "bert" => "BERT encoder (MiniLM, BGE, E5, GTE, bge-m3)",
+                "mistral3" => "Mistral 3 embedding (Nemotron 3.5 Embed)",
                 "phi3" => "Phi-3 / Phi-4",
                 "qwen3moe" => "Qwen 3 MoE",
                 "gpt-oss" => "gpt-oss",
@@ -125,9 +127,10 @@ ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Har
 — or named with `--chat-template` for a file that declares none";
 
     // 6. Embeddings
-    let embd_str = "causal decoders as embedders (`<arch>.pooling_type`: last or mean) and \
-Gemma 3 encoders (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`), `POST /v1/embeddings`, \
-`peregrine embed`";
+    let embd_str = "causal decoders as embedders (`<arch>.pooling_type`: last or mean), and \
+bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), Gemma 3 (EmbeddingGemma: \
+mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); \
+`POST /v1/embeddings`, `peregrine embed`";
 
     // 7. Decision models
     let dec_str = "native decision models with a `systemone` template: the `openjev` type, \

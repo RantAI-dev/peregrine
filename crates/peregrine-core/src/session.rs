@@ -193,6 +193,16 @@ impl Session {
     /// Initialize a single-user `Session` from an already loaded model.
     pub fn from_model(model: Arc<Model>, cfg: SessionCfg) -> Result<Session, String> {
         let c = model.cfg;
+        // An encoder has no decode path at all: a conversation on it is refused by name,
+        // before the chat template is looked for (an embedding-only file has none, and
+        // "no chat template" would be a misleading message for a request that can never
+        // be served). The server's `/v1/chat/completions` says the same thing.
+        if model.causality() == crate::arch::Causality::Bidirectional {
+            return Err(format!(
+                "{} is an embedding model and cannot generate text; use /v1/embeddings (or `peregrine embed`)",
+                c.arch_name
+            ));
+        }
         // a hybrid model's recurrent state rolls back only to its turn-start checkpoint, so nothing may
         // write positions it later takes back: no suffix speculation, no drafter.
         let mut cfg = cfg;

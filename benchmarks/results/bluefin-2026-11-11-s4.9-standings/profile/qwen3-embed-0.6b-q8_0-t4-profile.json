@@ -1,0 +1,391 @@
+{
+ "model": "~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+ "threads": 4,
+ "method": "PEREGRINE_PROF2=1, peregrine-bench example cellprof: engine wall and StepStats for one request of the cell, tokenisation timed apart",
+ "cells": {
+  "L16_b1": {
+   "cell": "L16_b1",
+   "batch": 1,
+   "tokens": 16,
+   "bytes": 80,
+   "texts_per_s": 22.006,
+   "tokens_per_s": 352.1,
+   "wall_s": 0.0454,
+   "tokenise_s": 7.6e-05,
+   "tokenise_ms_per_text": 0.076,
+   "stats_ms": {
+    "matmul": 39.953,
+    "head": 0.0,
+    "attention": 0.885,
+    "other": 4.271,
+    "total": 45.109,
+    "barriers": 336
+   },
+   "prof_ms": {
+    "matmul qkv": 10.854,
+    "matmul wo": 5.229,
+    "matmul gate/up": 16.353,
+    "matmul down": 7.546,
+    "attention": 0.881,
+    "norms": 0.129,
+    "quantise": 0.949,
+    "rope+bias": 0.716,
+    "kv write": 1.081,
+    "residual": 0.147,
+    "barrier wait": 1.315
+   }
+  },
+  "L16_b8": {
+   "cell": "L16_b8",
+   "batch": 8,
+   "tokens": 128,
+   "bytes": 738,
+   "texts_per_s": 21.934,
+   "tokens_per_s": 350.9,
+   "wall_s": 0.3647,
+   "tokenise_s": 0.000475,
+   "tokenise_ms_per_text": 0.059,
+   "stats_ms": {
+    "matmul": 320.702,
+    "head": 0.0,
+    "attention": 7.351,
+    "other": 34.297,
+    "total": 362.351,
+    "barriers": 2688
+   },
+   "prof_ms": {
+    "matmul qkv": 86.939,
+    "matmul wo": 41.964,
+    "matmul gate/up": 131.197,
+    "matmul down": 60.815,
+    "attention": 7.316,
+    "norms": 1.051,
+    "quantise": 7.639,
+    "rope+bias": 5.784,
+    "kv write": 8.692,
+    "residual": 1.194,
+    "barrier wait": 9.612
+   }
+  },
+  "L16_b32": {
+   "cell": "L16_b32",
+   "batch": 32,
+   "tokens": 512,
+   "bytes": 2862,
+   "texts_per_s": 21.979,
+   "tokens_per_s": 351.7,
+   "wall_s": 1.456,
+   "tokenise_s": 0.001309,
+   "tokenise_ms_per_text": 0.041,
+   "stats_ms": {
+    "matmul": 1285.414,
+    "head": 0.0,
+    "attention": 29.104,
+    "other": 131.745,
+    "total": 1446.263,
+    "barriers": 10752
+   },
+   "prof_ms": {
+    "matmul qkv": 352.933,
+    "matmul wo": 168.348,
+    "matmul gate/up": 521.08,
+    "matmul down": 243.919,
+    "attention": 28.969,
+    "norms": 4.187,
+    "quantise": 30.467,
+    "rope+bias": 19.277,
+    "kv write": 34.459,
+    "residual": 8.401,
+    "barrier wait": 33.836
+   }
+  },
+  "L128_b1": {
+   "cell": "L128_b1",
+   "batch": 1,
+   "tokens": 128,
+   "bytes": 701,
+   "texts_per_s": 2.665,
+   "tokens_per_s": 341.1,
+   "wall_s": 0.3752,
+   "tokenise_s": 0.000409,
+   "tokenise_ms_per_text": 0.409,
+   "stats_ms": {
+    "matmul": 321.948,
+    "head": 0.0,
+    "attention": 15.457,
+    "other": 36.366,
+    "total": 373.77,
+    "barriers": 2688
+   },
+   "prof_ms": {
+    "matmul qkv": 87.382,
+    "matmul wo": 42.187,
+    "matmul gate/up": 131.71,
+    "matmul down": 60.879,
+    "attention": 15.421,
+    "norms": 1.089,
+    "quantise": 7.634,
+    "rope+bias": 5.262,
+    "kv write": 9.817,
+    "residual": 1.61,
+    "barrier wait": 10.833
+   }
+  },
+  "L128_b8": {
+   "cell": "L128_b8",
+   "batch": 8,
+   "tokens": 1024,
+   "bytes": 6141,
+   "texts_per_s": 2.525,
+   "tokens_per_s": 323.2,
+   "wall_s": 3.1684,
+   "tokenise_s": 0.002286,
+   "tokenise_ms_per_text": 0.286,
+   "stats_ms": {
+    "matmul": 2704.227,
+    "head": 0.0,
+    "attention": 140.609,
+    "other": 311.598,
+    "total": 3156.434,
+    "barriers": 21504
+   },
+   "prof_ms": {
+    "matmul qkv": 738.576,
+    "matmul wo": 355.133,
+    "matmul gate/up": 1099.333,
+    "matmul down": 513.658,
+    "attention": 140.349,
+    "norms": 9.534,
+    "quantise": 69.547,
+    "rope+bias": 48.297,
+    "kv write": 83.694,
+    "residual": 15.911,
+    "barrier wait": 117.329
+   }
+  },
+  "L128_b32": {
+   "cell": "L128_b32",
+   "batch": 32,
+   "tokens": 4096,
+   "bytes": 24876,
+   "texts_per_s": 2.659,
+   "tokens_per_s": 340.4,
+   "wall_s": 12.0328,
+   "tokenise_s": 0.008168,
+   "tokenise_ms_per_text": 0.255,
+   "stats_ms": {
+    "matmul": 10367.753,
+    "head": 0.0,
+    "attention": 503.27,
+    "other": 1108.821,
+    "total": 11979.844,
+    "barriers": 86016
+   },
+   "prof_ms": {
+    "matmul qkv": 2816.638,
+    "matmul wo": 1360.449,
+    "matmul gate/up": 4234.522,
+    "matmul down": 1963.085,
+    "attention": 502.092,
+    "norms": 34.246,
+    "quantise": 246.032,
+    "rope+bias": 155.199,
+    "kv write": 312.251,
+    "residual": 40.586,
+    "barrier wait": 331.747
+   }
+  },
+  "L512_b1": {
+   "cell": "L512_b1",
+   "batch": 1,
+   "tokens": 512,
+   "bytes": 3144,
+   "texts_per_s": 0.619,
+   "tokens_per_s": 317.2,
+   "wall_s": 1.6143,
+   "tokenise_s": 0.001453,
+   "tokenise_ms_per_text": 1.453,
+   "stats_ms": {
+    "matmul": 1290.996,
+    "head": 0.0,
+    "attention": 184.033,
+    "other": 132.913,
+    "total": 1607.941,
+    "barriers": 10752
+   },
+   "prof_ms": {
+    "matmul qkv": 351.363,
+    "matmul wo": 170.54,
+    "matmul gate/up": 524.897,
+    "matmul down": 245.056,
+    "attention": 183.874,
+    "norms": 4.335,
+    "quantise": 30.58,
+    "rope+bias": 18.434,
+    "kv write": 41.13,
+    "residual": 5.062,
+    "barrier wait": 32.966
+   }
+  },
+  "L512_b8": {
+   "cell": "L512_b8",
+   "batch": 8,
+   "tokens": 4096,
+   "bytes": 25465,
+   "texts_per_s": 0.615,
+   "tokens_per_s": 314.8,
+   "wall_s": 13.0117,
+   "tokenise_s": 0.008599,
+   "tokenise_ms_per_text": 1.075,
+   "stats_ms": {
+    "matmul": 10337.385,
+    "head": 0.0,
+    "attention": 1476.676,
+    "other": 1146.774,
+    "total": 12960.834,
+    "barriers": 86016
+   },
+   "prof_ms": {
+    "matmul qkv": 2813.739,
+    "matmul wo": 1362.943,
+    "matmul gate/up": 4205.671,
+    "matmul down": 1961.758,
+    "attention": 1475.46,
+    "norms": 34.411,
+    "quantise": 251.528,
+    "rope+bias": 168.618,
+    "kv write": 328.301,
+    "residual": 62.922,
+    "barrier wait": 368.463
+   }
+  },
+  "L512_b32": {
+   "cell": "L512_b32",
+   "batch": 32,
+   "tokens": 16384,
+   "bytes": 101451,
+   "texts_per_s": 0.622,
+   "tokens_per_s": 318.3,
+   "wall_s": 51.4746,
+   "tokenise_s": 0.033064,
+   "tokenise_ms_per_text": 1.033,
+   "stats_ms": {
+    "matmul": 41528.465,
+    "head": 0.0,
+    "attention": 5948.426,
+    "other": 3885.514,
+    "total": 51362.404,
+    "barriers": 344064
+   },
+   "prof_ms": {
+    "matmul qkv": 11309.738,
+    "matmul wo": 5476.987,
+    "matmul gate/up": 16886.354,
+    "matmul down": 7883.682,
+    "attention": 5943.699,
+    "norms": 138.831,
+    "quantise": 1015.624,
+    "rope+bias": 672.508,
+    "kv write": 612.104,
+    "residual": 245.024,
+    "barrier wait": 1346.036
+   }
+  },
+  "L2000_b1": {
+   "cell": "L2000_b1",
+   "batch": 1,
+   "tokens": 2000,
+   "bytes": 12394,
+   "texts_per_s": 0.122,
+   "tokens_per_s": 243.5,
+   "wall_s": 8.2141,
+   "tokenise_s": 0.004494,
+   "tokenise_ms_per_text": 4.494,
+   "stats_ms": {
+    "matmul": 5086.964,
+    "head": 0.0,
+    "attention": 2529.713,
+    "other": 569.62,
+    "total": 8186.296,
+    "barriers": 42000
+   },
+   "prof_ms": {
+    "matmul qkv": 1385.941,
+    "matmul wo": 673.216,
+    "matmul gate/up": 2064.701,
+    "matmul down": 967.175,
+    "attention": 2529.2,
+    "norms": 17.532,
+    "quantise": 134.723,
+    "rope+bias": 76.937,
+    "kv write": 169.427,
+    "residual": 27.122,
+    "barrier wait": 164.279
+   }
+  },
+  "L2000_b8": {
+   "cell": "L2000_b8",
+   "batch": 8,
+   "tokens": 16000,
+   "bytes": 98932,
+   "texts_per_s": 0.122,
+   "tokens_per_s": 244.0,
+   "wall_s": 65.5849,
+   "tokenise_s": 0.032028,
+   "tokenise_ms_per_text": 4.004,
+   "stats_ms": {
+    "matmul": 40584.622,
+    "head": 0.0,
+    "attention": 20142.735,
+    "other": 4639.613,
+    "total": 65366.97,
+    "barriers": 336000
+   },
+   "prof_ms": {
+    "matmul qkv": 11052.182,
+    "matmul wo": 5366.419,
+    "matmul gate/up": 16480.458,
+    "matmul down": 7715.163,
+    "attention": 20138.402,
+    "norms": 138.811,
+    "quantise": 1117.793,
+    "rope+bias": 636.23,
+    "kv write": 1360.716,
+    "residual": 217.106,
+    "barrier wait": 1509.698
+   }
+  },
+  "mixed_b32": {
+   "cell": "mixed_b32",
+   "batch": 32,
+   "tokens": 3516,
+   "bytes": 21369,
+   "texts_per_s": 2.991,
+   "tokens_per_s": 328.6,
+   "wall_s": 10.7003,
+   "tokenise_s": 0.007301,
+   "tokenise_ms_per_text": 0.228,
+   "stats_ms": {
+    "matmul": 8916.978,
+    "head": 0.0,
+    "attention": 788.331,
+    "other": 946.284,
+    "total": 10651.592,
+    "barriers": 74284
+   },
+   "prof_ms": {
+    "matmul qkv": 2426.537,
+    "matmul wo": 1173.381,
+    "matmul gate/up": 3631.534,
+    "matmul down": 1691.431,
+    "attention": 787.294,
+    "norms": 29.659,
+    "quantise": 212.809,
+    "rope+bias": 132.735,
+    "kv write": 281.872,
+    "residual": 40.43,
+    "barrier wait": 268.703
+   }
+  }
+ }
+}

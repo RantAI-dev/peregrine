@@ -277,21 +277,18 @@ pub fn gemm(
     }
     #[cfg(target_arch = "aarch64")]
     {
-        // NEON: F32 and BF16 on baseline NEON, F16 where the exact half-to-single
-        // widening instruction (`fcvtl`) is part of the tier. Without it the scalar
-        // chain below produces the same bits.
+        // NEON: F32, BF16 and F16. The half-to-single widening (`fcvtl`) is base
+        // Advanced SIMD; the `fp16` extension is about half-precision arithmetic,
+        // which this kernel does not use.
         if crate::cpu::have_neon() {
             if matches!(fmt, Format::F16) {
-                if crate::cpu::have_fp16() {
-                    // SAFETY: the preconditions above are this function's.
-                    unsafe { neon::gemm_f16(fmt, packed, n_in, panels, acts, bias, out) };
-                    return;
-                }
-            } else {
                 // SAFETY: the preconditions above are this function's.
-                unsafe { neon::gemm_neon(fmt, packed, n_in, panels, acts, bias, out) };
+                unsafe { neon::gemm_f16(fmt, packed, n_in, panels, acts, bias, out) };
                 return;
             }
+            // SAFETY: the preconditions above are this function's.
+            unsafe { neon::gemm_neon(fmt, packed, n_in, panels, acts, bias, out) };
+            return;
         }
     }
     #[cfg(target_arch = "x86_64")]
@@ -644,6 +641,12 @@ mod neon {
     use super::*;
     use std::arch::aarch64::*;
 
+    /// Test-only: how often the F16 kernel ran, so a test can pin the dispatch on
+    /// every NEON tier (the result is bit-identical either way).
+    #[cfg(test)]
+    pub(super) static F16_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     /// Sixteen F32 or BF16 weights of one panel step as four f32 vectors.
     ///
     /// BF16 shifts the half's bits into the high half of an f32; the conversion is exact.
@@ -667,7 +670,7 @@ mod neon {
 
     /// Sixteen F16 weights of one panel step as four f32 vectors, widened by `fcvtl`.
     #[inline]
-    #[target_feature(enable = "neon,fp16")]
+    #[target_feature(enable = "neon")]
     unsafe fn w16_f16(p: *const u8) -> [float32x4_t; 4] {
         [
             f16x4(p),
@@ -679,10 +682,12 @@ mod neon {
 
     /// Four f16 halves widened to f32 (`fcvtl`), exactly.
     ///
+    /// `fcvtl` is base Advanced SIMD, not part of the `fp16` arithmetic extension.
+    ///
     /// # Safety
-    /// The CPU must have `fp16` and `p` must be readable for eight bytes.
+    /// The CPU must have NEON and `p` must be readable for eight bytes.
     #[inline]
-    #[target_feature(enable = "neon,fp16")]
+    #[target_feature(enable = "neon")]
     unsafe fn f16x4(p: *const u8) -> float32x4_t {
         let h = vld1_u16(p as *const u16);
         let mut r: float32x4_t;
@@ -813,8 +818,8 @@ mod neon {
     /// The same loop for F16 weights, widened by `fcvtl`.
     ///
     /// # Safety
-    /// As [`super::gemm`], and the CPU must have `fp16`.
-    #[target_feature(enable = "neon,fp16")]
+    /// As [`super::gemm`].
+    #[target_feature(enable = "neon")]
     pub unsafe fn gemm_f16(
         fmt: Format,
         packed: &[u8],
@@ -824,6 +829,8 @@ mod neon {
         bias: Option<&[f32]>,
         out: &mut [f32],
     ) {
+        #[cfg(test)]
+        F16_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         gemm_body!(fmt, packed, n_in, panels, acts, bias, out, |p| w16_f16(p));
     }
 }
@@ -980,7 +987,7 @@ mod tests {
             }
         }
         #[cfg(target_arch = "aarch64")]
-        if crate::cpu::have_neon() && (fmt != Format::F16 || crate::cpu::have_fp16()) {
+        if crate::cpu::have_neon() {
             // The NEON kernel against the scalar reference — the bit-identity the
             // aarch64 tiers inherit from the x86 ones.
             let mut an = vec![0.0f32; panels * PANEL * xs.len()];
@@ -1047,6 +1054,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `fcvtl` is base Advanced SIMD, so F16 must take the packed NEON kernel on
+    /// plain `neon` too, not fall through to the scalar chain.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn f16_takes_the_neon_kernel_on_every_neon_tier() {
+        if !crate::cpu::have_neon() {
+            return;
+        }
+        let (n_out, n_in) = (16, 32);
+        let w = matrix(Format::F16, n_out, n_in, 9);
+        let packed = pack(Format::F16, &w, n_out, n_in);
+        let xs = acts(2, n_in, 4);
+        let panels = n_out.div_ceil(PANEL);
+        let mut out = vec![0.0f32; panels * PANEL * xs.len()];
+        let before = neon::F16_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        gemm(Format::F16, &packed, n_in, panels, &xs, None, &mut out);
+        assert!(
+            neon::F16_CALLS.load(std::sync::atomic::Ordering::Relaxed) > before,
+            "F16 did not reach the NEON kernel on this tier"
+        );
     }
 
     /// A row computed alone, in the middle of a batch, or last must be the same bits.

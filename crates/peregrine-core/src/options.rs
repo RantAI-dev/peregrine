@@ -294,6 +294,12 @@ pub struct EngineOptions {
     /// a request are in flight at once, not how many the request may hold: the rest wait in the
     /// engine's queue. `--slots` bounds chat slots only.
     pub work_cache_mb: Option<usize>,
+    /// `PEREGRINE_EMBED_CACHE_MB`: memory for the exact cache of finished embedding vectors,
+    /// keyed by token ids, pooling and dimensions (S4.9k; default 64 MiB, `0` disables).
+    ///
+    /// The cache is serving-only: a hit returns the vector a computation would, bit for bit.
+    /// 64 MiB holds about 16 000 vectors of 1024 f32 (21 000 of 768), with their keys counted.
+    pub embed_cache_mb: usize,
     /// `PEREGRINE_MTP=0`: no MTP speculation.
     pub mtp: bool,
     /// `PEREGRINE_MTP_VOCAB`: vocabulary rows the MTP drafter scores (default 32768).
@@ -364,6 +370,7 @@ impl Default for EngineOptions {
             prefill_chunk: None,
             pass_rows: None,
             work_cache_mb: None,
+            embed_cache_mb: 64,
             mtp: true,
             mtp_vocab: 32768,
             dspark: DsparkOptions {
@@ -543,6 +550,7 @@ impl EngineOptions {
             prefill_chunk: num("PREFILL_CHUNK").filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v)),
             pass_rows: num("PASS_ROWS").filter(|&v| (1..=MAX_PASS_ROWS).contains(&v)),
             work_cache_mb: num("WORK_CACHE_MB").filter(|&v| v > 0),
+            embed_cache_mb: num("EMBED_CACHE_MB").unwrap_or(d.embed_cache_mb),
             mtp: unless("MTP", "0"),
             mtp_vocab: num("MTP_VOCAB").unwrap_or(d.mtp_vocab),
             dspark: DsparkOptions {
@@ -682,6 +690,7 @@ impl EngineOptions {
             ("prefill_chunk", opt(self.prefill_chunk)),
             ("pass_rows", opt(self.pass_rows)),
             ("work_cache_mb", opt(self.work_cache_mb)),
+            ("embed_cache_mb", self.embed_cache_mb.to_string()),
             ("mtp", self.mtp.to_string()),
             ("mtp_vocab", self.mtp_vocab.to_string()),
             ("dspark.logits_start", self.dspark.logits_start.to_string()),
@@ -747,6 +756,7 @@ pub const NAMES: &[&str] = &[
     "PREFILL_CHUNK",
     "PASS_ROWS",
     "WORK_CACHE_MB",
+    "EMBED_CACHE_MB",
     "MTP",
     "MTP_VOCAB",
     "DSPARK_LOGITS_START",
@@ -914,6 +924,9 @@ mod tests {
         // The work cache budget.
         assert_eq!(with(&[("WORK_CACHE_MB", "128")]).work_cache_mb, Some(128));
         assert_eq!(with(&[("WORK_CACHE_MB", "0")]).work_cache_mb, None);
+        // The embedding result cache: a size in MiB, and 0 disables it.
+        assert_eq!(with(&[("EMBED_CACHE_MB", "32")]).embed_cache_mb, 32);
+        assert_eq!(with(&[("EMBED_CACHE_MB", "0")]).embed_cache_mb, 0);
     }
 
     #[test]

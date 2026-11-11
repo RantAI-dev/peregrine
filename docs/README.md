@@ -25,4 +25,4 @@
 | Reference | |
 |---|---|
 | [compat.md](compat.md) | OpenAI API compatibility: what the server speaks, and where it differs |
-| [reference/](reference/) | format specs (Bonsai 2 / PQ2_0 / PTQ1_0) |
+| [reference/](reference/) | format and model specs (Bonsai 2 / PQ2_0 / PTQ1_0, `gemma-embedding`, `bert`, System One) |

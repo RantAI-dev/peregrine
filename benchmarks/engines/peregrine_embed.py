@@ -31,7 +31,7 @@ class PeregrineEmbedAdapter(EmbedAdapter):
         threads: int = 4,
         binary: Optional[str] = None,
         worktree: Optional[str] = None,
-        slots: int = 10,
+        slots: int = 40,
     ):
         super().__init__(threads=threads)
         self.worktree = Path(
@@ -71,6 +71,7 @@ class PeregrineEmbedAdapter(EmbedAdapter):
         return info
 
     def start(self, row: Dict[str, Any], model: Dict[str, Any], port: int) -> Dict[str, Any]:
+        self.slots = int(row.get("slots") or self.slots)
         if not self.binary.exists():
             raise FileNotFoundError(
                 f"peregrine binary not found at {self.binary}; build the S4.1 branch "

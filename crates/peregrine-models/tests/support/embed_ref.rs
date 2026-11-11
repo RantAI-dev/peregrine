@@ -335,3 +335,224 @@ pub fn reference_embedding(model: &Model, tokens: &[u32], pooling: Pooling) -> V
     }
     v
 }
+
+/// `mistral3`'s final normed hidden states of one text (llama.cpp's `result_norm`), in
+/// order — the reference for NVIDIA Nemotron 3.5 Embed 1B's graph (roadmap S4.14).
+///
+/// The graph is llama.cpp v0.9.0's `src/models/mistral3.cpp:139-269`, with the mask
+/// removed (`attention.causal = false`): every row sees every row of its own text. It is
+/// reimplemented here layer by layer with plain loops, over the same arithmetic the
+/// engine's blocks define, as [`hidden_rows`] is for `gemma-embedding`:
+///
+/// - the embeddings are read unscaled;
+/// - `attn_norm` → q/k/v → RoPE (YaRN) → the per-row attention temperature
+///   (`ln(floor(pos / n_ctx_orig) + 1) · scale + 1`, `src/llama-graph.cpp:304-312`) →
+///   attention with `kq_scale = 1/sqrt(head_dim)` → `attn_output` → residual;
+/// - `ffn_norm` → gate/up → SwiGLU → down → residual;
+/// - `output_norm` over every row.
+///
+/// The YaRN table is built by the same `build_rope_table_yarn` the engine's state uses;
+/// the table's own arithmetic is pinned by `blocks::rope`'s tests, and the metadata that
+/// feeds it is read here independently.
+pub fn hidden_rows_mistral3(model: &Model, tokens: &[u32]) -> Vec<f32> {
+    let g = model.gguf();
+    let cfg = &model.cfg;
+    let dm = cfg.d_model;
+    let hd = cfg.head_dim;
+    let qd = cfg.q_dim();
+    let kvd = cfg.kv_dim();
+    let n = tokens.len();
+    let arch = "mistral3";
+
+    let tok_embd = mat(g, "token_embd.weight");
+    let out_norm = vec_f32(g, "output_norm.weight");
+    let eps = cfg.eps;
+    let scale = 1.0 / (hd as f32).sqrt();
+
+    let base = g.f32(&format!("{arch}.rope.freq_base")).unwrap_or(10_000.0);
+    let factor = g
+        .f32(&format!("{arch}.rope.scaling.factor"))
+        .expect("mistral3 YaRN factor");
+    let n_ctx_orig = g
+        .u32(&format!("{arch}.rope.scaling.original_context_length"))
+        .unwrap_or(4096) as usize;
+    let beta_fast = g
+        .f32(&format!("{arch}.rope.scaling.yarn_beta_fast"))
+        .unwrap_or(32.0);
+    let beta_slow = g
+        .f32(&format!("{arch}.rope.scaling.yarn_beta_slow"))
+        .unwrap_or(1.0);
+    let log_mul = g
+        .f32(&format!("{arch}.rope.scaling.yarn_log_multiplier"))
+        .unwrap_or(0.0);
+    let yarn = peregrine_core::blocks::rope::yarn_params(
+        cfg.rope_dim,
+        base,
+        factor,
+        n_ctx_orig,
+        1.0,
+        1.0,
+        log_mul,
+        beta_fast,
+        beta_slow,
+    );
+    let table = peregrine_core::blocks::rope::build_rope_table_yarn(
+        cfg.rope_dim,
+        base,
+        n.max(1),
+        None,
+        &yarn,
+    );
+    let temp_scale = g
+        .f32(&format!("{arch}.attention.temperature_scale"))
+        .unwrap_or(0.0);
+
+    let mut x = vec![0.0f32; n * dm];
+    for (r, &tok) in tokens.iter().enumerate() {
+        let row = tok_embd.row(tok as usize);
+        for d in 0..dm {
+            x[r * dm + d] = f32::from_le_bytes(row[d * 4..d * 4 + 4].try_into().unwrap());
+        }
+    }
+
+    for il in 0..cfg.n_layer {
+        let p = |s: &str| format!("blk.{il}.{s}");
+        let attn_norm = vec_f32(g, &p("attn_norm.weight"));
+        let wq = mat(g, &p("attn_q.weight"));
+        let wk = mat(g, &p("attn_k.weight"));
+        let wv = mat(g, &p("attn_v.weight"));
+        let wo = mat(g, &p("attn_output.weight"));
+        let ffn_norm = vec_f32(g, &p("ffn_norm.weight"));
+        let gate = mat(g, &p("ffn_gate.weight"));
+        let up = mat(g, &p("ffn_up.weight"));
+        let down = mat(g, &p("ffn_down.weight"));
+
+        let mut xnorm = vec![0.0f32; n * dm];
+        for r in 0..n {
+            let row = rmsnorm(&x[r * dm..(r + 1) * dm], &attn_norm, eps);
+            xnorm[r * dm..(r + 1) * dm].copy_from_slice(&row);
+        }
+        let mut q = vec![0.0f32; n * qd];
+        let mut k = vec![0.0f32; n * kvd];
+        let mut v = vec![0.0f32; n * kvd];
+        for r in 0..n {
+            wq.apply(&xnorm[r * dm..(r + 1) * dm], &mut q[r * qd..(r + 1) * qd]);
+            wk.apply(&xnorm[r * dm..(r + 1) * dm], &mut k[r * kvd..(r + 1) * kvd]);
+            wv.apply(&xnorm[r * dm..(r + 1) * dm], &mut v[r * kvd..(r + 1) * kvd]);
+        }
+        for r in 0..n {
+            // NORM rotary pairing (llama.cpp's `llama_model_rope_type` for `mistral3`).
+            peregrine_core::blocks::rope::rope(
+                &table,
+                &mut q[r * qd..(r + 1) * qd],
+                cfg.n_head,
+                r,
+                hd,
+                cfg.rope_dim,
+                false,
+            );
+            peregrine_core::blocks::rope::rope(
+                &table,
+                &mut k[r * kvd..(r + 1) * kvd],
+                cfg.n_kv_head,
+                r,
+                hd,
+                cfg.rope_dim,
+                false,
+            );
+            // `llm_graph_input_attn_temp::set_input`: Q is multiplied per row, after RoPE.
+            if temp_scale != 0.0 {
+                let t = peregrine_core::vmath::det_ln(((r / n_ctx_orig) as f32) + 1.0) * temp_scale
+                    + 1.0;
+                for x in &mut q[r * qd..(r + 1) * qd] {
+                    *x *= t;
+                }
+            }
+        }
+        let gqa = cfg.gqa();
+        let mut attn = vec![0.0f32; n * qd];
+        for r in 0..n {
+            for h in 0..cfg.n_head {
+                let kh = h / gqa;
+                let (lo, hi) = peregrine_kernels::bidir::band(r, n, None);
+                let mut scores = vec![0.0f32; n];
+                for (j, s) in scores.iter_mut().enumerate().take(hi).skip(lo) {
+                    let mut acc = 0.0f32;
+                    for d in 0..hd {
+                        acc = q[r * qd + h * hd + d].mul_add(k[j * kvd + kh * hd + d], acc);
+                    }
+                    *s = acc * scale;
+                }
+                let max = scores[lo..hi]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let mut l = 0.0f64;
+                for s in scores[lo..hi].iter_mut() {
+                    *s = peregrine_kernels::vmath::exp_scalar(*s - max);
+                }
+                for &e in &scores[lo..hi] {
+                    l += e as f64;
+                }
+                let inv = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
+                let mut acc = vec![0.0f32; hd];
+                for (j, &e) in scores[lo..hi].iter().enumerate() {
+                    let j = lo + j;
+                    for d in 0..hd {
+                        acc[d] = e.mul_add(v[j * kvd + kh * hd + d], acc[d]);
+                    }
+                }
+                for d in 0..hd {
+                    attn[r * qd + h * hd + d] = acc[d] * inv;
+                }
+            }
+        }
+        let mut o = vec![0.0f32; n * dm];
+        for r in 0..n {
+            wo.apply(&attn[r * qd..(r + 1) * qd], &mut o[r * dm..(r + 1) * dm]);
+        }
+        for i in 0..n * dm {
+            x[i] += o[i];
+        }
+
+        let mut xnorm = vec![0.0f32; n * dm];
+        for r in 0..n {
+            let row = rmsnorm(&x[r * dm..(r + 1) * dm], &ffn_norm, eps);
+            xnorm[r * dm..(r + 1) * dm].copy_from_slice(&row);
+        }
+        let f = cfg.n_ff;
+        let mut hb = vec![0.0f32; n * f];
+        let mut hb2 = vec![0.0f32; n * f];
+        for r in 0..n {
+            gate.apply(&xnorm[r * dm..(r + 1) * dm], &mut hb[r * f..(r + 1) * f]);
+            up.apply(&xnorm[r * dm..(r + 1) * dm], &mut hb2[r * f..(r + 1) * f]);
+        }
+        for r in 0..n {
+            peregrine_kernels::vmath::swiglu(&mut hb[r * f..(r + 1) * f], &hb2[r * f..(r + 1) * f]);
+        }
+        let mut o = vec![0.0f32; n * dm];
+        for r in 0..n {
+            down.apply(&hb[r * f..(r + 1) * f], &mut o[r * dm..(r + 1) * dm]);
+        }
+        for i in 0..n * dm {
+            x[i] += o[i];
+        }
+    }
+
+    let mut hidden = vec![0.0f32; n * dm];
+    for r in 0..n {
+        let row = rmsnorm(&x[r * dm..(r + 1) * dm], &out_norm, eps);
+        hidden[r * dm..(r + 1) * dm].copy_from_slice(&row);
+    }
+    hidden
+}
+
+/// The pooled embedding of one text through the `mistral3` reference graph.
+pub fn reference_embedding_mistral3(model: &Model, tokens: &[u32], pooling: Pooling) -> Vec<f32> {
+    let dm = model.cfg.d_model;
+    let hidden = hidden_rows_mistral3(model, tokens);
+    let mut sum = vec![0.0f64; dm];
+    let mut v = vec![0.0f32; dm];
+    peregrine_core::embed::pool_rows_into(&hidden, dm, pooling, &mut sum, &mut v);
+    v
+}
