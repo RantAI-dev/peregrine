@@ -142,6 +142,11 @@ All notable changes to this project are documented here. The format follows
   109 and 437 tokens and +55 % for 32-text batches; decode is unchanged. `PEREGRINE_FPACK=0` is the
   A/B switch back to the old tile. The load-time pack costs about 2 s for the 1.2 GB f16 file and
   +18 % resident memory until the store is cached (S4.9e); aarch64 keeps the old float path for now.
+  The rest of the gap to llama.cpp on an f16 file is the **pass size**, not the kernel: at the
+  128-row cap the two engines are within 2 % (290.1 against 289.6 tok/s on one 437-token text), and
+  llama.cpp's 512-row ubatch is worth 1.08-1.13× — which is S4.9b's token-budget pass, not a kernel
+  change. `/v1/embeddings` at 12 threads: f16 253.6 → 290.1 tok/s from chunk 16 to 128, Q8_0 flat
+  (330.7 → 334.7, it was never weight-bound).
 
 ## [0.1.2] - 2026-11-10
 
