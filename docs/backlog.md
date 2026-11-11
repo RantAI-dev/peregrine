@@ -64,6 +64,7 @@ the stage profile of 2026-11-11 that `docs/design/s4.9-sota.md` is built on.
 
 | Idea | Why | Size |
 |---|---|---|
+| **Chat baselines against the other engines the targets name** | `docs/targets.md` lists ik_llama.cpp, OpenVINO GenAI and MNN beside llama.cpp, and bitnet.cpp / T-MAC for ternary models; the published tables compare with llama.cpp (and PrismML's fork) only. ik_llama.cpp is the one most often reported ahead of llama.cpp on x86 prompt processing (community reports range from 1.3-2× ahead to 30% behind, by model and format; decode about equal), which is where Peregrine's lead over llama.cpp is narrowest (1.03-1.30×). The harness already has an ik_llama.cpp adapter. Until these rows exist, "ahead of llama.cpp" is the claim, not "fastest". | M |
 | **A controlled accuracy study of GGUF formats for embedders** | Nobody has published MTEB or BEIR numbers for Q8_0 / Q4_K embedding files, only cosine drift. Running NanoBEIR and four BEIR sets per format, per engine, tells users which file to download, and is publishable on its own. | M |
 | **Batch-invariance as a published property** | ONNX Runtime's quantised path uses one activation scale for the whole batch, so a text's vector depends on its batch-mates; padded engines can differ by mask handling. A small public test that any engine can run ("same text, different batch: same bits?") makes Peregrine's guarantee visible. | S |
 | **Cost per million embeddings** | The number buyers compare. Publish it for a small cloud VM alongside texts per second. | S |
