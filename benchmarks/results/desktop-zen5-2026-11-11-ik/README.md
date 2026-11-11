@@ -23,6 +23,10 @@ often reported faster than upstream on x86 CPUs. Nothing in the engine changed: 
 | Engine | Version / commit | Build |
 |---|---|---|
 | Peregrine | `origin/main` `99eabe9d9edb1fee43410d12b82de03c085e9280` | `cargo build --release -p peregrine`, rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+
+`origin/main` advanced to `af7eb09` while these runs were in progress; the measured tree stayed
+at `99eabe9` so that every row in this folder is one binary, and the rebuilt post-reboot binary
+is the same commit.
 | llama.cpp | v0.9.0, commit `cd959ba` | harness cache build, CMake Release AVX2/FMA, `llama-server` |
 | ik_llama.cpp | `master` `479074ccac2ac94f06b6d24a9ce26f0f9e9aa6ae` (2026-11-11 08:54:37 +0200) | CMake Release, `-DGGML_NATIVE=ON -DGGML_AVX512=ON -DGGML_AVX512_VBMI=ON -DGGML_AVX512_VNNI=ON -DGGML_AVX512_BF16=ON` |
 
@@ -87,7 +91,18 @@ sweep was split by user count so that each command stays inside the cap:
   `peregrine,llama_cpp,ik_llama_cpp`, `--runs 3`.
 - 512 llama.cpp sensitivity: `--engines llama_cpp --llama-fa off`, one invocation per pair of
   models, same method.
-- 4096: see the section below.
+- 4096, 1 user: one invocation per model, all three engines, `--runs 3` (fits in 3–6 min).
+- 4096, 4 users and 10 users: a full three-engine, three-round invocation does not fit in the
+  cap at this context (one 10-user 4096 round is 2–9 min depending on the engine). Those rows
+  were therefore measured **one round per engine**, and for 1B the peregrine and llama arms
+  shared one invocation while ik ran separately. The JSON files record `runs: 1` and the tables
+  below mark `n=1`; their spread column is zero by construction and they are not as strong as
+  the `n=3` rows.
+- **A host reboot at 17:36 wiped `/tmp` and the worktree.** The 512 results had already been
+  committed and pushed; the first pass of 4096 single-user measurements was lost and re-run
+  after rebuilding both engines at the same pinned commits (18:01 onward). Only the `n=3`
+  4096 single-user rows in this folder are from that second pass; nothing was merged from the
+  lost pass.
 
 `run.py` was changed to give every phase a fresh free port (`pick_free_port`). ik_llama.cpp
 does not set `SO_REUSEADDR`, so a fixed port reused by the next engine can fail to bind while
@@ -140,6 +155,70 @@ that number, so above 1 means Peregrine is faster. ik_llama.cpp is `-rtr -fa on`
 | 10 users, total tok/s | 76.28 ± 0.58 | 55.53 ± 1.24 | 46.65 ± 0.24 | auto 55.53 | 72.67 ± 1.73 | **1.37×** | 1.05× |
 | 10 users, TTFT (s) | 12.69 ± 1.20 | 20.23 ± 1.17 | 23.33 ± 0.21 | auto 20.23 | 9.48 ± 1.30 | **0.63× (faster)** | 1.34× (slower) |
 
+## 4096-token context
+
+Medians of three interleaved rounds where `n=3`; single-round rows are marked `n=1`. At 4096
+llama.cpp was **not** re-measured with `-fa off` (the sweep hit the ten-minute cap before it
+reached 4096); the comparison uses `-fa auto`, which is on and was the faster setting for every
+512 throughput row except gemma decode. ik_llama.cpp is `-rtr -fa on`.
+
+### Llama 3.2 1B Instruct Q4_K_M (`6f85a640…`)
+
+| Metric | Peregrine | llama.cpp `auto` | ik_llama.cpp | P ÷ llama | P ÷ ik | n |
+|---|---|---|---|---|---|---|
+| Decode tok/s | 40.64 ± 0.52 | 33.62 ± 0.51 | 42.26 ± 0.81 | **1.21×** | 0.96× | 3 |
+| Prompt tok/s | 208.41 ± 3.52 | 186.87 ± 1.43 | 358.95 ± 3.04 | **1.12×** | 0.58× | 3 |
+| 4 users, total tok/s | 11.53 | 9.42 | 5.67 | **1.22×** | **2.03×** | 1 |
+| 10 users, total tok/s | 11.77 | 8.83 | not completed | **1.33×** | — | 1 |
+| 10 users, TTFT (s) | 122.09 | 137.20 | not completed | **0.89× (faster)** | — | 1 |
+
+### Qwen 2.5 0.5B Instruct Q4_K_M (`74a4da8c…`)
+
+| Metric | Peregrine | llama.cpp `auto` | ik_llama.cpp | P ÷ llama | P ÷ ik | n |
+|---|---|---|---|---|---|---|
+| Decode tok/s | 65.32 ± 5.88 | 48.73 ± 0.55 | 69.05 ± 1.42 | **1.34×** | 0.95× | 3 |
+| Prompt tok/s | 379.11 ± 5.66 | 290.55 ± 0.70 | 662.86 ± 2.14 | **1.30×** | 0.57× | 3 |
+| 4 users, total tok/s | 20.01 | 14.71 | 9.96 | **1.36×** | **2.01×** | 1 |
+| 10 users, total tok/s | 20.20 | 13.74 | 6.53 | **1.47×** | **3.09×** | 1 |
+| 10 users, TTFT (s) | 71.24 | 87.60 | 149.86 | **0.81× (faster)** | **0.48× (faster)** | 1 |
+
+### SmolLM2 360M Instruct Q4_K_M (`2fa3f013…`)
+
+| Metric | Peregrine | llama.cpp `auto` | ik_llama.cpp | P ÷ llama | P ÷ ik | n |
+|---|---|---|---|---|---|---|
+| Decode tok/s | 57.80 ± 1.20 | 41.95 ± 1.07 | 55.52 ± 1.16 | **1.38×** | **1.04×** | 3 |
+| Prompt tok/s | 304.53 ± 2.84 | 257.89 ± 3.80 | 555.98 ± 14.99 | **1.18×** | 0.55× | 3 |
+| 4 users, total tok/s | not measured | not measured | not measured | — | — | 0 |
+| 10 users, total tok/s | not measured | not measured | not measured | — | — | 0 |
+| 10 users, TTFT (s) | not measured | not measured | not measured | — | — | 0 |
+
+### gemma-3-1b-it Q4_K_M (`12bf0fff…`)
+
+| Metric | Peregrine | llama.cpp `auto` | ik_llama.cpp | P ÷ llama | P ÷ ik | n |
+|---|---|---|---|---|---|---|
+| Decode tok/s | 47.45 ± 2.06 | 39.72 ± 0.31 | 53.43 ± 1.76 | **1.19×** | 0.89× | 3 |
+| Prompt tok/s | 281.16 ± 1.99 | 222.94 ± 0.21 | 569.42 ± 5.56 | **1.26×** | 0.49× | 3 |
+| 4 users, total tok/s | not measured | not measured | not measured | — | — | 0 |
+| 10 users, total tok/s | not measured | not measured | not measured | — | — | 0 |
+| 10 users, TTFT (s) | not measured | not measured | not measured | — | — | 0 |
+
+## What the 4096 rows say
+
+- Against llama.cpp, Peregrine wins every measured 4096 row: decode 1.19–1.38×, prompt
+  1.12–1.30×, 4 users 1.22–1.36×, 10 users 1.33–1.47×, TTFT at 10 users 0.81–0.89×.
+- **The depth decode gap against ik_llama.cpp closes.** ik decodes 42.3 vs 40.6 tok/s on the
+  1B (Peregrine 0.96×), 69.1 vs 65.3 on the 0.5B (0.95×), 55.5 vs 57.8 on SmolLM2 (1.04×),
+  and 53.4 vs 47.5 on gemma (**0.89×**, the largest decode loss in this report). At 512
+  Peregrine was at parity or ahead on the same files, so the fork's repacked GEMMs hold up
+  better as context grows.
+- **ik_llama.cpp's multi-user path does not.** At 4 users Peregrine is 2.0× its aggregate
+  (11.5 vs 5.7 on the 1B, 20.0 vs 10.0 on the 0.5B), and at 10 users 3.1× (20.2 vs 6.5 on the
+  0.5B) with TTFT 71 s vs 150 s. Its 1B 10-user round did not finish inside the ten-minute
+  command cap (10 concurrent 4096-token prefills plus 2,560 decode tokens); that row is
+  recorded as not completed rather than estimated.
+- Prompt processing remains the fork's win: 0.49–0.58× Peregrine at 4096 (358 vs 208 on the
+  1B, 663 vs 379 on the 0.5B).
+
 ## What the 512 rows say
 
 - **Against llama.cpp, Peregrine wins every throughput row except SmolLM2 prompt
@@ -159,6 +238,22 @@ that number, so above 1 means Peregrine is faster. ik_llama.cpp is `-rtr -fa on`
   (1.34×). The gemma loss tracks the fork's shorter per-slot prefill and its 10-user aggregate
   being close to Peregrine's.
 
+## What was not measured
+
+- **OpenVINO GenAI (step 4): not attempted.** It is the second priority in the brief and the
+  ik_llama.cpp sweep is not complete (below), so no `openvino_genai` adapter or IR export was
+  produced. No OpenVINO number appears anywhere in this folder.
+- ik_llama.cpp, Llama 3.2 1B, 4096 tokens, 10 users: one round did not finish inside the
+  ten-minute command cap (slowest engine on the slowest model/context combination). Not
+  estimated.
+- SmolLM2 and gemma-3, 4096 tokens, 4 and 10 users: not measured (time). Their 512 multi-user
+  rows are complete.
+- llama.cpp `-fa off` at 4096: not measured. The 512 arms show `-fa auto` (on) faster for
+  every throughput row except gemma decode, and the published 2026-11-08 desktop run also
+  found `-fa off` slower at 4096, so `auto` is the competitor used at 4096; this is a
+  like-for-like choice supported by the 512 arms, not a measured 4096 arm.
+- 16k context: out of scope for this run (the published table is 512/4096).
+
 ## Measurement notes and artefacts
 
 - The host ran 8–10% slower than the 2026-11-09 session for **both** established engines
@@ -176,6 +271,7 @@ that number, so above 1 means Peregrine is faster. ik_llama.cpp is `-rtr -fa on`
 
 ## Files
 
+- `report.md`: the narrative comparison and the wins/losses list.
 - `2026-11-11-*.json`: raw run sets, one per engine per invocation, with the machine record,
   engine builds, settings, every raw sample and the derived medians.
 - `summarize.py`: rebuilds the tables above from the JSON (concatenates split samples).
