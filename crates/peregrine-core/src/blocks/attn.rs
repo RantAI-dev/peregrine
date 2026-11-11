@@ -21,10 +21,33 @@ pub struct AttnScratch {
     /// have a cache of their own (the decoding users of a mixed step).
     runs: Vec<(usize, usize, usize)>,
     rows: Vec<usize>,
-    /// One score row per worker for the bidirectional pass (`blocks/bidir.rs`), so a
-    /// text's `n × n` scores are computed once instead of twice. Sized `threads ×
-    /// max_batch`; unused by a causal model.
-    pub bidir_scores: Vec<f32>,
+    /// The bidirectional pass's strip scratch (`blocks/bidir.rs`, S4.9g). Empty for a
+    /// causal model.
+    pub bidir: BidirScratch,
+}
+
+/// The encoder attention strip's reusable buffers (S4.9g): a head's keys transposed
+/// into a panel, and one score strip per worker.
+///
+/// Nothing here allocates inside a pass. `panel` is `max_batch × head_dim` floats — one
+/// `[head_dim][len]` region per text at offset `row0 × head_dim`, because the texts of
+/// a pass have `max_batch` rows in total — and each worker's slot is
+/// [`peregrine_kernels::bidir::STRIP_SLOT`] floats (128 KiB), so a 2 048-row pass of a
+/// 256-wide head costs 2 MiB plus 1 MiB at 8 threads.
+#[derive(Default)]
+pub struct BidirScratch {
+    /// `[head_dim][n]` per text, keys along the lanes.
+    pub panel: Vec<f32>,
+    /// One strip's scores (turned into weights in place) per worker.
+    pub strips: Vec<f32>,
+}
+
+impl BidirScratch {
+    /// Size the scratch for a pass of up to `max_batch` rows on `threads` workers.
+    pub fn resize(&mut self, max_batch: usize, head_dim: usize, threads: usize) {
+        self.panel = vec![0.0; max_batch * head_dim];
+        self.strips = vec![0.0; threads.max(1) * peregrine_kernels::bidir::STRIP_SLOT];
+    }
 }
 
 impl AttnScratch {
@@ -41,7 +64,7 @@ impl AttnScratch {
             ml: vec![(0.0, 0.0); cfg.n_kv_head * attn::MAX_CHUNKS * attn::MAX_PARTIAL_ROWS],
             runs: Vec::new(),
             rows: Vec::new(),
-            bidir_scores: vec![0.0; threads.max(1) * max_batch],
+            bidir: BidirScratch::default(),
         }
     }
 }

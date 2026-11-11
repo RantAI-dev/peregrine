@@ -13,6 +13,7 @@
     clippy::chunks_exact_to_as_chunks
 )]
 
+pub mod bidir;
 pub mod cpu;
 pub mod delta;
 pub mod format;

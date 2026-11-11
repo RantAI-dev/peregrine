@@ -140,6 +140,16 @@ pub struct State {
     pub emb: Vec<f32>,
     /// The text boundaries of one bidirectional pass, reused (a pass must not allocate).
     pub spans: Vec<crate::blocks::bidir::TextSpan>,
+    /// S4.9d: the label read-out of the next forward. Each entry is `(index into the
+    /// pass's `want_logits`, start in [`State::label_ids`], count)`; the head then
+    /// evaluates only those token ids of that row instead of the whole vocabulary
+    /// row. Empty on every pass that reads no labels (a chat token, an embedding).
+    pub label_rows: Vec<(usize, usize, usize)>,
+    /// The label token ids of [`State::label_rows`], flattened; `label_out` holds one
+    /// value per id, at the same offsets.
+    pub label_ids: Vec<u32>,
+    /// The head's label entries, one per id in [`State::label_ids`].
+    pub label_out: Vec<f32>,
 }
 
 impl State {
@@ -245,6 +255,9 @@ impl State {
             pool_sum: Vec::new(),
             emb: vec![0.0; b * act_layout.act_width],
             spans: Vec::new(),
+            label_rows: Vec::new(),
+            label_ids: Vec::new(),
+            label_out: Vec::new(),
         }
     }
 

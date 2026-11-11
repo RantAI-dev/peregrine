@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A decision computes only its label rows of the output head (S4.9d)**: a `Want::Labels` slot used
+  to evaluate the whole vocabulary row of its last prompt position and gather the handful of token
+  ids it reads. The head now evaluates those ids alone: one dot product of the already-quantised
+  hidden row per label, through the same kernel the full path uses for that weight row and format on
+  the current tier — the per-row kernel (or the eight-row Q5_0/Q8_0 one for a single activation),
+  the eight-row k-quant tile, the sixteen-row ternary tile or the sixteen-row packed float panel,
+  taking the one output from the tile or panel that contains the row. Every output of those kernels
+  is independent of its neighbours, so a label entry is the full row's entry bit for bit; no format
+  falls back, and only a LittleBit sidecar head keeps the full row. Chat, embeddings and speculation
+  are untouched. Tested in every head format the synthetic generator writes (F32, F16, BF16, Q4_0,
+  Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, and the ternary PQ2_0/PTQ1_0 of a
+  rotated hybrid), tied and untied, on `native`, `PEREGRINE_ISA=avx2` and `PEREGRINE_ISA=scalar`,
+  with labels at the first, last and arbitrary vocabulary indices, duplicates, and 1, 3 and 255
+  labels; the existing label invariance, prefix, fork and beside-other-slots tests are unchanged.
+  On a 248,320-token vocabulary the head stage falls from 1.2 ms to ≤0.01 ms on one thread and from
+  0.65 ms to ≤0.01 ms on four (tinyopenjev), and from 11-12 ms to 0.02 ms on Qwen3.5-2B Q4_K_M
+  (four threads, repack off); `/v1/systemone` on a ~300-token state gains about 3-11% in
+  questions/s at 1, 3 and 10 questions.
+
 - **Token-budget passes and prompt-sized caches for embedding and decision work (S4.9b)**: a step
   now fills a weight pass up to a row budget (`PEREGRINE_PASS_ROWS`) with pooled (embedding) and
   label (decision) slots, taking whole short texts and pieces of a long one from as many waiting
@@ -191,6 +210,37 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The encoder's attention is a fused, cache-blocked strip with a defined arithmetic (S4.9g).**
+  A whole text's bidirectional attention was a scalar, strict-order dot product per (query row,
+  key), parallel over rows only — 35 % of an EmbeddingGemma pass at 128 tokens and 60 % at 512, and
+  after S4.9a a larger share still. `peregrine_kernels::bidir` is the kernel now: one head's keys
+  are transposed once per (text, KV head) into a panel with the keys along the vector lanes, so a
+  lane holds one score and the head dimension folds inside it as one sequential FMA chain
+  (`acc = fma(q[k], key[k], acc)`); scores are taken in 128-key blocks (an L1/L2-resident panel
+  slice shared by the strip's rows); the window is an exact band, so a sliding layer computes only
+  the keys inside each row's window; the weights go through `vmath::exp8` and its scalar twin; the
+  denominator is an `f64` sum in ascending key order; and the value mix accumulates four query rows
+  at a time in ascending key order, sharing one value load. A row's bits depend only on its own
+  text: not on the strip it fell in, the strip size, the thread, the neighbours or the tier — the
+  kernel tests hold the scalar twin and AVX2 equal on `to_bits` for head dims 16-256, n from 1 to
+  600, six windows, GQA 1/2/4 and strips of 1/7/16/32/n, and the engine's batch/thread/admission
+  matrix is bit-identical. `blocks/bidir.rs` schedules it (panel build in one fork-join per KV head,
+  then row ranges re-chunked by text and strip of up to 32 rows), and `tests/support/embed_ref.rs`
+  states the same arithmetic as the reference. Measured on H0 (Xeon E5-2680 v4 VM, 8 vCPU, AVX2, load
+  average 4.5-7), EmbeddingGemma 300M Q8_0, one pass, 4 threads, median of 3: 128 tokens 257 → 195 ms
+  (attention 98 → 17 ms, 38 % → 8.6 % of the pass), 512 tokens 2051 → 1177 ms (1386 → 429 ms,
+  66 % → 33 %), 2000 tokens 11.8 → 5.0 s (9.0 → 2.0 s, 76 % → 39 %); 16 tokens is unchanged
+  (26.5 → 26.0 ms). Through `/v1/embeddings` at 4 threads: 128-token text 2.35 → 3.45 texts/s,
+  512-token 0.32 → 0.72, 2000-token 0.078 → 0.177, a batch of 32×128 2.40 → 3.50, 32×16 unchanged
+  within the host's noise. `crates/peregrine-bench/examples/bidirbench.rs` reports the loop against
+  the strip per thread: at EmbeddingGemma's head width (256) 3.0 → 21.4 M score-pairs/s at n = 128
+  and 3.0 → 10.7 M at 512. The synthetic encoder's three tier goldens are re-recorded once (the FMA
+  chain moves the vectors by about one ulp); attention is now bit-identical across tiers, and with
+  the kernel forced to its scalar twin on an AVX2 machine the AVX2 golden still matches. The
+  real-file accuracy gate still holds (mean 0.9994629 vs llama.cpp's 0.9994734 at 768 d, and our
+  Q8_0 min against llama.cpp's Q8_0 improved from 0.99817 to 0.99910); its worst-text slack is
+  widened from 1e-4 to 1.5e-3 because an int8-activation encoder path re-rolls a few texts by up to
+  ~1.2e-3 when any arithmetic changes — the mean bound (1e-4) is the accuracy statement.
 - **The encoder quantises each input once, and only the layouts its kernels read (S4.9a).**
   A Gemma 3 encoder layer filled the int8 activation of every projection separately, serially,
   while the matmuls ran in parallel: q/k/v read the same normed rows and gate/up read the same

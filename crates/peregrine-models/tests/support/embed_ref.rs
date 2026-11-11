@@ -10,6 +10,11 @@
 //! The synthetic reference model is F32; other formats are checked by the invariance
 //! and golden tests.
 //!
+//! Attention is written out here as the *definition* the kernels implement (S4.9g): one
+//! sequential FMA chain per score over the head dimension, `vmath::exp_scalar` for the
+//! weights, an f64 denominator summed in ascending key order, and a value mix that
+//! folds the keys in ascending order — all over the row's exact window.
+//!
 //! The mask rule is llama.cpp v0.9.0's symmetric window (`src/llama-hparams.h`,
 //! `is_masked_swa`): `|p1 - p0| > n_swa / 2` is masked. Pooling is `pool_rows`' rule:
 //! f64 over the text's rows in position order, one rounding.
@@ -215,37 +220,41 @@ pub fn hidden_rows(model: &Model, tokens: &[u32]) -> Vec<f32> {
         for r in 0..n {
             for h in 0..cfg.n_head {
                 let kh = h / gqa;
-                // The reference's score and value loops are the engine's: f32 in key
-                // order, f64 softmax denominator.
-                let mut max = f32::NEG_INFINITY;
-                for j in 0..n {
-                    if half.is_some_and(|w| r.abs_diff(j) > w) {
-                        continue;
-                    }
-                    let mut dot = 0.0f32;
+                // The arithmetic the kernels define (S4.9g,
+                // `peregrine_kernels::bidir`): a score is one sequential FMA chain over
+                // the head dimension, the weights are the engine's own `exp` (the
+                // scalar twin of the vector one, bit-identical), the denominator is an
+                // f64 sum in ascending key order, and the value mix accumulates in
+                // ascending key order. Only the keys inside the row's window are
+                // computed — the band, not a mask.
+                let (lo, hi) = peregrine_kernels::bidir::band(r, n, half);
+                let mut scores = vec![0.0f32; n];
+                for (j, s) in scores.iter_mut().enumerate().take(hi).skip(lo) {
+                    let mut acc = 0.0f32;
                     for d in 0..hd {
-                        dot += q[r * qd + h * hd + d] * k[j * kvd + kh * hd + d];
+                        acc = q[r * qd + h * hd + d].mul_add(k[j * kvd + kh * hd + d], acc);
                     }
-                    max = max.max(dot);
+                    *s = acc;
                 }
+                let max = scores[lo..hi]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
                 let mut l = 0.0f64;
-                let mut acc = vec![0.0f32; hd];
-                for j in 0..n {
-                    if half.is_some_and(|w| r.abs_diff(j) > w) {
-                        continue;
-                    }
-                    let mut dot = 0.0f32;
-                    for d in 0..hd {
-                        dot += q[r * qd + h * hd + d] * k[j * kvd + kh * hd + d];
-                    }
-                    let e = (dot - max).exp() as f64;
-                    l += e;
-                    let e = e as f32;
-                    for d in 0..hd {
-                        acc[d] += e * v[j * kvd + kh * hd + d];
-                    }
+                for s in scores[lo..hi].iter_mut() {
+                    *s = peregrine_kernels::vmath::exp_scalar(*s - max);
+                }
+                for &e in &scores[lo..hi] {
+                    l += e as f64;
                 }
                 let inv = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
+                let mut acc = vec![0.0f32; hd];
+                for (j, &e) in scores[lo..hi].iter().enumerate() {
+                    let j = lo + j;
+                    for d in 0..hd {
+                        acc[d] = e.mul_add(v[j * kvd + kh * hd + d], acc[d]);
+                    }
+                }
                 for d in 0..hd {
                     attn[r * qd + h * hd + d] = acc[d] * inv;
                 }

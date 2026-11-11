@@ -552,6 +552,10 @@ impl Model {
         );
         let (lx, lt) = self.lb_scratch(max_batch);
         st.set_lb_scratch(lx, lt);
+        if self.causality() == crate::arch::Causality::Bidirectional {
+            // An encoder's strip scratch (S4.9g): the pass allocates nothing.
+            st.attn.bidir.resize(max_batch, self.cfg.head_dim, threads);
+        }
         st
     }
 
@@ -594,6 +598,15 @@ impl Model {
             return Err(format!(
                 "batch of {total} rows exceeds the scratch of {}",
                 st8.max_batch
+            ));
+        }
+        if self.causality() == crate::arch::Causality::Bidirectional
+            && (st8.attn.bidir.panel.len() < total * self.cfg.head_dim
+                || st8.attn.bidir.strips.is_empty())
+        {
+            return Err(format!(
+                "the attention strip's scratch is not sized for {total} rows; build the state \
+                 with Model::new_state"
             ));
         }
         for (i, t) in texts.iter().enumerate() {
