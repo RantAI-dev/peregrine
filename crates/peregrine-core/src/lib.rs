@@ -83,6 +83,7 @@ pub mod systemone;
 pub mod telem;
 pub mod template;
 pub mod tokenizer;
+pub mod tools;
 mod unicode_data;
 
 pub use gguf::{Format, Gguf};

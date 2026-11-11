@@ -362,6 +362,21 @@ splitter was also compared with llama.cpp's `unicode_regex_split` on the Tekken 
 patterns over 10,538 strings (every three-character combination of the classes that matter, 4,000
 random mixed-script strings, and runs of each class), with no divergence.
 
+### Tool-calling prompts: fixtures rendered by llama.cpp
+
+`crates/peregrine-core/tests/tools_render.rs` rebuilds the prompt of every case in
+`tests/fixtures/tools-*.jsonl` from the request alone and compares it byte for byte with the prompt
+llama.cpp built. It needs no model file and runs in CI. A case llama.cpp refused must be refused by
+Peregrine too.
+
+The fixtures come from llama.cpp itself: `scripts/tool-fixtures.py` sends each case of
+`scripts/tool-cases.json` (messages and tools in OpenAI's shapes) to `POST /apply-template` of a
+`llama-server --jinja` built at v0.9.0 (`cd959ba`) and stores the request text exactly as sent and
+the prompt that came back. `--template <file>` renders with a template file in place of the model's
+own, so a template can be exercised with any small chat model loaded. The Qwen 2.5 fixture was made
+with `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf` (the pinned bartowski upload) and its own template, which
+is the file `crates/peregrine-core/src/tools/qwen25.jinja`.
+
 ### System One prompts: fixtures rendered by llama.cpp
 
 `crates/peregrine-core/tests/systemone_render.rs` rebuilds the prompt of every case in
