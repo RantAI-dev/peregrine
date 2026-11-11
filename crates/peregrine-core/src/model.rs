@@ -713,6 +713,13 @@ impl Model {
         (0, 0)
     }
 
+    /// Bytes per weight in the file: what decides whether a pass is memory- or compute-bound,
+    /// and so how many rows a weight pass should carry (S4.9b's pass budget).
+    pub fn bytes_per_param(&self) -> f64 {
+        let elems = self.w.g.total_weight_elements().max(1);
+        self.weight_bytes() as f64 / elems as f64
+    }
+
     pub fn weight_bytes(&self) -> u64 {
         #[cfg(feature = "littlebit")]
         {

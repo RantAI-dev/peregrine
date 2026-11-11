@@ -275,7 +275,7 @@ def run_bench(args) -> None:
     texts_dir = Path(args.texts_dir)
 
     machine = machine_record(args.threads)
-    pre = preflight()
+    pre = preflight(min_load=args.max_load, min_avail_gb=args.min_avail_gb)
 
     for model_name, model, row in rows:
         texts_file = texts_dir / f"{model_name}.json"
@@ -385,6 +385,33 @@ def run_bench(args) -> None:
                               f"p50 {res['latency_s']['p50'] * 1000:7.1f} ms "
                               f"p99 {res['latency_s']['p99'] * 1000:8.1f} ms "
                               f"n={res['requests']} ({res['elapsed_s']}s)", flush=True)
+            # S4.9b: the mixed-length cell. One batch of `--mixed-batch` texts whose lengths
+            # were drawn from 8..512 with a fixed seed (`embed_texts.py --mixed-set`), so no
+            # engine is timed on a padded rectangle of one length.
+            mixed = tdata["lengths"].get("mixed") if args.mixed_cell else None
+            if mixed:
+                all_texts = [t["text"] for t in mixed]
+                all_tokens = [t["tokens"] for t in mixed]
+                key = f"mixed_b{args.mixed_batch}_c1"
+                t0 = time.perf_counter()
+                res = run_cell(
+                    adapter, all_texts, all_tokens, args.mixed_batch, 1,
+                    budget=0.0, max_requests=2, request_timeout=args.request_timeout,
+                )
+                res.update({
+                    "length": "mixed",
+                    "batch": args.mixed_batch,
+                    "clients": 1,
+                    "elapsed_s": round(time.perf_counter() - t0, 2),
+                    "tokens_per_text_median": int(statistics.median(all_tokens)),
+                    "tokens_per_text_sum": int(sum(all_tokens)),
+                    "seed": tdata.get("mixed_seed"),
+                })
+                cells[key] = res
+                print(f"  {key:20s} {res['texts_per_s']:8.2f} texts/s "
+                      f"{res['tokens_per_s']:9.1f} tok/s "
+                      f"p50 {res['latency_s']['p50'] * 1000:7.1f} ms "
+                      f"n={res['requests']} ({res['elapsed_s']}s)", flush=True)
             state_after = host_state()
         finally:
             adapter.stop()
@@ -536,10 +563,17 @@ def parse_args():
     ap.add_argument("--max-cell-seconds", type=float, default=120.0,
                     help="skip a batch cell whose predicted single-request time exceeds this")
     ap.add_argument("--request-timeout", type=float, default=900.0)
+    ap.add_argument("--min-avail-gb", type=float, default=5.0,
+                    help="preflight: refuse to time with less free memory (default 5)")
+    ap.add_argument("--max-load", type=float, default=0.5,
+                    help="preflight: refuse to time above this 1-minute load (default 0.5)")
     ap.add_argument("--port", type=int, default=8401)
     ap.add_argument("--texts-dir", default="/var/tmp/embed-texts")
     ap.add_argument("--output-dir", default="benchmarks/results/bluefin-embed-2026-11-10")
     ap.add_argument("--mode", choices=["bench", "accuracy"], default="bench")
+    ap.add_argument("--mixed-cell", action="store_true",
+                    help="also time one batch of the texts file's mixed-length set (S4.9b)")
+    ap.add_argument("--mixed-batch", type=int, default=32)
     ap.add_argument("--ref-label", default="torch-fp32")
     ap.add_argument("--acc-batch", type=int, default=16)
     ap.add_argument("--peregrine-worktree", default=None,

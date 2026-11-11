@@ -666,6 +666,16 @@ impl KvCache {
         self.n_layer as u64 * self.bytes_per_position_per_layer()
     }
 
+    /// Bytes this cache actually allocated: its K/V buffers, the I8 scales and a hybrid model's
+    /// recurrent state (S4.9b: what a prompt-sized cache costs).
+    pub fn allocated_bytes(&self) -> u64 {
+        (self.k.len() + self.v.len() + 4 * (self.ks.len() + self.vs.len())) as u64
+            + self
+                .rec
+                .as_ref()
+                .map_or(0, |r| 4 * (r.state.len() + r.conv.len()) as u64)
+    }
+
     /// `κ(T)`: bytes read from the cache to produce one token at the current length.
     pub fn bytes_read_at(&self, len: usize) -> u64 {
         self.bytes_per_position() * len as u64

@@ -13,6 +13,7 @@ within 5% of the requested length.
 import argparse
 import json
 from pathlib import Path
+import random
 import re
 import sys
 
@@ -116,6 +117,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--mixed", action="store_true",
                     help="cycle lengths across texts instead of a fixed block per length")
+    ap.add_argument("--mixed-set", type=int, default=0,
+                    help="also emit this many texts of lengths drawn from 8..512, under the "
+                         "\"mixed\" key (S4.9b: the mixed-length cell)")
+    ap.add_argument("--mixed-seed", type=int, default=20261111)
     args = ap.parse_args()
 
     lengths = [int(x) for x in args.lengths.split(",") if x]
@@ -151,6 +156,23 @@ def main():
         toks = [t["tokens"] for t in texts]
         print(f"L={L}: {uniq}/{len(texts)} distinct, tokens "
               f"{min(toks)}..{max(toks)} (median {sorted(toks)[len(toks)//2]})")
+    if args.mixed_set:
+        # A fixed seed and a fixed length pool: the same mixed batch for every engine, with
+        # lengths from 8 to 512 tokens (the sum is ~14 000 tokens per 32-text batch).
+        rng = random.Random(args.mixed_seed)
+        pool = [8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512]
+        texts = []
+        for i in range(args.mixed_set):
+            target = rng.choice(pool)
+            start = (i * 53 + target * 11) % span
+            text, n = build_text(tok, stream, start, target, args.max_tokens)
+            texts.append({"text": text, "tokens": n})
+        out["mixed_seed"] = args.mixed_seed
+        out["mixed_lengths"] = sorted({t["tokens"] for t in texts})
+        out["lengths"]["mixed"] = texts
+        toks = [t["tokens"] for t in texts]
+        print(f"mixed: {len(texts)} texts, tokens {min(toks)}..{max(toks)} "
+              f"(sum {sum(toks)}), seed {args.mixed_seed}")
     if bad:
         print(f"[warn] {bad} texts fell outside the 5% window", file=sys.stderr)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

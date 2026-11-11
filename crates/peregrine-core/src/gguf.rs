@@ -475,6 +475,14 @@ impl Gguf {
         self.tensors.values().map(|t| t.bytes()).sum()
     }
 
+    /// The number of weights in the file: the product of every tensor's dimensions.
+    pub fn total_weight_elements(&self) -> u64 {
+        self.tensors
+            .values()
+            .map(|t| t.dims.iter().copied().product::<u64>())
+            .sum()
+    }
+
     /// A boolean metadata value, or `None` when the key is absent or not a bool.
     pub fn bool(&self, k: &str) -> Option<bool> {
         match self.meta.get(k) {

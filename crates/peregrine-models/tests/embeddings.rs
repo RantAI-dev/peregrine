@@ -80,7 +80,22 @@ fn embed_batch(
     ctx: usize,
     extra: Option<(Vec<u32>, SlotCfg)>,
 ) -> Run {
-    let mut engine = Engine::new_with_chunk(
+    embed_batch_pass(model, texts, pooling, threads, chunk, ctx, None, extra)
+}
+
+/// [`embed_batch`] with an explicit pass budget (`None`: the machine's default, S4.9b).
+#[allow(clippy::too_many_arguments)]
+fn embed_batch_pass(
+    model: &Arc<Model>,
+    texts: &[Vec<u32>],
+    pooling: Pooling,
+    threads: usize,
+    chunk: usize,
+    ctx: usize,
+    pass_rows: Option<usize>,
+    extra: Option<(Vec<u32>, SlotCfg)>,
+) -> Run {
+    let mut engine = Engine::new_with_chunk_and_pass(
         model.clone(),
         threads,
         ctx,
@@ -88,6 +103,7 @@ fn embed_batch(
         KvPrec::F16,
         0,
         chunk,
+        pass_rows,
     );
     let mut by_slot: HashMap<u64, usize> = HashMap::new();
     for (i, t) in texts.iter().enumerate() {
@@ -567,6 +583,365 @@ fn a_label_slot_is_refused_by_an_encoder() {
         .admit_pooled(encoder_text(3, 8), SlotCfg::default(), Pooling::Mean)
         .unwrap();
     engine.cancel(id);
+}
+
+/// S4.9b: the pass budget is scheduling only. A text's vector is bit-identical alone and in
+/// batches at budgets 1, 16, 64, 256 and the default, at 1, 2 and 4 threads, with prefill chunks
+/// 1 and 16, and beside a chat slot that shares the pass.
+#[test]
+fn a_texts_vector_is_bit_identical_for_every_pass_budget() {
+    let dir = tmpdir("budget-invariance");
+    for (arch, model) in model_files(&dir) {
+        let pooling = model.pooling().unwrap().unwrap();
+        let probe = text(9, 37);
+        let alone = embed_batch_pass(
+            &model,
+            std::slice::from_ref(&probe),
+            pooling,
+            1,
+            64,
+            model.cfg.ctx_train,
+            None,
+            None,
+        )
+        .vectors[0]
+            .clone();
+        for budget in [Some(1usize), Some(16), Some(64), Some(256), None] {
+            for threads in [1usize, 2, 4] {
+                for chunk in [1usize, 16] {
+                    let n = 7;
+                    let mut texts = Vec::with_capacity(n);
+                    for i in 0..n {
+                        texts.push(if i == n / 2 {
+                            probe.clone()
+                        } else {
+                            text(100 + i as u32, 1 + (i * 7) % 23)
+                        });
+                    }
+                    let run = embed_batch_pass(
+                        &model,
+                        &texts,
+                        pooling,
+                        threads,
+                        chunk,
+                        model.cfg.ctx_train,
+                        budget,
+                        None,
+                    );
+                    assert_eq!(
+                        bits(&run.vectors[n / 2]),
+                        bits(&alone),
+                        "{arch} {pooling:?}: probe in a batch of {n}, budget {budget:?}, \
+                         {threads} threads, chunk {chunk}"
+                    );
+                }
+            }
+        }
+        // A wider batch (the batch of 64 the earlier test uses) at the budgets where it runs
+        // in a few passes each; budget 1 would be one text per pass.
+        for budget in [Some(64usize), Some(256), None] {
+            for threads in [2usize, 4] {
+                let n = 64;
+                let mut texts = Vec::with_capacity(n);
+                for i in 0..n {
+                    texts.push(if i == n / 2 {
+                        probe.clone()
+                    } else {
+                        text(300 + i as u32, 1 + (i * 7) % 23)
+                    });
+                }
+                let run = embed_batch_pass(
+                    &model,
+                    &texts,
+                    pooling,
+                    threads,
+                    64,
+                    model.cfg.ctx_train,
+                    budget,
+                    None,
+                );
+                assert_eq!(
+                    bits(&run.vectors[n / 2]),
+                    bits(&alone),
+                    "{arch} {pooling:?}: probe in a batch of {n}, budget {budget:?}, {threads} threads"
+                );
+            }
+        }
+        // Beside a decoding chat slot, at every budget: the pass is shared with its decode rows.
+        for budget in [Some(1usize), Some(16), Some(64), Some(256), None] {
+            let cfg = SlotCfg {
+                max_tokens: 3,
+                ..Default::default()
+            };
+            let run = embed_batch_pass(
+                &model,
+                std::slice::from_ref(&probe),
+                pooling,
+                2,
+                4,
+                model.cfg.ctx_train,
+                budget,
+                Some((text(55, 9), cfg)),
+            );
+            assert_eq!(
+                bits(&run.vectors[0]),
+                bits(&alone),
+                "{arch} {pooling:?}: probe beside a chat slot, budget {budget:?}"
+            );
+        }
+    }
+}
+
+/// The encoder's whole-text pass uses the same budget: a batch of short texts fills a pass and
+/// a text is bit-identical at every budget and thread count.
+#[test]
+fn an_encoders_vector_is_bit_identical_for_every_pass_budget() {
+    let dir = tmpdir("encoder-budget");
+    for fmt in [Format::F32, Format::Q8_0] {
+        let model = gemma_embedding(&dir, fmt, 71 + usize::from(fmt == Format::Q8_0) as u64);
+        let pooling = Pooling::Mean;
+        let probe = encoder_text(9, 37);
+        let alone = embed_batch_pass(
+            &model,
+            std::slice::from_ref(&probe),
+            pooling,
+            1,
+            64,
+            model.cfg.ctx_train,
+            None,
+            None,
+        )
+        .vectors[0]
+            .clone();
+        for budget in [Some(1usize), Some(16), Some(64), Some(256), None] {
+            for threads in [1usize, 2, 4] {
+                let n = 7;
+                let mut texts = Vec::with_capacity(n);
+                for i in 0..n {
+                    texts.push(if i == n / 2 {
+                        probe.clone()
+                    } else {
+                        encoder_text(100 + i as u32, 1 + (i * 13) % 29)
+                    });
+                }
+                let run = embed_batch_pass(
+                    &model,
+                    &texts,
+                    pooling,
+                    threads,
+                    64,
+                    model.cfg.ctx_train,
+                    budget,
+                    None,
+                );
+                assert_eq!(
+                    bits(&run.vectors[n / 2]),
+                    bits(&alone),
+                    "{}: probe in a batch of {n}, budget {budget:?}, {threads} threads",
+                    fmt.label()
+                );
+            }
+        }
+    }
+}
+
+/// Run `texts` as pooled slots and count the engine's steps (one weight pass each). With no chat
+/// slot in flight, every step is a non-decoding pass.
+fn steps_to_finish(
+    model: &Arc<Model>,
+    texts: &[Vec<u32>],
+    pooling: Pooling,
+    threads: usize,
+    chunk: usize,
+    pass_rows: Option<usize>,
+) -> usize {
+    let mut engine = Engine::new_with_chunk_and_pass(
+        model.clone(),
+        threads,
+        model.cfg.ctx_train,
+        1,
+        KvPrec::F16,
+        0,
+        chunk,
+        pass_rows,
+    );
+    for t in texts {
+        engine
+            .admit_pooled(t.clone(), SlotCfg::default(), pooling)
+            .expect("admit a pooled slot");
+    }
+    let mut steps = 0;
+    while engine.active() > 0 {
+        engine.step();
+        steps += 1;
+        assert!(steps < 100_000, "the engine made no progress");
+    }
+    steps
+}
+
+/// S4.9b: 32 texts of 16 tokens (512 rows) take ceil(rows / budget) passes, not one per text.
+#[test]
+fn a_non_decoding_pass_carries_the_whole_budget() {
+    let dir = tmpdir("pass-count");
+    let texts: Vec<Vec<u32>> = (0..32).map(|i| text(200 + i, 16)).collect();
+    let total: usize = 32 * 16;
+    for (arch, model) in model_files(&dir) {
+        let pooling = model.pooling().unwrap().unwrap();
+        for budget in [16usize, 64, 256] {
+            let steps = steps_to_finish(&model, &texts, pooling, 2, 16, Some(budget));
+            assert_eq!(
+                steps,
+                total.div_ceil(budget),
+                "{arch}: 32 texts at budget {budget}"
+            );
+        }
+    }
+    // The encoder packs whole texts: 32 eight-token texts are ceil(256 / budget) passes.
+    let model = gemma_embedding(&dir, Format::F32, 72);
+    let short: Vec<Vec<u32>> = (0..32).map(|i| encoder_text(210 + i, 8)).collect();
+    for budget in [16usize, 64, 256] {
+        let steps = steps_to_finish(&model, &short, Pooling::Mean, 2, 64, Some(budget));
+        assert_eq!(
+            steps,
+            (32 * 8usize).div_ceil(budget),
+            "encoder: 32 eight-token texts at budget {budget}"
+        );
+    }
+}
+
+/// S4.9b: a pooled slot's cache is sized to its prompt, rounded to whole prefill chunks, not to
+/// the model's context; a chat slot keeps the context.
+#[test]
+fn a_pooled_slots_cache_is_sized_to_its_prompt() {
+    let dir = tmpdir("prompt-cache");
+    let dense = Dense {
+        ctx: 2048,
+        ..Default::default()
+    };
+    let path = write_dense_pooled(&dir, "llama", Format::F16, 73, dense, 3);
+    let model = load(&path);
+    let per_position = peregrine_core::kv::KvCache::new(
+        KvPrec::F16,
+        model.cfg.kv_layers(),
+        model.cfg.n_kv_head,
+        model.cfg.head_dim,
+        1,
+    )
+    .bytes_per_position();
+    let mut engine = Engine::new(model.clone(), 1, 2048, 1, KvPrec::F16, 0);
+    let context_cache = engine.cache_bytes_per_slot();
+    assert_eq!(context_cache, per_position * 2048);
+
+    let id = engine
+        .admit_pooled(text(1, 16), SlotCfg::default(), Pooling::Last)
+        .unwrap();
+    assert_eq!(
+        engine.slot_cache_bytes(id).unwrap(),
+        per_position * 16,
+        "a 16-token pooled prompt maps 16 positions"
+    );
+    let id = engine
+        .admit_pooled(text(2, 100), SlotCfg::default(), Pooling::Last)
+        .unwrap();
+    assert_eq!(
+        engine.slot_cache_bytes(id).unwrap(),
+        per_position * 112,
+        "a 100-token prompt rounds up to whole prefill chunks"
+    );
+    assert_eq!(
+        engine.cache_bytes_for_prompt(100),
+        per_position * 112,
+        "the admission budget counts the same bytes"
+    );
+    let chat = engine
+        .admit(
+            text(3, 10),
+            SlotCfg {
+                max_tokens: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        engine.slot_cache_bytes(chat).unwrap(),
+        context_cache,
+        "a chat slot still maps the context it may decode into"
+    );
+}
+
+/// S4.9b: embedding texts do not consume chat slots and do not wait for them. One chat slot
+/// (`--slots 1`) is busy decoding; 64 pooled texts are admitted anyway (the work budget, a
+/// memory bound, not a slot count), and the chat's tokens come out while the batch is still
+/// running.
+#[test]
+fn a_wide_embedding_batch_is_admitted_beside_a_chat_slot() {
+    let dir = tmpdir("work-admission");
+    let path = write_dense_pooled(&dir, "llama", Format::F16, 75, Dense::default(), 3);
+    let model = load(&path);
+    let pooling = Pooling::Last;
+    let mut engine = Engine::new_with_chunk_and_pass(
+        model.clone(),
+        2,
+        model.cfg.ctx_train,
+        1,
+        KvPrec::F16,
+        0,
+        16,
+        Some(16),
+    );
+    let chat = engine
+        .admit(
+            text(55, 9),
+            SlotCfg {
+                max_tokens: 4,
+                ..Default::default()
+            },
+        )
+        .expect("the one chat place");
+    assert!(!engine.has_room(), "the only chat place is taken");
+    let err = engine
+        .admit(text(56, 9), SlotCfg::default())
+        .expect_err("a second chat slot is refused");
+    assert!(err.1.contains("busy"), "{err:?}");
+
+    let n = 64;
+    for i in 0..n {
+        engine
+            .admit_pooled(text(600 + i as u32, 16), SlotCfg::default(), pooling)
+            .expect("a pooled slot beside the chat slot");
+    }
+    assert_eq!(
+        engine.active(),
+        n + 1,
+        "the chat slot and every text are in"
+    );
+    assert_eq!(engine.work_rows(), n * 16);
+
+    let mut done = 0usize;
+    let mut first_chat_token_at: Option<usize> = None;
+    let mut chat_tokens = 0usize;
+    let mut steps = 0usize;
+    while engine.active() > 0 {
+        for em in engine.step() {
+            if em.slot == chat {
+                if em.finish.is_none() {
+                    chat_tokens += 1;
+                    first_chat_token_at.get_or_insert(done);
+                }
+            } else if em.embedding.is_some() {
+                done += 1;
+            }
+        }
+        steps += 1;
+        assert!(steps < 100_000, "the engine made no progress");
+    }
+    assert_eq!(done, n, "every text of the batch answered");
+    assert!(chat_tokens >= 1, "the chat slot decoded");
+    let at = first_chat_token_at.expect("the chat slot decoded");
+    assert!(
+        at < n,
+        "the chat's first token came after all {n} texts; the batch starved it"
+    );
 }
 
 /// The synthetic encoder's golden for the current kernel tier.
