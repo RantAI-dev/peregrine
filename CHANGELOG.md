@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **An exact result cache for embeddings, and duplicate texts computed once (S4.9k)**: `POST
+  /v1/embeddings` keeps finished vectors keyed by the token ids, the pooling and the requested
+  dimensions, so a hit returns the bits a computation would (the value is already truncated and
+  L2-normalised). The cache is bounded by `PEREGRINE_EMBED_CACHE_MB` (64 MiB by default, `0`
+  disables; about 16 300 vectors of 1024 f32 or 21 700 of 768, keys and a 64-byte overhead
+  included), evicts insertion order, and is shared by concurrent requests under one short lock. A
+  request's duplicate texts are planned onto one engine job before submission, and usage still
+  counts every input. Measured on EmbeddingGemma 300M Q8_0, 4 threads: one repeated 128-token text
+  falls from 98.85 ms to 1.16 ms (85x), 32 identical texts from 115.4 ms to 17.7 ms (6.5x); a
+  batch of distinct texts is unchanged. `/metrics` reports the cache's entries and bytes. The
+  stage's threading items were measured and not kept: one 16-token text already scales 3.6x from
+  1 to 4 threads, barrier wait is 1.5-2.9% of a causal pass, and a 64-row no-fan-out threshold for
+  the encoder's single-strip attention changed the wall by under 1%. The 256/512-row slowdown is
+  the Q8_0 matmul's activation working set outgrowing L2 under the weight stream, not the pass
+  machinery; closing it needs a cache-blocked kernel. See `docs/design/s4.9-sota.md` §11.
 - **The `mistral3` encoder and NVIDIA Nemotron 3.5 Embed 1B (S4.14b)**: `arch-mistral3` adds
   `Arch::Mistral3` to the dense family — the Mistral 3 blocks with query heads wider than the
   residual (24 × 128 over 2048), 8 grouped key/value heads, YaRN positions (factor 16, original

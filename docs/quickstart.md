@@ -211,13 +211,14 @@ decodes: a pooled slot's cache is sized to its own text, not to the context, and
 `PEREGRINE_WORK_CACHE_MB` (512 MiB by default). Embedding and decision work never takes a chat
 slot (`--slots` bounds chat only), and the response lists the vectors in input order.
 
-Two engine options matter for this work; `peregrine tier` prints the resolved pass budget, and
-`serve --opt NAME=VALUE` sets either:
+Three engine options matter for this work; `peregrine tier` prints the resolved pass budget, and
+`serve --opt NAME=VALUE` sets any of them:
 
 | Option | Default | Meaning |
 |---|---|---|
 | `PEREGRINE_PASS_ROWS` | from the machine and the file | rows one weight pass carries for embedding and decision slots. More rows means fewer passes but a compute-bound pass; the default keeps a pass at the measured ridge (16 for Q8_0, ~22 for F16, 32 for an encoder) |
 | `PEREGRINE_WORK_CACHE_MB` | `512` | memory for the prompt-sized caches of slots that never decode, i.e. how many texts of a request are in flight at once |
+| `PEREGRINE_EMBED_CACHE_MB` | `64` | memory for the exact cache of finished embedding vectors, keyed by token ids, pooling and dimensions; `0` disables it. A repeated text returns the same bits without a forward pass, and a duplicate inside one batch is computed once. 64 MiB is about 16 300 vectors of 1024 f32 |
 
 Without a server, one process embeds every text it is given:
 

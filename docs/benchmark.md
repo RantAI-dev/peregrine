@@ -1,7 +1,7 @@
 # Benchmarks: Peregrine against llama.cpp
 
 Where Peregrine stands against llama.cpp on the same machine, the same model file and the same thread
-count. Wins and losses are both reported here. The raw data, method and machine records are in
+count, and, on the desktop, against the ik_llama.cpp fork. Wins and losses are both reported here. The raw data, method and machine records are in
 [`benchmarks/results/`](../benchmarks/results/); the targets these numbers are held to are in
 [targets.md](targets.md).
 
@@ -24,7 +24,11 @@ count. Wins and losses are both reported here. The raw data, method and machine 
   llama.cpp fork across x86-64 (AVX-512 and AVX2) and ARM64 (NEON). Upstream llama.cpp cannot load
   `PQ2_0` files, so PrismML's fork is the comparison engine for ternary models.
 
-**No completed throughput row is below 1.0×** on any host. The single remaining loss is time to first
+- **Against ik_llama.cpp, prompt processing is behind.** On the desktop the fork processes prompts about
+  twice as fast (Peregrine at 0.39-0.58×); decode is level (0.89-1.06×) and Peregrine is ahead with 10
+  users (1.05-3.09×). See [Against ik_llama.cpp](#against-ik_llamacpp-desktop-avx-512).
+
+**Against llama.cpp, no completed throughput row is below 1.0×** on any host. The single remaining loss is time to first
 token (TTFT) with 10 users on bluefin for Llama 3.2 1B at 4096 context (1.04×, Peregrine slower); at
 512 context Peregrine is faster on every TTFT row (0.66–0.86× on bluefin, 0.70–0.86× on the desktop).
 
@@ -102,6 +106,43 @@ flash-attention setting (`-fa auto` or `-fa off`) for that specific row.**
 Aggregate tokens per second across all concurrent users at a 512-token context. At a 4096-token context
 on bluefin, Peregrine leads by **1.43×** (4 users) and **1.52×** (10 users) on Llama 3.2 1B, **1.35×**
 and **1.40×** on Qwen 2.5 0.5B, and **1.55×** and **1.80×** on SmolLM2 360M.
+
+## Against ik_llama.cpp (desktop, AVX-512)
+
+ik_llama.cpp is the llama.cpp fork most often reported faster than upstream on x86. It runs the
+same GGUF files, so it was measured on the desktop on 2026-11-11 with its best documented CPU
+settings (an AVX-512 build, `-rtr` run-time repacking, its own flash attention), beside llama.cpp
+and Peregrine in the same session. Ratios are Peregrine ÷ ik_llama.cpp; above 1 means Peregrine is
+faster. Medians of three interleaved rounds.
+
+| Model | Context | Decode (tok/s): Peregrine / ik | Ratio | Prompt (tok/s): Peregrine / ik | Ratio | 10 users (tok/s): Peregrine / ik | Ratio |
+|---|---|---|---|---|---|---|---|
+| Llama 3.2 1B | 512 | 56.6 / 54.6 | **1.04×** | 274.1 / 526.8 | 0.52× | 85.1 / 58.5 | **1.45×** |
+| Llama 3.2 1B | 4096 | 40.6 / 42.3 | 0.96× | 208.4 / 359.0 | 0.58× | not completed | n/a |
+| Qwen 2.5 0.5B | 512 | 93.9 / 91.9 | **1.02×** | 470.9 / 1116.9 | 0.42× | 150.4 / 100.4 | **1.50×** |
+| Qwen 2.5 0.5B | 4096 | 65.3 / 69.1 | 0.95× | 379.1 / 662.9 | 0.57× | 20.2 / 6.5 | **3.09×** |
+| SmolLM2 360M | 512 | 97.9 / 92.4 | **1.06×** | 426.5 / 1030.6 | 0.41× | 132.0 / 74.8 | **1.76×** |
+| SmolLM2 360M | 4096 | 57.8 / 55.5 | **1.04×** | 304.5 / 556.0 | 0.55× | not measured | n/a |
+| gemma-3-1b-it | 512 | 54.3 / 54.0 | **1.01×** | 254.3 / 644.7 | 0.39× | 76.3 / 72.7 | **1.05×** |
+| gemma-3-1b-it | 4096 | 47.5 / 53.4 | 0.89× | 281.2 / 569.4 | 0.49× | not measured | n/a |
+
+What this says:
+
+- **Prompt processing: ik_llama.cpp is about twice as fast on every row** (Peregrine at 0.39-0.58×).
+  This is Peregrine's largest measured loss. The fork repacks the k-quant weights at load (`-rtr`)
+  for its own interleaved AVX-512 kernels. Where Peregrine's time goes in comparison has not been
+  profiled yet.
+- **Decode: level.** Peregrine is 1.01-1.06× at 512 context and 0.89-1.04× at 4096.
+- **Many users: Peregrine is ahead on every completed row** (1.05-3.09× with 10 users), because it
+  batches all users into one pass over the weights. At 4 users one row is behind (gemma-3-1b-it
+  at 512 context, 0.85×).
+- Time to first token with 10 users is behind on two 512-context rows (SmolLM2 1.09× and
+  gemma-3-1b-it 1.34× of ik_llama.cpp's time) and ahead on the others.
+
+Not measured: OpenVINO GenAI, the 4096-context multi-user rows for SmolLM2 and gemma-3-1b-it, and
+ik_llama.cpp on bluefin and on ARM. The 4096-context multi-user rows are single rounds. Method,
+settings and raw data: [`benchmarks/results/desktop-zen5-2026-11-11-ik/`](../benchmarks/results/desktop-zen5-2026-11-11-ik/README.md).
+The other tables on this page were measured earlier and against llama.cpp only.
 
 ## Bonsai 2 (ternary) vs PrismML's fork
 

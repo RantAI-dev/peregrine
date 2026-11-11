@@ -187,6 +187,46 @@ fn the_pooled_vector_is_the_reference_forwards_pooled_hidden_states() {
 }
 
 #[test]
+fn a_duplicate_in_a_batch_matches_the_text_alone() {
+    // The result cache computes a repeated text once (S4.9k); the engine's own
+    // invariance is what makes that safe. This pins it: the same text at two
+    // places in one batch, and alone, is one vector bit for bit.
+    let dir = tmpdir("duplicate-batch");
+    for (arch, model) in model_files(&dir) {
+        let pooling = model.pooling().unwrap().unwrap();
+        let probe = text(9, 37);
+        let alone = embed_batch(
+            &model,
+            std::slice::from_ref(&probe),
+            pooling,
+            4,
+            16,
+            model.cfg.ctx_train,
+            None,
+        )
+        .vectors[0]
+            .clone();
+        let texts = vec![text(4, 11), probe.clone(), text(5, 23), probe.clone()];
+        let run = embed_batch(&model, &texts, pooling, 4, 16, model.cfg.ctx_train, None);
+        assert_eq!(
+            bits(&run.vectors[1]),
+            bits(&alone),
+            "{arch} {pooling:?}: first copy of a duplicated text"
+        );
+        assert_eq!(
+            bits(&run.vectors[3]),
+            bits(&alone),
+            "{arch} {pooling:?}: second copy of a duplicated text"
+        );
+        assert_eq!(
+            bits(&run.vectors[1]),
+            bits(&run.vectors[3]),
+            "{arch} {pooling:?}: the two copies agree"
+        );
+    }
+}
+
+#[test]
 fn a_texts_vector_is_bit_identical_alone_in_batches_and_beside_a_chat_slot() {
     let dir = tmpdir("invariance");
     for (arch, model) in model_files(&dir) {
