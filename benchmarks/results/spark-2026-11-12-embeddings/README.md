@@ -10,8 +10,9 @@ changed.
 - Host: DGX Spark (Lenovo ThinkStation PGX), aarch64, 20 cores (10 × Cortex-X925 +
   10 × Cortex-A725), 121 GB unified memory, Linux `6.17.0-1008-nvidia`, governor
   `performance`, kernel tier `aarch64-neon-i8mm`.
-- Peregrine: `origin/main` at `a762a5c` (the bench branch's merge of `3030172`),
-  `cargo build --release -p peregrine`, rustc 1.99.1. The chat baselines in
+- Peregrine: `origin/main` at `3030172`, built from the bench branch's merge commit
+  `a762a5c` (no source difference from `3030172`), `cargo build --release -p peregrine`,
+  rustc 1.99.1. The chat baselines in
   [`spark-2026-11-11-ik`](../spark-2026-11-11-ik/README.md) were measured on `487f0a2`;
   this run rebuilt after `origin/main` gained the bert and mistral3 families.
 - llama.cpp: v0.9.0, `cd959ba`, harness cache build,
