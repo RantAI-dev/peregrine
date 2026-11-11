@@ -59,6 +59,13 @@ fn act_bytes(a: &QuantAct) -> usize {
         + 2 * (a.sums.len() + a.bsums.len() + a.tls.len())
 }
 
+/// The format of a matrix's packed float panels: the file's format, or F32 for a
+/// Q8_0 matrix dequantised into f32 panels at load (S4.9m).
+#[inline]
+fn panel_fmt(t: &TensorInfo) -> Format {
+    t.fp_kind.unwrap_or(t.kind)
+}
+
 /// One matrix of a fused group, dense or LittleBit. `linear_group` dispatches.
 #[derive(Clone, Copy)]
 pub struct LinJob<'a> {
@@ -136,7 +143,7 @@ fn matmul_block(
     let mut paths = [MatPath::PerRow; 4];
     for (p, j) in paths.iter_mut().zip(jobs) {
         *p = mk.path(
-            j.w.kind,
+            panel_fmt(j.w),
             j.w.tile_off.is_some(),
             j.w.kq_off.is_some(),
             j.w.fp_off.is_some(),
@@ -328,7 +335,7 @@ fn matmul_block(
                     // starts or ends inside a panel computes the panel and keeps
                     // the rows it asked for; a row's bits do not depend on that.
                     let off = j.w.fp_off.expect("a packed float path has a store offset");
-                    let fmt = j.w.kind;
+                    let fmt = panel_fmt(j.w);
                     let pb = peregrine_kernels::fpack::panel_bytes(fmt, n);
                     let store = w.fp();
                     let mut blk = [0.0f32; 16 * MAX_BATCH];
@@ -533,7 +540,7 @@ fn fp_group(
         let b0 = (local / per) * bs;
         let pn = FP_UNIT_PANELS.min(panels - first_panel);
         let bn = bs.min(nb - b0);
-        let pb = peregrine_kernels::fpack::panel_bytes(j.w.kind, n);
+        let pb = peregrine_kernels::fpack::panel_bytes(panel_fmt(j.w), n);
         let off = j.w.fp_off.expect("a packed float path has a store offset") + first_panel * pb;
         let at = off + pn * pb;
         let tf = crate::prof::detail().then(Instant::now);
@@ -554,7 +561,7 @@ fn fp_group(
                     .window_mut(b0 * rows + first_row, (bn - 1) * rows + pan)
             };
             MatKernels::get().fp_panels_gemm_strided(
-                j.w.kind,
+                panel_fmt(j.w),
                 &store[off..at],
                 n,
                 pn,
@@ -570,7 +577,7 @@ fn fp_group(
             let mut blk = [0.0f32; FP_UNIT_PANELS * 16 * MAX_BATCH];
             let out = &mut blk[..pn * 16 * bn];
             MatKernels::get().fp_panels_gemm(
-                j.w.kind,
+                panel_fmt(j.w),
                 &store[off..at],
                 n,
                 pn,
@@ -774,7 +781,7 @@ fn one_row_outputs(
             }
             MatPath::FloatPanels => {
                 let off = head.fp_off.expect("a packed float path has a store offset");
-                let fmt = head.kind;
+                let fmt = panel_fmt(head);
                 let pb = peregrine_kernels::fpack::panel_bytes(fmt, n);
                 let p = r / 16;
                 mk.fp_panels_gemm(

@@ -197,6 +197,13 @@ pub const ROWS_PER_WEIGHT_BYTE: f64 = 10.8;
 /// result.
 pub const SMALL_FLOAT_ENCODER_BYTES: u64 = 256 << 20;
 
+/// The largest Q8_0 `bert` file whose matrices are dequantised into f32 panels (S4.9m):
+/// its weights become four times the file's size, so the packed form stays under
+/// [`SMALL_FLOAT_ENCODER_BYTES`]. Measured on MiniLM Q8_0 (23 MiB) and bge-small-en-v1.5
+/// Q8_0 (34 MiB), which win; bge-m3 Q8_0 (604 MiB) and EmbeddingGemma 300M Q8_0 are
+/// past it and keep the int8 tiles.
+pub const Q8_FLOAT_MAX_BYTES: u64 = 64 << 20;
+
 /// [`pass_rows_default_for`] with the model's weight bytes, for the small-float-encoder rule.
 pub fn pass_rows_default_for(
     d_model: usize,
@@ -262,6 +269,10 @@ pub struct EngineOptions {
     pub fpack: bool,
     /// Whether `PEREGRINE_FPACK` was given, for the same reason as `kq_repack_switch`.
     pub fpack_switch: bool,
+    /// `PEREGRINE_Q8_FLOAT=0`: a small Q8_0 encoder keeps its int8 tiles instead of being
+    /// dequantised once into the float kernel's f32 panels (S4.9m). On by default for a
+    /// `bert` file of at most [`Q8_FLOAT_MAX_BYTES`].
+    pub q8_float: bool,
     /// `PEREGRINE_DYNAMIC=0` uses the static row partition instead of dynamic work splitting.
     pub dynamic_rows: bool,
     /// `PEREGRINE_PF`: software prefetch distance in bytes (0 = off).
@@ -379,6 +390,7 @@ impl Default for EngineOptions {
             kq_repack_switch: false,
             fpack: true,
             fpack_switch: false,
+            q8_float: true,
             dynamic_rows: true,
             prefetch_bytes: PF_DEFAULT,
             tq_span: 16,
@@ -549,6 +561,7 @@ impl EngineOptions {
             kq_repack_switch: krepack.is_some(),
             fpack: unless("FPACK", "0"),
             fpack_switch: s("FPACK").is_some(),
+            q8_float: unless("Q8_FLOAT", "0"),
             dynamic_rows: unless("DYNAMIC", "0"),
             prefetch_bytes: num("PF").unwrap_or(d.prefetch_bytes),
             tq_span: num("TQ_SPAN")
@@ -765,6 +778,7 @@ pub const NAMES: &[&str] = &[
     "TILES",
     "KREPACK",
     "FPACK",
+    "Q8_FLOAT",
     "DYNAMIC",
     "PF",
     "TQ_SPAN",

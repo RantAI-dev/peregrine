@@ -188,7 +188,8 @@ fn every_key_component_invalidates() {
     assert_eq!(pack_files(&packs).len(), 2, "a new key is a new file");
 
     // The layout version: a test bump makes the old file invisible.
-    let v2 = PackCache::new(&packs, u64::MAX).with_version(2);
+    let v2 = PackCache::new(&packs, u64::MAX)
+        .with_version(peregrine_core::packcache::FORMAT_VERSION + 1);
     let bumped = load(&path, &v2, true, false);
     assert!(!bumped.packed_from_cache(), "a version bump rebuilds");
     assert_eq!(

@@ -589,12 +589,16 @@ impl Architecture for Bert {
             for lin in lins {
                 match lin.dense() {
                     Some(ti) => {
-                        if matches!(
-                            ti.kind,
-                            peregrine_core::gguf::Format::F32
-                                | peregrine_core::gguf::Format::F16
-                                | peregrine_core::gguf::Format::BF16
-                        ) {
+                        // A small Q8_0 matrix dequantised into f32 panels at load
+                        // (`fp_kind`) reads the f32 rows too (S4.9m).
+                        if ti.fp_kind.is_some()
+                            || matches!(
+                                ti.kind,
+                                peregrine_core::gguf::Format::F32
+                                    | peregrine_core::gguf::Format::F16
+                                    | peregrine_core::gguf::Format::BF16
+                            )
+                        {
                             keep_f32 = true;
                         } else {
                             quantize = true;
