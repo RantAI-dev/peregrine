@@ -23,7 +23,7 @@ class LlamaCppEmbedAdapter(EmbedAdapter):
         threads: int = 4,
         server_bin: Optional[str] = None,
         flash_attn: str = "auto",
-        parallel: int = 10,
+        parallel: int = 32,
     ):
         super().__init__(threads=threads)
         self.server_bin = Path(
@@ -44,6 +44,7 @@ class LlamaCppEmbedAdapter(EmbedAdapter):
     def start(self, row: Dict[str, Any], model: Dict[str, Any], port: int) -> Dict[str, Any]:
         if not self.server_bin.exists():
             raise FileNotFoundError(f"llama-server not found at {self.server_bin}")
+        self.parallel = int(row.get("parallel") or self.parallel)
         model_path = Path(row["path"]).expanduser()
         # llama-server caps n_ctx_slot at the model's training context, and an
         # embedding request is processed as one task per slot (inputs are fed

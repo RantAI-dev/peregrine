@@ -1,0 +1,54 @@
+{
+ "benchmark": "peregrine-s4.2-embed-accuracy",
+ "timestamp": "2026-11-11T13:49:04.724069+00:00",
+ "model": {
+  "name": "bge-small",
+  "hf": "BAAI/bge-small-en-v1.5",
+  "pooling": "cls"
+ },
+ "row": {
+  "engine": "onnxruntime",
+  "precision": "int8",
+  "path": "~/models/embed/prepared/bge-small-onnx-int8",
+  "kind": "dir",
+  "sha256": "ca228d46e54254a9b600d2c606df64d9ac3191abce354a7d7213b9c70699fd64",
+  "size_bytes": 68465930
+ },
+ "reference": {
+  "label": "torch-fp32",
+  "backend": "torch-fp32",
+  "dim": 384,
+  "count": 200
+ },
+ "engine": {
+  "name": "onnxruntime",
+  "backend": "CPUExecutionProvider",
+  "venv": "/var/tmp/embed-venv",
+  "python": "/var/tmp/embed-venv/bin/python",
+  "version": "1.31.1"
+ },
+ "host_before": {
+  "loadavg": [
+   3.7685546875,
+   3.86572265625,
+   3.54931640625
+  ],
+  "mem_available_gb": 7.5,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.32
+ },
+ "cosine": {
+  "mean": 0.972794,
+  "min": 0.950791,
+  "p1": 0.958206,
+  "p50": 0.973509
+ },
+ "norm": {
+  "min": 1.0,
+  "max": 1.0,
+  "mean": 1.0
+ },
+ "dim": 384,
+ "n": 200
+}

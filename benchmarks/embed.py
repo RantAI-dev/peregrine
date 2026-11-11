@@ -37,8 +37,16 @@ from engines.tei_embed import TEIAdapter
 from engines.fastembed_embed import FastEmbedAdapter
 from engines.openvino_embed import OpenVINOAdapter
 from engines.peregrine_embed import PeregrineEmbedAdapter
+from engines.onnxruntime_embed import OnnxRuntimeAdapter
 
 DEFAULT_MODEL_DIR = Path(os.environ.get("EMBED_MODEL_DIR", "~/models/embed")).expanduser()
+HOME = os.path.expanduser("~")
+
+
+def json_clean(obj) -> str:
+    """JSON text that never carries this machine's home path."""
+    text = json.dumps(obj, indent=1)
+    return text.replace(HOME, "~") if HOME not in ("", "/") else text
 REGISTRY = Path(__file__).resolve().parent / "embed_models.json"
 
 ENGINES = {
@@ -46,6 +54,7 @@ ENGINES = {
     "tei": TEIAdapter,
     "fastembed": FastEmbedAdapter,
     "openvino": OpenVINOAdapter,
+    "onnxruntime": OnnxRuntimeAdapter,
     "peregrine": PeregrineEmbedAdapter,
 }
 
@@ -461,7 +470,7 @@ def run_bench(args) -> None:
             "cells": cells,
         }
         fname = f"{model_name}-{row['engine']}-{row['precision']}-r{args.round}.json"
-        (out_dir / fname).write_text(json.dumps(record, indent=1), encoding="utf-8")
+        (out_dir / fname).write_text(json_clean(record), encoding="utf-8")
         print(f"  wrote {out_dir / fname}", flush=True)
 
 
@@ -542,7 +551,7 @@ def run_accuracy(args) -> None:
             "n": len(cos),
         }
         fname = f"accuracy-{model_name}-{row['engine']}-{row['precision']}.json"
-        (out_dir / fname).write_text(json.dumps(record, indent=1), encoding="utf-8")
+        (out_dir / fname).write_text(json_clean(record), encoding="utf-8")
         print(f"  cosine mean {record['cosine']['mean']:.6f} min {record['cosine']['min']:.6f}; "
               f"norm {record['norm']['mean']:.4f}; dim {record['dim']}; wrote {fname}", flush=True)
 
