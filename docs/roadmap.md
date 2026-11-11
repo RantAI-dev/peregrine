@@ -118,7 +118,7 @@ prompt is the one llama.cpp builds from the model's template, byte for byte. Des
 |---|---|---|
 | S6.1 | Design | 0.2 |
 | S6.2 | The tool module: the `hermes` format (Qwen 2.5) and the `qwen-xml` format (Qwen 3.5 / Bonsai 2), renderers and parsers, fixtures from llama.cpp — done for both in the module; Qwen 3 is next | 1.0 |
-| S6.3 | The endpoint: `tools`, `tool_choice`, `tool_calls` in requests and responses, streaming | 1.0 |
+| S6.3 | The endpoint: `tools`, `tool_choice`, `tool_calls` in requests and responses, streaming — done for the `hermes` format (Qwen 2.5): 15 of 16 replies identical to llama.cpp's on the same file | 1.0 |
 | S6.4 | The `llama3` format (Llama 3.1 / 3.2) | 0.5 |
 | S6.5 | The `harmony` format (gpt-oss) | 0.5 |
 | S6.6 | Constrained sampling for calls: a JSON-schema matcher and a token mask; `tool_choice: "required"` and named choices | 2.0 |

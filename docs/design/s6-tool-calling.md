@@ -144,3 +144,55 @@ Peregrine's form:
 4. **A broken call is text**, never an error.
 5. **The constraint is a schema matcher**, not a grammar language. A general `grammar` field stays
    unsupported.
+
+## 9. S6.3 as built (the endpoint)
+
+**Routing.** A chat request takes the tool path when it carries a non-empty `tools`, a `tool`
+message, or an assistant message with `tool_calls`. The file's `tokenizer.chat_template` is matched
+once at start (`ToolFormat::for_template`); a file with no tool format answers such a request with a
+400 that names the model. The request body is read a second time with the order-keeping JSON,
+because a tool's schema is written into the prompt in the client's own key order. Every other
+request takes the path it took before and builds the same prompt.
+
+**The reply.** Generated content goes through `CallParser`; its text events become `content` and
+each call becomes a `tool_calls` entry with an id (`call_` and 24 hex digits, numbered from the
+request's sequence number, so they are unique within a response without a random source).
+`content` is `null` when the reply is only calls; `finish_reason` is `"tool_calls"` when there is
+at least one. A stream sends each call as one chunk (`delta.tool_calls` with `index`, `id`, `type`
+and the whole `function`). Reasoning text does not pass through the parser.
+
+**Options.** `tool_choice`: `"auto"` or absent parses calls; `"none"` renders the tools and returns
+text; `"required"` and a named function are refused (they need S6.6). `parallel_tool_calls: false`
+cancels the generation when the first call is complete. `functions` and `function_call` are refused
+by name, also on requests without tools.
+
+**The call tags reach the parser.** In Qwen 2.5's vocabulary the opening and closing tags of a call
+are single tokens that are not control tokens; the text the endpoint assembles contains them, so
+nothing had to change in detokenisation.
+
+**Against llama.cpp** (`scripts/tool-e2e.py`; `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf`, temperature 0,
+three tools: weather, calculator, search; llama.cpp v0.9.0 `llama-server --jinja` on the same file):
+
+| | Peregrine | llama.cpp |
+|---|---|---|
+| 12 requests where one known call is right: right tool called | 9 | 9 |
+| 4 requests where no call is right: answered in text | 4 | 4 |
+| replies identical to the other engine's (same calls, arguments equal as JSON, same text) | 15 of 16 | |
+| two-step exchange: the tool's result sent back, answered in text | same sentence in both | |
+
+The three wrong calls are the model's (a 0.5B model calls the weather tool for a power of two and
+for a football result, and answers one search request in text) and are the same in both engines.
+The one reply that differs is that text answer: the two engines' greedy tokens part at a near-tie
+in the middle of the sentence, as their kernels' rounding differs; neither calls a tool there.
+
+**Tests.** The endpoint's unit tests drive the reply builder with scripted pieces through the
+parser (text only, one call, text then two calls, a broken call as text, an unknown tool as text, a
+call split across pieces, `parallel_tool_calls: false`, stream chunk shapes, `finish_reason`).
+`crates/peregrine/tests/server_tools.rs` serves two synthetic files with the real binary, one whose
+template has a tool format and one whose template has none: a request with tools is served and is
+deterministic, a tool conversation is rendered, the refusals answer 400 by name, and an ordinary
+request is untouched.
+
+**Not built.** Other formats (Qwen 3, Qwen 3.5 / Bonsai 2, Llama 3, gpt-oss, the generic fallback);
+`required` and named choices (S6.6); arguments streamed in pieces (a call arrives whole); tool
+calling in `peregrine run`.

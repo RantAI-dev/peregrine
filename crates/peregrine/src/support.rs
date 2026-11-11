@@ -132,7 +132,12 @@ bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), Gemma 3 (
 mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); \
 `POST /v1/embeddings`, `peregrine embed`";
 
-    // 7. Decision models
+    // 7. Tool calling
+    let tool_str = "OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on \
+`POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format); the prompt \
+is the one llama.cpp builds from the model's template";
+
+    // 8. Decision models
     let dec_str = "native decision models with a `systemone` template: the `openjev` type, \
 `POST /v1/systemone`, `peregrine decide`";
 
@@ -144,6 +149,7 @@ mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); 
     let _ = writeln!(out, "| Tokenizers | {tok_str} |");
     let _ = writeln!(out, "| Chat templates | {tmpl_str} |");
     let _ = writeln!(out, "| Embeddings | {embd_str} |");
+    let _ = writeln!(out, "| Tool calling | {tool_str} |");
     let _ = writeln!(out, "| Decision models | {dec_str} |");
 
     out

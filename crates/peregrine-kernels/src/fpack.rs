@@ -160,9 +160,30 @@ pub fn gemm_scalar(
     bias: Option<&[f32]>,
     out: &mut [f32],
 ) {
+    gemm_scalar_strided(fmt, packed, n_in, panels, acts, bias, out, panels * PANEL);
+}
+
+/// [`gemm_scalar`] writing each activation row `b` at `b * out_stride`.
+///
+/// `out_stride` is the row width of the caller's output buffer: the panel's rows
+/// land at `out[b · out_stride + p · PANEL + lane]`, so a caller whose output is
+/// already row-major (a projection's `[row][out]`) is written in place instead of
+/// through a temporary and a copy.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_scalar_strided(
+    fmt: Format,
+    packed: &[u8],
+    n_in: usize,
+    panels: usize,
+    acts: &[QuantAct],
+    bias: Option<&[f32]>,
+    out: &mut [f32],
+    out_stride: usize,
+) {
     let pb = panel_bytes(fmt, n_in);
     debug_assert!(packed.len() >= panels * pb);
-    debug_assert!(out.len() >= panels * PANEL * acts.len());
+    debug_assert!(out_stride >= panels * PANEL);
+    debug_assert!(acts.is_empty() || out.len() >= (acts.len() - 1) * out_stride + panels * PANEL);
     for (b, a) in acts.iter().enumerate() {
         debug_assert!(
             a.keep_f32 && a.xf.len() >= n_in,
@@ -177,7 +198,7 @@ pub fn gemm_scalar(
                     let wv = w_at(fmt, w, k * PANEL + lane);
                     acc = a.xf[k].mul_add(wv, acc);
                 }
-                out[b * panels * PANEL + r] = acc;
+                out[b * out_stride + r] = acc;
             }
         }
     }
@@ -264,9 +285,37 @@ pub fn gemm(
     bias: Option<&[f32]>,
     out: &mut [f32],
 ) {
+    gemm_strided(fmt, packed, n_in, panels, acts, bias, out, panels * PANEL);
+}
+
+/// [`gemm`] with a caller-chosen output stride: activation row `b` is written at
+/// `out[b · out_stride ..][..panels · PANEL]`.
+///
+/// The kernel computes the same chain; only where it stores differs, so the values
+/// are the row-major kernel's bit for bit. A projection whose output buffer is
+/// `[row][out]` passes `out_stride = out_rows` and lets the kernel write it
+/// directly, with no temporary block and no copy.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_strided(
+    fmt: Format,
+    packed: &[u8],
+    n_in: usize,
+    panels: usize,
+    acts: &[QuantAct],
+    bias: Option<&[f32]>,
+    out: &mut [f32],
+    out_stride: usize,
+) {
     assert!(matches!(fmt, Format::F32 | Format::F16 | Format::BF16));
     assert!(packed.len() >= panels * panel_bytes(fmt, n_in));
-    assert!(out.len() >= panels * PANEL * acts.len());
+    assert!(
+        out_stride >= panels * PANEL,
+        "output stride {out_stride} is narrower than {panels} panels"
+    );
+    assert!(
+        acts.is_empty() || out.len() >= (acts.len() - 1) * out_stride + panels * PANEL,
+        "strided float matmul output too short"
+    );
     assert!(bias.is_none_or(|b| b.len() >= panels * PANEL));
     assert!(
         acts.iter().all(|a| a.keep_f32 && a.xf.len() >= n_in),
@@ -283,11 +332,11 @@ pub fn gemm(
         if crate::cpu::have_neon() {
             if matches!(fmt, Format::F16) {
                 // SAFETY: the preconditions above are this function's.
-                unsafe { neon::gemm_f16(fmt, packed, n_in, panels, acts, bias, out) };
+                unsafe { neon::gemm_f16(fmt, packed, n_in, panels, acts, bias, out, out_stride) };
                 return;
             }
             // SAFETY: the preconditions above are this function's.
-            unsafe { neon::gemm_neon(fmt, packed, n_in, panels, acts, bias, out) };
+            unsafe { neon::gemm_neon(fmt, packed, n_in, panels, acts, bias, out, out_stride) };
             return;
         }
     }
@@ -300,16 +349,16 @@ pub fn gemm(
         }
         if x86::have_zmm() {
             // SAFETY: the preconditions above are this function's.
-            unsafe { x86::gemm_avx512(fmt, packed, n_in, panels, acts, bias, out) };
+            unsafe { x86::gemm_avx512(fmt, packed, n_in, panels, acts, bias, out, out_stride) };
             return;
         }
         if crate::simd::have_batched() {
             // SAFETY: the preconditions above are this function's.
-            unsafe { x86::gemm_avx2(fmt, packed, n_in, panels, acts, bias, out) };
+            unsafe { x86::gemm_avx2(fmt, packed, n_in, panels, acts, bias, out, out_stride) };
             return;
         }
     }
-    gemm_scalar(fmt, packed, n_in, panels, acts, bias, out);
+    gemm_scalar_strided(fmt, packed, n_in, panels, acts, bias, out, out_stride);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -411,6 +460,7 @@ mod x86 {
     /// The tail of a block duplicates the last row's pointer; its lanes are computed
     /// and thrown away, which costs a few multiplies and keeps the stores in bounds.
     #[target_feature(enable = "avx2,fma,f16c")]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn gemm_avx2(
         fmt: Format,
         packed: &[u8],
@@ -419,12 +469,13 @@ mod x86 {
         acts: &[QuantAct],
         bias: Option<&[f32]>,
         out: &mut [f32],
+        out_stride: usize,
     ) {
         let eb = elem_bytes(fmt);
         let pb = panel_bytes(fmt, n_in);
         let nb = acts.len();
         let bs = row_block(n_in);
-        let stride = panels * PANEL;
+        let stride = out_stride;
         let pf = crate::simd::prefetch_distance();
         let mut b0 = 0;
         while b0 < nb {
@@ -493,6 +544,7 @@ mod x86 {
     /// (24 accumulators) amortise each activation broadcast over two panels, and the
     /// panel loads stay 256 bits wide.
     #[target_feature(enable = "avx512vl,avx2,fma,f16c")]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn gemm_avx512(
         fmt: Format,
         packed: &[u8],
@@ -501,12 +553,13 @@ mod x86 {
         acts: &[QuantAct],
         bias: Option<&[f32]>,
         out: &mut [f32],
+        out_stride: usize,
     ) {
         let eb = elem_bytes(fmt);
         let pb = panel_bytes(fmt, n_in);
         let nb = acts.len();
         let bs = row_block(n_in);
-        let stride = panels * PANEL;
+        let stride = out_stride;
         let pf = crate::simd::prefetch_distance();
         let mut b0 = 0;
         while b0 < nb {
@@ -747,12 +800,12 @@ mod neon {
     /// activation rows at a time, sixteen accumulators, one weight load feeding all
     /// four rows. The tail duplicates the last row's pointer, as the AVX2 kernel does.
     macro_rules! gemm_body {
-        ($fmt:ident, $packed:ident, $n_in:ident, $panels:ident, $acts:ident, $bias:ident, $out:ident, $loader:expr) => {{
+        ($fmt:ident, $packed:ident, $n_in:ident, $panels:ident, $acts:ident, $bias:ident, $out:ident, $stride:ident, $loader:expr) => {{
             let eb = elem_bytes($fmt);
             let pb = panel_bytes($fmt, $n_in);
             let nb = $acts.len();
             let bs = row_block($n_in);
-            let stride = $panels * PANEL;
+            let stride = $stride;
             let mut b0 = 0;
             while b0 < nb {
                 let bn = bs.min(nb - b0);
@@ -803,6 +856,7 @@ mod neon {
     /// # Safety
     /// As [`super::gemm`]: the caller checks the lengths and the feature sets.
     #[target_feature(enable = "neon")]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn gemm_neon(
         fmt: Format,
         packed: &[u8],
@@ -811,8 +865,19 @@ mod neon {
         acts: &[QuantAct],
         bias: Option<&[f32]>,
         out: &mut [f32],
+        out_stride: usize,
     ) {
-        gemm_body!(fmt, packed, n_in, panels, acts, bias, out, |p| w16(fmt, p));
+        gemm_body!(
+            fmt,
+            packed,
+            n_in,
+            panels,
+            acts,
+            bias,
+            out,
+            out_stride,
+            |p| w16(fmt, p)
+        );
     }
 
     /// The same loop for F16 weights, widened by `fcvtl`.
@@ -820,6 +885,7 @@ mod neon {
     /// # Safety
     /// As [`super::gemm`].
     #[target_feature(enable = "neon")]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn gemm_f16(
         fmt: Format,
         packed: &[u8],
@@ -828,10 +894,21 @@ mod neon {
         acts: &[QuantAct],
         bias: Option<&[f32]>,
         out: &mut [f32],
+        out_stride: usize,
     ) {
         #[cfg(test)]
         F16_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        gemm_body!(fmt, packed, n_in, panels, acts, bias, out, |p| w16_f16(p));
+        gemm_body!(
+            fmt,
+            packed,
+            n_in,
+            panels,
+            acts,
+            bias,
+            out,
+            out_stride,
+            |p| w16_f16(p)
+        );
     }
 }
 
@@ -992,9 +1069,31 @@ mod tests {
             // aarch64 tiers inherit from the x86 ones.
             let mut an = vec![0.0f32; panels * PANEL * xs.len()];
             if fmt == Format::F16 {
-                unsafe { neon::gemm_f16(fmt, &packed, n_in, panels, xs, bias, &mut an) };
+                unsafe {
+                    neon::gemm_f16(
+                        fmt,
+                        &packed,
+                        n_in,
+                        panels,
+                        xs,
+                        bias,
+                        &mut an,
+                        panels * PANEL,
+                    )
+                };
             } else {
-                unsafe { neon::gemm_neon(fmt, &packed, n_in, panels, xs, bias, &mut an) };
+                unsafe {
+                    neon::gemm_neon(
+                        fmt,
+                        &packed,
+                        n_in,
+                        panels,
+                        xs,
+                        bias,
+                        &mut an,
+                        panels * PANEL,
+                    )
+                };
             }
             for (i, (&x, &y)) in an.iter().zip(&got_s).enumerate() {
                 assert!(same(x, y), "{fmt:?} NEON vs scalar {n_out}x{n_in} at {i}");
@@ -1005,13 +1104,35 @@ mod tests {
             // The AVX2 kernel and, when the CPU has it, the AVX-512 kernel, both
             // against the scalar reference — the bit-identity across tiers.
             let mut a2 = vec![0.0f32; panels * PANEL * xs.len()];
-            unsafe { x86::gemm_avx2(fmt, &packed, n_in, panels, xs, bias, &mut a2) };
+            unsafe {
+                x86::gemm_avx2(
+                    fmt,
+                    &packed,
+                    n_in,
+                    panels,
+                    xs,
+                    bias,
+                    &mut a2,
+                    panels * PANEL,
+                )
+            };
             for (i, (&x, &y)) in a2.iter().zip(&got_s).enumerate() {
                 assert!(same(x, y), "{fmt:?} AVX2 vs scalar {n_out}x{n_in} at {i}");
             }
             if x86::have_zmm() {
                 let mut a5 = vec![0.0f32; panels * PANEL * xs.len()];
-                unsafe { x86::gemm_avx512(fmt, &packed, n_in, panels, xs, bias, &mut a5) };
+                unsafe {
+                    x86::gemm_avx512(
+                        fmt,
+                        &packed,
+                        n_in,
+                        panels,
+                        xs,
+                        bias,
+                        &mut a5,
+                        panels * PANEL,
+                    )
+                };
                 for (i, (&x, &y)) in a5.iter().zip(&got_s).enumerate() {
                     assert!(
                         same(x, y),
@@ -1051,6 +1172,50 @@ mod tests {
                     let run = n_out.div_ceil(PANEL) * PANEL;
                     let bias: Vec<f32> = (0..run).map(|r| r as f32 * 0.25 - 1.0).collect();
                     check_all(fmt, n_out, n_in, &xs, Some(&bias));
+                }
+            }
+        }
+    }
+
+    /// The strided store writes the same values as the row-major one, and leaves
+    /// every other element of the caller's buffer alone.
+    #[test]
+    fn the_strided_store_is_the_row_major_store() {
+        let sizes = [(16, 384), (24, 384), (40, 384), (16, 96), (5, 37), (1, 1)];
+        for fmt in FORMATS {
+            for &(n_out, n_in) in &sizes {
+                for nb in [1, 2, 5, 8] {
+                    let xs = acts(nb, n_in, (n_out * 13 + n_in + nb) as u64);
+                    let w = matrix(fmt, n_out, n_in, (n_out * 7 + n_in * 3 + nb) as u64);
+                    let packed = pack(fmt, &w, n_out, n_in);
+                    let panels = n_out.div_ceil(PANEL);
+                    let run = panels * PANEL;
+                    let mut want = vec![0.0f32; run * nb];
+                    gemm(fmt, &packed, n_in, panels, &xs, None, &mut want);
+                    // A wider, row-major buffer: the kernel writes the run at the
+                    // start of each activation row.
+                    let stride = run + 9;
+                    let mut got = vec![-7.0f32; stride * nb];
+                    gemm_strided(fmt, &packed, n_in, panels, &xs, None, &mut got, stride);
+                    for b in 0..nb {
+                        for r in 0..run {
+                            assert!(
+                                same(got[b * stride + r], want[b * run + r]),
+                                "{fmt:?} {n_out}x{n_in} b={b} r={r}"
+                            );
+                        }
+                        for r in run..stride {
+                            assert_eq!(got[b * stride + r], -7.0, "wrote past the run");
+                        }
+                    }
+                    // The scalar twin takes the same stride.
+                    let mut gs = vec![0.0f32; stride * nb];
+                    gemm_scalar_strided(fmt, &packed, n_in, panels, &xs, None, &mut gs, stride);
+                    for b in 0..nb {
+                        for r in 0..run {
+                            assert!(same(gs[b * stride + r], want[b * run + r]));
+                        }
+                    }
                 }
             }
         }

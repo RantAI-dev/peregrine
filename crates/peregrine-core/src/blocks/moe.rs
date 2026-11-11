@@ -302,6 +302,7 @@ pub fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
         tile_off: None,
         kq_off: None,
         fp_off: None,
+        fp_kind: None,
     })
 }
 
@@ -839,6 +840,7 @@ mod tests {
             tile_off: None,
             kq_off: None,
             fp_off: None,
+            fp_kind: None,
         };
         let v = expert_view(&t, 2).unwrap();
         assert_eq!(v.dims, vec![64, 32], "a 2D matrix");

@@ -1,0 +1,327 @@
+//! Tool calling on `POST /v1/chat/completions`, end to end (roadmap S6.3).
+//!
+//! Synthetic chat files are served by the real binary on a free port and driven over HTTP.
+//! One file carries a chat template Peregrine has a tool format for (Qwen 2.5's, from
+//! `peregrine_core::tools`), the other the ordinary synthetic template. A synthetic model
+//! writes random tokens, so these tests pin the routing, the refusals and the response
+//! shapes; what a call looks like in a reply is pinned by the endpoint's unit tests, and
+//! the comparison with llama.cpp on a real file is in `docs/design/s6-tool-calling.md`.
+
+#[path = "../../peregrine-models/tests/support/mod.rs"]
+mod support;
+
+use peregrine_core::gguf::Format;
+use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+use support::models::{write_dense, write_dense_with_template, Dense};
+
+fn tmpdir(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "peregrine-server-tools-{}-{name}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+/// Kill the server even when an assertion fails first.
+struct Guard(Child);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn free_port() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+}
+
+/// One HTTP/1.1 exchange; `None` when the server is not listening yet.
+fn try_http(port: u16, method: &str, path: &str, body: Option<&Value>) -> Option<(u16, String)> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
+    let payload = body.map(|b| b.to_string()).unwrap_or_default();
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+        payload.len()
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut out = String::new();
+    stream.read_to_string(&mut out).ok()?;
+    let status = out
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body = out
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    Some((status, body))
+}
+
+fn post(port: u16, body: Value) -> (u16, Value) {
+    let (status, text) = try_http(port, "POST", "/v1/chat/completions", Some(&body))
+        .expect("the server is listening");
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+fn wait_for_health(port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if matches!(try_http(port, "GET", "/health", None), Some((200, _))) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("the server did not answer /health");
+}
+
+/// A context wide enough for a prompt that carries tool definitions.
+const CTX: usize = 4096;
+
+fn shape() -> Dense {
+    Dense {
+        ctx: CTX,
+        ..Dense::default()
+    }
+}
+
+fn serve(model: &Path, dir: &Path) -> (Guard, u16) {
+    let port = free_port();
+    let log_file = std::fs::File::create(dir.join("serve.log")).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
+        .args([
+            "serve",
+            "-m",
+            model.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--ctx",
+            &CTX.to_string(),
+            "--threads",
+            "2",
+            "--slots",
+            "2",
+            "--no-profile",
+        ])
+        .stdout(Stdio::from(log_file.try_clone().unwrap()))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .expect("spawn peregrine serve");
+    let guard = Guard(child);
+    wait_for_health(port);
+    (guard, port)
+}
+
+/// A file whose chat template has a tool format.
+fn serve_tool_model(name: &str) -> (Guard, u16) {
+    let dir = tmpdir(name);
+    let model = write_dense_with_template(
+        &dir,
+        "qwen2",
+        Format::F16,
+        41,
+        shape(),
+        peregrine_core::tools::QWEN25_TEMPLATE,
+    );
+    serve(&model, &dir)
+}
+
+fn weather_tool() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            }
+        }
+    })
+}
+
+fn tool_request(extra: Value) -> Value {
+    let mut body = json!({
+        "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
+        "tools": [weather_tool()],
+        "temperature": 0,
+        "max_tokens": 4
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        body[k] = v.clone();
+    }
+    body
+}
+
+fn error_message(v: &Value) -> String {
+    v["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn a_request_with_tools_is_served_on_a_file_that_has_a_tool_format() {
+    let (_server, port) = serve_tool_model("served");
+
+    let (status, body) = post(port, tool_request(json!({})));
+    assert_eq!(status, 200, "{body}");
+    let choice = &body["choices"][0];
+    assert_eq!(choice["message"]["role"], "assistant");
+    let finish = choice["finish_reason"].as_str().unwrap();
+    assert!(
+        ["stop", "length", "tool_calls"].contains(&finish),
+        "finish_reason {finish}"
+    );
+    // The usage counts the tool definitions: the prompt is far longer than the question.
+    assert!(
+        body["usage"]["prompt_tokens"].as_u64().unwrap() > 60,
+        "{body}"
+    );
+
+    // The same request is the same reply: the tool path is deterministic at temperature 0.
+    let (_, again) = post(port, tool_request(json!({})));
+    assert_eq!(body["choices"], again["choices"]);
+
+    // `tool_choice: "none"` and `"auto"` are served; `parallel_tool_calls` is read.
+    for extra in [
+        json!({"tool_choice": "none"}),
+        json!({"tool_choice": "auto"}),
+        json!({"parallel_tool_calls": false}),
+    ] {
+        let (status, body) = post(port, tool_request(extra.clone()));
+        assert_eq!(status, 200, "{extra}: {body}");
+    }
+
+    // A conversation with a call and its result in the history is rendered and served.
+    let (status, body) = post(
+        port,
+        json!({
+            "messages": [
+                {"role": "user", "content": "What is the weather in Paris?"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp\": 18}"}
+            ],
+            "tools": [weather_tool()],
+            "temperature": 0,
+            "max_tokens": 4
+        }),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // Streaming: server-sent chunks, each a chat.completion.chunk, then [DONE].
+    let (status, text) = try_http(
+        port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&tool_request(json!({"stream": true}))),
+    )
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(text.contains("chat.completion.chunk"), "{text}");
+    assert!(text.contains("[DONE]"), "{text}");
+
+    // An ordinary request on the same file still takes the ordinary path.
+    let plain = json!({
+        "messages": [{"role": "user", "content": "Hello"}],
+        "temperature": 0,
+        "max_tokens": 4
+    });
+    let (status, a) = post(port, plain.clone());
+    assert_eq!(status, 200, "{a}");
+    assert!(a["choices"][0]["message"].get("tool_calls").is_none());
+    let (_, b) = post(port, plain);
+    assert_eq!(a["choices"], b["choices"]);
+}
+
+#[test]
+fn what_cannot_be_honoured_is_refused_by_name() {
+    let (_server, port) = serve_tool_model("refusals");
+    let refused = |extra: Value, word: &str| {
+        let (status, body) = post(port, tool_request(extra.clone()));
+        assert_eq!(status, 400, "{extra}: {body}");
+        let message = error_message(&body);
+        assert!(
+            message.contains(word),
+            "{extra}: {message:?} lacks {word:?}"
+        );
+    };
+    refused(json!({"tool_choice": "required"}), "constrained sampling");
+    refused(
+        json!({"tool_choice": {"type": "function", "function": {"name": "get_weather"}}}),
+        "constrained sampling",
+    );
+    refused(json!({"functions": [{"name": "f"}]}), "functions");
+    refused(json!({"function_call": "auto"}), "function_call");
+    refused(json!({"tools": [{"type": "retrieval"}]}), "retrieval");
+    refused(
+        json!({"tools": [{"type": "function", "function": {}}]}),
+        "name",
+    );
+    refused(json!({"parallel_tool_calls": "no"}), "parallel_tool_calls");
+    refused(
+        json!({"messages": [{"role": "developer", "content": "x"}, {"role": "user", "content": "y"}]}),
+        "developer",
+    );
+    refused(
+        json!({"messages": [
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "tool_calls": [
+                {"type": "function", "function": {"name": "get_weather", "arguments": "{broken"}}
+            ]},
+            {"role": "tool", "content": "1"}
+        ]}),
+        "not JSON",
+    );
+}
+
+#[test]
+fn tools_on_a_file_without_a_tool_format_are_refused() {
+    let dir = tmpdir("no-format");
+    let model = write_dense(&dir, "qwen2", Format::F16, 42, shape());
+    let (_server, port) = serve(&model, &dir);
+
+    let (status, body) = post(port, tool_request(json!({})));
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        error_message(&body).contains("no tool format"),
+        "{}",
+        error_message(&body)
+    );
+
+    // A tool conversation without `tools` takes the tool path too, and is refused the same way.
+    let (status, body) = post(
+        port,
+        json!({"messages": [
+            {"role": "user", "content": "x"},
+            {"role": "tool", "content": "1"}
+        ]}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(error_message(&body).contains("no tool format"));
+
+    // An ordinary request is served as before.
+    let (status, body) = post(
+        port,
+        json!({"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 4}),
+    );
+    assert_eq!(status, 200, "{body}");
+}

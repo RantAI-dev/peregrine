@@ -234,6 +234,7 @@ impl State {
                     a.ptq1 = act_layout.ptq1;
                     a.tb_span = act_layout.tb_span;
                     a.keep_f32 = act_layout.keep_f32;
+                    a.quantize = act_layout.quantize;
                     a
                 })
                 .collect(),
