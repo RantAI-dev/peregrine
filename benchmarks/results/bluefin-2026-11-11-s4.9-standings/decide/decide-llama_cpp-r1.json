@@ -1,0 +1,229 @@
+{
+ "benchmark": "peregrine-s4.9-decisions",
+ "timestamp": "2026-11-11T11:42:15.892511+00:00",
+ "round": 1,
+ "engine": "llama_cpp",
+ "model": "~/models/tinyopenjev-for-testing-Q8_0.gguf",
+ "machine": {
+  "hostname": "bluefin",
+  "cpu": "",
+  "threads": 4,
+  "kernel": "7.2.7-200.fc44.x86_64"
+ },
+ "settings": {
+  "ctx": 8192,
+  "slots": 4,
+  "runs": 7,
+  "questions": [
+   1,
+   3,
+   10
+  ],
+  "states": [
+   64,
+   300,
+   1000
+  ],
+  "cmd": [
+   "/var/tmp/llama.cpp/build/bin/llama-server",
+   "-m",
+   "~/models/tinyopenjev-for-testing-Q8_0.gguf",
+   "-t",
+   "4",
+   "-c",
+   "8192",
+   "-np",
+   "1",
+   "-b",
+   "2048",
+   "-ub",
+   "512",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8351"
+  ]
+ },
+ "cells": {
+  "S64_q1": {
+   "state_tokens": 64,
+   "questions": 1,
+   "wall_ms_median": 8.74,
+   "wall_ms_min": 8.462,
+   "wall_ms_p50": 8.74,
+   "wall_ms_p90": 9.581,
+   "questions_per_s": 114.422,
+   "per_question_ms": 8.74,
+   "runs": [
+    8.869,
+    9.202,
+    10.15,
+    8.703,
+    8.74,
+    8.462,
+    8.56
+   ],
+   "input_tokens": 120
+  },
+  "S64_q3": {
+   "state_tokens": 64,
+   "questions": 3,
+   "wall_ms_median": 24.889,
+   "wall_ms_min": 24.462,
+   "wall_ms_p50": 24.889,
+   "wall_ms_p90": 28.53,
+   "questions_per_s": 120.537,
+   "per_question_ms": 8.296,
+   "runs": [
+    24.889,
+    27.892,
+    29.488,
+    25.282,
+    24.836,
+    24.462,
+    24.559
+   ],
+   "input_tokens": 365
+  },
+  "S64_q10": {
+   "state_tokens": 64,
+   "questions": 10,
+   "wall_ms_median": 79.93,
+   "wall_ms_min": 79.153,
+   "wall_ms_p50": 79.93,
+   "wall_ms_p90": 85.326,
+   "questions_per_s": 125.109,
+   "per_question_ms": 7.993,
+   "runs": [
+    80.683,
+    85.89,
+    79.153,
+    79.804,
+    79.536,
+    84.95,
+    79.93
+   ],
+   "input_tokens": 1218
+  },
+  "S300_q1": {
+   "state_tokens": 300,
+   "questions": 1,
+   "wall_ms_median": 22.169,
+   "wall_ms_min": 21.689,
+   "wall_ms_p50": 22.169,
+   "wall_ms_p90": 25.92,
+   "questions_per_s": 45.108,
+   "per_question_ms": 22.169,
+   "runs": [
+    25.915,
+    22.169,
+    25.812,
+    25.927,
+    22.072,
+    22.122,
+    21.689
+   ],
+   "input_tokens": 356
+  },
+  "S300_q3": {
+   "state_tokens": 300,
+   "questions": 3,
+   "wall_ms_median": 67.81,
+   "wall_ms_min": 63.095,
+   "wall_ms_p50": 67.81,
+   "wall_ms_p90": 69.413,
+   "questions_per_s": 44.242,
+   "per_question_ms": 22.603,
+   "runs": [
+    70.039,
+    67.81,
+    64.007,
+    68.995,
+    63.623,
+    63.095,
+    68.733
+   ],
+   "input_tokens": 1073
+  },
+  "S300_q10": {
+   "state_tokens": 300,
+   "questions": 10,
+   "wall_ms_median": 208.55,
+   "wall_ms_min": 208.232,
+   "wall_ms_p50": 208.55,
+   "wall_ms_p90": 217.356,
+   "questions_per_s": 47.95,
+   "per_question_ms": 20.855,
+   "runs": [
+    218.781,
+    208.232,
+    216.406,
+    209.582,
+    208.55,
+    208.326,
+    208.384
+   ],
+   "input_tokens": 3578
+  },
+  "S1000_q1": {
+   "state_tokens": 1000,
+   "questions": 1,
+   "wall_ms_median": 65.567,
+   "wall_ms_min": 65.341,
+   "wall_ms_p50": 65.567,
+   "wall_ms_p90": 65.975,
+   "questions_per_s": 15.252,
+   "per_question_ms": 65.567,
+   "runs": [
+    65.534,
+    66.201,
+    65.567,
+    65.824,
+    65.341,
+    65.754,
+    65.376
+   ],
+   "input_tokens": 1052
+  },
+  "S1000_q3": {
+   "state_tokens": 1000,
+   "questions": 3,
+   "wall_ms_median": 192.401,
+   "wall_ms_min": 192.1,
+   "wall_ms_p50": 192.401,
+   "wall_ms_p90": 193.349,
+   "questions_per_s": 15.592,
+   "per_question_ms": 64.134,
+   "runs": [
+    192.1,
+    192.401,
+    192.561,
+    194.458,
+    192.209,
+    192.286,
+    192.61
+   ],
+   "input_tokens": 3161
+  },
+  "S1000_q10": {
+   "state_tokens": 1000,
+   "questions": 10,
+   "wall_ms_median": 635.584,
+   "wall_ms_min": 634.004,
+   "wall_ms_p50": 635.584,
+   "wall_ms_p90": 637.139,
+   "questions_per_s": 15.734,
+   "per_question_ms": 63.558,
+   "runs": [
+    638.899,
+    634.78,
+    634.004,
+    635.966,
+    635.578,
+    635.584,
+    635.705
+   ],
+   "input_tokens": 10538
+  }
+ }
+}
