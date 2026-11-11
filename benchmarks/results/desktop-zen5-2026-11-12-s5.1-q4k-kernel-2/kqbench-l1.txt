@@ -1,0 +1,26 @@
+gemm(4): 40.37 ns/(tile*act*sb)  50.7 GMAC/s/core
+gemm(64): 36.33 ns/(tile*act*sb)  56.4 GMAC/s/core
+gemv(1): 66.66 ns/(tile*act*sb)  30.7 GMAC/s/core
+q4k   1 acts: row   21.2  tile(avx2)   31.4  tile(zmm)   44.7  GMAC/s/core
+q4k   4 acts: row   34.5  tile(avx2)   51.3  tile(zmm)   81.0  GMAC/s/core
+q4k  16 acts: row   35.2  tile(avx2)   55.4  tile(zmm)   81.2  GMAC/s/core
+q4k  64 acts: row   32.4  tile(avx2)   54.5  tile(zmm)   77.5  GMAC/s/core
+q4k 128 acts: row   23.8  tile(avx2)   54.7  tile(zmm)   78.6  GMAC/s/core
+zmm gemm(4): 25.47 ns/(tile*act*sb)  80.4 GMAC/s/core
+zmm gemm(64): 26.08 ns/(tile*act*sb)  78.5 GMAC/s/core
+zmm gemv(1): 45.57 ns/(tile*act*sb)  44.9 GMAC/s/core
+q5   1 acts: avx2 21.1 G  zmm 25.0 G MAC/s/core  (+18%)
+q5   4 acts: avx2 36.1 G  zmm 48.4 G MAC/s/core  (+34%)
+q5  16 acts: avx2 36.0 G  zmm 53.3 G MAC/s/core  (+48%)
+q5  64 acts: avx2 34.2 G  zmm 51.6 G MAC/s/core  (+51%)
+q5 128 acts: avx2 35.9 G  zmm 52.4 G MAC/s/core  (+46%)
+q6k   1 acts: row   19.2 G  tile   18.9 G  zmm   24.3 G MAC/s/core  (zmm +29%)
+q6k   4 acts: row   30.3 G  tile   31.6 G  zmm   51.7 G MAC/s/core  (zmm +63%)
+q6k  16 acts: row   36.7 G  tile   33.7 G  zmm   59.5 G MAC/s/core  (zmm +76%)
+q6k  64 acts: row   32.5 G  tile   33.7 G  zmm   58.7 G MAC/s/core  (zmm +74%)
+q6k 128 acts: row   33.1 G  tile   34.3 G  zmm   58.3 G MAC/s/core  (zmm +70%)
+q5k   1 acts: row   16.2 G  tile   16.9 G MAC/s/core  (+5%)
+q5k   4 acts: row   31.0 G  tile   35.8 G MAC/s/core  (+15%)
+q5k  16 acts: row   35.7 G  tile   45.3 G MAC/s/core  (+27%)
+q5k  64 acts: row   33.1 G  tile   44.2 G MAC/s/core  (+33%)
+q5k 128 acts: row   33.5 G  tile   44.8 G MAC/s/core  (+34%)

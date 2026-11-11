@@ -1,0 +1,370 @@
+{
+ "host": "AMD Ryzen AI 9 HX 370, WSL2",
+ "isa": "avx2",
+ "threads": 12,
+ "rounds": 3,
+ "rows": [
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 247.31823335691726,
+   "prefill_s": 2.0702072509999994,
+   "decode_tok_s": 27.821357567660087,
+   "wall_s": 6.62,
+   "load": [
+    "8.02",
+    "8.17",
+    "5.67"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 272.23099460903455,
+   "prefill_s": 1.8807557190000004,
+   "decode_tok_s": 61.513240873114164,
+   "wall_s": 3.06,
+   "load": [
+    "8.18",
+    "8.20",
+    "5.70"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 263.2776387006224,
+   "prefill_s": 1.944715102,
+   "decode_tok_s": 59.324827915452026,
+   "wall_s": 3.05,
+   "load": [
+    "8.48",
+    "8.26",
+    "5.73"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 209.39218958478037,
+   "prefill_s": 19.561379095000003,
+   "decode_tok_s": 48.58636734371051,
+   "wall_s": 18.8,
+   "load": [
+    "9.48",
+    "8.51",
+    "5.87"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 212.31209080161548,
+   "prefill_s": 19.292353933,
+   "decode_tok_s": 47.2545669560178,
+   "wall_s": 20.55,
+   "load": [
+    "10.26",
+    "8.75",
+    "6.00"
+   ]
+  },
+  {
+   "round": 0,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 211.90342263453178,
+   "prefill_s": 19.329560368000003,
+   "decode_tok_s": 45.53863655745371,
+   "wall_s": 18.61,
+   "load": [
+    "10.90",
+    "8.99",
+    "6.14"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 241.67602489416373,
+   "prefill_s": 2.118538652,
+   "decode_tok_s": 62.83534240438997,
+   "wall_s": 3.16,
+   "load": [
+    "10.99",
+    "9.04",
+    "6.17"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 272.10665175998406,
+   "prefill_s": 1.8816151559999998,
+   "decode_tok_s": 62.6469766592557,
+   "wall_s": 2.9,
+   "load": [
+    "10.99",
+    "9.04",
+    "6.17"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 257.3290274855838,
+   "prefill_s": 1.9896705979999998,
+   "decode_tok_s": 60.239731163633756,
+   "wall_s": 3.04,
+   "load": [
+    "10.91",
+    "9.06",
+    "6.20"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 213.13126931589838,
+   "prefill_s": 19.218203003,
+   "decode_tok_s": 47.48752047253786,
+   "wall_s": 18.4,
+   "load": [
+    "11.22",
+    "9.25",
+    "6.32"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 213.48948963120412,
+   "prefill_s": 19.185956213,
+   "decode_tok_s": 45.9576292602988,
+   "wall_s": 20.34,
+   "load": [
+    "11.52",
+    "9.45",
+    "6.45"
+   ]
+  },
+  {
+   "round": 1,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 213.28147915152203,
+   "prefill_s": 19.204668011000006,
+   "decode_tok_s": 43.504158966328575,
+   "wall_s": 18.51,
+   "load": [
+    "11.44",
+    "9.56",
+    "6.55"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 244.92094379589193,
+   "prefill_s": 2.0904704680000004,
+   "decode_tok_s": 62.34357631408405,
+   "wall_s": 3.12,
+   "load": [
+    "11.48",
+    "9.60",
+    "6.58"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 268.9531111668816,
+   "prefill_s": 1.9036775510000001,
+   "decode_tok_s": 62.283711539623226,
+   "wall_s": 2.92,
+   "load": [
+    "11.48",
+    "9.60",
+    "6.58"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 512,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 266.8094903427002,
+   "prefill_s": 1.9189722200000001,
+   "decode_tok_s": 62.295204272613134,
+   "wall_s": 3.01,
+   "load": [
+    "11.52",
+    "9.64",
+    "6.61"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 16,
+   "tokens": 16,
+   "prefill_tok_s": 214.68054625260382,
+   "prefill_s": 19.079511727999996,
+   "decode_tok_s": 48.544341782263636,
+   "wall_s": 18.17,
+   "load": [
+    "11.72",
+    "9.81",
+    "6.73"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 64,
+   "tokens": 16,
+   "prefill_tok_s": 211.76814022924756,
+   "prefill_s": 19.341908539999995,
+   "decode_tok_s": 47.72107769762443,
+   "wall_s": 20.45,
+   "load": [
+    "11.87",
+    "9.97",
+    "6.85"
+   ]
+  },
+  {
+   "round": 2,
+   "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "isa": "avx2",
+   "threads": 12,
+   "prompt_tokens": 4096,
+   "chunk": 128,
+   "tokens": 16,
+   "prefill_tok_s": 211.76664054603222,
+   "prefill_s": 19.342045515000002,
+   "decode_tok_s": 42.966339007245175,
+   "wall_s": 18.55,
+   "load": [
+    "11.35",
+    "9.99",
+    "6.92"
+   ]
+  }
+ ],
+ "summary": {
+  "chunk128-p4096": {
+   "prefill_tok_s": 211.9,
+   "prefill_s": 19.33,
+   "n": 3,
+   "spread_tok_s": 0.8
+  },
+  "chunk128-p512": {
+   "prefill_tok_s": 263.3,
+   "prefill_s": 1.945,
+   "n": 3,
+   "spread_tok_s": 4.7
+  },
+  "chunk16-p4096": {
+   "prefill_tok_s": 213.1,
+   "prefill_s": 19.218,
+   "n": 3,
+   "spread_tok_s": 2.6
+  },
+  "chunk16-p512": {
+   "prefill_tok_s": 244.9,
+   "prefill_s": 2.09,
+   "n": 3,
+   "spread_tok_s": 2.8
+  },
+  "chunk64-p4096": {
+   "prefill_tok_s": 212.3,
+   "prefill_s": 19.292,
+   "n": 3,
+   "spread_tok_s": 0.9
+  },
+  "chunk64-p512": {
+   "prefill_tok_s": 272.1,
+   "prefill_s": 1.882,
+   "n": 3,
+   "spread_tok_s": 1.6
+  }
+ }
+}
