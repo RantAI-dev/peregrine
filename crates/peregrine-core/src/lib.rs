@@ -149,6 +149,7 @@ pub fn check_compatible_metadata(
             "qwen3moe" => Some("arch-qwen3moe"),
             "gpt-oss" => Some("arch-gpt-oss"),
             "phi3" => Some("arch-phi3"),
+            "mistral3" => Some("arch-mistral3"),
             _ => None,
         };
         if let Some(feat) = feat {
@@ -192,8 +193,9 @@ pub fn check_compatible_metadata(
         }
     }
     if let Ok(t) = g.str(&format!("{arch}.rope.scaling.type")) {
-        // YaRN is gpt-oss's scaling; the families that read it check the rest.
-        if t != "none" && t != "linear" && !(t == "yarn" && arch == "gpt-oss") {
+        // YaRN is gpt-oss's and mistral3's scaling; the families that read it check the rest.
+        if t != "none" && t != "linear" && !(t == "yarn" && (arch == "gpt-oss" || arch == "mistral3"))
+        {
             return Err(format!("rope scaling {t:?} is not implemented"));
         }
     }

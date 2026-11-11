@@ -763,6 +763,180 @@ pub fn write_gemma_embedding(
     path
 }
 
+/// The shape of a synthetic `mistral3` embedder (roadmap S4.14).
+///
+/// The default has query heads wider than the residual (6 × 32 over 128), two key/value
+/// heads over six query heads, YaRN with a 32-token original context and a 4× factor,
+/// and an attention temperature of 0.1: a text of 40 tokens sees positions at and above
+/// the original context, so both the YaRN ramp and the temperature run.
+#[derive(Clone, Copy, Debug)]
+pub struct Mistral3Config {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    /// The head width (`attention.key_length`); `n_head * head_dim` may exceed `d_model`.
+    pub head_dim: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    /// `rope.scaling.original_context_length`: the YaRN original context and the
+    /// attention temperature's divisor.
+    pub n_ctx_orig: usize,
+    pub factor: f32,
+    pub beta_fast: f32,
+    pub beta_slow: f32,
+    pub log_mul: f32,
+    /// `attention.temperature_scale`; 0 writes the key as zero and disables the scaling.
+    pub temp_scale: f32,
+    pub pooling_type: u32,
+    /// Write `attention.causal true` — a file the loader must refuse by name.
+    pub causal: bool,
+}
+
+impl Default for Mistral3Config {
+    fn default() -> Self {
+        Mistral3Config {
+            d_model: 128,
+            n_layer: 3,
+            n_head: 6,
+            n_head_kv: 2,
+            head_dim: 32,
+            n_ff: 256,
+            ctx: 256,
+            n_ctx_orig: 32,
+            factor: 4.0,
+            beta_fast: 8.0,
+            beta_slow: 1.0,
+            log_mul: 1.0,
+            temp_scale: 0.1,
+            pooling_type: 1,
+            causal: false,
+        }
+    }
+}
+
+/// Write a synthetic `mistral3` embedder: NVIDIA Nemotron 3.5 Embed 1B's shape, tiny.
+///
+/// There is no output head and no chat template: the file only produces embeddings.
+pub fn write_mistral3(dir: &Path, fmt: Format, seed: u64, s: Mistral3Config) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    w.str("general.architecture", "mistral3");
+    w.str("general.name", &format!("synthetic-mistral3-{}", fmt.label()));
+    let k = |x: &str| format!("mistral3.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("attention.head_count_kv"), s.n_head_kv as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.u32(&k("attention.key_length"), s.head_dim as u32);
+    w.u32(&k("attention.value_length"), s.head_dim as u32);
+    w.u32(&k("rope.dimension_count"), s.head_dim as u32);
+    w.f32(&k("rope.freq_base"), 10_000.0);
+    w.str(&k("rope.scaling.type"), "yarn");
+    w.f32(&k("rope.scaling.factor"), s.factor);
+    w.u32(
+        &k("rope.scaling.original_context_length"),
+        s.n_ctx_orig as u32,
+    );
+    w.f32(&k("rope.scaling.yarn_beta_fast"), s.beta_fast);
+    w.f32(&k("rope.scaling.yarn_beta_slow"), s.beta_slow);
+    w.f32(&k("rope.scaling.yarn_log_multiplier"), s.log_mul);
+    w.bool(&k("attention.causal"), s.causal);
+    w.f32(&k("attention.temperature_scale"), s.temp_scale);
+    w.f32(&k("attention.layer_norm_rms_epsilon"), 1e-5);
+    w.u32(&k("pooling_type"), s.pooling_type);
+
+    vocab::add_tokenizer_metadata(&mut w, "qwen2");
+    // No chat template: an embedding-only file has none, and the build says so.
+
+    let kv = s.n_head_kv * s.head_dim;
+    let q = s.n_head * s.head_dim;
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    for i in 0..s.n_layer {
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_q.weight"),
+            s.d_model,
+            q,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_k.weight"),
+            s.d_model,
+            kv,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_v.weight"),
+            s.d_model,
+            kv,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.attn_output.weight"),
+            q,
+            s.d_model,
+        );
+        norm(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_norm.weight"),
+            s.d_model,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_gate.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_up.weight"),
+            s.d_model,
+            s.n_ff,
+        );
+        mat(
+            &mut w,
+            &mut rng,
+            &format!("blk.{i}.ffn_down.weight"),
+            s.n_ff,
+            s.d_model,
+        );
+    }
+    norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
+
+    let path = dir.join(format!("mistral3-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// Write a `qwen35` hybrid model (Gated DeltaNet layers, one gated-attention layer in every
 /// `interval`, Hadamard-rotated ternary matmuls) with every matmul in `fmt` (PQ2_0 or PTQ1_0).
 ///

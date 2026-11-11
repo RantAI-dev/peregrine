@@ -367,6 +367,245 @@ fn a_pooled_slot_that_finishes_in_a_decode_pass_is_reaped() {
 }
 
 // ---------------------------------------------------------------------------
+// S4.14b: the `mistral3` encoder, NVIDIA Nemotron 3.5 Embed 1B
+// ---------------------------------------------------------------------------
+
+fn mistral3(dir: &std::path::Path, fmt: Format, seed: u64) -> Arc<Model> {
+    let path = support::models::write_mistral3(
+        dir,
+        fmt,
+        seed,
+        support::models::Mistral3Config::default(),
+    );
+    load(&path)
+}
+
+#[test]
+fn a_mistral3_file_reports_itself_as_an_encoder() {
+    let dir = tmpdir("mistral3-pooling");
+    let model = mistral3(&dir, Format::F32, 81);
+    assert_eq!(
+        model.causality(),
+        peregrine_core::arch::Causality::Bidirectional
+    );
+    assert_eq!(model.pooling().unwrap(), Some(Pooling::Mean));
+    assert_eq!(model.embedding_width(), model.cfg.d_model);
+    // Wider query heads than the residual, grouped key/value heads.
+    assert_eq!(model.cfg.q_dim(), 6 * 32);
+    assert_eq!(model.cfg.kv_dim(), 2 * 32);
+    assert!(model.cfg.q_dim() > model.cfg.d_model);
+}
+
+#[test]
+fn a_causal_mistral3_file_is_refused_by_name() {
+    let dir = tmpdir("mistral3-causal");
+    let mut cfg = support::models::Mistral3Config::default();
+    cfg.causal = true;
+    let path = support::models::write_mistral3(&dir, Format::F32, 82, cfg);
+    let g = peregrine_core::Gguf::open(&path).expect("open the synthetic model");
+    let err = match peregrine_models::load(g) {
+        Ok(_) => panic!("a causal mistral3 file must be refused"),
+        Err(e) => e,
+    };
+
+    assert!(
+        err.contains("Mistral 3 chat models are not supported"),
+        "{err}"
+    );
+    assert!(err.contains("attention.causal"), "{err}");
+}
+
+#[test]
+fn the_mistral3_vector_is_the_exact_scalar_reference_forward() {
+    let dir = tmpdir("mistral3-reference");
+    let model = mistral3(&dir, Format::F32, 83);
+    for pooling in [Pooling::Mean, Pooling::Cls, Pooling::Last] {
+        // Lengths below, at and above the YaRN original context (32) and the
+        // temperature's second step (64), so both rules run at every layer.
+        for (i, len) in [1usize, 2, 7, 31, 33, 64, 70, 130].into_iter().enumerate() {
+            let text = encoder_text(1 + i as u32, len);
+            let want = support::embed_ref::reference_embedding_mistral3(&model, &text, pooling);
+            let got = embed_batch(
+                &model,
+                std::slice::from_ref(&text),
+                pooling,
+                1,
+                64,
+                model.cfg.ctx_train,
+                None,
+            )
+            .vectors;
+            assert_eq!(
+                bits(&got[0]),
+                bits(&want),
+                "{pooling:?} len {len}: the engine differs from the reference"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_mistral3_vector_is_bit_identical_alone_in_batches_and_in_any_order() {
+    let dir = tmpdir("mistral3-invariance");
+    for (fmt, seed) in [(Format::F32, 84u64), (Format::Q8_0, 85)] {
+        let model = mistral3(&dir, fmt, seed);
+        let pooling = Pooling::Mean;
+        // A text longer than the original context, so the temperature is not 1.
+        let probe = encoder_text(9, 70);
+        let alone = embed_batch(
+            &model,
+            std::slice::from_ref(&probe),
+            pooling,
+            1,
+            64,
+            model.cfg.ctx_train,
+            None,
+        )
+        .vectors[0]
+            .clone();
+
+        for (n, threads) in [(2usize, 1usize), (7, 2), (64, 4), (7, 1), (64, 8)] {
+            let mut texts = Vec::with_capacity(n);
+            for i in 0..n {
+                texts.push(if i == n / 2 {
+                    probe.clone()
+                } else {
+                    encoder_text(100 + i as u32, 1 + (i * 11) % 53)
+                });
+            }
+            if n % 2 == 0 {
+                texts.swap(0, n / 2);
+            }
+            let run = embed_batch(
+                &model,
+                &texts,
+                pooling,
+                threads,
+                64,
+                model.cfg.ctx_train,
+                None,
+            );
+            let probe_at = texts.iter().position(|t| t == &probe).unwrap();
+            assert_eq!(
+                bits(&run.vectors[probe_at]),
+                bits(&alone),
+                "{}: probe in a batch of {n}, {threads} threads, admitted at {probe_at}",
+                fmt.label()
+            );
+        }
+
+        // The pass budget is scheduling only (S4.9b), here too.
+        for budget in [Some(1usize), Some(16), Some(64), Some(256), None] {
+            for threads in [1usize, 2, 4] {
+                let n = 7;
+                let mut texts = Vec::with_capacity(n);
+                for i in 0..n {
+                    texts.push(if i == n / 2 {
+                        probe.clone()
+                    } else {
+                        encoder_text(300 + i as u32, 1 + (i * 13) % 29)
+                    });
+                }
+                let run = embed_batch_pass(
+                    &model,
+                    &texts,
+                    pooling,
+                    threads,
+                    64,
+                    model.cfg.ctx_train,
+                    budget,
+                    None,
+                );
+                assert_eq!(
+                    bits(&run.vectors[n / 2]),
+                    bits(&alone),
+                    "{}: probe in a batch of {n}, budget {budget:?}, {threads} threads",
+                    fmt.label()
+                );
+            }
+        }
+    }
+}
+
+
+/// The synthetic `mistral3` encoder's golden for the current kernel tier.
+///
+/// The vector is the whole output, so the golden hashes every bit of two vectors (mean at
+/// full width and cls truncated to 64 dimensions) instead of logits. Recorded with
+/// `PEREGRINE_GOLDEN=record` on each pinned tier, like the synthetic goldens. The text is
+/// longer than the 32-token original context, so the YaRN ramp and the attention
+/// temperature are part of the pinned bits.
+#[test]
+fn the_synthetic_mistral3_matches_its_golden_for_the_tier() {
+    let dir = tmpdir("mistral3-golden");
+    let model = mistral3(&dir, Format::Q8_0, 86);
+
+    let mut out = String::new();
+    for (pooling, dims) in [(Pooling::Mean, None), (Pooling::Cls, Some(64usize))] {
+        let text = encoder_text(21, 70);
+        let run = embed_batch(
+            &model,
+            std::slice::from_ref(&text),
+            pooling,
+            3,
+            64,
+            model.cfg.ctx_train,
+            None,
+        );
+        let mut v = run.vectors[0].clone();
+        embed::finish(&mut v, dims).unwrap();
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for x in &v {
+            for b in x.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        use std::fmt::Write as _;
+        writeln!(
+            out,
+            "{} {dims:?} len {} fnv {h:016x}",
+            pooling.name(),
+            v.len()
+        )
+        .unwrap();
+    }
+    let tier = peregrine_core::cpu::tier_name();
+    let golden_tier = format!(
+        "{}{}",
+        if tier == "x86_64-avx2-vnni256" {
+            "x86_64-avx2"
+        } else {
+            tier.as_str()
+        },
+        if cfg!(target_os = "macos") {
+            "-macos"
+        } else {
+            ""
+        }
+    );
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/synthetic")
+        .join(golden_tier);
+    let gpath = dir.join("mistral3-Q8_0.golden");
+    let record = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record");
+    let require = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "require");
+    if record && tier != "x86_64-avx2-vnni256" {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&gpath, &out).unwrap();
+        eprintln!("synthetic: recorded mistral3-Q8_0 ({tier})");
+    } else if let Ok(want) = std::fs::read_to_string(&gpath) {
+        assert_eq!(want, out, "{}", gpath.display());
+    } else if require {
+        panic!(
+            "mistral3-Q8_0 has no golden for tier {tier} ({}); record it with PEREGRINE_GOLDEN=record",
+            gpath.display()
+        );
+    }
+}
+
+
+// ---------------------------------------------------------------------------
 // S4.4: the bidirectional encoder, `gemma-embedding`
 // ---------------------------------------------------------------------------
 
@@ -1203,14 +1442,20 @@ fn cosine_at(a: &[f32], b: &[f32], dims: usize) -> f64 {
 }
 
 fn read_vectors(path: &std::path::Path) -> Vec<Vec<f32>> {
+    read_vectors_dim(path, 768)
+}
+
+/// `count × dims` little-endian f32 rows.
+fn read_vectors_dim(path: &std::path::Path, dims: usize) -> Vec<Vec<f32>> {
     let bytes = std::fs::read(path).unwrap();
-    let (rows, rest) = bytes.as_chunks::<3072>();
+    let row = dims * 4;
     assert!(
-        rest.is_empty(),
-        "{}: not a whole number of 768-d rows",
+        bytes.len() % row == 0,
+        "{}: not a whole number of {dims}-d rows",
         path.display()
     );
-    rows.iter()
+    bytes
+        .chunks_exact(row)
         .map(|row| {
             let (words, rest) = row.as_chunks::<4>();
             assert!(rest.is_empty());
@@ -1321,6 +1566,168 @@ fn embeddinggemma_real_file_is_within_the_bound_of_llama_cpp() {
             "{dims}-d: vs llama.cpp Q8_0 min {min_l:.6} mean {mean_l:.7}; \
              vs the F16 reference Peregrine min {min_r:.6} mean {mean_r:.7}, \
              llama.cpp min {min_rl:.6} mean {mean_rl:.7}"
+        );
+    }
+}
+
+/// NVIDIA Nemotron 3.5 Embed 1B against llama.cpp v0.9.0, when the files are on this
+/// machine (roadmap S4.14b).
+///
+/// The fixture (`tests/fixtures/nemotron/`) holds 64 texts, their token ids from
+/// llama.cpp and llama.cpp's vectors for the F16 and Q8_0 uploads, so this feeds the
+/// stored ids and needs no tokenizer. The gate is the design's §5 item 2: the F16 vector
+/// is within 0.9999 cosine of llama.cpp's F16 vector, and Peregrine's Q8_0 is no further
+/// from that reference than llama.cpp's own Q8_0 is (1e-4 slack on the mean). `dims`
+/// 1024 and 512 are Matryoshka: truncate, then normalise.
+///
+/// `cargo test --release -p peregrine-models --test embeddings -- --ignored` runs it.
+#[test]
+#[ignore = "needs Nemotron-3.5-Embed-1B-F16.gguf and -Q8_0.gguf in ~/models/nemotron/"]
+fn nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nemotron");
+    let tokens: Vec<Vec<u32>> = std::fs::read_to_string(fixture.join("tokens.txt"))
+        .unwrap()
+        .lines()
+        .map(|l| l.split_whitespace().map(|t| t.parse().unwrap()).collect())
+        .collect();
+    assert_eq!(tokens.len(), 64);
+    let f16_ref = read_vectors_dim(&fixture.join("llama_f16.f32"), 2048);
+    let llama_q8 = read_vectors_dim(&fixture.join("llama_q8_0.f32"), 2048);
+    assert_eq!(f16_ref.len(), tokens.len());
+    assert_eq!(llama_q8.len(), tokens.len());
+
+    let min_mean = |v: &[f64]| {
+        (
+            v.iter().copied().fold(f64::INFINITY, f64::min),
+            v.iter().sum::<f64>() / v.len() as f64,
+        )
+    };
+
+    let file = |tag: &str| {
+        let name = format!("Nemotron-3.5-Embed-1B-{tag}.gguf");
+        let mut candidates = Vec::new();
+        if let Ok(d) = std::env::var("PEREGRINE_NEMOTRON_DIR") {
+            candidates.push(PathBuf::from(d).join(&name));
+        }
+        candidates.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../models/nemotron")
+                .join(&name),
+        );
+        if let Ok(h) = std::env::var("HOME") {
+            candidates.push(PathBuf::from(&h).join("models/nemotron").join(&name));
+        }
+        candidates.into_iter().find(|p| p.is_file())
+    };
+
+    let embed_with = |path: &std::path::Path| -> Option<Vec<Vec<f32>>> {
+        let g = match peregrine_core::Gguf::open(path) {
+            Ok(g) => g,
+            Err(e) => panic!("{}: {e}", path.display()),
+        };
+        let model = match peregrine_models::load(g) {
+            Ok(m) => Arc::new(m),
+            Err(e) if e.contains("pre-tokenizer") && e.contains("pixtral") => {
+                eprintln!(
+                    "{}: this build's tokenizer does not read the file's Tekken \
+                     pre-tokenizer yet (S4.14a); skipped",
+                    path.display()
+                );
+                return None;
+            }
+            Err(e) => panic!("{}: {e}", path.display()),
+        };
+        assert_eq!(
+            model.causality(),
+            peregrine_core::arch::Causality::Bidirectional
+        );
+        assert_eq!(model.pooling().unwrap(), Some(Pooling::Mean));
+        assert_eq!(model.cfg.ctx_train, 32768, "the model's real text limit");
+        let run = embed_batch(&model, &tokens, Pooling::Mean, 4, 512, 2048, None);
+        Some(
+            run.vectors
+                .into_iter()
+                .map(|mut v| {
+                    embed::finish(&mut v, None).unwrap();
+                    v
+                })
+                .collect(),
+        )
+    };
+
+    // F16: the whole graph, against llama.cpp's F16 vectors.
+    let Some(f16_path) = file("F16") else {
+        eprintln!("Nemotron-3.5-Embed-1B-F16.gguf is not on this machine; skipped");
+        return;
+    };
+    let Some(ours_f16) = embed_with(&f16_path) else {
+        return;
+    };
+    for dims in [2048usize, 1024, 512] {
+        let to_llama: Vec<f64> = ours_f16
+            .iter()
+            .zip(&f16_ref)
+            .map(|(a, b)| cosine_at(a, b, dims))
+            .collect();
+        let (min_l, mean_l) = min_mean(&to_llama);
+        assert!(
+            min_l >= 0.9999,
+            "F16 at {dims} d: min cosine to llama.cpp {min_l:.7} < 0.9999"
+        );
+        eprintln!("F16 {dims}-d vs llama.cpp F16: min {min_l:.7} mean {mean_l:.8}");
+    }
+    drop(ours_f16);
+
+    // Q8_0: no further from the F16 reference than llama.cpp's Q8_0 is.
+    let Some(q8_path) = file("Q8_0") else {
+        eprintln!("Nemotron-3.5-Embed-1B-Q8_0.gguf is not on this machine; skipped");
+        return;
+    };
+    let Some(ours_q8) = embed_with(&q8_path) else {
+        return;
+    };
+    for dims in [2048usize, 1024, 512] {
+        let to_ref: Vec<f64> = ours_q8
+            .iter()
+            .zip(&f16_ref)
+            .map(|(a, b)| cosine_at(a, b, dims))
+            .collect();
+        let llama_to_ref: Vec<f64> = llama_q8
+            .iter()
+            .zip(&f16_ref)
+            .map(|(a, b)| cosine_at(a, b, dims))
+            .collect();
+        let to_llama: Vec<f64> = ours_q8
+            .iter()
+            .zip(&llama_q8)
+            .map(|(a, b)| cosine_at(a, b, dims))
+            .collect();
+        let (min_r, mean_r) = min_mean(&to_ref);
+        let (min_rl, mean_rl) = min_mean(&llama_to_ref);
+        let (min_l, mean_l) = min_mean(&to_llama);
+        eprintln!(
+            "Q8_0 {dims}-d: vs llama.cpp Q8_0 min {min_l:.6} mean {mean_l:.7}; \
+             vs the F16 reference Peregrine min {min_r:.6} mean {mean_r:.7}, \
+             llama.cpp min {min_rl:.6} mean {mean_rl:.7}"
+        );
+        // Measured in the S4.14b PR (4 threads, this fixture): cross-engine min
+        // 0.99994 / mean 0.99998, and Peregrine is a little *closer* to the F16
+        // reference than llama.cpp at every width. The mean is the accuracy statement;
+        // the min bound is a gross-break check with room for a tier's few-ulp
+        // differences in the Q8_0 activation path.
+        assert!(
+            min_l >= 0.9995 && mean_l >= 0.9999,
+            "Q8_0 at {dims} d: cross-engine min {min_l:.6} mean {mean_l:.7}, \
+             bound 0.9995 / 0.9999"
+        );
+        assert!(
+            mean_r >= mean_rl - 1e-4,
+            "Q8_0 at {dims} d: mean to the F16 reference {mean_r:.7}, llama.cpp's {mean_rl:.7}"
+        );
+        assert!(
+            min_r >= min_rl - 1e-3,
+            "Q8_0 at {dims} d: min to the F16 reference {min_r:.6}, llama.cpp's {min_rl:.6}"
         );
     }
 }

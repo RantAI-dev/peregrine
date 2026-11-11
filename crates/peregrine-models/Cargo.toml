@@ -24,6 +24,7 @@ default = [
     "arch-qwen3moe",
     "arch-gpt-oss",
     "arch-phi3",
+    "arch-mistral3",
     "fmt-mxfp4",
     "fmt-kquant",
     "fmt-ternary",
@@ -43,6 +44,7 @@ arch-gemma-embedding = []
 arch-qwen3moe = []
 arch-gpt-oss = []
 arch-phi3 = []
+arch-mistral3 = []
 
 # Formats passed through to core and kernels
 fmt-mxfp4 = ["peregrine-core/fmt-mxfp4", "peregrine-kernels/fmt-mxfp4"]
@@ -94,7 +96,7 @@ required-features = ["littlebit", "arch-llama"]
 
 [[test]]
 name = "no_alloc"
-required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-phi3", "mtp", "fmt-ternary"]
+required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-phi3", "arch-mistral3", "mtp", "fmt-ternary"]
 
 [[test]]
 name = "runtime_parity"
@@ -106,7 +108,7 @@ required-features = ["arch-qwen", "fmt-kquant"]
 
 [[test]]
 name = "synthetic"
-required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-gemma3", "arch-gemma-embedding", "arch-gpt-oss", "arch-phi3", "mtp", "fmt-mxfp4", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
+required-features = ["arch-llama", "arch-qwen", "arch-qwen35", "arch-qwen3moe", "arch-gemma3", "arch-gemma-embedding", "arch-gpt-oss", "arch-phi3", "arch-mistral3", "mtp", "fmt-mxfp4", "fmt-kquant", "fmt-ternary", "fmt-legacy"]
 
 [lints]
 workspace = true
