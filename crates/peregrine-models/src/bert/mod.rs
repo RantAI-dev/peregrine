@@ -782,7 +782,7 @@ impl Architecture for Bert {
                 &spans,
                 None,
                 1.0,
-                &mut st.attn.bidir_scores,
+                &mut st.attn.bidir,
                 pool,
                 stats,
             );

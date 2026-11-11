@@ -285,6 +285,10 @@ and S4.9h.
 - Pooling is the text's own rows in position order (`embed::pool_rows_into`), then `finish`'s
   truncation and L2 normalisation.
 - The exact GELU and the defined LayerNorm above; no f16 lookup table.
+- Attention is the engine's shared bidirectional block (`blocks::bidir::attend_texts`, now the
+  S4.9g strip kernel), the way the float matmul chain is shared: the exact scalar reference
+  forward in the tests owns the graph around it and calls the block for the `n × n` attention, so
+  a change to that kernel moves both sides together.
 - Tests: a synthetic `bert` file in `tests/support/models.rs` (WordPiece and unigram variants,
   cls and mean pooling, F32 and Q8_0), the independent scalar reference in
   `tests/support/bert_ref.rs`, the invariance matrix, server/CLI tests, the no-allocation test

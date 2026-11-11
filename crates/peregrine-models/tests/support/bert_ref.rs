@@ -11,9 +11,11 @@
 //!
 //! The arithmetic the reference owns, and which it must get right on its own:
 //! the embedding sum (token + type row 0 + position), the bias adds after every
-//! projection, the residuals, the `1/√head_dim` scale applied to Q, and the
-//! attention itself (f32 dot in key order, f64 softmax denominator, f32 value
-//! mix — the order `blocks::bidir::attend_texts` defines).
+//! projection, the residuals and the `1/√head_dim` scale applied to Q. The
+//! `n × n` attention itself is the engine's block (`blocks::bidir::attend_texts`),
+//! called here for one text on one worker: since S4.9g it is a strip kernel whose
+//! arithmetic is pinned by that kernel's own cross-tier and cross-thread tests, and
+//! the block is shared the same way the float matmul chain is.
 
 use peregrine_core::embed::Pooling;
 use peregrine_core::gguf::{Format, Gguf};
@@ -184,40 +186,29 @@ pub fn hidden_rows(model: &Model, tokens: &[u32]) -> Vec<f32> {
                 v[r * kvd + d] += bv[d];
             }
         }
-        // Attention, the engine's per-row order.
-        let gqa = cfg.gqa();
+        // Attention: the engine's bidirectional block (S4.9g's strip kernel), one
+        // text, one worker. It is a *shared* kernel like the matmul chain: its
+        // arithmetic is pinned by S4.9g's own cross-tier and cross-thread tests, and
+        // this reference owns the graph around it.
+        let pool = peregrine_core::pool::Pool::new(1);
+        let mut stats = peregrine_core::model::StepStats::default();
+        let mut scratch = peregrine_core::blocks::attn::BidirScratch::default();
+        scratch.resize(n, hd, 1);
+        let span = [peregrine_core::blocks::bidir::TextSpan { row0: 0, len: n }];
         let mut attn = vec![0.0f32; n * qd];
-        for r in 0..n {
-            for h in 0..cfg.n_head {
-                let kh = h / gqa;
-                let mut max = f32::NEG_INFINITY;
-                for j in 0..n {
-                    let mut dot = 0.0f32;
-                    for d in 0..hd {
-                        dot += q[r * qd + h * hd + d] * k[j * kvd + kh * hd + d];
-                    }
-                    max = max.max(dot);
-                }
-                let mut l = 0.0f64;
-                let mut acc = vec![0.0f32; hd];
-                for j in 0..n {
-                    let mut dot = 0.0f32;
-                    for d in 0..hd {
-                        dot += q[r * qd + h * hd + d] * k[j * kvd + kh * hd + d];
-                    }
-                    let e = (dot - max).exp() as f64;
-                    l += e;
-                    let e = e as f32;
-                    for d in 0..hd {
-                        acc[d] += e * v[j * kvd + kh * hd + d];
-                    }
-                }
-                let inv = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
-                for d in 0..hd {
-                    attn[r * qd + h * hd + d] = acc[d] * inv;
-                }
-            }
-        }
+        peregrine_core::blocks::bidir::attend_texts(
+            cfg,
+            &q,
+            &k,
+            &v,
+            &mut attn,
+            &span,
+            None,
+            1.0,
+            &mut scratch,
+            &pool,
+            &mut stats,
+        );
         // attn_output (+ bias), residual, attn_output_norm.
         let mut o = vec![0.0f32; n * dm];
         for r in 0..n {
