@@ -235,6 +235,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The bert family's element-wise work is vectorised, with the definitions kept (S4.9h).**
+  `vmath::gelu_erf_rows` and `vmath::layer_norm_rows` gained AVX2 bodies beside the scalar twins
+  S4.6a defined, and the two are `to_bits` equal. The GELU runs sixteen elements per step, four
+  `f64` lanes per `erf`, with the definition's three Maclaurin polynomials as three Horner chains
+  selected by `|x|` (a block takes the shortest path all its lanes can take), the same scalar
+  `erfc_tail` for the rare `(3, 4.6)` lane, and NaN bits kept. LayerNorm runs eight rows per
+  step, one `f64` lane per row, so each row's sums stay in index order and the mean and scale
+  round once; the scale-and-shift is eight `f32` lanes along the row, unfused as the definition
+  says. The bit-identity is tested over a million random bit patterns, the range boundaries, ±0,
+  subnormals, infinities, NaN payloads and row widths 1-40; aarch64 keeps the scalar twins with a
+  `// S4.9h:` note. Separately, a model whose every matrix is F32/F16/BF16 no longer builds the
+  int8 activation layouts nothing reads (`ActLayout::quantize`; the dense and gemma-embedding
+  families set it too), so a float file's fill is only the f32 row copy; the norm or GELU that
+  produces a row fills the next consumer's activation in the same pool task, the attention
+  output's bias and residual are fused into its matmul-sized chunks, and the down projection's
+  bias and residual are one pass. On MiniLM-L6-v2 F16, one 420-token text, 4 threads, min of 12
+  warm passes (H0, shared, load 6.6-6.8): the element-wise work 39 → 10 ms (23 % → 10 % of the
+  pass), the pass 171 → 97 ms; interleaved old/new medians of five give 1.14-1.76× from 16 to
+  512 tokens, batch 1 and 32. Every vector of the three downloaded real files (MiniLM F16 and
+  Q8_0, bge-small Q8_0) is the base commit's bit for bit (five texts, `peregrine embed` compared
+  with `cmp`), so no golden changed and the 200-text accuracy gate still prints the reference
+  note's numbers. See `docs/design/s4.9-sota.md` §10.
 - **The encoder's attention is a fused, cache-blocked strip with a defined arithmetic (S4.9g).**
   A whole text's bidirectional attention was a scalar, strict-order dot product per (query row,
   key), parallel over rows only — 35 % of an EmbeddingGemma pass at 128 tokens and 60 % at 512, and

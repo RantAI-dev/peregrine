@@ -492,17 +492,24 @@ impl Architecture for Dense {
 
     fn act_layout(&self) -> ActLayout {
         let mut keep_f32 = false;
+        let mut quantize = false;
         self.linear_groups(&mut |lins| {
             for lin in lins {
-                if let Some(ti) = lin.dense() {
-                    if matches!(ti.kind, Format::F32 | Format::F16 | Format::BF16) {
-                        keep_f32 = true;
+                match lin.dense() {
+                    Some(ti) => {
+                        if matches!(ti.kind, Format::F32 | Format::F16 | Format::BF16) {
+                            keep_f32 = true;
+                        } else {
+                            quantize = true;
+                        }
                     }
+                    None => quantize = true,
                 }
             }
         });
         ActLayout {
             keep_f32,
+            quantize,
             ..ActLayout::default()
         }
     }
