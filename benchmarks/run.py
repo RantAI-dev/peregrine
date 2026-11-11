@@ -337,6 +337,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def pick_free_port(start: int, span: int = 100) -> int:
+    """Return the first port at or after ``start`` that can be bound on loopback.
+
+    Some engines (notably ik_llama.cpp) do not set SO_REUSEADDR, so reusing a
+    single fixed port across servers can fail while the previous server's
+    connections sit in TIME_WAIT. Binding a probe socket selects a port that is
+    free now; the probe never accepts a connection, so it leaves no TIME_WAIT.
+    """
+    import socket
+
+    for port in range(start, start + span):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError(f"no free port in {start}..{start + span - 1}")
+
+
 def calculate_stats(samples: List[float]) -> Dict[str, float]:
     """Calculate median and spread (half-range: (max - min) / 2) from samples."""
     if not samples:
@@ -502,6 +522,8 @@ def main():
                     "token_tolerance": args.token_tolerance,
                     "interleaved": True,
                     "llama_flash_attn": args.llama_fa,
+                    "port_base": args.port,
+                    "ports": "fresh free port per phase (pick_free_port)",
                 },
                 "results": {
                     str(ctx): {
@@ -520,7 +542,13 @@ def main():
         # Interleaved repeat rounds: ABAB...
         for round_idx in range(runs):
             print(f"\n--- Interleaved Run {round_idx + 1} of {runs} ---")
-            for eng in selected_engines:
+            for eng_idx, eng in enumerate(selected_engines):
+                # One port per engine. Reusing a single port across engines is
+                # fragile: a server without SO_REUSEADDR withholds the port
+                # from the next engine, and a lingering server would silently
+                # answer another engine's requests. The guard makes the latter
+                # impossible.
+                engine_port = args.port + eng_idx
                 print(f"[{eng.name}] Starting run {round_idx + 1}...")
 
                 if args.dry_run:
@@ -559,17 +587,22 @@ def main():
                         if users in selected_user_counts
                     ]
 
-                    for users, phase_key, phase_label in phases:
-                        print(f"[{eng.name}] Context {ctx} tokens, {phase_label} (slots={users}, ctx={server_ctx}):")
+                    for phase_idx, (users, phase_key, phase_label) in enumerate(phases):
+                        # A fresh, currently-free port per phase: no TIME_WAIT
+                        # collisions and no chance of talking to a stale server.
+                        phase_port = pick_free_port(
+                            engine_port + 10 * contexts.index(ctx) + phase_idx
+                        )
+                        print(f"[{eng.name}] Context {ctx} tokens, {phase_label} (slots={users}, ctx={server_ctx}, port={phase_port}):")
                         server_proc = eng.start_server(
                             model_path=str(model_path),
-                            port=args.port,
+                            port=phase_port,
                             threads=args.threads,
                             ctx=server_ctx,
                             slots=users,
                             extra_args=engine_extra_args.get(eng.name, []),
                         )
-                        server_url = f"http://127.0.0.1:{args.port}"
+                        server_url = f"http://127.0.0.1:{phase_port}"
 
                         try:
                             # Warm-up request after every server start
