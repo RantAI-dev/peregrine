@@ -28,6 +28,12 @@ All notable changes to this project are documented here. The format follows
   bit-identical for budgets 1, 16, 64, 256 and the default, at 1/2/4 threads, alone and in batches,
   in decision groups and beside chat slots; measured on bluefin (tables and raw JSON in
   `benchmarks/results/bluefin-embed-2026-11-11/`).
+
+- **A required hygiene job (`ci`)**: `scripts/hygiene.sh` fails a tracked credential file, a
+  credential-shaped string in a tracked text file, and (when `HYGIENE_BANNED_PATTERN` is set) a banned
+  name, on the tree and on every commit a pull request adds; `scripts/hygiene-selftest.sh` proves each
+  check and `ci-ok` now requires the job.
+
 - **Decision questions fork one evaluation of their shared state (S4.9j, part 1)**: a cache snapshot
   now carries a hybrid model's per-layer Gated DeltaNet state and convolution history
   (`KvSnapshot::rec`), restorable only at the snapshot's own length, and `KvCache::fork_from` copies
@@ -149,6 +155,52 @@ All notable changes to this project are documented here. The format follows
   file as llama.cpp reads them. `peregrine embed` prints one line of floats per text (or `--json`),
   reads stdin lines, and `peregrine inspect` reports the file's pooling type.
 - `peregrine support` lists embeddings in the support table.
+- **The float GEMM (roadmap S4.9f).** F32, F16 and BF16 matrices are packed at load into panels of
+  sixteen output rows (`TensorInfo::fp_off`, a store of its own built by reading the file, so the
+  matrix's mapped pages are never faulted in), and `MatPath::FloatPanels` multiplies them with a
+  broadcast-form FMA kernel: 6×16 on AVX2 and 2×6×16 on the AVX-512 tier's extra registers, with a
+  single-row GEMV for decode. Every output element is one sequential FMA chain over the input index,
+  so a row's bits do not depend on the tile, the tail, the row block, the thread split or the vector
+  width: AVX2, AVX-512 and the scalar `mul_add` reference agree bit for bit, and a float model gives
+  the same tokens on the AVX2 and AVX-512 tiers. Measured on the Ryzen AI 9 HX 370, one thread: 25-27
+  GMAC/s against the old float tile's 11-15 and the repacked Q8_0 tile's 29-36 (the FMA peak is 28).
+  On Qwen3-Embedding 0.6B f16 (12 threads): prefill 159 → 237 tok/s, embedding throughput 1.5× at
+  109 and 437 tokens and +55 % for 32-text batches; decode is unchanged. `PEREGRINE_FPACK=0` is the
+  A/B switch back to the old tile. The load-time pack costs about 2 s for the 1.2 GB f16 file and
+  +18 % resident memory until the store is cached (S4.9e); aarch64 keeps the old float path for now.
+  The rest of the gap to llama.cpp on an f16 file is the **pass size**, not the kernel: at the
+  128-row cap the two engines are within 2 % (290.1 against 289.6 tok/s on one 437-token text), and
+  llama.cpp's 512-row ubatch is worth 1.08-1.13× — which is S4.9b's token-budget pass, not a kernel
+  change. `/v1/embeddings` at 12 threads: f16 253.6 → 290.1 tok/s from chunk 16 to 128, Q8_0 flat
+  (330.7 → 334.7, it was never weight-bound).
+
+### Changed
+
+- **The encoder quantises each input once, and only the layouts its kernels read (S4.9a).**
+  A Gemma 3 encoder layer filled the int8 activation of every projection separately, serially,
+  while the matmuls ran in parallel: q/k/v read the same normed rows and gate/up read the same
+  rows, so five of the fills were the same bytes again, and the two post-norms (whose output only
+  a residual add reads) quantised for nothing. `linear_rows_shared` fills the group's activation
+  once and runs the projections as one fork-join, as the causal families already did; the post
+  norms use `norm_rows_f32`; the down projection reuses the activation `geglu_rows` produced. The
+  per-256 activation layout (`qk`/`dk`/`bsums`, a second quantisation of the whole row) is built
+  only when some matrix of the model reads it (`Format::reads_k_layout`), which a Q8_0/F16 model
+  such as EmbeddingGemma never does. Every vector is bit-identical: the encoder's three tier
+  goldens, the exact scalar reference forward and the batch-invariance tests are unchanged, and
+  the Q8_0 model's vectors hash the same as `main`'s on all four measured text shapes. Measured on
+  H0 (Xeon E5-2680 v4 VM, 8 vCPU, AVX2), EmbeddingGemma 300M Q8_0 through `/v1/embeddings`, median
+  of five before/after rounds at 4 threads: 16-token text 21.7 → 33.9 texts/s, 128-token 2.49 →
+  3.33, 512-token 0.37 → 0.46, a batch of 32×16 26.0 → 39.5, 32×128 2.06 → 3.49 (1.24-1.69×).
+- **The tokenizer finds special tokens with a first-byte index instead of testing every special
+  at every byte (S4.9c).** The SentencePiece and byte-level BPE paths ran `starts_with` for each
+  of a vocabulary's control/user-defined/unknown tokens at every position — 163 of them on
+  EmbeddingGemma, 87 µs per token. `SpecialIndex` keys them by first byte and tests a byte's
+  candidates in `specials` order (longest text first, then lowest id), which is exactly the order
+  the per-special scan took the first match in, so the ids do not change; the "next special"
+  search is one bitmap test per byte. 87.9 → 1.17 µs per token on a 1 MB text (75×) with that
+  vocabulary. A differential test keeps the old scan as its reference and compares 4000 random
+  strings built from the specials' texts, their prefixes and their overlaps on the BPE and
+  SentencePiece paths.
 
 ## [0.1.2] - 2026-11-10
 

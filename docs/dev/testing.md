@@ -6,6 +6,7 @@ cargo xclippy     # = clippy on every target, warnings are errors
 ```
 
 Tests run in release mode: kernels are tested as they ship, and debug-mode SIMD tests are slow.
+Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and strings (and banned names when `HYGIENE_BANNED_PATTERN` is set); `scripts/hygiene-selftest.sh` tests it.
 
 ## Three kinds of test
 

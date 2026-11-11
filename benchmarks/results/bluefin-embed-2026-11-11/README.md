@@ -6,6 +6,13 @@ Competitor: llama.cpp v0.9.0 (`cd959ba`, `/var/tmp/llama.cpp/build/bin/llama-ser
 Models: `Qwen3-Embedding-0.6B` Q8_0 (causal, 0.6 GB) and `EmbeddingGemma-300M` Q8_0
 (bidirectional encoder, 0.3 GB), under `~/models/embed/`.
 
+The timings compare **main at 1213f5d** — the commit this branch was cut from — with this branch at
+`38dd0ea` (its engine change, before later `main` commits were merged) and with llama.cpp. `main`
+has since gained S4.9a/c/f; those are merged into the branch but their gains are not claimed here
+and are not in these tables, and the merge was re-validated by the test suite rather than re-timed
+(the host was busy with another build by then). The Q8_0 path these tables measure is untouched by
+S4.9f.
+
 Method: `benchmarks/embed.py` (three interleaved rounds, median shown), one request per
 timed wave, 2 waves per cell, 4 threads, `--budget 1.0`. `texts/s` and `tokens/s` (engine
 usage), same 128 calibrated texts per length for every engine. `mixed_b32` is 32 texts whose

@@ -237,6 +237,25 @@ jobs:
       - run: rm rust-toolchain.toml
       - run: cargo +1.96 check --workspace --all-targets --locked
 
+  # Credential files, credential-shaped strings and banned names in tracked text files. Full history so
+  # a pull request's commit range is checked too: a credential path a later commit removed still fails.
+  hygiene:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: check the tree and the PR's commit range
+        env:
+          HYGIENE_BANNED_PATTERN: ${{ secrets.HYGIENE_BANNED_PATTERN }}
+        run: |
+          scripts/hygiene.sh
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts/hygiene.sh "${{ github.event.pull_request.base.sha }}..${{ github.sha }}"
+          fi
+      - name: self-test
+        run: scripts/hygiene-selftest.sh
+
   # Licenses, advisories, sources and banned crates (deny.toml).
   supply-chain:
     runs-on: ubuntu-24.04
@@ -261,7 +280,7 @@ jobs:
   # One job the branch protection rule can require, whatever the matrix becomes.
   ci-ok:
     if: always()
-    needs: [lint, test, tiers, msrv, supply-chain, compat, docker]
+    needs: [lint, test, tiers, msrv, supply-chain, compat, docker, hygiene]
     runs-on: ubuntu-24.04
     steps:
       - run: '[ "${{ contains(needs.*.result, ''failure'') || contains(needs.*.result, ''cancelled'') }}" = "false" ]'

@@ -159,10 +159,11 @@ pub fn describe_runtime() -> String {
         |n| n.to_string(),
     );
     format!(
-        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nprefill chunk {chunk} (for {threads} workers)\npass rows     {pass}\noptions:\n{}",
+        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\nprefill chunk {chunk} (for {threads} workers)\npass rows     {pass}\noptions:\n{}",
         peregrine_kernels::cpu::tier_name(),
         peregrine_core::simd_name(),
         o.kq_repack_note(),
+        o.fpack_note(),
         o.describe()
             .lines()
             .map(|l| format!("  {l}\n"))

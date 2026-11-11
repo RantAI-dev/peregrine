@@ -29,6 +29,17 @@
 //! The tests at the bottom of this file assert `to_bits()` equality, not a tolerance. That is what
 //! keeps a row's result independent of batch width, chunk, pass width, thread count and
 //! speculation (`docs/design/s2.8-neon.md` §5).
+//!
+//! # S4.9f: the packed float GEMM goes here
+//!
+//! The packed float GEMM (S4.9f, `fpack.rs`) has no NEON kernel yet: aarch64 keeps the pre-S4.9f
+//! float tile (`simd.rs`'s shape, in `quant.rs`'s scalar reference and the NEON helpers below), and
+//! `MatKernels::fp_panels` is false here, so the load-time pack is not even built. The kernel to add
+//! is the same shape as `fpack`'s: 16-output-row panels, accumulators in `float32x4_t` lanes (four
+//! panels = 16 accumulators, `vmlaq_laneq_f32` with the activation lane), f16 widened by `vcvt_f32_f16`
+//! and bf16 by shifting into the high half — both exact — and the same sequential `vmlaq` chain per
+//! output, so it would be bit-identical to the scalar reference and to the x86 tiers. No ARM host was
+//! available for this step; the scalar chain already compiles and runs anywhere (`fpack::gemm_scalar`).
 
 #![cfg(target_arch = "aarch64")]
 #![cfg_attr(

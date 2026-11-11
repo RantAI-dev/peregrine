@@ -1,6 +1,6 @@
 //! Root-mean-square normalisation blocks.
 
-use crate::blocks::par::{for_row_chunks_2, Sched};
+use crate::blocks::par::{for_row_chunks, for_row_chunks_2, Sched};
 use crate::blocks::ROW_PARALLEL;
 use crate::gguf::{f16, Format, TensorInfo};
 use crate::model::{StepStats, Weights};
@@ -66,6 +66,47 @@ pub fn rmsnorm(
 ) {
     rmsnorm_into(w, weight, eps, x, out);
     st.bytes_weights += weight.bytes();
+}
+
+/// For every batch row: `xb[b] = rmsnorm(x[b])`, without quantising the result.
+///
+/// Two norms of a Gemma 3 block (the post-attention and post-FFN ones) feed only a
+/// residual add: no matmul reads their output, so the quantisation [`norm_rows`]
+/// does would be thrown away a few instructions later (S4.9a).
+#[allow(clippy::too_many_arguments)]
+pub fn norm_rows_f32(
+    w: &Weights,
+    weight: &TensorInfo,
+    d_model: usize,
+    eps: f32,
+    x: &[f32],
+    xb: &mut [f32],
+    nb: usize,
+    pool: &Pool,
+    stats: &mut StepStats,
+) {
+    let d = d_model;
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    for_row_chunks(
+        pool,
+        parallel,
+        xb,
+        d,
+        nb,
+        Sched::Static,
+        |_wk, rows, xb_chunk| {
+            for (i, b) in rows.enumerate() {
+                let out = &mut xb_chunk[i * d..(i + 1) * d];
+                crate::prof::time(crate::prof::Slot::Norm, || {
+                    rmsnorm_into(w, weight, eps, &x[b * d..(b + 1) * d], out)
+                });
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
+    stats.bytes_weights += weight.bytes();
 }
 
 /// For every batch row: `xb[b] = rmsnorm(x[b])`, then quantise it into `acts[b]`.

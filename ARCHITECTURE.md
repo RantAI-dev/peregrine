@@ -69,9 +69,10 @@ allocate no cache.
 | `cpu.rs` | Kernel tiers and `cpu_has!`: feature detection under the `PEREGRINE_ISA` cap. |
 | `delta.rs` | Gated DeltaNet linear-attention recurrent head: safe dispatch, scalar reference, AVX2 and AVX-512 kernels. |
 | `simd.rs`, `quant.rs`, `vmath.rs` | x86 kernels for k-quants and Q8_0, activation quantization, vector math. Each has a scalar twin it is tested against. |
+| `fpack.rs` | The float GEMM (S4.9f): packing F32/F16/BF16 weights into 16-output-row panels, and the scalar, AVX2 (6×16) and AVX-512 (2×6×16) kernels plus the single-row GEMV. Every output is one sequential FMA chain, so the tier, tile and batch cannot change a bit. |
 | `tern.rs` | Ternary kernels for PQ2_0 / PTQ1_0 (AVX2, AVX-512 VNNI/GFNI/VBMI tiers). |
 | `hadamard.rs` | Fast Walsh-Hadamard transform for rotated weights and the rotated int8 KV cache. |
-| `options.rs` | The six switches kernel code reads, set from `EngineOptions`. |
+| `options.rs` | The kernel switches (`PEREGRINE_ISA`, `ZMM`, `NO_WIDE`, `PF`, `TQ_SPAN`, `EXACT`, `KREPACK`, `FPACK`), set from `EngineOptions`. |
 
 `peregrine-core` re-exports these modules under their old paths (`peregrine_core::simd`, ...).
 
@@ -84,7 +85,8 @@ allocate no cache.
 | `systemone.rs`, `json.rs` | System One prompts: one renderer per decision type, written from the type's `systemone` template and checked byte for byte against prompts llama.cpp rendered (`openjev` so far); and the order-keeping JSON value whose text is the one llama.cpp's Jinja `tojson` writes. |
 | `decision.rs` | The decision front end and answer math: `DecisionInfo` reads a file's decision metadata; `Decider` refuses a type or `systemone` template this build does not render, checks the option letters are single tokens, and turns a request into prompt questions (llama.cpp's `parse_questions` and its messages); `format_answer` turns one score vector per question into a choice, score or noul answer. |
 | `arch.rs` | The `Architecture`, `MtpHead` and `Family` traits (ADR 0006). |
-| `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, tile store for repacked weights, LittleBit accounting, and parameterized loading via family table. |
+| `model.rs` | `Model`: facade delegating to the `Architecture` trait, `Model::new_state`, the tile/k-quant/float stores for repacked and packed weights, LittleBit accounting, and parameterized loading via family table. |
+| `kq.rs`, `fpack.rs` | The load-time packs: k-quants into eight-row tiles (S3.4) and F32/F16/BF16 into 16-row panels (S4.9f), both filled by reading the file so the mapped pages stay cold. |
 | `state.rs` | `State`, `Caches`, and `StepStats`: reusable runtime scratch, KV caches, and step telemetry accounting. |
 | `model/mtp.rs` | Re-exports for the multi-token-prediction head traits. |
 | `blocks/` | Pieces shared by the model families (ADR 0006), as free functions over slices: `linear` (matmul groups, LittleBit), `norm`, `ffn` (SwiGLU, GeGLU, OpenAI's `swiglu_oai`), `moe` (the router, the expert feed-forward, the expert biases), `rope` (the plain and the YaRN tables), `attn` (attention scratch, row prep, KV write, attention, the attention sinks), `bidir` (the encoder's per-text `n × n` attention and its symmetric sliding window), `embed`; `rotate`, the block Hadamard rotation (the signs and the transform, in the two orders the hybrid needs); `recurrent`, the Gated DeltaNet steps; `par`, the `Disjoint<'a, T>` checked helper for disjoint worker writes, bounds-checked with debug overlap detection, plus partition drivers. |

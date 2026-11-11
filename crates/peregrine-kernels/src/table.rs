@@ -26,6 +26,8 @@ pub enum MatPath {
     PerRow,
     /// Repacked eight-row k-quant, Q5_0 or Q8_0 tiles (AVX2 and up).
     KqTiles,
+    /// Float weights packed into 16-output-row panels (S4.9f; x86-64).
+    FloatPanels,
 }
 
 /// The matrix kernels this process runs.
@@ -37,6 +39,7 @@ pub struct MatKernels {
     kq_tiles: bool,
     kq_i8mm: bool,
     kq_zmm: bool,
+    fp_panels: bool,
     exact: bool,
 }
 
@@ -87,6 +90,12 @@ impl MatKernels {
         let kq_zmm = kq_tiles && crate::kqsimd::have_zmm512();
         #[cfg(not(target_arch = "x86_64"))]
         let kq_zmm = false;
+        // The packed float GEMM (S4.9f) runs on x86-64 — the scalar tier included,
+        // on the scalar chain — and its load-time store is built only where it does.
+        #[cfg(target_arch = "x86_64")]
+        let fp_panels = crate::fpack::have_packed() && crate::options::get().fpack;
+        #[cfg(not(target_arch = "x86_64"))]
+        let fp_panels = false;
         MatKernels {
             tiles,
             pq2_rows,
@@ -94,6 +103,7 @@ impl MatKernels {
             kq_tiles,
             kq_i8mm,
             kq_zmm,
+            fp_panels,
             exact: crate::quant::exact_ternary(),
         }
     }
@@ -116,6 +126,17 @@ impl MatKernels {
     /// Whether the repacked k-quant kernels may run.
     pub fn kq_tiles(&self) -> bool {
         self.kq_tiles
+    }
+
+    /// Whether the packed float GEMM may run, and the load-time float store is worth building.
+    pub fn fp_panels(&self) -> bool {
+        self.fp_panels
+    }
+
+    /// Whether `fmt` has a packed float kernel on this CPU.
+    #[inline]
+    pub fn fp_panels_for(&self, fmt: Format) -> bool {
+        self.fp_panels && matches!(fmt, Format::F32 | Format::F16 | Format::BF16)
     }
 
     /// Whether `fmt` has a repacked tile kernel on this CPU.
@@ -153,12 +174,15 @@ impl MatKernels {
 
     /// The path for a matrix in `fmt`, repacked into tiles or not, against activations in the PTQ1 layout or not.
     ///
-    /// `kq` says whether the matrix carries repacked k-quant tiles (`TensorInfo::kq_off`).
+    /// `kq` says whether the matrix carries repacked k-quant tiles (`TensorInfo::kq_off`);
+    /// `fp` whether it carries packed float panels (`TensorInfo::fp_off`).
     #[inline]
-    pub fn path(&self, fmt: Format, tiled: bool, kq: bool, act_ptq1: bool) -> MatPath {
+    pub fn path(&self, fmt: Format, tiled: bool, kq: bool, fp: bool, act_ptq1: bool) -> MatPath {
         if self.exact {
             // The f32 reference lives in `dot_batch`.
             MatPath::PerRow
+        } else if fp && self.fp_panels_for(fmt) {
+            MatPath::FloatPanels
         } else if tiled && self.tiles {
             MatPath::Tiles
         } else if fmt == Format::PTQ1_0 && act_ptq1 && self.ptq1_rows {
@@ -231,6 +255,31 @@ impl MatKernels {
             let _ = (tile, n_sb);
             unreachable!("no repacked k-quant kernel on this architecture")
         }
+    }
+
+    /// A run of packed float panels against a batch of activation rows (S4.9f).
+    ///
+    /// `packed` holds `panels` panels of `n_in` weights; `out[b · panels · 16 + i]`
+    /// receives output row `i` of the run for activation row `b`. Every element is
+    /// one sequential FMA chain over `k`, so the bits do not depend on the batch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fp_panels_gemm(
+        &self,
+        fmt: Format,
+        packed: &[u8],
+        n_in: usize,
+        panels: usize,
+        acts: &[QuantAct],
+        bias: Option<&[f32]>,
+        out: &mut [f32],
+    ) {
+        assert!(
+            self.fp_panels_for(fmt),
+            "the packed float kernel used where it cannot run"
+        );
+        assert!(packed.len() >= panels * crate::fpack::panel_bytes(fmt, n_in));
+        assert!(out.len() >= panels * crate::fpack::PANEL * acts.len());
+        crate::fpack::gemm(fmt, packed, n_in, panels, acts, bias, out);
     }
 
     /// Eight rows of a repacked Q4_K tile against one to three activations, in
@@ -837,10 +886,11 @@ mod tests {
             kq_tiles: true,
             kq_i8mm: true,
             kq_zmm: true,
+            fp_panels: true,
             exact: true,
         };
         for f in [Format::PQ2_0, Format::PTQ1_0, Format::Q4_K, Format::Q5_0] {
-            assert_eq!(t.path(f, true, true, true), MatPath::PerRow);
+            assert_eq!(t.path(f, true, true, true, false), MatPath::PerRow);
         }
     }
 
@@ -853,37 +903,80 @@ mod tests {
             kq_tiles: true,
             kq_i8mm: true,
             kq_zmm: true,
+            fp_panels: true,
             exact: false,
         };
-        assert_eq!(all.path(Format::PQ2_0, true, false, false), MatPath::Tiles);
         assert_eq!(
-            all.path(Format::PQ2_0, false, false, false),
+            all.path(Format::PQ2_0, true, false, false, false),
+            MatPath::Tiles
+        );
+        assert_eq!(
+            all.path(Format::PQ2_0, false, false, false, false),
             MatPath::RowsPq2
         );
         assert_eq!(
-            all.path(Format::PTQ1_0, false, false, true),
+            all.path(Format::PTQ1_0, false, false, false, true),
             MatPath::RowsPtq1
         );
         // PTQ1_0 against int8 activations has no block kernel.
         assert_eq!(
-            all.path(Format::PTQ1_0, false, false, false),
+            all.path(Format::PTQ1_0, false, false, false, false),
             MatPath::PerRow
         );
+        // The packed float panels (S4.9f): a float matrix with a packed store takes
+        // them, and one without (the pack off, a format that is not float) does not.
+        assert_eq!(
+            all.path(Format::F16, false, false, true, false),
+            MatPath::FloatPanels
+        );
+        for fmt in [Format::F32, Format::F16, Format::BF16] {
+            assert_eq!(
+                all.path(fmt, false, false, true, false),
+                MatPath::FloatPanels
+            );
+            assert_eq!(all.path(fmt, false, false, false, false), MatPath::PerRow);
+        }
+        assert!(all.fp_panels_for(Format::F32));
+        assert!(!all.fp_panels_for(Format::Q8_0));
         // A repacked Q4_K matrix goes to the repacked kernel; one that is not
         // repacked goes the old way.
-        assert_eq!(all.path(Format::Q4_K, false, true, false), MatPath::KqTiles);
-        assert_eq!(all.path(Format::Q4_K, false, false, false), MatPath::PerRow);
+        assert_eq!(
+            all.path(Format::Q4_K, false, true, false, false),
+            MatPath::KqTiles
+        );
+        assert_eq!(
+            all.path(Format::Q4_K, false, false, false, false),
+            MatPath::PerRow
+        );
         // Q5_0 and Q6_K have their own repacked tiles on aarch64 too (S2.8 F1/F3).
-        assert_eq!(all.path(Format::Q5_0, false, true, false), MatPath::KqTiles);
-        assert_eq!(all.path(Format::Q5_0, false, false, false), MatPath::PerRow);
+        assert_eq!(
+            all.path(Format::Q5_0, false, true, false, false),
+            MatPath::KqTiles
+        );
+        assert_eq!(
+            all.path(Format::Q5_0, false, false, false, false),
+            MatPath::PerRow
+        );
         // Q8_0's repacked tile: the tied output head and the other Q8_0 matrices.
-        assert_eq!(all.path(Format::Q8_0, false, true, false), MatPath::KqTiles);
-        assert_eq!(all.path(Format::Q8_0, false, false, false), MatPath::PerRow);
+        assert_eq!(
+            all.path(Format::Q8_0, false, true, false, false),
+            MatPath::KqTiles
+        );
+        assert_eq!(
+            all.path(Format::Q8_0, false, false, false, false),
+            MatPath::PerRow
+        );
         // Q6_K's tile is NEON-only for now: x86 keeps the per-row kernel (S3.4 PR 4).
         #[cfg(not(target_arch = "aarch64"))]
-        assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::PerRow);
+        assert_eq!(
+            all.path(Format::Q6_K, false, true, false, false),
+            MatPath::PerRow
+        );
         #[cfg(target_arch = "aarch64")]
-        assert_eq!(all.path(Format::Q6_K, false, true, false), MatPath::KqTiles);
+        assert_eq!(
+            all.path(Format::Q6_K, false, true, false, false),
+            MatPath::KqTiles
+        );
         let avx2 = MatKernels {
             tiles: false,
             pq2_rows: true,
@@ -891,15 +984,16 @@ mod tests {
             kq_tiles: true,
             kq_i8mm: false,
             kq_zmm: false,
+            fp_panels: true,
             exact: false,
         };
         // A tiled matrix on a CPU without the tile kernel cannot happen (no repack), but stays correct.
         assert_eq!(
-            avx2.path(Format::PQ2_0, true, false, false),
+            avx2.path(Format::PQ2_0, true, false, false, false),
             MatPath::RowsPq2
         );
         assert_eq!(
-            avx2.path(Format::PTQ1_0, false, false, true),
+            avx2.path(Format::PTQ1_0, false, false, false, true),
             MatPath::PerRow
         );
         let scalar = MatKernels {
@@ -909,15 +1003,22 @@ mod tests {
             kq_tiles: false,
             kq_i8mm: false,
             kq_zmm: false,
+            fp_panels: false,
             exact: false,
         };
         assert_eq!(
-            scalar.path(Format::PQ2_0, false, false, false),
+            scalar.path(Format::PQ2_0, false, false, false, false),
             MatPath::PerRow
         );
         // Without the repacked kernel, a repacked matrix still goes the old way.
         assert_eq!(
-            scalar.path(Format::Q4_K, false, true, false),
+            scalar.path(Format::Q4_K, false, true, false, false),
+            MatPath::PerRow
+        );
+        // A table without the float pack keeps the row kernel even for a matrix
+        // whose packed panels are in the store.
+        assert_eq!(
+            scalar.path(Format::F16, false, false, true, false),
             MatPath::PerRow
         );
     }

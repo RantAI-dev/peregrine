@@ -49,6 +49,9 @@ pub struct TensorInfo {
     /// where this matrix sits in the model's repacked k-quant store (Q4_K and Q6_K in eight-row
     /// tiles), if it was repacked at load; the bytes are the same, reordered (`kq.rs`).
     pub kq_off: Option<usize>,
+    /// where this matrix sits in the model's packed float store (F32, F16 and BF16 in 16-row
+    /// panels), if it was packed at load; the bytes are the same, reordered (`fpack.rs`).
+    pub fp_off: Option<usize>,
 }
 
 impl TensorInfo {
@@ -106,6 +109,14 @@ impl TensorInfo {
             kind: self.kind,
             offset,
             tile_off: None,
+            fp_off: self.fp_off.and_then(|off| {
+                // A slice of a packed matrix is packed too, when it starts and ends
+                // on a whole panel; every other slice keeps the row path.
+                if start % 16 != 0 || n % 16 != 0 {
+                    return None;
+                }
+                Some(off + (start / 16) * peregrine_kernels::fpack::panel_bytes(self.kind, cols))
+            }),
             kq_off: self.kq_off.and_then(|off| {
                 // A slice of a repacked matrix is repacked too, when it starts and
                 // ends on a row the tiles hold whole; the rows in between are the
@@ -306,6 +317,7 @@ impl Gguf {
                 offset,
                 tile_off: None,
                 kq_off: None,
+                fp_off: None,
             };
             if !kind.is_supported() {
                 let feat = kind.required_feature().unwrap_or("unknown");
@@ -758,6 +770,7 @@ mod tests {
             offset: 1000,
             tile_off: Some(42),
             kq_off: None,
+            fp_off: None,
         };
         let q = t_f16.rows(0, 32).expect("q slice");
         assert_eq!(q.name, "attn_qkv[0..32]");
@@ -788,6 +801,7 @@ mod tests {
             offset: 2048,
             tile_off: None,
             kq_off: None,
+            fp_off: None,
         };
         let gate = t_q8.rows(0, 10).expect("gate");
         assert_eq!(gate.name, "ffn_up[0..10]");
@@ -807,6 +821,7 @@ mod tests {
             offset: 0,
             tile_off: None,
             kq_off: None,
+            fp_off: None,
         };
         assert!(t_1d.rows(0, 10).is_err());
 
@@ -817,6 +832,7 @@ mod tests {
             offset: 0,
             tile_off: None,
             kq_off: None,
+            fp_off: None,
         };
         assert!(t_3d.rows(0, 10).is_err());
 
@@ -833,6 +849,7 @@ mod tests {
             offset: 0,
             tile_off: None,
             kq_off: None,
+            fp_off: None,
         };
         assert!(t_unaligned.rows(0, 5).is_err());
     }

@@ -12,6 +12,10 @@ use std::time::Instant;
 /// The rows one repacked k-quant tile holds.
 const KQ_TILE_ROWS: usize = 8;
 
+/// The output panels one unit of packed-float work covers (S4.9f). Two are what
+/// the AVX-512 tile multiplies at once; on AVX2 the kernel runs them in turn.
+const FP_UNIT_PANELS: usize = 2;
+
 /// Largest batch one matmul call accepts. A stack array of this many scratch floats
 /// holds one row's results; `PEREGRINE_PREFILL_CHUNK` and `draft_len + 1` are both far below it.
 pub const MAX_BATCH: usize = 128;
@@ -51,11 +55,12 @@ fn act_bytes(a: &QuantAct) -> usize {
     a.q.len()
         + a.qk.len()
         + a.tq.len()
-        + 4 * (a.d.len() + a.dk.len() + a.td.len())
+        + 4 * (a.d.len() + a.dk.len() + a.td.len() + a.xf.len())
         + 2 * (a.sums.len() + a.bsums.len() + a.tls.len())
 }
 
 /// One matrix of a fused group, dense or LittleBit. `linear_group` dispatches.
+#[derive(Clone, Copy)]
 pub struct LinJob<'a> {
     pub lin: &'a Linear,
     pub out: OutPtr<'a>,
@@ -134,6 +139,7 @@ fn matmul_block(
             j.w.kind,
             j.w.tile_off.is_some(),
             j.w.kq_off.is_some(),
+            j.w.fp_off.is_some(),
             act_ptq1,
         );
     }
@@ -310,6 +316,40 @@ fn matmul_block(
                         }
                     }
                 }
+                MatPath::FloatPanels => {
+                    // S4.9f: whole panels of the packed float store. A range that
+                    // starts or ends inside a panel computes the panel and keeps
+                    // the rows it asked for; a row's bits do not depend on that.
+                    let off = j.w.fp_off.expect("a packed float path has a store offset");
+                    let pb = peregrine_kernels::fpack::panel_bytes(j.w.kind, n);
+                    let store = w.fp();
+                    let mut blk = [0.0f32; 16 * MAX_BATCH];
+                    let first = r / 16;
+                    let last = rz.div_ceil(16);
+                    for p in first..last {
+                        let at = off + p * pb;
+                        mk.fp_panels_gemm(
+                            j.w.kind,
+                            &store[at..at + pb],
+                            n,
+                            1,
+                            acts,
+                            None,
+                            &mut blk[..16 * nb],
+                        );
+                        for i in 0..16 {
+                            let row = p * 16 + i;
+                            if row < r || row >= rz {
+                                continue;
+                            }
+                            for b in 0..nb {
+                                // SAFETY: the row belongs to this worker (a `share`
+                                // range, or a chunk claimed from the counter).
+                                unsafe { j.out.set((b0 + b) * rows + row, blk[b * 16 + i]) };
+                            }
+                        }
+                    }
+                }
                 MatPath::PerRow => {
                     let bytes = w.bytes(j.w);
                     let mut r = r;
@@ -356,6 +396,14 @@ fn matmul_block(
             off += rows;
         }
     };
+    // S4.9f: a group that is entirely packed float panels is worked in (panel,
+    // activation-row block) units — the units the kernel itself would have used, so
+    // distributing them changes neither the work nor a bit of the result. Every
+    // other group (and a mixed one) keeps the row partition above.
+    if paths.iter().all(|&p| p == MatPath::FloatPanels) {
+        fp_group(w, jobs, acts, nb, b0, pool, st);
+        return;
+    }
     // on a CPU with fast and slow cores (Zen 5 + Zen 5c) equal shares make every matmul wait for the
     // slowest core. Workers instead claim chunks of rows from a counter, so a fast core takes more of them.
     // Which worker computes a row never changes the row's value, so the output is identical either way.
@@ -401,9 +449,145 @@ fn matmul_block(
         let reads = match path {
             MatPath::KqTiles => rows.div_ceil(KQ_TILE_ROWS),
             MatPath::Tiles => rows.div_ceil(16),
+            // One pass over the activation per 16-row panel and L2-sized block.
+            MatPath::FloatPanels => {
+                rows.div_ceil(16) * nb.div_ceil(peregrine_kernels::fpack::row_block(n))
+            }
             _ => rows,
         };
         st.bytes_acts += (reads * nb * per_row) as u64;
+    }
+    st.barriers += 1;
+}
+
+/// The activation rows one packed-float unit covers.
+///
+/// At most [`peregrine_kernels::fpack::row_block`] (half of L2), and few enough rows
+/// that a matrix with too few panels still fills the pool: a group of one panel pair
+/// (a router, the MTP head's slice) would otherwise be one unit, one thread. The
+/// block only changes how often a panel is read, never a result.
+fn fp_row_block(n_in: usize, nb: usize, per: usize, width: usize) -> usize {
+    let want = (width / per.max(1)).max(1);
+    nb.div_ceil(want)
+        .min(peregrine_kernels::fpack::row_block(n_in))
+        .max(1)
+}
+
+/// The packed float panels of a group, one work unit at a time (S4.9f).
+///
+/// A unit is [`FP_UNIT_PANELS`] panels against one [`row_block`](peregrine_kernels::fpack::row_block)
+/// of activation rows; the units of every job are concatenated and partitioned
+/// exactly as `matmul_group`'s row space is, so nothing about who computed a unit
+/// can reach the result. Threading: with few activation rows there is one block and
+/// the units are panels (a weight stream per worker); with many there are several
+/// blocks and the batch is split too, which is the same work the kernel would do
+/// serially and the same total weight traffic.
+fn fp_group(
+    w: &Weights,
+    jobs: &[MatJob],
+    acts: &[QuantAct],
+    nb: usize,
+    b_off: usize,
+    pool: &Pool,
+    st: &mut StepStats,
+) {
+    let store = w.fp();
+    // Units per job, the running base of each job's units, and the block size each
+    // job's units were laid out with (the accounting below reads the same numbers).
+    let mut bases = [0usize; 4];
+    let mut per_of = [0usize; 4];
+    let mut bs_of = [0usize; 4];
+    let mut total = 0usize;
+    for (ji, j) in jobs.iter().enumerate() {
+        bases[ji] = total;
+        let n = j.w.dims[0] as usize;
+        let panels = j.rows().div_ceil(16);
+        let per = panels.div_ceil(FP_UNIT_PANELS).max(1);
+        let bs = fp_row_block(n, nb, per, pool.width());
+        per_of[ji] = per;
+        bs_of[ji] = bs;
+        total += per * nb.div_ceil(bs);
+    }
+    let unit = |u: usize| {
+        // The job whose units hold `u`.
+        let ji = bases[..jobs.len()]
+            .iter()
+            .rposition(|&b| b <= u)
+            .expect("a unit belongs to a job");
+        let j = &jobs[ji];
+        let n = j.w.dims[0] as usize;
+        let rows = j.rows();
+        let panels = rows.div_ceil(16);
+        let bs = bs_of[ji];
+        let per = per_of[ji];
+        let local = u - bases[ji];
+        let first_panel = (local % per) * FP_UNIT_PANELS;
+        let b0 = (local / per) * bs;
+        let pn = FP_UNIT_PANELS.min(panels - first_panel);
+        let bn = bs.min(nb - b0);
+        let pb = peregrine_kernels::fpack::panel_bytes(j.w.kind, n);
+        let off = j.w.fp_off.expect("a packed float path has a store offset") + first_panel * pb;
+        let at = off + pn * pb;
+        let tf = crate::prof::detail().then(Instant::now);
+        let mut blk = [0.0f32; FP_UNIT_PANELS * 16 * MAX_BATCH];
+        let out = &mut blk[..pn * 16 * bn];
+        // SAFETY: `out` holds one unit; the store holds the matrix's panels.
+        MatKernels::get().fp_panels_gemm(
+            j.w.kind,
+            &store[off..at],
+            n,
+            pn,
+            &acts[b0..b0 + bn],
+            None,
+            out,
+        );
+        for i in 0..pn * 16 {
+            let row = first_panel * 16 + i;
+            if row >= rows {
+                break;
+            }
+            for b in 0..bn {
+                // SAFETY: unit `u` is computed by exactly one worker, so every
+                // (b, row) it writes is written once.
+                unsafe {
+                    j.out
+                        .set((b_off + b0 + b) * rows + row, out[b * pn * 16 + i])
+                };
+            }
+        }
+        if let Some(t) = tf {
+            crate::prof::add_shared(
+                crate::prof::format_slot(j.w.kind),
+                t.elapsed().as_nanos() as u64,
+            );
+        }
+    };
+    if dynamic_rows() && pool.width() > 1 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        pool.run(|_wk, _nw| loop {
+            let u = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if u >= total {
+                break;
+            }
+            unit(u);
+        });
+    } else {
+        pool.run(|wk, nw| {
+            let (lo, hi) = share(total, wk, nw);
+            for u in lo..hi {
+                unit(u);
+            }
+        });
+    }
+    // The same accounting `matmul_group` does, for this block: the multiply count
+    // and the activation's traffic (one pass per 16-row panel and L2-sized block).
+    // The weight bytes are counted once per matrix by `matmul_group`.
+    for (ji, j) in jobs.iter().enumerate() {
+        let n = j.w.dims[0] as usize;
+        let rows = j.rows();
+        st.macs += (rows * n * nb) as u64;
+        let blocks = nb.div_ceil(bs_of[ji].max(1));
+        st.bytes_acts += (rows.div_ceil(16) * blocks * nb * act_bytes(&acts[0])) as u64;
     }
     st.barriers += 1;
 }
