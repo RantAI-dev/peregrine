@@ -1,0 +1,411 @@
+{
+ "rows": [
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "chunk16",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "16"
+   },
+   "prefill_tok_s": 94.01427899850005,
+   "prefill_s": 5.445981242999999,
+   "prof": "",
+   "wall_s": 5.971,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "chunk32",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "32"
+   },
+   "prefill_tok_s": 94.31022675620649,
+   "prefill_s": 5.428891623000001,
+   "prof": "",
+   "wall_s": 5.998,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "chunk64",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 93.17998787173646,
+   "prefill_s": 5.494742076,
+   "prof": "",
+   "wall_s": 4.362,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "chunk128",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "128"
+   },
+   "prefill_tok_s": 90.51847592881603,
+   "prefill_s": 5.6563038070000005,
+   "prof": "",
+   "wall_s": 6.214,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "chunk16",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "16"
+   },
+   "prefill_tok_s": 94.0427304588317,
+   "prefill_s": 5.444333629,
+   "prof": "",
+   "wall_s": 5.963,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "chunk32",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "32"
+   },
+   "prefill_tok_s": 93.84227361730613,
+   "prefill_s": 5.455963291,
+   "prof": "",
+   "wall_s": 6.011,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "chunk64",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 90.28976977970933,
+   "prefill_s": 5.67063136,
+   "prof": "",
+   "wall_s": 6.227,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "chunk128",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "128"
+   },
+   "prefill_tok_s": 89.31488500936901,
+   "prefill_s": 5.732527114,
+   "prof": "",
+   "wall_s": 6.318,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "chunk16",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "16"
+   },
+   "prefill_tok_s": 92.50506521195794,
+   "prefill_s": 5.534832053,
+   "prof": "",
+   "wall_s": 4.483,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "chunk32",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "32"
+   },
+   "prefill_tok_s": 95.51787070595503,
+   "prefill_s": 5.360253492,
+   "prof": "",
+   "wall_s": 5.919,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "chunk64",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 89.86900364392164,
+   "prefill_s": 5.697181222,
+   "prof": "",
+   "wall_s": 6.236,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "chunk128",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "128"
+   },
+   "prefill_tok_s": 89.86341137423123,
+   "prefill_s": 5.697535761999999,
+   "prof": "",
+   "wall_s": 6.277,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "chunk16",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "16"
+   },
+   "prefill_tok_s": 47.49357462165389,
+   "prefill_s": 10.780405646000002,
+   "prof": "",
+   "wall_s": 9.893,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "chunk32",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "32"
+   },
+   "prefill_tok_s": 43.201676760894124,
+   "prefill_s": 11.851391852999999,
+   "prof": "",
+   "wall_s": 12.528,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "chunk64",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 35.95879991507947,
+   "prefill_s": 14.238517448000001,
+   "prof": "",
+   "wall_s": 14.92,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "chunk128",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "128"
+   },
+   "prefill_tok_s": 32.99569331646131,
+   "prefill_s": 15.517176592999999,
+   "prof": "",
+   "wall_s": 14.659,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "chunk16",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "16"
+   },
+   "prefill_tok_s": 47.84698565238431,
+   "prefill_s": 10.700778596999998,
+   "prof": "",
+   "wall_s": 11.424,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "chunk32",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "32"
+   },
+   "prefill_tok_s": 43.97248492764345,
+   "prefill_s": 11.643644903,
+   "prof": "",
+   "wall_s": 10.72,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "chunk64",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 36.50485194550162,
+   "prefill_s": 14.025532846,
+   "prof": "",
+   "wall_s": 14.727,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "chunk128",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "128"
+   },
+   "prefill_tok_s": 32.26581237278532,
+   "prefill_s": 15.868188722,
+   "prof": "",
+   "wall_s": 15.008,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "chunk16",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "16"
+   },
+   "prefill_tok_s": 47.30287191915406,
+   "prefill_s": 10.823867118999999,
+   "prof": "",
+   "wall_s": 11.539,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "chunk32",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "32"
+   },
+   "prefill_tok_s": 42.892741076042256,
+   "prefill_s": 11.936751701,
+   "prof": "",
+   "wall_s": 12.658,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "chunk64",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "64"
+   },
+   "prefill_tok_s": 36.108273990265985,
+   "prefill_s": 14.179575577000001,
+   "prof": "",
+   "wall_s": 13.29,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "chunk128",
+   "threads": 1,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_PREFILL_CHUNK": "128"
+   },
+   "prefill_tok_s": 33.04701671080252,
+   "prefill_s": 15.493077771,
+   "prof": "",
+   "wall_s": 16.259,
+   "bytes_acts": 293727109120
+  }
+ ],
+ "extra": {},
+ "summary": {
+  "qwen05": {
+   "chunk16": {
+    "median": 94.0,
+    "n": 3,
+    "spread": 0.8
+   },
+   "chunk32": {
+    "median": 94.3,
+    "n": 3,
+    "spread": 0.8
+   },
+   "chunk64": {
+    "median": 90.3,
+    "n": 3,
+    "spread": 1.7
+   },
+   "chunk128": {
+    "median": 89.9,
+    "n": 3,
+    "spread": 0.6
+   }
+  },
+  "llama1b": {
+   "chunk16": {
+    "median": 47.5,
+    "n": 3,
+    "spread": 0.3
+   },
+   "chunk32": {
+    "median": 43.2,
+    "n": 3,
+    "spread": 0.5
+   },
+   "chunk64": {
+    "median": 36.1,
+    "n": 3,
+    "spread": 0.3
+   },
+   "chunk128": {
+    "median": 33.0,
+    "n": 3,
+    "spread": 0.4
+   }
+  }
+ }
+}

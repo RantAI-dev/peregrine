@@ -244,8 +244,8 @@ anything else as a string.
 
 ## Performance
 
-Against the fastest engine that runs the same file on the same machine and thread count —
-llama.cpp v0.9.0 for the Q4_K_M models, and PrismML's llama.cpp fork for the ternary Bonsai 2 files:
+Against llama.cpp v0.9.0 for the Q4_K_M models and PrismML's llama.cpp fork for the ternary Bonsai 2
+files, on the same file, machine and thread count:
 
 ![Where Peregrine is fastest](docs/img/bench-wins.svg)
 
@@ -259,6 +259,10 @@ llama.cpp v0.9.0 for the Q4_K_M models, and PrismML's llama.cpp fork for the ter
   1.03–1.43× on the 4-core Ryzen 3, and 1.78–2.45× on ARM Cortex-X925 (`aarch64-neon-i8mm`).
 - **Bonsai 2 (ternary): 1.4–2.3× the decode and 1.9–2.6× the prompt speed** of PrismML's fork across
   x86-64 (AVX-512 and AVX2) and ARM64 (NEON), and **1.8–2.8× with 10 users**.
+
+- **Where Peregrine is behind:** the ik_llama.cpp fork processes prompts about twice as fast on the
+  AVX-512 desktop (Peregrine at 0.39–0.58×). Decode is level with it (0.89–1.06×) and Peregrine is ahead
+  with 10 users (1.05–3.09×).
 
 Full tables, charts, accuracy verification, and machine records are in [docs/benchmark.md](docs/benchmark.md).
 
@@ -281,7 +285,7 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 | Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Gemma 3 embedding (EmbeddingGemma), Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4 |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code |
-| Tokenizers | GPT-2 byte-level BPE, SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
+| Tokenizers | GPT-2 byte-level BPE (smollm, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 | Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean) and Gemma 3 encoders (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`), `POST /v1/embeddings`, `peregrine embed` |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |

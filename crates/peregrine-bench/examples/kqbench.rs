@@ -6,15 +6,25 @@
 //!
 //! One thread, a synthetic eight-row tile and synthetic activations, alternating
 //! the two kernels so a busy machine moves both. Reports ns per (tile, activation
-//! row, super-block) for the GEMV (1 row) and the GEMM (4 and 64 rows).
+//! row, super-block) for the GEMV (1 row) and the GEMM (4 and 64 rows), and then the
+//! row kernel against the tile kernel at 1, 16, 64 and 128 activation rows (S5's
+//! widths: a decode row, the prefill chunk, and the widths beyond it).
 
-use peregrine_kernels::kq::{repack_q4k8, repack_q5_08, KqActs, Q4K8, Q5_08};
-use peregrine_kernels::kqsimd::{
-    q4k8_gemm, q4k8_gemm_zmm, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm, q5_08_gemm_zmm,
+#[cfg(target_arch = "x86_64")]
+use peregrine_kernels::kq::{
+    repack_q4k8, repack_q5_08, repack_q5k8, repack_q6k8, KqActs, Q4K8, Q5K8, Q5_08, Q6K8,
 };
+#[cfg(target_arch = "x86_64")]
+use peregrine_kernels::kqsimd::{
+    q4k8_gemm, q4k8_gemm_zmm, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm, q5_08_gemm_zmm, q5k8_gemm,
+    q5k8_gemv, q6k8_gemm, q6k8_gemv,
+};
+#[cfg(target_arch = "x86_64")]
 use peregrine_kernels::quant::QuantAct;
+#[cfg(target_arch = "x86_64")]
 use std::time::Instant;
 
+#[cfg(target_arch = "x86_64")]
 fn prng(seed: u64, n: usize) -> Vec<u8> {
     let mut s = seed | 1;
     (0..n)
@@ -27,6 +37,7 @@ fn prng(seed: u64, n: usize) -> Vec<u8> {
         .collect()
 }
 
+#[cfg(target_arch = "x86_64")]
 fn tile(n_sb: usize, seed: u64) -> Vec<u8> {
     let mut out = vec![0u8; n_sb * Q4K8::SIZE];
     for sb in 0..n_sb {
@@ -44,6 +55,7 @@ fn tile(n_sb: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+#[cfg(target_arch = "x86_64")]
 fn tile5(n_blk: usize, seed: u64) -> Vec<u8> {
     let mut out = vec![0u8; n_blk * Q5_08::SIZE];
     for t in 0..n_blk {
@@ -60,6 +72,7 @@ fn tile5(n_blk: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+#[cfg(target_arch = "x86_64")]
 fn acts(rows: usize, n: usize, seed: u64) -> Vec<QuantAct> {
     (0..rows)
         .map(|r| {
@@ -79,11 +92,18 @@ fn acts(rows: usize, n: usize, seed: u64) -> Vec<QuantAct> {
         .collect()
 }
 
+#[cfg(target_arch = "x86_64")]
 fn best(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[0]
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {
+    println!("kqbench benchmarks the x86-only AVX2/AVX-512 k-quant kernels; nothing to run on this architecture");
+}
+
+#[cfg(target_arch = "x86_64")]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let n_sb: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(8);
@@ -128,7 +148,7 @@ fn main() {
     }
     let n = n_sb * 256;
     let t = tile(n_sb, 0x5EED_1234);
-    let batch = acts(64, n, 0xC0DE_5678);
+    let batch = acts(128, n, 0xC0DE_5678);
     let mut kq = KqActs::default();
     kq.fill(&batch);
     let mut out = vec![0.0f32; 64 * 8];
@@ -195,6 +215,89 @@ fn main() {
             2048.0 / ns
         );
     }
+    // The widths the prefill study asks for (S5): the row kernel against the tile kernel on
+    // the same eight rows, at 1, 16, 64 and 128 activation rows. The tile `t` above is the
+    // repacked store, so the row kernel needs the file's own bytes; they are rebuilt here.
+    {
+        let rb = n_sb * 144;
+        let mut rows = vec![0u8; 8 * rb];
+        for r in 0..8 {
+            for sb in 0..n_sb {
+                let at = r * rb + sb * 144;
+                let b = &mut rows[at..at + 144];
+                b.copy_from_slice(&prng(0xA5A5_1234 ^ (r * 97 + sb) as u64, 144));
+                b[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                b[2..4].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes());
+            }
+        }
+        let mut tile = vec![0u8; n_sb * Q4K8::SIZE];
+        for sb in 0..n_sb {
+            let mut blocks: [&[u8]; 8] = [&[]; 8];
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = &rows[r * rb + sb * 144..r * rb + sb * 144 + 144];
+            }
+            repack_q4k8(&blocks, &mut tile[sb * Q4K8::SIZE..(sb + 1) * Q4K8::SIZE]);
+        }
+        let mut o = vec![0.0f32; 8 * 128];
+        for &nb in &[1usize, 16, 64, 128] {
+            let mut row = Vec::new();
+            let mut tl = Vec::new();
+            let mut tz = Vec::new();
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    for r in 0..8 {
+                        let rw = &rows[r * rb..(r + 1) * rb];
+                        unsafe {
+                            peregrine_kernels::simd::dot_batch(
+                                peregrine_kernels::format::Format::Q4_K,
+                                rw,
+                                &batch[..nb],
+                                &mut o[r * nb..(r + 1) * nb],
+                            )
+                        };
+                    }
+                }
+                row.push(t0.elapsed().as_secs_f64());
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    unsafe {
+                        if nb < 4 {
+                            q4k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut o)
+                        } else {
+                            q4k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                        }
+                    }
+                }
+                tl.push(t0.elapsed().as_secs_f64());
+                if zmm {
+                    let t0 = Instant::now();
+                    for _ in 0..reps {
+                        unsafe {
+                            if nb < 4 {
+                                q4k8_gemv_zmm(&tile, n_sb, &batch[..nb], nb, &mut o)
+                            } else {
+                                q4k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o)
+                            }
+                        }
+                    }
+                    tz.push(t0.elapsed().as_secs_f64());
+                }
+            }
+            let macs = 2048.0 * n_sb as f64 * nb as f64 * reps as f64;
+            let g = |v: &mut Vec<f64>| macs / best(v) / 1e9;
+            print!(
+                "q4k {nb:>3} acts: row {:6.1}  tile(avx2) {:6.1}",
+                g(&mut row),
+                g(&mut tl)
+            );
+            if zmm {
+                print!("  tile(zmm) {:6.1}", g(&mut tz));
+            }
+            println!("  GMAC/s/core");
+        }
+    }
+
     if zmm {
         for (name, v, rows) in [
             ("zmm gemm(4)", &mut z4, 4usize),
@@ -260,6 +363,109 @@ fn main() {
             println!(
                 "{name}: {ns:.2} ns/(tile*act*blk)  {:.1} GMAC/s/core",
                 256.0 / ns
+            );
+        }
+    }
+
+    // Q6_K and Q5_K (S4.9i): the repacked tile against the row-at-a-time path,
+    // at the widths that decide the GEMV/GEMM split. One (tile, act, sb) is
+    // eight rows x 256 weights = 2048 MACs.
+    for (fmt, ts, block, label) in [
+        (
+            peregrine_kernels::format::Format::Q6_K,
+            Q6K8::SIZE,
+            210usize,
+            "q6k",
+        ),
+        (
+            peregrine_kernels::format::Format::Q5_K,
+            Q5K8::SIZE,
+            176usize,
+            "q5k",
+        ),
+    ] {
+        let rb = n_sb * block;
+        let mut rows = vec![0u8; 8 * rb];
+        for r in 0..8 {
+            for sb in 0..n_sb {
+                let at = r * rb + sb * block;
+                let b = &mut rows[at..at + block];
+                b.copy_from_slice(&prng(0x9E37_79B9 ^ (r * 131 + sb) as u64, block));
+                if fmt == peregrine_kernels::format::Format::Q5_K {
+                    b[0..2]
+                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                    b[2..4].copy_from_slice(
+                        &peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes(),
+                    );
+                    for i in 0..12 {
+                        b[4 + i] &= 0x3F;
+                    }
+                } else {
+                    b[208..210]
+                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                    for i in 0..16 {
+                        b[192 + i] &= 0x3F;
+                    }
+                }
+            }
+        }
+        let mut tile = vec![0u8; n_sb * ts];
+        for sb in 0..n_sb {
+            let mut blocks: [&[u8]; 8] = [&[]; 8];
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = &rows[r * rb + sb * block..r * rb + sb * block + block];
+            }
+            let out = &mut tile[sb * ts..(sb + 1) * ts];
+            if fmt == peregrine_kernels::format::Format::Q6_K {
+                repack_q6k8(&blocks, out)
+            } else {
+                repack_q5k8(&blocks, out)
+            }
+        }
+        for &nb in &[1usize, 4, 16, 64, 128] {
+            let mut old = Vec::new();
+            let mut new = Vec::new();
+            let mut o = vec![0.0f32; 8 * nb];
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    for r in 0..8 {
+                        let row = &rows[r * rb..(r + 1) * rb];
+                        unsafe {
+                            peregrine_kernels::simd::dot_batch(
+                                fmt,
+                                row,
+                                &batch[..nb],
+                                &mut o[r * nb..(r + 1) * nb],
+                            )
+                        };
+                    }
+                }
+                old.push(t0.elapsed().as_secs_f64());
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    unsafe {
+                        if nb < 4 {
+                            if fmt == peregrine_kernels::format::Format::Q6_K {
+                                q6k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut o)
+                            } else {
+                                q5k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut o)
+                            }
+                        } else if fmt == peregrine_kernels::format::Format::Q6_K {
+                            q6k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                        } else {
+                            q5k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                        }
+                    }
+                }
+                new.push(t0.elapsed().as_secs_f64());
+            }
+            let macs = 8.0 * 256.0 * n_sb as f64 * nb as f64 * reps as f64;
+            let old_g = macs / best(&mut old) / 1e9;
+            let new_g = macs / best(&mut new) / 1e9;
+            println!(
+                "{label} {nb:>2} acts: row {old_g:6.1} G  tile {new_g:6.1} G MAC/s/core  ({:+.0}%)",
+                (new_g / old_g - 1.0) * 100.0
             );
         }
     }

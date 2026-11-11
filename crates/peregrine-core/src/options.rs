@@ -97,6 +97,19 @@ pub fn prefill_chunk_default_for(threads: usize) -> usize {
 /// other users need the room.
 pub const MAX_PREFILL_CHUNK: usize = crate::blocks::linear::MAX_BATCH;
 
+/// Where the packed-weight cache lives (`PEREGRINE_PACK_CACHE`, S4.9e).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum PackCacheSetting {
+    /// `$PEREGRINE_CACHE_DIR`/`packs`, `$XDG_CACHE_HOME/peregrine/packs`, or
+    /// `~/.cache/peregrine/packs`.
+    #[default]
+    Default,
+    /// `PEREGRINE_PACK_CACHE=0`: pack in memory on every load, as before S4.9e.
+    Off,
+    /// `PEREGRINE_PACK_CACHE=<dir>`: the packs of every model go in this directory.
+    Path(PathBuf),
+}
+
 /// The row budget of a pass that carries work which never decodes (S4.9b): one weight pass
 /// carries up to this many rows of pooled or label slots, taken from as many waiting slots as
 /// fit.
@@ -241,6 +254,13 @@ pub struct EngineOptions {
     pub hugepages: bool,
     /// `PEREGRINE_TILE_HUGEPAGES=0`: keep the repacked tiles in ordinary pages.
     pub tile_hugepages: bool,
+    /// `PEREGRINE_PACK_CACHE`: where the load-time packed stores are cached on disk
+    /// (`~/.cache/peregrine/packs` by default; `0` turns the cache off, a path
+    /// overrides the directory). S4.9e.
+    pub pack_cache: PackCacheSetting,
+    /// `PEREGRINE_PACK_CACHE_MB`: the cache directory's size cap in MiB (default 4096;
+    /// `0` disables eviction). Least-recently-used pack files are removed to stay under it.
+    pub pack_cache_mb: usize,
     /// `PEREGRINE_KV_ROTATE=0`: plain int8 KV cache instead of the Hadamard-rotated one.
     pub kv_rotate: bool,
     /// `PEREGRINE_KV` (`f16`, `f32`, `i8`): the precision of the KV cache. The
@@ -274,6 +294,12 @@ pub struct EngineOptions {
     /// a request are in flight at once, not how many the request may hold: the rest wait in the
     /// engine's queue. `--slots` bounds chat slots only.
     pub work_cache_mb: Option<usize>,
+    /// `PEREGRINE_EMBED_CACHE_MB`: memory for the exact cache of finished embedding vectors,
+    /// keyed by token ids, pooling and dimensions (S4.9k; default 64 MiB, `0` disables).
+    ///
+    /// The cache is serving-only: a hit returns the vector a computation would, bit for bit.
+    /// 64 MiB holds about 16 000 vectors of 1024 f32 (21 000 of 768), with their keys counted.
+    pub embed_cache_mb: usize,
     /// `PEREGRINE_MTP=0`: no MTP speculation.
     pub mtp: bool,
     /// `PEREGRINE_MTP_VOCAB`: vocabulary rows the MTP drafter scores (default 32768).
@@ -336,12 +362,15 @@ impl Default for EngineOptions {
             exact: false,
             hugepages: false,
             tile_hugepages: true,
+            pack_cache: PackCacheSetting::Default,
+            pack_cache_mb: 4096,
             kv_rotate: true,
             kv_prec: crate::kv::KvPrec::F16,
             mix: true,
             prefill_chunk: None,
             pass_rows: None,
             work_cache_mb: None,
+            embed_cache_mb: 64,
             mtp: true,
             mtp_vocab: 32768,
             dspark: DsparkOptions {
@@ -507,6 +536,12 @@ impl EngineOptions {
             exact: only("EXACT", "1"),
             hugepages: only("HUGEPAGES", "1"),
             tile_hugepages: unless("TILE_HUGEPAGES", "0"),
+            pack_cache: match s("PACK_CACHE").as_deref() {
+                Some("0") | Some("off") | Some("false") => PackCacheSetting::Off,
+                Some(p) if !p.is_empty() && p != "1" => PackCacheSetting::Path(PathBuf::from(p)),
+                _ => PackCacheSetting::Default,
+            },
+            pack_cache_mb: num("PACK_CACHE_MB").unwrap_or(d.pack_cache_mb),
             kv_rotate: unless("KV_ROTATE", "0"),
             kv_prec: s("KV")
                 .and_then(|v| crate::kv::KvPrec::parse(&v))
@@ -515,6 +550,7 @@ impl EngineOptions {
             prefill_chunk: num("PREFILL_CHUNK").filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v)),
             pass_rows: num("PASS_ROWS").filter(|&v| (1..=MAX_PASS_ROWS).contains(&v)),
             work_cache_mb: num("WORK_CACHE_MB").filter(|&v| v > 0),
+            embed_cache_mb: num("EMBED_CACHE_MB").unwrap_or(d.embed_cache_mb),
             mtp: unless("MTP", "0"),
             mtp_vocab: num("MTP_VOCAB").unwrap_or(d.mtp_vocab),
             dspark: DsparkOptions {
@@ -586,6 +622,20 @@ impl EngineOptions {
         format!("{state} ({why})")
     }
 
+    /// The pack cache setting and its directory, for `peregrine tier`: the directory,
+    /// `off (PEREGRINE_PACK_CACHE)`, or the default directory with `(default)`.
+    pub fn pack_cache_note(&self) -> String {
+        match &self.pack_cache {
+            PackCacheSetting::Off => "off (PEREGRINE_PACK_CACHE)".into(),
+            PackCacheSetting::Path(p) => format!("{} (PEREGRINE_PACK_CACHE)", p.display()),
+            PackCacheSetting::Default => format!(
+                "{} (default, cap {} MiB)",
+                crate::packcache::default_dir().display(),
+                self.pack_cache_mb
+            ),
+        }
+    }
+
     /// The options that differ from the defaults, as `name=value` pairs.
     pub fn non_default(&self) -> Vec<(&'static str, String)> {
         let d = EngineOptions::default().pairs();
@@ -625,12 +675,22 @@ impl EngineOptions {
             ("exact", self.exact.to_string()),
             ("hugepages", self.hugepages.to_string()),
             ("tile_hugepages", self.tile_hugepages.to_string()),
+            (
+                "pack_cache",
+                match &self.pack_cache {
+                    PackCacheSetting::Default => "default".into(),
+                    PackCacheSetting::Off => "off".into(),
+                    PackCacheSetting::Path(p) => p.display().to_string(),
+                },
+            ),
+            ("pack_cache_mb", self.pack_cache_mb.to_string()),
             ("kv_rotate", self.kv_rotate.to_string()),
             ("kv_prec", self.kv_prec.name().to_string()),
             ("mix", self.mix.to_string()),
             ("prefill_chunk", opt(self.prefill_chunk)),
             ("pass_rows", opt(self.pass_rows)),
             ("work_cache_mb", opt(self.work_cache_mb)),
+            ("embed_cache_mb", self.embed_cache_mb.to_string()),
             ("mtp", self.mtp.to_string()),
             ("mtp_vocab", self.mtp_vocab.to_string()),
             ("dspark.logits_start", self.dspark.logits_start.to_string()),
@@ -688,12 +748,15 @@ pub const NAMES: &[&str] = &[
     "EXACT",
     "HUGEPAGES",
     "TILE_HUGEPAGES",
+    "PACK_CACHE",
+    "PACK_CACHE_MB",
     "KV_ROTATE",
     "KV",
     "MIX",
     "PREFILL_CHUNK",
     "PASS_ROWS",
     "WORK_CACHE_MB",
+    "EMBED_CACHE_MB",
     "MTP",
     "MTP_VOCAB",
     "DSPARK_LOGITS_START",
@@ -861,6 +924,9 @@ mod tests {
         // The work cache budget.
         assert_eq!(with(&[("WORK_CACHE_MB", "128")]).work_cache_mb, Some(128));
         assert_eq!(with(&[("WORK_CACHE_MB", "0")]).work_cache_mb, None);
+        // The embedding result cache: a size in MiB, and 0 disables it.
+        assert_eq!(with(&[("EMBED_CACHE_MB", "32")]).embed_cache_mb, 32);
+        assert_eq!(with(&[("EMBED_CACHE_MB", "0")]).embed_cache_mb, 0);
     }
 
     #[test]

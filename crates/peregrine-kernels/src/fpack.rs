@@ -29,10 +29,10 @@
 //! one sequential fused-multiply-add chain over the input index, and nothing else.
 //! The vector kernels compute that chain lane per output, so a result's bits do not
 //! depend on the tile, the tails, the row block, the thread split or the vector
-//! width: AVX2, AVX-512 and [`gemm_scalar`] — the same chain with `f32::mul_add`,
-//! and the scalar tier's kernel — agree bit for bit. F16 is widened by
-//! `vcvtph2ps` and BF16 by shifting into the high half of an f32; both conversions
-//! are exact, so they contribute nothing to the rounding.
+//! width: AVX2, AVX-512, NEON and [`gemm_scalar`] — the same chain with
+//! `f32::mul_add`, and the scalar tier's kernel — agree bit for bit. F16 is widened
+//! by `vcvtph2ps` (AVX) or `fcvtl` (NEON) and BF16 by shifting into the high half of
+//! an f32; both conversions are exact, so they contribute nothing to the rounding.
 //!
 //! Fusing changes the value of every float matrix product once (one rounding per
 //! term instead of two, and a different summation order from four partial sums and
@@ -52,16 +52,18 @@
 //! 512-bit operations on 256-bit datapaths, so the width buys registers and
 //! broadcast amortisation, not twice the FLOPs — measured, 12×32 zmm and 12×16 ymm
 //! are within a few percent per multiply, and 12×32 wins on the panel loads.
+//! NEON runs 4 activation rows × 16 outputs (16 `float32x4_t` accumulators), which
+//! is one panel step's four loads feeding all four rows.
 //!
 //! # Threading and the row block
 //!
 //! Nothing here threads. `peregrine-core`'s `blocks::linear` splits work over
 //! (panel, activation-row block) units; the row block is [`row_block`], sized so a
 //! block's activations stay in half of L2, and it only changes how many times a
-//! panel is read, never a result. A single activation row takes the GEMV path
-//! ([`gemv_scalar`] here, `gemv_avx2`/`gemv_avx512` beside it), which streams each
-//! panel once and keeps the same chain per output, so decode and prefill agree bit
-//! for bit.
+//! panel is read, never a result. A single activation row takes the same GEMM loop
+//! with one row on NEON; on AVX2 it takes the GEMV path ([`gemv_scalar`] here,
+//! `gemv_avx2`/`gemv_avx512` beside it), which streams each panel once and keeps the
+//! same chain per output, so decode and prefill agree bit for bit.
 
 use crate::format::{f16, Format};
 use crate::quant::QuantAct;
@@ -240,10 +242,11 @@ fn parse_cache_size(s: &str) -> Option<usize> {
     num.parse::<usize>().ok().map(|v| v * mult)
 }
 
-/// Whether the packed float path may run on this target: x86-64 only in this step
-/// (the NEON kernel is S4.9k's, and `neon.rs` says where it goes).
+/// Whether the packed float path may run on this target: x86-64 and aarch64. The
+/// store is worth building on aarch64 even on the scalar tier, whose kernel is the
+/// same `f32::mul_add` chain.
 pub fn have_packed() -> bool {
-    cfg!(target_arch = "x86_64")
+    cfg!(any(target_arch = "x86_64", target_arch = "aarch64"))
 }
 
 /// The kernel for this CPU: GEMV for one activation row, else the widest GEMM.
@@ -271,6 +274,22 @@ pub fn gemm(
     );
     if panels == 0 || acts.is_empty() {
         return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NEON: F32, BF16 and F16. The half-to-single widening (`fcvtl`) is base
+        // Advanced SIMD; the `fp16` extension is about half-precision arithmetic,
+        // which this kernel does not use.
+        if crate::cpu::have_neon() {
+            if matches!(fmt, Format::F16) {
+                // SAFETY: the preconditions above are this function's.
+                unsafe { neon::gemm_f16(fmt, packed, n_in, panels, acts, bias, out) };
+                return;
+            }
+            // SAFETY: the preconditions above are this function's.
+            unsafe { neon::gemm_neon(fmt, packed, n_in, panels, acts, bias, out) };
+            return;
+        }
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -616,6 +635,206 @@ mod x86 {
         }
     }
 }
+
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use super::*;
+    use std::arch::aarch64::*;
+
+    /// Test-only: how often the F16 kernel ran, so a test can pin the dispatch on
+    /// every NEON tier (the result is bit-identical either way).
+    #[cfg(test)]
+    pub(super) static F16_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    /// Sixteen F32 or BF16 weights of one panel step as four f32 vectors.
+    ///
+    /// BF16 shifts the half's bits into the high half of an f32; the conversion is exact.
+    #[inline(always)]
+    unsafe fn w16(fmt: Format, p: *const u8) -> [float32x4_t; 4] {
+        match fmt {
+            Format::F32 => [
+                vld1q_f32(p as *const f32),
+                vld1q_f32((p as *const f32).add(4)),
+                vld1q_f32((p as *const f32).add(8)),
+                vld1q_f32((p as *const f32).add(12)),
+            ],
+            _ => [
+                bf16x4(p),
+                bf16x4(p.add(8)),
+                bf16x4(p.add(16)),
+                bf16x4(p.add(24)),
+            ],
+        }
+    }
+
+    /// Sixteen F16 weights of one panel step as four f32 vectors, widened by `fcvtl`.
+    #[inline]
+    #[target_feature(enable = "neon")]
+    unsafe fn w16_f16(p: *const u8) -> [float32x4_t; 4] {
+        [
+            f16x4(p),
+            f16x4(p.add(8)),
+            f16x4(p.add(16)),
+            f16x4(p.add(24)),
+        ]
+    }
+
+    /// Four f16 halves widened to f32 (`fcvtl`), exactly.
+    ///
+    /// `fcvtl` is base Advanced SIMD, not part of the `fp16` arithmetic extension.
+    ///
+    /// # Safety
+    /// The CPU must have NEON and `p` must be readable for eight bytes.
+    #[inline]
+    #[target_feature(enable = "neon")]
+    unsafe fn f16x4(p: *const u8) -> float32x4_t {
+        let h = vld1_u16(p as *const u16);
+        let mut r: float32x4_t;
+        // The `float16x4_t` intrinsics are unstable at this workspace's MSRV, so the
+        // instruction is written out; the register class is all it needs.
+        std::arch::asm!(
+            "fcvtl {r:v}.4s, {a:v}.4h",
+            r = lateout(vreg) r,
+            a = in(vreg) h,
+            options(pure, nomem, nostack),
+        );
+        r
+    }
+
+    /// Four bf16 halves widened to f32 by the high-half shift, exactly.
+    ///
+    /// # Safety
+    /// The CPU must have NEON and `p` must be readable for eight bytes.
+    #[inline]
+    #[target_feature(enable = "neon")]
+    unsafe fn bf16x4(p: *const u8) -> float32x4_t {
+        let h = vld1_u16(p as *const u16);
+        vreinterpretq_f32_u32(vshlq_n_u32::<16>(vmovl_u16(h)))
+    }
+
+    /// One `k` step of one panel against four activation rows.
+    #[inline(always)]
+    unsafe fn step4(
+        acc: &mut [[float32x4_t; 4]; 4],
+        xp: &[*const f32; 4],
+        k: usize,
+        w: &[float32x4_t; 4],
+    ) {
+        let x0 = vdupq_n_f32(*xp[0].add(k));
+        let x1 = vdupq_n_f32(*xp[1].add(k));
+        let x2 = vdupq_n_f32(*xp[2].add(k));
+        let x3 = vdupq_n_f32(*xp[3].add(k));
+        acc[0][0] = vfmaq_f32(acc[0][0], w[0], x0);
+        acc[0][1] = vfmaq_f32(acc[0][1], w[1], x0);
+        acc[0][2] = vfmaq_f32(acc[0][2], w[2], x0);
+        acc[0][3] = vfmaq_f32(acc[0][3], w[3], x0);
+        acc[1][0] = vfmaq_f32(acc[1][0], w[0], x1);
+        acc[1][1] = vfmaq_f32(acc[1][1], w[1], x1);
+        acc[1][2] = vfmaq_f32(acc[1][2], w[2], x1);
+        acc[1][3] = vfmaq_f32(acc[1][3], w[3], x1);
+        acc[2][0] = vfmaq_f32(acc[2][0], w[0], x2);
+        acc[2][1] = vfmaq_f32(acc[2][1], w[1], x2);
+        acc[2][2] = vfmaq_f32(acc[2][2], w[2], x2);
+        acc[2][3] = vfmaq_f32(acc[2][3], w[3], x2);
+        acc[3][0] = vfmaq_f32(acc[3][0], w[0], x3);
+        acc[3][1] = vfmaq_f32(acc[3][1], w[1], x3);
+        acc[3][2] = vfmaq_f32(acc[3][2], w[2], x3);
+        acc[3][3] = vfmaq_f32(acc[3][3], w[3], x3);
+    }
+
+    /// The GEMM loop, shared by the F32/BF16 and F16 entry points: one panel, four
+    /// activation rows at a time, sixteen accumulators, one weight load feeding all
+    /// four rows. The tail duplicates the last row's pointer, as the AVX2 kernel does.
+    macro_rules! gemm_body {
+        ($fmt:ident, $packed:ident, $n_in:ident, $panels:ident, $acts:ident, $bias:ident, $out:ident, $loader:expr) => {{
+            let eb = elem_bytes($fmt);
+            let pb = panel_bytes($fmt, $n_in);
+            let nb = $acts.len();
+            let bs = row_block($n_in);
+            let stride = $panels * PANEL;
+            let mut b0 = 0;
+            while b0 < nb {
+                let bn = bs.min(nb - b0);
+                for p in 0..$panels {
+                    let w = $packed.as_ptr().add(p * pb);
+                    let op = $out.as_mut_ptr().add(b0 * stride + p * PANEL);
+                    let ib = match $bias {
+                        Some(v) => {
+                            let q = v.as_ptr().add(p * PANEL);
+                            [
+                                vld1q_f32(q),
+                                vld1q_f32(q.add(4)),
+                                vld1q_f32(q.add(8)),
+                                vld1q_f32(q.add(12)),
+                            ]
+                        }
+                        None => [vdupq_n_f32(0.0); 4],
+                    };
+                    let mut t = 0;
+                    while t < bn {
+                        let tn = (bn - t).min(4);
+                        let mut xp = [std::ptr::null(); 4];
+                        for (r, x) in xp.iter_mut().enumerate() {
+                            *x = $acts[b0 + t + r.min(tn - 1)].xf.as_ptr();
+                        }
+                        let mut acc = [ib; 4];
+                        for k in 0..$n_in {
+                            let wv = $loader(w.add(k * PANEL * eb));
+                            step4(&mut acc, &xp, k, &wv);
+                        }
+                        for r in 0..tn {
+                            let o = op.add((t + r) * stride);
+                            vst1q_f32(o, acc[r][0]);
+                            vst1q_f32(o.add(4), acc[r][1]);
+                            vst1q_f32(o.add(8), acc[r][2]);
+                            vst1q_f32(o.add(12), acc[r][3]);
+                        }
+                        t += tn;
+                    }
+                }
+                b0 += bn;
+            }
+        }};
+    }
+
+    /// One panel, four activation rows at a time (NEON), F32 and BF16.
+    ///
+    /// # Safety
+    /// As [`super::gemm`]: the caller checks the lengths and the feature sets.
+    #[target_feature(enable = "neon")]
+    pub unsafe fn gemm_neon(
+        fmt: Format,
+        packed: &[u8],
+        n_in: usize,
+        panels: usize,
+        acts: &[QuantAct],
+        bias: Option<&[f32]>,
+        out: &mut [f32],
+    ) {
+        gemm_body!(fmt, packed, n_in, panels, acts, bias, out, |p| w16(fmt, p));
+    }
+
+    /// The same loop for F16 weights, widened by `fcvtl`.
+    ///
+    /// # Safety
+    /// As [`super::gemm`].
+    #[target_feature(enable = "neon")]
+    pub unsafe fn gemm_f16(
+        fmt: Format,
+        packed: &[u8],
+        n_in: usize,
+        panels: usize,
+        acts: &[QuantAct],
+        bias: Option<&[f32]>,
+        out: &mut [f32],
+    ) {
+        #[cfg(test)]
+        F16_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        gemm_body!(fmt, packed, n_in, panels, acts, bias, out, |p| w16_f16(p));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +986,20 @@ mod tests {
                 );
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        if crate::cpu::have_neon() {
+            // The NEON kernel against the scalar reference — the bit-identity the
+            // aarch64 tiers inherit from the x86 ones.
+            let mut an = vec![0.0f32; panels * PANEL * xs.len()];
+            if fmt == Format::F16 {
+                unsafe { neon::gemm_f16(fmt, &packed, n_in, panels, xs, bias, &mut an) };
+            } else {
+                unsafe { neon::gemm_neon(fmt, &packed, n_in, panels, xs, bias, &mut an) };
+            }
+            for (i, (&x, &y)) in an.iter().zip(&got_s).enumerate() {
+                assert!(same(x, y), "{fmt:?} NEON vs scalar {n_out}x{n_in} at {i}");
+            }
+        }
         #[cfg(target_arch = "x86_64")]
         if x86::have_avx2() {
             // The AVX2 kernel and, when the CPU has it, the AVX-512 kernel, both
@@ -821,6 +1054,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `fcvtl` is base Advanced SIMD, so F16 must take the packed NEON kernel on
+    /// plain `neon` too, not fall through to the scalar chain.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn f16_takes_the_neon_kernel_on_every_neon_tier() {
+        if !crate::cpu::have_neon() {
+            return;
+        }
+        let (n_out, n_in) = (16, 32);
+        let w = matrix(Format::F16, n_out, n_in, 9);
+        let packed = pack(Format::F16, &w, n_out, n_in);
+        let xs = acts(2, n_in, 4);
+        let panels = n_out.div_ceil(PANEL);
+        let mut out = vec![0.0f32; panels * PANEL * xs.len()];
+        let before = neon::F16_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        gemm(Format::F16, &packed, n_in, panels, &xs, None, &mut out);
+        assert!(
+            neon::F16_CALLS.load(std::sync::atomic::Ordering::Relaxed) > before,
+            "F16 did not reach the NEON kernel on this tier"
+        );
     }
 
     /// A row computed alone, in the middle of a batch, or last must be the same bits.

@@ -50,9 +50,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod embed_cache;
 mod harmony;
 pub mod lifecycle;
 mod stop;
+
+use embed_cache::{EmbedCache, Key};
 
 use harmony::{Channel, Harmony, ReasoningFormat};
 use stop::StopMatcher;
@@ -157,6 +160,9 @@ struct App {
     pooling: Option<Pooling>,
     /// The width of one embedding vector (the final hidden state's width).
     embedding_width: usize,
+    /// Exact cache of finished embedding vectors, keyed by token ids, pooling and
+    /// dimensions (S4.9k). `0` MiB disables it.
+    embed_cache: EmbedCache,
     /// The decision front end, when the file is a decision model (`/v1/systemone`).
     decider: Option<Decider>,
     think_open: Option<u32>,
@@ -353,6 +359,7 @@ pub async fn run(a: Args) {
         option_metrics,
         pooling,
         embedding_width,
+        embed_cache: EmbedCache::new(peregrine_core::options::get().embed_cache_mb),
         decider,
         think_open: model.tk.id_of("<think>"),
         think_close: model.tk.id_of("</think>"),
@@ -680,7 +687,7 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
 
 async fn metrics(State(s): State<Arc<App>>) -> String {
     format!(
-        "# Peregrine server\nllamacpp:requests_processing {}\nllamacpp:requests_deferred {}\nperegrine_slots_total {}\nperegrine_requests_total {}\nperegrine_tokens_predicted_total {}\nperegrine_decode_steps_total {}\nperegrine_decode_rows_total {}\nperegrine_mtp_drafts_total {}\nperegrine_mtp_accepted_total {}\nperegrine_uptime_seconds {}\n{}",
+        "# Peregrine server\nllamacpp:requests_processing {}\nllamacpp:requests_deferred {}\nperegrine_slots_total {}\nperegrine_requests_total {}\nperegrine_tokens_predicted_total {}\nperegrine_decode_steps_total {}\nperegrine_decode_rows_total {}\nperegrine_mtp_drafts_total {}\nperegrine_mtp_accepted_total {}\nperegrine_uptime_seconds {}\nperegrine_embed_cache_entries {}\nperegrine_embed_cache_bytes {}\n{}",
         s.engine.active.load(Ordering::SeqCst),
         s.engine.waiting.load(Ordering::SeqCst),
         s.max_slots,
@@ -691,6 +698,8 @@ async fn metrics(State(s): State<Arc<App>>) -> String {
         s.engine.drafts.load(Ordering::SeqCst),
         s.engine.hits.load(Ordering::SeqCst),
         s.started.elapsed().as_secs(),
+        s.embed_cache.len(),
+        s.embed_cache.bytes(),
         s.option_metrics
     )
 }
@@ -2066,29 +2075,52 @@ async fn embeddings(State(app): State<Arc<App>>, OpenAiJson(body): OpenAiJson) -
     }
     let _busy = BusyGuard(app.clone());
     app.requests.fetch_add(1, Ordering::SeqCst);
-    let jobs = texts
-        .into_iter()
-        .map(|prompt| SlotJob {
-            prompt,
-            want: Want::Pooled(pooling),
-            labels: Vec::new(),
-        })
+    // Usage counts every input, including a text the cache answered or a duplicate
+    // that shares one computation (S4.9k).
+    let prompt_tokens: u64 = texts.iter().map(|t| t.len() as u64).sum();
+    let keys: Vec<Key> = texts
+        .iter()
+        .map(|t| Key::new(t.clone(), pooling, spec.dimensions))
         .collect();
-    let emissions = match run_jobs(&app, jobs).await {
-        Ok(e) => e,
-        Err(response) => return *response,
-    };
-    let mut vectors = Vec::with_capacity(emissions.len());
-    let mut prompt_tokens = 0u64;
-    for em in emissions {
-        prompt_tokens += em.cost.as_ref().map_or(0, |c| c.prompt_tokens as u64);
-        let Some(mut v) = em.embedding else {
-            return internal("the engine returned no embedding");
+    let plan = app.embed_cache.plan(keys);
+    let mut computed: Vec<Vec<f32>> = Vec::with_capacity(plan.jobs.len());
+    if !plan.jobs.is_empty() {
+        let jobs = plan
+            .jobs
+            .iter()
+            .map(|k| SlotJob {
+                prompt: k.tokens.clone(),
+                want: Want::Pooled(pooling),
+                labels: Vec::new(),
+            })
+            .collect();
+        let emissions = match run_jobs(&app, jobs).await {
+            Ok(e) => e,
+            Err(response) => return *response,
         };
-        if let Err(e) = peregrine_core::embed::finish(&mut v, spec.dimensions) {
-            return bad(e);
+        if emissions.len() != plan.jobs.len() {
+            return internal("the engine returned the wrong number of embeddings");
         }
-        vectors.push(v);
+        for (key, em) in plan.jobs.iter().zip(emissions) {
+            let Some(mut v) = em.embedding else {
+                return internal("the engine returned no embedding");
+            };
+            if let Err(e) = peregrine_core::embed::finish(&mut v, spec.dimensions) {
+                return bad(e);
+            }
+            app.embed_cache.put(key.clone(), v.clone());
+            computed.push(v);
+        }
+    }
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(plan.cached.len());
+    for (i, hit) in plan.cached.into_iter().enumerate() {
+        match hit {
+            Some(v) => vectors.push(v),
+            None => {
+                let j = plan.job_of[i].expect("a miss has a job");
+                vectors.push(computed[j].clone());
+            }
+        }
     }
     let data: Vec<Value> = vectors
         .iter()

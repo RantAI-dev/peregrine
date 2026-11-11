@@ -48,7 +48,7 @@
 #![cfg(target_arch = "x86_64")]
 #![cfg_attr(not(feature = "fmt-kquant"), allow(dead_code))]
 
-use crate::kq::{KqActs, ACT_GROUP, Q4K8};
+use crate::kq::{KqActs, ACT_GROUP, Q4K8, Q5K8, Q6K8};
 #[cfg(feature = "fmt-legacy")]
 use crate::kq::{Q5_08, Q8_08};
 use crate::quant::QuantAct;
@@ -145,6 +145,24 @@ pub trait ActSrc {
     /// accumulation and the float's exact-integer range agree bit for bit
     /// (`the_min_term_is_exact_in_int32_and_in_float` in this file).
     fn min_sum(&self, row: usize, sb: usize, j: usize) -> i32;
+
+    /// The pointers to the four four-byte code groups of Q6_K's sixteen-weight
+    /// run `run` (`0..16`, in the order `c·8 + 2·g + hf`).
+    ///
+    /// Q6_K's scale changes every sixteen weights, so its runs are half a Q4_K
+    /// sub-block: four groups of four codes, in the run's own order.
+    ///
+    /// # Safety
+    ///
+    /// The pointers must be valid for four bytes each.
+    unsafe fn run_quads(&self, row: usize, sb: usize, run: usize) -> [*const u8; 4];
+
+    /// The activation's sum over Q6_K's sixteen-weight run `run`.
+    ///
+    /// Q6_K stores its codes with an offset of 32, applied once per run against
+    /// this sum. The sum is at most 2032 in magnitude, and the run's term at
+    /// most 127 · (128 016 + 32 · 2032), so it is exact in int32.
+    fn sum16(&self, row: usize, sb: usize, run: usize) -> i32;
 }
 
 /// The interleaved activation: four rows side by side.
@@ -190,6 +208,34 @@ impl ActSrc for Interleaved<'_> {
         let n_sb = self.acts.super_blocks();
         self.acts.bs[(g * n_sb + sb) * ACT_GROUP * 8 + t * 8 + j]
     }
+
+    #[inline(always)]
+    unsafe fn run_quads(&self, row: usize, sb: usize, run: usize) -> [*const u8; 4] {
+        let g = row / ACT_GROUP;
+        let t = row % ACT_GROUP;
+        let n_sb = self.acts.super_blocks();
+        // The run's first weight is `sb·256 + c·128 + g·32 + hf·16`, and an
+        // eight-weight window holds two four-byte groups of it.
+        let c = run / 8;
+        let r = run % 8;
+        let j0 = c * 16 + (r / 2) * 4 + (r % 2) * 2;
+        let base = (g * n_sb + sb) * 1024;
+        let p = self.acts.q.as_ptr().add(base);
+        [
+            p.add(j0 * 32 + t * 8) as *const u8,
+            p.add(j0 * 32 + t * 8 + 4) as *const u8,
+            p.add((j0 + 1) * 32 + t * 8) as *const u8,
+            p.add((j0 + 1) * 32 + t * 8 + 4) as *const u8,
+        ]
+    }
+
+    #[inline(always)]
+    fn sum16(&self, row: usize, sb: usize, run: usize) -> i32 {
+        let g = row / ACT_GROUP;
+        let t = row % ACT_GROUP;
+        let n_sb = self.acts.super_blocks();
+        self.acts.bs16[(g * n_sb + sb) * ACT_GROUP * 16 + t * 16 + run]
+    }
 }
 
 /// The plain per-row activation: one row at a time.
@@ -224,6 +270,25 @@ impl ActSrc for Plain<'_> {
         // The per-16 run sums, added into the sub-block's sum.
         let rs = &self.acts[row].bsums[sb * 16..sb * 16 + 16];
         rs[2 * j] as i32 + rs[2 * j + 1] as i32
+    }
+
+    #[inline(always)]
+    unsafe fn run_quads(&self, row: usize, sb: usize, run: usize) -> [*const u8; 4] {
+        let c = run / 8;
+        let r = run % 8;
+        let o = sb * 256 + c * 128 + (r / 2) * 32 + (r % 2) * 16;
+        let p = self.acts[row].qk.as_ptr();
+        [
+            p.add(o) as *const u8,
+            p.add(o + 4) as *const u8,
+            p.add(o + 8) as *const u8,
+            p.add(o + 12) as *const u8,
+        ]
+    }
+
+    #[inline(always)]
+    fn sum16(&self, row: usize, sb: usize, run: usize) -> i32 {
+        self.acts[row].bsums[sb * 16 + run] as i32
     }
 }
 
@@ -688,6 +753,720 @@ pub unsafe fn q4k8_gemv(tile: &[u8], n_sb: usize, acts: &[QuantAct], nb: usize, 
         1 => q4k8_group::<_, 1>(tile, n_sb, &src, 0, nb, out),
         2 => q4k8_group::<_, 2>(tile, n_sb, &src, 0, nb, out),
         _ => q4k8_group::<_, 3>(tile, n_sb, &src, 0, nb, out),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The repacked Q6_K kernel (S4.9i): the same eight-row tiles, six-bit codes
+// ---------------------------------------------------------------------------
+//
+// Q6_K is Q4_K's shape with two differences that decide the kernel: the code is
+// six bits wide (0..63) and the scale changes every sixteen weights. The int16
+// stage therefore holds only four products per lane — two `vpmaddubsw` — before
+// the scale madd widens it to int32: 4 · 63 · 127 = 32 004, inside int16's
+// 32 767; eight products would be 128 016 and wrap. The unsigned offset of 32 is
+// applied once per sixteen-weight run against the activation's per-16 sum, in
+// int32, exactly as `wide_q6_k` and `dot_q6k8_ref` do.
+
+/// The eight rows' scale of run `run`, sign-extended and duplicated in the two
+/// 16-bit lanes of each row's int32 lane, in the kernel's lane order.
+#[inline(always)]
+unsafe fn q6k8_scale(t: *const u8, run: usize, lane: __m256i) -> __m256i {
+    let raw = _mm_loadl_epi64(t.add(crate::kq::q6_sc() + run * 8) as *const __m128i);
+    let v = _mm256_permutevar8x32_epi32(_mm256_cvtepi8_epi32(raw), lane);
+    // Each row's scale twice, in the two 16-bit lanes of its accumulator lane.
+    let p = _mm256_packs_epi32(v, v);
+    _mm256_unpacklo_epi16(p, p)
+}
+
+/// One four-byte group of a Q6_K run's codes: the nibble half `high` of `ql`
+/// OR'd with the two high bits `shift` (2·g) of `qh`, moved into bits 4..6.
+#[inline(always)]
+unsafe fn q6k_codes(
+    ql: __m256i,
+    qh: __m256i,
+    high: bool,
+    g: usize,
+    lownib: __m256i,
+    three: __m256i,
+) -> __m256i {
+    let nib = if high {
+        _mm256_and_si256(_mm256_srli_epi16(ql, 4), lownib)
+    } else {
+        _mm256_and_si256(ql, lownib)
+    };
+    // The shift is an immediate: `_mm256_srli_epi16` takes a constant.
+    let bits = match g {
+        0 => _mm256_srli_epi16(qh, 0),
+        1 => _mm256_srli_epi16(qh, 2),
+        2 => _mm256_srli_epi16(qh, 4),
+        _ => _mm256_srli_epi16(qh, 6),
+    };
+    let bits = _mm256_slli_epi16(_mm256_and_si256(bits, three), 4);
+    _mm256_or_si256(nib, bits)
+}
+
+/// One super-block of a repacked Q6_K tile against `N` activation rows, folded
+/// onto `facc`.
+///
+/// The scale and the offset are per sixteen-weight run, so the run is the unit:
+/// four `vpmaddubsw` (sixteen products, four per int16 lane) go through the
+/// run's scale madd into int32, and the run's offset term is accumulated
+/// separately as `scale · Σq` and shifted by 32 once per super-block.
+#[inline(always)]
+unsafe fn q6k8_sb<S: ActSrc, const N: usize>(
+    t: *const u8,
+    sb: usize,
+    src: &S,
+    row0: usize,
+    lane: __m256i,
+    dv: __m256,
+    facc: &mut [__m256; N],
+) {
+    let lownib = _mm256_set1_epi8(0x0F);
+    let three = _mm256_set1_epi8(0x03);
+    let low16 = _mm256_set1_epi32(0xFFFF);
+    let mut sumi = [_mm256_setzero_si256(); N];
+    let mut bias = [_mm256_setzero_si256(); N];
+    let ql = t.add(crate::kq::q6_ql());
+    let qh = t.add(crate::kq::q6_qh());
+    for run in 0..16 {
+        let c = run / 8;
+        let r = run % 8;
+        let g = r / 2;
+        let hf = r % 2;
+        // The run's two ql windows are the nibble half's; the two qh windows
+        // hold all four groups' high bits, so one load serves each pair.
+        let w0 = c * 8 + (if g % 2 == 0 { 0 } else { 4 }) + 2 * hf;
+        let h0 = c * 4 + 2 * hf;
+        let (a0, a1) = window_groups(ql, w0);
+        let (b0, b1) = window_groups(ql, w0 + 1);
+        let (p0, p1) = window_groups(qh, h0);
+        let (q0, q1) = window_groups(qh, h0 + 1);
+        let high = g >= 2;
+        let codes = [
+            q6k_codes(a0, p0, high, g, lownib, three),
+            q6k_codes(a1, p1, high, g, lownib, three),
+            q6k_codes(b0, q0, high, g, lownib, three),
+            q6k_codes(b1, q1, high, g, lownib, three),
+        ];
+        let scv = q6k8_scale(t, run, lane);
+        for u in 0..N {
+            let a = src.run_quads(row0 + u, sb, run);
+            // Two `vpmaddubsw` per scale madd: four products per int16 lane,
+            // 4 · 63 · 127 = 32 004 — the Q6_K bound. Eight would be 128 016
+            // and would wrap.
+            let p01 = _mm256_add_epi16(
+                _mm256_maddubs_epi16(codes[0], bcast4(a[0])),
+                _mm256_maddubs_epi16(codes[1], bcast4(a[1])),
+            );
+            sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(p01, scv));
+            let p23 = _mm256_add_epi16(
+                _mm256_maddubs_epi16(codes[2], bcast4(a[2])),
+                _mm256_maddubs_epi16(codes[3], bcast4(a[3])),
+            );
+            sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(p23, scv));
+            // The offset term: scale · Σq, accumulated in int32 and shifted by
+            // 32 once, after the super-block. Σq fits i16 (2032), the scale
+            // i16, so the madd is exact.
+            let bs = src.sum16(row0 + u, sb, run);
+            let b16 = _mm256_and_si256(_mm256_set1_epi32(bs), low16);
+            bias[u] = _mm256_add_epi32(bias[u], _mm256_madd_epi16(scv, b16));
+        }
+    }
+    for u in 0..N {
+        let x = _mm256_sub_epi32(sumi[u], _mm256_slli_epi32(bias[u], 5));
+        // `dot_q6k8_ref`'s fold, in its order: (d · dk) · sum, then an add.
+        let x = _mm256_mul_ps(
+            _mm256_mul_ps(dv, _mm256_set1_ps(src.scale(row0 + u, sb))),
+            _mm256_cvtepi32_ps(x),
+        );
+        facc[u] = _mm256_add_ps(facc[u], x);
+    }
+}
+
+/// Eight output rows of a repacked Q6_K tile against `N` activation rows.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C. The tile
+/// must hold `n_sb` tiles, and the activation must carry the per-256 layout.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn q6k8_group<S: ActSrc, const N: usize>(
+    tile: &[u8],
+    n_sb: usize,
+    src: &S,
+    row0: usize,
+    nvalid: usize,
+    out: &mut [f32],
+) {
+    assert!(
+        (1..=MAX_GROUP_ROWS).contains(&N),
+        "one to eight activation rows"
+    );
+    assert!(nvalid > 0 && nvalid <= N, "the valid rows fit the group");
+    assert!(
+        out.len() >= nvalid * ROWS,
+        "the output holds eight rows per row"
+    );
+    let lane = _mm256_loadu_si256(LANEPERM.as_ptr() as *const __m256i);
+    let mut facc = [_mm256_setzero_ps(); N];
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q6K8::SIZE);
+        let dv = _mm256_castsi256_ps(_mm256_permutevar8x32_epi32(
+            _mm256_castps_si256(_mm256_cvtph_ps(_mm_loadu_si128(
+                t.add(crate::kq::q6_d()) as *const __m128i
+            ))),
+            lane,
+        ));
+        q6k8_sb(t, sb, src, row0, lane, dv, &mut facc);
+    }
+    q4k8_write(&facc, nvalid, &mut out[row0 * ROWS..]);
+}
+
+/// Eight output rows of a repacked Q6_K tile against a batch of activations.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+pub unsafe fn q6k8_gemm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let src = Interleaved { acts };
+    let groups = nb.div_ceil(MAX_GROUP_ROWS);
+    for g in 0..groups {
+        let b0 = g * MAX_GROUP_ROWS;
+        let n = (nb - b0).min(MAX_GROUP_ROWS);
+        match n {
+            8 => q6k8_group::<_, 8>(tile, n_sb, &src, b0, n, out),
+            7 => q6k8_group::<_, 7>(tile, n_sb, &src, b0, n, out),
+            6 => q6k8_group::<_, 6>(tile, n_sb, &src, b0, n, out),
+            5 => q6k8_group::<_, 5>(tile, n_sb, &src, b0, n, out),
+            4 => q6k8_group::<_, 4>(tile, n_sb, &src, b0, n, out),
+            3 => q6k8_group::<_, 3>(tile, n_sb, &src, b0, n, out),
+            2 => q6k8_group::<_, 2>(tile, n_sb, &src, b0, n, out),
+            1 => q6k8_group::<_, 1>(tile, n_sb, &src, b0, n, out),
+            0 => break,
+            _ => unreachable!("a group holds eight activation rows"),
+        }
+    }
+}
+
+/// Eight output rows of a repacked Q6_K tile against one to three activations.
+///
+/// The decode path. It reads the tile's windows raw — four rows' eight bytes side by
+/// side — and broadcasts the activation's eight codes, so one `vpmaddubsw` covers
+/// four output rows × eight weights without the GEMM's transpose. The integer sums
+/// and the fold are the GEMM's, so the bits are identical.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+pub unsafe fn q6k8_gemv(tile: &[u8], n_sb: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
+    assert!((1..=3).contains(&nb), "the GEMV takes one to three rows");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    match nb {
+        1 => q6k8_gemv_raw::<1>(tile, n_sb, acts, out),
+        2 => q6k8_gemv_raw::<2>(tile, n_sb, acts, out),
+        _ => q6k8_gemv_raw::<3>(tile, n_sb, acts, out),
+    }
+}
+
+/// The eight bytes at `p`, broadcast to the whole register.
+#[inline(always)]
+unsafe fn bcast8_256(p: *const u8) -> __m256i {
+    _mm256_set1_epi64x((p as *const i64).read_unaligned())
+}
+
+/// The even int32 lanes of `v + swap_adjacent(v)`, in the low four lanes: the
+/// exact sum of each row's two partials.
+static PAIR_EVEN: [i32; 8] = [0, 2, 4, 6, 0, 0, 0, 0];
+
+#[inline(always)]
+unsafe fn pair_sum4(v: __m256i) -> __m128i {
+    let s = _mm256_add_epi32(v, _mm256_shuffle_epi32(v, 0xB1));
+    let p =
+        _mm256_permutevar8x32_epi32(s, _mm256_loadu_si256(PAIR_EVEN.as_ptr() as *const __m256i));
+    _mm256_castsi256_si128(p)
+}
+
+/// The two halves of a raw Q6_K window's codes, each four rows × eight weights.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn q6k_raw_window(
+    ql: *const u8,
+    qh: *const u8,
+    w: usize,
+    h: usize,
+    high: bool,
+    g: usize,
+    lownib: __m256i,
+    three: __m256i,
+) -> (__m256i, __m256i) {
+    let a = _mm256_loadu_si256(ql.add(w * 64) as *const __m256i);
+    let b = _mm256_loadu_si256(ql.add(w * 64 + 32) as *const __m256i);
+    let p = _mm256_loadu_si256(qh.add(h * 64) as *const __m256i);
+    let q = _mm256_loadu_si256(qh.add(h * 64 + 32) as *const __m256i);
+    (
+        q6k_codes(a, p, high, g, lownib, three),
+        q6k_codes(b, q, high, g, lownib, three),
+    )
+}
+
+/// Eight output rows of a repacked Q6_K tile against `N` activations, decoded
+/// raw (no transpose).
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn q6k8_gemv_raw<const N: usize>(
+    tile: &[u8],
+    n_sb: usize,
+    acts: &[QuantAct],
+    out: &mut [f32],
+) {
+    assert!((1..=N).contains(&acts.len()));
+    let ones = _mm256_set1_epi16(1);
+    let lownib = _mm256_set1_epi8(0x0F);
+    let three = _mm256_set1_epi8(0x03);
+    let mut facc = [_mm256_setzero_ps(); N];
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q6K8::SIZE);
+        let ql = t.add(crate::kq::q6_ql());
+        let qh = t.add(crate::kq::q6_qh());
+        let dv = _mm256_cvtph_ps(_mm_loadu_si128(t.add(crate::kq::q6_d()) as *const __m128i));
+        let mut sumi = [_mm256_setzero_si256(); N];
+        for run in 0..16 {
+            let c = run / 8;
+            let r = run % 8;
+            let g = r / 2;
+            let hf = r % 2;
+            let high = g >= 2;
+            let w0 = c * 8 + (if g % 2 == 0 { 0 } else { 4 }) + 2 * hf;
+            let h0 = c * 4 + 2 * hf;
+            let (c00, c01) = q6k_raw_window(ql, qh, w0, h0, high, g, lownib, three);
+            let (c10, c11) = q6k_raw_window(ql, qh, w0 + 1, h0 + 1, high, g, lownib, three);
+            let scale = _mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                t.add(crate::kq::q6_sc() + run * 8) as *const __m128i
+            ));
+            for u in 0..N {
+                let o = sb * 256 + c * 128 + g * 32 + hf * 16;
+                let a0 = bcast8_256(acts[u].qk.as_ptr().add(o) as *const u8);
+                let a1 = bcast8_256(acts[u].qk.as_ptr().add(o + 8) as *const u8);
+                // Two windows, four products per int16 lane: the Q6_K bound.
+                let lo =
+                    _mm256_add_epi16(_mm256_maddubs_epi16(c00, a0), _mm256_maddubs_epi16(c10, a1));
+                let hi =
+                    _mm256_add_epi16(_mm256_maddubs_epi16(c01, a0), _mm256_maddubs_epi16(c11, a1));
+                let sl = pair_sum4(_mm256_madd_epi16(lo, ones));
+                let sh = pair_sum4(_mm256_madd_epi16(hi, ones));
+                let rows = _mm256_inserti128_si256(_mm256_castsi128_si256(sl), sh, 1);
+                let bias = _mm256_set1_epi32(32 * acts[u].bsums[sb * 16 + run] as i32);
+                let x = _mm256_sub_epi32(rows, bias);
+                sumi[u] = _mm256_add_epi32(sumi[u], _mm256_mullo_epi32(scale, x));
+            }
+        }
+        for u in 0..N {
+            let x = _mm256_mul_ps(
+                _mm256_mul_ps(dv, _mm256_set1_ps(acts[u].dk[sb])),
+                _mm256_cvtepi32_ps(sumi[u]),
+            );
+            facc[u] = _mm256_add_ps(facc[u], x);
+        }
+    }
+    for u in 0..N {
+        _mm256_storeu_ps(out.as_mut_ptr().add(u * ROWS), facc[u]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The repacked Q5_K kernel (S4.9i): Q4_K plus a fifth bit per weight
+// ---------------------------------------------------------------------------
+//
+// The nibbles, scales and mins are Q4_K's; the fifth bit widens each code to
+// 0..31, which halves the int16 stage's headroom: eight products per lane are
+// 8 · 31 · 127 = 31 496, inside int16, and sixteen are 63 008, which wraps. So
+// the scale madd widens to int32 after every two windows instead of every four.
+
+/// The shuffle that spreads the eight rows' fifth-bit bytes to four bytes per
+/// row: output byte `k·4 + b` takes source byte `LANES[k]`.
+static Q5K_SPREAD: [u8; 32] = {
+    let mut t = [0u8; 32];
+    let mut k = 0;
+    while k < 8 {
+        let mut b = 0;
+        while b < 4 {
+            t[k * 4 + b] = LANES[k] as u8;
+            b += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
+/// The bit each of a row's four low weights is tested against.
+static Q5K_BITS_LO: [u8; 32] = {
+    let mut t = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        t[i] = 1 << (i % 4);
+        i += 1;
+    }
+    t
+};
+
+/// The same for the four high weights of an eight-weight window.
+static Q5K_BITS_HI: [u8; 32] = {
+    let mut t = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        t[i] = 16 << (i % 4);
+        i += 1;
+    }
+    t
+};
+
+/// The eight rows' fifth bits of one eight-weight window, spread to `0x10` or
+/// zero per weight: the first four weights and the last four.
+#[inline(always)]
+unsafe fn q5k_spread(p: *const u8) -> (__m256i, __m256i) {
+    let m = _mm256_set1_epi64x((p as *const i64).read_unaligned());
+    let v = _mm256_shuffle_epi8(m, _mm256_loadu_si256(Q5K_SPREAD.as_ptr() as *const __m256i));
+    let ten = _mm256_set1_epi8(0x10);
+    let lo_bits = _mm256_loadu_si256(Q5K_BITS_LO.as_ptr() as *const __m256i);
+    let hi_bits = _mm256_loadu_si256(Q5K_BITS_HI.as_ptr() as *const __m256i);
+    let lo = _mm256_and_si256(
+        _mm256_cmpeq_epi8(_mm256_and_si256(v, lo_bits), lo_bits),
+        ten,
+    );
+    let hi = _mm256_and_si256(
+        _mm256_cmpeq_epi8(_mm256_and_si256(v, hi_bits), hi_bits),
+        ten,
+    );
+    (lo, hi)
+}
+
+/// The four code vectors of one Q5_K window: its low nibbles (sub-block 2g)
+/// and high nibbles (2g+1), each OR'd with its fifth bits.
+#[inline(always)]
+unsafe fn q5k_window(t: *const u8, w: usize) -> WindowCodes {
+    let lownib = _mm256_set1_epi8(0x0F);
+    let (g0, g1) = window_groups(t.add(crate::kq::q5k_qs()), w);
+    let g = w / 4;
+    let grp = w % 4;
+    let (lo0, lo1) = q5k_spread(t.add(crate::kq::q5k_qh() + (2 * g * 4 + grp) * 8));
+    let (hi0, hi1) = q5k_spread(t.add(crate::kq::q5k_qh() + ((2 * g + 1) * 4 + grp) * 8));
+    (
+        _mm256_or_si256(_mm256_and_si256(g0, lownib), lo0),
+        _mm256_or_si256(_mm256_and_si256(g1, lownib), lo1),
+        _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(g0, 4), lownib), hi0),
+        _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(g1, 4), lownib), hi1),
+    )
+}
+
+/// The sixteen windows of a super-block's Q5_K codes, decoded once.
+#[inline(always)]
+unsafe fn q5k8_codes(t: *const u8) -> [WindowCodes; WINDOWS] {
+    let zero = _mm256_setzero_si256();
+    let mut codes = [(zero, zero, zero, zero); WINDOWS];
+    for w in 0..WINDOWS {
+        codes[w] = q5k_window(t, w);
+    }
+    codes
+}
+
+/// One super-block of a repacked Q5_K tile against `N` activation rows, folded
+/// onto `facc`. Q4_K's min term and fold, with the int16 stage widened twice.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn q5k8_sb<C: CodeSrc, S: ActSrc, const N: usize>(
+    codes: &C,
+    sb: usize,
+    src: &S,
+    row0: usize,
+    dv: __m256,
+    dminv: __m256,
+    sv: &[__m256i; SUBS],
+    mv: &[__m256i; SUBS],
+    facc: &mut [__m256; N],
+) {
+    let mut sumi = [_mm256_setzero_si256(); N];
+    for g in 0..WINDOWS / 4 {
+        let mut lo16 = [_mm256_setzero_si256(); N];
+        let mut hi16 = [_mm256_setzero_si256(); N];
+        for half in 0..2 {
+            for k in 0..2 {
+                let w = g * 4 + half * 2 + k;
+                let (vlo0, vlo1, vhi0, vhi1) = codes.window(w);
+                for u in 0..N {
+                    let q = src.quads(row0 + u, sb, w);
+                    let (x1, x2) = (bcast4(q[0]), bcast4(q[1]));
+                    let (y1, y2) = (bcast4(q[2]), bcast4(q[3]));
+                    let p = _mm256_add_epi16(
+                        _mm256_maddubs_epi16(vlo0, x1),
+                        _mm256_maddubs_epi16(vlo1, x2),
+                    );
+                    lo16[u] = _mm256_add_epi16(lo16[u], p);
+                    let p = _mm256_add_epi16(
+                        _mm256_maddubs_epi16(vhi0, y1),
+                        _mm256_maddubs_epi16(vhi1, y2),
+                    );
+                    hi16[u] = _mm256_add_epi16(hi16[u], p);
+                }
+            }
+            // Two windows: four maddubs, eight products per int16 lane,
+            // 8 · 31 · 127 = 31 496 — the Q5_K bound.
+            let (svlo, svhi) = (sv[2 * g], sv[2 * g + 1]);
+            for u in 0..N {
+                sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(svlo, lo16[u]));
+                sumi[u] = _mm256_add_epi32(sumi[u], _mm256_madd_epi16(svhi, hi16[u]));
+                lo16[u] = _mm256_setzero_si256();
+                hi16[u] = _mm256_setzero_si256();
+            }
+        }
+    }
+    for u in 0..N {
+        let mut mt = _mm256_setzero_si256();
+        for j in 0..SUBS {
+            mt = _mm256_add_epi32(
+                mt,
+                _mm256_mullo_epi32(mv[j], _mm256_set1_epi32(src.min_sum(row0 + u, sb, j))),
+            );
+        }
+        facc[u] = fold(
+            facc[u],
+            sumi[u],
+            _mm256_cvtepi32_ps(mt),
+            dv,
+            dminv,
+            src.scale(row0 + u, sb),
+        );
+    }
+}
+
+/// Eight output rows of a repacked Q5_K tile against `N` activation rows.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C. The tile
+/// must hold `n_sb` tiles, and the activation must carry the per-256 layout.
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn q5k8_group<S: ActSrc, const N: usize>(
+    tile: &[u8],
+    n_sb: usize,
+    src: &S,
+    row0: usize,
+    nvalid: usize,
+    out: &mut [f32],
+) {
+    assert!(
+        (1..=MAX_GROUP_ROWS).contains(&N),
+        "one to eight activation rows"
+    );
+    assert!(nvalid > 0 && nvalid <= N, "the valid rows fit the group");
+    assert!(
+        out.len() >= nvalid * ROWS,
+        "the output holds eight rows per row"
+    );
+    let lane = _mm256_loadu_si256(LANEPERM.as_ptr() as *const __m256i);
+    let mut facc = [_mm256_setzero_ps(); N];
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q5K8::SIZE);
+        // The Q5_K tile's d, dmin and scm sit where the Q4_K tile's do.
+        let (dv, dminv, sv, mv) = q4k8_scale(t, lane);
+        let decoded = q5k8_codes(t);
+        let codes = DecodedCodes { codes: &decoded };
+        q5k8_sb(&codes, sb, src, row0, dv, dminv, &sv, &mv, &mut facc);
+    }
+    q4k8_write(&facc, nvalid, &mut out[row0 * ROWS..]);
+}
+
+/// Eight output rows of a repacked Q5_K tile against a batch of activations.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+pub unsafe fn q5k8_gemm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let src = Interleaved { acts };
+    let groups = nb.div_ceil(MAX_GROUP_ROWS);
+    for g in 0..groups {
+        let b0 = g * MAX_GROUP_ROWS;
+        let n = (nb - b0).min(MAX_GROUP_ROWS);
+        match n {
+            8 => q5k8_group::<_, 8>(tile, n_sb, &src, b0, n, out),
+            7 => q5k8_group::<_, 7>(tile, n_sb, &src, b0, n, out),
+            6 => q5k8_group::<_, 6>(tile, n_sb, &src, b0, n, out),
+            5 => q5k8_group::<_, 5>(tile, n_sb, &src, b0, n, out),
+            4 => q5k8_group::<_, 4>(tile, n_sb, &src, b0, n, out),
+            3 => q5k8_group::<_, 3>(tile, n_sb, &src, b0, n, out),
+            2 => q5k8_group::<_, 2>(tile, n_sb, &src, b0, n, out),
+            1 => q5k8_group::<_, 1>(tile, n_sb, &src, b0, n, out),
+            0 => break,
+            _ => unreachable!("a group holds eight activation rows"),
+        }
+    }
+}
+
+/// Eight output rows of a repacked Q5_K tile against one to three activations.
+///
+/// The decode path, raw: the fifth bits and nibbles are spread over four rows ×
+/// eight weights per `vpmaddubsw`, without the GEMM's transpose. The integer
+/// sums and the fold are the GEMM's, so the bits are identical.
+///
+/// # Safety
+///
+/// The caller must have checked that the CPU has AVX2, FMA and F16C.
+#[target_feature(enable = "avx2,fma,f16c")]
+pub unsafe fn q5k8_gemv(tile: &[u8], n_sb: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
+    assert!((1..=3).contains(&nb), "the GEMV takes one to three rows");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    match nb {
+        1 => q5k8_gemv_raw::<1>(tile, n_sb, acts, out),
+        2 => q5k8_gemv_raw::<2>(tile, n_sb, acts, out),
+        _ => q5k8_gemv_raw::<3>(tile, n_sb, acts, out),
+    }
+}
+
+/// The raw-layout fifth-bit spread: output byte `k·8 + b` takes source byte `k`,
+/// so one row's eight-bit mask becomes its eight weights.
+static Q5K_SPREAD_RAW: [[u8; 32]; 2] = {
+    let mut t = [[0u8; 32]; 2];
+    let mut half = 0;
+    while half < 2 {
+        let mut k = 0;
+        while k < 4 {
+            let mut b = 0;
+            while b < 8 {
+                t[half][k * 8 + b] = (k + 4 * half) as u8;
+                b += 1;
+            }
+            k += 1;
+        }
+        half += 1;
+    }
+    t
+};
+
+/// The bit each of a row's eight weights is tested against.
+static Q5K_BITS_RAW: [u8; 32] = {
+    let mut t = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        t[i] = 1 << (i % 8);
+        i += 1;
+    }
+    t
+};
+
+/// The eight rows' fifth bits of one eight-weight window in the raw layout: four
+/// rows × eight weights, low and high.
+#[inline(always)]
+unsafe fn q5k_spread_raw(p: *const u8) -> (__m256i, __m256i) {
+    let m = _mm256_set1_epi64x((p as *const i64).read_unaligned());
+    let bits = _mm256_loadu_si256(Q5K_BITS_RAW.as_ptr() as *const __m256i);
+    let ten = _mm256_set1_epi8(0x10);
+    let ctl = Q5K_SPREAD_RAW.as_ptr() as *const __m256i;
+    let lo = _mm256_shuffle_epi8(m, _mm256_loadu_si256(ctl));
+    let hi = _mm256_shuffle_epi8(m, _mm256_loadu_si256(ctl.add(1)));
+    let lo = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_and_si256(lo, bits), bits), ten);
+    let hi = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_and_si256(hi, bits), bits), ten);
+    (lo, hi)
+}
+
+/// Eight output rows of a repacked Q5_K tile against `N` activations, decoded
+/// raw (no transpose).
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn q5k8_gemv_raw<const N: usize>(
+    tile: &[u8],
+    n_sb: usize,
+    acts: &[QuantAct],
+    out: &mut [f32],
+) {
+    assert!((1..=N).contains(&acts.len()));
+    let ones = _mm256_set1_epi16(1);
+    let lownib = _mm256_set1_epi8(0x0F);
+    let mut facc = [_mm256_setzero_ps(); N];
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q5K8::SIZE);
+        let dv = _mm256_cvtph_ps(_mm_loadu_si128(t.add(crate::kq::q5k_d()) as *const __m128i));
+        let dminv = _mm256_cvtph_ps(_mm_loadu_si128(
+            t.add(crate::kq::q5k_dmin()) as *const __m128i
+        ));
+        let mut mv = [_mm256_setzero_si256(); SUBS];
+        for j in 0..SUBS {
+            mv[j] = unpack6(t.add(crate::kq::q5k_scm() + j * crate::kq::Q4_SCM_STRIDE + 6));
+        }
+        let mut sumi = [_mm256_setzero_si256(); N];
+        for sub in 0..SUBS {
+            let high = sub % 2 == 1;
+            let mut lo16 = [_mm256_setzero_si256(); N];
+            let mut hi16 = [_mm256_setzero_si256(); N];
+            for wi in 0..4 {
+                let w = (sub / 2) * 4 + wi;
+                let a = _mm256_loadu_si256(t.add(crate::kq::q5k_qs() + w * 64) as *const __m256i);
+                let b =
+                    _mm256_loadu_si256(t.add(crate::kq::q5k_qs() + w * 64 + 32) as *const __m256i);
+                let (bits_lo, bits_hi) =
+                    q5k_spread_raw(t.add(crate::kq::q5k_qh() + (sub * 4 + wi) * 8));
+                let (nlo, nhi) = if high {
+                    (
+                        _mm256_and_si256(_mm256_srli_epi16(a, 4), lownib),
+                        _mm256_and_si256(_mm256_srli_epi16(b, 4), lownib),
+                    )
+                } else {
+                    (_mm256_and_si256(a, lownib), _mm256_and_si256(b, lownib))
+                };
+                let codes_lo = _mm256_or_si256(nlo, bits_lo);
+                let codes_hi = _mm256_or_si256(nhi, bits_hi);
+                for u in 0..N {
+                    let o = sb * 256 + sub * 32 + wi * 8;
+                    let av = bcast8_256(acts[u].qk.as_ptr().add(o) as *const u8);
+                    // Four windows, eight products per int16 lane: the Q5_K bound.
+                    lo16[u] = _mm256_add_epi16(lo16[u], _mm256_maddubs_epi16(codes_lo, av));
+                    hi16[u] = _mm256_add_epi16(hi16[u], _mm256_maddubs_epi16(codes_hi, av));
+                }
+            }
+            let sc = unpack6(t.add(crate::kq::q5k_scm() + sub * crate::kq::Q4_SCM_STRIDE));
+            for u in 0..N {
+                let sl = pair_sum4(_mm256_madd_epi16(lo16[u], ones));
+                let sh = pair_sum4(_mm256_madd_epi16(hi16[u], ones));
+                let rows = _mm256_inserti128_si256(_mm256_castsi128_si256(sl), sh, 1);
+                sumi[u] = _mm256_add_epi32(sumi[u], _mm256_mullo_epi32(sc, rows));
+            }
+        }
+        for u in 0..N {
+            let mut mt = _mm256_setzero_si256();
+            for j in 0..SUBS {
+                let bs = acts[u].bsums[sb * 16 + 2 * j] as i32
+                    + acts[u].bsums[sb * 16 + 2 * j + 1] as i32;
+                mt = _mm256_add_epi32(mt, _mm256_mullo_epi32(mv[j], _mm256_set1_epi32(bs)));
+            }
+            facc[u] = fold(
+                facc[u],
+                sumi[u],
+                _mm256_cvtepi32_ps(mt),
+                dv,
+                dminv,
+                acts[u].dk[sb],
+            );
+        }
+    }
+    for u in 0..N {
+        _mm256_storeu_ps(out.as_mut_ptr().add(u * ROWS), facc[u]);
     }
 }
 
@@ -2660,6 +3439,348 @@ mod tests {
                 // two real numbers at most a handful of ULP apart.
                 assert!(
                     ulps(got[b * 8 + r], want) <= 16,
+                    "row {r} of batch {b}: {} against the scalar kernel's {want}",
+                    got[b * 8 + r]
+                );
+            }
+        }
+    }
+
+    /// One Q5_K super-block with sane scales and random codes.
+    pub fn q5k_block(rng: &mut Rng) -> Vec<u8> {
+        let mut b = rng.bytes(crate::kq::Q5K_BLOCK);
+        b[0..2].copy_from_slice(&crate::quant::f32_to_f16(0.01).to_le_bytes());
+        b[2..4].copy_from_slice(&crate::quant::f32_to_f16(0.005).to_le_bytes());
+        for i in 0..12 {
+            b[4 + i] = rng.next_u8() & 0x3F;
+        }
+        b
+    }
+
+    /// A tile of eight rows and `n_sb` Q5_K super-blocks.
+    pub fn q5k8_tile(rng: &mut Rng, n_sb: usize) -> Vec<u8> {
+        let mut tile = vec![0u8; n_sb * Q5K8::SIZE];
+        for sb in 0..n_sb {
+            let rows: Vec<Vec<u8>> = (0..8).map(|_| q5k_block(rng)).collect();
+            let refs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+            crate::kq::repack_q5k8(&refs, &mut tile[sb * Q5K8::SIZE..(sb + 1) * Q5K8::SIZE]);
+        }
+        tile
+    }
+
+    /// One Q6_K super-block with a sane super-block scale and random codes.
+    pub fn q6k_block(rng: &mut Rng) -> Vec<u8> {
+        let mut b = rng.bytes(crate::kq::Q6K_BLOCK);
+        b[208..210].copy_from_slice(&crate::quant::f32_to_f16(0.01).to_le_bytes());
+        // The run scales: small magnitudes, so the products stay in a sane range.
+        for i in 0..16 {
+            b[192 + i] = rng.next_u8() % 64;
+        }
+        b
+    }
+
+    /// A tile of eight rows and `n_sb` Q6_K super-blocks.
+    pub fn q6k8_tile(rng: &mut Rng, n_sb: usize) -> Vec<u8> {
+        let mut tile = vec![0u8; n_sb * Q6K8::SIZE];
+        for sb in 0..n_sb {
+            let rows: Vec<Vec<u8>> = (0..8).map(|_| q6k_block(rng)).collect();
+            let refs: Vec<&[u8]> = rows.iter().map(|r| r.as_slice()).collect();
+            crate::kq::repack_q6k8(&refs, &mut tile[sb * Q6K8::SIZE..(sb + 1) * Q6K8::SIZE]);
+        }
+        tile
+    }
+
+    /// The Q5_K int16 stage's bound: two windows, four `vpmaddubsw`, eight
+    /// products per int16 lane: 8 · 31 · 127 = 31 496, inside int16. Four
+    /// windows would be 63 008 and would wrap.
+    #[test]
+    fn the_q5_k_int16_stage_has_headroom() {
+        let bound = 8 * 31 * 127;
+        assert!(bound <= i16::MAX as i32, "the int16 lanes would wrap");
+        assert!(-bound >= i16::MIN as i32);
+        if !crate::simd::have_batched() {
+            return;
+        }
+        unsafe {
+            let codes = _mm256_set1_epi8(31);
+            for a in [127i8, -127] {
+                let av = _mm256_set1_epi8(a);
+                let one = _mm256_maddubs_epi16(codes, av);
+                let mut acc = _mm256_setzero_si256();
+                for _ in 0..4 {
+                    acc = _mm256_add_epi16(acc, one);
+                }
+                let mut lanes = [0i16; 16];
+                _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, acc);
+                let want = 8 * 31 * a as i32;
+                assert!(
+                    lanes.iter().all(|&l| l as i32 == want),
+                    "the int16 lane is {lanes:?}, not {want}"
+                );
+            }
+        }
+    }
+
+    /// The Q6_K int16 stage's bound: one window, two `vpmaddubsw`, four
+    /// products per int16 lane: 4 · 63 · 127 = 32 004, inside int16's 32 767
+    /// by 763. The next maddubs would be 64 008 and would wrap.
+    #[test]
+    fn the_q6_k_int16_stage_has_headroom() {
+        let bound = 4 * 63 * 127;
+        assert!(bound <= i16::MAX as i32, "the int16 lanes would wrap");
+        assert!(-bound >= i16::MIN as i32);
+        if !crate::simd::have_batched() {
+            return;
+        }
+        unsafe {
+            let codes = _mm256_set1_epi8(63);
+            for a in [127i8, -127] {
+                let av = _mm256_set1_epi8(a);
+                let one = _mm256_maddubs_epi16(codes, av);
+                let mut acc = _mm256_setzero_si256();
+                for _ in 0..2 {
+                    acc = _mm256_add_epi16(acc, one);
+                }
+                let mut lanes = [0i16; 16];
+                _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, acc);
+                let want = 4 * 63 * a as i32;
+                assert!(
+                    lanes.iter().all(|&l| l as i32 == want),
+                    "the int16 lane is {lanes:?}, not {want}"
+                );
+            }
+        }
+    }
+
+    /// Every batch width of Q5_K, against the scalar reference.
+    #[test]
+    fn every_q5_k_batch_width_agrees_with_the_reference() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        for n_sb in [1usize, 3, 4, 10, 32] {
+            let n = n_sb * 256;
+            let mut rng = Rng(0x5EED_5C5C_1234_9876 ^ n_sb as u64);
+            let tile = q5k8_tile(&mut rng, n_sb);
+            let batch = acts(&mut rng, 8, n);
+            for nb in 1..=8usize {
+                let mut kq = KqActs::default();
+                kq.fill(&batch[..nb]);
+                let mut got = vec![0.0f32; nb * 8];
+                unsafe {
+                    if nb < 4 {
+                        q5k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut got)
+                    } else {
+                        q5k8_gemm(&tile, n_sb, &kq, nb, &mut got)
+                    }
+                }
+                for b in 0..nb {
+                    for r in 0..8 {
+                        let want = crate::kq::dot_q5k8_ref(&tile, n_sb, r, &batch[b]);
+                        assert!(
+                            ulps(got[b * 8 + r], want) <= 1,
+                            "n_sb {n_sb} nb {nb}: row {r} of batch {b} is {} not {want}",
+                            got[b * 8 + r]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The Q5_K GEMV and GEMM agree bit for bit.
+    #[test]
+    fn the_q5_k_gemv_and_gemm_agree_bit_for_bit() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        let n_sb = 4;
+        let n = n_sb * 256;
+        let mut rng = Rng(0x5EED_5C5C_ABCD_0001);
+        let tile = q5k8_tile(&mut rng, n_sb);
+        let batch = acts(&mut rng, 12, n);
+        let mut kq = KqActs::default();
+        kq.fill(&batch);
+        let mut gemm = vec![0.0f32; 12 * 8];
+        unsafe { q5k8_gemm(&tile, n_sb, &kq, 12, &mut gemm) };
+        for nb in 1..=3 {
+            let mut gemv = vec![0.0f32; 3 * 8];
+            unsafe { q5k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut gemv) };
+            for b in 0..nb {
+                for r in 0..8 {
+                    assert_eq!(
+                        gemv[b * 8 + r].to_bits(),
+                        gemm[b * 8 + r].to_bits(),
+                        "the GEMV and the GEMM disagree on row {r} of batch {b}"
+                    );
+                }
+            }
+        }
+        let mut sub = KqActs::default();
+        sub.fill(&batch[5..]);
+        let mut part = vec![0.0f32; 4 * 8];
+        unsafe { q5k8_gemm(&tile, n_sb, &sub, 4, &mut part) };
+        for b in 0..4 {
+            for r in 0..8 {
+                assert_eq!(
+                    part[b * 8 + r].to_bits(),
+                    gemm[(b + 5) * 8 + r].to_bits(),
+                    "the mid-batch start disagrees on row {r} of batch {b}"
+                );
+            }
+        }
+    }
+
+    /// Every batch width of Q6_K, against the scalar reference: the kernel
+    /// computes the reference's integers and folds them in the reference's
+    /// order, so the bits agree exactly.
+    #[test]
+    fn every_q6_k_batch_width_agrees_with_the_reference() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        for n_sb in [1usize, 3, 4, 10, 32] {
+            let n = n_sb * 256;
+            let mut rng = Rng(0x5EED_6C6C_1234_9876 ^ n_sb as u64);
+            let tile = q6k8_tile(&mut rng, n_sb);
+            let batch = acts(&mut rng, 8, n);
+            for nb in 1..=8usize {
+                let mut kq = KqActs::default();
+                kq.fill(&batch[..nb]);
+                let mut got = vec![0.0f32; nb * 8];
+                unsafe {
+                    if nb < 4 {
+                        q6k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut got)
+                    } else {
+                        q6k8_gemm(&tile, n_sb, &kq, nb, &mut got)
+                    }
+                }
+                for b in 0..nb {
+                    for r in 0..8 {
+                        let want = crate::kq::dot_q6k8_ref(&tile, n_sb, r, &batch[b]);
+                        assert_eq!(
+                            got[b * 8 + r].to_bits(),
+                            want.to_bits(),
+                            "n_sb {n_sb} nb {nb}: row {r} of batch {b} is {} not {want}",
+                            got[b * 8 + r]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The Q6_K GEMV and GEMM agree bit for bit.
+    #[test]
+    fn the_q6_k_gemv_and_gemm_agree_bit_for_bit() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        let n_sb = 4;
+        let n = n_sb * 256;
+        let mut rng = Rng(0x5EED_6C6C_ABCD_0001);
+        let tile = q6k8_tile(&mut rng, n_sb);
+        let batch = acts(&mut rng, 12, n);
+        let mut kq = KqActs::default();
+        kq.fill(&batch);
+        let mut gemm = vec![0.0f32; 12 * 8];
+        unsafe { q6k8_gemm(&tile, n_sb, &kq, 12, &mut gemm) };
+        for nb in 1..=3 {
+            let mut gemv = vec![0.0f32; 3 * 8];
+            unsafe { q6k8_gemv(&tile, n_sb, &batch[..nb], nb, &mut gemv) };
+            for b in 0..nb {
+                for r in 0..8 {
+                    assert_eq!(
+                        gemv[b * 8 + r].to_bits(),
+                        gemm[b * 8 + r].to_bits(),
+                        "the GEMV and the GEMM disagree on row {r} of batch {b}"
+                    );
+                }
+            }
+        }
+        let mut sub = KqActs::default();
+        sub.fill(&batch[5..]);
+        let mut part = vec![0.0f32; 4 * 8];
+        unsafe { q6k8_gemm(&tile, n_sb, &sub, 4, &mut part) };
+        for b in 0..4 {
+            for r in 0..8 {
+                assert_eq!(
+                    part[b * 8 + r].to_bits(),
+                    gemm[(b + 5) * 8 + r].to_bits(),
+                    "the mid-batch start disagrees on row {r} of batch {b}"
+                );
+            }
+        }
+    }
+
+    /// The Q5_K tile against the ordinary scalar kernel: the same real number,
+    /// re-rounded by the fold.
+    #[test]
+    fn the_q5_k_tile_matches_the_ordinary_scalar_kernel() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        let n_sb = 4;
+        let n = n_sb * 256;
+        let mut rng = Rng(0x5EED_5C5C_0DDF_0001);
+        let tile = q5k8_tile(&mut rng, n_sb);
+        let batch = acts(&mut rng, 2, n);
+        let mut blocks = vec![0u8; 8 * n_sb * crate::kq::Q5K_BLOCK];
+        for t in 0..n_sb {
+            let mut back = vec![0u8; Q5K8::SOURCE];
+            crate::kq::unrepack_q5k8(&tile[t * Q5K8::SIZE..(t + 1) * Q5K8::SIZE], &mut back);
+            for r in 0..8 {
+                let at = (r * n_sb + t) * crate::kq::Q5K_BLOCK;
+                blocks[at..at + crate::kq::Q5K_BLOCK]
+                    .copy_from_slice(&back[r * crate::kq::Q5K_BLOCK..][..crate::kq::Q5K_BLOCK]);
+            }
+        }
+        let mut got = vec![0.0f32; 2 * 8];
+        unsafe { q5k8_gemv(&tile, n_sb, &batch, 2, &mut got) };
+        for b in 0..2 {
+            for r in 0..8 {
+                let row = &blocks[r * n_sb * crate::kq::Q5K_BLOCK..][..n_sb * crate::kq::Q5K_BLOCK];
+                let want = crate::quant::dot_scalar(crate::format::Format::Q5_K, row, &batch[b]);
+                assert!(
+                    ulps(got[b * 8 + r], want) <= 16,
+                    "row {r} of batch {b}: {} against the scalar kernel's {want}",
+                    got[b * 8 + r]
+                );
+            }
+        }
+    }
+
+    /// The Q6_K tile against the ordinary scalar kernel: the reference is that
+    /// kernel's expression, so the bits agree exactly.
+    #[test]
+    fn the_q6_k_tile_matches_the_ordinary_scalar_kernel() {
+        if !crate::simd::have_batched() {
+            return;
+        }
+        let n_sb = 4;
+        let n = n_sb * 256;
+        let mut rng = Rng(0x5EED_6C6C_0DDF_0001);
+        let tile = q6k8_tile(&mut rng, n_sb);
+        let batch = acts(&mut rng, 2, n);
+        let mut blocks = vec![0u8; 8 * n_sb * crate::kq::Q6K_BLOCK];
+        for t in 0..n_sb {
+            let mut back = vec![0u8; Q6K8::SOURCE];
+            crate::kq::unrepack_q6k8(&tile[t * Q6K8::SIZE..(t + 1) * Q6K8::SIZE], &mut back);
+            for r in 0..8 {
+                let at = (r * n_sb + t) * crate::kq::Q6K_BLOCK;
+                blocks[at..at + crate::kq::Q6K_BLOCK]
+                    .copy_from_slice(&back[r * crate::kq::Q6K_BLOCK..][..crate::kq::Q6K_BLOCK]);
+            }
+        }
+        let mut got = vec![0.0f32; 2 * 8];
+        unsafe { q6k8_gemv(&tile, n_sb, &batch, 2, &mut got) };
+        for b in 0..2 {
+            for r in 0..8 {
+                let row = &blocks[r * n_sb * crate::kq::Q6K_BLOCK..][..n_sb * crate::kq::Q6K_BLOCK];
+                let want = crate::quant::dot_scalar(crate::format::Format::Q6_K, row, &batch[b]);
+                assert_eq!(
+                    got[b * 8 + r].to_bits(),
+                    want.to_bits(),
                     "row {r} of batch {b}: {} against the scalar kernel's {want}",
                     got[b * 8 + r]
                 );

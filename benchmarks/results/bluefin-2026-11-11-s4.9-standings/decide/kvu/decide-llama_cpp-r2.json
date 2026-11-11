@@ -1,0 +1,239 @@
+{
+ "benchmark": "peregrine-s4.9-decisions",
+ "timestamp": "2026-11-11T12:50:19.010337+00:00",
+ "round": 2,
+ "engine": "llama_cpp",
+ "model": "~/models/tinyopenjev-for-testing-Q8_0.gguf",
+ "machine": {
+  "hostname": "bluefin",
+  "cpu": "",
+  "threads": 4,
+  "kernel": "7.2.7-200.fc44.x86_64"
+ },
+ "settings": {
+  "ctx": 8192,
+  "llama_ctx": 16384,
+  "slots": 4,
+  "llama_slots": 11,
+  "llama_batch": 2048,
+  "llama_ubatch": 2048,
+  "llama_kv_unified": true,
+  "llama_cache_ram": 256,
+  "llama_flash_attn": null,
+  "runs": 7,
+  "questions": [
+   1,
+   3,
+   10
+  ],
+  "states": [
+   64,
+   300,
+   1000
+  ],
+  "cmd": [
+   "/var/tmp/llama.cpp/build/bin/llama-server",
+   "-m",
+   "~/models/tinyopenjev-for-testing-Q8_0.gguf",
+   "-t",
+   "4",
+   "-c",
+   "16384",
+   "-np",
+   "11",
+   "-b",
+   "2048",
+   "-ub",
+   "2048",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8351",
+   "-kvu",
+   "--cache-ram",
+   "256"
+  ]
+ },
+ "cells": {
+  "S64_q1": {
+   "state_tokens": 64,
+   "questions": 1,
+   "wall_ms_median": 8.564,
+   "wall_ms_min": 8.532,
+   "wall_ms_p50": 8.564,
+   "wall_ms_p90": 8.599,
+   "questions_per_s": 116.772,
+   "per_question_ms": 8.564,
+   "runs": [
+    8.584,
+    8.557,
+    8.532,
+    8.594,
+    8.552,
+    8.564,
+    8.606
+   ],
+   "input_tokens": 120
+  },
+  "S64_q3": {
+   "state_tokens": 64,
+   "questions": 3,
+   "wall_ms_median": 19.063,
+   "wall_ms_min": 18.925,
+   "wall_ms_p50": 19.063,
+   "wall_ms_p90": 19.411,
+   "questions_per_s": 157.376,
+   "per_question_ms": 6.354,
+   "runs": [
+    18.996,
+    18.925,
+    19.44,
+    18.999,
+    19.063,
+    19.377,
+    19.391
+   ],
+   "input_tokens": 365
+  },
+  "S64_q10": {
+   "state_tokens": 64,
+   "questions": 10,
+   "wall_ms_median": 46.294,
+   "wall_ms_min": 45.835,
+   "wall_ms_p50": 46.294,
+   "wall_ms_p90": 46.44,
+   "questions_per_s": 216.009,
+   "per_question_ms": 4.629,
+   "runs": [
+    45.835,
+    46.379,
+    46.294,
+    45.925,
+    46.319,
+    46.532,
+    46.277
+   ],
+   "input_tokens": 1218
+  },
+  "S300_q1": {
+   "state_tokens": 300,
+   "questions": 1,
+   "wall_ms_median": 22.047,
+   "wall_ms_min": 21.89,
+   "wall_ms_p50": 22.047,
+   "wall_ms_p90": 22.583,
+   "questions_per_s": 45.357,
+   "per_question_ms": 22.047,
+   "runs": [
+    21.89,
+    22.596,
+    22.011,
+    21.946,
+    22.575,
+    22.392,
+    22.047
+   ],
+   "input_tokens": 356
+  },
+  "S300_q3": {
+   "state_tokens": 300,
+   "questions": 3,
+   "wall_ms_median": 34.77,
+   "wall_ms_min": 34.486,
+   "wall_ms_p50": 34.77,
+   "wall_ms_p90": 37.116,
+   "questions_per_s": 86.281,
+   "per_question_ms": 11.59,
+   "runs": [
+    34.517,
+    35.166,
+    34.77,
+    34.649,
+    37.068,
+    37.187,
+    34.486
+   ],
+   "input_tokens": 1073
+  },
+  "S300_q10": {
+   "state_tokens": 300,
+   "questions": 10,
+   "wall_ms_median": 71.952,
+   "wall_ms_min": 71.68,
+   "wall_ms_p50": 71.952,
+   "wall_ms_p90": 72.294,
+   "questions_per_s": 138.981,
+   "per_question_ms": 7.195,
+   "runs": [
+    71.952,
+    71.89,
+    72.102,
+    72.423,
+    72.208,
+    71.94,
+    71.68
+   ],
+   "input_tokens": 3578
+  },
+  "S1000_q1": {
+   "state_tokens": 1000,
+   "questions": 1,
+   "wall_ms_median": 72.604,
+   "wall_ms_min": 72.274,
+   "wall_ms_p50": 72.604,
+   "wall_ms_p90": 72.851,
+   "questions_per_s": 13.773,
+   "per_question_ms": 72.604,
+   "runs": [
+    72.442,
+    72.476,
+    72.814,
+    72.82,
+    72.899,
+    72.274,
+    72.604
+   ],
+   "input_tokens": 1052
+  },
+  "S1000_q3": {
+   "state_tokens": 1000,
+   "questions": 3,
+   "wall_ms_median": 90.61,
+   "wall_ms_min": 90.389,
+   "wall_ms_p50": 90.61,
+   "wall_ms_p90": 94.658,
+   "questions_per_s": 33.109,
+   "per_question_ms": 30.203,
+   "runs": [
+    90.518,
+    94.812,
+    90.962,
+    94.556,
+    90.441,
+    90.61,
+    90.389
+   ],
+   "input_tokens": 3161
+  },
+  "S1000_q10": {
+   "state_tokens": 1000,
+   "questions": 10,
+   "wall_ms_median": 150.459,
+   "wall_ms_min": 149.414,
+   "wall_ms_p50": 150.459,
+   "wall_ms_p90": 152.108,
+   "questions_per_s": 66.463,
+   "per_question_ms": 15.046,
+   "runs": [
+    150.129,
+    150.961,
+    149.414,
+    150.108,
+    150.64,
+    150.459,
+    153.828
+   ],
+   "input_tokens": 10538
+  }
+ }
+}

@@ -1,0 +1,331 @@
+{
+ "rows": [
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 387.61204941688123,
+   "prefill_s": 1.320908369,
+   "prof": "",
+   "wall_s": 3.286,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "qwen05",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 465.31870411921784,
+   "prefill_s": 1.1003211250000002,
+   "prof": "",
+   "wall_s": 1.665,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 403.7966006898958,
+   "prefill_s": 1.267965107,
+   "prof": "",
+   "wall_s": 1.807,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 1,
+   "model": "qwen05",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 496.1227589720735,
+   "prefill_s": 1.0320026459999998,
+   "prof": "",
+   "wall_s": 1.584,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 413.77114916576403,
+   "prefill_s": 1.237398985,
+   "prof": "",
+   "wall_s": 1.898,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 2,
+   "model": "qwen05",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 467.36639564579275,
+   "prefill_s": 1.0955002429999998,
+   "prof": "",
+   "wall_s": 1.7,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 3,
+   "model": "qwen05",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 404.8525051948823,
+   "prefill_s": 1.2646581,
+   "prof": "",
+   "wall_s": 1.84,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 3,
+   "model": "qwen05",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 478.4321644905699,
+   "prefill_s": 1.0701621629999998,
+   "prof": "",
+   "wall_s": 1.662,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 4,
+   "model": "qwen05",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 406.28244962848305,
+   "prefill_s": 1.2602070319999996,
+   "prof": "",
+   "wall_s": 1.911,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 4,
+   "model": "qwen05",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 470.46282668205885,
+   "prefill_s": 1.088290022,
+   "prof": "",
+   "wall_s": 1.682,
+   "bytes_acts": 89376817152
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 239.51318925571803,
+   "prefill_s": 2.1376693350000004,
+   "prof": "",
+   "wall_s": 3.679,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 0,
+   "model": "llama1b",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 281.9279465095552,
+   "prefill_s": 1.816066858,
+   "prof": "",
+   "wall_s": 2.55,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 250.27462886766733,
+   "prefill_s": 2.045752709,
+   "prof": "",
+   "wall_s": 2.801,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 1,
+   "model": "llama1b",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 294.29897989599,
+   "prefill_s": 1.7397274030000003,
+   "prof": "",
+   "wall_s": 2.425,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 240.79160737557407,
+   "prefill_s": 2.126319956,
+   "prof": "",
+   "wall_s": 2.844,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 2,
+   "model": "llama1b",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 284.23856871211285,
+   "prefill_s": 1.8013037509999996,
+   "prof": "",
+   "wall_s": 2.449,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 3,
+   "model": "llama1b",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 241.24122731400897,
+   "prefill_s": 2.1223569689999997,
+   "prof": "",
+   "wall_s": 2.792,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 3,
+   "model": "llama1b",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 288.66412035858167,
+   "prefill_s": 1.773687701,
+   "prof": "",
+   "wall_s": 2.441,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 4,
+   "model": "llama1b",
+   "tag": "isaavx2",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "avx2"
+   },
+   "prefill_tok_s": 249.6794269768983,
+   "prefill_s": 2.050629506,
+   "prof": "",
+   "wall_s": 2.725,
+   "bytes_acts": 293727109120
+  },
+  {
+   "round": 4,
+   "model": "llama1b",
+   "tag": "isanative",
+   "threads": 12,
+   "cpus": null,
+   "env": {
+    "PEREGRINE_ISA": "native"
+   },
+   "prefill_tok_s": 279.87087514346837,
+   "prefill_s": 1.8294150820000001,
+   "prof": "",
+   "wall_s": 2.521,
+   "bytes_acts": 293727109120
+  }
+ ],
+ "extra": {},
+ "summary": {
+  "qwen05": {
+   "isaavx2": {
+    "median": 404.9,
+    "n": 5,
+    "spread": 13.1
+   },
+   "isanative": {
+    "median": 470.5,
+    "n": 5,
+    "spread": 15.4
+   }
+  },
+  "llama1b": {
+   "isaavx2": {
+    "median": 241.2,
+    "n": 5,
+    "spread": 5.4
+   },
+   "isanative": {
+    "median": 284.2,
+    "n": 5,
+    "spread": 7.2
+   }
+  }
+ }
+}

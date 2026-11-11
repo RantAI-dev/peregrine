@@ -142,6 +142,7 @@ and a drain with a streaming client holding the connection open (it ends at the 
 | tinyopenjev test model Q8_0 (`tinyopenjev-for-testing-Q8_0.gguf`, 46 MB) | `models/` or `~/models/` |
 | Phi-4 14B Q4_K_M (`phi-4-Q4_K_M.gguf`) | `~/models/` |
 | `bge-m3-Q2_K.gguf` (encoder-tokenizer XLM-R oracle; optional) | `models/` or `~/models/` |
+| `Nemotron-3.5-Embed-1B-Q4_K_M.gguf` (Tekken tokenizer oracle; optional) | `models/nemotron/` or `~/models/nemotron/` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 2B PQ2_0 | `models/bonsai2-2b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
@@ -313,6 +314,54 @@ checks that its `.bin` is byte-identical to what the file yields. A 2,400-input 
 against `llama-tokenize`/the oracle on the T5 vocabulary (bare ids, ids with specials, and
 detokenisation: 7,200 comparisons) found no divergence.
 
+### The Tekken pre-tokenizer: Nemotron 3.5 Embed
+
+Mistral's Tekken vocabulary is the one pre-type llama.cpp has no hand-written splitter for: it runs
+the pattern through `std::regex` over a collapsed text, so only ASCII case splits words and a
+non-ASCII letter counts as both upper and lower. NVIDIA's Nemotron 3.5 Embed 1B file
+(`general.architecture = mistral3`, `tokenizer.ggml.model = gpt2`, `tokenizer.ggml.pre = pixtral`,
+131,072 pieces and 269,443 merges) carries one, which is why Peregrine has `tekken`/`pixtral`,
+`tekken-num3` and `nemotron-3.5-embed` pre-types.
+
+`tests/tokenize_tekken.rs` checks 361 strings against ids llama.cpp v0.9.0 produced — every
+alternative of the pattern, ASCII case boundaries (`HTMLParser`, `iPhone`), leading punctuation and
+whitespace, single digits, punctuation runs before `/` and newlines, newline and CRLF runs, trailing
+whitespace, Latin/Cyrillic/Greek/CJK/Arabic/Hebrew/Indic/Thai text, combining marks, emoji, long
+words, contractions, the `query: ` / `passage: ` prefixes, literal `[INST]`/`<s>` spellings with
+`parse_special` on and off, and empty or whitespace-only input. A second fixture holds the 22 strings
+whose ids change under `nemotron-3.5-embed` (the ones containing U+200C), generated with that
+pre-tokenizer's metadata override, and the test switches the pre-type to match.
+
+That vocabulary is 131,072 pieces and 269,443 merges, so the `.bin` the encoder fixtures carry would
+be larger than 2 MB; like XLM-R, the test builds the tokenizer from
+`Nemotron-3.5-Embed-1B-Q4_K_M.gguf` in `models/nemotron/` or `~/models/nemotron/` and skips with a
+one-line notice when it is absent (CI has none of these files). The splitter itself is tested in
+`src/tokenizer.rs` with one case per alternative, and runs in CI with no model file.
+
+To regenerate the fixtures:
+
+```text
+g++ -std=c++17 -O2 -I$LLAMA/include -I$LLAMA/common -I$LLAMA/ggml/include \
+    -L$LLAMA/build/bin -Wl,-rpath,$LLAMA/build/bin scripts/tokenizer-oracle.cpp \
+    -o /tmp/tekken-oracle -lllama -lggml
+python3 scripts/gen-tekken-golden.py --oracle /tmp/tekken-oracle \
+    --llama-tokenize $LLAMA/build/bin/llama-tokenize \
+    --model nemotron/Nemotron-3.5-Embed-1B-Q4_K_M.gguf \
+    --out crates/peregrine-core/tests/fixtures/tokenize-golden-tekken.tsv \
+    --provenance "..." --sha256 HASH
+python3 scripts/gen-tekken-golden.py --oracle /tmp/tekken-oracle --pre nemotron-3.5-embed \
+    --model nemotron/Nemotron-3.5-Embed-1B-Q4_K_M.gguf \
+    --out crates/peregrine-core/tests/fixtures/tokenize-golden-tekken-nemotron.tsv \
+    --provenance "..." --sha256 HASH
+```
+
+The oracle prints a fifth column beside the four the encoder fixtures use — the ids with
+`add_special = true` and `parse_special = false` — and accepts an optional `KEY=VALUE` metadata
+override, because `llama-tokenize`'s own `--override-kv` never reaches the loader. In development the
+splitter was also compared with llama.cpp's `unicode_regex_split` on the Tekken and `tekken-num3`
+patterns over 10,538 strings (every three-character combination of the classes that matter, 4,000
+random mixed-script strings, and runs of each class), with no divergence.
+
 ### System One prompts: fixtures rendered by llama.cpp
 
 `crates/peregrine-core/tests/systemone_render.rs` rebuilds the prompt of every case in
@@ -387,6 +436,15 @@ The file declares the `phi3` architecture (40 blocks, embedding 5120, feed-forwa
 Greedy decoding (32 tokens, 8 threads) was checked against llama.cpp on three prompts: all three match bit for bit across all 32 steps (32/32 each, 96/96 steps in all). The end-of-generation tokens are taken out of the running on both sides — exactly what `llama-server`'s `ignore_eos` does — so the comparison runs the full 32 steps instead of stopping at the model's own end token.
 The chat path (`/v1/chat/completions`) answers "The capital of France is Paris.", like llama.cpp's `--jinja` server, on the same prompts: 14 tokens without a system message and 24 with one. The file's template is Phi-4's own ChatML variant (`<|im_start|>role<|im_sep|>text<|im_end|>`, no newlines), which Peregrine detects by `<|im_sep|>` as llama.cpp v0.9.0 does (`src/llama-chat.cpp:99-101`, rendered at `:345-352`).
 The model is recorded in `crates/peregrine-models/tests/golden/<tier>/` and checked in `docs/targets.md` (KL divergence at `-c 512`, 20 chunks).
+
+**The AVX2 golden needs re-recording.** The file holds 40 Q5_K tensors, and S4.9i changed the order
+in which the AVX2 and AVX-512 Q5_K kernels add up a row (the result stays within one ulp of the
+scalar reference). `tests/golden/x86_64-avx2/phi-4-Q4_K_M.golden` was recorded before that and no
+longer matches. Loading the file takes about 9 GB of memory, more than any x86 host of the project
+has free, so it could not be recorded again with the change: on an AVX2 machine that has the file,
+`PEREGRINE_GOLDEN=require` fails for this model until someone records it on a larger machine
+(`PEREGRINE_GOLDEN=record`). The other large files (Llama-2-7B, Mistral-7B, Qwen3-30B-A3B) hold no
+Q5_K tensors and are not touched by that change.
 
 ## Accuracy against llama.cpp
 

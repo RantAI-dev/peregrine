@@ -168,31 +168,21 @@ pub fn attend_texts(
                         let local0 = g0 - span.row0;
                         let rows_out = &mut out_chunk[(g0 - rows.start) * qd..];
                         for h in h_lo..h_hi {
-                            // Scores in blocks of keys: the block's panel slice stays in
-                            // cache while every row of the strip walks it, which is what
-                            // makes a head's keys read once per strip instead of once per
-                            // row. Only the keys inside a row's window are computed.
-                            let mut j0 = 0;
-                            while j0 < n {
-                                let j1 = (j0 + k::SCORE_BLOCK).min(n);
-                                for r in 0..cnt {
-                                    let i = local0 + r;
-                                    let (lo, hi) = k::band(i, n, half_window);
-                                    let a = lo.max(j0);
-                                    let b = hi.min(j1);
-                                    if a < b {
-                                        k::scores_row(
-                                            &q[(span.row0 + i) * qd + h * hd..],
-                                            p,
-                                            n,
-                                            hd,
-                                            a,
-                                            b,
-                                            scale,
-                                            &mut buf[r * n..(r + 1) * n],
-                                        );
-                                    }
-                                }
+                            // Scores in blocks of keys: the block's panel slice stays
+                            // in cache while every tile of the strip walks it. Rows of
+                            // a strip have overlapping windows, so a block is the
+                            // *union* of their bands, and the kernel scores the whole
+                            // block for every row: the keys outside a particular row's
+                            // band are written to that row's buffer and never read
+                            // (the max, the exponentials and the mix take the row's own
+                            // `band`). On a global layer the union is the text.
+                            let u_lo = k::band(local0, n, half_window).0;
+                            let u_hi = k::band(local0 + cnt - 1, n, half_window).1;
+                            let qs = &q[(span.row0 + local0) * qd + h * hd..];
+                            let mut j0 = u_lo;
+                            while j0 < u_hi {
+                                let j1 = (j0 + k::SCORE_BLOCK).min(u_hi);
+                                k::scores_tile(qs, qd, p, n, hd, cnt, j0, j1, scale, buf, n);
                                 j0 = j1;
                             }
                             // Then the row's maximum, weights and denominator, once per
@@ -200,8 +190,7 @@ pub fn attend_texts(
                             for r in 0..cnt {
                                 let (lo, hi) = k::band(local0 + r, n, half_window);
                                 let s = &mut buf[r * n..(r + 1) * n];
-                                let max =
-                                    s[lo..hi].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                                let max = k::max_row(s, lo, hi);
                                 let l = k::exp_row(s, lo, hi, max);
                                 inv[r] = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
                             }

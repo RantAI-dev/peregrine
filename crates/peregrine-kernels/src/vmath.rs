@@ -229,7 +229,7 @@ const EXP_P4: f32 = f32::from_bits(0x3f7f_fff6);
 #[cfg(target_arch = "aarch64")]
 #[inline]
 #[target_feature(enable = "neon")]
-unsafe fn exp4(x: float32x4_t) -> float32x4_t {
+pub(crate) unsafe fn exp4(x: float32x4_t) -> float32x4_t {
     let r = vdupq_n_f32(f32::from_bits(0x4b40_0000)); // 0x1.8p23
     let z = vfmaq_f32(r, x, vdupq_n_f32(EXP_LOG2E));
     let n = vsubq_f32(z, r);

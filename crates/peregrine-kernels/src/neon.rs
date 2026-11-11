@@ -30,16 +30,12 @@
 //! keeps a row's result independent of batch width, chunk, pass width, thread count and
 //! speculation (`docs/design/s2.8-neon.md` §5).
 //!
-//! # S4.9f: the packed float GEMM goes here
+//! # S4.9f: the packed float GEMM
 //!
-//! The packed float GEMM (S4.9f, `fpack.rs`) has no NEON kernel yet: aarch64 keeps the pre-S4.9f
-//! float tile (`simd.rs`'s shape, in `quant.rs`'s scalar reference and the NEON helpers below), and
-//! `MatKernels::fp_panels` is false here, so the load-time pack is not even built. The kernel to add
-//! is the same shape as `fpack`'s: 16-output-row panels, accumulators in `float32x4_t` lanes (four
-//! panels = 16 accumulators, `vmlaq_laneq_f32` with the activation lane), f16 widened by `vcvt_f32_f16`
-//! and bf16 by shifting into the high half — both exact — and the same sequential `vmlaq` chain per
-//! output, so it would be bit-identical to the scalar reference and to the x86 tiers. No ARM host was
-//! available for this step; the scalar chain already compiles and runs anywhere (`fpack::gemm_scalar`).
+//! The packed float GEMM (S4.9f) keeps its kernels beside their scalar twin in `fpack.rs`,
+//! the way the AVX2 and AVX-512 ones do; its NEON module is there too (`fcvtl` widens f16,
+//! a high-half shift widens bf16, and the accumulator is one `vfmaq_f32` chain per output).
+//! This file remains the home of the int8 NEON kernels above.
 
 #![cfg(target_arch = "aarch64")]
 #![cfg_attr(

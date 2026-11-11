@@ -87,6 +87,15 @@ read first, so a model this build cannot run is refused before the weights are d
 `hf:mradermacher/SmolLM2-360M-Instruct-GGUF/SmolLM2-360M-Instruct.Q4_K_M.gguf`. A download that is
 interrupted resumes from its `.part` file on the next run.
 
+The load-time packed weights are cached on disk too, under
+`~/.cache/peregrine/packs/` (`$XDG_CACHE_HOME/peregrine/packs`, or `$PEREGRINE_CACHE_DIR/packs`).
+The first load of a model writes them; later loads map that file read-only, so a one-shot `run`,
+`embed` or `decide` does not repack, and two processes serving the same model share the packed pages.
+`PEREGRINE_PACK_CACHE=<dir>` moves the directory and `PEREGRINE_PACK_CACHE=0` turns the cache off;
+`PEREGRINE_PACK_CACHE_MB` sets its size cap (default 4096 MiB, least-recently-used packs are evicted).
+`peregrine inspect <file>` and `peregrine tier -m <file>` report a model's cache and its size. To
+clear the cache, delete the directory: `rm -rf ~/.cache/peregrine/packs`.
+
 ## 3. Run one prompt
 
 No server and no client needed for a single reply — it streams to stdout:
@@ -202,13 +211,14 @@ decodes: a pooled slot's cache is sized to its own text, not to the context, and
 `PEREGRINE_WORK_CACHE_MB` (512 MiB by default). Embedding and decision work never takes a chat
 slot (`--slots` bounds chat only), and the response lists the vectors in input order.
 
-Two engine options matter for this work; `peregrine tier` prints the resolved pass budget, and
-`serve --opt NAME=VALUE` sets either:
+Three engine options matter for this work; `peregrine tier` prints the resolved pass budget, and
+`serve --opt NAME=VALUE` sets any of them:
 
 | Option | Default | Meaning |
 |---|---|---|
 | `PEREGRINE_PASS_ROWS` | from the machine and the file | rows one weight pass carries for embedding and decision slots. More rows means fewer passes but a compute-bound pass; the default keeps a pass at the measured ridge (16 for Q8_0, ~22 for F16, 32 for an encoder) |
 | `PEREGRINE_WORK_CACHE_MB` | `512` | memory for the prompt-sized caches of slots that never decode, i.e. how many texts of a request are in flight at once |
+| `PEREGRINE_EMBED_CACHE_MB` | `64` | memory for the exact cache of finished embedding vectors, keyed by token ids, pooling and dimensions; `0` disables it. A repeated text returns the same bits without a forward pass, and a duplicate inside one batch is computed once. 64 MiB is about 16 300 vectors of 1024 f32 |
 
 Without a server, one process embeds every text it is given:
 

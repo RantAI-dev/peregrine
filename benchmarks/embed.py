@@ -282,6 +282,20 @@ def run_bench(args) -> None:
         if not texts_file.exists():
             raise SystemExit(f"missing {texts_file}; run embed_texts.py first")
         tdata = json.loads(texts_file.read_text(encoding="utf-8"))
+        if args.ctx_tokens:
+            # A standings run may carry texts longer than the registry's documented
+            # serving context (the S4.9k baseline adds 2 000-token texts). The model
+            # file itself is unchanged; only this run's server context is raised.
+            model = dict(model)
+            row = dict(row)
+            model["max_tokens"] = args.ctx_tokens
+            row["_ctx"] = args.ctx_tokens
+        if row["engine"] == "llama_cpp" and (args.llama_batch or args.llama_ubatch):
+            row = dict(row)
+            if args.llama_batch:
+                row["batch"] = args.llama_batch
+            if args.llama_ubatch:
+                row["ubatch"] = args.llama_ubatch
         fp = path_fingerprint(row["path"])
         sha, size = fp["sha256"], fp["size_bytes"]
 
@@ -324,6 +338,8 @@ def run_bench(args) -> None:
                         if clients > 1 and batch != 1:
                             continue
                         key = cell_name(L, batch, clients)
+                        if args.cells and key not in args.cells:
+                            continue
                         # Conservative: one text costs what it cost alone, so the
                         # estimate never under-predicts a serial engine.
                         est = single_s[L] * batch
@@ -574,12 +590,26 @@ def parse_args():
     ap.add_argument("--mixed-cell", action="store_true",
                     help="also time one batch of the texts file's mixed-length set (S4.9b)")
     ap.add_argument("--mixed-batch", type=int, default=32)
+    ap.add_argument("--ctx-tokens", type=int, default=0,
+                    help="override the model's serving context (tokens per slot), for texts "
+                         "longer than the registry's documented length")
+    ap.add_argument("--cells", default="",
+                    help="comma-separated cell keys to run (L16_b8_c1,...); default all")
+    ap.add_argument("--llama-batch", type=int, default=0,
+                    help="llama.cpp -b (logical batch); a non-causal embedding model needs "
+                         "the whole prompt in one ubatch, so L2000 needs -ub 2048")
+    ap.add_argument("--llama-ubatch", type=int, default=0,
+                    help="llama.cpp -ub (physical batch)")
+    ap.add_argument("--llama-fa", choices=["auto", "on", "off"], default="auto",
+                    help="llama.cpp -fa; the published ratio uses the faster setting")
     ap.add_argument("--ref-label", default="torch-fp32")
     ap.add_argument("--acc-batch", type=int, default=16)
     ap.add_argument("--peregrine-worktree", default=None,
                     help="worktree whose target/release/peregrine serves /v1/embeddings (S4.1)")
     ap.add_argument("--peregrine-binary", default=None)
-    return ap.parse_args()
+    args = ap.parse_args()
+    args.cells = {c.strip() for c in args.cells.split(",") if c.strip()}
+    return args
 
 
 def make_adapter(engine: str, args):
@@ -587,6 +617,8 @@ def make_adapter(engine: str, args):
     if engine == "peregrine":
         return cls(threads=args.threads, binary=args.peregrine_binary,
                    worktree=args.peregrine_worktree)
+    if engine == "llama_cpp":
+        return cls(threads=args.threads, flash_attn=args.llama_fa)
     return cls(threads=args.threads)
 
 

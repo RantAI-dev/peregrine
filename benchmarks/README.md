@@ -86,7 +86,7 @@ As specified in `docs/targets.md`:
 |---|---|---|
 | **Peregrine** | Repository HEAD / tagged release | Built with `cargo build --release -p peregrine` |
 | **llama.cpp** | `v0.9.0` (commit `cd959ba`) | Standard CPU release; CMake Release build with AVX2/FMA |
-| **ik_llama.cpp** | `master` (`ikawrakow/ik_llama.cpp`) | Pinned fork optimized for x86 CPU matrix kernels |
+| **ik_llama.cpp** | `master` commit `479074c` (2026-11-11) | Pinned fork optimized for x86 CPU matrix kernels; CMake Release with `GGML_NATIVE` + the AVX-512 VNNI/VBMI/BF16 flags its `docs/build.md` requires, so the IQK kernels are compiled in. Server runs `-rtr -fa on` (its documented CPU settings); the same GGUF files as the other engines |
 | **bitnet.cpp** | Pinned release | Pinned for ternary model baselines (Claim 1) |
 | **PrismML llama.cpp** | `prism` branch, commit `62c418c` | Pinned fork for ternary PQ2_0 baselines; CMake Release build with native CPU dispatch |
 
