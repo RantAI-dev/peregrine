@@ -54,6 +54,7 @@ pub const TUNABLE: &[(&str, &str)] = &[
     ("PEREGRINE_DECODE_THREADS", "decode_threads"),
     ("PEREGRINE_PF", "prefetch_bytes"),
     ("PEREGRINE_PREFILL_CHUNK", "prefill_chunk"),
+    ("PEREGRINE_PASS_ROWS", "pass_rows"),
 ];
 
 /// The default prompt chunk on a pool no wider than the machine's physical cores: the prompt tokens one
@@ -95,6 +96,92 @@ pub fn prefill_chunk_default_for(threads: usize) -> usize {
 /// (`blocks::linear::MAX_BATCH`). The engine lowers it further when the decode rows of the
 /// other users need the room.
 pub const MAX_PREFILL_CHUNK: usize = crate::blocks::linear::MAX_BATCH;
+
+/// The row budget of a pass that carries work which never decodes (S4.9b): one weight pass
+/// carries up to this many rows of pooled or label slots, taken from as many waiting slots as
+/// fit.
+///
+/// The default is derived from the machine and the model ([`pass_rows_default_for`]): a pass's
+/// activation rows should fit in the caches a few workers write, and a batch of short texts
+/// should be one or two passes. `PEREGRINE_PASS_ROWS` overrides it.
+pub const PASS_ROWS_DEFAULT: usize = 256;
+
+/// The widest pass budget `PEREGRINE_PASS_ROWS` may ask for. The matmul driver splits a wider
+/// batch into blocks of its own row limit, so this only bounds the engine's scratch.
+pub const MAX_PASS_ROWS: usize = 512;
+
+/// The L2 cache of one core, in bytes: from sysfs, or 256 KiB when the machine does not say.
+///
+/// The pass budget keeps a pass's activation rows near the caches: no extra dependency, one
+/// small read at engine construction.
+pub fn l2_bytes() -> usize {
+    let base = std::path::Path::new("/sys/devices/system/cpu/cpu0/cache");
+    if let Ok(entries) = std::fs::read_dir(base) {
+        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        for dir in dirs {
+            let level = std::fs::read_to_string(dir.join("level"))
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok());
+            if level != Some(2) {
+                continue;
+            }
+            if let Some(n) = std::fs::read_to_string(dir.join("size"))
+                .ok()
+                .and_then(|s| parse_cache_size(s.trim()))
+            {
+                return n;
+            }
+        }
+    }
+    256 << 10
+}
+
+/// `512K` / `1M` (sysfs's cache-size spelling) in bytes.
+fn parse_cache_size(s: &str) -> Option<usize> {
+    let (digits, mult) = match s.chars().last()? {
+        'K' | 'k' => (&s[..s.len() - 1], 1 << 10),
+        'M' | 'm' => (&s[..s.len() - 1], 1 << 20),
+        _ => (s, 1),
+    };
+    digits.trim().parse::<usize>().ok().map(|n| n * mult)
+}
+
+/// Rows of a pass per byte of weights: the measured ridge of this engine's kernels.
+///
+/// A pass is memory-bound below this many rows and compute-bound above it. It is
+/// `FLOP/s ÷ (2 × bytes/s)`: every step reads the weights once (a pass's bytes are the model's
+/// weight bytes whatever its row count) and does `2 × params` FLOPs per row. Measured on bluefin
+/// at 4 threads, Q8_0: a 0.6B model does 417 GFLOP/s in 16-row passes and 373 GFLOP/s at 256, so
+/// 16 rows is already at the ridge; the ratio 420 GFLOP/s over 2 × 19.5 GB/s is [`ROWS_PER_WEIGHT_BYTE`].
+pub const ROWS_PER_WEIGHT_BYTE: f64 = 10.8;
+
+/// The default row budget of a non-decoding pass (S4.9b): what keeps a pass's activations hot
+/// and stops it before it turns compute-bound.
+///
+/// Two bounds, the smaller wins.
+///
+/// * The activation rows of one pass should stay inside half the L2. The measured files show the
+///   pass's buffers are shared by the workers — the design's `threads × L2/2` overcounts them by
+///   the thread count — so the bound is `L2/2 / (4 × d_model)` (four f32 buffers of `d_model` per
+///   row).
+/// * A pass turns compute-bound at `bytes_per_param × `[`ROWS_PER_WEIGHT_BYTE`] rows; packing
+///   more only spends compute at lower efficiency.
+///
+/// The sweep on bluefin (4 threads, 512 KiB L2 per core) pinned it: Q8_0 (1.06 bytes per weight)
+/// is best at 16 rows and 7-16% slower at 32 and above; F16 (2 bytes per weight) gains 5-15% at
+/// 32; the 300M encoder is flat from 32 and 12-14% ahead of 16. A bidirectional model packs whole
+/// texts, so its floor is 32. `PEREGRINE_PASS_ROWS` overrides the result.
+pub fn pass_rows_default_for(d_model: usize, bytes_per_param: f64, bidirectional: bool) -> usize {
+    let l2_rows = (l2_bytes() / 2) / (4 * d_model.max(1));
+    let ridge = (bytes_per_param.max(0.1) * ROWS_PER_WEIGHT_BYTE) as usize;
+    let rows = l2_rows.min(ridge);
+    if bidirectional {
+        rows.max(PASS_ROWS_DEFAULT / 8).clamp(16, 128)
+    } else {
+        rows.clamp(16, 64)
+    }
+}
 
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 /// The k-quant repack is on by default on every tier, the AVX-512 tier included
@@ -172,6 +259,21 @@ pub struct EngineOptions {
     /// Smaller pieces keep the activation scratch in cache and read the weights more often; the tokens
     /// do not depend on it (`crates/peregrine-models/tests/prefill_chunk.rs` pins that).
     pub prefill_chunk: Option<usize>,
+    /// `PEREGRINE_PASS_ROWS`: rows one weight pass carries for work that never decodes — pooled
+    /// (embedding) and label (decision) slots (default: [`pass_rows_default_for`], the machine's
+    /// L2 and the model's width).
+    ///
+    /// It is scheduling only: a text's vector and a question's label logits do not depend on it
+    /// (`crates/peregrine-models/tests/embeddings.rs` and `labels.rs` pin that for budgets 1, 16,
+    /// 64, 256 and the default).
+    pub pass_rows: Option<usize>,
+    /// `PEREGRINE_WORK_CACHE_MB`: memory for the caches of slots that never decode — pooled
+    /// (embedding) and label (decision) slots (S4.9b; default 512 MiB).
+    ///
+    /// A non-decoding slot's cache is sized to its own prompt, so this bounds how many texts of
+    /// a request are in flight at once, not how many the request may hold: the rest wait in the
+    /// engine's queue. `--slots` bounds chat slots only.
+    pub work_cache_mb: Option<usize>,
     /// `PEREGRINE_MTP=0`: no MTP speculation.
     pub mtp: bool,
     /// `PEREGRINE_MTP_VOCAB`: vocabulary rows the MTP drafter scores (default 32768).
@@ -238,6 +340,8 @@ impl Default for EngineOptions {
             kv_prec: crate::kv::KvPrec::F16,
             mix: true,
             prefill_chunk: None,
+            pass_rows: None,
+            work_cache_mb: None,
             mtp: true,
             mtp_vocab: 32768,
             dspark: DsparkOptions {
@@ -409,6 +513,8 @@ impl EngineOptions {
                 .unwrap_or(d.kv_prec),
             mix: unless("MIX", "0"),
             prefill_chunk: num("PREFILL_CHUNK").filter(|&v| (1..=MAX_PREFILL_CHUNK).contains(&v)),
+            pass_rows: num("PASS_ROWS").filter(|&v| (1..=MAX_PASS_ROWS).contains(&v)),
+            work_cache_mb: num("WORK_CACHE_MB").filter(|&v| v > 0),
             mtp: unless("MTP", "0"),
             mtp_vocab: num("MTP_VOCAB").unwrap_or(d.mtp_vocab),
             dspark: DsparkOptions {
@@ -523,6 +629,8 @@ impl EngineOptions {
             ("kv_prec", self.kv_prec.name().to_string()),
             ("mix", self.mix.to_string()),
             ("prefill_chunk", opt(self.prefill_chunk)),
+            ("pass_rows", opt(self.pass_rows)),
+            ("work_cache_mb", opt(self.work_cache_mb)),
             ("mtp", self.mtp.to_string()),
             ("mtp_vocab", self.mtp_vocab.to_string()),
             ("dspark.logits_start", self.dspark.logits_start.to_string()),
@@ -584,6 +692,8 @@ pub const NAMES: &[&str] = &[
     "KV",
     "MIX",
     "PREFILL_CHUNK",
+    "PASS_ROWS",
+    "WORK_CACHE_MB",
     "MTP",
     "MTP_VOCAB",
     "DSPARK_LOGITS_START",
@@ -743,6 +853,34 @@ mod tests {
         assert_eq!(with(&[("PREFILL_CHUNK", "0")]).prefill_chunk, None);
         assert_eq!(with(&[("PREFILL_CHUNK", "1000")]).prefill_chunk, None);
         assert_eq!(with(&[("PREFILL_CHUNK", "x")]).prefill_chunk, None);
+        // The non-decoding pass budget: 1 to `MAX_PASS_ROWS`.
+        assert_eq!(with(&[("PASS_ROWS", "64")]).pass_rows, Some(64));
+        assert_eq!(with(&[("PASS_ROWS", "0")]).pass_rows, None);
+        assert_eq!(with(&[("PASS_ROWS", "513")]).pass_rows, None);
+        assert_eq!(with(&[("PASS_ROWS", "x")]).pass_rows, None);
+        // The work cache budget.
+        assert_eq!(with(&[("WORK_CACHE_MB", "128")]).work_cache_mb, Some(128));
+        assert_eq!(with(&[("WORK_CACHE_MB", "0")]).work_cache_mb, None);
+    }
+
+    #[test]
+    fn the_pass_budget_default_follows_the_machine_and_the_model() {
+        // 16 rows is the floor and the ceiling is a format's measured ridge: Q8_0 (1.06 bytes per
+        // weight) sits at the ridge at 16, F16 (2) fits more, and an encoder starts at 32.
+        assert!(pass_rows_default_for(1024, 1.06, false) >= 16);
+        assert!(pass_rows_default_for(1024, 2.0, false) >= 16);
+        assert!(pass_rows_default_for(4096, 4.0, false) <= 64);
+        assert!(pass_rows_default_for(1024, 1.06, true) >= 32);
+        if l2_bytes() >= 64 << 10 {
+            assert!(
+                pass_rows_default_for(1024, 4.0, false) >= pass_rows_default_for(8192, 4.0, false),
+                "a narrower model fits more activation rows in the same caches"
+            );
+        }
+        assert!(parse_cache_size("512K") == Some(512 << 10));
+        assert!(parse_cache_size("2M") == Some(2 << 20));
+        assert!(parse_cache_size("1024") == Some(1024));
+        assert_eq!(parse_cache_size("x"), None);
     }
 
     #[test]

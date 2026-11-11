@@ -32,6 +32,17 @@ users' next tokens and chunks of new prompts, and runs **one forward pass** over
 single read of the weights. Decode for one user is bound by memory bandwidth; batches and prompts are
 bound by compute. That split drives most design choices.
 
+A slot that never decodes — an embedding's pooled slot or a decision question's label slot — is a slot
+like any other, with two differences. A pass fills up to a **row budget** (`PEREGRINE_PASS_ROWS`, from
+the machine's L2 and the file's bytes per weight) with such slots' rows, taking whole short texts and
+pieces of a long one from as many waiting slots as fit, instead of one prefill chunk in total; the
+matmul driver splits a batch wider than its 128-row kernel scratch into blocks. Its **cache is sized to
+its own prompt**, rounded to whole prefill chunks, not to the model's context, so a batch's memory is
+its texts' tokens. The server admits them by a memory budget (`PEREGRINE_WORK_CACHE_MB`, 512 MiB) and a
+slot cap, not by `--slots`, which bounds chat slots only: a wide embedding request never takes or waits
+for a chat slot. A chat slot keeps its chunk and its share of a mixed pass (embedding rows in a pass that
+carries decode rows are bounded to a quarter of a prefill chunk).
+
 There is one runtime (ADR 0007). A conversation is the same engine with one slot: `Session` renders the
 prompt, keeps the chat history and lends the slot the cache the conversation has filled so far.
 
@@ -43,8 +54,9 @@ one row per user, and the cache is what makes the next token cheap. A **bidirect
 For an encoder the engine schedules **whole texts**, never chunks: `Architecture::forward_texts` takes
 the batch's ragged texts, sends every row of every text through the layer projections in the same weight
 passes, and computes attention as one `n × n` block per text. Keys and values stay f32 in the pass, no KV
-cache is written, and a text's arithmetic depends only on its own length. Pooling, the model's dense head
-and normalisation happen after the final `output_norm`; chat is refused with a 400. The encoder's slots
+cache is written, and a text's arithmetic depends only on its own length. A pass packs whole texts (never
+pieces) up to the same row budget, so a batch of short texts fills it. Pooling, the model's dense head and
+normalisation happen after the final `output_norm`; chat is refused with a 400. The encoder's slots
 allocate no cache.
 
 ## Code map
@@ -81,7 +93,7 @@ allocate no cache.
 | `attn.rs` | Grouped online-softmax attention with optional sliding-window restriction. |
 | `kv.rs`, `prefix.rs` | One cache type for attention K/V and recurrent state; snapshots that carry both (the recurrent state after exactly their length), used by speculation, by the prefix store and to fork a cache into another at a position (`KvCache::fork_from`); and the prefix store that reuses a shared prompt beginning. |
 | `sample.rs` | Position-keyed sampling: the random draw depends on (seed, turn, position) only, which makes batching and speculation reproducible. |
-| `serve.rs` | `Engine`: the one runtime — slots, scheduling, mixed prefill/decode steps, and the verification step every draft goes through. The server runs this. |
+| `serve.rs` | `Engine`: the one runtime — slots, scheduling, mixed prefill/decode steps, the non-decoding pass budget and admission, and the verification step every draft goes through. The server runs this. |
 | `session.rs` | `Session`: the conversation layer over a one-slot `Engine` (ADR 0007) — the chat history, the template, the prompt, the reuse of the positions the previous turn computed, the context shifting, the per-turn telemetry. |
 | `draft.rs`, `dspark.rs`, `suffix.rs` | The `Drafter` interface every speculation goes through, and the drafters behind it: the suffix index (`suffix.rs`), DeepSeek's DSpark head (`dspark.rs`), the model's own MTP block (`draft.rs`). |
 | `profile.rs` | Tuning profiles: read, write, mismatch detection and default paths (ADR 0005). |

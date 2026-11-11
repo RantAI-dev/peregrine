@@ -197,8 +197,18 @@ option the server would otherwise ignore cannot change the vector silently):
 | `truncate` | a boolean, default `false`: truncate an over-length text instead of refusing it |
 | `user` | any string; accepted for compatibility, unused |
 
-A request with more texts than free slots queues the extra texts in the engine: they are admitted as
-slots free up and the response still lists the vectors in input order.
+Every text of a request is admitted at once, within the engine's budget for work that never
+decodes: a pooled slot's cache is sized to its own text, not to the context, and the budget is
+`PEREGRINE_WORK_CACHE_MB` (512 MiB by default). Embedding and decision work never takes a chat
+slot (`--slots` bounds chat only), and the response lists the vectors in input order.
+
+Two engine options matter for this work; `peregrine tier` prints the resolved pass budget, and
+`serve --opt NAME=VALUE` sets either:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `PEREGRINE_PASS_ROWS` | from the machine and the file | rows one weight pass carries for embedding and decision slots. More rows means fewer passes but a compute-bound pass; the default keeps a pass at the measured ridge (16 for Q8_0, ~22 for F16, 32 for an encoder) |
+| `PEREGRINE_WORK_CACHE_MB` | `512` | memory for the prompt-sized caches of slots that never decode, i.e. how many texts of a request are in flight at once |
 
 Without a server, one process embeds every text it is given:
 

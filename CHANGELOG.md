@@ -8,6 +8,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Token-budget passes and prompt-sized caches for embedding and decision work (S4.9b)**: a step
+  now fills a weight pass up to a row budget (`PEREGRINE_PASS_ROWS`) with pooled (embedding) and
+  label (decision) slots, taking whole short texts and pieces of a long one from as many waiting
+  slots as fit, instead of carrying one prefill chunk in total: 32 short texts are 2 passes at a
+  256-row budget rather than 32. The budget is derived from the machine and the file (the L2 and
+  the file's bytes per weight; the measured ridge), overridable, and reported by `peregrine tier`.
+  The matmul driver splits a batch wider than its 128-row kernel scratch into row blocks, so the
+  budget is not capped. A bidirectional encoder packs whole texts up to the same budget.
+  A pooled or label slot's cache — and each forked follower's — is sized to its own prompt,
+  rounded to whole prefill chunks, not to the model's context (a 16-token text on a 0.6B model at
+  context 8192: 896 MiB before, 1.75 MiB after; a chat slot keeps the context). Embedding texts and
+  decision questions get their own admission: a memory budget for their prompt-sized caches
+  (`PEREGRINE_WORK_CACHE_MB`, 512 MiB) and a slot cap, not `--slots`, so a 128-text request is
+  admitted whole on a `--slots 2` server, never consumes a chat slot and never waits for one.
+  Chat slots keep today's chunk and fairness rules; when a decode row shares a pass, embedding work
+  is bounded to a quarter of a prefill chunk, so a chat's token rate beside two embedding streams
+  is 1.4x lower instead of 7.4x (main). A text's vector and a question's label logits are
+  bit-identical for budgets 1, 16, 64, 256 and the default, at 1/2/4 threads, alone and in batches,
+  in decision groups and beside chat slots; measured on bluefin (tables and raw JSON in
+  `benchmarks/results/bluefin-embed-2026-11-11/`).
+
 - **A required hygiene job (`ci`)**: `scripts/hygiene.sh` fails a tracked credential file, a
   credential-shaped string in a tracked text file, and (when `HYGIENE_BANNED_PATTERN` is set) a banned
   name, on the tree and on every commit a pull request adds; `scripts/hygiene-selftest.sh` proves each

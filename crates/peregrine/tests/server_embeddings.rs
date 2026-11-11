@@ -93,6 +93,16 @@ fn wait_for_health(port: u16) {
 
 /// Serve a synthetic last-token-pooling llama file; returns (guard, port).
 fn serve(dir: &Path) -> (Guard, u16) {
+    serve_with(dir, 4)
+}
+
+/// [`serve`] with a chosen `--slots` (S4.9b: the chat-slot bound, not the embedding bound).
+fn serve_with(dir: &Path, slots: usize) -> (Guard, u16) {
+    serve_with_ctx(dir, slots, 64)
+}
+
+/// [`serve_with`] with a chosen context (the chat template's system block needs room).
+fn serve_with_ctx(dir: &Path, slots: usize, ctx: usize) -> (Guard, u16) {
     let model = write_dense_pooled(dir, "llama", Format::F16, 31, Dense::default(), 3);
     let port = free_port();
     let log = dir.join("serve.log");
@@ -107,11 +117,11 @@ fn serve(dir: &Path) -> (Guard, u16) {
             "--port",
             &port.to_string(),
             "--ctx",
-            "64",
+            &ctx.to_string(),
             "--threads",
             "2",
             "--slots",
-            "4",
+            &slots.to_string(),
             "--no-profile",
         ])
         .stdout(Stdio::from(log_file.try_clone().unwrap()))
@@ -444,4 +454,56 @@ fn unbase64_f32(s: &str) -> Vec<f32> {
         .chunks(4)
         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
         .collect()
+}
+
+/// S4.9b: on a server started with `--slots 2`, a 128-text request is admitted whole and returns
+/// 128 vectors in input order, each bit-identical to the same text alone. The texts do not take
+/// the chat slots: `--slots` bounds chat only.
+#[test]
+fn a_128_text_request_is_admitted_whole_on_a_two_slot_server() {
+    let dir = tmpdir("wide-batch");
+    let (_guard, port) = serve_with(&dir, 2);
+    let texts: Vec<String> = (0..128).map(|i| format!("text number {i}")).collect();
+    let (status, body) = post(port, "/v1/embeddings", json!({"input": &texts}));
+    assert_eq!(status, 200, "{body}");
+    let data = body["data"].as_array().expect("a data array");
+    assert_eq!(data.len(), 128, "every text of the batch came back");
+    for (i, item) in data.iter().enumerate() {
+        assert_eq!(item["index"].as_u64(), Some(i as u64), "input order");
+    }
+    // A sample of the batch is the text's own vector, alone.
+    for i in [0usize, 1, 63, 126, 127] {
+        let (status, alone) = post(port, "/v1/embeddings", json!({"input": texts[i]}));
+        assert_eq!(status, 200);
+        assert_eq!(
+            bits(&embedding(&body, i)),
+            bits(&embedding(&alone, 0)),
+            "text {i} changed in a 128-text request"
+        );
+    }
+}
+
+/// S4.9b: a chat request is served while a 128-text embedding request runs on the same
+/// one-chat-slot server. The embedding texts have their own admission, so they never consume the
+/// chat slot or wait for it (and the chat never waits for the whole batch).
+#[test]
+fn a_chat_request_is_served_while_a_wide_embedding_request_runs() {
+    let dir = tmpdir("chat-beside");
+    let (_guard, port) = serve_with_ctx(&dir, 1, 256);
+    let texts: Vec<String> = (0..128).map(|i| format!("text number {i}")).collect();
+    let embedding = thread::spawn(move || post(port, "/v1/embeddings", json!({"input": texts})));
+    let (status, chat) = post(
+        port,
+        "/v1/chat/completions",
+        json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 2,
+            "temperature": 0,
+        }),
+    );
+    assert_eq!(status, 200, "{chat}");
+    assert!(chat["choices"][0]["message"]["content"].is_string());
+    let (status, body) = embedding.join().expect("the embedding request thread");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"].as_array().unwrap().len(), 128);
 }
