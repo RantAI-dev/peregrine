@@ -1015,56 +1015,30 @@ impl Architecture for Gemma3 {
             return Ok(());
         }
         let nl = want_logits.len();
-        if nl > st.acts.len() || nl * cfg.n_vocab > st.logits.len() {
-            return Err(format!(
-                "logits requested for {nl} rows; scratch holds {} activations and {} logit rows",
-                st.acts.len(),
-                st.logits.len() / cfg.n_vocab
-            ));
-        }
-        for (i, &b) in want_logits.iter().enumerate() {
-            if b >= nb {
-                return Err(format!("logits requested for row {b} of a {nb}-row batch"));
+        // The same head as the other families (`layer::head_rows`, which reads a
+        // label row only at its token ids, S4.9d).
+        crate::layer::head_rows(
+            w,
+            cfg,
+            st,
+            &self.out_norm,
+            &self.head,
+            nb,
+            want_logits,
+            pool,
+            stats,
+        )?;
+
+        if let Some(cap) = self.final_logit_softcapping {
+            let inv_cap = 1.0 / cap;
+            for logit in &mut st.logits[..nl * cfg.n_vocab] {
+                *logit = cap * peregrine_core::vmath::det_tanh(*logit * inv_cap);
             }
-            let (xs, xe) = (b * dm, (b + 1) * dm);
-            let (os, oe) = (i * dm, (i + 1) * dm);
-            let (xv, xbv) = (&st.x, &mut st.xb);
-            peregrine_core::blocks::norm::rmsnorm(
-                w,
-                &self.out_norm,
-                cfg.eps,
-                &xv[xs..xe],
-                &mut xbv[os..oe],
-                stats,
-            );
-            st.acts[i].fill(&st.xb[os..oe]);
+            // A label entry is the full row's entry after the same softcap.
+            for v in &mut st.label_out {
+                *v = cap * peregrine_core::vmath::det_tanh(*v * inv_cap);
+            }
         }
-        let before = stats.ns_matmul;
-        {
-            let lbx = Disjoint::new(&mut st.lb_x);
-            let lbt = Disjoint::new(&mut st.lb_t);
-            let acts = &st.acts[..nl];
-            let jobs = [LinJob {
-                lin: &self.head,
-                out: Disjoint::new(&mut st.logits),
-            }];
-            peregrine_core::blocks::linear::linear_group(
-                w,
-                w.lb(),
-                &jobs,
-                acts,
-                &st.xb,
-                dm,
-                nl,
-                lbx,
-                lbt,
-                pool,
-                stats,
-                &mut st.kq,
-            );
-        }
-        stats.ns_head += stats.ns_matmul - before;
-        stats.ns_matmul = before;
 
         if let Some(cap) = self.final_logit_softcapping {
             let inv_cap = 1.0 / cap;

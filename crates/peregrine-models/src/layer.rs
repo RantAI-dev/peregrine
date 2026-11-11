@@ -281,7 +281,34 @@ pub(crate) fn head_rows(
         });
     }
     let before = stats.ns_matmul;
-    {
+    if let Some(ti) = head.dense() {
+        // S4.9d: a label row reads only its token ids. The borrows are the state's
+        // own fields, which the head touches and nothing else does at once.
+        let State {
+            acts,
+            logits,
+            label_rows,
+            label_ids,
+            label_out,
+            kq,
+            ..
+        } = &mut *st;
+        peregrine_core::blocks::linear::output_rows(
+            w,
+            ti,
+            &acts[..nl],
+            want_logits,
+            logits,
+            label_rows,
+            label_ids,
+            label_out,
+            pool,
+            stats,
+            kq,
+        );
+    } else {
+        // A LittleBit head has no single-row kernel here: compute every row and
+        // gather the label ids out of it (the same values, just not the saving).
         let lbx = Disjoint::new(&mut st.lb_x);
         let lbt = Disjoint::new(&mut st.lb_t);
         let acts = &st.acts[..nl];
@@ -305,6 +332,12 @@ pub(crate) fn head_rows(
                 &mut st.kq,
             )
         });
+        for &(row, start, count) in &st.label_rows {
+            let base = row * cfg.n_vocab;
+            for (k, &id) in st.label_ids[start..start + count].iter().enumerate() {
+                st.label_out[start + k] = st.logits[base + id as usize];
+            }
+        }
     }
     stats.ns_head += stats.ns_matmul - before;
     stats.ns_matmul = before;

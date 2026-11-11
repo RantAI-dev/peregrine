@@ -19,7 +19,7 @@ use peregrine_core::serve::{Emission, Engine, Finish, SlotCfg};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use support::models::{write_dense, write_hybrid_plain, Dense};
+use support::models::{write_dense, write_hybrid, write_hybrid_plain, Dense};
 
 fn tmpdir(test: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("peregrine-labels-{}-{test}", std::process::id()));
@@ -851,6 +851,212 @@ fn a_forked_questions_logits_are_the_same_for_every_pass_budget() {
                         "{arch}: question {i} of {n} ungrouped, budget {budget:?}"
                     );
                 }
+            }
+        }
+    }
+}
+// ---------------------------------------------------------------------------
+// S4.9d: the label only path over every head format and every tier.
+// ---------------------------------------------------------------------------
+
+/// Every weight format the synthetic generator can give the output head.
+const HEAD_FORMATS: &[Format] = &[
+    Format::F32,
+    Format::F16,
+    Format::BF16,
+    Format::Q4_0,
+    Format::Q5_0,
+    Format::Q8_0,
+    Format::Q2_K,
+    Format::Q3_K,
+    Format::Q4_K,
+    Format::Q5_K,
+    Format::Q6_K,
+    Format::IQ4_NL,
+    Format::IQ4_XS,
+    Format::MXFP4,
+];
+
+/// The whole vocabulary row of a prompt's last position, computed by the ordinary
+/// forward path: the reference the label entries are compared with.
+fn full_row(model: &Model, prompt: &[u32], threads: usize) -> Vec<f32> {
+    let pool = Pool::new(threads);
+    let mut st = model.new_state(prompt.len(), 1, model.cfg.ctx_train, threads);
+    let mut kv = model.new_cache(KvPrec::F16, model.cfg.ctx_train);
+    let mut stats = StepStats::default();
+    model
+        .forward(
+            &mut st,
+            &mut kv,
+            &pool,
+            prompt,
+            0,
+            &[prompt.len() - 1],
+            &mut stats,
+        )
+        .expect("the reference forward");
+    st.logits_row(0, model.cfg.n_vocab).to_vec()
+}
+
+/// Admit one labels slot and return its emission's logits.
+fn labels_via_engine(
+    model: &Arc<Model>,
+    prompt: &[u32],
+    labels: &[u32],
+    threads: usize,
+) -> Vec<f32> {
+    let mut engine = Engine::new_with_chunk(
+        model.clone(),
+        threads,
+        model.cfg.ctx_train,
+        1,
+        KvPrec::F16,
+        0,
+        16,
+    );
+    let id = engine
+        .admit_labels(prompt.to_vec(), SlotCfg::default(), labels.to_vec())
+        .expect("admit a labels slot");
+    let mut got: Option<Vec<f32>> = None;
+    let mut steps = 0;
+    while engine.active() > 0 {
+        for em in engine.step() {
+            if em.slot != id {
+                continue;
+            }
+            if let Some(Finish::Error(e)) = &em.finish {
+                panic!("the labels slot failed: {e}");
+            }
+            if em.finish.is_some() {
+                got = em.label_logits.clone();
+            }
+        }
+        steps += 1;
+        assert!(steps < 10_000, "the engine made no progress");
+    }
+    got.expect("one emission per question")
+}
+
+fn check_loaded(model: &Arc<Model>, what: &str) {
+    let n_vocab = model.cfg.n_vocab as u32;
+    let prompt: Vec<u32> = (0..12).map(|i| 100 + (i * 7) % 90).collect();
+    let last = n_vocab - 1;
+    let many: Vec<u32> = (0..255u32).map(|i| (i * 37 + 11) % n_vocab).collect();
+    let cases: [Vec<u32>; 6] = [
+        vec![0],
+        vec![last],
+        vec![7, 100, last],
+        vec![5, 5, 17, 5],
+        vec![42],
+        many,
+    ];
+    for threads in [1usize, 4] {
+        let row = full_row(model, &prompt, threads);
+        for labels in &cases {
+            let want: Vec<f32> = labels.iter().map(|&l| row[l as usize]).collect();
+            let got = labels_via_engine(model, &prompt, labels, threads);
+            assert_eq!(
+                bits(&got),
+                bits(&want),
+                "{what}: {} labels, {threads} threads",
+                labels.len()
+            );
+        }
+    }
+}
+
+fn check_head_format(dir: &Path, fmt: Format, tied: bool, seed: u64) {
+    let shape = Dense {
+        tied,
+        ..Dense::default()
+    };
+    let path = write_dense(dir, "llama", fmt, seed, shape);
+    check_loaded(&load(&path), &format!("{fmt:?} tied={tied}"));
+}
+
+/// The ternary files (rotated hybrid) give the head PQ2_0 or PTQ1_0, whose full path runs
+/// 8-, 16- or row kernels; the label path must agree there too.
+fn check_ternary_format(dir: &Path, fmt: Format, seed: u64) {
+    let path = write_hybrid(dir, fmt, seed, false);
+    check_loaded(&load(&path), &format!("{fmt:?} hybrid"));
+}
+
+fn check_head_formats() {
+    let dir = tmpdir(&format!(
+        "head-formats-{}",
+        std::env::var("PEREGRINE_ISA").unwrap_or_else(|_| "native".into())
+    ));
+    let mut seed = 9100u64;
+    for &fmt in HEAD_FORMATS {
+        for tied in [false, true] {
+            seed += 1;
+            check_head_format(&dir, fmt, tied, seed);
+        }
+    }
+    for &fmt in &[Format::PQ2_0, Format::PTQ1_0] {
+        seed += 1;
+        check_ternary_format(&dir, fmt, seed);
+    }
+}
+
+/// S4.9d: in every head format (tied and untied), the label logits are the full row's
+/// entries bit for bit, on every kernel tier this machine runs. The tier is
+/// process-wide and read once, so `native` runs here and `avx2`/`scalar` in children.
+#[test]
+fn label_rows_match_the_full_row_in_every_head_format() {
+    if std::env::var_os("PEREGRINE_LABELS_FORMAT_CHILD").is_some() {
+        check_head_formats();
+        return;
+    }
+    check_head_formats();
+    let exe = std::env::current_exe().expect("the test binary's path");
+    for isa in ["avx2", "scalar"] {
+        let status = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "label_rows_match_the_full_row_in_every_head_format",
+                "--nocapture",
+            ])
+            .env("PEREGRINE_ISA", isa)
+            .env("PEREGRINE_LABELS_FORMAT_CHILD", "1")
+            .status()
+            .expect("spawn the tier child");
+        assert!(status.success(), "the PEREGRINE_ISA={isa} child failed");
+    }
+}
+
+/// S4.9d with S4.9b: a wide pass packs many label rows beside each other, so the head
+/// takes each label row from the `MAX_BATCH`-row block the matmul driver would hand the
+/// kernel — including the batched k-quant tile kernel, which reads the interleaved
+/// activation filled once per block.
+#[test]
+fn a_wide_pass_of_label_rows_is_bit_identical() {
+    let dir = tmpdir("wide");
+    for fmt in [Format::Q4_K, Format::Q5_0, Format::Q6_K, Format::Q8_0] {
+        let path = write_dense(&dir, "llama", fmt, 9500, Dense::default());
+        let model = load(&path);
+        let prompts = forked_questions(24, &[3, 4, 5], 10);
+        let want: Vec<Vec<f32>> = prompts
+            .iter()
+            .map(|p| reference(&model, p, &LABELS, 4))
+            .collect();
+        for budget in [Some(4usize), Some(16), Some(64), Some(256)] {
+            let r = run_prec_pass(
+                &model,
+                &prompts,
+                4,
+                16,
+                1 << 20,
+                KvPrec::F16,
+                Some(1),
+                budget,
+            );
+            for (i, w) in want.iter().enumerate() {
+                assert_eq!(
+                    bits(&r.logits[i]),
+                    bits(w),
+                    "{fmt:?}: question {i} of 10, budget {budget:?}"
+                );
             }
         }
     }

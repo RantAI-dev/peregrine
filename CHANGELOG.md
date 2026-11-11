@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A decision computes only its label rows of the output head (S4.9d)**: a `Want::Labels` slot used
+  to evaluate the whole vocabulary row of its last prompt position and gather the handful of token
+  ids it reads. The head now evaluates those ids alone: one dot product of the already-quantised
+  hidden row per label, through the same kernel the full path uses for that weight row and format on
+  the current tier — the per-row kernel (or the eight-row Q5_0/Q8_0 one for a single activation),
+  the eight-row k-quant tile, the sixteen-row ternary tile or the sixteen-row packed float panel,
+  taking the one output from the tile or panel that contains the row. Every output of those kernels
+  is independent of its neighbours, so a label entry is the full row's entry bit for bit; no format
+  falls back, and only a LittleBit sidecar head keeps the full row. Chat, embeddings and speculation
+  are untouched. Tested in every head format the synthetic generator writes (F32, F16, BF16, Q4_0,
+  Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, and the ternary PQ2_0/PTQ1_0 of a
+  rotated hybrid), tied and untied, on `native`, `PEREGRINE_ISA=avx2` and `PEREGRINE_ISA=scalar`,
+  with labels at the first, last and arbitrary vocabulary indices, duplicates, and 1, 3 and 255
+  labels; the existing label invariance, prefix, fork and beside-other-slots tests are unchanged.
+  On a 248,320-token vocabulary the head stage falls from 1.2 ms to ≤0.01 ms on one thread and from
+  0.65 ms to ≤0.01 ms on four (tinyopenjev), and from 11-12 ms to 0.02 ms on Qwen3.5-2B Q4_K_M
+  (four threads, repack off); `/v1/systemone` on a ~300-token state gains about 3-11% in
+  questions/s at 1, 3 and 10 questions.
+
 - **Token-budget passes and prompt-sized caches for embedding and decision work (S4.9b)**: a step
   now fills a weight pass up to a row budget (`PEREGRINE_PASS_ROWS`) with pooled (embedding) and
   label (decision) slots, taking whole short texts and pieces of a long one from as many waiting
