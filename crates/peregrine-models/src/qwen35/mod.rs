@@ -61,6 +61,7 @@ impl Architecture for Qwen35 {
             tb_span: self.cfg.tb_span,
             keep_f32: self.cfg.keep_f32,
             act_width: 0,
+            quantize: true,
         }
     }
 

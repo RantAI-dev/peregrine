@@ -158,7 +158,7 @@ pub fn describe_runtime() -> String {
         || {
             format!(
                 "{} (default, for a Q8_0 model of d_model 1024; L2 and bytes-per-weight)",
-                peregrine_core::options::pass_rows_default_for(1024, 1.06, false)
+                peregrine_core::options::pass_rows_default_for(1024, 1.06, false, 0, false)
             )
         },
         |n| n.to_string(),

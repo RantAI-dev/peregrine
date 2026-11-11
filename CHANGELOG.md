@@ -29,6 +29,45 @@ All notable changes to this project are documented here. The format follows
   into text and calls as it arrives, never passes on half a tag, and gives a call that does not
   parse back as text. A template is recognised by exact comparison with the copy in the crate; a
   variant is refused, not guessed at. The chat endpoint does not use this yet (S6.3).
+- **Small Q8_0 encoders run on the float path (S4.9m, part c)**: a `bert` file of at most 64 MiB
+  whose matrices are Q8_0 is dequantised once at load into the packed float kernel's f32 panels
+  (`scale × code` is exact in f32), so its projections take the float path with no activation
+  quantisation (15.5-17.5% of the old Q8_0 bert pass) and no int8 tile store. The tensor keeps its
+  file format and gains `TensorInfo::fp_kind`, so readers of the file's own bytes are unaffected;
+  the k-quant store leaves the converted matrices out, and the pack cache keys the new form
+  (`FORMAT_VERSION` 2). `PEREGRINE_Q8_FLOAT=0` turns it off. The rule is measured: bge-m3 Q8_0
+  (604 MiB) loses 22% at 16 tokens on the f32 stream, MiniLM (23 MiB) and bge-small (34 MiB) win
+  or are neutral. Medians of three, 4 threads, on top of (b) and (a): all-MiniLM-L6-v2 Q8_0 16
+  tokens × 32 559 → 725 texts/s, 128 tokens × 8 74.1 → 96.8, 512 tokens × 1 15.0 → 18.2;
+  bge-small-en-v1.5 Q8_0 295 → 392, 36.6 → 49.4, 7.5 → 9.3. Accuracy improves against the fp32
+  PyTorch fixtures: MiniLM Q8_0 cosine min/mean 0.9991371/0.9994906 →
+  0.9995210/0.9997640, bge-small Q8_0 0.9997426/0.9998402 → 0.9998790/0.9999280. The synthetic
+  Q8_0 `bert` golden changes once; the scalar, AVX2 and AVX-512-under-SDE goldens were
+  re-recorded and agree bit for bit. See `docs/design/s4.9-sota.md` §14.
+
+- **Whole texts in one weight pass for small float encoders (S4.9m, part a)**: a `bert` file whose
+  every matrix is float and whose weights are at most 256 MiB now takes passes of 128 rows instead
+  of the 32-row bidirectional floor, so a 32-text batch of 16-token texts is four weight passes
+  rather than sixteen. A Q8_0 encoder keeps 32 rows (its tile kernels' activation working set
+  outgrows L2 above it: bge-m3 Q8_0 measured 3% slower at 128); `PEREGRINE_PASS_ROWS` still
+  overrides. Medians of three, 4 threads, on top of the strided store above: all-MiniLM-L6-v2 F16
+  16 tokens × 32 631 → 691 texts/s and × 8 593 → 641; bge-small-en-v1.5 F32 325 → 395 and
+  315 → 380. Whole-slice per-thread threading was measured and not kept: with the copy-out gone
+  the matrix stage is 98% busy inside the kernel and the barrier wait is 1.5-4%. No golden
+  changed; a text's vector is independent of the pass size (the invariance tests pin 1, 16, 64
+  and 256 rows). See `docs/design/s4.9-sota.md` §13.
+
+- **Fewer passes over the activations on the float path (S4.9m, part b)**: the packed float GEMM
+  now takes the caller's output stride (`fpack::gemm_strided`), so a projection's panels are
+  written straight into its row-major `[row][out]` buffer instead of a 16-row stack block and a
+  second copy. The copy was 19.5% of the matmul wall on an encoder pass; the matmul falls 19-21%
+  and the pass 16-18% on every measured cell, with the scalar twin, NEON, AVX2 and AVX-512
+  kernels bit-identical (a synthetic shape whose output rows are not whole panels keeps the
+  block-and-copy path). all-MiniLM-L6-v2 F16, 4 threads, medians of three: 16 tokens × 32
+  543 → 631 texts/s, 128 tokens × 8 79.7 → 90.9, 512 tokens × 1 15.9 → 17.8; bge-small-en-v1.5
+  F32 281.9 → 324.9, 41.9 → 49.5 and 8.2 → 9.5. No golden changed. See
+  `docs/design/s4.9-sota.md` §12.
+
 - **An exact result cache for embeddings, and duplicate texts computed once (S4.9k)**: `POST
   /v1/embeddings` keeps finished vectors keyed by the token ids, the pooling and the requested
   dimensions, so a hit returns the bits a computation would (the value is already truncated and
@@ -343,6 +382,28 @@ c63d13b (docs: the mistral3 reading note, the supported-model list and the tests
 
 ### Changed
 
+- **The bert family's element-wise work is vectorised, with the definitions kept (S4.9h).**
+  `vmath::gelu_erf_rows` and `vmath::layer_norm_rows` gained AVX2 bodies beside the scalar twins
+  S4.6a defined, and the two are `to_bits` equal. The GELU runs sixteen elements per step, four
+  `f64` lanes per `erf`, with the definition's three Maclaurin polynomials as three Horner chains
+  selected by `|x|` (a block takes the shortest path all its lanes can take), the same scalar
+  `erfc_tail` for the rare `(3, 4.6)` lane, and NaN bits kept. LayerNorm runs eight rows per
+  step, one `f64` lane per row, so each row's sums stay in index order and the mean and scale
+  round once; the scale-and-shift is eight `f32` lanes along the row, unfused as the definition
+  says. The bit-identity is tested over a million random bit patterns, the range boundaries, ±0,
+  subnormals, infinities, NaN payloads and row widths 1-40; aarch64 keeps the scalar twins with a
+  `// S4.9h:` note. Separately, a model whose every matrix is F32/F16/BF16 no longer builds the
+  int8 activation layouts nothing reads (`ActLayout::quantize`; the dense and gemma-embedding
+  families set it too), so a float file's fill is only the f32 row copy; the norm or GELU that
+  produces a row fills the next consumer's activation in the same pool task, the attention
+  output's bias and residual are fused into its matmul-sized chunks, and the down projection's
+  bias and residual are one pass. On MiniLM-L6-v2 F16, one 420-token text, 4 threads, min of 12
+  warm passes (H0, shared, load 6.6-6.8): the element-wise work 39 → 10 ms (23 % → 10 % of the
+  pass), the pass 171 → 97 ms; interleaved old/new medians of five give 1.14-1.76× from 16 to
+  512 tokens, batch 1 and 32. Every vector of the three downloaded real files (MiniLM F16 and
+  Q8_0, bge-small Q8_0) is the base commit's bit for bit (five texts, `peregrine embed` compared
+  with `cmp`), so no golden changed and the 200-text accuracy gate still prints the reference
+  note's numbers. See `docs/design/s4.9-sota.md` §10.
 - **Encoder attention at long text lengths (S4.9g, part 3).** The strip's keys are stored
   key-major in 16-key tiles on x86_64, so a score tile reads the panel front to back instead
   of one 64-byte run every `n × 4` bytes; the value mix walks the keys in 128-key blocks for
