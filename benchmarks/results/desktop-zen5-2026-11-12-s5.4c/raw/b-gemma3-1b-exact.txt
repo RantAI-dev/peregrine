@@ -1,0 +1,91 @@
+base file    base/gemma3-1b.base.bin
+  n_ctx 512, n_vocab 262144, n_chunk 40
+  255 scored positions per chunk (the second half, the last one excluded), 10200 in total
+model        models/gemma-3-1b-it-Q4_K_M.gguf
+  n_vocab 262144, add_bos true
+  KV cache    f16
+  prompt rows unmarked (the exact default)
+  8-bit form  0 bytes
+reference    models/gemma-3-1b-it-f16.gguf (exact)
+  8-bit form  0 bytes
+   1    PPL   18.5259    KLD   0.09644    chunk KLD   0.09644    chunk top 88.627 %    same top p 88.627 %
+   2    PPL   26.3736    KLD   0.07978    chunk KLD   0.06312    chunk top 90.196 %    same top p 89.412 %
+   3    PPL   24.7973    KLD   0.08582    chunk KLD   0.09788    chunk top 87.843 %    same top p 88.889 %
+   4    PPL   25.4728    KLD   0.07905    chunk KLD   0.05876    chunk top 87.451 %    same top p 88.529 %
+   5    PPL   25.9653    KLD   0.07335    chunk KLD   0.05055    chunk top 90.588 %    same top p 88.941 %
+   6    PPL   27.7029    KLD   0.06893    chunk KLD   0.04682    chunk top 87.451 %    same top p 88.693 %
+   7    PPL   29.2844    KLD   0.06741    chunk KLD   0.05832    chunk top 85.490 %    same top p 88.235 %
+   8    PPL   30.7584    KLD   0.06889    chunk KLD   0.07922    chunk top 85.490 %    same top p 87.892 %
+   9    PPL   32.7979    KLD   0.06775    chunk KLD   0.05864    chunk top 87.451 %    same top p 87.843 %
+  10    PPL   33.8026    KLD   0.06636    chunk KLD   0.05384    chunk top 85.882 %    same top p 87.647 %
+  11    PPL   33.5515    KLD   0.06517    chunk KLD   0.05327    chunk top 87.843 %    same top p 87.665 %
+  12    PPL   34.8840    KLD   0.06776    chunk KLD   0.09620    chunk top 87.451 %    same top p 87.647 %
+  13    PPL   36.7853    KLD   0.06719    chunk KLD   0.06044    chunk top 86.667 %    same top p 87.572 %
+  14    PPL   35.4323    KLD   0.06628    chunk KLD   0.05440    chunk top 89.804 %    same top p 87.731 %
+  15    PPL   34.0447    KLD   0.06631    chunk KLD   0.06679    chunk top 83.529 %    same top p 87.451 %
+  16    PPL   34.4622    KLD   0.06837    chunk KLD   0.09916    chunk top 84.314 %    same top p 87.255 %
+  17    PPL   32.3452    KLD   0.06785    chunk KLD   0.05957    chunk top 88.235 %    same top p 87.313 %
+  18    PPL   33.0099    KLD   0.07006    chunk KLD   0.10762    chunk top 81.961 %    same top p 87.015 %
+  19    PPL   32.4072    KLD   0.07150    chunk KLD   0.09742    chunk top 86.275 %    same top p 86.976 %
+  20    PPL   32.1877    KLD   0.07188    chunk KLD   0.07907    chunk top 88.235 %    same top p 87.039 %
+  21    PPL   31.4814    KLD   0.07354    chunk KLD   0.10688    chunk top 89.412 %    same top p 87.152 %
+  22    PPL   31.4497    KLD   0.07491    chunk KLD   0.10363    chunk top 89.412 %    same top p 87.255 %
+  23    PPL   30.2258    KLD   0.07857    chunk KLD   0.15910    chunk top 88.627 %    same top p 87.315 %
+  24    PPL   28.6138    KLD   0.08252    chunk KLD   0.17341    chunk top 84.706 %    same top p 87.206 %
+  25    PPL   28.3065    KLD   0.08503    chunk KLD   0.14508    chunk top 85.098 %    same top p 87.122 %
+  26    PPL   27.5475    KLD   0.08656    chunk KLD   0.12503    chunk top 85.490 %    same top p 87.059 %
+  27    PPL   27.1671    KLD   0.08761    chunk KLD   0.11492    chunk top 87.451 %    same top p 87.073 %
+  28    PPL   26.8633    KLD   0.08865    chunk KLD   0.11672    chunk top 88.235 %    same top p 87.115 %
+  29    PPL   26.5741    KLD   0.08848    chunk KLD   0.08353    chunk top 90.196 %    same top p 87.221 %
+  30    PPL   26.5491    KLD   0.08798    chunk KLD   0.07360    chunk top 87.843 %    same top p 87.242 %
+  31    PPL   26.2926    KLD   0.08964    chunk KLD   0.13954    chunk top 88.235 %    same top p 87.274 %
+  32    PPL   26.7006    KLD   0.08983    chunk KLD   0.09545    chunk top 87.843 %    same top p 87.292 %
+  33    PPL   26.6313    KLD   0.08931    chunk KLD   0.07285    chunk top 86.667 %    same top p 87.273 %
+  34    PPL   27.1329    KLD   0.08915    chunk KLD   0.08394    chunk top 85.882 %    same top p 87.232 %
+  35    PPL   27.5805    KLD   0.08903    chunk KLD   0.08472    chunk top 81.176 %    same top p 87.059 %
+  36    PPL   28.1576    KLD   0.08850    chunk KLD   0.06993    chunk top 88.627 %    same top p 87.102 %
+  37    PPL   28.6707    KLD   0.08791    chunk KLD   0.06668    chunk top 85.490 %    same top p 87.059 %
+  38    PPL   28.5122    KLD   0.08803    chunk KLD   0.09264    chunk top 87.059 %    same top p 87.059 %
+  39    PPL   28.3549    KLD   0.08783    chunk KLD   0.08028    chunk top 88.235 %    same top p 87.089 %
+  40    PPL   28.2154    KLD   0.08723    chunk KLD   0.06361    chunk top 88.627 %    same top p 87.127 %
+
+====== Perplexity statistics ======
+reference: models/gemma-3-1b-it-f16.gguf (exact)
+Mean PPL(Q)                   :  28.215407 ±   1.040009
+Mean PPL(base)                :  27.609644 ±   1.020035
+Cor(ln(PPL(Q)), ln(PPL(base))):  98.39%
+Mean ln(PPL(Q)/PPL(base))     :   0.021703 ±   0.006630
+Mean PPL(Q)/PPL(base)         :   1.021940 ±   0.006776
+Mean PPL(Q)-PPL(base)         :   0.605763 ±   0.186112
+
+====== KL divergence statistics ======
+Mean    KLD:   0.087227 ±   0.002563
+Maximum KLD:   5.929045
+99.9%   KLD:   3.493175
+99.0%   KLD:   1.016071
+95.0%   KLD:   0.285629
+90.0%   KLD:   0.171970
+Median  KLD:   0.032016
+10.0%   KLD:   0.000644
+ 5.0%   KLD:   0.000128
+ 1.0%   KLD:   0.000008
+ 0.1%   KLD:  -0.000000
+Minimum KLD:  -0.000037
+
+====== Token probability statistics ======
+Mean    Δp: -0.574 ± 0.082 %
+Maximum Δp:  0.973%
+99.9%   Δp:  0.714%
+99.0%   Δp:  0.218%
+95.0%   Δp:  0.071%
+90.0%   Δp:  0.033%
+75.0%   Δp:  0.003%
+Median  Δp: -0.000%
+25.0%   Δp: -0.008%
+10.0%   Δp: -0.055%
+ 5.0%   Δp: -0.106%
+ 1.0%   Δp: -0.274%
+ 0.1%   Δp: -0.810%
+Minimum Δp: -0.996%
+RMS Δp    :  8.339 ± 0.268 %
+Same top p: 87.127 ± 0.332 %
