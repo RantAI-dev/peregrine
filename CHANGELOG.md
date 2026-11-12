@@ -159,6 +159,34 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Q8_0 encoders take the float path on aarch64, and the missing ARM goldens are recorded
+  (S4.9o).** A Q8_0 `modern-bert` file kept the repacked int8 tiles on every tier, and on aarch64
+  those tiles have no `i8mm` body: `q4k8_gemm_i8mm`, `q5_08_gemm_i8mm` and `q6k8_gemm_i8mm` exist
+  and `q8_08_gemm_i8mm` does not, so a Q8_0 matmul ran the `sdot` eight-row tile on the
+  `aarch64-neon-i8mm` tier too. The packed float panel kernel is faster per multiply than that
+  tile even at four times the weight bytes, so on the two tiers that carry those tiles
+  (`aarch64-neon-dotprod` and up) a `modern-bert` file of at most 256 MiB
+  (`Q8_FLOAT_MAX_BYTES_ARM`; the measured gte file is 151 MiB) is dequantised once at load into
+  f32 panels, exactly as a `bert` file of at most 64 MiB already was (S4.9m). The two lower
+  aarch64 tiers keep the per-row kernel they already ran. The route is the
+  more exact one — `scale × code` is exact in f32 and no activation is quantised — and the
+  synthetic Q8_0 file's vector is now the scalar float reference's bit for bit on both int8
+  tiers. On the 200 real texts against llama.cpp's F16 conversion, gte Q8_0 goes 0.9963540/0.9996125
+  → 0.9994969/0.9997834 (min/mean cosine). x86 keeps the int8 tiles and the 64 MiB `bert` rule;
+  `gemma-embedding`, the causal embedders and `PEREGRINE_Q8_FLOAT=0` are unchanged. Measured on
+  the ARM host (10 threads pinned to the Cortex-X925 cluster, seven interleaved rounds, medians,
+  embedding cache off), gte Q8_0 texts/s before → after, and against llama.cpp (ratio after ÷
+  llama): 16 tokens 80.915 → 103.196 (1.28×, the smallest gain; 1.43× llama), 128 tokens 12.484 →
+  23.199 (1.86×; 1.62× llama), 512 tokens 3.168 → 6.404 (2.02×; 1.77× llama), batch of 16 × 32
+  tokens 48.306 → 98.502 (2.04×; 1.55× llama). The same run's F16 control moves −0.3 % to +0.8 %,
+  and the MiniLM Q8_0 control ±1.7 %. The two int8 tiers' `modern-bert-Q8_0` golden becomes
+  `51c9434cc8ba546e` (mean) and `55e17bd3fd81801d` (cls), where the int8 tile hashed
+  `301cbef7263b78d7` / `bb1ba15a4583cf63`; the `aarch64` and `aarch64-neon` goldens keep
+  `07f65ef98b0e8dc5` / `a05d5ecbd3b65f03`, and `bert-heads-Q8_0.golden` is recorded on the four
+  aarch64 tiers (`ca54d90d43e88fb2`, `e4b7b55d6db4b1bd`, `f65b54f0d4866827`, `79e9c20796542234`,
+  the x86 scalar hashes). No golden of another family or tier changed. See
+  `docs/design/s4.9-sota.md` §17 and `benchmarks/results/spark-arm-2026-11-12-q8-encoders/`.
+
 - **AVX2 bodies for the modern-bert element-wise kernels (S4.9n).** `geglu_erf` and
   `layer_norm_rows_nobias` were the ModernBERT family's two scalar-only kernels; both now have an
   AVX2+FMA body that is `to_bits` equal to its scalar twin, so no golden moved on any tier.

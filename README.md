@@ -354,8 +354,7 @@ fastembed and text-embeddings-inference):
 - **Where Peregrine is behind:** the ik_llama.cpp fork processes prompts about twice as fast on the
   AVX-512 desktop (Peregrine at 0.39–0.58×). Decode is level with it (0.89–1.06×) and Peregrine is ahead
   with 10 users (1.05–3.09×). For embeddings, OpenVINO and ONNX Runtime are faster on the two small BERT
-  encoders at 128 and 512 tokens (Peregrine at 0.85–0.99×), and on ARM llama.cpp is faster on Q8_0
-  ModernBERT from 128 tokens up (0.77–0.94×).
+  encoders at 128 and 512 tokens (Peregrine at 0.85–0.99×).
 
 Full tables, charts, accuracy verification, and machine records are in [docs/benchmark.md](docs/benchmark.md).
 

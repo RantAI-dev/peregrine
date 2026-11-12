@@ -1,0 +1,225 @@
+{
+ "runs": 5,
+ "threads": 10,
+ "cells": [
+  "16",
+  "128",
+  "512",
+  "batch32"
+ ],
+ "models": {
+  "gte-modernbert-base-Q8_0": {
+   "path": "~/models/gte-modernbert-base-Q8_0.gguf",
+   "bytes": 160208512,
+   "engines": {
+    "peregrine-i8mm": {
+     "cmd": "/var/tmp/q8probe/peregrine-floatroute serve -m ~/models/gte-modernbert-base-Q8_0.gguf --host 127.0.0.1 --port 18211 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_BIN=/var/tmp/q8probe/peregrine-floatroute PEREGRINE_ISA=native",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        94.3244,
+        76.6579,
+        104.0195,
+        97.7249,
+        110.3148
+       ],
+       "median": 97.7249,
+       "min": 76.6579,
+       "max": 110.3148,
+       "spread_pct": 34.44
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        19.213,
+        21.2513,
+        20.6343,
+        18.7796,
+        20.9594
+       ],
+       "median": 20.6343,
+       "min": 18.7796,
+       "max": 21.2513,
+       "spread_pct": 11.98
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        3.9207,
+        3.928,
+        3.9684,
+        3.7646,
+        4.2585
+       ],
+       "median": 3.928,
+       "min": 3.7646,
+       "max": 4.2585,
+       "spread_pct": 12.57
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 512,
+       "texts_per_s": [
+        92.7478,
+        92.3573,
+        90.6014,
+        93.1459,
+        90.3445
+       ],
+       "median": 92.3573,
+       "min": 90.3445,
+       "max": 93.1459,
+       "spread_pct": 3.03
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 0.9999009848091807,
+       "mean": 0.9999009848091807,
+       "n": 1
+      },
+      "128": {
+       "min": 0.9998966099192812,
+       "mean": 0.9998966099192812,
+       "n": 1
+      },
+      "512": {
+       "min": 0.9998604907641948,
+       "mean": 0.9998604907641948,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9998114192697535,
+       "mean": 0.9998507177175718,
+       "n": 16
+      }
+     }
+    },
+    "llama.cpp": {
+     "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/gte-modernbert-base-Q8_0.gguf --embedding --pooling cls -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18212",
+     "env": "CUDA_VISIBLE_DEVICES= PEREGRINE_BIN=/var/tmp/q8probe/peregrine-floatroute",
+     "binary_version": "version: 0.9.0-dev (build 1, commit cd959ba)",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        73.365,
+        71.3044,
+        74.4586,
+        64.8119,
+        71.7694
+       ],
+       "median": 71.7694,
+       "min": 64.8119,
+       "max": 74.4586,
+       "spread_pct": 13.44
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        14.0707,
+        14.0661,
+        14.1674,
+        14.0162,
+        14.1451
+       ],
+       "median": 14.0707,
+       "min": 14.0162,
+       "max": 14.1674,
+       "spread_pct": 1.07
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        3.6065,
+        3.6172,
+        3.5927,
+        3.6208,
+        3.6214
+       ],
+       "median": 3.6172,
+       "min": 3.5927,
+       "max": 3.6214,
+       "spread_pct": 0.79
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 512,
+       "texts_per_s": [
+        63.3672,
+        63.7419,
+        63.5944,
+        63.3802,
+        63.3773
+       ],
+       "median": 63.3802,
+       "min": 63.3672,
+       "max": 63.7419,
+       "spread_pct": 0.59
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 1.0,
+       "mean": 1.0,
+       "n": 1
+      },
+      "128": {
+       "min": 1.0000000000000002,
+       "mean": 1.0000000000000002,
+       "n": 1
+      },
+      "512": {
+       "min": 1.0000000000000002,
+       "mean": 1.0000000000000002,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9999999999999998,
+       "mean": 1.0,
+       "n": 16
+      }
+     }
+    }
+   },
+   "texts": {
+    "16": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning",
+    "128": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history pattern grammar field server schedule node and and kernel response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field retrieval embedding question tree model channel path representation pattern capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and index for latency score history test method information solution processor country be neural report weight table server processor score country",
+    "512": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history pattern grammar field server schedule node and and kernel response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field retrieval embedding question tree model channel path representation pattern capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and index for latency score history test method information solution processor country be neural report weight table server processor score country size deployment signal semantics algorithm queue environment thread Paris deployment document database result to connection state be method server similarity state river column stream attention in evaluation it. Client search recovery stream and benchmark ranking method throughput search thread sentence field it recovery semantics size retrieval search in setting information stream field record data process container passage ranking matrix build which history protocol build for which library container design value weight number database index data request from clause path row dimension were function dimension query sentence performance module processor failure node meaning city number algorithm module speed report queue algorithm package metric server token layer sentence benchmark compiler grammar cluster capital instruction is are environment is country production word information performance deployment socket sentence suite schedule. Channel kernel attention environment production build integer algorithm tree channel information capital thread from buffer instruction container release a module speed process integer token country array signal history compiler dimension instruction as environment field machine training list similarity file latency record score with embedding is name algorithm index approach accuracy algorithm search speed evaluation sentence result image record column was vector query was schedule solution passage search list form grammar mountain failure tree data performance name at country accuracy build training inference query dimension attention capital were or search which knowledge the image layer array report error detail integer record France instruction number metric space memory image answer machine form node environment France model or capital result kernel score version field in search Paris city instruction channel database pattern test are passage an learning library transformer graph capital table similarity design was that parameter method schedule deployment knowledge to value default array sentence training protocol search data signal search structure algorithm table value grammar capital and are cycle validation noise cluster option recovery state as training algorithm training size image runtime instruction France release buffer score socket city was signal benchmark result index by instruction hardware file graph vector report schedule or by retrieval language array timeout transformer value failure by the default metric inference vector. Library token structure cycle accuracy river be row integer with client form with runtime latency server language representation request request connection space field machine capital result algorithm latency report by search recovery integer parameter float float by system city",
+    "batch32": [
+     "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history",
+     "response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field retrieval",
+     "capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and index",
+     "processor country be neural report weight table server processor score country size deployment signal semantics algorithm queue environment thread Paris deployment document database result to connection state be method server",
+     "evaluation it. Client search recovery stream and benchmark ranking method throughput search thread sentence field it recovery semantics size retrieval search in setting information stream field record data",
+     "build for which library container design value weight number database index data request from clause path row dimension were function dimension query sentence performance module processor failure node meaning city",
+     "package metric server token layer sentence benchmark compiler grammar cluster capital instruction is are environment is country production word information performance deployment socket sentence suite schedule. Channel kernel attention",
+     "capital thread from buffer instruction container release a module speed process integer token country array signal history compiler dimension instruction as environment field machine training list similarity file latency record",
+     "approach accuracy algorithm search speed evaluation sentence result image record column was vector query was schedule solution passage search list form grammar mountain failure tree data performance name at",
+     "capital were or search which knowledge the image layer array report error detail integer record France instruction number metric space memory image answer machine form node environment France model or",
+     "search Paris city instruction channel database pattern test are passage an learning library transformer graph capital table similarity design was that parameter method schedule deployment knowledge to value default array",
+     "structure algorithm table value grammar capital and are cycle validation noise cluster option recovery state as training algorithm training size image runtime instruction France release buffer score socket city was",
+     "file graph vector report schedule or by retrieval language array timeout transformer value failure by the default metric inference vector. Library token structure cycle accuracy river be row integer",
+     "representation request request connection space field machine capital result algorithm latency report by search recovery integer parameter float float by system city database signal instruction noise country this transformer semantics",
+     "analysis detail France runtime recovery performance library database process name option matrix connection metric France method module path connection failure accuracy latency index on benchmark passage parameter test by noise",
+     "language tree deployment in integer question semantics matrix evaluation on protocol and transformer pattern speed space file cache as problem recovery timeout data value language row as space context distance"
+    ]
+   },
+   "cell_tokens": {
+    "16": 16,
+    "128": 128,
+    "512": 512,
+    "batch32": 512
+   }
+  }
+ }
+}
