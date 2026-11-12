@@ -298,7 +298,7 @@ cells of the first two models (0.95–0.99×). Q8_0 ModernBERT was behind from 1
 of up to 256 MiB now has its matrices widened to float at load, which is both faster (1.28–2.04×
 the old pass) and closer to the full-precision vectors, at four times the weight memory.
 
-Full details: [`spark-2026-11-12-embeddings`](../benchmarks/results/spark-2026-11-12-embeddings/README.md)
+Full details: [`spark-2026-11-12-embeddings`](../benchmarks/results/spark-2026-11-12-embeddings/README.md),
 [`spark-arm-2026-11-12-modern-bert`](../benchmarks/results/spark-arm-2026-11-12-modern-bert/README.md)
 (the F16 row) and [`spark-arm-2026-11-12-q8-encoders`](../benchmarks/results/spark-arm-2026-11-12-q8-encoders/README.md)
 (the Q8_0 row).
