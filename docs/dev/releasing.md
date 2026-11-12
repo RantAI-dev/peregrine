@@ -34,36 +34,41 @@ Work down the list; do not cut the tag until every line holds.
 4. **Move the CHANGELOG's *Unreleased* section** under the new version with the date, bump
    `[workspace.package] version`, commit (`chore: release vX.Y.Z`), open and merge that PR.
 5. **Tag `vX.Y.Z` on `main`.** Pushing the tag runs `.github/workflows/release.yml`, which on each
-   target runner (linux-x86_64, linux-aarch64, windows-x86_64) runs the full test suite in release
-   mode, proves the run-time ISA dispatch, builds the archives (`scripts/release/build.sh`, and
-   `scripts/release/build.ps1` on Windows), and uploads them to a GitHub release whose notes are
-   generated from PR labels. Nothing else publishes. A manual start is a dry run and never
-   publishes: it builds and uploads the archives as workflow artefacts only (the publish job is
-   guarded on a tag push):
+   target runner (linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64) runs the full test
+   suite in release mode, proves the run-time ISA dispatch, builds the archives
+   (`scripts/release/build.sh`, and `scripts/release/build.ps1` on Windows), and uploads them to a
+   GitHub release whose notes are generated from PR labels. Nothing else publishes. A manual start
+   is a dry run and never publishes: it builds and uploads the archives as workflow artefacts only
+   (the publish job is guarded on a tag push):
    ```sh
    gh workflow run release.yml --ref <branch> -f dry_run=true
    gh run watch <id>          # then download the artefacts and check their listing and SHA-256
    ```
 6. **Check the release.** Download every archive, `sha256sum -c SHA256SUMS` (on Windows:
    `Get-FileHash <zip> -Algorithm SHA256` against the same file), run `./peregrine tier`
-   (x86-64: an `x86_64-avx2*` tier from the baseline binary; aarch64: `aarch64`; Windows:
-   `peregrine.exe tier`), then
+   (x86-64: an `x86_64-avx2*` tier from the baseline binary; aarch64: `aarch64`; macOS: an
+   `aarch64-neon*` tier; Windows: `peregrine.exe tier`), then
    `peregrine inspect` a model and smoke-test `serve` (`docs/quickstart.md`):
    (a) run the first `hf:` command with a cold cache (an empty `PEREGRINE_CACHE_DIR`), so the
    download path is exercised; (b) leave `peregrine serve` up for at least 60 s and answer a chat
    request after that, so a lifetime tied to the drain timeout cannot ship again; (c) exercise
    `serve --background`, `status`, `stop`, then `status` again (it must report no managed server).
-   On Windows also run `scripts/install.ps1 -Version vX.Y.Z -BaseUrl <dir with the zip> -InstallDir
+   On the macOS archive also check `codesign -dv` reports an ad-hoc signature and that
+   `scripts/install.sh --version vX.Y.Z` installs and runs it (the installer refuses Intel Macs).
+   On Windows run `scripts/install.ps1 -Version vX.Y.Z -BaseUrl <dir with the zip> -InstallDir
    <temp>` and start the installed `peregrine.exe`: it must report the same version and tier.
+7. **Record the goldens of any new platform tier** with the **Record goldens** workflow before the
+   release (`docs/dev/testing.md`), so the archive's suite compares them instead of skipping.
 
 ## What ships
 
 - `install.sh`, the `curl | sh` installer, and `install.ps1`, the PowerShell installer, as release
   assets: `releases/latest/download/install.sh` and `/install.ps1` are what the vanity host
   redirects to.
-- `peregrine-vX.Y.Z-linux-x86_64.tar.gz`, `peregrine-vX.Y.Z-linux-aarch64.tar.gz` and
-  `peregrine-vX.Y.Z-windows-x86_64.zip`: the stripped `peregrine`/`peregrine.exe` binary,
-  `LICENSE` and `NOTICE`, with a `SHA256SUMS` covering every archive.
+- `peregrine-vX.Y.Z-linux-x86_64.tar.gz`, `peregrine-vX.Y.Z-linux-aarch64.tar.gz`,
+  `peregrine-vX.Y.Z-macos-aarch64.tar.gz` and `peregrine-vX.Y.Z-windows-x86_64.zip`: the stripped
+  `peregrine`/`peregrine.exe` binary, `LICENSE` and `NOTICE`, with a `SHA256SUMS` covering every
+  archive.
 - The x86-64 binary is built for the plain x86-64 baseline: no `RUSTFLAGS`, no `-C target-cpu=native`
   (the build script refuses `RUSTFLAGS`, and the workflow asserts the baseline binary still picks the
   AVX2 tier on an AVX2-only runner). AVX2, AVX-VNNI-256 and AVX-512 are chosen at run time by the
@@ -71,11 +76,20 @@ Work down the list; do not cut the tag until every line holds.
 - Binaries are built natively per target on the release runners (no cross-compilation). Build them
   with `--profile dist` (fat LTO, one codegen unit): same speed as `release` on the S3.9 A/B, 29%
   smaller. Published benchmark numbers stay on `release` (see [`build-profiles.md`](build-profiles.md)).
+- The macOS archive targets macOS 11.0 (`MACOSX_DEPLOYMENT_TARGET`), is ad-hoc signed
+  (`codesign --sign -`) and **not notarised**. `curl` sets no quarantine flag, so the installer's
+  path runs; a browser download needs the `xattr -d com.apple.quarantine` line in
+  `docs/quickstart.md`. Intel Macs have no archive: they build from source.
 - The Windows archive is built with `-C target-feature=+crt-static`, so the `.exe` needs no Visual
   C++ redistributable. It is **unsigned**: there is no Authenticode certificate yet, so SmartScreen
   warns about a browser download; the installer's download path does not carry the zone identifier.
-- macOS archives and container images are not in the first release; both are follow-ups
-  (the Dockerfile ships first, an image publish comes with it).
+  Windows on ARM64 has no archive: it builds from source.
+- **v0.2.0 shipped the two Linux archives only.** The `macos-aarch64` and `windows-x86_64` archives
+  and their two installers ship from the release after v0.2.0; both platforms already build and
+  pass the full suite on every change, so until that release they install with
+  `cargo build --release`. `scripts/install.sh` says exactly that on a Mac pointed at v0.2.0.
+- Container images are not in the first release (the Dockerfile ships first, an image publish comes
+  with it).
 
 ## The vanity download host
 

@@ -186,8 +186,17 @@ pub fn describe_runtime() -> String {
         },
         |n| n.to_string(),
     );
+    // S5.4e: with the mode on, name the 8-bit body this tier takes, so `peregrine
+    // tier` answers "does ARM run the NEON body?" without a bench run.
+    let fast = if o.fast_prompt {
+        let body = peregrine_core::options::fast_prompt_body()
+            .unwrap_or("scalar twin: correct, but not faster than the exact kernels on this tier");
+        format!("fast prompt   {body}\n")
+    } else {
+        String::new()
+    };
     format!(
-        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\npack cache    {}\nprefill chunk {chunk} (for {threads} workers), {wide} with no decoder\npass rows     {pass}\noptions:\n{}",
+        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\npack cache    {}\n{fast}prefill chunk {chunk} (for {threads} workers), {wide} with no decoder\npass rows     {pass}\noptions:\n{}",
         peregrine_kernels::cpu::tier_name(),
         peregrine_core::simd_name(),
         o.kq_repack_note(),

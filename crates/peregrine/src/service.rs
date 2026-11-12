@@ -358,14 +358,16 @@ fn wait_gone(pid: u32, timeout: Duration) -> Result<(), String> {
     Ok(())
 }
 
-/// The release asset's platform name for a system and architecture, e.g. `windows-x86_64`.
+/// The release asset's platform name for a system and architecture, e.g. `macos-aarch64`.
 ///
 /// The names match the release archives' (`scripts/release/build.sh`, `scripts/release/build.ps1`).
-/// Windows on ARM has no archive yet (docs/design/s7-platforms.md §2).
+/// Intel Macs and Windows on ARM have no archive: they build from source
+/// (docs/design/s7-platforms.md §2).
 fn release_platform(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
         ("linux", "x86_64") => Some("linux-x86_64"),
         ("linux", "aarch64") => Some("linux-aarch64"),
+        ("macos", "aarch64") => Some("macos-aarch64"),
         ("windows", "x86_64") => Some("windows-x86_64"),
         _ => None,
     }
@@ -751,31 +753,40 @@ mod tests {
     #[test]
     fn the_release_platform_names_the_system_and_architecture() {
         // The mapping is a function of the system and architecture, not of the machine this test
-        // runs on, so every case is checked by argument.
-        assert_eq!(release_platform("linux", "x86_64"), Some("linux-x86_64"));
-        assert_eq!(release_platform("linux", "aarch64"), Some("linux-aarch64"));
-        assert_eq!(
-            release_platform("windows", "x86_64"),
-            Some("windows-x86_64")
-        );
-        // Windows on ARM and Intel macOS have no release archive.
-        assert_eq!(release_platform("windows", "aarch64"), None);
-        assert_eq!(release_platform("macos", "x86_64"), None);
+        // runs on, so every case is checked by argument. The four names are the four archives the
+        // release workflow builds; the two `None`s are the platforms that build from source.
+        let cases = [
+            (("linux", "x86_64"), Some("linux-x86_64")),
+            (("linux", "aarch64"), Some("linux-aarch64")),
+            (("macos", "aarch64"), Some("macos-aarch64")),
+            (("windows", "x86_64"), Some("windows-x86_64")),
+            // Intel macOS and Windows on ARM have no release archive.
+            (("macos", "x86_64"), None),
+            (("windows", "aarch64"), None),
+        ];
+        for ((os, arch), expected) in cases {
+            assert_eq!(release_platform(os, arch), expected, "{os} on {arch}");
+        }
     }
 
     #[test]
     fn the_archive_name_matches_the_platform() {
-        let tag = "v0.2.0";
-        let windows = release_platform("windows", "x86_64").unwrap();
-        assert_eq!(
-            format!("peregrine-{tag}-{windows}.{}", archive_extension(windows)),
-            "peregrine-v0.2.0-windows-x86_64.zip"
-        );
-        let linux = release_platform("linux", "x86_64").unwrap();
-        assert_eq!(
-            format!("peregrine-{tag}-{linux}.{}", archive_extension(linux)),
-            "peregrine-v0.2.0-linux-x86_64.tar.gz"
-        );
+        // The tag is a stand-in, never a released version: the name is what the mapping plus the
+        // extension produces.
+        let tag = "vX.Y.Z";
+        let cases = [
+            ("linux", "x86_64", "peregrine-vX.Y.Z-linux-x86_64.tar.gz"),
+            ("linux", "aarch64", "peregrine-vX.Y.Z-linux-aarch64.tar.gz"),
+            ("macos", "aarch64", "peregrine-vX.Y.Z-macos-aarch64.tar.gz"),
+            ("windows", "x86_64", "peregrine-vX.Y.Z-windows-x86_64.zip"),
+        ];
+        for (os, arch, expected) in cases {
+            let platform = release_platform(os, arch).unwrap();
+            assert_eq!(
+                format!("peregrine-{tag}-{platform}.{}", archive_extension(platform)),
+                expected
+            );
+        }
     }
 
     #[test]

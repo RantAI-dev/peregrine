@@ -146,12 +146,24 @@ pub fn wide_chunk_default_for(_tier: crate::cpu::Tier) -> usize {
 /// choice and its scratch is half the size. S5.4c re-measures this in a quiet window.
 pub const WIDE_CHUNK_DEFAULT_FAST: usize = 256;
 
+/// The fast mode's wide chunk on aarch64: **512** (S5.4e). Measured on the DGX Spark at ten
+/// threads on Llama 3.2 1B and Qwen 2.5 0.5B, 512 is 7.7–26.6 % ahead of 256 on both prompt
+/// lengths (512 and 4 096 tokens) and level at one thread (81.0 against 81.0 tok/s on the 1B,
+/// 88.5 against 89.0 on the 0.5B). That clears the 5 %-on-both-models bar the x86 first look
+/// set, so ARM widens; x86 keeps 256.
+pub const WIDE_CHUNK_DEFAULT_FAST_ARM: usize = 512;
+
 /// [`wide_chunk_default_for`] for the process's mode: the fast prompt mode widens further
-/// (`WIDE_CHUNK_DEFAULT_FAST`), because a prompt row read from the 8-bit form pays one scale
-/// multiply per 256 weights and wants more rows under it.
+/// (`WIDE_CHUNK_DEFAULT_FAST`, or `WIDE_CHUNK_DEFAULT_FAST_ARM` on aarch64), because a prompt
+/// row read from the 8-bit form pays one scale multiply per 256 weights and wants more rows
+/// under it.
 pub fn wide_chunk_default_for_mode(tier: crate::cpu::Tier, fast_prompt: bool) -> usize {
     if fast_prompt {
-        WIDE_CHUNK_DEFAULT_FAST
+        if cfg!(target_arch = "aarch64") {
+            WIDE_CHUNK_DEFAULT_FAST_ARM
+        } else {
+            WIDE_CHUNK_DEFAULT_FAST
+        }
     } else {
         wide_chunk_default_for(tier)
     }
@@ -308,9 +320,9 @@ pub fn pass_rows_default_for(
     }
 }
 
-/// Whether the fast prompt mode's 8-bit form has a SIMD body on this tier (AVX-512
-/// or AVX2 on x86; NEON is S5.4d's ARM half). A tier without one runs the mode
-/// correctly through the scalar twin, just no faster than the exact kernel.
+/// Whether the fast prompt mode's 8-bit form has a SIMD body on this tier (AVX-512 or
+/// AVX2 on x86; `smmla` or `sdot` on aarch64 since S5.4e). A tier without one runs the
+/// mode correctly through the scalar twin, just no faster than the exact kernel.
 pub fn fast_prompt_simd() -> bool {
     peregrine_kernels::table::MatKernels::get().q8k_simd()
 }
@@ -1003,6 +1015,24 @@ mod tests {
             assert!(wide >= PREFILL_CHUNK_DEFAULT, "{tier}");
             assert!(wide <= MAX_PREFILL_CHUNK, "{tier}");
         }
+    }
+
+    #[test]
+    fn the_fast_modes_wide_chunk_is_the_tiers_choice() {
+        // S5.4e: aarch64 widens the fast mode's wide chunk to 512 (7.7–26.6 % over 256 on both
+        // models at ten threads); x86 keeps the first look's 256. With the mode off the exact
+        // default is unchanged on both, and both fit the scratch.
+        let fast_expected = if cfg!(target_arch = "aarch64") {
+            512
+        } else {
+            WIDE_CHUNK_DEFAULT_FAST
+        };
+        for tier in [crate::cpu::Tier::Avx512, crate::cpu::Tier::NeonI8mm] {
+            assert_eq!(wide_chunk_default_for_mode(tier, true), fast_expected);
+            assert_eq!(wide_chunk_default_for_mode(tier, false), WIDE_CHUNK_DEFAULT);
+        }
+        assert!(fast_expected >= PREFILL_CHUNK_DEFAULT);
+        assert!(fast_expected <= MAX_PREFILL_CHUNK);
     }
 
     #[test]
