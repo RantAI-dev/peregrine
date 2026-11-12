@@ -166,6 +166,15 @@ synthetic model's logits are insensitive to the reordering: its argmax is one to
 throughout). Nothing else: the AVX2 and scalar fast goldens, every exact golden and the
 `aarch64*` set are untouched.
 
+**The Windows twins.** S7.4 (PR #254) gave the AVX-512 tier `-windows` twins of both fast
+goldens, and the Q6_K one has to move with this change. Recording them needs a Windows runner
+with AVX-512, and three `record-goldens.yml` starts (`-f runner=windows-2025`) all drew an AMD
+EPYC 7763 — Zen 3, AVX2 and no AVX-512 — which records the `x86_64-avx2-windows` set instead
+(and recorded it identically). So the two AVX-512 fast goldens are **deleted** rather than left
+stale: the Windows AVX-512 runner then skips them (that job does not set `PEREGRINE_GOLDEN=require`),
+and the pinned-AVX2 Windows step, which does, is unaffected because its own goldens are there.
+`git log`/`git show 25f5509` is the commit that removes them.
+
 ## 3. B: the pass's non-kernel share
 
 `docs/design/s5.4-fast-prompt.md` §5l has the step list. In one sentence: the only **serial**
