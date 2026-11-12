@@ -12,8 +12,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use support::models::{
-    write_dense_pooled, write_gemma_embedding, write_modern_bert, Dense, GemmaEmbeddingConfig,
-    ModernBertConfig,
+    write_dense_pooled, write_gemma_embedding, write_modern_bert, write_nomic_bert, Dense,
+    GemmaEmbeddingConfig, ModernBertConfig, NomicBertConfig,
 };
 
 fn tmpdir(test: &str) -> PathBuf {
@@ -269,6 +269,57 @@ fn a_modern_bert_encoder_embeds_and_refuses_to_generate() {
         assert_eq!(v.len(), 128);
         assert!((norm(&v) - 1.0).abs() < 1e-5);
     }
+    let out = Command::new(bin())
+        .arg("inspect")
+        .arg(&model)
+        .output()
+        .expect("run inspect");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("pooling       mean (1) (embedding model)"),
+        "{text}"
+    );
+    let out = Command::new(bin())
+        .args(["run", "-m"])
+        .arg(&model)
+        .args(["--no-profile", "-t", "2", "hello"])
+        .output()
+        .expect("run peregrine run");
+    assert!(!out.status.success(), "a chat run on an encoder must fail");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("embedding model"));
+}
+
+/// A synthetic `nomic-bert` encoder (roadmap S4.8a): `embed` works over the
+/// WordPiece vocabulary (`[CLS] … [SEP]`), `--dimensions` truncates then
+/// normalises, `inspect` prints the file's mean pooling, and `run` refuses.
+#[test]
+fn a_nomic_bert_encoder_embeds_and_refuses_to_generate() {
+    let dir = tmpdir("nomic-bert");
+    let model = write_nomic_bert(&dir, Format::F16, 31, NomicBertConfig::default());
+    let out = embed(&model, &["hello world", "the test of a paris city"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        let v = floats(line);
+        assert_eq!(v.len(), 128);
+        assert!((norm(&v) - 1.0).abs() < 1e-5);
+    }
+    let out = embed(&model, &["--dimensions", "32", "--json", "hello"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let data: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let v: Vec<f32> = serde_json::from_value(data["data"][0]["embedding"].clone()).unwrap();
+    assert_eq!(v.len(), 32);
+    assert!((norm(&v) - 1.0).abs() < 1e-5);
     let out = Command::new(bin())
         .arg("inspect")
         .arg(&model)

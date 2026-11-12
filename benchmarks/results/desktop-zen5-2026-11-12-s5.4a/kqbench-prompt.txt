@@ -1,0 +1,46 @@
+gemm(4): 40.69 ns/(tile*act*sb)  50.3 GMAC/s/core
+gemm(64): 36.68 ns/(tile*act*sb)  55.8 GMAC/s/core
+gemv(1): 69.95 ns/(tile*act*sb)  29.3 GMAC/s/core
+q4k   1 acts: row   20.5  tile(avx2)   29.8  tile(zmm)   42.7  GMAC/s/core
+q4k   4 acts: row   29.8  tile(avx2)   51.1  tile(zmm)   77.1  GMAC/s/core
+q4k  16 acts: row   34.8  tile(avx2)   55.8  tile(zmm)   79.4  GMAC/s/core
+q4k  64 acts: row   32.2  tile(avx2)   55.1  tile(zmm)   79.5  GMAC/s/core
+q4k 128 acts: row   25.0  tile(avx2)   53.6  tile(zmm)   79.6  GMAC/s/core
+zmm gemm(4): 26.81 ns/(tile*act*sb)  76.4 GMAC/s/core
+zmm gemm(64): 25.76 ns/(tile*act*sb)  79.5 GMAC/s/core
+zmm gemv(1): 48.25 ns/(tile*act*sb)  42.4 GMAC/s/core
+--- the 8-bit prompt form (S5.4a): 2048 weights x 8192 output rows, one thread; exact: the file's tiles, resident: the form built once, per-pass: the form built per tile inside the pass, build: the conversion alone ---  (hygiene:allow, the logged wording of the run before the banner was reworded)
+--- the form's bytes per weight: 1.03125 (a Q4_K file holds 0.5625, a Q6_K file 0.8203) ---
+ q4k   1 acts: exact   33.6  resident   22.0 (-35%)  per-pass    1.6 (-95%)  build   1.7 G weights/s  GMAC/s/core
+ q6k   1 acts: exact   18.8  resident   19.4 (+3%)  per-pass    1.4 (-93%)  build   1.4 G weights/s  GMAC/s/core
+q5_0   1 acts: exact   21.4  resident   22.0 (+3%)  per-pass    1.5 (-93%)  build   1.6 G weights/s  GMAC/s/core
+ q4k   8 acts: exact   65.3  resident   85.3 (+31%)  per-pass   10.6 (-84%)  build   1.5 G weights/s  GMAC/s/core
+ q6k   8 acts: exact   39.7  resident   92.2 (+132%)  per-pass   10.0 (-75%)  build   1.5 G weights/s  GMAC/s/core
+q5_0   8 acts: exact   42.4  resident   87.3 (+106%)  per-pass   10.0 (-76%)  build   1.5 G weights/s  GMAC/s/core
+ q4k  16 acts: exact   62.7  resident   73.6 (+17%)  per-pass   18.6 (-70%)  build   1.5 G weights/s  GMAC/s/core
+ q6k  16 acts: exact   38.9  resident   73.4 (+89%)  per-pass   17.0 (-56%)  build   1.4 G weights/s  GMAC/s/core
+q5_0  16 acts: exact   49.0  resident   81.5 (+66%)  per-pass   20.9 (-57%)  build   1.8 G weights/s  GMAC/s/core
+ q4k  64 acts: exact   63.2  resident   84.0 (+33%)  per-pass   45.4 (-28%)  build   1.5 G weights/s  GMAC/s/core
+ q6k  64 acts: exact   43.3  resident   83.2 (+92%)  per-pass   42.8 (-1%)  build   1.4 G weights/s  GMAC/s/core
+q5_0  64 acts: exact   49.2  resident   89.8 (+82%)  per-pass   51.7 (+5%)  build   1.6 G weights/s  GMAC/s/core
+ q4k 128 acts: exact   74.4  resident   95.5 (+28%)  per-pass   68.3 (-8%)  build   2.0 G weights/s  GMAC/s/core
+ q6k 128 acts: exact   46.7  resident   89.0 (+91%)  per-pass   61.1 (+31%)  build   1.5 G weights/s  GMAC/s/core
+q5_0 128 acts: exact   45.1  resident   92.2 (+105%)  per-pass   62.1 (+38%)  build   1.4 G weights/s  GMAC/s/core
+ q4k 512 acts: exact   66.2  resident   91.9 (+39%)  per-pass   82.1 (+24%)  build   1.6 G weights/s  GMAC/s/core
+ q6k 512 acts: exact   45.3  resident   90.1 (+99%)  per-pass   79.9 (+76%)  build   1.5 G weights/s  GMAC/s/core
+q5_0 512 acts: exact   42.9  resident   90.6 (+111%)  per-pass   81.8 (+91%)  build   1.4 G weights/s  GMAC/s/core
+q5   1 acts: avx2 20.5 G  zmm 24.2 G MAC/s/core  (+18%)
+q5   4 acts: avx2 35.9 G  zmm 48.3 G MAC/s/core  (+35%)
+q5  16 acts: avx2 29.1 G  zmm 46.2 G MAC/s/core  (+59%)
+q5  64 acts: avx2 30.1 G  zmm 50.0 G MAC/s/core  (+66%)
+q5 128 acts: avx2 29.7 G  zmm 52.1 G MAC/s/core  (+76%)
+q6k   1 acts: row   19.0 G  tile   19.5 G  zmm   24.1 G MAC/s/core  (zmm +24%)
+q6k   4 acts: row   25.3 G  tile   31.6 G  zmm   51.1 G MAC/s/core  (zmm +62%)
+q6k  16 acts: row   30.2 G  tile   26.8 G  zmm   46.1 G MAC/s/core  (zmm +72%)
+q6k  64 acts: row   28.9 G  tile   34.1 G  zmm   59.9 G MAC/s/core  (zmm +76%)
+q6k 128 acts: row   29.8 G  tile   35.2 G  zmm   60.1 G MAC/s/core  (zmm +71%)
+q5k   1 acts: row   15.9 G  tile   17.1 G MAC/s/core  (+8%)
+q5k   4 acts: row   26.8 G  tile   37.8 G MAC/s/core  (+41%)
+q5k  16 acts: row   36.3 G  tile   45.6 G MAC/s/core  (+26%)
+q5k  64 acts: row   31.6 G  tile   40.8 G MAC/s/core  (+29%)
+q5k 128 acts: row   32.3 G  tile   39.3 G MAC/s/core  (+22%)
