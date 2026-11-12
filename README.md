@@ -27,13 +27,13 @@ peregrine tier      # the SIMD tier picked for this CPU: AVX-512, AVX2, NEON, i8
 Pin a release or choose the install directory by passing arguments to `sh`:
 
 ```sh
-curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --version v0.1.2
+curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --version v0.2.0
 curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --prefix /usr/local
 peregrine upgrade            # self-update in place to the newest release
 ```
 
-The release archives (`peregrine-v0.1.2-linux-x86_64.tar.gz` and
-`peregrine-v0.1.2-linux-aarch64.tar.gz` on the
+The release archives (`peregrine-v0.2.0-linux-x86_64.tar.gz` and
+`peregrine-v0.2.0-linux-aarch64.tar.gz` on the
 [releases page](https://github.com/RantAI-dev/peregrine/releases)) contain portable binaries built for
 the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and i8mm are selected at run time,
 so one binary runs on every CPU of that architecture; `peregrine tier` prints what it picked.

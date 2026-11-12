@@ -24,6 +24,9 @@ the rest. When a rule has to be broken, say so in a comment that gives the reaso
    left are listed in issue #64; each is a bug until it is gone. Exactly rounded operations
    (`sqrt`, the fused multiply-add) are fine: the standard prescribes their result, so every
    library returns the same one.
+   `clippy.toml` enforces the part of this that has already bitten: the single-precision
+   functions glibc changed (`tanh`, `sinh`, `cosh`, the inverse hyperbolics, `exp_m1`, `ln_1p`,
+   `cbrt`) are disallowed methods, so `cargo xclippy` fails on a new call.
 
 ## 2. `unsafe`
 
