@@ -14,12 +14,14 @@
 #[path = "../../peregrine-models/tests/support/mod.rs"]
 mod support;
 
+mod common;
+
 use peregrine_core::gguf::Format;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 use support::models::{
@@ -45,13 +47,6 @@ impl Drop for Guard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
 }
 
 /// One HTTP/1.1 exchange; `None` when the server is not listening yet.
@@ -101,15 +96,12 @@ fn wait_for_health(port: u16) {
 
 /// Serve the given files with the given ids, one `-m`/`--alias` pair each.
 fn serve(dir: &Path, models: &[(&Path, &str)], threads: usize, ctx: usize) -> (Guard, u16) {
-    let port = free_port();
-    let log = dir.join(format!("serve-{port}.log"));
-    let log_file = std::fs::File::create(&log).unwrap();
     let mut args: Vec<String> = vec![
         "serve".into(),
         "--host".into(),
         "127.0.0.1".into(),
         "--port".into(),
-        port.to_string(),
+        common::PORT.into(),
         "--ctx".into(),
         ctx.to_string(),
         "--threads".into(),
@@ -124,12 +116,8 @@ fn serve(dir: &Path, models: &[(&Path, &str)], threads: usize, ctx: usize) -> (G
         args.push("--alias".into());
         args.push((*id).into());
     }
-    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
-        .args(&args)
-        .stdout(Stdio::from(log_file.try_clone().unwrap()))
-        .stderr(Stdio::from(log_file))
-        .spawn()
-        .expect("spawn peregrine serve");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (child, port) = common::start(dir, &[], &args);
     let guard = Guard(child);
     wait_for_health(port);
     (guard, port)
@@ -475,11 +463,10 @@ fn no_two_engines_run_a_pass_at_once() {
 fn drain_covers_every_engine() {
     let dir = tmpdir("drain");
     let f = files(&dir);
-    let port = free_port();
-    let log = dir.join("serve-drain.log");
-    let log_file = std::fs::File::create(&log).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
-        .args([
+    let (child, port) = common::start(
+        &dir,
+        &[("PEREGRINE_DRAIN_TIMEOUT_MS", "20000")],
+        &[
             "serve",
             "-m",
             f.chat.to_str().unwrap(),
@@ -496,18 +483,14 @@ fn drain_covers_every_engine() {
             "--host",
             "127.0.0.1",
             "--port",
-            &port.to_string(),
+            common::PORT,
             "--ctx",
             "512",
             "--threads",
             "2",
             "--no-profile",
-        ])
-        .env("PEREGRINE_DRAIN_TIMEOUT_MS", "20000")
-        .stdout(Stdio::from(log_file.try_clone().unwrap()))
-        .stderr(Stdio::from(log_file))
-        .spawn()
-        .expect("spawn peregrine serve");
+        ],
+    );
     let mut guard = Guard(child);
     wait_for_health(port);
 
@@ -557,11 +540,10 @@ fn the_cli_takes_repeated_models_and_aliases() {
     let f = files(&dir);
 
     // No aliases: the ids are the file stems, in `-m` order.
-    let port2 = free_port();
-    let log = dir.join("serve-cli.log");
-    let log_file = std::fs::File::create(&log).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
-        .args([
+    let (child, port2) = common::start(
+        &dir,
+        &[],
+        &[
             "serve",
             "-m",
             f.chat.to_str().unwrap(),
@@ -570,17 +552,14 @@ fn the_cli_takes_repeated_models_and_aliases() {
             "--host",
             "127.0.0.1",
             "--port",
-            &port2.to_string(),
+            common::PORT,
             "--ctx",
             "128",
             "--threads",
             "1",
             "--no-profile",
-        ])
-        .stdout(Stdio::from(log_file.try_clone().unwrap()))
-        .stderr(Stdio::from(log_file))
-        .spawn()
-        .expect("spawn peregrine serve");
+        ],
+    );
     let guard = Guard(child);
     wait_for_health(port2);
     let (_, listed) = http(port2, "GET", "/v1/models", None);
@@ -613,7 +592,7 @@ fn the_cli_takes_repeated_models_and_aliases() {
             "--host",
             "127.0.0.1",
             "--port",
-            &free_port().to_string(),
+            &common::free_port().to_string(),
             "--no-profile",
         ])
         .output()

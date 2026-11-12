@@ -168,6 +168,20 @@ The unit tests around `serve_with_drain` in `crates/peregrine-server/src/lib.rs`
 shutdown paths directly: no shutdown request (the server keeps serving), an idle drain (prompt exit),
 and a drain with a streaming client holding the connection open (it ends at the timeout, not before).
 
+## Starting a server in a test
+
+A test that drives `peregrine serve` over HTTP starts it with `common::start`
+(`crates/peregrine/tests/common/mod.rs`), giving the arguments with `common::PORT` where the port
+goes. The helper asks the system for a free port, starts the server on it, and returns once that
+child has written its own `listening on` line, so the server a test talks to is the one it
+started. If the port was taken between choosing it and the server's `bind` (by another test of the
+same binary, or as the local port of another test's connection), the server exits with
+`cannot listen on`, and the helper starts another on a new port; a server that dies for any other
+reason fails the test with its log. Do not choose a port and poll `/health` on it: a test that did
+either waited out its deadline for a server that never listened, or was answered by another
+test's server until that test ended (both seen in CI). `tests/server_start.rs` tests the helper,
+including the retry.
+
 ## Where tests look for model files
 
 | File | Location |

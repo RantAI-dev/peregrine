@@ -10,12 +10,14 @@
 #[path = "../../peregrine-models/tests/support/mod.rs"]
 mod support;
 
+mod common;
+
 use peregrine_core::gguf::Format;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::models::{write_dense, write_dense_with_template, Dense};
@@ -37,13 +39,6 @@ impl Drop for Guard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
 }
 
 /// One HTTP/1.1 exchange; `None` when the server is not listening yet.
@@ -98,17 +93,17 @@ fn shape() -> Dense {
 }
 
 fn serve(model: &Path, dir: &Path) -> (Guard, u16) {
-    let port = free_port();
-    let log_file = std::fs::File::create(dir.join("serve.log")).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
-        .args([
+    let (child, port) = common::start(
+        dir,
+        &[],
+        &[
             "serve",
             "-m",
             model.to_str().unwrap(),
             "--host",
             "127.0.0.1",
             "--port",
-            &port.to_string(),
+            common::PORT,
             "--ctx",
             &CTX.to_string(),
             "--threads",
@@ -116,11 +111,8 @@ fn serve(model: &Path, dir: &Path) -> (Guard, u16) {
             "--slots",
             "2",
             "--no-profile",
-        ])
-        .stdout(Stdio::from(log_file.try_clone().unwrap()))
-        .stderr(Stdio::from(log_file))
-        .spawn()
-        .expect("spawn peregrine serve");
+        ],
+    );
     let guard = Guard(child);
     wait_for_health(port);
     (guard, port)

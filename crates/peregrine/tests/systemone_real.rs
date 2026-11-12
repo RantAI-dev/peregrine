@@ -12,11 +12,13 @@
 //!
 //! No request, prompt or fixture line is printed; a failure names the case number only.
 
+mod common;
+
 use peregrine_core::json::Value;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,13 +40,6 @@ impl Drop for Guard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let p = l.local_addr().unwrap().port();
-    drop(l);
-    p
 }
 
 fn try_http(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(u16, String)> {
@@ -71,21 +66,17 @@ fn try_http(port: u16, method: &str, path: &str, body: Option<&str>) -> Option<(
 }
 
 fn serve(model: &Path) -> (Guard, u16) {
-    let port = free_port();
-    let log = std::env::temp_dir().join(format!(
-        "peregrine-systemone-real-{}-{port}.log",
-        std::process::id()
-    ));
-    let log_file = std::fs::File::create(&log).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_peregrine"))
-        .args([
+    let (child, port) = common::start(
+        &std::env::temp_dir(),
+        &[],
+        &[
             "serve",
             "-m",
             model.to_str().unwrap(),
             "--host",
             "127.0.0.1",
             "--port",
-            &port.to_string(),
+            common::PORT,
             "--ctx",
             "4096",
             "--threads",
@@ -93,11 +84,8 @@ fn serve(model: &Path) -> (Guard, u16) {
             "--slots",
             "4",
             "--no-profile",
-        ])
-        .stdout(Stdio::from(log_file.try_clone().unwrap()))
-        .stderr(Stdio::from(log_file))
-        .spawn()
-        .expect("spawn peregrine serve");
+        ],
+    );
     let guard = Guard(child);
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
