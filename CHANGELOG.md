@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The ARM embedding table re-measured with the result cache off.** The DGX Spark embedding
+  table had timed its batch cells with Peregrine's exact embedding-vector cache on, so a repeated
+  text list inside a cell was answered by a lookup after the first wave. Every row is now measured
+  with `--opt EMBED_CACHE_MB=0`: the four Q8_0 files, Qwen3-Embedding 0.6B F16, both
+  `gte-modernbert-base` files (now with 2 000-token, 32 × 128 and mixed cells), `all-MiniLM-L6-v2`
+  in F16 and Q8_0, and `bge-reranker-v2-m3` Q8_0 on `/v1/rerank` (8 and 32 documents of 124–128
+  tokens, 1.38× and 1.35× llama.cpp). Qwen3-Embedding 0.6B F16's batch of 32 falls from the
+  cache-on 2.72–3.21× to **1.17×** and its mixed batch is 1.10×; one cell is now below 1.0×,
+  that file at a single 2 000-token text (0.96×). The other eight rows are 1.33–3.20× ahead on
+  every cell. Three interleaved rounds, medians, both engines pinned to the Cortex-X925 cluster,
+  a co-tenant on the host. See `benchmarks/results/spark-arm-2026-11-12-embeddings-cache-off/`.
+
 - **An `i8mm` body for the Q8_0 tile (S4.9q).** The Q8_0 repacked eight-row tile was the one tile
   with no `smmla` body, so on `aarch64-neon-i8mm` every Q8_0 file that stays on int8 tiles ran the
   `sdot` kernel. `q8_08_gemm_i8mm` runs whole groups of four activation rows on `smmla` (a tile

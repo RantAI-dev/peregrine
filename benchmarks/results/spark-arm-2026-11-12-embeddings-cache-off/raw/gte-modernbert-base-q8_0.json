@@ -1,0 +1,133 @@
+{
+ "gte-modernbert-base-q8_0": {
+  "path": "~/models/gte-modernbert-base-Q8_0.gguf",
+  "pooling": "cls",
+  "ctx": 2048,
+  "cells": {
+   "16": {
+    "texts": 1,
+    "tokens_per_text": 36,
+    "peregrine": [
+     62.553,
+     61.748,
+     53.599
+    ],
+    "llama.cpp": [
+     35.031,
+     38.36,
+     29.468
+    ],
+    "peregrine_median": 61.748,
+    "llama_median": 35.031,
+    "ratio": 1.763,
+    "peregrine_spread_pct": 14.5,
+    "llama_spread_pct": 25.38
+   },
+   "128": {
+    "texts": 1,
+    "tokens_per_text": 259,
+    "peregrine": [
+     11.723,
+     12.794,
+     13.779
+    ],
+    "llama.cpp": [
+     6.377,
+     7.488,
+     7.589
+    ],
+    "peregrine_median": 12.794,
+    "llama_median": 7.488,
+    "ratio": 1.709,
+    "peregrine_spread_pct": 16.07,
+    "llama_spread_pct": 16.19
+   },
+   "512": {
+    "texts": 1,
+    "tokens_per_text": 903,
+    "peregrine": [
+     3.41,
+     3.3,
+     3.228
+    ],
+    "llama.cpp": [
+     1.894,
+     1.897,
+     1.839
+    ],
+    "peregrine_median": 3.3,
+    "llama_median": 1.894,
+    "ratio": 1.742,
+    "peregrine_spread_pct": 5.52,
+    "llama_spread_pct": 3.06
+   },
+   "2000": {
+    "texts": 1,
+    "tokens_per_text": 2000,
+    "peregrine": [
+     1.393,
+     1.386,
+     1.388
+    ],
+    "llama.cpp": [
+     0.778,
+     0.777,
+     0.781
+    ],
+    "peregrine_median": 1.388,
+    "llama_median": 0.778,
+    "ratio": 1.784,
+    "peregrine_spread_pct": 0.5,
+    "llama_spread_pct": 0.51
+   },
+   "batch": {
+    "texts": 32,
+    "tokens_per_text": 238.0,
+    "peregrine": [
+     13.172,
+     13.08,
+     13.136
+    ],
+    "llama.cpp": [
+     7.938,
+     7.91,
+     7.855
+    ],
+    "peregrine_median": 13.136,
+    "llama_median": 7.91,
+    "ratio": 1.661,
+    "peregrine_spread_pct": 0.7,
+    "llama_spread_pct": 1.05
+   },
+   "mixed": {
+    "texts": 32,
+    "tokens_per_text": 420.09,
+    "peregrine": [
+     7.541,
+     7.488,
+     7.477
+    ],
+    "llama.cpp": [
+     4.271,
+     4.305,
+     4.277
+    ],
+    "peregrine_median": 7.488,
+    "llama_median": 4.277,
+    "ratio": 1.751,
+    "peregrine_spread_pct": 0.85,
+    "llama_spread_pct": 0.79
+   }
+  },
+  "peregrine": {
+   "cmd": "~/wt-arm-emb/target/release/peregrine serve -m ~/models/gte-modernbert-base-Q8_0.gguf --host 127.0.0.1 --port 18401 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/gte-modernbert-base-Q8_0.gguf --embedding --pooling cls -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18402",
+   "version": []
+  }
+ }
+}

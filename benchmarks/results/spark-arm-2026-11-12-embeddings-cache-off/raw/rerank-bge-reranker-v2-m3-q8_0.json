@@ -1,0 +1,85 @@
+{
+ "model": "~/models/bge-reranker-v2-m3-Q8_0.gguf",
+ "query": "Which of these passages explains how the new index was scheduled to be built?",
+ "cells": {
+  "8": {
+   "peregrine": {
+    "pairs_per_s": [
+     6.564,
+     5.091,
+     7.526,
+     7.412,
+     7.852
+    ],
+    "median": 7.412,
+    "min": 5.091,
+    "max": 7.852,
+    "prompt_tokens": 1171,
+    "pairs_per_s_spread_pct": 37.25
+   },
+   "llama.cpp": {
+    "pairs_per_s": [
+     5.414,
+     5.375,
+     5.388,
+     5.377,
+     5.386
+    ],
+    "median": 5.386,
+    "min": 5.375,
+    "max": 5.414,
+    "prompt_tokens": 1171,
+    "pairs_per_s_spread_pct": 0.72
+   },
+   "ratio": 1.376
+  },
+  "32": {
+   "peregrine": {
+    "pairs_per_s": [
+     6.958,
+     7.316,
+     7.309,
+     7.187,
+     7.069
+    ],
+    "median": 7.187,
+    "min": 6.958,
+    "max": 7.316,
+    "prompt_tokens": 4689,
+    "pairs_per_s_spread_pct": 4.98
+   },
+   "llama.cpp": {
+    "pairs_per_s": [
+     5.298,
+     5.306,
+     5.317,
+     5.322,
+     5.309
+    ],
+    "median": 5.309,
+    "min": 5.298,
+    "max": 5.322,
+    "prompt_tokens": 4689,
+    "pairs_per_s_spread_pct": 0.45
+   },
+   "ratio": 1.354
+  }
+ },
+ "engines": {
+  "peregrine": {
+   "cmd": "~/wt-arm-emb/target/release/peregrine serve -m ~/models/bge-reranker-v2-m3-Q8_0.gguf --host 127.0.0.1 --port 18600 -t 10 -c 8192 --slots 1 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/bge-reranker-v2-m3-Q8_0.gguf --reranking -t 10 -c 8192 -b 2048 -ub 2048 -np 1 -fa auto --host 127.0.0.1 --port 18601",
+   "version": []
+  }
+ },
+ "document_tokens": {
+  "min": 124,
+  "max": 128,
+  "mean": 127.53
+ }
+}

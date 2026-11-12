@@ -281,41 +281,60 @@ Full details, per-cell tables, stage profiles and the excluded rows:
 ### DGX Spark (ARM64): against llama.cpp
 
 10 threads (the Cortex-X925 cluster), `aarch64-neon-i8mm`, llama.cpp v0.9.0 with one slot per text.
+The embedding result cache is off on every timed row (`--opt EMBED_CACHE_MB=0`), so every engine
+computes every text; three interleaved rounds, medians.
 
-| Model | File | One text (16 to 2 000 tokens) | Batch of 32 | Mixed batch of 32 |
+| Model | File | One text (16 to 2 000 tokens; BERT to 512) | Batch of 32 × 128 | Mixed batch of 32 |
 |---|---|---|---|---|
-| EmbeddingGemma 300M | Q8_0 | **1.98–2.47×** | **1.91×** | **1.94×** |
-| Qwen3-Embedding 0.6B | Q8_0 | **1.33–2.20×** | **2.02×** | **1.93×** |
-| Qwen3-Embedding 0.6B | F16 | **1.05–1.52×** | **2.72–3.21×** | **1.11×** |
-| Nemotron 3.5 Embed 1B | Q8_0 | **2.37–2.65×** | **2.63×** | **2.63×** |
-| bge-m3 | Q8_0 | **1.83–2.10×** | **2.03×** | **2.02×** |
-| gte-modernbert-base | F16 | **1.42–1.56×** | **1.15×** (16 texts) | n/a |
-| gte-modernbert-base | Q8_0 | **1.43–1.77×** (16 to 512 tokens) | **1.55×** (16 texts) | n/a |
+| EmbeddingGemma 300M | Q8_0 | **2.02–2.13×** | **1.99×** | **1.96×** |
+| Qwen3-Embedding 0.6B | Q8_0 | **1.38–3.20×** | **1.99×** | **1.80×** |
+| Qwen3-Embedding 0.6B | F16 | 0.96–1.57× | **1.17×** | **1.10×** |
+| Nemotron 3.5 Embed 1B | Q8_0 | **2.40–2.72×** | **2.70×** | **2.62×** |
+| bge-m3 | Q8_0 | **1.99–2.19×** | **2.08×** | **2.07×** |
+| gte-modernbert-base | F16 | **1.34–1.59×** | **1.33×** | **1.37×** |
+| gte-modernbert-base | Q8_0 | **1.66–1.78×** | **1.66×** | **1.75×** |
+| all-MiniLM-L6-v2 | F16 | **1.49–1.65×** (16 to 512 tokens) | **1.33×** | **1.36×** |
+| all-MiniLM-L6-v2 | Q8_0 | **1.58–1.90×** (16 to 512 tokens) | **1.63×** | **1.66×** |
 
-The batch cells are the largest wins because llama.cpp runs one embedding task at a time inside a
-request while Peregrine shares weight passes across the texts. No cell in this table is behind
-after S4.9q, which added the missing `i8mm` body for the Q8_0 int8 tile (`smmla` instead of
-`sdot`, 3.05× the kernel, 1.5–2.6× the whole pass) — before it, nine cells of these four Q8_0
-files were at or below 1.0×. The narrowest now is Qwen3-Embedding Q8_0 at one 2 000-token text
-(1.33×), whose attention-heavy pass and llama.cpp's CPU flash attention are the reason it is
-close. Q8_0 ModernBERT was behind from 128 tokens up (0.77–0.94×) until S4.9o: a Q8_0
-ModernBERT file of up to 256 MiB now has its matrices widened to float at load, which is both
-faster (1.28–2.04× the old pass) and closer to the full-precision vectors, at four times the
-weight memory.
+The batch cells are still wins because llama.cpp runs one embedding task at a time inside a
+request while Peregrine shares weight passes across the texts, but the cache-off numbers are much
+smaller than the ones this table first published: the old run reused one text list inside a timed
+cell with the exact result cache on, so a timed wave after the first was a lookup. Qwen3-Embedding
+0.6B F16's batch of 32 read 2.72–3.21× that way and reads **1.17×** with every text computed. One
+cell is now below 1.0×: Qwen3-Embedding 0.6B F16 at a single 2 000-token text, **0.96×** (its
+512-token cell is 1.06× and its 128-token cell 1.14×). The F16 matrix pass and llama.cpp's CPU
+flash attention meet at long context; the Q8_0 file of the same model is 1.38–3.20× ahead. The
+narrowest wins above 1.0 are MiniLM F16 batch and gte F16 batch at 1.33× and the rerank
+32-document cell at 1.35×. S4.9q's `i8mm` body for the Q8_0 int8 tile (`smmla` instead of `sdot`,
+3.05× the kernel) and S4.9o's load-time widening of small Q8_0 ModernBERT files still stand; the
+Q8_0 rows here are measured on the same main as those changes.
 
-Full details: [`spark-arm-2026-11-12-q8-i8mm`](../benchmarks/results/spark-arm-2026-11-12-q8-i8mm/README.md)
+Full details: [`spark-arm-2026-11-12-embeddings-cache-off`](../benchmarks/results/spark-arm-2026-11-12-embeddings-cache-off/README.md)
+(every row of this table, cache off, with the per-cell spreads),
+[`spark-arm-2026-11-12-q8-i8mm`](../benchmarks/results/spark-arm-2026-11-12-q8-i8mm/README.md)
 (the Q8_0 int8-tile rows, before/after the `i8mm` body),
 [`spark-2026-11-12-embeddings`](../benchmarks/results/spark-2026-11-12-embeddings/README.md),
 [`spark-arm-2026-11-12-modern-bert`](../benchmarks/results/spark-arm-2026-11-12-modern-bert/README.md)
 (the F16 row) and [`spark-arm-2026-11-12-q8-encoders`](../benchmarks/results/spark-arm-2026-11-12-q8-encoders/README.md)
-(the Q8_0 ModernBERT row).
+(the Q8_0 ModernBERT row). The three older runs timed their batch cells with the result cache on;
+their single-text cells remain comparable.
 
 ### Rerank
 
 `POST /v1/rerank` on bge-reranker-v2-m3 and bge-reranker-base gives the same token ids and the same
-ranking order as llama.cpp on the reference pairs. Speed has only been measured on the shared
-development VM so far: level with llama.cpp at 123-token pairs and 5–6% ahead at 449-token pairs
-([reference/bert.md](reference/bert.md)). A table from a quiet host is still owed.
+ranking order as llama.cpp on the reference pairs. On the ARM host, bge-reranker-v2-m3 Q8_0 with
+one query and documents of 124–128 tokens, five interleaved rounds, `pairs/s` (Peregrine ÷
+llama.cpp, above 1.00 is Peregrine ahead):
+
+| Documents | Peregrine pairs/s | llama.cpp pairs/s | Ratio |
+|---:|---:|---:|---:|
+| 8 | 7.41 | 5.39 | **1.38×** |
+| 32 | 7.19 | 5.31 | **1.35×** |
+
+The shared development VM had put Peregrine level with llama.cpp at 123-token pairs and 5–6% ahead
+at 449-token pairs ([reference/bert.md](reference/bert.md)); on the quiet ARM host it is 35–38%
+ahead at this pair length. Full details:
+[`spark-arm-2026-11-12-embeddings-cache-off`](../benchmarks/results/spark-arm-2026-11-12-embeddings-cache-off/README.md).
 
 ## Task accuracy and decoding invariance
 

@@ -1,0 +1,114 @@
+{
+ "minilm-q8_0": {
+  "path": "~/models/embed/minilm/all-MiniLM-L6-v2-Q8_0.gguf",
+  "pooling": "mean",
+  "ctx": 512,
+  "cells": {
+   "16": {
+    "texts": 1,
+    "tokens_per_text": 43,
+    "peregrine": [
+     248.134,
+     251.166,
+     226.838
+    ],
+    "llama.cpp": [
+     123.569,
+     163.936,
+     130.787
+    ],
+    "peregrine_median": 248.134,
+    "llama_median": 130.787,
+    "ratio": 1.897,
+    "peregrine_spread_pct": 9.8,
+    "llama_spread_pct": 30.86
+   },
+   "128": {
+    "texts": 1,
+    "tokens_per_text": 273,
+    "peregrine": [
+     77.873,
+     83.314,
+     91.686
+    ],
+    "llama.cpp": [
+     41.565,
+     52.78,
+     52.608
+    ],
+    "peregrine_median": 83.314,
+    "llama_median": 52.608,
+    "ratio": 1.584,
+    "peregrine_spread_pct": 16.58,
+    "llama_spread_pct": 21.32
+   },
+   "512": {
+    "texts": 1,
+    "tokens_per_text": 504,
+    "peregrine": [
+     42.547,
+     42.319,
+     42.044
+    ],
+    "llama.cpp": [
+     23.229,
+     23.372,
+     24.216
+    ],
+    "peregrine_median": 42.319,
+    "llama_median": 23.372,
+    "ratio": 1.811,
+    "peregrine_spread_pct": 1.19,
+    "llama_spread_pct": 4.22
+   },
+   "batch": {
+    "texts": 32,
+    "tokens_per_text": 247.75,
+    "peregrine": [
+     95.03,
+     94.889,
+     95.042
+    ],
+    "llama.cpp": [
+     58.345,
+     58.617,
+     58.133
+    ],
+    "peregrine_median": 95.03,
+    "llama_median": 58.345,
+    "ratio": 1.629,
+    "peregrine_spread_pct": 0.16,
+    "llama_spread_pct": 0.83
+   },
+   "mixed": {
+    "texts": 32,
+    "tokens_per_text": 271.72,
+    "peregrine": [
+     85.349,
+     85.09,
+     85.471
+    ],
+    "llama.cpp": [
+     51.492,
+     51.137,
+     51.592
+    ],
+    "peregrine_median": 85.349,
+    "llama_median": 51.492,
+    "ratio": 1.658,
+    "peregrine_spread_pct": 0.45,
+    "llama_spread_pct": 0.88
+   }
+  },
+  "peregrine": {
+   "cmd": "~/wt-arm-emb/target/release/peregrine serve -m ~/models/embed/minilm/all-MiniLM-L6-v2-Q8_0.gguf --host 127.0.0.1 --port 18401 -t 10 -c 512 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/minilm/all-MiniLM-L6-v2-Q8_0.gguf --embedding --pooling mean -t 10 -c 16640 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18402",
+   "version": []
+  }
+ }
+}
