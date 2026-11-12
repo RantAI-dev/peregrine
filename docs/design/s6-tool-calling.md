@@ -193,6 +193,103 @@ template has a tool format and one whose template has none: a request with tools
 deterministic, a tool conversation is rendered, the refusals answer 400 by name, and an ordinary
 request is untouched.
 
-**Not built.** Other formats (Qwen 3, Qwen 3.5 / Bonsai 2, Llama 3, gpt-oss, the generic fallback);
-`required` and named choices (S6.6); arguments streamed in pieces (a call arrives whole); tool
-calling in `peregrine run`.
+**Not built.** Other formats (Qwen 3, Llama 3, gpt-oss, the generic fallback); `required` and
+named choices (S6.6); arguments streamed in pieces (a call arrives whole); tool calling in
+`peregrine run`.
+
+## 10. S6.3b as built (the `qwen-xml` format on the endpoint)
+
+**Which files.** Bonsai 2 files and Qwen's own 4B and 9B files carry one text of Qwen 3.5's
+template; Qwen's 0.8B and 2B files and unsloth's conversions carry three others. They differ in
+two places: whether the thinking block is written "unless `enable_thinking` is false" or "only
+when it is true", and whether a call's arguments are walked with `|items` or with a key loop.
+Neither changes a prompt: llama.cpp always defines `enable_thinking` (true unless the request
+says otherwise) and so does the renderer, and arguments that are not an object are refused before
+rendering. llama.cpp v0.9.0 renders all 51 fixture cases to the same bytes with each of the four
+texts (`scripts/tool-fixtures.py --check`), so `ToolFormat::for_template` accepts the four and
+nothing else. The template of unsloth's `*-MTP` conversions (a `developer` role, two leading
+system messages merged, no refusals) is a different one and is refused for tools.
+
+**The request.** The tool path reads the messages the way this format's template does
+(`messages_from_json_for`: the parts of a content list are joined without a separator) and passes
+the thinking switch to the renderer: `chat_template_kwargs.enable_thinking` (default on), and
+`reasoning_effort: "none"` switches it off, as on the ordinary path.
+
+**The reply starts as reasoning.** With thinking on, this template opens the thinking block at
+the end of the prompt, so the model writes its reasoning first and then only the closing tag.
+`ToolFormat::opens_reasoning` says whether a rendered prompt ends that way; when it does, the
+reply is read from inside the reasoning span: the text up to the closing tag is
+`reasoning_content` and what follows goes through the call parser. Text inside the span never
+reaches the parser, also under `reasoning_format: none` (where it is returned as `content`): a
+call the model only thought about is not a call. A reasoning budget (`thinking_budget_tokens`)
+continues the same turn with the reasoning so far and the closing tag appended to the prompt,
+without a second opening tag. With thinking off the template writes an empty block and the reply
+is content from its first token.
+
+**Argument types.** The format writes values bare, so the parser is built with the request's
+tools (`CallParser::with_tools`): a parameter the schema declares a string stays text (`5` is
+`"5"`), anything else is read as JSON when it parses.
+
+**Against llama.cpp** (`scripts/tool-e2e.py`; `Qwen_Qwen3.5-2B-Q4_K_M.gguf` from
+`bartowski/Qwen_Qwen3.5-2B-GGUF`, temperature 0, the same three tools and 16 requests as §9;
+llama.cpp v0.9.0 `llama-server --jinja` on the same file):
+
+| | thinking off | thinking on |
+|---|---|---|
+| 12 requests where one known call is right: right tool called (Peregrine / llama.cpp) | 12 / 12 | 11 / 11 |
+| 4 requests where no call is right: answered in text (Peregrine / llama.cpp) | 4 / 4 | 4 / 4 |
+| calls identical to the other engine's (same tool, arguments equal as JSON) | 12 of 12 | 11 of 11 |
+| whole replies identical (calls, text and reasoning) | 13 of 16 | 4 of 16 |
+| two-step exchange: the tool's result sent back, answered in text | same sentence | same facts, wording differs |
+
+The prompts are the same length in both engines (285 tokens for a request with one tool). The
+one miss with thinking on is the model's and is the same in both: asked who won a football
+tournament, it reasons that it knows and answers in text. Where whole replies differ, the calls
+do not: the two engines' greedy tokens part at a near-tie somewhere in a free-text answer or in
+the reasoning (about a hundred tokens of prose before each call), as their kernels' rounding
+differs. `content` is `null` beside a call in Peregrine and `""` in llama.cpp, and Peregrine
+always returns `reasoning_content` (empty when there is none); both are as §9 left them.
+
+**Whitespace.** llama.cpp returns the reasoning stripped at both ends and starts the answer at its
+first character after the closing tag; a reply cut off inside its reasoning keeps the whitespace
+it ended with. A reply whose thinking block the template opened is returned the same way, in a
+stream too: whitespace at the end of the reasoning is held back until more reasoning follows, and
+dropped when the closing tag does.
+
+**Requests without tools.** Qwen 3.5's template is not the ChatML the ordinary path writes: it
+opens the thinking block, trims each message, and writes earlier turns' thinking back. On the 2B
+file the ordinary path's prompt was two tokens shorter than llama.cpp's with thinking on, and the
+model answered at once where llama.cpp's prompt made it reason first; with a padded system message
+it was two tokens longer with thinking off. The renderer gives llama.cpp's bytes for conversations
+without tools too (the fixtures include them), so a file with this template now has every chat
+request rendered by it (`renders_every_chat`): the prompt lengths are llama.cpp's in the four
+cases checked (thinking on and off, with and without a system message: 16, 25, 18 and 27 tokens)
+and the model reasons as it does there. Such a request is validated as before (the last message
+must be the user's) and nothing in its reply is read as a call. Qwen 2.5's template is the
+ordinary ChatML with a default system message, so its requests without tools are unchanged.
+`peregrine run` still builds its prompt the ordinary way for these files; that is the next step.
+
+**Bonsai 2** (`Ternary-Bonsai-2-2B-PQ2_0.gguf`, Peregrine only: llama.cpp does not load the
+format; same requests):
+
+| | thinking off | thinking on |
+|---|---|---|
+| 12 requests where one known call is right: right tool called | 12 | 11 |
+| 4 requests where no call is right: answered in text | 4 | 4 |
+| two-step exchange: the tool's result sent back | answered in text | answered in text |
+
+The miss with thinking on is the same question as on Qwen 3.5 (the football result, answered
+from memory, here correctly). Every call's arguments are valid for its tool's schema.
+
+**Not built.** The template of unsloth's `*-MTP` conversions; the same renderer for
+`peregrine run`; Qwen 3's template (thinking opened by the model, `hermes`-style calls).
+
+**Tests.** `tools.rs`: the four texts are recognised and a changed one is not; a rendered prompt
+says whether it ends inside a thinking block (on, off, a continued assistant text, the `hermes`
+format). The endpoint's unit tests: the thinking switch changes the prompt's ending and
+`reasoning_open`; a reply fed three characters at a time gives one call whose arguments have the
+schema's types. `server_tools.rs` serves a synthetic file with the template: with thinking on
+everything the model writes is `reasoning_content` and nothing is read for calls, with it off
+(either spelling) the same tokens are content, `reasoning_format: none` returns the span as
+content, a stream carries `reasoning_content` deltas, and the four texts of the template give the
+same prompt length and the same reply for the same weights.

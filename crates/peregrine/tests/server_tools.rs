@@ -252,6 +252,170 @@ fn a_request_with_tools_is_served_on_a_file_that_has_a_tool_format() {
     assert_eq!(a["choices"], b["choices"]);
 }
 
+/// A file that carries one of the texts of Qwen 3.5's template.
+fn serve_qwen35_model(name: &str, seed: u64, template: &str) -> (Guard, u16) {
+    let dir = tmpdir(name);
+    let model = write_dense_with_template(&dir, "qwen2", Format::F16, seed, shape(), template);
+    serve(&model, &dir)
+}
+
+fn text_of(v: &Value) -> String {
+    v.as_str().unwrap_or_default().to_string()
+}
+
+/// Qwen 3.5's template opens the thinking block itself, so the reply begins as reasoning
+/// and only the closing tag is the model's. A synthetic model never writes that tag: with
+/// thinking on, everything it writes is reasoning; with thinking off, nothing is.
+#[test]
+fn a_template_that_opens_the_thinking_block_starts_the_reply_as_reasoning() {
+    let (_server, port) = serve_qwen35_model(
+        "qwen35-thinking",
+        43,
+        peregrine_core::tools::QWEN35_TEMPLATE,
+    );
+    let message = |extra: Value| {
+        let (status, body) = post(port, tool_request(extra.clone()));
+        assert_eq!(status, 200, "{extra}: {body}");
+        body["choices"][0]["message"].clone()
+    };
+
+    // Thinking is on unless the request says otherwise.
+    let on = message(json!({}));
+    assert!(!text_of(&on["reasoning_content"]).is_empty(), "{on}");
+    assert!(text_of(&on["content"]).is_empty(), "{on}");
+    assert!(on.get("tool_calls").is_none(), "{on}");
+
+    // Off, either way a client may say it: the same tokens are content.
+    for extra in [
+        json!({"chat_template_kwargs": {"enable_thinking": false}}),
+        json!({"reasoning_effort": "none"}),
+    ] {
+        let off = message(extra.clone());
+        assert!(
+            text_of(&off["reasoning_content"]).is_empty(),
+            "{extra}: {off}"
+        );
+        assert!(
+            !text_of(&off["content"]).is_empty() || off.get("tool_calls").is_some(),
+            "{extra}: {off}"
+        );
+    }
+
+    // `reasoning_format: none` returns the reasoning span as content, and it is still not
+    // read for calls.
+    let inline = message(json!({"reasoning_format": "none"}));
+    assert!(text_of(&inline["reasoning_content"]).is_empty(), "{inline}");
+    // (The reasoning field is stripped at its start; the span as content is not.)
+    assert_eq!(
+        text_of(&inline["content"]).trim_start(),
+        text_of(&on["reasoning_content"]).trim_start()
+    );
+    assert!(inline.get("tool_calls").is_none(), "{inline}");
+
+    // The thinking switch changes the prompt: one more closing tag and two newlines.
+    let usage = |extra: Value| {
+        let (_, body) = post(port, tool_request(extra));
+        body["usage"]["prompt_tokens"].as_u64().unwrap()
+    };
+    assert!(
+        usage(json!({"chat_template_kwargs": {"enable_thinking": false}})) > usage(json!({})),
+        "thinking off writes an empty block into the prompt"
+    );
+
+    // Streaming: the same split, as reasoning deltas.
+    let (status, text) = try_http(
+        port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&tool_request(json!({"stream": true}))),
+    )
+    .unwrap();
+    assert_eq!(status, 200);
+    assert!(text.contains("reasoning_content"), "{text}");
+    assert!(text.contains("[DONE]"), "{text}");
+}
+
+/// A file with Qwen 3.5's template has every chat request rendered by the template's own
+/// rules, tools or not: without tools the prompt still ends inside the thinking block, so
+/// the reply still starts as reasoning.
+#[test]
+fn a_request_without_tools_gets_the_same_template() {
+    let (_server, port) =
+        serve_qwen35_model("qwen35-plain", 45, peregrine_core::tools::QWEN35_TEMPLATE);
+    let plain = |extra: Value| {
+        let mut body = json!({
+            "messages": [
+                {"role": "system", "content": "  Be brief.  "},
+                {"role": "user", "content": "Hello"}
+            ],
+            "temperature": 0,
+            "max_tokens": 4
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let (status, body) = post(port, body);
+        assert_eq!(status, 200, "{body}");
+        body
+    };
+    let on = plain(json!({}));
+    let message = &on["choices"][0]["message"];
+    assert!(
+        !text_of(&message["reasoning_content"]).is_empty(),
+        "{message}"
+    );
+    assert!(text_of(&message["content"]).is_empty(), "{message}");
+    assert!(message.get("tool_calls").is_none(), "{message}");
+
+    let off = plain(json!({"chat_template_kwargs": {"enable_thinking": false}}));
+    let message = &off["choices"][0]["message"];
+    assert!(
+        text_of(&message["reasoning_content"]).is_empty(),
+        "{message}"
+    );
+    assert!(!text_of(&message["content"]).is_empty(), "{message}");
+    // The empty thinking block is part of the prompt when thinking is off.
+    assert!(
+        off["usage"]["prompt_tokens"].as_u64().unwrap()
+            > on["usage"]["prompt_tokens"].as_u64().unwrap()
+    );
+    // The same request is the same reply.
+    assert_eq!(plain(json!({}))["choices"], on["choices"]);
+
+    // A request without tools is still refused for what it was always refused for.
+    let (status, body) = post(
+        port,
+        json!({"messages": [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"}
+        ]}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(error_message(&body).contains("user"), "{body}");
+}
+
+/// The texts of Qwen 3.5's template that other publishers ship are the same format: the
+/// same weights and the same request give the same prompt and the same reply.
+#[test]
+fn every_published_text_of_qwen35s_template_serves_tools() {
+    let texts = std::iter::once(peregrine_core::tools::QWEN35_TEMPLATE)
+        .chain(peregrine_core::tools::QWEN35_VARIANTS.iter().copied());
+    let mut replies = Vec::new();
+    for (i, template) in texts.enumerate() {
+        let (_server, port) = serve_qwen35_model(&format!("qwen35-text-{i}"), 44, template);
+        let (status, body) = post(port, tool_request(json!({})));
+        assert_eq!(status, 200, "text {i}: {body}");
+        replies.push((
+            body["usage"]["prompt_tokens"].clone(),
+            body["choices"].clone(),
+        ));
+    }
+    assert_eq!(replies.len(), 4);
+    for (i, reply) in replies.iter().enumerate() {
+        assert_eq!(reply, &replies[0], "text {i} is not served like the first");
+    }
+}
+
 #[test]
 fn what_cannot_be_honoured_is_refused_by_name() {
     let (_server, port) = serve_tool_model("refusals");

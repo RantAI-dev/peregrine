@@ -8,6 +8,39 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Tool calling for Qwen 3.5 and Bonsai 2 on the chat endpoint (S6.3b)**: a file that carries
+  Qwen 3.5's chat template is served with tools through the `qwen-xml` format. Four published
+  texts of that template are recognised: the one in Bonsai 2 files and Qwen's 4B and 9B files,
+  the one in Qwen's 0.8B and 2B files, and unsloth's two; llama.cpp v0.9.0 renders all 51 fixture
+  conversations to the same bytes with each (`scripts/tool-fixtures.py --check`). The request's
+  thinking switch reaches the prompt (`chat_template_kwargs.enable_thinking`, or
+  `reasoning_effort: "none"`); with thinking on the template opens the thinking block, so the
+  reply is read from inside it: reasoning up to the closing tag is `reasoning_content`, never
+  read for calls, and what follows goes through the call parser, which takes each argument's
+  type from the tool's schema. The reasoning is returned stripped and the answer starts at its
+  first character, as llama.cpp returns them. On `Qwen_Qwen3.5-2B-Q4_K_M.gguf` at temperature 0
+  (`scripts/tool-e2e.py`, 16 requests, three tools), both engines call the right tool on 12 of 12
+  requests with thinking off and 11 of 12 with it on (the same miss), answer the four others in
+  text, and every call is identical between the engines (same tool, same arguments); 13 of 16
+  whole replies are identical with thinking off and 4 of 16 with it on, where the free-text
+  reasoning parts at near-ties. `Ternary-Bonsai-2-2B-PQ2_0.gguf` (Peregrine only) calls the right
+  tool on 12 of 12 with thinking off and 11 of 12 with it on, and answers a tool's result in text.
+
+### Changed
+
+- **Chat without tools on Qwen 3.5 and Bonsai 2 files uses the template's own prompt**: these
+  files' template opens the thinking block at the end of the prompt, trims each message and
+  writes earlier turns' thinking back, which the built-in ChatML did not. With thinking on, the
+  2B model answered at once on Peregrine where llama.cpp's prompt made it reason first. Every
+  chat request on such a file is now rendered by the format's renderer, tools or not, so
+  `peregrine serve` builds llama.cpp's prompt (the same token counts in the four cases checked:
+  thinking on and off, with and without a system message) and returns the reasoning in
+  `reasoning_content`. A model that thinks spends tokens on it: send
+  `"chat_template_kwargs": {"enable_thinking": false}` for the old behaviour of a direct answer.
+  Requests on other files, and `peregrine run`, are unchanged.
+
+### Added
+
 - **The `modern-bert` family's element-wise kernels have NEON bodies, and its aarch64
   goldens are recorded (roadmap S4.9n)**: `geglu_erf` (the exact erf GELU times the second
   half) and `layer_norm_rows_nobias` (the f64 two-pass norm with one final multiply and no
