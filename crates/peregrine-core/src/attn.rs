@@ -866,6 +866,11 @@ pub(crate) fn run_range<O: RowSink>(
         let pair_mix = v16.is_some() && pairs;
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let pair_mix = false;
+        // Four rows over one V tile is an aarch64 body (S4.9t).
+        #[cfg(target_arch = "aarch64")]
+        let quad_mix = v16.is_some() && pairs;
+        #[cfg(not(target_arch = "aarch64"))]
+        let quad_mix = false;
         let mut lr = 0;
         while lr < sub {
             let n_ctx = ctx_of[lr];
@@ -879,8 +884,16 @@ pub(crate) fn run_range<O: RowSink>(
             let v0 = visible_start(sh, n_ctx);
             let visible = n_ctx - v0;
             // A pair needs the same visible range, hence the same chunk boundaries.
+            // On aarch64's F16-direct tile four rows can ride one pass over V when all
+            // four agree on the context and so on the chunks (S4.9t).
             let two =
                 pair_mix && lr + 1 < sub && ctx_of[lr + 1] == n_ctx && count[lr + 1] == count[lr];
+            // Four rows can ride one pass over V when all four see the same context, so
+            // their pieces and their chunk boundaries coincide: cutting a row anywhere
+            // but its own boundary would give its soft-max an extra step and move a bit.
+            let four = quad_mix
+                && lr + 3 < sub
+                && (1..4).all(|d| ctx_of[lr + d] == n_ctx && count[lr + d] == count[lr]);
             let mut pos = blk;
             while pos < vis_end {
                 let ci = cur[lr];
@@ -891,32 +904,47 @@ pub(crate) fn run_range<O: RowSink>(
                     let j_start = start - blk;
                     let len = end - start;
                     let base = start - vis_start;
-                    let mut alpha = [1.0f32; 2];
-                    let rows = if two { 2 } else { 1 };
-                    for (r, row) in (lr..lr + rows).enumerate() {
-                        let s = &mut sc.s_tile[row * BLOCK + base..row * BLOCK + base + len];
-                        let m_old = sc.m[row];
-                        let m_new = m_old.max(crate::vmath::max(s));
-                        let psum = crate::vmath::exp_shift_sum(s, m_new);
-                        alpha[r] = crate::vmath::det_exp(m_old - m_new);
-                        sc.l[row] = sc.l[row] * alpha[r] as f64 + psum;
-                        sc.m[row] = m_new;
-                    }
+                    let mut alpha = [1.0f32; 4];
+                    let rows = if four {
+                        4
+                    } else if two {
+                        2
+                    } else {
+                        1
+                    };
+                    softmax_rows(sc, lr, base, len, rows, &mut alpha);
                     match v16 {
                         #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
                         Some(v) => {
                             let halves = &v[j_start * hd * 2..];
                             // A piece never crosses a chunk boundary (it is cut at it),
                             // so the pair body has nothing to bank and the caller does.
-                            #[cfg(target_arch = "x86_64")]
-                            if two {
+                            #[cfg(target_arch = "aarch64")]
+                            if four {
+                                let s = &sc.s_tile[lr * BLOCK + base..];
+                                // SAFETY: the F16 cache is direct (`f16_direct`); `v`
+                                // holds the tile's halves and `s` four rows of scores at
+                                // `BLOCK`.
+                                unsafe {
+                                    peregrine_kernels::neon::mix_f16_quad(
+                                        &mut sc.o[lr * hd..],
+                                        &alpha,
+                                        s,
+                                        BLOCK,
+                                        len,
+                                        halves,
+                                        hd,
+                                    )
+                                };
+                            } else if two {
                                 let s0 = &sc.s_tile[lr * BLOCK + base..][..len];
                                 let s1 = &sc.s_tile[(lr + 1) * BLOCK + base..][..len];
                                 let (lo, hi) = sc.o.split_at_mut((lr + 1) * hd);
-                                // SAFETY: the F16 cache is direct (`f16_direct`), `v`
-                                // holds the tile's halves and each `s` its row's scores.
+                                // SAFETY: NEON is this target's baseline (`f16_direct`
+                                // also checked it); `v` holds the tile's halves and each
+                                // `s` its row's scores for the positions mixed.
                                 unsafe {
-                                    mix_f16_pair_same(
+                                    peregrine_kernels::neon::mix_f16_pair(
                                         &mut lo[lr * hd..],
                                         &mut hi[..hd],
                                         alpha[0],
@@ -935,16 +963,15 @@ pub(crate) fn run_range<O: RowSink>(
                                     mix_f16(&mut sc.o[lr * hd..][..hd], alpha[0], s, halves, hd)
                                 }
                             }
-                            #[cfg(target_arch = "aarch64")]
+                            #[cfg(target_arch = "x86_64")]
                             if two {
                                 let s0 = &sc.s_tile[lr * BLOCK + base..][..len];
                                 let s1 = &sc.s_tile[(lr + 1) * BLOCK + base..][..len];
                                 let (lo, hi) = sc.o.split_at_mut((lr + 1) * hd);
-                                // SAFETY: NEON is this target's baseline (`f16_direct`
-                                // also checked it); `v` holds the tile's halves and each
-                                // `s` its row's scores for the positions mixed.
+                                // SAFETY: the F16 cache is direct (`f16_direct`), `v`
+                                // holds the tile's halves and each `s` its row's scores.
                                 unsafe {
-                                    peregrine_kernels::neon::mix_f16_pair(
+                                    mix_f16_pair_same(
                                         &mut lo[lr * hd..],
                                         &mut hi[..hd],
                                         alpha[0],
@@ -1023,7 +1050,14 @@ pub(crate) fn run_range<O: RowSink>(
                 if end == chunk_end && ci + 1 < count[lr] {
                     // The chunk is complete: bank it and start the next one fresh,
                     // exactly as a task of its own would have.
-                    for &row in &[lr, lr + 1][..if two { 2 } else { 1 }] {
+                    let banked = if four {
+                        4
+                    } else if two {
+                        2
+                    } else {
+                        1
+                    };
+                    for &row in &[lr, lr + 1, lr + 2, lr + 3][..banked] {
                         save_part(sc, row, ci, hd);
                         sc.o[row * hd..(row + 1) * hd].fill(0.0);
                         sc.m[row] = f32::NEG_INFINITY;
@@ -1032,7 +1066,13 @@ pub(crate) fn run_range<O: RowSink>(
                     }
                 }
             }
-            lr += if two { 2 } else { 1 };
+            lr += if four {
+                4
+            } else if two {
+                2
+            } else {
+                1
+            };
         }
         if let Some(t) = tm {
             ns_mix += t.elapsed().as_nanos() as u64;
@@ -1273,6 +1313,32 @@ fn score_tile(
             scale,
             &mut s_tile[(lr + r) * BLOCK..(lr + r) * BLOCK + len],
         );
+    }
+}
+
+/// The online softmax of `rows` consecutive rows of the task over the same piece of
+/// the tile: each row's running maximum, the exponentials in place, its ascending
+/// `f64` denominator and its rescale factor `α`.
+///
+/// With four rows the four denominators advance interleaved (`exp_rows4_sums`, S4.9r's
+/// encoder body); each row still folds its own exponentials in ascending key order
+/// into its own `f64`, so no row's bits depend on the rows beside it.
+fn softmax_rows(
+    sc: &mut Scratch,
+    lr: usize,
+    base: usize,
+    len: usize,
+    rows: usize,
+    alpha: &mut [f32; 4],
+) {
+    for (r, row) in (lr..lr + rows).enumerate() {
+        let s = &mut sc.s_tile[row * BLOCK + base..row * BLOCK + base + len];
+        let m_old = sc.m[row];
+        let m_new = m_old.max(crate::vmath::max(s));
+        let psum = crate::vmath::exp_shift_sum(s, m_new);
+        alpha[r] = crate::vmath::det_exp(m_old - m_new);
+        sc.l[row] = sc.l[row] * alpha[r] as f64 + psum;
+        sc.m[row] = m_new;
     }
 }
 
@@ -4153,16 +4219,8 @@ mod tests {
                         if edge {
                             // The values a saturated softmax leaves in a K tile: signed
                             // zeros, the smallest subnormal, ±1 and the format's maximum.
-                            const EDGE: [f32; 8] = [
-                                0.0,
-                                -0.0,
-                                6.0e-8,
-                                1.0,
-                                -1.0,
-                                65504.0,
-                                -65504.0,
-                                0.5,
-                            ];
+                            const EDGE: [f32; 8] =
+                                [0.0, -0.0, 6.0e-8, 1.0, -1.0, 65504.0, -65504.0, 0.5];
                             EDGE[(i * 7 + i / 5) % EDGE.len()]
                         } else {
                             prng(0x37 + (i * 13) as u64, 1)[0]
@@ -4189,7 +4247,9 @@ mod tests {
                     for r in 0..4 {
                         let mut want = vec![0.0f32; n];
                         // SAFETY: `half` holds n · hd halves.
-                        unsafe { scores_f16(&q[r * hd..(r + 1) * hd], &half, n, hd, scale, &mut want) };
+                        unsafe {
+                            scores_f16(&q[r * hd..(r + 1) * hd], &half, n, hd, scale, &mut want)
+                        };
                         for j in 0..n {
                             assert_eq!(
                                 got[r * stride + j].to_bits(),
@@ -4234,7 +4294,13 @@ mod tests {
                 let vb = c.block_bytes(false, 0, 0, 0, n);
                 let pads: Vec<f32> = prng(0xa1 + (hd * 31 + n) as u64, 4 * n)
                     .iter()
-                    .map(|x| if n % 3 == 0 { x.abs() * 0.5 } else { x.abs() + 0.01 })
+                    .map(|x| {
+                        if n % 3 == 0 {
+                            x.abs() * 0.5
+                        } else {
+                            x.abs() + 0.01
+                        }
+                    })
                     .collect();
                 let cases: [(f32, f32, f32, f32); 5] = [
                     (0.75, 0.25, 1.0, 0.5),
@@ -4245,44 +4311,40 @@ mod tests {
                 ];
                 for (al0, al1, al2, al3) in cases {
                     let alphas = [al0, al1, al2, al3];
-                    let o: Vec<f32> = prng(0xb2 + (hd * 71 + n) as u64, 4 * hd);
-                    let mut got = o.clone();
-                    // SAFETY: NEON is this target's baseline; `vb` holds n · hd halves
-                    // and `pads` four rows at stride n.
-                    unsafe {
-                        peregrine_kernels::neon::mix_f16_quad(
-                            &mut got, &alphas, &pads, n, vb, hd,
-                        );
-                    }
-                    let mut twin = o.clone();
-                    peregrine_kernels::neon::mix_f16_quad_scalar(
-                        &mut twin, &alphas, &pads, n, vb, hd,
-                    );
-                    for r in 0..4 {
-                        let mut want = o[r * hd..(r + 1) * hd].to_vec();
-                        // SAFETY: `vb` holds n · hd halves and `want` one row.
+                    {
+                        let o: Vec<f32> = prng(0xb2 + (hd * 71 + n) as u64, 4 * hd);
+                        let mut got = o.clone();
+                        // SAFETY: NEON is this target's baseline; `vb` holds n · hd halves
+                        // and `pads` four rows at stride n.
                         unsafe {
-                            mix_f16(
-                                &mut want,
-                                alphas[r],
-                                &pads[r * n..(r + 1) * n],
-                                vb,
-                                hd,
-                            )
-                        };
-                        for d in 0..hd {
-                            assert_eq!(
-                                got[r * hd + d].to_bits(),
-                                want[d].to_bits(),
-                                "hd={hd} vis={n} row={r} d={d} alpha={:?}",
-                                alphas
+                            peregrine_kernels::neon::mix_f16_quad(
+                                &mut got, &alphas, &pads, n, n, vb, hd,
                             );
-                            assert_eq!(
-                                got[r * hd + d].to_bits(),
-                                twin[r * hd + d].to_bits(),
-                                "twin hd={hd} vis={n} row={r} d={d} alpha={:?}",
-                                alphas
-                            );
+                        }
+                        let mut twin = o.clone();
+                        peregrine_kernels::neon::mix_f16_quad_scalar(
+                            &mut twin, &alphas, &pads, n, n, vb, hd,
+                        );
+                        for r in 0..4 {
+                            let mut want = o[r * hd..(r + 1) * hd].to_vec();
+                            // SAFETY: `vb` holds n · hd halves and `want` one row.
+                            unsafe {
+                                mix_f16(&mut want, alphas[r], &pads[r * n..(r + 1) * n], vb, hd)
+                            };
+                            for d in 0..hd {
+                                assert_eq!(
+                                    got[r * hd + d].to_bits(),
+                                    want[d].to_bits(),
+                                    "hd={hd} vis={n} row={r} d={d} alpha={:?}",
+                                    alphas
+                                );
+                                assert_eq!(
+                                    got[r * hd + d].to_bits(),
+                                    twin[r * hd + d].to_bits(),
+                                    "twin hd={hd} vis={n} row={r} d={d} alpha={:?}",
+                                    alphas
+                                );
+                            }
                         }
                     }
                 }

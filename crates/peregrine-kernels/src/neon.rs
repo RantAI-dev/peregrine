@@ -2974,7 +2974,10 @@ pub fn scores_f16_tile4_scalar(
     stride: usize,
 ) {
     assert!(q.len() >= 4 * hd, "four query rows are needed");
-    assert!(k.len() >= vis * hd * 2, "the K tile is shorter than vis · hd");
+    assert!(
+        k.len() >= vis * hd * 2,
+        "the K tile is shorter than vis · hd"
+    );
     assert!(
         s.len() >= 3 * stride + vis,
         "four score rows need 3 · stride + vis floats"
@@ -2984,8 +2987,8 @@ pub fn scores_f16_tile4_scalar(
         .collect();
     for r in 0..4 {
         for j in 0..vis {
-            s[r * stride + j] = score_tree_scalar(&q[r * hd..(r + 1) * hd], &halves[j * hd..][..hd])
-                * scale;
+            s[r * stride + j] =
+                score_tree_scalar(&q[r * hd..(r + 1) * hd], &halves[j * hd..][..hd]) * scale;
         }
     }
 }
@@ -3014,12 +3017,18 @@ pub unsafe fn scores_f16_tile4(
 ) {
     use std::arch::aarch64::*;
     assert!(q.len() >= 4 * hd, "four query rows are needed");
-    assert!(k.len() >= vis * hd * 2, "the K tile is shorter than vis · hd");
+    assert!(
+        k.len() >= vis * hd * 2,
+        "the K tile is shorter than vis · hd"
+    );
     assert!(
         s.len() >= 3 * stride + vis,
         "four score rows need 3 · stride + vis floats"
     );
-    assert!(hd.is_multiple_of(8), "the tile body walks eight dims at a time");
+    assert!(
+        hd.is_multiple_of(8),
+        "the tile body walks eight dims at a time"
+    );
     let qs = [
         q.as_ptr(),
         q.as_ptr().add(hd),
@@ -3093,23 +3102,24 @@ unsafe fn hsum4_pairwise(v: float32x4_t) -> float32x4_t {
 /// [`mix_f16_quad`]'s scalar definition: four rows' own `α·o + Σ_j p_j · v_j`, one
 /// separate multiply and one separate add per ascending key.
 ///
-/// `o` holds four output rows of `hd` floats; `p` four weight rows, row `r` at
-/// `p[r · p_stride ..]`; `v` the tile's halves.
+/// `o` holds four output rows of `hd` floats; `p` four weight rows of `n` weights, row
+/// `r` at `p[r · p_stride ..]`; `v` the tile's halves.
 #[cfg(target_arch = "aarch64")]
 pub fn mix_f16_quad_scalar(
     o: &mut [f32],
     alphas: &[f32; 4],
     p: &[f32],
     p_stride: usize,
+    n: usize,
     v: &[u8],
     hd: usize,
 ) {
     assert!(o.len() >= 4 * hd, "four output rows are needed");
     assert!(
-        p.len() >= 3 * p_stride + p_stride,
-        "four score rows are needed"
+        p.len() >= 3 * p_stride + n,
+        "four score rows of n floats are needed"
     );
-    assert!(v.len() >= p_stride * hd * 2, "the V tile is shorter than p");
+    assert!(v.len() >= n * hd * 2, "the V tile is shorter than n");
     for r in 0..4 {
         if alphas[r] != 1.0 {
             o[r * hd..(r + 1) * hd]
@@ -3117,7 +3127,7 @@ pub fn mix_f16_quad_scalar(
                 .for_each(|x| *x *= alphas[r]);
         }
     }
-    for j in 0..p_stride {
+    for j in 0..n {
         for d in 0..hd {
             let at = (j * hd + d) * 2;
             let value = f16(u16::from_le_bytes([v[at], v[at + 1]]));
@@ -3133,12 +3143,14 @@ pub fn mix_f16_quad_scalar(
 /// all four rows.
 ///
 /// The arithmetic is [`mix_f16_quad_scalar`]'s element for element — a separate
-/// multiply and a separate add per key, in ascending key order, with `α·o` first —
-/// so a row's bits are the single-row body's.
+/// multiply and a separate add per key, in ascending key order, with `α·o` first — so
+/// a row's bits are the single-row body's. All four rows mix the same `n` positions:
+/// a row cut at another row's position would take an extra soft-max step, which moves
+/// its denominator's summation, so the caller groups rows that share their context.
 ///
 /// # Safety
 /// The CPU must have NEON; `o` must hold four rows of `hd` floats, `p` four rows of
-/// `p_stride` weights, `v` at least `p_stride · hd · 2` bytes, and `hd` a multiple of
+/// `n` weights at `p_stride`, `v` at least `n · hd · 2` bytes, and `hd` a multiple of
 /// eight.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
@@ -3148,17 +3160,21 @@ pub unsafe fn mix_f16_quad(
     alphas: &[f32; 4],
     p: &[f32],
     p_stride: usize,
+    n: usize,
     v: &[u8],
     hd: usize,
 ) {
     use std::arch::aarch64::*;
     assert!(o.len() >= 4 * hd, "four output rows are needed");
     assert!(
-        p.len() >= 3 * p_stride + p_stride,
-        "four score rows are needed"
+        p.len() >= 3 * p_stride + n,
+        "four score rows of n floats are needed"
     );
-    assert!(v.len() >= p_stride * hd * 2, "the V tile is shorter than p");
-    assert!(hd.is_multiple_of(8), "the tile body walks eight dims at a time");
+    assert!(v.len() >= n * hd * 2, "the V tile is shorter than n");
+    assert!(
+        hd.is_multiple_of(8),
+        "the tile body walks eight dims at a time"
+    );
     for r in 0..4 {
         if alphas[r] != 1.0 {
             let mut d = 0;
@@ -3180,9 +3196,9 @@ pub unsafe fn mix_f16_quad(
             acc[0] = vld1q_f32(o.as_ptr().add(r * hd + d));
             acc[1] = vld1q_f32(o.as_ptr().add(r * hd + d + 4));
         }
-        for j in 0..p_stride {
+        for j in 0..n {
             let at = (j * hd + d) * 2;
-            // SAFETY: `v` holds p_stride · hd halves and d + 8 <= hd.
+            // SAFETY: `v` holds n · hd halves and d + 8 <= hd.
             let v0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at) as *const u16)));
             let v1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at + 8) as *const u16)));
             for (r, acc) in a.iter_mut().enumerate() {
@@ -3202,7 +3218,7 @@ pub unsafe fn mix_f16_quad(
     while d < hd {
         for r in 0..4 {
             let mut x = *o.get_unchecked(r * hd + d);
-            for j in 0..p_stride {
+            for j in 0..n {
                 let at = (j * hd + d) * 2;
                 let value = f16(u16::from_le_bytes([*vp.add(at), *vp.add(at + 1)]));
                 x += p[r * p_stride + j] * value;
