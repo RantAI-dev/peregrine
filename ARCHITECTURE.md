@@ -162,6 +162,7 @@ The engine provides fine-grained Cargo features across its layers so embedders c
 | | `arch-gemma-embedding` | `peregrine-models` | Gemma 3 bidirectional encoder (`gemma-embedding`, EmbeddingGemma) |
 | | `arch-bert` | `peregrine-models` | BERT bidirectional encoder (`bert`: MiniLM, BGE, E5, GTE, bge-m3) |
 | | `arch-modern-bert` | `peregrine-models` | ModernBERT bidirectional encoder (`modern-bert`: ModernBERT, gte-modernbert, Granite Embedding R2) |
+| | `arch-nomic-bert` | `peregrine-models` | NomicBERT bidirectional encoder (`nomic-bert`: nomic-embed-text v1.5) |
 | | `arch-qwen3moe` | `peregrine-models` | Mixture of experts (`qwen3moe`) |
 | | `arch-gpt-oss` | `peregrine-models` | OpenAI's mixture of experts (`gpt-oss`) |
 | | `arch-phi3` | `peregrine-models` | Phi-3 and Phi-4 (`phi3`) |
