@@ -103,7 +103,7 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    that disagree with `cls.output`, an activation llama.cpp does not read), the head slot's refusal
    by name on a file without one, and one tier golden
    (`tests/golden/synthetic/<tier>/bert-heads-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
-   under SDE; no aarch64 golden). `tests/no_alloc.rs` passes a head text through the whole-text
+   under SDE, and on the four aarch64 tiers). `tests/no_alloc.rs` passes a head text through the whole-text
    pass. `crates/peregrine/tests/server_rerank.rs` starts the built server on those files and checks
    `/v1/rerank`'s shape, order, `top_n`, `return_documents`, the four routes, the object form of a
    document, batch independence of a score, `truncate` and the over-length error, the refusals
