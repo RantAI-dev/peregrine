@@ -1,0 +1,13 @@
+--- kernel table: 2048 weights x 8 output rows x 128 activation rows; GMAC/s aggregate over {1, 4} cores ---
+q4k exact x1:   77.4 GMAC/s
+q4k  twin x1:    1.6 GMAC/s
+q4k  simd x1:   59.7 GMAC/s
+q4k exact x4:  307.7 GMAC/s
+q4k  twin x4:    6.2 GMAC/s
+q4k  simd x4:  236.6 GMAC/s
+q6k exact x1:   45.8 GMAC/s
+q6k  twin x1:    1.6 GMAC/s
+q6k  simd x1:   59.5 GMAC/s
+q6k exact x4:  181.6 GMAC/s
+q6k  twin x4:    6.2 GMAC/s
+q6k  simd x4:  236.2 GMAC/s

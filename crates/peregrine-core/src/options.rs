@@ -320,17 +320,16 @@ pub fn pass_rows_default_for(
     }
 }
 
-/// Whether the fast prompt mode's 8-bit form has a SIMD body on this tier (AVX-512
-/// on x86-64; `smmla` or `sdot` on aarch64 since S5.4e; AVX2 is still open). A
-/// tier without one runs the mode correctly through the scalar twin, just no
-/// faster than the exact kernel.
+/// Whether the fast prompt mode's 8-bit form has a SIMD body on this tier (AVX-512 or
+/// AVX2 on x86; `smmla` or `sdot` on aarch64 since S5.4e). A tier without one runs the
+/// mode correctly through the scalar twin, just no faster than the exact kernel.
 pub fn fast_prompt_simd() -> bool {
     peregrine_kernels::table::MatKernels::get().q8k_simd()
 }
 
-/// Which body the fast prompt mode's 8-bit form runs on this tier, as the
-/// option's startup line and `peregrine tier` report it.
-pub fn fast_prompt_body() -> &'static str {
+/// The name of that body, for the startup line: `None` where the mode runs through
+/// the scalar twin.
+pub fn fast_prompt_body() -> Option<&'static str> {
     peregrine_kernels::table::MatKernels::get().q8k_body()
 }
 
@@ -1019,19 +1018,6 @@ mod tests {
     }
 
     #[test]
-    fn the_fast_prompt_mode_is_off_unless_asked_for() {
-        assert!(!with(&[]).fast_prompt);
-        assert!(with(&[("FAST_PROMPT", "1")]).fast_prompt);
-        assert!(!with(&[("FAST_PROMPT", "0")]).fast_prompt);
-        assert!(!with(&[("FAST_PROMPT", "yes")]).fast_prompt);
-        // It is recorded with the other options, so `/metrics`, `tier` and `bench --json` see it.
-        assert!(with(&[("FAST_PROMPT", "1")])
-            .pairs()
-            .iter()
-            .any(|&(k, ref v)| k == "fast_prompt" && v == "true"));
-    }
-
-    #[test]
     fn the_fast_modes_wide_chunk_is_the_tiers_choice() {
         // S5.4e: aarch64 widens the fast mode's wide chunk to 512 (7.7–26.6 % over 256 on both
         // models at ten threads); x86 keeps the first look's 256. With the mode off the exact
@@ -1047,6 +1033,19 @@ mod tests {
         }
         assert!(fast_expected >= PREFILL_CHUNK_DEFAULT);
         assert!(fast_expected <= MAX_PREFILL_CHUNK);
+    }
+
+    #[test]
+    fn the_fast_prompt_mode_is_off_unless_asked_for() {
+        assert!(!with(&[]).fast_prompt);
+        assert!(with(&[("FAST_PROMPT", "1")]).fast_prompt);
+        assert!(!with(&[("FAST_PROMPT", "0")]).fast_prompt);
+        assert!(!with(&[("FAST_PROMPT", "yes")]).fast_prompt);
+        // It is recorded with the other options, so `/metrics`, `tier` and `bench --json` see it.
+        assert!(with(&[("FAST_PROMPT", "1")])
+            .pairs()
+            .iter()
+            .any(|&(k, ref v)| k == "fast_prompt" && v == "true"));
     }
 
     #[test]

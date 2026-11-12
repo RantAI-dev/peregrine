@@ -37,9 +37,11 @@ pub struct BenchArgs {
     #[arg(long)]
     pub threads: Option<usize>,
     /// Experimental and lossy: prompt tokens read their Q4_K and Q6_K weights from an
-    /// 8-bit copy built at load. Prompts get faster and a reply can differ from the
-    /// default engine's; the accuracy report is not published yet (roadmap S5.4c).
-    /// Generated tokens keep the exact kernels. Off by default.
+    /// 8-bit copy built at load, so a reply can differ from the default engine's; the
+    /// accuracy report is not published yet (roadmap S5.4c). Generated tokens keep the
+    /// exact kernels. A prompt pass is faster on AVX-512 and about a tenth slower on
+    /// AVX2, where the exact Q4_K kernel is the stronger one; the numbers are in
+    /// `docs/design/s5.4-fast-prompt.md` section 5d. Off by default.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
 }

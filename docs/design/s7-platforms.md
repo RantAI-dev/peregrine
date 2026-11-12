@@ -1,7 +1,7 @@
 # S7: macOS and Windows
 
-- Status: design, decided 2026-11-12. S7.2 built (Windows x86-64 builds and passes the suite in
-  CI); the rest is not built.
+- Status: design, decided 2026-11-12. S7.2 (Windows builds and passes the suite) and S7.3 (Windows
+  lifetime, installer and release archive) built; the rest is not built.
 - Owner request: "add support to windows, mac".
 
 ## 0. Where things stand
@@ -192,3 +192,71 @@ llama.cpp's Windows build, for decode, prompt and ten users on the three gate mo
   unsigned `.exe`), need certificates the project does not have.
 - **Windows Defender and mapped model files.** First-run scanning of a multi-gigabyte mapped file
   can dominate load time; measured in S7.4, with the documented exclusion if it does.
+
+## 8. S7.3 as built
+
+Windows x86-64 reaches the bar in §1 for the lifetime commands, `upgrade`, the installer and the
+release archive; the goldens and the measurement are S7.4's.
+
+- **Stop and the drain.** Windows has no `SIGTERM`. `peregrine stop` writes
+  `serve-<port>.stop` in the state directory (beside `serve.json`, named for the port like the
+  log), the server watches it every 250 ms, removes it and runs the same drain a Unix `SIGTERM`
+  starts (`serve_with_drain`, 30 s cap), and exits with the same status. `stop` waits the Unix
+  40 s `DRAIN_TIMEOUT` and only then ends the process with `TerminateProcess`. Ctrl-C still works:
+  the Windows `shutdown_signal` selects over `tokio`'s console handler and the stop-file tick.
+- **Liveness and the background server.** `serve --background` spawns the child with
+  `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`, redirects it to the same log file and writes the
+  same state record; the parent waits for the child's state file (written after `bind`, before
+  `listening on` is logged) before it reports success. `status` reads the record and checks the
+  process with `OpenProcess` + `GetExitCodeProcess`; it also probes `/health` and prints the answer.
+  The two calls are hand-written `extern "system"` declarations in
+  `crates/peregrine-core/src/win32.rs` with SAFETY comments on every `unsafe`, like the S7.2
+  topology call; there is no new dependency.
+- **A detached child and the caller's pipes.** Windows' `CreateProcess(bInheritHandles = TRUE)`
+  handed the detached server the caller's stdin/stdout/stderr pipe handles, so
+  `peregrine serve --background | cat` and a test's `Command::output()` never saw EOF. The spawn
+  now clears `HANDLE_FLAG_INHERIT` on this process's three standard handles for the duration of
+  `CreateProcess` and restores them (`win32::NoInheritStdHandles`); the child's own stdio is passed
+  explicitly to the log file and is unaffected.
+- **Tests.** `serve_lifetime.rs` and `server_multi_model.rs` keep their Unix `SIGTERM` tests
+  unchanged and gain Windows counterparts that ask for the drain through the stop file: the
+  in-flight requests finish, a new connection is refused once the listener closes, and the process
+  exits 0. `serve_lifetime.rs` also exercises `serve --background`, `status` (address and
+  `health     ok`) and `stop` end to end. The Windows job runs all of them.
+- **`upgrade`.** `release_platform(os, arch)` maps `windows`/`x86_64` to `windows-x86_64` (Windows
+  on ARM gets the build-from-source answer), the asset is the `.zip`, and the SHA-256 comes from
+  `certutil -hashfile` where Unix uses `sha256sum`/`shasum`. A running `.exe` cannot be overwritten
+  but can be renamed: the installed binary becomes `peregrine.exe.old` (a unique name if that one
+  is still running), the new one is moved into place, and every start removes `<name>.old` copies.
+  Extraction uses PowerShell 5.1's `Expand-Archive`, the one archive tool every Windows has. The
+  mapping is unit-tested by argument, and the rename swap with ordinary temporary files on every
+  platform.
+- **Installer.** `scripts/install.ps1` is Windows PowerShell 5.1 (no `??`, no ternary), needs no
+  administrator rights, and follows `install.sh`'s shape: GitHub's latest tag (or `-Version`),
+  `peregrine-vX.Y.Z-windows-x86_64.zip` and `SHA256SUMS` from `-BaseUrl` (a URL, a `file://` URL or
+  a local directory, as `PEREGRINE_BASE_URL` is for the shell script), a `Get-FileHash` check, and
+  `Expand-Archive` into `%LOCALAPPDATA%\Programs\peregrine` (or `-InstallDir`). It appends the
+  directory to the **user** `Path` only when it is missing, prints the install and the undo
+  commands, and refuses ARM64 with the build-from-source line.
+- **CI.** `test (windows-x86_64)` gains an installer step after its smoke step: build.ps1 builds
+  the zip, `install.ps1 -BaseUrl <repo>/dist -InstallDir <temp>` installs it, and the installed
+  `peregrine.exe` must answer `--version` and `tier` (`x86_64-avx2…`). The job is green in about
+  ten minutes cold.
+- **Release.** `release.yml`'s matrix has `windows-2025` / `x86_64-pc-windows-msvc` /
+  `windows-x86_64`; `scripts/release/build.ps1` is the PowerShell twin of `build.sh` (the Windows
+  runner has no `strip` or `sha256sum`, and `Compress-Archive` writes `\` as an entry separator, so
+  the zip entries are written with `/` through `System.IO.Compression`). The build sets
+  `RUSTFLAGS=-C target-feature=+crt-static` for the release job only, so the `.exe` needs no Visual
+  C++ redistributable; the binary still has no `target-cpu` and dispatches kernels at run time. The
+  archive carries `peregrine.exe`, `LICENSE` and `NOTICE`, exactly like the Linux archives, and
+  its SHA-256 joins `SHA256SUMS` in the same `hash  name` format. The publish job uploads `*.zip`
+  and `install.ps1` beside `*.tar.gz` and `install.sh`, and is guarded on a tag push.
+- **The dry run.** `gh workflow run release.yml --ref s7.3-windows-lifetime -f dry_run=true` was
+  accepted: the three build jobs ran and uploaded artefacts, and the `release` job was skipped.
+  The Windows build (`build (windows-x86_64)`) took 7 m 38 s and produced
+  `peregrine-v0.2.0-windows-x86_64.zip` (3,111,510 bytes, SHA-256 `f900f0cd…908eb0`); its listing is
+  `peregrine-v0.2.0-windows-x86_64/{LICENSE,NOTICE,peregrine.exe}` (8,186,389 bytes uncompressed).
+- **Not done.** The Windows goldens (`-windows` directories) and a native Windows measurement are
+  S7.4; every golden suite still skips on Windows. The `.exe` is unsigned (Authenticode needs a
+  certificate, §7), and the installer's `irm … | iex` path is the one that avoids SmartScreen's
+  browser-download mark rather than a signature.

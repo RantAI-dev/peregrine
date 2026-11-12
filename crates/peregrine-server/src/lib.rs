@@ -121,9 +121,11 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub speculate: bool,
     /// Experimental and lossy: prompt tokens read their Q4_K and Q6_K weights from an
-    /// 8-bit copy built at load. Prompts get faster and a reply can differ from the
-    /// default engine's; the accuracy report is not published yet (roadmap S5.4c).
-    /// Generated tokens keep the exact kernels. Off by default.
+    /// 8-bit copy built at load, so a reply can differ from the default engine's; the
+    /// accuracy report is not published yet (roadmap S5.4c). Generated tokens keep the
+    /// exact kernels. A prompt pass is faster on AVX-512 and about a tenth slower on
+    /// AVX2, where the exact Q4_K kernel is the stronger one; the numbers are in
+    /// `docs/design/s5.4-fast-prompt.md` section 5d. Off by default.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
     /// Memory (MB) for snapshots of finished conversations' caches, so a prompt that shares a long beginning with an
@@ -212,6 +214,12 @@ struct App {
 
 /// Run the server until it is stopped. Logging must already be set up (see [`init_logging`]).
 pub async fn run(a: Args) {
+    // A stop file left by a crashed or force-killed predecessor on this port must not make this
+    // server exit the moment it starts (S7.3: Windows has no signals, so `stop` is a file).
+    #[cfg(windows)]
+    {
+        let _ = std::fs::remove_file(lifecycle::stop_path(a.port));
+    }
     // Engine options are process-wide (one thread count, one pass budget, one set of
     // kernel switches), so a default tuning profile is looked up for the first model.
     let first = &a.model[0];
@@ -279,16 +287,18 @@ pub async fn run(a: Args) {
     peregrine_core::options::init(opts)
         .expect("engine options are set once, before the model loads");
     if peregrine_core::options::get().fast_prompt {
-        // One line, at start: what the mode trades, and whether this tier has the
-        // SIMD body (S5.4b; AVX2 and NEON are S5.4d).
+        // One line, at start: what the mode trades, and which SIMD body this tier
+        // runs it through (S5.4b; AVX2 since S5.4d, NEON still pending).
         tracing::info!(
             "fast prompt mode: prompt tokens read Q4_K/Q6_K weights from the resident 8-bit \
              form ({}); results differ from the exact mode, generated tokens, embeddings, \
              rerank and decisions stay exact",
-            if peregrine_core::options::fast_prompt_simd() {
-                peregrine_core::options::fast_prompt_body()
-            } else {
-                "scalar twin: correct, but not faster than the exact kernels on this tier"
+            match peregrine_core::options::fast_prompt_body() {
+                Some(body) => format!("{body} body"),
+                None => {
+                    "scalar twin: correct, but not faster than the exact kernels on this tier"
+                        .to_string()
+                }
             }
         );
     }
@@ -535,7 +545,7 @@ pub async fn run(a: Args) {
     match serve_with_drain(
         listener,
         router,
-        shutdown_signal(a.state_file.clone(), a.log_file.clone()),
+        shutdown_signal(a.state_file.clone(), a.log_file.clone(), a.port),
         drain,
     )
     .await
@@ -706,12 +716,18 @@ async fn bind(host: &str, port: u16, reuse_port: bool) -> std::io::Result<tokio:
 /// Resolve on `Ctrl-C` or `SIGTERM`; on `SIGHUP`, re-exec the binary on disk beside this process
 /// with `SO_REUSEPORT` and drain once the replacement is listening. A handoff that fails leaves
 /// this process serving.
+///
+/// Windows has no signals: Ctrl-C arrives through `tokio`, and `peregrine stop` is the stop file
+/// in the state directory (`lifecycle::stop_path`), watched every 250 ms and removed here before
+/// the same drain a Unix `SIGTERM` starts (S7.3).
 async fn shutdown_signal(
     state_file: Option<std::path::PathBuf>,
     log_file: Option<std::path::PathBuf>,
+    port: u16,
 ) {
     #[cfg(unix)]
     {
+        let _ = port;
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = match signal(SignalKind::terminate()) {
             Ok(s) => s,
@@ -799,8 +815,28 @@ async fn shutdown_signal(
     #[cfg(not(unix))]
     {
         let _ = (state_file, log_file);
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutdown requested; draining in-flight requests");
+        let stop = lifecycle::stop_path(port);
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        // The first tick is immediate; a stale file was removed at startup, so this only sees a
+        // request made after this server started listening.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("shutdown requested; draining in-flight requests");
+                    return;
+                }
+                _ = tick.tick() => {
+                    if stop.exists() {
+                        // Removing it before the drain lets `peregrine stop` tell a finished
+                        // request from one that was never seen.
+                        let _ = std::fs::remove_file(&stop);
+                        tracing::info!("stop requested; draining in-flight requests");
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 

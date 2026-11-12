@@ -3857,8 +3857,8 @@ mod tests {
                 "the dispatch took another body than the tier's own"
             );
             assert!(
-                !mk.q8k_body().starts_with("scalar twin"),
-                "a tier with dotprod must not report the scalar twin"
+                mk.q8k_body().is_some_and(|b| b.starts_with("NEON")),
+                "a tier with dotprod must report a NEON body"
             );
         } else {
             assert_eq!(

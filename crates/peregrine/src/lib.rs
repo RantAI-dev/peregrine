@@ -189,10 +189,9 @@ pub fn describe_runtime() -> String {
     // S5.4e: with the mode on, name the 8-bit body this tier takes, so `peregrine
     // tier` answers "does ARM run the NEON body?" without a bench run.
     let fast = if o.fast_prompt {
-        format!(
-            "fast prompt   {}\n",
-            peregrine_core::options::fast_prompt_body()
-        )
+        let body = peregrine_core::options::fast_prompt_body()
+            .unwrap_or("scalar twin: correct, but not faster than the exact kernels on this tier");
+        format!("fast prompt   {body}\n")
     } else {
         String::new()
     };
