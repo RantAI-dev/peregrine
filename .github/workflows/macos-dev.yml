@@ -6,6 +6,7 @@ on:
     branches: [s7.1-macos]
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: macos-dev-${{ github.ref }}
   cancel-in-progress: true
@@ -43,6 +44,22 @@ jobs:
           codesign -dv "$RUNNER_TEMP/prefix/bin/peregrine" 2>&1 || true
       - name: install.sh platform matrix (stubs)
         run: scripts/install-test.sh
+      - name: install the release dry-run archive with install.sh and run it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh run list --workflow release.yml --branch s7.1-macos --limit 5 \
+            --json databaseId,conclusion \
+            --jq '[.[]|select(.conclusion=="success")][0].databaseId')
+          test -n "$run"
+          echo "release dry run: $run"
+          gh run download "$run" -n dist-macos-aarch64 -D "$RUNNER_TEMP/dry"
+          ls -l "$RUNNER_TEMP/dry"
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          PEREGRINE_BASE_URL="file://$RUNNER_TEMP/dry" \
+            sh scripts/install.sh --version "v$version" --prefix "$RUNNER_TEMP/prefix-dry"
+          "$RUNNER_TEMP/prefix-dry/bin/peregrine" --version
+          "$RUNNER_TEMP/prefix-dry/bin/peregrine" tier
       - name: a synthetic run from the release binary
         run: |
           model=$(cargo run -q --release --locked -p peregrine-bench --example write_synthetic \
