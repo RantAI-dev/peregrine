@@ -1327,3 +1327,238 @@ none was run; items 1-3 of §10.6 each carry the standard KL gate.
   measured against the host and against CPU time) is not something a process inside WSL2 can
   see. It is reported as the hazard it is: absolute rates from different sessions are not
   comparable unless the clock was checked in each.
+
+## 11. Round 4: is the fork's wide pass exact, and what an exact one can reach (S5.2)
+
+- Status: the question settled — **the fork's wide pass is not exact, and an exact one buys
+  nothing.** No engine change.
+- Date: 2026-11-12 (06:20–08:10 local, UTC+7)
+- Host: AMD Ryzen AI 9 HX 370 (Zen 5, 12 cores / 24 threads, AVX-512 F/BW/VL/VNNI/VBMI/BF16),
+  WSL2, 11.7 GiB
+- Peregrine: `s5.2-exactness` = `origin/main` (`dd6d64c`) + `kqbench`'s wide-pass mode and the
+  exact wide kernel it measures; ik_llama.cpp `479074c` (the build of §10, not rebuilt);
+  llama.cpp v0.9.0 (the build `docs/targets.md` quotes), both for Part 1 only
+- Raw data, the corpus recipe, the end-to-end driver and the clock probe:
+  `benchmarks/results/desktop-zen5-2026-11-12-s5.2-exactness/`
+- Every ratio below is **Peregrine ÷ the fork**.
+
+§10.6's item 1 proposed converting each block of weight rows to 8 bits once per wide pass, as
+the fork does, and said it could be bit-identical "if the kernel widens, not requantises". This
+round asks two questions in order: what the fork actually stores, and what an exact wide kernel
+can reach. The first decides whether the fork's prompt-processing lead is bought with an
+approximation; the second decides whether there is anything for Peregrine to build.
+
+### 11.1 What the fork's 8-bit form stores
+
+The dispatcher is `MulMat::is_dequant_better` (`ggml/src/iqk/iqk_mul_mat.cpp:252`): a repacked
+Q4_K matrix (`GGML_TYPE_Q4_K_R4`) takes the 8-bit form for 32 activation rows or more
+(`:281`), and a repacked Q6_K matrix for 32 or more (`:285`). `iqk_dequant_type` (`:607`) is
+that function exposed, which is how §10.3's probe read it. Above that width, `iqk_mul_mat`
+converts the tile's rows through `iqk_convert_repack` (`:665`, `:741`, `:932`, `:992-995`) into
+`iqk_convert_kquants_q8X_r8` (`ggml/src/iqk/iqk_gemm_kquants.cpp:3263`), which for Q4_K is
+`iqk_convert_q4_k_r4_q8_k_r16` (`:2400`) and for Q6_K `iqk_convert_q6_k_r4_q8_k_r16` (`:2724`).
+
+What Q4_K's conversion stores, per row of the tile and per 256-weight super-block:
+
+1. **The exact f32 weights.** The block's 32-weight sub-blocks are dequantised one at a time
+   with the format's own arithmetic, in f32: `w = q·Ld·d + (−dmin·Lm)` with `q` the 4-bit code,
+   `Ld`/`Lm` the 6-bit scale and min (`:2444-2463`). The integer products are exact (they are at
+   most 945 and are converted to f32 without loss), so `w` is the value the 4-bit kernel
+   computes to within two f32 roundings, ~1e-7 relative.
+2. **One maximum.** `block_max` is the largest `|w|` over all 256 weights of that row's
+   super-block (`:2455`), and
+3. **one 8-bit grid per (row, 256 weights)**: `dq = block_max/127` (`:2464`), stored as an f32
+   (`set_scale(y[i].d, k, dq)`, `:2466`; the `q8_k_r16` header is `float d[16]`, so this is not
+   rounded again — the AVX2 `q8_k_r8` variant's header is f16 and does round it).
+4. **One int8 code per weight**: `round(w/dq)` to nearest (`PackerQ80::convert`, `:16-26`, with
+   `_MM_ROUND_NEAREST`), saturating packs that cannot saturate because `|w| ≤ block_max`, then
+   biased to unsigned for `vpdpbusd` by an xor of `0x80` (`:2471-2474`).
+
+So the fork replaces eight 6-bit scales and eight 6-bit mins per 256 weights with **one f32
+scale per 256 weights and an int8 code per weight**, and it gets there by *rounding the weights
+onto a new grid*. That is a requantisation, not a widening: `sc·q` reaches 945 and does not fit
+int8, so nothing about the original grid survives except that `dq` is a real number.
+
+**The error.** Each weight is off by at most half a step, `dq/2 = block_max/254`, i.e.
+**0.394 % of the block's largest weight** (RMS `dq/√12` = 0.227 %, for uniformly distributed
+fractional parts; a weight at half the block's maximum is off by at most 0.79 % of itself). Q6_K
+is the same construction (`convert_to_q8_k_r8`, `ggml/src/iqk/iqk_common.h:638-687`) with one
+more twist: it computes the maximum of `|q·sc|` in int16 *before* multiplying by the block's
+`d`, and if that scaled maximum is below 127 it stores the codes **exactly** with a scale of
+`1.0` (`:648-651`) — so Q6_K's conversion is exact for blocks whose weights are small and
+rounds to `max/254` otherwise. Q4_K has no such case.
+
+For comparison, the 4-bit format's own rounding is `0.5·d·sc` against a within-sub-block maximum
+of about `15·d·sc`: ~3 % per weight. The requantisation adds about an eighth of that in RMS
+terms, which is not much per weight and is what the next section measures end to end.
+
+### 11.2 The measurement
+
+40 chunks of 512 tokens of this repository's own prose (the recipe is in the results README; no
+chat template was used anywhere), `llama-perplexity -c 512 -t 4`, the base run saving all
+logits and the compared run reading them back with `--kl-divergence`.
+
+| engine, comparison | PPL(Q) | PPL(base) | Mean KLD | RMS Δp | same top p |
+|---|---|---|---|---|---|
+| fork, `-ub 16` vs its `-ub 512` | 38.7359 | 38.7171 | **0.001087** | 0.634 % | **97.873 %** |
+| llama.cpp v0.9.0, `-ub 16` vs its `-ub 512` | 38.7618 | 38.7551 | 0.003169 | 1.069 % | 96.559 % |
+| llama.cpp v0.9.0 at 512 vs the fork at 512 | 38.7551 | 38.7171 | 0.003018 | 1.046 % | 96.520 % |
+| llama.cpp v0.9.0 at 16 vs the fork at 16 | 38.7618 | 38.7359 | 0.002863 | 1.048 % | 96.716 % |
+
+**Is `-ub 512` bit-different from `-ub 16`?** Yes, in both engines, at the first predicted
+position: the two log-probability files differ at byte 81945, which is the fourth byte of the
+first token's record (the header and the 512×40-token stream end at 81,940). Neither file is a
+prefix of the other.
+
+**Peregrine at chunk 16 against chunk 64 is identical**, which is the invariant the change is
+about: `prefill_chunk.rs`'s `a_real_model_gives_the_same_tokens_at_any_chunk_size` reads a
+200-token prompt in pieces of 16, 32, 64 and 128 on a real Qwen 2.5 0.5B and gets the same 16
+greedy tokens every time, and `the_prompt_says_the_same_whatever_the_chunk_size` compares the
+KV cache and the logits themselves; both pass on this branch. The fork's own 0.001087 is not
+available to Peregrine by construction (ADR 0003).
+
+### 11.3 Is the fork's prompt-processing lead bought with an approximation?
+
+Partly, and the size is 0.0011 nats — **44 % of the distance between Q4_K_M and the unquantised
+model** (`docs/targets.md`: 0.00248 mean KLD for this model on wikitext-2) — but pass-width
+dependence is not unique to the requantisation and the honest reading is narrower than §10.6
+item 1 implied. llama.cpp v0.9.0, which requantises nothing, moves its own logits *more* than the
+fork does when `-ub` goes from 16 to 512 (0.003169 against 0.001087, top-1 96.6 % against
+97.9 %), so part of every engine's width dependence is not weights at all (llama.cpp's attention
+and activation quantisation are shape-dependent). What the fork's 0.001087 does establish is
+that its wide path is a *different arithmetic* from its narrow one: a request's numbers would
+depend on how the batch was packed, which is the thing ADR 0003 forbids regardless of size. And
+the size is not negligible: for the two engines to be at 0.0029-0.0032 from each other at
+*either* width, and for the fork's own width change to be 0.0011 of that, means a third of what
+separates the two engines on real text is the fork's wide path rather than its kernels. A fork
+user who wants the narrow path's numbers gets 0.62 of its prompt speed; a user who wants the wide
+path's speed accepts 0.0011 nats. Peregrine chooses the first, and this round finds no exact way
+to have the second.
+
+### 11.4 What an exact wide pass can reach: measured
+
+The exact version of the fork's conversion is not a requantisation at all: a Q4_K code is 0-15
+and fits a byte, so the widening step is `and`/`shift` per window, copied into a scratch buffer
+once per tile, and the per-32 scale multiply and the min term stay exactly as they are. That is
+§10.6 item 1's "widen, not requantise", built as `kq4_8`'s two variants in
+`crates/peregrine-kernels/src/kqsimd.rs`:
+
+- **(a) widened codes, epilogue unchanged.** `q4k8_widen` copies a tile's 1024 nibble bytes into
+  2048 bytes of codes once (`Q4K8_WIDE`), and `q4k8_gemm_zmm_wide` runs today's kernel body over
+  the widened buffer: no `and`, no `shift` in the inner loop, the per-32 `vpmulld` on the int32
+  partials and #199's `vpdpwssd` min term kept exactly. It is bit-identical to
+  `q4k8_gemm_zmm` — asserted at every width from 4 to 40 by
+  `the_widened_wide_pass_is_bit_identical_to_the_narrow_one`, and at 8-512 rows by
+  `kqbench`'s own check before each timing — so it could be dispatched by pass width without
+  moving a golden.
+- **(b) the epilogue in its cheapest exact form.** That *is* today's kernel: one `vpmulld` per
+  (sub-block, activation row) on int32 partials, the min term through `vpdpwssd` on paired sums,
+  and the fold in the reference's order. §9's and #199's measurements (the scale multiply 18 %,
+  the min term 10 %) were its budget. There is no cheaper exact arrangement of "one 6-bit
+  multiply and one 6-bit min per 32 weights": the partials are 13-bit and the products 18-bit, so
+  nothing can be merged into a wider lane, and a 16-bit stage would halve the products per
+  instruction. **(a) against (b) is therefore the whole experiment.**
+
+One real layer (2048 × 8192, 1024 eight-row tiles, 9.4 MB streamed, one thread), two runs half
+an hour apart, `KQBENCH_LAYER=1 KQBENCH_WIDE=1`:
+
+| activation rows | today (b), GMAC/s | widened (a), GMAC/s | (a) ÷ (b) | run 2 (a) |
+|---|---|---|---|---|
+| 8 | 73.0 | 61.8 | 0.85 | 64.5 |
+| 64 | 75.1 | 73.8 | 0.98 | 71.7 |
+| 128 | 73.4 | 73.5 | **1.00** | 73.7 |
+| 256 | 71.3 | 70.6 | 0.99 | 72.2 |
+| 512 | 71.7 | 72.6 | **1.01** | 70.5 |
+
+The widening alone costs 46-59 GMAC/s of its own work, so it only pays from 64 rows up, and from
+64 rows up it pays **nothing**: ±2 %, both signs, in both runs. The nibble split is free. That
+is the answer to §10.6 item 1, and the reason is measurable in the instruction mix: per
+super-block per eight activation rows the kernel issues 256 `vpdpbusd`, 128 `vpmulld`/`vpaddd`
+for the scale, 32 for the min term, ~72 for the fold and ~48 for the split; removing 48 of 536
+instructions (9 %) while doubling the bytes read per tile changes nothing, because the byte dot
+and the int32 multiplier are the ports that are busy and the `and`/`shift` are not. So an exact
+wide kernel's ceiling is today's 74-76 GMAC/s, not the fork's 91: what stands between it and the
+roof (121) is the per-32 scale multiply and the min term, 28 % of the kernel by §9's count, and
+those cannot be removed without the requantisation. **Nothing ships for Part 2**; the kernel
+stays in the crate, documented and tested, so the measurement can be repeated.
+
+### 11.5 The Q5_0 kernel: measured, and why it is where it is
+
+§10.6 item 3 asked for `q5_08_gemm_zmm` (50.8 GMAC/s isolated) to be brought towards Q4_K's
+74.2. The measurement this round first explains the gap, and then shows that the obvious fixes
+are not fixes. One Q5_0 block is **32 weights**: one f16 scale, no min, 5-bit codes. The kernel
+therefore runs its float fold — horizontal sum, the `−16·Σa` bias, the exact int32 sum, one fma —
+once per block per activation row, i.e. **eight times more often per weight than Q4_K**, whose
+fold is per 256. Per 2048 MACs the Q5_0 kernel issues ~162 instructions against Q4_K's ~72 per
+same 2048, and the fold is 40 % of them. It measures 52.0 / 50.1 / 47.9 GMAC/s (8 / 64 / 512
+activation rows, layer mode) against Q4_K's 74.0 / 71.8 / 70.6 on the same run.
+
+Two exact variants were built and measured, and neither is faster:
+
+1. **A cheaper decode and a prefetch.** The fifth-bit expansion through `vptestmb` plus one
+   masked add of 16 instead of `vpcmpeqb`/`vpmovm2b`/`or` (two instructions fewer per group,
+   bit-identical), and the Q8_0 kernel's prefetch distance. A/B on the same binary pair:
+   +2.4 % at 64 activation rows, −1.9 % at 512, inside the ±3 % the same binary shows between
+   runs. The kernel is not instruction-bound there.
+2. **Sixteen output rows per fold.** A Q5_0 block's fold cannot be amortised within a tile, but
+   two adjacent eight-row tiles are sixteen output rows, which fit one ZMM: the fold becomes one
+   16-lane fma, and the activation broadcast that feeds both tiles is loaded once. It was built,
+   asserted bit-identical to the eight-row kernel lane for lane, and measured **slower at every
+   width**: 42.4 against 46.8 GMAC/s at 4 activation rows, 43.6 against 54.8 at 16, 42.4 against
+   53.6 at 128 — the two weight streams and the doubled accumulator count cost more than the
+   shared fold saves. With two activation rows per group (28 registers rather than 44) it was
+   worse still, 29.8.
+
+So Q5_0 stays at ~52 GMAC/s isolated (47-49 streamed) and **nothing ships for Part 3** either.
+The gap to Q4_K is the format's 32-weight block, not the kernel: amortising the fold needs
+sixteen output rows per tile, which the engine's eight-row store, the aarch64 kernel's identical
+layout, the pack cache's bytes and `KQ_TILE_ROWS` all fix. That is a stage-5-sized change to the
+store, not a kernel change, and it is not attempted here.
+
+### 11.6 End to end, at the defaults
+
+Nothing changed in the engine, so this is the §10.2 picture re-measured in this session's clock
+regime (MONOTONIC ~10 % fast, i.e. every tok/s ~10 % conservative in real seconds; the ratio is
+untouched). 512 prompt tokens, no decode, three rounds interleaved, medians: the fork at its
+`-ub 512` default, Peregrine at its default chunk (the adaptive wide pass).
+
+| model | pk | threads | fork tok/s | Peregrine tok/s | P ÷ fork |
+|---|---|---|---|---|---|
+| Llama 3.2 1B Q4_K_M | 64 | 1 | 78.8 | 50.4 | 0.639 |
+| Llama 3.2 1B Q4_K_M | 64 | 12 | 527.9 | 326.2 | 0.618 |
+| Qwen 2.5 0.5B Q4_K_M | 64 | 1 | 171.2 | 97.3 | 0.568 |
+| Qwen 2.5 0.5B Q4_K_M | 64 | 12 | 1 095.2 | 574.3 | 0.524 |
+
+These agree with §10.2 (0.65 and 0.62, 0.58 and 0.55-0.58) to within this host's noise; the
+one-thread numbers are 4-9 % *worse* than §10.2's and the fork's are 2-6 % *better*, which is
+the load average (2-5, other tenants) rather than a change in the engine. With no engine change
+in this round, **Peregrine is at 0.64 of ik_llama.cpp on Llama 3.2 1B and 0.57 on Qwen 2.5 0.5B
+on prompt processing at the default settings**, one thread, and 0.62 and 0.52 at twelve.
+
+### 11.7 Bits
+
+No engine code changed. The source changes are `kqsimd.rs`'s `Q4K8_WIDE`/`q4k8_widen`/
+`q4k8_gemm_zmm_wide` (a kernel nobody dispatches), the `Q4Codes` split of the Q4_K group body
+that lets the narrowed and the widened source share one implementation (the narrow path is
+byte-for-byte the code it was), a test that the two agree bit for bit, and `kqbench`'s
+`KQBENCH_WIDE` mode (off by default, so its existing output is unchanged). No golden can move
+and none was run for Part A; the two structural Q5_0 variants were reverted after measuring.
+
+### 11.8 What is not reconciled
+
+- **Where llama.cpp's own pass-width difference comes from** (0.003169, larger than the fork's)
+  is not pinned. It requantises no weights, so it is attention or activation quantisation, and
+  §10.3's method (a probe on one matmul) cannot see it. The comparison in 11.3 uses it only as
+  an upper bound on what is *not* the fork's requantisation.
+- **The requantisation's effect on the matmul alone** was not isolated from attention: a probe
+  that called the fork's 4-bit and 8-bit paths on the same matrix would change the activation
+  quantisation too (`q8_2_x4` against `q8_k`), and the fork does not export its conversion
+  entry point, so the per-weight error in 11.1 is arithmetic from the source (worst case
+  `block_max/254`) rather than sampled from real weights.
+- **The Q5_0 kernel's 42 GMAC/s paired variant** is reported, not explained: no `perf` is
+  available under WSL2, and the guess (two weight streams and two accumulators per activation
+  row spilling) was not confirmed.
+- **Decode was measured and is not judged here.** At 128 tokens after a 16-token prompt the two
+  engines read 0.34 (1B, one thread) and 0.21 (1B, twelve), which is far below anything the
+  prompt-path account predicts and outside this round's question; it is recorded in `e2e.txt`
+  as a flag, not as a result.

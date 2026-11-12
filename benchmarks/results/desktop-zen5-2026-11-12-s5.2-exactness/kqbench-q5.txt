@@ -1,0 +1,37 @@
+Part 3: the Q5_0 kernel. One thread, CPU 4. One (tile, activation row, block) is
+8 rows x 32 weights = 256 MACs; "L1" is one eight-row tile resident in cache, "layer" is a real
+layer's stream (8192 rows x 2048 weights = 11.3 MB of Q5_0 bytes, 1024 tiles).
+
+Today's kernel, three separate builds over the session (the same source, so the spread is the
+host's, not the code's):
+  L1     1 act: 23.5-24.6   L1    16 acts: 51.5-54.8   L1    64 acts: 51.3-52.6
+  L1   128 acts: 50.4-54.8
+  layer  8 acts: 48.9-52.0   layer 64 acts: 47.4-50.5   layer 512 acts: 45.6-48.8
+
+Variant A: the fifth-bit expansion through vptestmb + a masked add of 16 instead of
+vpcmpeqb/vpmovm2b/or, and a prefetch with the Q8_0 kernel's distance. A/B against variant 0, the
+same binary pair interleaved three times, layer mode:
+  variant 0 (no prefetch)   q5_0 50.0 / 49.5 / 48.5   (8 / 64 / 512 acts, medians of 3)
+  variant 1 (prefetch)      q5_0 50.8 / 50.7 / 47.6
+i.e. +2.4 % at 64 rows and -1.9 % at 512, inside the +/-3 % the same binary shows between runs.
+The masked form is two instructions fewer per group and moves no bit; it buys nothing because
+the kernel is not instruction-bound there, so it was reverted with the rest.
+
+Variant B: sixteen output rows per fold, two adjacent eight-row tiles per call. A Q5_0 block is
+32 weights, so the float fold runs once per block per activation row -- eight times more often
+per weight than Q4_K's, whose fold is per 256. Two tiles fit one ZMM, which would fold both
+rows-halves at once and load the activation broadcast once for both. Measured, one L1 tile,
+against today's kernel in the same run:
+  4  act rows: today 46.8   paired 42.4 (the printed figure is per eight rows; the pair does
+                           sixteen, so its true rate is twice the printed one)
+  16 act rows: today 54.8   paired 43.6
+  64 act rows: today 53.8   paired 42.8
+  128 act rows: today 53.6   paired 42.4
+and with two act rows per group (28 registers instead of 44) it was worse still, 29.8. The
+variant is slower at every width, so it was withdrawn; the mechanism is the pair of weight
+streams and the doubled accumulator count, not the arithmetic -- the results were asserted
+equal, bit for bit, to the eight-row kernel before it was timed.
+
+Conclusion: nothing exact was faster. The Q5_0 kernel's gap to Q4_K is its 32-weight block: the
+fold is 40 % of its instructions and cannot be amortised without a sixteen-row tile, which the
+engine's eight-row store, the aarch64 kernel's identical layout and the pack cache all fix.

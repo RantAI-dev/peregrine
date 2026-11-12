@@ -1,0 +1,60 @@
+Part 1: the fork's wide pass against its own narrow one, and against llama.cpp v0.9.0.
+Llama 3.2 1B Instruct Q4_K_M, -c 512, -t 4, --chunks 40, 255 predicted tokens per chunk.
+The base run wrote --save-all-logits; the compared run read it with --kl-divergence.
+
+Final estimates (perplexity over the 40 chunks)
+-----------------------------------------------
+fork        ub 512   38.7171 +/- 1.29588     (base for the two fork rows below)
+fork        ub  16   38.7359 +/- 1.29655
+llama.cpp   ub 512   38.7551 +/- 1.29584     (base for the two llama.cpp rows below)
+llama.cpp   ub  16   38.7618 +/- 1.29593
+
+fork, ub 16 against the fork's ub 512
+-------------------------------------
+Mean PPL(Q)                   :  38.735887 +/-   1.296554
+Mean PPL(base)                :  38.717134 +/-   1.295884
+Mean PPL(Q)/PPL(base)         :   1.000484 +/-   0.000512
+Mean PPL(Q)-PPL(base)         :   0.018753 +/-   0.019822
+Mean    KLD:   0.001087 +/-   0.000012
+Mean    dp: -0.007 +/- 0.006 %
+RMS dp    :  0.634 +/- 0.018 %
+Same top p: 97.873 +/- 0.143 %
+99.0%   KLD:   0.005105
+95.0%   KLD:   0.002796
+90.0%   KLD:   0.002117
+Median  KLD:   0.000876
+10.0%   KLD:   0.000063
+ 1.0%   KLD:  -0.000008
+Minimum KLD:  -0.000120
+
+llama.cpp v0.9.0, ub 16 against its own ub 512
+----------------------------------------------
+Mean PPL(Q)                   :  38.761845 +/-   1.295925
+Mean PPL(base)                :  38.753325 +/-   1.295711
+Mean PPL(Q)/PPL(base)         :   1.000220 +/-   0.000861
+Mean    KLD:   0.003169 +/-   0.000032
+RMS dp    :  1.069 +/- 0.029 %
+Same top p: 96.559 +/- 0.180 %
+
+llama.cpp v0.9.0 at ub 512 against the fork at ub 512
+-----------------------------------------------------
+Mean PPL(Q)                   :  38.755088 +/-   1.295837
+Mean PPL(base)                :  38.717134 +/-   1.295884
+Mean PPL(Q)/PPL(base)         :   1.000980 +/-   0.000871
+Mean    KLD:   0.003018 +/-   0.000033
+RMS dp    :  1.046 +/- 0.025 %
+Same top p: 96.520 +/- 0.181 %
+
+llama.cpp v0.9.0 at ub 16 against the fork at ub 16
+---------------------------------------------------
+Mean PPL(Q)                   :  38.761845 +/-   1.295925
+Mean PPL(base)                :  38.735898 +/-   1.296554
+Mean PPL(Q)/PPL(base)         :   1.000670 +/-   0.000846
+Mean    KLD:   0.002863 +/-   0.000032
+RMS dp    :  1.048 +/- 0.027 %
+Same top p: 96.716 +/- 0.176 %
+
+For the scale: docs/targets.md measures this model's Q4_K_M against the unquantised model at
+Mean KLD 0.00248 on wikitext-2 (-c 512, 40 chunks, 8 threads). The fork's pass-width change is
+0.001087, i.e. 44 % of the whole quantisation error, and llama.cpp's own pass-width change is
+0.003169, i.e. larger than the quantisation error the model was chosen for.
