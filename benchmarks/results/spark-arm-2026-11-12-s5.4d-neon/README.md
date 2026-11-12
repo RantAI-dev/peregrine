@@ -217,7 +217,10 @@ The raw runs are `neonbench-4096x512-1t.txt`, `-10t.txt`,
 Q4_K/Q6_K/Q5_0 tensors and a **resident form of 1 274 363 904 bytes (1.187 GiB,
 1.0312 bytes per weight)**. The whole file is 799 592 448 bytes (0.745 GiB), so
 the form costs +0.44 GiB on the 1B — the same number S5.4a measured on x86, as
-it must be: the form's geometry does not depend on the tier.
+it must be: the form's geometry does not depend on the tier. That 1.187 GiB is the form for all
+three formats, which is what S5.4a's table measures. The option as built by S5.4b carries Q4_K
+and Q6_K only, and that form is **957.0 MiB** on the same file (S5.4b's measurement; the
+geometry is tier-independent, so the ARM figure is the same).
 
 ## What surprised
 

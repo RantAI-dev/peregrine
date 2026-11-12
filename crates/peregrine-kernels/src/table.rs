@@ -368,6 +368,87 @@ impl MatKernels {
         }
     }
 
+    /// The resident 8-bit prompt form of one run of eight output rows against a
+    /// batch of activation rows (`crate::kq8`, S5.4a; dispatched here since
+    /// S5.4b).
+    ///
+    /// `form` is one run of eight rows over `n_sb` 256-weight super-blocks, as
+    /// the load-time builder lays it out; `out[b · 8 + r]` receives output row
+    /// `r` for activation row `b`. The form is format-agnostic (Q4_K and Q6_K
+    /// produce the same object), so one entry point multiplies both.
+    ///
+    /// The AVX-512 body is `crate::kqsimd::q8k_gemm_zmm`; every other tier
+    /// runs the scalar twin, [`crate::kq8::gemm_q8k`] (AVX2 and NEON bodies are
+    /// S5.4d). The two are bit-identical on the same tier
+    /// (`crates/peregrine-kernels/src/kqsimd.rs`'s tests), so this choice moves
+    /// time, never a number.
+    pub fn q8k_gemm(&self, form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+        assert!(
+            form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+            "the form holds fewer than n_sb super-blocks"
+        );
+        assert!(nb <= acts.rows, "more activations than the buffer holds");
+        assert!(
+            out.len() >= nb * crate::kq8::Q8K_ROWS,
+            "the output holds fewer than eight rows per activation"
+        );
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        if crate::kqsimd::have_zmm512() {
+            // SAFETY: `have_zmm512()` checked; `q8k_gemm_zmm` checks the same
+            // bounds this wrapper does.
+            unsafe { crate::kqsimd::q8k_gemm_zmm(form, n_sb, acts, nb, out) };
+            return;
+        }
+        crate::kq8::gemm_q8k(form, n_sb, acts, nb, out)
+    }
+
+    /// Build the 8-bit form of `n_sb` super-blocks from a repacked eight-row tile:
+    /// the AVX-512 builder when the tier has it, the scalar twin otherwise (S5.4b).
+    ///
+    /// Both write the same bytes: the conformance test in `crate::kq8` and the
+    /// per-weight bound hold either way.
+    pub fn q8k_build(&self, kind: Format, tile: &[u8], n_sb: usize, form: &mut [u8]) {
+        assert!(
+            matches!(kind, Format::Q4_K | Format::Q6_K),
+            "only Q4_K and Q6_K have an 8-bit form in this step"
+        );
+        assert!(
+            form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+            "the form holds fewer than n_sb super-blocks"
+        );
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        if crate::kqsimd::have_zmm512() {
+            // SAFETY: `have_zmm512()` checked; both builders check the tile's and
+            // the form's lengths.
+            unsafe {
+                match kind {
+                    Format::Q4_K => crate::kqsimd::q8k_build_q4k_zmm(tile, n_sb, form),
+                    _ => crate::kqsimd::q8k_build_q6k_zmm(tile, n_sb, form),
+                }
+            }
+            return;
+        }
+        match kind {
+            Format::Q4_K => crate::kq8::build_q4k(tile, n_sb, form),
+            _ => crate::kq8::build_q6k(tile, n_sb, form),
+        }
+    }
+
+    /// Whether the 8-bit prompt form has a SIMD body on this tier (AVX-512 today).
+    ///
+    /// A tier without one runs the mode correctly through the scalar twin, just
+    /// no faster than the exact kernel; the option's startup line says so.
+    pub fn q8k_simd(&self) -> bool {
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        {
+            crate::kqsimd::have_zmm512()
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
+        {
+            false
+        }
+    }
+
     /// Eight rows of a repacked Q6_K tile against a batch of four or more
     /// activations, through the interleaved layout.
     ///

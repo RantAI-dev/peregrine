@@ -22,6 +22,17 @@ All notable changes to this project are documented here. The format follows
   8 192-weight streamed shape (0.63–0.70× for Q4_K), and costs 1.187 GiB on Llama 3.2 1B.
   **Nothing is wired in**: no default-path file changes and no golden moves. Numbers:
   `benchmarks/results/spark-arm-2026-11-12-s5.4d-neon/`.
+- **`--fast-prompt`, the opt-in 8-bit prompt pass (S5.4b)**: with the option on, a prompt
+  row's Q4_K and Q6_K weights are read from an 8-bit form built once per matrix at load
+  (one f32 scale and one int8 code per weight, per 256-weight super-block), while generated
+  tokens, embeddings, rerank and decisions keep the exact kernels. `PEREGRINE_FAST_PROMPT=1`
+  or `--opt FAST_PROMPT=1` is the engine switch; `peregrine serve`, `run` and `bench` take
+  `--fast-prompt`. Off by default: with it off nothing moves by a bit or a millisecond (the
+  activation's whole-block sums are built only when it is on). The form costs 957 MiB on
+  Llama 3.2 1B Q4_K_M and is built in about half a second on AVX-512; a tier without a SIMD
+  body (AVX2, NEON) runs the mode correctly through the scalar twin, no faster. The accuracy
+  report is S5.4c. Design: `docs/design/s5.4-fast-prompt.md` §5b; first-look numbers:
+  `benchmarks/results/desktop-zen5-2026-11-12-s5.4b/`.
 - **The 8-bit prompt kernel (S5.4a)**, the first build step of the opt-in fast prompt mode:
   `crates/peregrine-kernels/src/kq8.rs` holds the form's layout, its scalar twin and the
   requantisation, `kqsimd.rs` the AVX-512 bodies of both (asserted bit for bit equal to the twin
@@ -64,6 +75,32 @@ All notable changes to this project are documented here. The format follows
   cell — Peregrine's embedding pass budget is 32 rows, so that request is several weight
   passes). `nomic-bert-moe` (nomic-embed-text-v2-moe) and the jina BERT variants are not
   in this step; a `nomic-bert-moe` file is refused by name as roadmap S4.8b.
+
+- **The `jina-bert-v2` family (S4.8c)**: jina-embeddings-v2-base-en (and -small-en) are
+  served on `/v1/embeddings` and `peregrine embed`, transcribed from llama.cpp v0.9.0's
+  `LLM_ARCH_JINA_BERT_V2` graph: ALiBi's additive `slope·(−|i−j|)` attention bias instead
+  of position embeddings, the token-type row, optional per-token query/key LayerNorms, the
+  GEGLU feed-forward (separate `ffn_gate`/`ffn_up` or the fused `2·n_ff` layout), one
+  LayerNorm between the attention residual and the feed-forward plus the optional
+  `attn_norm_2`, and the layer's own output norm with no final norm. The bias is a new
+  input to the shared attention block (`peregrine_kernels::bidir::alibi_slopes`/`alibi_row`,
+  scalar, with its own tests and the whole path held bit for bit to a row-by-row
+  reference); the other families pass `None`, so their goldens did not move. On
+  jina-embeddings-v2-base-en against llama.cpp, 200 texts of 16–8180 tokens: token ids
+  identical. F16 cosine vs llama.cpp's F16 min **0.9999999**, mean **1.0000000**. Q8_0 vs
+  llama.cpp's F16 reference min **0.9993389**, mean **0.9996382** (llama.cpp's own Q8_0:
+  min 0.9992368, mean 0.9996404, so Peregrine is 2.2e-6 below on the mean, inside the S4
+  gate's 1e-4); Q8_0 vs llama.cpp's own Q8_0 min 0.9998662, mean 0.9999650. Speed on the
+  shared 8-vCPU VM (rough), 4 threads, Q8_0, cache off, five runs, texts/s: 16 tokens
+  **33.75 vs 22.55 (1.50×)**; 128 tokens **4.654 vs 4.201 (1.11×)**; 512 tokens **0.888 vs
+  0.857 (1.04×, the worst cell)**; one request of sixteen different 32-token texts **20.9
+  vs 15.8 (1.32×)**, both engines putting the whole request through (a request of sixteen
+  copies of one text answers faster still — 309 texts/s — because identical texts are
+  computed once in it, which is deduplication, not a batch ratio). Synthetic
+  goldens on scalar, AVX2 and AVX-512 under SDE, a no-allocation pass, server and CLI
+  cases, and an `#[ignore]`d real-file gate. `docs/reference/jina-bert.md` holds the
+  transcription and says what `jina-bert-v3` (RoPE, plain GELU, LoRA adapters) would take;
+  it is not built.
 
 ### Changed
 

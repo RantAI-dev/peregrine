@@ -2480,11 +2480,7 @@ pub unsafe fn q8k_gemm(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: 
     } else if crate::cpu::have_dotprod() {
         q8k_gemm_sdot(form, n_sb, acts, nb, out);
     } else {
-        for b in 0..nb {
-            for r in 0..ROWS {
-                out[b * ROWS + r] = crate::kq8::dot_q8k(form, n_sb, r, acts, b);
-            }
-        }
+        crate::kq8::gemm_q8k(form, n_sb, acts, nb, out);
     }
 }
 

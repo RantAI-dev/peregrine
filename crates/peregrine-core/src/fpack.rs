@@ -234,6 +234,7 @@ mod tests {
             kind,
             offset: 0,
             tile_off: None,
+            q8_off: None,
             kq_off: None,
             fp_off: None,
             fp_kind: None,
