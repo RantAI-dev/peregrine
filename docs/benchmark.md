@@ -191,10 +191,11 @@ The other four gate models: 0.0026-0.0171 nats. Task scores (GSM8K/MMLU/HumanEva
 gate models) are not significantly different from the default engine's in any cell (largest
 +7.5 points at n = 80, all McNemar p ≥ 0.15). The mode costs +957 MiB of resident memory and
 0.5-1.7 s of load on the 1B; decode is unchanged (63.1 → 64.5 tok/s after the prompt).
-It stays off by default. These are the AVX-512 numbers; on AVX2 the same mode is
-**0.88-0.92× the exact mode** (the 8-bit dot needs four instructions per 32 products there,
-the 4-bit kernel chains eight deep), so the mode is an AVX-512-and-ARM trade, not an x86 one
-(`benchmarks/results/bluefin-2026-11-12-s5.4d/`).
+It stays off by default. These are the AVX-512 numbers, where the mode takes Q4_K and Q6_K;
+which formats take the form is per tier (S5.4f): AVX2 takes Q6_K only (a fast prompt is
+**1.05-1.08×** the exact one on the 1B there, `benchmarks/results/bluefin-2026-11-12-s5.4f/`),
+aarch64 takes Q4_K and Q6_K, and a tier with no SIMD body takes none, so the option changes
+nothing there.
 
 ## Bonsai 2 (ternary) vs PrismML's fork
 

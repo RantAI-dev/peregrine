@@ -42,6 +42,23 @@
 
 use crate::format::{f16, Format};
 
+/// Whether the fast prompt mode needs the per-256 activation layout of a row that
+/// is `n` weights wide padded to a whole super-block (S5.4f).
+///
+/// Q5_0's file blocks are 32 weights and its matrices may stop inside a
+/// super-block — Qwen 2.5 0.5B's are 896 wide, three and a half. The form's
+/// kernel reads one scale per 256 weights, so its activation is built over four
+/// super-blocks with the missing codes zero (and the form's missing codes zero
+/// too, so the padded lanes contribute nothing). Only a tier that actually uses
+/// the Q5_0 form pays this; with the option off or the format outside the tier's
+/// table, the layout is exactly what it was.
+#[inline]
+fn pad_k_layout(n: usize) -> bool {
+    !n.is_multiple_of(256)
+        && crate::options::get().fast_prompt
+        && crate::table::MatKernels::get().q8k_uses_form(Format::Q5_0)
+}
+
 /// An activation vector quantised to int8 in blocks of 32.
 ///
 /// Built once per matmul and shared across every output row — that sharing is what
@@ -462,17 +479,27 @@ impl QuantAct {
         self.dk.clear();
         self.bsums.clear();
         let mut codes = [0i8; 32];
-        if self.k_layout && x.len().is_multiple_of(256) {
-            for blk in x.chunks_exact(256) {
+        if self.k_layout && (x.len().is_multiple_of(256) || pad_k_layout(x.len())) {
+            let n_sb = x.len().div_ceil(256);
+            for sb in 0..n_sb {
+                let lo = sb * 256;
+                let blk = &x[lo..(lo + 256).min(x.len())];
                 let amax = crate::simd::absmax(blk);
                 let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
                 let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+                let mut halves = 0;
                 for half in blk.chunks_exact(32) {
                     crate::simd::quantize32(half.as_ptr(), inv, codes.as_mut_ptr());
                     self.qk.extend_from_slice(&codes);
                     for run in codes.chunks_exact(16) {
                         self.bsums.push(run.iter().map(|&q| q as i16).sum());
                     }
+                    halves += 1;
+                }
+                for _ in halves..8 {
+                    self.qk.extend_from_slice(&[0i8; 32]);
+                    self.bsums.push(0);
+                    self.bsums.push(0);
                 }
                 self.dk.push(d);
             }
@@ -518,17 +545,27 @@ impl QuantAct {
         self.dk.clear();
         self.bsums.clear();
         let mut codes = [0i8; 32];
-        if self.k_layout && x.len().is_multiple_of(256) {
-            for blk in x.chunks_exact(256) {
+        if self.k_layout && (x.len().is_multiple_of(256) || pad_k_layout(x.len())) {
+            let n_sb = x.len().div_ceil(256);
+            for sb in 0..n_sb {
+                let lo = sb * 256;
+                let blk = &x[lo..(lo + 256).min(x.len())];
                 let amax = crate::neon::absmax(blk);
                 let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
                 let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+                let mut halves = 0;
                 for half in blk.chunks_exact(32) {
                     crate::neon::quantize32(half.as_ptr(), inv, codes.as_mut_ptr());
                     self.qk.extend_from_slice(&codes);
                     for run in codes.chunks_exact(16) {
                         self.bsums.push(run.iter().map(|&q| q as i16).sum());
                     }
+                    halves += 1;
+                }
+                for _ in halves..8 {
+                    self.qk.extend_from_slice(&[0i8; 32]);
+                    self.bsums.push(0);
+                    self.bsums.push(0);
                 }
                 self.dk.push(d);
             }
@@ -722,11 +759,15 @@ impl QuantAct {
         self.dk.clear();
         self.bsums.clear();
 
-        if self.k_layout && x.len().is_multiple_of(256) {
-            for blk in x.chunks_exact(256) {
+        if self.k_layout && (x.len().is_multiple_of(256) || pad_k_layout(x.len())) {
+            let n_sb = x.len().div_ceil(256);
+            for sb in 0..n_sb {
+                let lo = sb * 256;
+                let blk = &x[lo..(lo + 256).min(x.len())];
                 let amax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
                 let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
                 let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+                let mut runs = 0;
                 for run in blk.chunks_exact(16) {
                     let mut s = 0i16;
                     for &v in run {
@@ -735,6 +776,11 @@ impl QuantAct {
                         s += q as i16;
                     }
                     self.bsums.push(s);
+                    runs += 1;
+                }
+                for _ in runs..16 {
+                    self.qk.extend_from_slice(&[0i8; 16]);
+                    self.bsums.push(0);
                 }
                 self.dk.push(d);
             }

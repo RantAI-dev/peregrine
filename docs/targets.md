@@ -132,8 +132,8 @@ addition is smaller than the run's own error, not an improvement. The design's s
 and corpus when its repacked path is on (`-rtr`); the 0.000945 that the bound was taken from is the fork's *default*
 wide path, a finer `Q8_1`/`Q8_0` conversion (design §5c, results README §4). Task scores (GSM8K/MMLU/HumanEval+,
 `benchmarks/accuracy/`) move by at most +7.5 points at n = 80, every paired McNemar p ≥ 0.15. Prompt speed is
-1.18-1.46× the default engine's in the eight measured cells (AVX-512; on AVX2 the mode is slower than
-the exact kernel and stays off, S5.4d); the ratio against ik_llama.cpp is in
+1.18-1.46× the default engine's in the eight measured cells (AVX-512; the per-tier format table of
+S5.4f keeps the mode to Q6_K on AVX2, where it is 1.05-1.08× the exact engine on the 1B); the ratio against ik_llama.cpp is in
 `docs/benchmark.md`.
 
 ## 2. Speed

@@ -269,9 +269,9 @@ engines at their best defaults: `llama-bench -p N -n 0 -t T`, ik at its defaults
 | Qwen3 1.7B | 4096 | 12 | 163.5 | 200.4 | 214.0 | 253.5 | 125.4 | **1.23×** | **0.94×** | **0.79×** | 1.60× |
 | Qwen3 1.7B | 4096 | 1 | 25.8 | 31.9 | 32.0 | 37.3 | 20.7 | **1.24×** | **1.00×** | **0.85×** | 1.54× |
 
-Prompt tok/s, medians, **AVX-512** (on AVX2 the mode is 0.88-0.92× the exact mode — S5.4d,
-`benchmarks/results/bluefin-2026-11-12-s5.4d/` — which is why the help text says AVX-512 for
-the faster prompts). **Every cell below 1.0 is named, not hidden:**
+Prompt tok/s, medians, **AVX-512**, where the mode takes Q4_K and Q6_K (the tier table of
+S5.4f, §5g, keeps it to Q6_K on AVX2 and to nothing on a tier with no SIMD body; on AVX2 a
+fast prompt is 1.05-1.08× the exact one on the 1B — `benchmarks/results/bluefin-2026-11-12-s5.4f/`). **Every cell below 1.0 is named, not hidden:**
 `fast ÷ ik -rtr` is below 1.0 in **all eight** cells (0.74-0.94×) — the fork's fastest
 prompt path is still 6-26 % ahead of the fast mode. `fast ÷ ik (defaults)` is below 1.0 in
 **six of eight** (0.90-1.00×, the exceptions are the two 1-thread 512-token cells at
@@ -364,8 +364,11 @@ one byte per weight more than the file.
   | §4 item 4: Qwen 2.5 0.5B, option on, `scripts/tool-e2e.py` | same calls as the default engine? |
   |---|---|
   | — (the project lead's; **not measured in S5.4c**) | — |
-* Q5_0's form (§6): still not wired in, so Qwen2.5 0.5B's and Gemma 3 1B's Q5_0 tensors
-  stay exact; this report does not cover a Q5_0 fast mode.
+* Q5_0's form: S5.4f added it but **no x86 tier selects it**, so Qwen2.5 0.5B's, Gemma 3
+  1B's and SmolLM2's Q5_0 tensors stay exact and this report does not cover a Q5_0 fast
+  mode. S5.4f's per-tier format table (§5g) leaves the **AVX-512 set as measured here** —
+  Q4_K and Q6_K — so these numbers describe the merged tree's AVX-512 behaviour; the spot
+  check in `raw/spot/` re-measured two models after the merge and matches.
 * The full task sets (250/500/163) on all four models: the subset the README documents,
   with a smaller Qwen3 subset, on a host shared with another worker.
 * Five runs for the two 4096-token 1-thread cells: three, for the reason in §6.

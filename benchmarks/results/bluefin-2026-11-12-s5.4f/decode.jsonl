@@ -1,0 +1,10 @@
+{"round": 1, "mode": "exact", "prefill_tok_s": 226.2377709155826, "decode_tok_s": 46.64810466666151}
+{"round": 1, "mode": "fast", "prefill_tok_s": 240.9729522413616, "decode_tok_s": 46.25208333295092}
+{"round": 2, "mode": "fast", "prefill_tok_s": 239.36604012735006, "decode_tok_s": 46.69184321980974}
+{"round": 2, "mode": "exact", "prefill_tok_s": 224.86391757243484, "decode_tok_s": 46.71701539470919}
+{"round": 3, "mode": "exact", "prefill_tok_s": 225.70556928637686, "decode_tok_s": 46.40976494869551}
+{"round": 3, "mode": "fast", "prefill_tok_s": 230.84038416162772, "decode_tok_s": 46.40393106029565}
+{"round": 4, "mode": "fast", "prefill_tok_s": 229.36355033731815, "decode_tok_s": 46.60818258322073}
+{"round": 4, "mode": "exact", "prefill_tok_s": 223.33894944276418, "decode_tok_s": 46.79852072859383}
+{"round": 5, "mode": "exact", "prefill_tok_s": 224.47573480594, "decode_tok_s": 46.63604637134017}
+{"round": 5, "mode": "fast", "prefill_tok_s": 240.30429195560438, "decode_tok_s": 46.48353482599594}

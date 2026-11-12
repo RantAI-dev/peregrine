@@ -333,6 +333,32 @@ pub fn fast_prompt_body() -> Option<&'static str> {
     peregrine_kernels::table::MatKernels::get().q8k_body()
 }
 
+/// The weight formats whose prompt rows take the 8-bit form on this tier (S5.4f).
+///
+/// Empty where the tier has no faster 8-bit kernel: the option then computes
+/// exactly what the exact engine computes, and the startup line says so.
+pub fn fast_prompt_formats() -> &'static [peregrine_kernels::format::Format] {
+    peregrine_kernels::table::MatKernels::get().q8k_formats()
+}
+
+/// [`fast_prompt_formats`] as the human-readable list the startup line, `peregrine
+/// tier` and the option's help quote (`"Q6_K and Q5_0"`, or `"none"`).
+pub fn fast_prompt_format_list() -> String {
+    let formats = fast_prompt_formats();
+    match formats {
+        [] => "none".to_string(),
+        [one] => one.label().to_string(),
+        [.., last] => {
+            let head = formats[..formats.len() - 1]
+                .iter()
+                .map(|f| f.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{head} and {}", last.label())
+        }
+    }
+}
+
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 /// The k-quant repack is on by default on every tier, the AVX-512 tier included
 /// ([`EngineOptions::kq_repack_note`] says whether the switch overrode it).
@@ -390,13 +416,14 @@ pub struct EngineOptions {
     pub tb_span: usize,
     /// `PEREGRINE_EXACT=1`: ternary matmuls in f32 against decoded weights (slow reference path).
     pub exact: bool,
-    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): the Q4_K and Q6_K weights of a
-    /// *prompt* row are read from an 8-bit form built at load, one scale per 256
-    /// weights, instead of the file's own codes. Prompt passes get 1.18-1.46× faster
-    /// on AVX-512 (0.88-0.92× on AVX2, where the exact Q4_K kernel is the stronger
-    /// one — S5.4d) and their logits move: on Llama 3.2 1B Q4_K_M, measured on
-    /// AVX-512, the prompt's mean KL divergence from the default engine is 0.0035 and
-    /// 96.7 % of positions keep the same top token (the report:
+    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): a *prompt* row reads the weights
+    /// of the formats whose 8-bit form beats this CPU tier's exact kernel from a form
+    /// built at load (AVX-512: Q4_K and Q6_K, one f32 scale per 256 weights; AVX2:
+    /// Q6_K; a tier with no SIMD body: none, so the option computes exactly what the
+    /// exact engine computes). Prompt passes get 1.18-1.46× faster on AVX-512
+    /// (1.05-1.08× on an AVX2 host, S5.4f) and their logits move: on Llama 3.2 1B
+    /// Q4_K_M, measured on AVX-512, the prompt's mean KL divergence from the default
+    /// engine is 0.0035 and 96.7 % of positions keep the same top token (the report:
     /// `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`). Generated rows keep the
     /// exact kernels, on a cache the 8-bit prompt wrote; embeddings, rerank and
     /// decisions keep the exact kernels throughout. Off by default (ADR 0003);
@@ -948,6 +975,7 @@ impl EngineOptions {
             exact: self.exact,
             kq_repack: self.kq_repack,
             fpack: self.fpack,
+            fast_prompt: self.fast_prompt,
         }
     }
 }
