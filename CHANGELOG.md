@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The fast prompt pass at long prompts on ARM: the account, and it is attention (S5.4k)**:
+  S5.4h left `--fast-prompt` behind ik_llama.cpp at 4 096-token prompts (Qwen 2.5 0.5B 0.86× at
+  one thread, 0.91× at ten; Llama 3.2 1B 0.74× at ten) and named the form's 385.9 MiB of
+  resident bytes as the suspect. The engine's own stage timers at 512 and 4 096 tokens, one
+  thread and ten, say otherwise: the form's weight matmul runs at the same rate at both lengths
+  (Q5_0 204-225 GMAC/s at 4 096 against 199-221 at 512; Q4_K/Q6_K 268-279), which is 80-91 % of
+  its hot-tile kernel-table rate — the rest is streaming the form once per chunk, not the
+  activation's preparation (1.8-1.9 % of the pass) and not the chunk (64-512 within 1 % at one
+  thread). What grows is **attention**: 19.5 % → 65.1 % of a one-thread Qwen pass and 13.5 % →
+  54.5 % on the 1B, because its MACs are O(n²); the score half runs at 35 GMAC/s and the value
+  mix at 18-23, the S4.9s/S4.9t rates, and the four-row bodies do fire. At ten threads the pass
+  is half caller wait on a host with a co-tenant (load 4-14). End to end the fast mode is
+  **1.31-1.75× ik on the 512-token cells** and 1.28× on the 1B at 4 096/1; below 1.0, all at
+  4 096 tokens: Qwen 0.94× at one thread (attention is 65 % of that pass; 20 % faster score and
+  mix kernels would make it 1.04×), Qwen 0.78× at ten and Llama 0.94× at ten (both on a loaded
+  host whose ik rounds spread 1.7×). Against llama.cpp the mode is 1.60-6.87× on all eight
+  cells. **No engine file changed**: the account names the next step (a new loop shape on the
+  attention kernels) rather than taking a 2.4 % one. ik's aarch64 wide path is read from its
+  source: it expands the file's k-quant codes to eight-bit in registers per 32 weights and
+  streams 0.5625/0.8125 bytes per weight, so its 4 096-token win is its CPU flash attention, not
+  its matmul. Numbers, scripts and the eight cells:
+  `benchmarks/results/spark-arm-2026-11-12-s5.4k/`; design §5m.
 - **Windows has its own goldens, and both systems compare theirs on every pull request (S7.4).** The
   synthetic set for Windows' three x86-64 tiers (scalar, AVX2 and AVX-512) and its session fixture
   were recorded on `windows-2025` by the **Record goldens** workflow, which now takes an `isa` input

@@ -1,0 +1,17 @@
+chunk 64 4096/1    175.1 tok/s  matmul   6.44 s  attn  15.20 s
+chunk 128 4096/1    176.6 tok/s  matmul   6.31 s  attn  15.14 s
+chunk 256 4096/1    177.0 tok/s  matmul   6.27 s  attn  15.11 s
+chunk 512 4096/1    176.5 tok/s  matmul   6.29 s  attn  15.12 s
+load1 4.07
+threads 1 4096    176.2 tok/s  matmul   6.30 s  attn  15.14 s
+threads 2 4096    349.0 tok/s  matmul   3.27 s  attn   7.54 s
+threads 4 4096    593.8 tok/s  matmul   2.05 s  attn   4.14 s
+threads 6 4096    793.0 tok/s  matmul   1.60 s  attn   2.88 s
+threads 8 4096    879.3 tok/s  matmul   1.58 s  attn   2.36 s
+threads 10 4096    542.9 tok/s  matmul   2.34 s  attn   3.09 s
+load1 4.59
+chunk 64 4096/1    107.9 tok/s  matmul  15.27 s  attn  20.43 s
+chunk 128 4096/1    110.1 tok/s  matmul  14.65 s  attn  20.27 s
+chunk 256 4096/1    110.6 tok/s  matmul  14.56 s  attn  20.19 s
+chunk 512 4096/1    110.7 tok/s  matmul  14.56 s  attn  20.13 s
+load1 6.49
