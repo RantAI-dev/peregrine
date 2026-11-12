@@ -1,0 +1,7 @@
+# The five large float encoders, from their public repositories (2026-11-13).
+# Sizes in bytes and SHA-256 of the exact files measured; all under ~/models.
+1157671200  daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a501e3062c  bge-m3-FP16.gguf                      (gpustack/bge-m3-GGUF, F16; 1097.5 MiB, 24 blocks, d 1024, ff 4096, 8192 ctx)
+1217982432  a3125072128fc76d1c1d8d19f7b095c7e3bfbf00594dcf8a8bd3bcb334935d57  embeddinggemma-300M-F32.gguf          (unsloth/embeddinggemma-300m-GGUF, F32; 1155.3 MiB, 24 blocks, d 768, ff 1152, 2048 ctx)
+ 299876992  2cda419ce09e87b1dd5294177a1c7d563e9536700e33652a9bb9e9c503c4e437  gte-modernbert-base-F16.gguf          (local; F16; 284.3 MiB, 22 blocks, d 768, ff 1152, 8192 ctx)
+ 274290560  f7af6f66802f4df86eda10fe9bbcfc75c39562bed48ef6ace719a251cf1c2fdb  nomic-embed-text-v1.5.f16.gguf        (nomic-ai/nomic-embed-text-v1.5-GGUF, F16; 260.9 MiB, 12 blocks, d 768, ff 3072, 2048 ctx)
+ 274367296  27cbf1ef2fa3c9f982cf71c02922f961fcdee172a33b3838bba1f1d1079e8dbc  jina-embeddings-v2-base-en-f16.gguf   (second-state/jina-embeddings-v2-base-en-gguf, F16; 261.0 MiB, 12 blocks, d 768, ff 3072, 8192 ctx)

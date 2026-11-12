@@ -29,7 +29,20 @@ All notable changes to this project are documented here. The format follows
   texts; a 128-token text is one pass either way, so the 128-token cells do not move). Tables,
   both engines' own profiles, file hashes and commands:
   `benchmarks/results/bluefin-2026-11-12-s4.9u/` and the re-read's
-  `benchmarks/results/bluefin-2026-11-13-s4.9u-merge/`; design §24.
+  `benchmarks/results/bluefin-2026-11-13-s4.9u-merge/`; design §25.
+- **The pass width of large float encoders is right for ARM (S4.9, measured)**: #251 gave a
+  bidirectional encoder whose weights are all float and larger than 256 MiB 128 rows per pass
+  instead of 32, measured on x86 only. Re-measured on the ARM host with both settings of one
+  build (`--opt PASS_ROWS=32` against `128`, alternating inside every round, cache off, fresh
+  texts per request) on five such encoders — bge-m3 F16, EmbeddingGemma 300M F32,
+  gte-modernbert-base F16, nomic-embed-text v1.5 F16 (260.9 MiB) and jina-embeddings-v2-base-en
+  F16 (261.0 MiB) — the rule holds: at one thread the single-text cells are level (0.996-1.008,
+  a text is never split) and every batch gains, **16 × 32 tokens 1.084-1.289**, 32 × 128
+  1.038-1.081, 8 × 512 1.064-1.142, the mixed batch 1.004-1.010. The ten-thread cells are
+  host-contaminated (load 5.7-32.5); the two below 1.0 there (bge-m3 512 0.817, jina 8 × 512
+  0.896) are 0.999 and 1.085 at one thread. **No code changed and no golden moved**: the pass
+  budget is scheduling, and the size rule is the smallest that fits. Numbers and harness:
+  `benchmarks/results/spark-arm-2026-11-12-pass-rows/`; design §24.
 - **The fast prompt pass at long prompts on ARM: the account, and it is attention (S5.4k)**:
   S5.4h left `--fast-prompt` behind ik_llama.cpp at 4 096-token prompts (Qwen 2.5 0.5B 0.86× at
   one thread, 0.91× at ten; Llama 3.2 1B 0.74× at ten) and named the form's 385.9 MiB of
@@ -247,6 +260,28 @@ All notable changes to this project are documented here. The format follows
   `docs/design/s5-prefill-avx512.md` §13.
 
 ### Added
+
+- **Constrained decoding and `response_format` (S6.6a)**: `POST /v1/chat/completions` accepts
+  OpenAI's `response_format`: `{"type": "json_object"}` or a JSON Schema document
+  (`{"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`), and the sampler may
+  only pick tokens that keep the reply a valid prefix of that document. The forward pass is
+  untouched: logits are bit-for-bit what they were and the mask is applied between them and the
+  sampler, so an unconstrained request takes exactly today's path. A new dependency-free module,
+  `peregrine_core::constrain`, holds the schema compiler, an incremental byte-level matcher that
+  tracks UTF-8 and surrogate pairs across token boundaries, and a token mask over a vocabulary
+  byte trie with precomputed plain-string bitsets. Supported keywords, and everything refused by
+  name with its JSON pointer, are in `docs/compat.md`; the design is
+  `docs/design/s6.6-constrained-decoding.md`. `peregrine run` gains `--json-schema FILE` and
+  `--json-object`. A constrained slot does not speculate; a reasoning model with thinking on is
+  refused rather than constrained in the wrong span. Measured: 100 % of self-ended replies on
+  200 requests per model over 10 schemas validate (Qwen 2.5 0.5B and Llama 3.2 1B, against
+  llama.cpp v0.9.0's 198/198 and 187/187); the warm mask is 0.14-0.17 ms per token (0.3-0.7 % of a
+  decode step) and decode throughput is 0.99-1.03× the unconstrained engine across
+  json_object/medium/large schemas; the one-time vocabulary preparation is 187-221 ms median on
+  this host (148 ms when it is not saturated). Against llama.cpp v0.9.0 on the same requests,
+  Peregrine is 1.285× (Qwen) and 1.134× (Llama) its tokens/s and closes every object where
+  llama.cpp cut 2/200 (Qwen) and 13/200 (Llama) on `max_tokens`. Results:
+  `benchmarks/results/shiro-2026-11-12-s6.6a/`.
 
 - **The `nomic-bert-moe` family: nomic-embed-text-v2-moe (S4.8b)**: a GGUF with
   `general.architecture = "nomic-bert-moe"` now loads and serves `/v1/embeddings` and

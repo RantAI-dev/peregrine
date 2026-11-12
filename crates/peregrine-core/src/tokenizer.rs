@@ -2339,6 +2339,12 @@ impl Tokenizer {
         self.specials.iter().any(|(_, i)| *i == id)
     }
 
+    /// Every control / user-defined / unknown token id, for a caller that tests the whole
+    /// vocabulary (the constrained-decoding mask) in one pass.
+    pub fn special_ids(&self) -> Vec<u32> {
+        self.specials.iter().map(|&(_, id)| id).collect()
+    }
+
     pub fn piece(&self, id: u32) -> &str {
         self.pieces
             .get(id as usize)
