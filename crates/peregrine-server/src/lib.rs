@@ -284,7 +284,7 @@ pub async fn run(a: Args) {
              form ({}); results differ from the exact mode, generated tokens, embeddings, \
              rerank and decisions stay exact",
             if peregrine_core::options::fast_prompt_simd() {
-                "AVX-512 body"
+                peregrine_core::options::fast_prompt_body()
             } else {
                 "scalar twin: correct, but not faster than the exact kernels on this tier"
             }

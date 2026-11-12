@@ -377,11 +377,12 @@ impl MatKernels {
     /// `r` for activation row `b`. The form is format-agnostic (Q4_K and Q6_K
     /// produce the same object), so one entry point multiplies both.
     ///
-    /// The AVX-512 body is `crate::kqsimd::q8k_gemm_zmm`; every other tier
-    /// runs the scalar twin, [`crate::kq8::gemm_q8k`] (AVX2 and NEON bodies are
-    /// S5.4d). The two are bit-identical on the same tier
-    /// (`crates/peregrine-kernels/src/kqsimd.rs`'s tests), so this choice moves
-    /// time, never a number.
+    /// The AVX-512 body is `crate::kqsimd::q8k_gemm_zmm`; on aarch64 the NEON
+    /// entry point `crate::neon::q8k_gemm` picks `smmla` on `neon-i8mm` and
+    /// `sdot` on `neon-dotprod` (S5.4e); every other tier runs the scalar twin,
+    /// [`crate::kq8::gemm_q8k`] (AVX2's body is still S5.4d). All of them are
+    /// bit-identical to the twin (`crates/peregrine-kernels/src/kqsimd.rs`'s and
+    /// `neon.rs`'s tests), so this choice moves time, never a number.
     pub fn q8k_gemm(&self, form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
         assert!(
             form.len() >= n_sb * crate::kq8::Q8K_SIZE,
@@ -399,13 +400,22 @@ impl MatKernels {
             unsafe { crate::kqsimd::q8k_gemm_zmm(form, n_sb, acts, nb, out) };
             return;
         }
+        // SAFETY: `have_dotprod()` is the tier's own check (it honours
+        // `PEREGRINE_ISA`); `neon::q8k_gemm` picks `smmla` only where
+        // `have_i8mm()` holds and checks the same bounds this wrapper does.
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
+        if crate::cpu::have_dotprod() {
+            unsafe { crate::neon::q8k_gemm(form, n_sb, acts, nb, out) };
+            return;
+        }
         crate::kq8::gemm_q8k(form, n_sb, acts, nb, out)
     }
 
     /// Build the 8-bit form of `n_sb` super-blocks from a repacked eight-row tile:
-    /// the AVX-512 builder when the tier has it, the scalar twin otherwise (S5.4b).
+    /// the AVX-512 builder when the tier has it, the NEON builder on aarch64, the
+    /// scalar twin otherwise (S5.4b, S5.4e).
     ///
-    /// Both write the same bytes: the conformance test in `crate::kq8` and the
+    /// All three write the same bytes: the conformance test in `crate::kq8` and the
     /// per-weight bound hold either way.
     pub fn q8k_build(&self, kind: Format, tile: &[u8], n_sb: usize, form: &mut [u8]) {
         assert!(
@@ -428,13 +438,27 @@ impl MatKernels {
             }
             return;
         }
+        // SAFETY: `have_neon()` is the tier's own check (it honours
+        // `PEREGRINE_ISA`); both builders need only `neon` and check the tile's
+        // and the form's lengths.
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
+        if crate::cpu::have_neon() {
+            unsafe {
+                match kind {
+                    Format::Q4_K => crate::neon::q8k_build_q4k_neon(tile, n_sb, form),
+                    _ => crate::neon::q8k_build_q6k_neon(tile, n_sb, form),
+                }
+            }
+            return;
+        }
         match kind {
             Format::Q4_K => crate::kq8::build_q4k(tile, n_sb, form),
             _ => crate::kq8::build_q6k(tile, n_sb, form),
         }
     }
 
-    /// Whether the 8-bit prompt form has a SIMD body on this tier (AVX-512 today).
+    /// Whether the 8-bit prompt form has a SIMD body on this tier (AVX-512 on
+    /// x86-64; `smmla` or `sdot` on aarch64).
     ///
     /// A tier without one runs the mode correctly through the scalar twin, just
     /// no faster than the exact kernel; the option's startup line says so.
@@ -443,10 +467,35 @@ impl MatKernels {
         {
             crate::kqsimd::have_zmm512()
         }
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
+        {
+            crate::cpu::have_dotprod()
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", feature = "fmt-kquant"),
+            all(target_arch = "aarch64", feature = "fmt-kquant")
+        )))]
         {
             false
         }
+    }
+
+    /// Which body [`MatKernels::q8k_gemm`] runs on this tier, for the option's
+    /// startup line and `peregrine tier`.
+    pub fn q8k_body(&self) -> &'static str {
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        if crate::kqsimd::have_zmm512() {
+            return "AVX-512 body";
+        }
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
+        if crate::cpu::have_dotprod() {
+            return if crate::cpu::have_i8mm() {
+                "NEON smmla body"
+            } else {
+                "NEON sdot body"
+            };
+        }
+        "scalar twin: correct, but not faster than the exact kernels on this tier"
     }
 
     /// Eight rows of a repacked Q6_K tile against a batch of four or more

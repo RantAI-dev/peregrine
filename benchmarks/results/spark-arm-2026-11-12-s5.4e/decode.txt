@@ -1,0 +1,22 @@
+# 32 decode tokens after a 512-token prompt, chunk 256, 10 threads; alternate order each round
+model round order load prefill_tok_s decode_tok_s
+Llama-3.2-1B-Instruct-Q4_K_M 1 exact 29.08 237.8 27.63
+Llama-3.2-1B-Instruct-Q4_K_M 1 fast 30.27 489.6 17.08
+Qwen2.5-0.5B-Instruct-Q4_K_M 1 exact 29.29 341.4 72.71
+Qwen2.5-0.5B-Instruct-Q4_K_M 1 fast 29.29 270.0 2.37
+Llama-3.2-1B-Instruct-Q4_K_M 2 fast 28.83 543.9 46.56
+Llama-3.2-1B-Instruct-Q4_K_M 2 exact 28.83 338.8 14.38
+Qwen2.5-0.5B-Instruct-Q4_K_M 2 fast 27.72 328.7 24.09
+Qwen2.5-0.5B-Instruct-Q4_K_M 2 exact 28.46 348.7 16.86
+Llama-3.2-1B-Instruct-Q4_K_M 3 exact 28.46 343.2 40.94
+Llama-3.2-1B-Instruct-Q4_K_M 3 fast 27.14 568.4 20.14
+Qwen2.5-0.5B-Instruct-Q4_K_M 3 exact 28.17 369.0 26.34
+Qwen2.5-0.5B-Instruct-Q4_K_M 3 fast 28.17 315.4 81.32
+Llama-3.2-1B-Instruct-Q4_K_M 4 fast 27.36 391.1 73.53
+Llama-3.2-1B-Instruct-Q4_K_M 4 exact 27.36 263.1 68.76
+Qwen2.5-0.5B-Instruct-Q4_K_M 4 fast 26.37 311.6 27.67
+Qwen2.5-0.5B-Instruct-Q4_K_M 4 exact 26.37 394.4 92.9
+Llama-3.2-1B-Instruct-Q4_K_M 5 exact 25.62 298.9 33.03
+Llama-3.2-1B-Instruct-Q4_K_M 5 fast 25.62 440.8 24.49
+Qwen2.5-0.5B-Instruct-Q4_K_M 5 exact 24.45 325.4 62.63
+Qwen2.5-0.5B-Instruct-Q4_K_M 5 fast 24.45 443.1 36.88
