@@ -1014,7 +1014,7 @@ pub fn write_bert(dir: &Path, fmt: Format, seed: u64, s: BertConfig) -> PathBuf 
 /// The defaults have four layers with the converter's pattern 3: layer 0 and 3
 /// are global and layers 1 and 2 see a symmetric window of 8 (`|i - j| <= 4`),
 /// small enough that a 37-token test text is cut into several bands.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ModernBertConfig {
     pub d_model: usize,
     pub n_layer: usize,
@@ -1034,10 +1034,48 @@ pub struct ModernBertConfig {
     pub hidden_act: &'static str,
     /// `modern-bert.pooling_type`: 1 is mean, 2 is cls.
     pub pooling_type: u32,
-    /// Whether the file carries a classifier head (`cls`, `cls.norm`,
-    /// `cls.output`, `classifier.output_labels`), which this step loads and
-    /// ignores for serving.
-    pub classifier: bool,
+    /// The classifier head (`cls`, `cls.norm`, `cls.output`,
+    /// `classifier.output_labels`), when the file carries one (S4.7b).
+    pub head: Option<ModernBertHeadConfig>,
+}
+
+/// The classifier head of a synthetic `modern-bert` file (roadmap S4.7b).
+#[derive(Clone, Debug)]
+pub struct ModernBertHeadConfig {
+    /// `cls.output`'s rows: 1 is a reranker's raw score, more is a classifier.
+    pub n_out: usize,
+    /// `classifier.output_labels`; empty writes no key (a reranker).
+    pub labels: Vec<String>,
+    /// `classifier.activation`; `None` writes no key, which llama.cpp reads as the
+    /// exact (erf) GELU for this family.
+    pub activation: Option<&'static str>,
+    /// Write `cls.weight`, the dense layer.
+    pub dense: bool,
+    /// Write `cls.norm.weight`, the head's LayerNorm.
+    pub norm: bool,
+    /// Write `cls.output.weight`/`.bias`, the projection to the file's outputs.
+    pub out: bool,
+    /// `classifier.pooling_type`: `None` writes no key (mean), 2 writes cls (row 0).
+    pub pooling_type: Option<u32>,
+    /// Write `cls.bias` and `cls.norm.bias`, which llama.cpp does **not** create for
+    /// this family (`src/models/modern-bert.cpp:90-93`): a file that carries them is
+    /// read without them.
+    pub extra_biases: bool,
+}
+
+impl Default for ModernBertHeadConfig {
+    fn default() -> Self {
+        ModernBertHeadConfig {
+            n_out: 1,
+            labels: Vec::new(),
+            activation: None,
+            dense: true,
+            norm: true,
+            out: true,
+            pooling_type: None,
+            extra_biases: false,
+        }
+    }
 }
 
 impl Default for ModernBertConfig {
@@ -1054,7 +1092,7 @@ impl Default for ModernBertConfig {
             rope_base_local: 10_000.0,
             hidden_act: "gelu",
             pooling_type: 1,
-            classifier: false,
+            head: None,
         }
     }
 }
@@ -1137,18 +1175,36 @@ pub fn write_modern_bert(dir: &Path, fmt: Format, seed: u64, s: ModernBertConfig
         norm(&mut w, &mut rng, &p("ffn_norm.weight"), s.d_model);
     }
 
-    if s.classifier {
-        // `ModernBertForSequenceClassification`'s head, in llama.cpp's order:
-        // dense (`cls`), activation, `cls.norm`, then `cls.output`.
-        mat(&mut w, &mut rng, "cls.weight", s.d_model, s.d_model);
-        bias(&mut w, &mut rng, "cls.bias", s.d_model);
-        norm(&mut w, &mut rng, "cls.norm.weight", s.d_model);
-        bias(&mut w, &mut rng, "cls.norm.bias", s.d_model);
-        mat(&mut w, &mut rng, "cls.output.weight", s.d_model, 2);
-        bias(&mut w, &mut rng, "cls.output.bias", 2);
-        w.arr_str(&k("classifier.output_labels"), &["negative", "positive"]);
-        w.str(&k("classifier.activation"), "gelu");
-        w.u32(&k("classifier.pooling_type"), 2);
+    if let Some(h) = &s.head {
+        // `ModernBertForSequenceClassification`'s head, in llama.cpp's order: dense
+        // (`cls`, no bias), activation, `cls.norm` (weight only), then `cls.output`.
+        // `cls.bias` and `cls.norm.bias` exist in the transformers config only when
+        // `classifier_bias` / `norm_bias` are on, and llama.cpp creates neither; a file
+        // that carries them is read without them (`extra_biases` writes them so the
+        // tests can say so).
+        if h.dense {
+            mat(&mut w, &mut rng, "cls.weight", s.d_model, s.d_model);
+        }
+        if h.norm {
+            norm(&mut w, &mut rng, "cls.norm.weight", s.d_model);
+        }
+        if h.out {
+            mat(&mut w, &mut rng, "cls.output.weight", s.d_model, h.n_out);
+            bias(&mut w, &mut rng, "cls.output.bias", h.n_out);
+        }
+        if h.extra_biases {
+            bias(&mut w, &mut rng, "cls.bias", s.d_model);
+            bias(&mut w, &mut rng, "cls.norm.bias", s.d_model);
+        }
+        if !h.labels.is_empty() {
+            w.arr_str(&k("classifier.output_labels"), &h.labels);
+        }
+        if let Some(a) = h.activation {
+            w.str(&k("classifier.activation"), a);
+        }
+        if let Some(p) = h.pooling_type {
+            w.u32(&k("classifier.pooling_type"), p);
+        }
     }
 
     let path = dir.join(format!("modern-bert-{}.gguf", fmt.label()));

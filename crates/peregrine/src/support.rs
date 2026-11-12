@@ -76,7 +76,7 @@ pub fn support_text() -> String {
     let _ = writeln!(out, "rerank and classify:");
     let _ = writeln!(
         out,
-        "  a bert file's classifier head (cls, cls.output, classifier.output_labels), POST /v1/rerank and POST /v1/classify, peregrine rerank"
+        "  a bert or modern-bert file's classifier head (cls, cls.norm, cls.output, classifier.output_labels), POST /v1/rerank and POST /v1/classify, peregrine rerank"
     );
 
     let _ = writeln!(out, "decisions:");
@@ -151,10 +151,10 @@ gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Nom
 prompt is the one llama.cpp builds from the model's template";
 
     // 8. Rerank and classify
-    let rr_str = "a `bert` file's classifier head (`cls`, `cls.output`, \
-`classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), \
-`POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3 and bge-reranker-base checked \
-against llama.cpp v0.9.0";
+    let rr_str = "a `bert` or `modern-bert` file's classifier head (`cls`, `cls.norm`, \
+`cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, \
+`/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3, bge-reranker-base \
+and gte-reranker-modernbert-base checked against llama.cpp v0.9.0";
 
     // 8. Decision models
     let dec_str = "native decision models with a `systemone` template: the `openjev` type, \

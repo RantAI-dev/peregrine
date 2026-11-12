@@ -1,0 +1,859 @@
+{
+ "runs": 7,
+ "threads": 10,
+ "pin_cpus": "5-9,15-19",
+ "cells": [
+  "16",
+  "128",
+  "512",
+  "batch32"
+ ],
+ "models": {
+  "gte-modernbert-base-Q8_0": {
+   "path": "~/models/gte-modernbert-base-Q8_0.gguf",
+   "bytes": 160208512,
+   "engines": {
+    "peregrine-before": {
+     "cmd": "taskset -c 5-9,15-19 /var/tmp/q8probe/peregrine-before serve -m ~/models/gte-modernbert-base-Q8_0.gguf --host 127.0.0.1 --port 18211 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_BIN=/var/tmp/q8probe/peregrine-before PEREGRINE_ISA=native PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        78.359,
+        80.7955,
+        78.732,
+        78.7726,
+        78.0992,
+        78.703,
+        73.3462
+       ],
+       "median": 78.703,
+       "min": 73.3462,
+       "max": 80.7955,
+       "spread_pct": 9.47
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        12.4723,
+        12.3674,
+        12.2917,
+        12.2951,
+        12.2734,
+        12.2203,
+        12.3725
+       ],
+       "median": 12.2951,
+       "min": 12.2203,
+       "max": 12.4723,
+       "spread_pct": 2.05
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        3.1318,
+        3.1273,
+        3.1376,
+        3.1332,
+        3.1267,
+        3.1561,
+        3.1238
+       ],
+       "median": 3.1318,
+       "min": 3.1238,
+       "max": 3.1561,
+       "spread_pct": 1.03
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 512,
+       "texts_per_s": [
+        47.4814,
+        48.073,
+        47.7471,
+        47.858,
+        47.6769,
+        48.4087,
+        47.5443
+       ],
+       "median": 47.7471,
+       "min": 47.4814,
+       "max": 48.4087,
+       "spread_pct": 1.94
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 0.9998900838638132,
+       "mean": 0.9998900838638132,
+       "n": 1
+      },
+      "128": {
+       "min": 0.9999009523020053,
+       "mean": 0.9999009523020053,
+       "n": 1
+      },
+      "512": {
+       "min": 0.9997946556337507,
+       "mean": 0.9997946556337507,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9997991644641908,
+       "mean": 0.9998497662242695,
+       "n": 16
+      }
+     }
+    },
+    "peregrine-dotprod": {
+     "cmd": "taskset -c 5-9,15-19 /var/tmp/q8probe/peregrine-before serve -m ~/models/gte-modernbert-base-Q8_0.gguf --host 127.0.0.1 --port 18212 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_BIN=/var/tmp/q8probe/peregrine-before PEREGRINE_ISA=neon-dotprod PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        79.3643,
+        76.987,
+        80.0095,
+        76.8277,
+        79.0376,
+        75.8117,
+        76.1271
+       ],
+       "median": 76.987,
+       "min": 75.8117,
+       "max": 80.0095,
+       "spread_pct": 5.45
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        12.3839,
+        12.5401,
+        12.271,
+        12.432,
+        12.2344,
+        12.3419,
+        12.3041
+       ],
+       "median": 12.3419,
+       "min": 12.2344,
+       "max": 12.5401,
+       "spread_pct": 2.48
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        3.1734,
+        3.1429,
+        3.1708,
+        3.1355,
+        3.1284,
+        3.1346,
+        3.1242
+       ],
+       "median": 3.1355,
+       "min": 3.1242,
+       "max": 3.1734,
+       "spread_pct": 1.57
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 512,
+       "texts_per_s": [
+        48.6409,
+        47.7929,
+        48.7781,
+        47.6289,
+        48.0641,
+        48.1501,
+        48.3424
+       ],
+       "median": 48.1501,
+       "min": 47.6289,
+       "max": 48.7781,
+       "spread_pct": 2.39
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 0.9998900838638132,
+       "mean": 0.9998900838638132,
+       "n": 1
+      },
+      "128": {
+       "min": 0.9999009523020053,
+       "mean": 0.9999009523020053,
+       "n": 1
+      },
+      "512": {
+       "min": 0.9997946556337507,
+       "mean": 0.9997946556337507,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9997991644641908,
+       "mean": 0.9998497662242695,
+       "n": 16
+      }
+     }
+    },
+    "peregrine-neon": {
+     "cmd": "taskset -c 5-9,15-19 /var/tmp/q8probe/peregrine-before serve -m ~/models/gte-modernbert-base-Q8_0.gguf --host 127.0.0.1 --port 18213 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_BIN=/var/tmp/q8probe/peregrine-before PEREGRINE_ISA=neon PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        25.8653,
+        25.6676,
+        25.6779,
+        25.4294,
+        25.7395,
+        25.5284,
+        25.9619
+       ],
+       "median": 25.6779,
+       "min": 25.4294,
+       "max": 25.9619,
+       "spread_pct": 2.07
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        3.0937,
+        3.1165,
+        3.0961,
+        3.097,
+        3.0908,
+        3.0391,
+        3.0523
+       ],
+       "median": 3.0937,
+       "min": 3.0391,
+       "max": 3.1165,
+       "spread_pct": 2.5
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        0.8077,
+        0.7987,
+        0.8041,
+        0.7991,
+        0.7978,
+        0.8026,
+        0.7998
+       ],
+       "median": 0.7998,
+       "min": 0.7978,
+       "max": 0.8077,
+       "spread_pct": 1.24
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 512,
+       "texts_per_s": [
+        13.6224,
+        13.6469,
+        13.6889,
+        13.6698,
+        13.6546,
+        13.6548,
+        13.6279
+       ],
+       "median": 13.6546,
+       "min": 13.6224,
+       "max": 13.6889,
+       "spread_pct": 0.49
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 0.9998920302439114,
+       "mean": 0.9998920302439114,
+       "n": 1
+      },
+      "128": {
+       "min": 0.9999036862501739,
+       "mean": 0.9999036862501739,
+       "n": 1
+      },
+      "512": {
+       "min": 0.9997882281183822,
+       "mean": 0.9997882281183822,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9997990217161561,
+       "mean": 0.9998487435273395,
+       "n": 16
+      }
+     }
+    },
+    "llama.cpp": {
+     "cmd": "taskset -c 5-9,15-19 ~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/gte-modernbert-base-Q8_0.gguf --embedding --pooling cls -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18214",
+     "env": "CUDA_VISIBLE_DEVICES= PEREGRINE_BIN=/var/tmp/q8probe/peregrine-before",
+     "binary_version": "version: 0.9.0-dev (build 1, commit cd959ba)",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        70.8541,
+        76.0514,
+        72.366,
+        73.691,
+        71.3901,
+        77.0876,
+        74.8676
+       ],
+       "median": 73.691,
+       "min": 70.8541,
+       "max": 77.0876,
+       "spread_pct": 8.46
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        14.1584,
+        14.2623,
+        14.2,
+        14.2026,
+        14.108,
+        14.3492,
+        14.291
+       ],
+       "median": 14.2026,
+       "min": 14.108,
+       "max": 14.3492,
+       "spread_pct": 1.7
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        3.5966,
+        3.5996,
+        3.5719,
+        3.5942,
+        3.5781,
+        3.5857,
+        3.5843
+       ],
+       "median": 3.5857,
+       "min": 3.5719,
+       "max": 3.5996,
+       "spread_pct": 0.77
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 512,
+       "texts_per_s": [
+        62.6501,
+        63.331,
+        62.9015,
+        62.8384,
+        62.4383,
+        62.6037,
+        62.1094
+       ],
+       "median": 62.6501,
+       "min": 62.1094,
+       "max": 63.331,
+       "spread_pct": 1.95
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 1.0,
+       "mean": 1.0,
+       "n": 1
+      },
+      "128": {
+       "min": 1.0000000000000002,
+       "mean": 1.0000000000000002,
+       "n": 1
+      },
+      "512": {
+       "min": 1.0000000000000002,
+       "mean": 1.0000000000000002,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9999999999999998,
+       "mean": 1.0,
+       "n": 16
+      }
+     }
+    }
+   },
+   "texts": {
+    "16": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning",
+    "128": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history pattern grammar field server schedule node and and kernel response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field retrieval embedding question tree model channel path representation pattern capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and index for latency score history test method information solution processor country be neural report weight table server processor score country",
+    "512": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history pattern grammar field server schedule node and and kernel response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field retrieval embedding question tree model channel path representation pattern capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and index for latency score history test method information solution processor country be neural report weight table server processor score country size deployment signal semantics algorithm queue environment thread Paris deployment document database result to connection state be method server similarity state river column stream attention in evaluation it. Client search recovery stream and benchmark ranking method throughput search thread sentence field it recovery semantics size retrieval search in setting information stream field record data process container passage ranking matrix build which history protocol build for which library container design value weight number database index data request from clause path row dimension were function dimension query sentence performance module processor failure node meaning city number algorithm module speed report queue algorithm package metric server token layer sentence benchmark compiler grammar cluster capital instruction is are environment is country production word information performance deployment socket sentence suite schedule. Channel kernel attention environment production build integer algorithm tree channel information capital thread from buffer instruction container release a module speed process integer token country array signal history compiler dimension instruction as environment field machine training list similarity file latency record score with embedding is name algorithm index approach accuracy algorithm search speed evaluation sentence result image record column was vector query was schedule solution passage search list form grammar mountain failure tree data performance name at country accuracy build training inference query dimension attention capital were or search which knowledge the image layer array report error detail integer record France instruction number metric space memory image answer machine form node environment France model or capital result kernel score version field in search Paris city instruction channel database pattern test are passage an learning library transformer graph capital table similarity design was that parameter method schedule deployment knowledge to value default array sentence training protocol search data signal search structure algorithm table value grammar capital and are cycle validation noise cluster option recovery state as training algorithm training size image runtime instruction France release buffer score socket city was signal benchmark result index by instruction hardware file graph vector report schedule or by retrieval language array timeout transformer value failure by the default metric inference vector. Library token structure cycle accuracy river be row integer with client form with runtime latency server language representation request request connection space field machine capital result algorithm latency report by search recovery integer parameter float float by system city",
+    "batch32": [
+     "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history",
+     "response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field retrieval",
+     "capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and index",
+     "processor country be neural report weight table server processor score country size deployment signal semantics algorithm queue environment thread Paris deployment document database result to connection state be method server",
+     "evaluation it. Client search recovery stream and benchmark ranking method throughput search thread sentence field it recovery semantics size retrieval search in setting information stream field record data",
+     "build for which library container design value weight number database index data request from clause path row dimension were function dimension query sentence performance module processor failure node meaning city",
+     "package metric server token layer sentence benchmark compiler grammar cluster capital instruction is are environment is country production word information performance deployment socket sentence suite schedule. Channel kernel attention",
+     "capital thread from buffer instruction container release a module speed process integer token country array signal history compiler dimension instruction as environment field machine training list similarity file latency record",
+     "approach accuracy algorithm search speed evaluation sentence result image record column was vector query was schedule solution passage search list form grammar mountain failure tree data performance name at",
+     "capital were or search which knowledge the image layer array report error detail integer record France instruction number metric space memory image answer machine form node environment France model or",
+     "search Paris city instruction channel database pattern test are passage an learning library transformer graph capital table similarity design was that parameter method schedule deployment knowledge to value default array",
+     "structure algorithm table value grammar capital and are cycle validation noise cluster option recovery state as training algorithm training size image runtime instruction France release buffer score socket city was",
+     "file graph vector report schedule or by retrieval language array timeout transformer value failure by the default metric inference vector. Library token structure cycle accuracy river be row integer",
+     "representation request request connection space field machine capital result algorithm latency report by search recovery integer parameter float float by system city database signal instruction noise country this transformer semantics",
+     "analysis detail France runtime recovery performance library database process name option matrix connection metric France method module path connection failure accuracy latency index on benchmark passage parameter test by noise",
+     "language tree deployment in integer question semantics matrix evaluation on protocol and transformer pattern speed space file cache as problem recovery timeout data value language row as space context distance"
+    ]
+   },
+   "cell_tokens": {
+    "16": 16,
+    "128": 128,
+    "512": 512,
+    "batch32": 512
+   }
+  },
+  "all-MiniLM-L6-v2-Q8_0": {
+   "path": "~/models/embed/minilm/all-MiniLM-L6-v2-Q8_0.gguf",
+   "bytes": 25008064,
+   "engines": {
+    "peregrine-before": {
+     "cmd": "taskset -c 5-9,15-19 /var/tmp/q8probe/peregrine-before serve -m ~/models/embed/minilm/all-MiniLM-L6-v2-Q8_0.gguf --host 127.0.0.1 --port 18216 -t 10 -c 512 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_BIN=/var/tmp/q8probe/peregrine-before PEREGRINE_ISA=native PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        389.5603,
+        385.6565,
+        416.9877,
+        355.8596,
+        368.753,
+        373.5754,
+        399.7713
+       ],
+       "median": 385.6565,
+       "min": 355.8596,
+       "max": 416.9877,
+       "spread_pct": 15.85
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        155.6533,
+        153.9245,
+        138.381,
+        159.326,
+        150.1382,
+        159.954,
+        159.3622
+       ],
+       "median": 155.6533,
+       "min": 138.381,
+       "max": 159.954,
+       "spread_pct": 13.86
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        40.0518,
+        39.8159,
+        37.9318,
+        40.1413,
+        40.1296,
+        38.5045,
+        40.299
+       ],
+       "median": 40.0518,
+       "min": 37.9318,
+       "max": 40.299,
+       "spread_pct": 5.91
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 511,
+       "texts_per_s": [
+        685.0073,
+        698.0651,
+        667.22,
+        672.9555,
+        685.8886,
+        683.7548,
+        707.9148
+       ],
+       "median": 685.0073,
+       "min": 667.22,
+       "max": 707.9148,
+       "spread_pct": 5.94
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 0.9997518374335673,
+       "mean": 0.9997518374335673,
+       "n": 1
+      },
+      "128": {
+       "min": 0.9997906449604598,
+       "mean": 0.9997906449604598,
+       "n": 1
+      },
+      "512": {
+       "min": 0.9998326961788397,
+       "mean": 0.9998326961788397,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9996427502796547,
+       "mean": 0.9997319379144077,
+       "n": 16
+      }
+     }
+    },
+    "peregrine-dotprod": {
+     "cmd": "taskset -c 5-9,15-19 /var/tmp/q8probe/peregrine-before serve -m ~/models/embed/minilm/all-MiniLM-L6-v2-Q8_0.gguf --host 127.0.0.1 --port 18217 -t 10 -c 512 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_BIN=/var/tmp/q8probe/peregrine-before PEREGRINE_ISA=neon-dotprod PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        304.3368,
+        351.9461,
+        454.917,
+        337.2,
+        341.603,
+        333.6574,
+        365.3962
+       ],
+       "median": 341.603,
+       "min": 304.3368,
+       "max": 454.917,
+       "spread_pct": 44.08
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        145.3983,
+        145.6422,
+        70.142,
+        148.9762,
+        157.7106,
+        150.4342,
+        70.845
+       ],
+       "median": 145.6422,
+       "min": 70.142,
+       "max": 157.7106,
+       "spread_pct": 60.13
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        41.9856,
+        41.9413,
+        42.4329,
+        40.9622,
+        42.0089,
+        42.1575,
+        41.2292
+       ],
+       "median": 41.9856,
+       "min": 40.9622,
+       "max": 42.4329,
+       "spread_pct": 3.5
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 511,
+       "texts_per_s": [
+        664.7686,
+        694.2174,
+        527.4597,
+        666.4863,
+        661.5998,
+        515.9209,
+        673.9833
+       ],
+       "median": 664.7686,
+       "min": 515.9209,
+       "max": 694.2174,
+       "spread_pct": 26.82
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 0.9997518374335673,
+       "mean": 0.9997518374335673,
+       "n": 1
+      },
+      "128": {
+       "min": 0.9997906449604598,
+       "mean": 0.9997906449604598,
+       "n": 1
+      },
+      "512": {
+       "min": 0.9998326961788397,
+       "mean": 0.9998326961788397,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9996427502796547,
+       "mean": 0.9997319379144077,
+       "n": 16
+      }
+     }
+    },
+    "peregrine-neon": {
+     "cmd": "taskset -c 5-9,15-19 /var/tmp/q8probe/peregrine-before serve -m ~/models/embed/minilm/all-MiniLM-L6-v2-Q8_0.gguf --host 127.0.0.1 --port 18218 -t 10 -c 512 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_BIN=/var/tmp/q8probe/peregrine-before PEREGRINE_ISA=neon PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        372.2915,
+        322.2866,
+        337.0527,
+        413.7169,
+        431.0209,
+        244.6359,
+        379.5971
+       ],
+       "median": 372.2915,
+       "min": 244.6359,
+       "max": 431.0209,
+       "spread_pct": 50.06
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        166.197,
+        157.3553,
+        151.2156,
+        164.7435,
+        165.5591,
+        154.0155,
+        163.183
+       ],
+       "median": 163.183,
+       "min": 151.2156,
+       "max": 166.197,
+       "spread_pct": 9.18
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        43.0447,
+        43.402,
+        43.5229,
+        44.3966,
+        44.5097,
+        44.0761,
+        42.8355
+       ],
+       "median": 43.5229,
+       "min": 42.8355,
+       "max": 44.5097,
+       "spread_pct": 3.85
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 511,
+       "texts_per_s": [
+        706.9194,
+        695.1314,
+        615.097,
+        582.957,
+        694.7262,
+        683.8338,
+        686.5214
+       ],
+       "median": 686.5214,
+       "min": 582.957,
+       "max": 706.9194,
+       "spread_pct": 18.06
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 0.9997518374335673,
+       "mean": 0.9997518374335673,
+       "n": 1
+      },
+      "128": {
+       "min": 0.9997906449604598,
+       "mean": 0.9997906449604598,
+       "n": 1
+      },
+      "512": {
+       "min": 0.9998326961788397,
+       "mean": 0.9998326961788397,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9996427502796547,
+       "mean": 0.9997319379144077,
+       "n": 16
+      }
+     }
+    },
+    "llama.cpp": {
+     "cmd": "taskset -c 5-9,15-19 ~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/minilm/all-MiniLM-L6-v2-Q8_0.gguf --embedding --pooling mean -t 10 -c 16640 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18219",
+     "env": "CUDA_VISIBLE_DEVICES= PEREGRINE_BIN=/var/tmp/q8probe/peregrine-before",
+     "binary_version": "version: 0.9.0-dev (build 1, commit cd959ba)",
+     "cells": {
+      "16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        196.496,
+        213.7716,
+        185.314,
+        181.9933,
+        265.6431,
+        186.3889,
+        212.1282
+       ],
+       "median": 196.496,
+       "min": 181.9933,
+       "max": 265.6431,
+       "spread_pct": 42.57
+      },
+      "128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        105.2502,
+        96.3801,
+        96.121,
+        95.8315,
+        93.3085,
+        94.1657,
+        97.7914
+       ],
+       "median": 96.121,
+       "min": 93.3085,
+       "max": 105.2502,
+       "spread_pct": 12.42
+      },
+      "512": {
+       "texts": 1,
+       "tokens": 512,
+       "texts_per_s": [
+        23.7753,
+        23.2856,
+        24.2368,
+        23.663,
+        23.8543,
+        24.4673,
+        23.5217
+       ],
+       "median": 23.7753,
+       "min": 23.2856,
+       "max": 24.4673,
+       "spread_pct": 4.97
+      },
+      "batch32": {
+       "texts": 16,
+       "tokens": 511,
+       "texts_per_s": [
+        445.34,
+        461.6829,
+        455.2409,
+        454.8746,
+        457.4393,
+        456.4483,
+        450.3182
+       ],
+       "median": 455.2409,
+       "min": 445.34,
+       "max": 461.6829,
+       "spread_pct": 3.59
+      }
+     },
+     "cosine_vs_llama": {
+      "16": {
+       "min": 1.0,
+       "mean": 1.0,
+       "n": 1
+      },
+      "128": {
+       "min": 1.0,
+       "mean": 1.0,
+       "n": 1
+      },
+      "512": {
+       "min": 1.0,
+       "mean": 1.0,
+       "n": 1
+      },
+      "batch32": {
+       "min": 0.9999999999999998,
+       "mean": 1.0,
+       "n": 16
+      }
+     }
+    }
+   },
+   "texts": {
+    "16": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value",
+    "128": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history pattern grammar field server schedule node and and kernel response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field retrieval embedding question tree model channel path representation pattern capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and index for latency score history test method information solution processor country be neural report weight",
+    "512": "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history pattern grammar field server schedule node and and kernel response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field retrieval embedding question tree model channel path representation pattern capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and index for latency score history test method information solution processor country be neural report weight table server processor score country size deployment signal semantics algorithm queue environment thread Paris deployment document database result to connection state be method server similarity state river column stream attention in evaluation it. Client search recovery stream and benchmark ranking method throughput search thread sentence field it recovery semantics size retrieval search in setting information stream field record data process container passage ranking matrix build which history protocol build for which library container design value weight number database index data request from clause path row dimension were function dimension query sentence performance module processor failure node meaning city number algorithm module speed report queue algorithm package metric server token layer sentence benchmark compiler grammar cluster capital instruction is are environment is country production word information performance deployment socket sentence suite schedule. Channel kernel attention environment production build integer algorithm tree channel information capital thread from buffer instruction container release a module speed process integer token country array signal history compiler dimension instruction as environment field machine training list similarity file latency record score with embedding is name algorithm index approach accuracy algorithm search speed evaluation sentence result image record column was vector query was schedule solution passage search list form grammar mountain failure tree data performance name at country accuracy build training inference query dimension attention capital were or search which knowledge the image layer array report error detail integer record France instruction number metric space memory image answer machine form node environment France model or capital result kernel score version field in search Paris city instruction channel database pattern test are passage an learning library transformer graph capital table similarity design was that parameter method schedule deployment knowledge to value default array sentence training protocol search data signal search structure algorithm table value grammar capital and are cycle validation noise cluster option recovery state as training algorithm training size image runtime instruction France release buffer score socket city was signal benchmark result index by instruction hardware file graph vector report schedule or by retrieval language array timeout transformer value failure by the default metric inference vector. Library token structure cycle accuracy river be row integer with client form with runtime latency server language representation request request connection",
+    "batch32": [
+     "Instruction retrieval dimension server an file similarity noise default solution analysis similarity learning value city information. Directory node function size software score metric tree function throughput example history",
+     "response information example. Name record network number cache from cluster grammar response failure module file river token throughput France retrieval version name value capital weight connection parameter field",
+     "capital detail distance context and deployment text request version default throughput that. Was network design space space country an accuracy vector cluster signal data question example for and",
+     "processor country be neural report weight table server processor score country size deployment signal semantics algorithm queue environment thread Paris deployment document database result to connection state be method server",
+     "evaluation it. Client search recovery stream and benchmark ranking method throughput search thread sentence field it recovery semantics size retrieval search in setting information stream field record",
+     "build for which library container design value weight number database index data request from clause path row dimension were function dimension query sentence performance module processor failure node meaning city",
+     "package metric server token layer sentence benchmark compiler grammar cluster capital instruction is are environment is country production word information performance deployment socket sentence suite schedule. Channel kernel",
+     "capital thread from buffer instruction container release a module speed process integer token country array signal history compiler dimension instruction as environment field machine training list similarity file latency",
+     "approach accuracy algorithm search speed evaluation sentence result image record column was vector query was schedule solution passage search list form grammar mountain failure tree data performance name at country",
+     "capital were or search which knowledge the image layer array report error detail integer record France instruction number metric space memory image answer machine form node environment France model or",
+     "search Paris city instruction channel database pattern test are passage an learning library transformer graph capital table similarity design was that parameter method schedule deployment knowledge to value default",
+     "structure algorithm table value grammar capital and are cycle validation noise cluster option recovery state as training algorithm training size image runtime instruction France release buffer score socket city",
+     "file graph vector report schedule or by retrieval language array timeout transformer value failure by the default metric inference vector. Library token structure cycle accuracy river be",
+     "representation request request connection space field machine capital result algorithm latency report by search recovery integer parameter float float by system city database signal instruction noise country this",
+     "analysis detail France runtime recovery performance library database process name option matrix connection metric France method module path connection failure accuracy latency index on benchmark passage parameter",
+     "language tree deployment in integer question semantics matrix evaluation on protocol and transformer pattern speed space file cache as problem recovery timeout data value language row as space"
+    ]
+   },
+   "cell_tokens": {
+    "16": 16,
+    "128": 128,
+    "512": 512,
+    "batch32": 511
+   }
+  }
+ }
+}

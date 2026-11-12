@@ -422,6 +422,30 @@ fn a_decode_step_allocates_nothing() {
         }
     }
 
+    // A modern-bert file with a classifier head (S4.7b): the head's dense layer, its
+    // own LayerNorm and its projection run in the pass, and they must allocate nothing.
+    let modern_head = load(&write_modern_bert(
+        &dir,
+        Format::Q8_0,
+        7010,
+        ModernBertConfig {
+            head: Some(support::models::ModernBertHeadConfig {
+                n_out: 2,
+                labels: vec!["a".into(), "b".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&modern_head, threads);
+        if n != 0 {
+            failures.push(format!(
+                "modern-bert classifier head, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
     // The same hybrid file with one NextN block: a draft step through the MTP head.
     let mtp = load(&write_hybrid(&dir, Format::PQ2_0, 7002, true));
     if !mtp.has_mtp() {
