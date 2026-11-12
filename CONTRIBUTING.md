@@ -38,6 +38,29 @@ into the repository.
 - **Update docs** (`CHANGELOG.md` under *Unreleased*, the support table, `ARCHITECTURE.md`) when behaviour
   changes.
 
+## Goldens for a new model, format or tokenizer
+
+A change that adds a synthetic model, a format or a tokenizer needs its tier goldens before the PR is
+merged: scalar, AVX2 and AVX-512 on Linux as `docs/dev/testing.md` says, and one set each for macOS
+and Windows, which are recorded on those systems by the manually started **Record goldens** workflow.
+The Windows runner pool draws AVX2 and AVX-512 machines, so its set is recorded twice, pinned:
+
+```sh
+gh workflow run record-goldens.yml --ref <branch> -f runner=macos-15
+gh workflow run record-goldens.yml --ref <branch> -f runner=windows-2025 -f isa=scalar
+gh workflow run record-goldens.yml --ref <branch> -f runner=windows-2025 -f isa=avx2
+gh run watch <id> --exit-status        # repeat while a run is still going
+gh run download <id> -n goldens-macos-15-native -D /tmp/s7-goldens
+gh run download <id> -n goldens-windows-2025-scalar -D /tmp/s7-goldens
+gh run download <id> -n goldens-windows-2025-avx2 -D /tmp/s7-goldens
+tar -xzf /tmp/s7-goldens/goldens.tar.gz -C .
+git status --porcelain -- crates/peregrine-models/tests/golden crates/peregrine-models/tests/fixtures
+```
+
+Commit the downloaded files by name, and only under the `-macos`/`-windows` directories. CI compares
+both sets on every PR on a pinned tier and fails on a skip line, so a missing one does not pass
+silently.
+
 ## Commits and PR titles
 
 Conventional prefixes, used for the changelog and release notes:

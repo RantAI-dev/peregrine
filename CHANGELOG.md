@@ -21,6 +21,24 @@ All notable changes to this project are documented here. The format follows
   0.896) are 0.999 and 1.085 at one thread. **No code changed and no golden moved**: the pass
   budget is scheduling, and the size rule is the smallest that fits. Numbers and harness:
   `benchmarks/results/spark-arm-2026-11-12-pass-rows/`; design §24.
+- **Windows has its own goldens, and both systems compare theirs on every pull request (S7.4).** The
+  synthetic set for Windows' three x86-64 tiers (scalar, AVX2 and AVX-512) and its session fixture
+  were recorded on `windows-2025` by the **Record goldens** workflow, which now takes an `isa` input
+  (`PEREGRINE_ISA`; empty is the runner's own tier) and names its artefact after it. The Windows
+  runner pool draws both AVX2 and AVX-512 machines, so the job compares the committed
+  `x86_64-avx2-windows` set with `PEREGRINE_ISA=avx2` on every pull request whatever CPU it drew, and
+  fails on a "no golden for tier" / "no recording for tier" line instead of skipping silently; the
+  macOS job has the same guard at `aarch64-neon-dotprod`. The first measurements on GitHub's runners
+  (a shared EPYC/Xeon pool, not a benchmark host) put Windows within 0.80–0.95 of Linux on the same
+  CPU model and tier, and put the first load of a freshly downloaded 271 MB model at 2.3–3.6 s
+  against 0.1–0.3 s for the second one, which is Defender's first-open scan; the numbers and the
+  caveats are in `docs/design/s7-platforms.md` §10. A change that adds a golden now records it for
+  macOS and for both Windows tiers (`docs/dev/testing.md`). The sweep after the S4.8b and S5.4f
+  merges recorded `nomic-bert-moe-Q8_0` for macOS and all three Windows tiers, and removed the three
+  Windows `*-fast` goldens the scalar and AVX2 tiers no longer read: S5.4f takes the form only where
+  it wins, so the fast test compares against the exact engine and the exact golden on those tiers.
+  A second sweep after S5.4h merged recorded nothing on either system: macOS's `llama-Q5_0-fast`
+  golden came with #257, and no x86 tier takes Q5_0 in the form.
 - **The fast prompt pass measured against ik_llama.cpp's `-rtr` path, and a per-32 form as a
   prototype (S5.4i)**: the opt-in 8-bit prompt pass was 0.74-0.94× the fork's `-rtr` path on all
   eight cells (S5.4c), and this step accounts for it. **The 8-bit kernel is not where the pass
@@ -177,6 +195,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The Windows installer no longer flattens the user `Path`.** `scripts/install.ps1` read the value
+  with `[Environment]::GetEnvironmentVariable("Path","User")`, which expands every `%VARIABLE%`, and
+  wrote it back with `[Environment]::SetEnvironmentVariable`, which stores a plain `REG_SZ`: an entry
+  such as `%USERPROFILE%\bin` came back as `C:\Users\name\bin` and the value's kind changed from
+  `REG_EXPAND_SZ` to `REG_SZ`. It now reads the raw value from `HKCU:\Environment`
+  (`DoNotExpandEnvironmentNames`), appends the install directory, writes it back with
+  `RegistryValueKind::ExpandString` and broadcasts the change with a no-op
+  `[Environment]::SetEnvironmentVariable` on a scratch name (PowerShell 5.1 has no
+  `SendMessageTimeout` without `Add-Type`). The undo text is unchanged. The CI installer step starts
+  from a user `Path` carrying `%USERPROFILE%` and checks that the value comes back with the variable
+  intact, with the install directory appended, and still typed `ExpandString`.
 - **Prompt processing: a pass's "6-10 % of the caller's serial work" is not serial work
   (S5.2c)**: SwiGLU had no timer, and the pass's step account now names every step over 0.5 %
   (quantise 2.6-6.3 %, SwiGLU 2.4-5.9 %, residual 0.7-4.4 %, RoPE 0.4-1.7 %, RMSNorm
