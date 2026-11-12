@@ -1202,9 +1202,11 @@ fn head_row(
         );
         let row = &mut st.xb2[..dm];
         match h.act {
+            // The engine's own `tanh`, not the C library's: `tanhf` changed its rounding in
+            // glibc 2.40, and a score may not depend on the host's libc (issue #64).
             HeadAct::Tanh => {
                 for v in row.iter_mut() {
-                    *v = v.tanh();
+                    *v = peregrine_core::vmath::tanh(*v);
                 }
             }
             HeadAct::Gelu => peregrine_core::vmath::gelu_erf_rows(row),

@@ -1,0 +1,433 @@
+{
+ "runs": 5,
+ "threads": 10,
+ "pin_cpus": "5-9,15-19",
+ "cells": [
+  "t16",
+  "t128",
+  "t512",
+  "t2000",
+  "b32x128",
+  "mixed"
+ ],
+ "host_before": {
+  "loadavg": [
+   9.38525390625,
+   7.66162109375,
+   6.294921875
+  ],
+  "MemAvailable_gb": 36.3
+ },
+ "models": {
+  "Qwen3-Embedding-0.6B-Q8_0": {
+   "path": "~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+   "bytes": 639150592,
+   "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+   "cell_tokens": {
+    "t16": 16,
+    "t128": 128,
+    "t512": 528,
+    "t2000": 2000,
+    "b32x128": 4095,
+    "mixed": 3565
+   },
+   "engines": {
+    "peregrine-before": {
+     "cmd": "taskset -c 5-9,15-19 ~/wt-s49q-before/target/release/peregrine serve -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf --host 127.0.0.1 --port 18410 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_ISA=native PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "t16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        32.876,
+        33.2852,
+        32.2331,
+        31.6806,
+        31.9324
+       ],
+       "median": 32.2331,
+       "min": 31.6806,
+       "max": 33.2852,
+       "spread_pct": 4.98
+      },
+      "t128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        4.2402,
+        4.2376,
+        4.2355,
+        4.2479,
+        4.2516
+       ],
+       "median": 4.2402,
+       "min": 4.2355,
+       "max": 4.2516,
+       "spread_pct": 0.38
+      },
+      "t512": {
+       "texts": 1,
+       "tokens": 528,
+       "texts_per_s": [
+        0.9285,
+        0.9245,
+        0.9361,
+        0.9315,
+        0.941
+       ],
+       "median": 0.9315,
+       "min": 0.9245,
+       "max": 0.941,
+       "spread_pct": 1.77
+      },
+      "t2000": {
+       "texts": 1,
+       "tokens": 2000,
+       "texts_per_s": [
+        0.1391,
+        0.1451,
+        0.1471,
+        0.145,
+        0.149
+       ],
+       "median": 0.1451,
+       "min": 0.1391,
+       "max": 0.149,
+       "spread_pct": 6.82
+      },
+      "b32x128": {
+       "texts": 32,
+       "tokens": 4095,
+       "texts_per_s": [
+        4.1982,
+        4.1715,
+        4.2079,
+        4.2023,
+        4.2149
+       ],
+       "median": 4.2023,
+       "min": 4.1715,
+       "max": 4.2149,
+       "spread_pct": 1.03
+      },
+      "mixed": {
+       "texts": 32,
+       "tokens": 3565,
+       "texts_per_s": [
+        4.6466,
+        4.6022,
+        4.6548,
+        4.6504,
+        4.6371
+       ],
+       "median": 4.6466,
+       "min": 4.6022,
+       "max": 4.6548,
+       "spread_pct": 1.13
+      }
+     },
+     "cosine_vs_llama": {
+      "t16": {
+       "min": 0.9997220953269161,
+       "mean": 0.9997220953269161,
+       "n": 1
+      },
+      "t128": {
+       "min": 0.9997695144090193,
+       "mean": 0.9997695144090193,
+       "n": 1
+      },
+      "t512": {
+       "min": 0.9997494313704605,
+       "mean": 0.9997494313704605,
+       "n": 1
+      },
+      "t2000": {
+       "min": 0.9997489205006864,
+       "mean": 0.9997489205006864,
+       "n": 1
+      },
+      "b32x128": {
+       "min": 0.9995451682375608,
+       "mean": 0.9997105216599022,
+       "n": 32
+      },
+      "mixed": {
+       "min": 0.9995391550569813,
+       "mean": 0.9997181776211994,
+       "n": 32
+      }
+     }
+    },
+    "peregrine-after": {
+     "cmd": "taskset -c 5-9,15-19 ~/wt-s49q/target/release/peregrine serve -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf --host 127.0.0.1 --port 18411 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_ISA=native PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "t16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        64.0052,
+        63.1233,
+        64.7602,
+        63.6188,
+        63.221
+       ],
+       "median": 63.6188,
+       "min": 63.1233,
+       "max": 64.7602,
+       "spread_pct": 2.57
+      },
+      "t128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        8.5249,
+        8.6246,
+        8.7374,
+        8.6053,
+        8.6703
+       ],
+       "median": 8.6246,
+       "min": 8.5249,
+       "max": 8.7374,
+       "spread_pct": 2.46
+      },
+      "t512": {
+       "texts": 1,
+       "tokens": 528,
+       "texts_per_s": [
+        1.7582,
+        1.7781,
+        1.7768,
+        1.7891,
+        1.7789
+       ],
+       "median": 1.7781,
+       "min": 1.7582,
+       "max": 1.7891,
+       "spread_pct": 1.74
+      },
+      "t2000": {
+       "texts": 1,
+       "tokens": 2000,
+       "texts_per_s": [
+        0.2859,
+        0.287,
+        0.2853,
+        0.2838,
+        0.2867
+       ],
+       "median": 0.2859,
+       "min": 0.2838,
+       "max": 0.287,
+       "spread_pct": 1.12
+      },
+      "b32x128": {
+       "texts": 32,
+       "tokens": 4095,
+       "texts_per_s": [
+        8.6528,
+        8.6434,
+        8.5878,
+        8.5593,
+        8.684
+       ],
+       "median": 8.6434,
+       "min": 8.5593,
+       "max": 8.684,
+       "spread_pct": 1.44
+      },
+      "mixed": {
+       "texts": 32,
+       "tokens": 3565,
+       "texts_per_s": [
+        9.2175,
+        9.2258,
+        9.2129,
+        9.1316,
+        9.2666
+       ],
+       "median": 9.2175,
+       "min": 9.1316,
+       "max": 9.2666,
+       "spread_pct": 1.46
+      }
+     },
+     "cosine_vs_llama": {
+      "t16": {
+       "min": 0.9997220953269161,
+       "mean": 0.9997220953269161,
+       "n": 1
+      },
+      "t128": {
+       "min": 0.9997695144090193,
+       "mean": 0.9997695144090193,
+       "n": 1
+      },
+      "t512": {
+       "min": 0.9997494313704605,
+       "mean": 0.9997494313704605,
+       "n": 1
+      },
+      "t2000": {
+       "min": 0.9997489205006864,
+       "mean": 0.9997489205006864,
+       "n": 1
+      },
+      "b32x128": {
+       "min": 0.9995451682375608,
+       "mean": 0.9997105216599022,
+       "n": 32
+      },
+      "mixed": {
+       "min": 0.9995391550569813,
+       "mean": 0.9997181776211994,
+       "n": 32
+      }
+     }
+    },
+    "llama.cpp": {
+     "cmd": "taskset -c 5-9,15-19 ~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf --embedding --pooling last -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18412",
+     "env": "CUDA_VISIBLE_DEVICES=",
+     "binary_version": "version: 0.9.0-dev (build 1, commit cd959ba)",
+     "cells": {
+      "t16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        27.7045,
+        28.1227,
+        29.3511,
+        29.4316,
+        28.8883
+       ],
+       "median": 28.8883,
+       "min": 27.7045,
+       "max": 29.4316,
+       "spread_pct": 5.98
+      },
+      "t128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        4.1705,
+        4.1566,
+        4.1626,
+        4.1476,
+        4.1928
+       ],
+       "median": 4.1626,
+       "min": 4.1476,
+       "max": 4.1928,
+       "spread_pct": 1.09
+      },
+      "t512": {
+       "texts": 1,
+       "tokens": 528,
+       "texts_per_s": [
+        1.0026,
+        0.9857,
+        0.992,
+        0.9938,
+        0.9974
+       ],
+       "median": 0.9938,
+       "min": 0.9857,
+       "max": 1.0026,
+       "spread_pct": 1.7
+      },
+      "t2000": {
+       "texts": 1,
+       "tokens": 2000,
+       "texts_per_s": [
+        0.215,
+        0.2139,
+        0.2141,
+        0.2152,
+        0.2158
+       ],
+       "median": 0.215,
+       "min": 0.2139,
+       "max": 0.2158,
+       "spread_pct": 0.88
+      },
+      "b32x128": {
+       "texts": 32,
+       "tokens": 4095,
+       "texts_per_s": [
+        4.2707,
+        4.2615,
+        4.2711,
+        4.2751,
+        4.2958
+       ],
+       "median": 4.2711,
+       "min": 4.2615,
+       "max": 4.2958,
+       "spread_pct": 0.8
+      },
+      "mixed": {
+       "texts": 32,
+       "tokens": 3565,
+       "texts_per_s": [
+        4.7478,
+        4.7396,
+        4.7646,
+        4.7662,
+        4.7986
+       ],
+       "median": 4.7646,
+       "min": 4.7396,
+       "max": 4.7986,
+       "spread_pct": 1.24
+      }
+     }
+    }
+   },
+   "vectors_before_after": {
+    "t16": {
+     "identical": true,
+     "n": 1,
+     "elements": 1024
+    },
+    "t128": {
+     "identical": true,
+     "n": 1,
+     "elements": 1024
+    },
+    "t512": {
+     "identical": true,
+     "n": 1,
+     "elements": 1024
+    },
+    "t2000": {
+     "identical": true,
+     "n": 1,
+     "elements": 1024
+    },
+    "b32x128": {
+     "identical": true,
+     "n": 32,
+     "elements": 32768
+    },
+    "mixed": {
+     "identical": true,
+     "n": 32,
+     "elements": 32768
+    }
+   }
+  }
+ },
+ "host_after": {
+  "loadavg": [
+   10.03759765625,
+   9.21435546875,
+   7.4013671875
+  ],
+  "MemAvailable_gb": 36.2
+ }
+}
