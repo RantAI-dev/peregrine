@@ -151,6 +151,7 @@ fn slot_cfg(model: &Model, temperature: f32) -> SlotCfg {
         kv_rotation: true,
         // No drafter: the slot decodes plainly, as the server asks for.
         drafter: Default::default(),
+        constraint: None,
     }
 }
 

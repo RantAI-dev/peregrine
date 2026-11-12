@@ -1,0 +1,34 @@
+{
+ "qwen-peregrine": {
+  "total": 200,
+  "errors": 0,
+  "stop": 200,
+  "valid_selfend": 200,
+  "cut": 0,
+  "median_tps": 40.5169047933784
+ },
+ "qwen-llama": {
+  "total": 200,
+  "errors": 0,
+  "stop": 198,
+  "valid_selfend": 198,
+  "cut": 2,
+  "median_tps": 31.522202226055605
+ },
+ "llama-peregrine": {
+  "total": 200,
+  "errors": 0,
+  "stop": 200,
+  "valid_selfend": 200,
+  "cut": 0,
+  "median_tps": 21.50110770642559
+ },
+ "llama-llama": {
+  "total": 200,
+  "errors": 0,
+  "stop": 187,
+  "valid_selfend": 187,
+  "cut": 13,
+  "median_tps": 18.959347265654046
+ }
+}

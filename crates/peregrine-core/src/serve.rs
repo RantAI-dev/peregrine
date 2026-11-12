@@ -28,6 +28,7 @@
 // speculation while batching: verifying a draft multiplies the rows per pass, which past the ridge above is
 // exactly where there are no spare FLOPs (measured elsewhere: 2.7x at one row falling to 1.6x at eight).
 
+use crate::constrain::TokenMask;
 use crate::embed::Pooling;
 use crate::kv::{KvCache, KvPrec};
 use crate::model::{Caches, Model, State, StepStats};
@@ -275,6 +276,14 @@ pub struct SlotCfg {
     /// admitted, and the engine verifies its proposals in the same
     /// verification step the MTP block goes through.
     pub drafter: DrafterChoice,
+    /// Constrained decoding: every sampled token must keep the reply a valid prefix of
+    /// this constraint (`docs/design/s6.6-constrained-decoding.md`).
+    ///
+    /// `None` — the default — is today's unconstrained path. A constrained slot does
+    /// not speculate (neither the engine's MTP block nor a drafter): a draft would have to
+    /// be verified against a sampler whose allowed set changes with every accepted token.
+    /// Its `stop` list supplies the end tokens; it must not be empty.
+    pub constraint: Option<Arc<crate::constrain::Constraint>>,
 }
 
 impl Default for SlotCfg {
@@ -292,6 +301,7 @@ impl Default for SlotCfg {
             turn: 0,
             kv_rotation: true,
             drafter: DrafterChoice::None,
+            constraint: None,
         }
     }
 }
@@ -436,6 +446,36 @@ struct Slot {
     /// can hand it to the prefix store without allocating, and the tokens it is kept under.
     fork_snap: Option<crate::kv::KvSnapshot>,
     fork_tokens: Vec<u32>,
+    /// The constrained-decoding state, when the request asked for one.
+    constraint: Option<SlotConstraint>,
+}
+
+/// One slot's constrained-decoding state: the matcher, the vocabulary's masks and the
+/// end tokens. The masks themselves are memoised on the vocabulary, shared by every slot.
+struct SlotConstraint {
+    matcher: crate::constrain::Matcher,
+    vocab: Arc<crate::constrain::Vocabulary>,
+    ends: Vec<u32>,
+}
+
+impl SlotConstraint {
+    fn new(
+        constraint: &crate::constrain::Constraint,
+        vocab: Arc<crate::constrain::Vocabulary>,
+        ends: Vec<u32>,
+    ) -> Result<SlotConstraint, String> {
+        let matcher = crate::constrain::Matcher::new(constraint).map_err(|e| e.to_string())?;
+        Ok(SlotConstraint {
+            matcher,
+            vocab,
+            ends,
+        })
+    }
+
+    /// The allowed token ids for the current state.
+    fn mask(&mut self) -> TokenMask {
+        self.vocab.allowed(&self.matcher, &self.ends)
+    }
 }
 
 /// MTP speculation for a lone user; `PEREGRINE_MTP=0` turns it off.
@@ -582,6 +622,17 @@ pub struct Engine {
     /// Decode steps run, and the rows they carried: their ratio is the batching actually achieved.
     pub decode_steps: u64,
     pub decode_rows: u64,
+    /// The vocabulary's byte trie and fast-path flags, built lazily on the first
+    /// constrained request and reused by every slot of this model.
+    vocab: Option<Arc<crate::constrain::Vocabulary>>,
+    /// Mask calls and their time: the constraint's per-token cost, for the benchmark and for
+    /// `Engine::mask_stats`. Zero for an engine that never served a constraint.
+    pub mask_calls: u64,
+    pub mask_ns: u64,
+    pub mask_ns_max: u64,
+    /// Every mask call's nanoseconds, for the benchmark's median and p99. Grows with the
+    /// constrained tokens served; an unconstrained engine leaves it empty.
+    pub mask_samples: Vec<u64>,
     // one sampler scratch per pool worker: the rows of a step are sampled in parallel.
     samps: Vec<std::sync::Mutex<crate::sample::Scratch>>,
     /// The model's MTP block, when it has one and speculation is on: the
@@ -924,6 +975,11 @@ impl Engine {
             stats: StepStats::default(),
             decode_steps: 0,
             decode_rows: 0,
+            vocab: None,
+            mask_calls: 0,
+            mask_ns: 0,
+            mask_ns_max: 0,
+            mask_samples: Vec::new(),
             tap_layers: Vec::new(),
             samps: (0..pool.width())
                 .map(|_| std::sync::Mutex::new(crate::sample::Scratch::default()))
@@ -957,6 +1013,22 @@ impl Engine {
     /// exact kernels whatever this says.
     pub fn set_fast_prompt(&mut self, on: bool) {
         self.fast_prompt = on;
+    }
+
+    /// The vocabulary mask tables, built on first use (one-time cost, then shared by every
+    /// constrained slot of this engine).
+    fn vocabulary(&mut self) -> Arc<crate::constrain::Vocabulary> {
+        if let Some(v) = &self.vocab {
+            return v.clone();
+        }
+        let v = Arc::new(crate::constrain::Vocabulary::new(&self.model.tk));
+        self.vocab = Some(v.clone());
+        v
+    }
+
+    /// The constrained sampler's mask calls, their total nanoseconds and the worst one.
+    pub fn mask_stats(&self) -> (u64, u64, u64) {
+        (self.mask_calls, self.mask_ns, self.mask_ns_max)
     }
 
     /// Whether the fast prompt mode is on for this engine.
@@ -1444,6 +1516,31 @@ impl Engine {
         if let Err(e) = self.check_request(&prompt, want, &labels) {
             return self.refuse(prompt, cache, e);
         }
+        if cfg.constraint.is_some() {
+            if !want.is_tokens() {
+                return self.refuse(
+                    prompt,
+                    cache,
+                    "constrained decoding applies to a token slot".into(),
+                );
+            }
+            if cfg.stop.is_empty() {
+                return self.refuse(
+                    prompt,
+                    cache,
+                    "a constrained request needs at least one end token in the stop list".into(),
+                );
+            }
+            if cfg.drafter != DrafterChoice::None {
+                return self.refuse(
+                    prompt,
+                    cache,
+                    "constrained decoding cannot use a drafter (a draft would be verified against a \
+                     sampler whose allowed set changes with every accepted token)"
+                        .into(),
+                );
+            }
+        }
         let whole = want.whole_prompt();
         // The last prompt token is never prefilled (it is what the first decode step feeds), so a prefix may
         // cover everything before it. A group's leader may only restore what the whole group shares.
@@ -1547,7 +1644,11 @@ impl Engine {
         // thread each accepted token into the window between the two row draws. Turning speculation off for
         // these slots is the simple, lossless choice (the request asked for penalties explicitly).
         let penalized = !cfg.penalties.is_off();
-        let alone = !penalized && want.is_tokens() && self.slots.is_empty() && fed == 0;
+        let alone = !penalized
+            && cfg.constraint.is_none()
+            && want.is_tokens()
+            && self.slots.is_empty()
+            && fed == 0;
         // The engine's own drafter is the MTP block, and only for a slot that
         // did not ask for one of its own.
         let own = if asked.is_none() && alone {
@@ -1582,6 +1683,16 @@ impl Engine {
             let labels = self.slots.iter().filter(|s| s.want.is_labels()).count();
             self.ensure_logit_rows(labels + self.max_slots + 1);
         }
+        let constraint = match &cfg.constraint {
+            Some(c) => {
+                let vocab = self.vocabulary();
+                match SlotConstraint::new(c, vocab, cfg.stop.clone()) {
+                    Ok(state) => Some(state),
+                    Err(e) => return self.refuse(prompt, Some(kv), e),
+                }
+            }
+            None => None,
+        };
         self.slots.push(Slot {
             drafter: drafter.map(std::sync::Mutex::new),
             drafter_depth: depth,
@@ -1615,6 +1726,7 @@ impl Engine {
             fork_wait: forking.is_some_and(|f| f.wait),
             fork_snap: None,
             fork_tokens: Vec::new(),
+            constraint,
         });
         if speculating {
             self.spec_slot = Some(id);
@@ -1743,6 +1855,13 @@ impl Engine {
         let Some(i) = self.slots.iter().position(|s| s.id == id) else {
             return Err(format!("no slot {id}"));
         };
+        if self.slots[i].constraint.is_some() {
+            return Err(
+                "constrained decoding cannot use a drafter (a draft would be verified against a \
+                 sampler whose allowed set changes with every accepted token)"
+                    .into(),
+            );
+        }
         self.slots[i].drafter = Some(std::sync::Mutex::new(drafter));
         self.slots[i].drafter_depth = depth.min(self.state.max_batch.saturating_sub(1));
         if self.spec_slot == Some(id) {
@@ -2717,10 +2836,32 @@ impl Engine {
                 self.slots[si].prepare_penalties(n_vocab);
             }
         }
+        // Constrained rows: compute the allowed set before the parallel sampling (the
+        // matcher state is advanced serially in `account`, after the draws).
+        let mut masks: Vec<Option<TokenMask>> = Vec::with_capacity(n);
+        let mut mask_ns = Vec::with_capacity(n);
+        for &si in dec {
+            let t = std::time::Instant::now();
+            let mask = self.slots[si].constraint.as_mut().map(|c| c.mask());
+            mask_ns.push(match &mask {
+                Some(_) => t.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                None => 0,
+            });
+            masks.push(mask);
+        }
+        for ns in mask_ns {
+            if ns > 0 {
+                self.mask_calls += 1;
+                self.mask_ns += ns;
+                self.mask_ns_max = self.mask_ns_max.max(ns);
+                self.mask_samples.push(ns);
+            }
+        }
         {
             let next = std::sync::atomic::AtomicUsize::new(0);
             let pk = std::sync::Mutex::new(&mut picks);
             let (slots, state, samps) = (&self.slots, &self.state, &self.samps);
+            let masks = &masks;
             let body = |wk: usize, _nw: usize| {
                 let mut sc = None;
                 loop {
@@ -2731,18 +2872,35 @@ impl Engine {
                     let sc = sc.get_or_insert_with(|| samps[wk].lock().expect("sampler scratch"));
                     let s = &slots[dec[b]];
                     let logits = state.logits_row(b, n_vocab);
-                    let id = crate::sample::sample_penalized(
-                        logits,
-                        s.cfg.temperature,
-                        s.cfg.top_p,
-                        s.cfg.top_k,
-                        s.cfg.min_p,
-                        &s.cfg.penalties,
-                        s.pen.window(),
-                        crate::sample::position_key(s.seed, s.cfg.turn as u64, s.pos + 1),
-                        sc,
-                    );
-                    let lp = if s.cfg.logprobs {
+                    let id = match &masks[b] {
+                        Some(allowed) => crate::sample::sample_constrained(
+                            logits,
+                            s.cfg.temperature,
+                            s.cfg.top_p,
+                            s.cfg.top_k,
+                            s.cfg.min_p,
+                            &s.cfg.penalties,
+                            s.pen.window(),
+                            allowed,
+                            crate::sample::position_key(s.seed, s.cfg.turn as u64, s.pos + 1),
+                            sc,
+                        )
+                        // The sentinel is not a token: the output loop below turns it into
+                        // a 500 instead of ever emitting an unconstrained token.
+                        .unwrap_or(u32::MAX),
+                        None => crate::sample::sample_penalized(
+                            logits,
+                            s.cfg.temperature,
+                            s.cfg.top_p,
+                            s.cfg.top_k,
+                            s.cfg.min_p,
+                            &s.cfg.penalties,
+                            s.pen.window(),
+                            crate::sample::position_key(s.seed, s.cfg.turn as u64, s.pos + 1),
+                            sc,
+                        ),
+                    };
+                    let lp = if s.cfg.logprobs && id != u32::MAX {
                         crate::session::logprob_of(logits, id)
                     } else {
                         0.0
@@ -2759,6 +2917,24 @@ impl Engine {
         let mut out = Vec::with_capacity(n);
         for (b, &si) in dec.iter().enumerate() {
             let (id, logprob) = picks[b];
+            if id == u32::MAX {
+                out.push(Emission {
+                    slot: self.slots[si].id,
+                    token: 0,
+                    text: String::new(),
+                    logprob: 0.0,
+                    finish: Some(Finish::Error(
+                        "the constrained sampler found no token that keeps the reply a valid \
+                         prefix of the schema"
+                            .into(),
+                    )),
+                    cost: None,
+                    embedding: None,
+                    label_logits: None,
+                    head: None,
+                });
+                continue;
+            }
             out.push(self.account(si, b, fed[b], id, logprob, share));
         }
         self.reap(&out);
@@ -2800,6 +2976,30 @@ impl Engine {
         s.produced += 1;
         s.decode_s += secs;
         let stop = s.cfg.stop.contains(&id);
+        // Constrained decoding: the chosen token's bytes must be a valid continuation.
+        // The mask already guaranteed it; a disagreement is a bug, never a silent
+        // unconstrained token.
+        if !stop {
+            if let Some(c) = &mut s.constraint {
+                let bytes = self.model.tk.token_bytes(id);
+                if c.matcher.advance_bytes(&bytes).is_err() {
+                    return Emission {
+                        slot: s.id,
+                        token: 0,
+                        text: String::new(),
+                        logprob: 0.0,
+                        finish: Some(Finish::Error(
+                            "the constrained sampler emitted a token outside the schema's grammar"
+                                .into(),
+                        )),
+                        cost: None,
+                        embedding: None,
+                        label_logits: None,
+                        head: None,
+                    };
+                }
+            }
+        }
         // The stop token itself is not part of the answer.
         let text = if stop {
             String::new()
