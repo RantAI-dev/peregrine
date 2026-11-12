@@ -420,6 +420,28 @@ same model loaded and `--template crates/peregrine-core/src/tools/qwen35.jinja -
 file is the template of `Ternary-Bonsai-2-2B-PQ2_0.gguf`, which llama.cpp cannot load itself, and
 the set adds the cases that only this family has (thinking on and off, thinking in the history).
 
+Publishers ship several texts of Qwen 3.5's template. Qwen's own 4B and 9B files carry the text
+Bonsai 2 does; Qwen's 0.8B and 2B files write the thinking block only when `enable_thinking` is
+true (the others write it unless it is false); unsloth's files walk a call's arguments with a key
+loop where Qwen's uses `|items`, with either thinking rule. llama.cpp always defines
+`enable_thinking`, and arguments that are not an object are refused before rendering, so the four
+texts give the same prompts. That is checked, not assumed: `--check` renders the cases with a
+template and compares them with an existing fixture file instead of writing one, and each text
+under `crates/peregrine-core/src/tools/qwen35*.jinja` passes it against `tools-qwen35.jsonl` (all
+51 cases; only the line number inside a template error differs):
+
+```sh
+for t in qwen35-optin qwen35-unsloth qwen35-unsloth-optin; do
+  python3 scripts/tool-fixtures.py --server "$LLAMA_SERVER" --model "$ANY_SMALL_CHAT_MODEL" \
+      --template crates/peregrine-core/src/tools/$t.jinja --set qwen35 \
+      --check crates/peregrine-core/tests/fixtures/tools-qwen35.jsonl
+done
+```
+
+A text that is not one of these is not served with tools: the template of unsloth's `*-MTP` files
+(a `developer` role, two leading system messages merged, no refusals) renders other prompts and is
+left out until it has a fixture set of its own.
+
 ### System One prompts: fixtures rendered by llama.cpp
 
 `crates/peregrine-core/tests/systemone_render.rs` rebuilds the prompt of every case in

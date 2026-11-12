@@ -12,8 +12,11 @@
 //! the bytes llama.cpp v0.9.0's `POST /apply-template` gives for the same request on the
 //! same template (`tests/tools_render.rs`, fixtures written by `scripts/tool-fixtures.py`).
 //!
-//! A template is recognised by comparing it with the copy kept under `tools/`: a file whose
+//! A template is recognised by comparing it with the copies kept under `tools/`: a file whose
 //! template differs is not guessed at, and a request that carries tools is refused for it.
+//! A format may keep several copies: publishers ship variants of one template whose text
+//! differs and whose prompts do not, and each copy here has been rendered through llama.cpp
+//! on the format's whole fixture set and found byte-identical to the others.
 //!
 //! # Formats
 //!
@@ -41,8 +44,28 @@ const QWEN25_DEFAULT_SYSTEM: &str =
 /// Qwen 2.5's chat template, as its GGUF files carry it (`tokenizer.chat_template`).
 pub const QWEN25_TEMPLATE: &str = include_str!("tools/qwen25.jinja");
 
-/// Qwen 3.5's chat template, as Bonsai 2's GGUF files carry it.
+/// Qwen 3.5's chat template, as Bonsai 2's GGUF files and Qwen's own 4B and 9B files
+/// carry it: the model thinks unless `enable_thinking` is false.
 pub const QWEN35_TEMPLATE: &str = include_str!("tools/qwen35.jinja");
+
+/// The variants of Qwen 3.5's template that render the same prompts as [`QWEN35_TEMPLATE`].
+///
+/// * `qwen35-optin.jinja`: Qwen's own 0.8B and 2B files. The model thinks only when
+///   `enable_thinking` is true. llama.cpp always defines `enable_thinking` (true unless the
+///   request says otherwise), and so does this renderer, so the "not defined" branch that
+///   tells the two templates apart is never taken.
+/// * `qwen35-unsloth.jinja` and `qwen35-unsloth-optin.jinja`: unsloth's files, with either
+///   thinking rule. They walk a call's arguments with `is mapping` and a key loop where
+///   Qwen's template uses `|items`: the same text for an object, and arguments that are
+///   not an object are refused before rendering ([`messages_from_json`]).
+///
+/// Each was rendered by llama.cpp v0.9.0 on every case of `tests/fixtures/tools-qwen35.jsonl`
+/// and gave the same prompts and the same refusals (`scripts/tool-fixtures.py --check`).
+pub const QWEN35_VARIANTS: [&str; 3] = [
+    include_str!("tools/qwen35-optin.jinja"),
+    include_str!("tools/qwen35-unsloth.jinja"),
+    include_str!("tools/qwen35-unsloth-optin.jinja"),
+];
 
 /// The thinking block's tags in the Qwen 3 and 3.5 templates.
 const THINK_OPEN: &str = "<think>";
@@ -69,10 +92,25 @@ impl ToolFormat {
         if template.trim_end() == QWEN25_TEMPLATE.trim_end() {
             return Some(ToolFormat::Hermes);
         }
-        if template.trim_end() == QWEN35_TEMPLATE.trim_end() {
+        if template.trim_end() == QWEN35_TEMPLATE.trim_end()
+            || QWEN35_VARIANTS
+                .iter()
+                .any(|v| template.trim_end() == v.trim_end())
+        {
             return Some(ToolFormat::QwenXml);
         }
         None
+    }
+
+    /// Whether `prompt`, as [`render_with`] wrote it for this format, ends inside a thinking
+    /// block the template opened for the model. The model's reply then begins with its
+    /// reasoning and writes only the closing tag, so whoever reads the reply must start in
+    /// the reasoning span.
+    pub fn opens_reasoning(self, prompt: &str) -> bool {
+        match self {
+            ToolFormat::Hermes => false,
+            ToolFormat::QwenXml => prompt.ends_with("<think>\n"),
+        }
     }
 
     pub fn name(self) -> &'static str {
@@ -1268,6 +1306,56 @@ mod tests {
         );
         assert_eq!(ToolFormat::QwenXml.name(), "qwen-xml");
         assert_ne!(QWEN25_TEMPLATE, QWEN35_TEMPLATE);
+    }
+
+    #[test]
+    fn the_published_variants_of_qwen35s_template_are_the_same_format() {
+        for (i, variant) in QWEN35_VARIANTS.iter().enumerate() {
+            assert_ne!(*variant, QWEN35_TEMPLATE, "variant {i} is a copy");
+            assert_eq!(
+                ToolFormat::for_template(variant),
+                Some(ToolFormat::QwenXml),
+                "variant {i}"
+            );
+            // A GGUF writer may add a newline at the end; nothing else is forgiven.
+            assert_eq!(
+                ToolFormat::for_template(&format!("{variant}\n")),
+                Some(ToolFormat::QwenXml)
+            );
+            assert_eq!(
+                ToolFormat::for_template(&variant.replace("tool_call", "call")),
+                None
+            );
+        }
+        // The variants differ from one another too: three texts, not one text three times.
+        assert_ne!(QWEN35_VARIANTS[0], QWEN35_VARIANTS[1]);
+        assert_ne!(QWEN35_VARIANTS[0], QWEN35_VARIANTS[2]);
+        assert_ne!(QWEN35_VARIANTS[1], QWEN35_VARIANTS[2]);
+    }
+
+    #[test]
+    fn a_prompt_that_ends_inside_a_thinking_block_says_so() {
+        let ask = vec![Msg::User("What time is it?".into())];
+        let xml = ToolFormat::QwenXml;
+        let on = render_with(xml, &[], &ask, RenderOptions { thinking: true }).unwrap();
+        assert!(xml.opens_reasoning(&on), "{on:?}");
+        // Thinking off: the template closes an empty block, so the reply starts as content.
+        let off = render_with(xml, &[], &ask, RenderOptions { thinking: false }).unwrap();
+        assert!(!xml.opens_reasoning(&off), "{off:?}");
+        // A continued assistant text is left open where the client stopped, outside a block.
+        let continued = vec![
+            Msg::User("What time is it?".into()),
+            Msg::Assistant {
+                content: "It is".into(),
+                reasoning: None,
+                tool_calls: vec![],
+            },
+        ];
+        let open = render(xml, &[], &continued).unwrap();
+        assert!(!xml.opens_reasoning(&open), "{open:?}");
+        // Qwen 2.5's template has no thinking block.
+        let hermes = render(ToolFormat::Hermes, &[], &ask).unwrap();
+        assert!(!ToolFormat::Hermes.opens_reasoning(&hermes));
     }
 
     #[test]
