@@ -144,8 +144,9 @@ gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Gem
 
     // 7. Tool calling
     let tool_str = "OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on \
-`POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format); the prompt \
-is the one llama.cpp builds from the model's template";
+`POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format) and for \
+Qwen 3.5 and Bonsai 2 (the `qwen-xml` format, thinking on or off); the prompt is the one llama.cpp \
+builds from the model's template";
 
     // 8. Rerank and classify
     let rr_str = "a `bert` file's classifier head (`cls`, `cls.output`, \
