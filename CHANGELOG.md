@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The 8-bit prompt kernel (S5.4a)**, the first build step of the opt-in fast prompt mode:
+  `crates/peregrine-kernels/src/kq8.rs` holds the form's layout, its scalar twin and the
+  requantisation, `kqsimd.rs` the AVX-512 bodies of both (asserted bit for bit equal to the twin
+  at every width from 1 to 40 and at 63, 64, 65, 127, 128, 129, 511, 512 and 513 activation
+  rows), and `KQBENCH_PROMPT=1` measures them. On one real layer the resident form runs at
+  91.9 GMAC/s against the exact Q4_K kernel's 66.2 at 512 activation rows, the per-pass
+  conversion only pays above about 128 rows, the codes and scales are identical to
+  ik_llama.cpp's arithmetic on 1.44 M weights of a real file, and the form costs 1.19 GiB on
+  Llama 3.2 1B. **Nothing is wired in**: the engine's default path is untouched and no golden
+  moved. Numbers: `benchmarks/results/desktop-zen5-2026-11-12-s5.4a/`.
+
 ## [0.2.0] - 2026-11-12
 
 This release adds tool calling, embedding models, rerank and classify, decision models and

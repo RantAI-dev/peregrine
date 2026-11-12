@@ -314,6 +314,10 @@ fn main() {
         }
     }
 
+    if std::env::var("KQBENCH_PROMPT").is_ok() {
+        prompt_mode(n_sb);
+    }
+
     if std::env::var("KQBENCH_LAYER").is_ok() {
         layer_mode(n_sb, reps);
     }
@@ -711,5 +715,345 @@ fn wide_layer(n_sb: usize, n_tiles: usize, kq: &KqActs, tiles: &[u8]) {
             // weight bytes it copies per second instead.
             (n_tiles * 8 * n * reps) as f64 / best(&mut widen) / 1e9,
         );
+    }
+}
+
+/// The 8-bit prompt form against the exact kernels (S5.4a): one real layer's worth of
+/// tiles (2048 × 8192, 1024 eight-row tiles, 4 MB streamed — and the same tile over
+/// and over, L1-resident), at the widths a prompt pass runs at.
+///
+/// Four numbers per (format, width):
+///
+///  * `exact`: today's kernel over the file's own tiles (`q4k8_gemm_zmm`,
+///    `q6k8_gemm_zmm`, `q5_08_gemm_zmm`);
+///  * `resident`: `q8k_gemm_zmm` over a form built once, outside the timing;
+///  * `per-pass`: the same form built inside the pass, once per tile, timed with the
+///    multiply;
+///  * `build`: the conversion alone, reported as weights per second.
+///
+/// ```text
+/// KQBENCH_PROMPT=1 taskset -c 20-23 cargo run --release -p peregrine-bench \
+///     --example kqbench -- 8 40 1
+/// ```
+///
+/// Before each width is timed, the resident form is rebuilt inside the pass and
+/// compared with the one built outside: the two paths must agree, or the table
+/// would be comparing a different arithmetic.
+#[cfg(target_arch = "x86_64")]
+fn prompt_mode(n_sb: usize) {
+    use peregrine_kernels::kq8::{build_q4k, build_q5_0, build_q6k, form_size, Q8K_SIZE};
+    use peregrine_kernels::kqsimd::{
+        q8k_build_q4k_zmm, q8k_build_q5_0_zmm, q8k_build_q6k_zmm, q8k_gemm_zmm,
+    };
+    let n_tiles = 1024; // 8192 output rows
+    let n = n_sb * 256;
+    let batch = acts(512, n, 0xC0DE_5678);
+    let mut kq = KqActs::default();
+    kq.fill(&batch);
+    let zmm = peregrine_kernels::kqsimd::have_zmm512();
+    if !zmm {
+        eprintln!("the 8-bit form has no AVX2 body; nothing to measure here");
+        return;
+    }
+    let n_blk5 = n / 32;
+
+    // The exact tiles (the engine's own store) and the forms built from them.
+    let mut tiles4 = vec![0u8; n_tiles * n_sb * Q4K8::SIZE];
+    let mut tiles6 = vec![0u8; n_tiles * n_sb * Q6K8::SIZE];
+    let mut tiles5 = vec![0u8; n_tiles * n_blk5 * Q5_08::SIZE];
+    for t in 0..n_tiles {
+        for sb in 0..n_sb {
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = prng(0x5EED_0000 + (t * 8 + r) as u64 * 31 + sb as u64, Q4K_BLOCK);
+                b[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                b[2..4].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes());
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let at = (t * n_sb + sb) * Q4K8::SIZE;
+            repack_q4k8(&refs, &mut tiles4[at..at + Q4K8::SIZE]);
+        }
+        for sb in 0..n_sb {
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = prng(0x6EED_0000 + (t * 8 + r) as u64 * 37 + sb as u64, Q6K_BLOCK);
+                b[208..210]
+                    .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let at = (t * n_sb + sb) * Q6K8::SIZE;
+            repack_q6k8(&refs, &mut tiles6[at..at + Q6K8::SIZE]);
+        }
+        for blk in 0..n_blk5 {
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = prng(0x50ED_0000 + (t * 8 + r) as u64 * 41 + blk as u64, 22);
+                b[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let at = (t * n_blk5 + blk) * Q5_08::SIZE;
+            repack_q5_08(&refs, &mut tiles5[at..at + Q5_08::SIZE]);
+        }
+    }
+    // The resident forms, built once.
+    let stride4 = n_sb * Q8K_SIZE;
+    let stride6 = n_sb * Q8K_SIZE;
+    let stride5 = n_sb * Q8K_SIZE;
+    let mut forms4 = vec![0u8; n_tiles * form_size(n_sb)];
+    let mut forms6 = vec![0u8; n_tiles * form_size(n_sb)];
+    let mut forms5 = vec![0u8; n_tiles * form_size(n_sb)];
+    let mut scratch = vec![0u8; form_size(n_sb)];
+    for t in 0..n_tiles {
+        let a = t * n_sb * Q4K8::SIZE;
+        unsafe {
+            q8k_build_q4k_zmm(
+                &tiles4[a..a + n_sb * Q4K8::SIZE],
+                n_sb,
+                &mut forms4[t * stride4..(t + 1) * stride4],
+            )
+        };
+        let a = t * n_sb * Q6K8::SIZE;
+        unsafe {
+            q8k_build_q6k_zmm(
+                &tiles6[a..a + n_sb * Q6K8::SIZE],
+                n_sb,
+                &mut forms6[t * stride6..(t + 1) * stride6],
+            )
+        };
+        let a = t * n_blk5 * Q5_08::SIZE;
+        unsafe {
+            q8k_build_q5_0_zmm(
+                &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+                n_blk5,
+                &mut forms5[t * stride5..(t + 1) * stride5],
+            )
+        };
+    }
+    // The forms are the twin's, built from the same tiles (this also checks that the
+    // resident store is what the per-pass path will produce).
+    for (i, tile) in [0usize, 7, 999].iter().enumerate() {
+        let mut want = vec![0u8; form_size(n_sb)];
+        let a = tile * n_sb * Q4K8::SIZE;
+        build_q4k(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &mut want);
+        assert_eq!(
+            want,
+            &forms4[tile * stride4..(tile + 1) * stride4],
+            "the Q4_K form {i} is not the twin's"
+        );
+        let a = tile * n_sb * Q6K8::SIZE;
+        build_q6k(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &mut want);
+        assert_eq!(
+            want,
+            &forms6[tile * stride6..(tile + 1) * stride6],
+            "the Q6_K form {i} is not the twin's"
+        );
+        let a = tile * n_blk5 * Q5_08::SIZE;
+        build_q5_0(&tiles5[a..a + n_blk5 * Q5_08::SIZE], n_blk5, &mut want);
+        assert_eq!(
+            want,
+            &forms5[tile * stride5..(tile + 1) * stride5],
+            "the Q5_0 form {i} is not the twin's"
+        );
+    }
+    println!(
+        "--- the 8-bit prompt form (S5.4a): {n} weights x {} output rows, one thread; the columns are \
+         'exact' (the file's tiles), 'resident' (the form built once), 'per-pass' (the form built per tile \
+         inside the pass) and 'build' (the conversion alone) ---",
+        8 * n_tiles
+    );
+    println!(
+        "--- the form's bytes per weight: {:.5} (a Q4_K file holds {:.4}, a Q6_K file {:.4}) ---",
+        Q8K_SIZE as f64 / 2048.0,
+        Q4K_BLOCK as f64 / 256.0,
+        Q6K_BLOCK as f64 / 256.0
+    );
+    for &nb in &[1usize, 8, 16, 64, 128, 512] {
+        let reps = (200 / nb).max(1);
+        let mut o = vec![0.0f32; nb * 8];
+        let macs = (n_tiles * 8 * n * nb * reps) as f64;
+        let mut rows = Vec::new();
+        // Q4_K.
+        let mut exact = Vec::new();
+        let mut resident = Vec::new();
+        let mut per_pass = Vec::new();
+        let mut build_only = Vec::new();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_sb * Q4K8::SIZE;
+                    unsafe {
+                        q4k8_gemm_zmm(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &kq, nb, &mut o)
+                    };
+                }
+            }
+            exact.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * stride4;
+                    unsafe { q8k_gemm_zmm(&forms4[a..a + stride4], n_sb, &kq, nb, &mut o) };
+                }
+            }
+            resident.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_sb * Q4K8::SIZE;
+                    unsafe {
+                        q8k_build_q4k_zmm(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &mut scratch);
+                        q8k_gemm_zmm(&scratch, n_sb, &kq, nb, &mut o);
+                    }
+                }
+            }
+            per_pass.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_sb * Q4K8::SIZE;
+                    unsafe {
+                        q8k_build_q4k_zmm(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &mut scratch)
+                    };
+                }
+            }
+            build_only.push(t0.elapsed().as_secs_f64());
+        }
+        let g = |v: &mut Vec<f64>| macs / best(v) / 1e9;
+        let w = |v: &mut Vec<f64>| (n_tiles * 8 * n * reps) as f64 / best(v) / 1e9;
+        rows.push((
+            "q4k",
+            g(&mut exact),
+            g(&mut resident),
+            g(&mut per_pass),
+            w(&mut build_only),
+        ));
+        // Q6_K.
+        let mut exact = Vec::new();
+        let mut resident = Vec::new();
+        let mut per_pass = Vec::new();
+        let mut build_only = Vec::new();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_sb * Q6K8::SIZE;
+                    unsafe {
+                        q6k8_gemm_zmm(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &kq, nb, &mut o)
+                    };
+                }
+            }
+            exact.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * stride6;
+                    unsafe { q8k_gemm_zmm(&forms6[a..a + stride6], n_sb, &kq, nb, &mut o) };
+                }
+            }
+            resident.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_sb * Q6K8::SIZE;
+                    unsafe {
+                        q8k_build_q6k_zmm(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &mut scratch);
+                        q8k_gemm_zmm(&scratch, n_sb, &kq, nb, &mut o);
+                    }
+                }
+            }
+            per_pass.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_sb * Q6K8::SIZE;
+                    unsafe {
+                        q8k_build_q6k_zmm(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &mut scratch)
+                    };
+                }
+            }
+            build_only.push(t0.elapsed().as_secs_f64());
+        }
+        rows.push((
+            "q6k",
+            g(&mut exact),
+            g(&mut resident),
+            g(&mut per_pass),
+            w(&mut build_only),
+        ));
+        // Q5_0: the same form, built from the Q5_0 tiles.
+        let mut exact = Vec::new();
+        let mut resident = Vec::new();
+        let mut per_pass = Vec::new();
+        let mut build_only = Vec::new();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_blk5 * Q5_08::SIZE;
+                    unsafe {
+                        q5_08_gemm_zmm(
+                            &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+                            n_blk5,
+                            &batch[..nb],
+                            nb,
+                            &mut o,
+                        )
+                    };
+                }
+            }
+            exact.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * stride5;
+                    unsafe { q8k_gemm_zmm(&forms5[a..a + stride5], n_sb, &kq, nb, &mut o) };
+                }
+            }
+            resident.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_blk5 * Q5_08::SIZE;
+                    unsafe {
+                        q8k_build_q5_0_zmm(
+                            &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+                            n_blk5,
+                            &mut scratch,
+                        );
+                        q8k_gemm_zmm(&scratch, n_sb, &kq, nb, &mut o);
+                    }
+                }
+            }
+            per_pass.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * n_blk5 * Q5_08::SIZE;
+                    unsafe {
+                        q8k_build_q5_0_zmm(
+                            &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+                            n_blk5,
+                            &mut scratch,
+                        )
+                    };
+                }
+            }
+            build_only.push(t0.elapsed().as_secs_f64());
+        }
+        rows.push((
+            "q5_0",
+            g(&mut exact),
+            g(&mut resident),
+            g(&mut per_pass),
+            w(&mut build_only),
+        ));
+        for (label, exact, resident, per_pass, build) in rows {
+            println!(
+                "{label:>4} {nb:>3} acts: exact {exact:6.1}  resident {resident:6.1} ({:+.0}%)  \
+                 per-pass {per_pass:6.1} ({:+.0}%)  build {build:5.1} G weights/s  GMAC/s/core",
+                (resident / exact - 1.0) * 100.0,
+                (per_pass / exact - 1.0) * 100.0,
+            );
+        }
     }
 }
