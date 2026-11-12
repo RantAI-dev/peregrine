@@ -128,6 +128,20 @@ prompt is the one llama.cpp builds from the model's template, byte for byte. Des
 | S6.6 | Constrained sampling for calls: a JSON-schema matcher and a token mask; `tool_choice: "required"` and named choices | 2.0 |
 | S6.7 | The `generic` format for templates without a tool section | 0.5 |
 
+## Stage 7: macOS and Windows
+
+Peregrine on the two other desktop systems, to the bar Linux is held to: CI on every PR, a release
+archive, an installer, `upgrade`, the server's lifetime commands, goldens. The design is
+[`docs/design/s7-platforms.md`](design/s7-platforms.md).
+
+| ID | Item | pw |
+|---|---|---|
+| S7.1 | macOS on Apple Silicon: release job with a dry run, installer, `upgrade`, performance-core default, synthetic goldens, quickstart | 1.0 |
+| S7.2 | Windows x86-64 builds and passes the suite in CI | 1.5 |
+| S7.3 | Windows lifetime commands, `upgrade`, `install.ps1`, release job | 1.5 |
+| S7.4 | Windows goldens, docs for both systems, a native Windows measurement on the desktop | 1.0 |
+| S7.5 | A release that ships all four archives | 0.3 |
+
 ## Open decisions
 
 1. ARM in Stage 2, or x86 only for now.
