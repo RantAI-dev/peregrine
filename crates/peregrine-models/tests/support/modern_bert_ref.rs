@@ -385,9 +385,10 @@ pub fn reference_head(model: &Model, tokens: &[u32]) -> Vec<f32> {
                     *v *= 1.0 / (1.0 + (-*v).exp());
                 }
             }
+            // The engine's `tanh` is the one defined in `vmath`, not the C library's.
             Ok("tanh") => {
                 for v in out.iter_mut() {
-                    *v = v.tanh();
+                    *v = peregrine_core::vmath::tanh(*v);
                 }
             }
             // The family's default is the exact (erf) GELU, not `bert`'s tanh.
