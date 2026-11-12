@@ -30,7 +30,7 @@ All notable changes to this project are documented here. The format follows
   source: it expands the file's k-quant codes to eight-bit in registers per 32 weights and
   streams 0.5625/0.8125 bytes per weight, so its 4 096-token win is its CPU flash attention, not
   its matmul. Numbers, scripts and the eight cells:
-  `benchmarks/results/spark-arm-2026-11-12-s5.4k/`; design §5i.
+  `benchmarks/results/spark-arm-2026-11-12-s5.4k/`; design §5k.
 =======
 - **The fast prompt pass measured against ik_llama.cpp's `-rtr` path, and a per-32 form as a
   prototype (S5.4i)**: the opt-in 8-bit prompt pass was 0.74-0.94× the fork's `-rtr` path on all
