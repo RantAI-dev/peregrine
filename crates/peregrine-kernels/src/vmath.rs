@@ -1428,6 +1428,11 @@ unsafe fn gelu_erf_rows_avx2(x: &mut [f32]) {
     let n = x.len();
     let p = x.as_mut_ptr();
     let mut i = 0;
+    while i + 32 <= n {
+        gelu_erf_16(p.add(i));
+        gelu_erf_16(p.add(i + 16));
+        i += 32;
+    }
     while i + 16 <= n {
         gelu_erf_16(p.add(i));
         i += 16;

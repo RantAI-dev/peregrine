@@ -114,6 +114,7 @@ def command(r, args, mode):
            "--round", str(args.round),
            "--threads", "4",
            "--max-load", str(args.max_load),
+           "--min-avail-gb", str(args.min_avail_gb),
            "--port", str(args.port),
            "--texts-dir", str(args.texts_dir),
            "--output-dir", str(args.out_dir)]
@@ -157,6 +158,9 @@ def main():
     ap.add_argument("--max-load", type=float, default=20.0,
                     help="the host is shared; the load is recorded, and the gate only "
                          "refuses a host that is actually busy")
+    ap.add_argument("--min-avail-gb", type=float, default=5.0,
+                    help="refuse to time below this much free memory; the small encoder "
+                         "rows need a fraction of it, so a shared desktop can lower it")
     ap.add_argument("--port", type=int, default=8401)
     ap.add_argument("--max-seconds", type=float, default=480.0,
                     help="stop and report between rows after this much wall time")
