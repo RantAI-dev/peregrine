@@ -8,6 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The pass width of large float encoders is right for ARM (S4.9, measured)**: #251 gave a
+  bidirectional encoder whose weights are all float and larger than 256 MiB 128 rows per pass
+  instead of 32, measured on x86 only. Re-measured on the ARM host with both settings of one
+  build (`--opt PASS_ROWS=32` against `128`, alternating inside every round, cache off, fresh
+  texts per request) on five such encoders — bge-m3 F16, EmbeddingGemma 300M F32,
+  gte-modernbert-base F16, nomic-embed-text v1.5 F16 (260.9 MiB) and jina-embeddings-v2-base-en
+  F16 (261.0 MiB) — the rule holds: at one thread the single-text cells are level (0.996-1.008,
+  a text is never split) and every batch gains, **16 × 32 tokens 1.084-1.289**, 32 × 128
+  1.038-1.081, 8 × 512 1.064-1.142, the mixed batch 1.004-1.010. The ten-thread cells are
+  host-contaminated (load 5.7-32.5); the two below 1.0 there (bge-m3 512 0.817, jina 8 × 512
+  0.896) are 0.999 and 1.085 at one thread. **No code changed and no golden moved**: the pass
+  budget is scheduling, and the size rule is the smallest that fits. Numbers and harness:
+  `benchmarks/results/spark-arm-2026-11-12-pass-rows/`; design §24.
+
 - **Long-context attention on ARM reads a query-tile row group once, same bits (S4.9t)**:
   S4.9s's account left the score kernel at 29.0 GMAC/s and the value mix at 21.3 (bucket, soft-max
   included) against this core's 66 GMAC/s f32 roof, both limited by how many accumulation chains
