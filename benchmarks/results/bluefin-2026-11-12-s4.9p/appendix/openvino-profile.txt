@@ -1,0 +1,16 @@
+# OpenVINO's own per-node times (CPU plugin, PERF_COUNT, 4 threads, one 512-token inference)
+# python appendix/ovprof.py <onnx> 512
+
+## all-MiniLM-L6-v2 / onnx-fp32.onnx
+FullyConnected 31.38 ms 72.0% (36 nodes)
+Subgraph       10.60 ms 24.3% (33 nodes)
+Transpose       0.54 ms  1.2% (6 nodes)
+Gather          0.51 ms  1.2% (2 nodes)
+TOTAL          43.58 ms
+
+## bge-small-en-v1.5 / onnx-fp32.onnx
+FullyConnected 62.59 ms 74.1% (72 nodes)
+Subgraph       19.78 ms 23.4% (63 nodes)
+Transpose       0.91 ms  1.1% (12 nodes)
+MVN             0.66 ms  0.8% (25 nodes)
+TOTAL          84.42 ms
