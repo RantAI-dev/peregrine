@@ -195,7 +195,7 @@ pub struct Vocabulary {
     /// The closing tokens whose remainder the stack below the string accepts, by that
     /// stack. A closing token's validity after the quote depends on the parent, not on the
     /// string's character count.
-    closing_parents: Mutex<HashMap<u64, (usize, Vec<super::matcher::Item>, TokenMask)>>,
+    closing_parents: Mutex<HashMap<u64, ClosingParent>>,
     /// Cumulative `plain` masks: index `c` holds the tokens with a plain character count
     /// at most `c` (`c < COUNT_CAP`); longer ones are in `long_plain`.
     plain_by_count: Vec<TokenMask>,
@@ -221,6 +221,8 @@ pub struct Vocabulary {
 }
 
 type MaskEntry = (Matcher, Vec<u32>, TokenMask, u64);
+
+type ClosingParent = (usize, Vec<super::matcher::Item>, TokenMask);
 
 #[derive(Clone)]
 struct ClosingToken {
