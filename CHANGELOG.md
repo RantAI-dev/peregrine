@@ -8,6 +8,21 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Prompt processing: the 512-token path's value mix takes two rows per V pass (S5.2c)**: the
+  widened f32 tile — the one a prompt below 1024 positions uses — had no pair body, so the
+  trick S5.2b shipped for the F16 tile applied to nothing at 512 tokens. Two query rows of one
+  KV head see the same positions, so each f32 value is now loaded once and feeds both rows'
+  fused multiply-adds; each row keeps its own accumulators and its own ascending position
+  order, so no result bit moves (no golden file changed; the new
+  `the_prefill_f32_pair_mix_is_each_rows_own_mix` pins it to the solo mix row by row on the
+  S5.2b grid). The mix's own time at one thread falls to 0.78 (Llama 3.2 1B) and 0.86 (Qwen
+  2.5 0.5B) of what it was, and the 512-token prompt gains **+3.3 % and +2.7 %**; at six and
+  twelve threads the pass does not resolve the 4-6 % bucket it lives in (both arm orders
+  straddle 1.0). 4096 tokens, decode and ten users are unchanged. **Still below
+  ik_llama.cpp**: 0.37-0.60 of it at twelve threads, unchanged in cause from S5.2b — the fork's
+  requantising weight kernel. Against llama.cpp the same round reads 1.00-1.43 except Qwen at 512
+  tokens, 0.89 on a host loaded at 16-22 where the rounds overlap; that cell is to be measured
+  again on a quiet host.
 - **Prompt processing: the attention value mix takes two rows per V pass (S5.2b)**: on a
   4096-token prompt attention is 35-45 % of a pass and the value mix alone is twice the score
   stage, running at 8.6-9.3 GMAC/s per core, a sixth of this machine's f32 FMA roof. Two query
@@ -21,6 +36,18 @@ All notable changes to this project are documented here. The format follows
   and 0.47 at 512, where the prompt takes the widened f32 tile and this body does not apply;
   the remaining gap is the weight matmul (the fork runs a requantising kernel at 91 GMAC/s
   against Peregrine's exact 72-75, §11.3-11.4 of `docs/design/s5-prefill-avx512.md`).
+
+### Fixed
+
+- **Prompt processing: a pass's "6-10 % of the caller's serial work" is not serial work
+  (S5.2c)**: SwiGLU had no timer, and the pass's step account now names every step over 0.5 %
+  (quantise 2.6-6.3 %, SwiGLU 2.4-5.9 %, residual 0.7-4.4 %, RoPE 0.4-1.7 %, RMSNorm
+  0.2-1.1 %, KV write **0.9-1.8 %**). Only the KV write is serial; the rest is pool work
+  paying one fork-join, and the 13-24 % "barrier wait" is workers parked by the OS on a shared
+  host — 12 385 joins a 4096 pass at 0.17 ms each with 6 347 parks of 1-5 ms, level 0 of the
+  spin ladder, and an even 24-task split — not imbalance. Nothing was threaded or fused that
+  the numbers did not pay for; the reasons and the measured candidates are in
+  `docs/design/s5-prefill-avx512.md` §13.
 
 ### Added
 
@@ -47,6 +74,45 @@ All notable changes to this project are documented here. The format follows
   invariance on F32 and Q8_0, refusals by name, the no-allocation pass, server and CLI
   cases, and a Q8_0 golden on scalar, AVX2 and AVX-512 under SDE.
 
+- **An AVX2 body for the fast prompt mode's 8-bit kernel (S5.4d)**: `--fast-prompt` had one
+  SIMD body (AVX-512); on an AVX2 machine the mode ran through the scalar twin, correct and
+  about as fast as the exact kernels. `crates/peregrine-kernels/src/kqsimd.rs` now has
+  `q8k_gemm_avx2` and the AVX2 builders (`q8k_build_q4k_avx2`, `q8k_build_q6k_avx2`), and
+  `MatKernels::q8k_gemm`/`q8k_build`/`q8k_body` dispatch them (`q8k_body` is what the server's
+  startup line and `fast_prompt_simd()` report). The body uses the `vpsignb` sign trick
+  (`|code|` × `sign(code)·a`, `2·128·127 = 32 512 < 32 767`) because `vpmaddubsw` saturates,
+  which is the trap the AVX-512 body's non-saturating `vpdpbusd` does not have; it is
+  **bit-identical to the scalar twin** — `to_bits` equal at every width class from 1 to 512
+  activation rows, at one, two, three and five super-blocks, on random forms and with every
+  code at `−128` and at `127` and the activation extremes — and the tier's fast goldens pass
+  unchanged (no golden file moves). On bluefin it runs at **59.7 GMAC/s against the scalar
+  twin's 1.6** (37×) and the AVX-512 body is still what the AVX-512 tier takes. **It is not
+  faster than this tier's exact Q4_K kernel** (59.7 against 77.4: an 8-bit dot needs four
+  instructions per 32 products on AVX2, while the 4-bit kernel chains eight `vpmaddubsw` deep),
+  it is 1.30× the exact Q6_K kernel, and end to end the fast mode is 0.88-0.92 of the exact
+  mode on Llama 3.2 1B Q4_K_M and level on Qwen 2.5 0.5B Q4_K_M (mostly Q5_0, which has no
+  form). The option's help text and `docs/design/s5.4-fast-prompt.md` §5d say so; the mode
+  stays off by default. Form build +0.83 s and +987 MiB on the 1B. Numbers:
+  `benchmarks/results/bluefin-2026-11-12-s5.4d/`.
+- **Windows lifetime commands, `upgrade`, installer and release archive (roadmap S7.3)**:
+  `serve --background`, `status`, `stop` and `upgrade` work on Windows. Windows has no `SIGTERM`,
+  so `peregrine stop` writes `serve-<port>.stop` in the state directory; the server notices it
+  within about 250 ms, removes it and runs the same drain a Unix `SIGTERM` starts, and `stop` ends
+  the process with `TerminateProcess` only after the 40 s drain timeout. `status` reads the same
+  state file and checks liveness with hand-written `OpenProcess`/`GetExitCodeProcess` calls (one
+  more declaration in `crates/peregrine-core/src/win32.rs`, no new dependency); `--background`
+  starts the child with `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` and logs to the same log file
+  as Unix. `upgrade` maps Windows x86-64 to `windows-x86_64`, verifies the zip against
+  `SHA256SUMS` with `certutil`, renames the running `peregrine.exe` to `peregrine.exe.old` before
+  putting the new one in place (removed at the next start), and restarts a managed server after it
+  drains (a short gap: Windows has no `SO_REUSEPORT`). `scripts/install.ps1` is a PowerShell 5.1
+  installer (`irm … | iex`) that verifies `Get-FileHash`, installs to
+  `%LOCALAPPDATA%\Programs\peregrine`, adds that directory to the user `Path`, refuses ARM64 and
+  prints how to undo it. `release.yml` gains a `windows-2025` / `x86_64-pc-windows-msvc` job that
+  builds `peregrine-vX.Y.Z-windows-x86_64.zip` with `-C target-feature=+crt-static` (no Visual C++
+  redistributable needed), and a `workflow_dispatch` dry run that builds artefacts without
+  publishing. CI's Windows job runs the installer against the archive it just built. Windows
+  counterparts of the `SIGTERM` drain tests go through the stop file with the same assertions.
 - **NEON bodies for the 8-bit prompt kernel (S5.4d, ARM)**: `crates/peregrine-kernels/src/neon.rs`
   gains the vectorised build of the Q4_K/Q6_K/Q5_0 forms (`q8k_build_*_neon`) and the multiply on
   `sdot` (`q8k_gemm_sdot`) and `smmla` (`q8k_gemm_i8mm`), with `q8k_gemm` picking the tier's body.
