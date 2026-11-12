@@ -48,7 +48,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: dry run
         if: github.event_name == 'workflow_dispatch'
-        run: echo "dry run (dry_run=${{ inputs.dry_run }}): the archives upload as workflow artefacts; the release job is skipped"
+        run: |
+          echo "dry run (dry_run=${{ inputs.dry_run }}): the archives upload as workflow artefacts; the release job is skipped"
       # The tagged commit must pass the suite in release mode on every target (mirrors ci.yml's
       # `test` job: the kernels are tested as they ship).
       - name: test (x86-64, every target)
