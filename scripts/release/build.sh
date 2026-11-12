@@ -76,7 +76,11 @@ if [[ "$target" == *-apple-darwin ]]; then
     strip -x "$stage/peregrine"
     codesign --force --sign - "$stage/peregrine"
     codesign --verify --strict "$stage/peregrine"
-    codesign -dv "$stage/peregrine" 2>&1 | sed -n '1,4p'
+    codesign -dv "$stage/peregrine" 2>&1 | grep -E '^(Identifier|Format|Signature)='
+    if ! codesign -dv "$stage/peregrine" 2>&1 | grep -q '^Signature=adhoc'; then
+        echo "scripts/release: $stage/peregrine is not ad-hoc signed" >&2
+        exit 1
+    fi
 else
     strip "$stage/peregrine"
 fi
