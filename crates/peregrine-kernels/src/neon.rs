@@ -387,6 +387,8 @@ unsafe fn q8_08_group<const N: usize>(
 /// says, and `out` `nb · 8` floats.
 #[target_feature(enable = "neon,dotprod")]
 pub unsafe fn q8_08_gemm(tile: &[u8], n_blk: usize, acts: &[QuantAct], nb: usize, out: &mut [f32]) {
+    #[cfg(test)]
+    Q8_08_SDOT_CALLS.with(|c| c.set(c.get() + 1));
     assert!(
         !acts.is_empty() && nb <= acts.len(),
         "more rows than activations"
@@ -423,6 +425,121 @@ pub unsafe fn q8_08_gemv(tile: &[u8], n_blk: usize, acts: &[QuantAct], nb: usize
         "the Q8_0 GEMV takes one to three rows"
     );
     q8_08_gemm(tile, n_blk, acts, nb, out);
+}
+
+// Test-only counts of the two Q8_0 tile bodies' calls, so the dispatch test can see
+// which one the tier's table takes. `thread_local` keeps a concurrently running test
+// out of the count. Both are compiled only into the crate's own tests.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static Q8_08_I8MM_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static Q8_08_SDOT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One block of a repacked Q8_0 tile against four activation rows (two pairs) on
+/// `smmla`, folded onto `facc[activation_pair][row_pair]`.
+///
+/// Q8_0's block is one f16 scale and 32 signed codes per row, so the tile's window —
+/// two output rows of eight codes — is `smmla`'s first operand as it stands, and two
+/// activation rows' eight codes, joined, are its second. One instruction therefore
+/// forms the 32 products of two output rows by two activations, and four instructions
+/// cover the eight output rows of a window. A block's four windows share one scale,
+/// so they accumulate into one exact int32 sum; the fold is
+/// [`kq::dot_q8_08_ref`]'s `(d·dk)` then one fused multiply-add, block by block in
+/// the tile's order, so a row is bit-identical to the `sdot` body in [`q8_08_group`].
+#[inline]
+#[target_feature(enable = "neon,i8mm")]
+unsafe fn q8_08_group_i8mm(tile: &[u8], n_blk: usize, acts: &[QuantAct], out: &mut [f32]) {
+    // [activation pair][row pair]; the lanes are [r0·a0, r1·a0, r0·a1, r1·a1].
+    let mut facc = [[vdupq_n_f32(0.0); 4]; 2];
+    for t in 0..n_blk {
+        let b = tile.as_ptr().add(t * Q8_08::SIZE);
+        let mut acc = [[vdupq_n_s32(0); 4]; 2];
+        for w in 0..4 {
+            // Each column of `smmla`'s second operand is one activation's eight codes.
+            let mut bv = [vdupq_n_s8(0); 2];
+            for (q, av) in bv.iter_mut().enumerate() {
+                let p0 = acts[2 * q].q.as_ptr().add(t * Q8_0_WEIGHTS + w * 8);
+                let p1 = acts[2 * q + 1].q.as_ptr().add(t * Q8_0_WEIGHTS + w * 8);
+                *av = vcombine_s8(vld1_s8(p0), vld1_s8(p1));
+            }
+            for pair in 0..4 {
+                let codes = vld1q_s8(
+                    b.add(crate::kq::q8_qs() + w * crate::kq::Q8_WINDOW + pair * 16) as *const i8,
+                );
+                for q in 0..2 {
+                    acc[q][pair] = smmla(acc[q][pair], codes, bv[q]);
+                }
+            }
+        }
+        let dv = rows_f16(tile, t * Q8_08::SIZE + crate::kq::q8_d());
+        let mut d8 = [0.0f32; 8];
+        vst1q_f32(d8.as_mut_ptr(), dv[0]);
+        vst1q_f32(d8.as_mut_ptr().add(4), dv[1]);
+        for q in 0..2 {
+            let (u0, u1) = (2 * q, 2 * q + 1);
+            let dk = pair_f32(acts[u0].d[t], acts[u1].d[t]);
+            for pair in 0..4 {
+                // `dot_q8_08_ref`'s fold, in its order: `(d·dk)` first, then one fused
+                // multiply-add. The lanes line up with the accumulator's.
+                let dp = quad_f32(d8[2 * pair], d8[2 * pair + 1]);
+                let dd = vmulq_f32(dp, dk);
+                facc[q][pair] = vfmaq_f32(facc[q][pair], dd, vcvtq_f32_s32(acc[q][pair]));
+            }
+        }
+    }
+    for q in 0..2 {
+        for pair in 0..4 {
+            let mut lanes = [0.0f32; 4];
+            vst1q_f32(lanes.as_mut_ptr(), facc[q][pair]);
+            let a = 2 * q;
+            out[a * ROWS + 2 * pair] = lanes[0];
+            out[(a + 1) * ROWS + 2 * pair] = lanes[1];
+            out[a * ROWS + 2 * pair + 1] = lanes[2];
+            out[(a + 1) * ROWS + 2 * pair + 1] = lanes[3];
+        }
+    }
+}
+
+/// Eight output rows of a repacked Q8_0 tile against a batch of activations, on
+/// `smmla` for whole groups of four and on the `sdot` body for the 1–3-row tail.
+///
+/// # Safety
+/// The CPU must have `asimd`, `asimddp` and `i8mm`; the tile must hold `n_blk` blocks
+/// and `out` must hold `nb · 8` floats.
+#[target_feature(enable = "neon,i8mm")]
+pub unsafe fn q8_08_gemm_i8mm(
+    tile: &[u8],
+    n_blk: usize,
+    acts: &[QuantAct],
+    nb: usize,
+    out: &mut [f32],
+) {
+    #[cfg(test)]
+    Q8_08_I8MM_CALLS.with(|c| c.set(c.get() + 1));
+    assert!(
+        !acts.is_empty() && nb <= acts.len(),
+        "more rows than activations"
+    );
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    assert!(
+        tile.len() >= n_blk * Q8_08::SIZE,
+        "the tile is shorter than its blocks"
+    );
+    let mut b = 0;
+    while b + ACT_GROUP <= nb {
+        q8_08_group_i8mm(tile, n_blk, &acts[b..], &mut out[b * ROWS..]);
+        b += ACT_GROUP;
+    }
+    match nb - b {
+        3 => q8_08_group::<3>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        2 => q8_08_group::<2>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        1 => q8_08_group::<1>(tile, n_blk, &acts[b..], &mut out[b * ROWS..]),
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2117,6 +2234,42 @@ mod tests {
         w
     }
 
+    /// A Q8_0 row of `n_blk` blocks: the half-precision scale `d`, codes from `code`.
+    fn q8_0_row_from(n_blk: usize, d: f32, code: fn(usize, usize) -> i8) -> Vec<u8> {
+        let mut w = Vec::with_capacity(n_blk * 34);
+        for t in 0..n_blk {
+            w.extend_from_slice(&crate::quant::f32_to_f16(d).to_le_bytes());
+            w.extend((0..32).map(|k| code(t, k) as u8));
+        }
+        w
+    }
+
+    /// An activation whose codes are all `code` and whose 32-block scales are `d`.
+    fn q8_act(n: usize, code: i8, d: f32) -> QuantAct {
+        q8_act_codes(&vec![code; n], d)
+    }
+
+    /// An activation from a code list, one 32-block scale `d`.
+    fn q8_act_codes(codes: &[i8], d: f32) -> QuantAct {
+        let mut a = QuantAct::with_capacity(codes.len());
+        a.n = codes.len();
+        a.q = codes.to_vec();
+        a.d = vec![d; codes.len() / 32];
+        a.sums = codes
+            .chunks(32)
+            .map(|c| c.iter().map(|&x| x as i32).sum())
+            .collect();
+        a
+    }
+
+    /// The row counts the Q8_0 i8mm body is checked at: every small count, the group
+    /// boundaries, and the batch sizes the encoders actually use.
+    fn q8_i8mm_row_counts() -> Vec<usize> {
+        let mut v: Vec<usize> = (1..=40).collect();
+        v.extend([63, 64, 65, 127, 128, 129, 511, 512, 513]);
+        v
+    }
+
     /// A Q4_K row of `n` weights: random codes, real-looking 6-bit scales and mins.
     fn q4_k_row(rng: &mut Rng, n: usize) -> Vec<u8> {
         let mut w = Vec::with_capacity(n / 256 * 144);
@@ -2360,6 +2513,130 @@ mod tests {
                         got[b * 8 + r]
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn q8_08_i8mm_gemm_is_bit_identical_to_the_sdot_gemm() {
+        if !crate::cpu::have_i8mm() {
+            eprintln!("skip: no i8mm on this CPU");
+            return;
+        }
+        let mut rng = Rng(0x0808_1a2b_3c4d_5e6f);
+        // Widths that are and are not multiples of the block: 32, 64, 96, 160 weights.
+        for n_blk in [1usize, 2, 3, 5] {
+            let n = n_blk * 32;
+            let rows: Vec<Vec<u8>> = (0..8).map(|_| q8_0_row(&mut rng, n)).collect();
+            let mut tile = vec![0u8; n_blk * Q8_08::SIZE];
+            for t in 0..n_blk {
+                let src: Vec<&[u8]> = rows.iter().map(|r| &r[t * 34..][..34]).collect();
+                repack_q8_08(&src, &mut tile[t * Q8_08::SIZE..]);
+            }
+            let acts: Vec<QuantAct> = (0..513).map(|_| activations(&mut rng, n)).collect();
+            for nb in q8_i8mm_row_counts() {
+                let mut got = vec![0.0f32; nb * 8];
+                let mut want = vec![0.0f32; nb * 8];
+                unsafe {
+                    q8_08_gemm_i8mm(&tile, n_blk, &acts[..nb], nb, &mut got);
+                    q8_08_gemm(&tile, n_blk, &acts[..nb], nb, &mut want);
+                }
+                for b in 0..nb {
+                    for r in 0..8 {
+                        let i = b * 8 + r;
+                        assert_eq!(
+                            got[i].to_bits(),
+                            want[i].to_bits(),
+                            "the i8mm body and the sdot body disagree: n_blk={n_blk} nb={nb} b={b} r={r}: {} vs {}",
+                            got[i],
+                            want[i]
+                        );
+                        // And the specification, `quant::dot_scalar`'s Q8_0 expression.
+                        let spec = dot_q8_08_ref(&tile, n_blk, r, &acts[b]);
+                        assert_eq!(
+                            got[i].to_bits(),
+                            spec.to_bits(),
+                            "the i8mm body and the tile reference disagree: n_blk={n_blk} nb={nb} b={b} r={r}: {} vs {spec}",
+                            got[i]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fmt-legacy")]
+    fn q8_08_i8mm_gemm_holds_the_extremes() {
+        if !crate::cpu::have_i8mm() {
+            eprintln!("skip: no i8mm on this CPU");
+            return;
+        }
+        let n_blk = 2usize;
+        let n = n_blk * 32;
+        // Row r carries case r: all -128, all 127, alternating, random codes behind a
+        // zero scale, and the two alternating patterns in between.
+        let cases: [fn(usize, usize) -> i8; 8] = [
+            |_, _| -128,
+            |_, _| 127,
+            |_, k| if k % 2 == 0 { -128 } else { 127 },
+            |_, k| if k % 2 == 0 { 127 } else { -128 },
+            |t, k| if (t + k) % 3 == 0 { -128 } else { 127 },
+            |_, k| (k as i8).wrapping_mul(37).wrapping_sub(64),
+            |t, _| if t % 2 == 0 { -128 } else { 127 },
+            |_, _| 0,
+        ];
+        let rows: Vec<Vec<u8>> = cases
+            .iter()
+            .enumerate()
+            .map(|(r, f)| {
+                let d = if r == 3 { 0.0 } else { 0.02 + r as f32 * 0.001 };
+                q8_0_row_from(n_blk, d, *f)
+            })
+            .collect();
+        let mut tile = vec![0u8; n_blk * Q8_08::SIZE];
+        for t in 0..n_blk {
+            let src: Vec<&[u8]> = rows.iter().map(|r| &r[t * 34..][..34]).collect();
+            repack_q8_08(&src, &mut tile[t * Q8_08::SIZE..]);
+        }
+        // Activations at the int8 limits, and one row with every code at the two ends.
+        let acts: Vec<QuantAct> = vec![
+            q8_act(n, -128, 1.0),
+            q8_act(n, 127, 1.0 / 127.0),
+            q8_act(n, -128, 0.0),
+            q8_act_codes(
+                &(0..n)
+                    .map(|i| if i % 2 == 0 { -128i8 } else { 127 })
+                    .collect::<Vec<i8>>(),
+                0.5,
+            ),
+        ];
+        for nb in q8_i8mm_row_counts() {
+            let acts: Vec<QuantAct> = (0..nb).map(|i| acts[i % acts.len()].clone()).collect();
+            let mut got = vec![0.0f32; nb * 8];
+            let mut want = vec![0.0f32; nb * 8];
+            unsafe {
+                q8_08_gemm_i8mm(&tile, n_blk, &acts, nb, &mut got);
+                q8_08_gemm(&tile, n_blk, &acts, nb, &mut want);
+            }
+            for i in 0..nb * 8 {
+                assert_eq!(
+                    got[i].to_bits(),
+                    want[i].to_bits(),
+                    "n_blk={n_blk} nb={nb} value {i}: {} vs {}",
+                    got[i],
+                    want[i]
+                );
+                let r = i % 8;
+                let b = i / 8;
+                let spec = dot_q8_08_ref(&tile, n_blk, r, &acts[b]);
+                assert_eq!(
+                    got[i].to_bits(),
+                    spec.to_bits(),
+                    "n_blk={n_blk} nb={nb} value {i}: {} vs {spec}",
+                    got[i]
+                );
             }
         }
     }

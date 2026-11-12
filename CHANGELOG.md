@@ -6,6 +6,50 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **An `i8mm` body for the Q8_0 tile (S4.9q).** The Q8_0 repacked eight-row tile was the one tile
+  with no `smmla` body, so on `aarch64-neon-i8mm` every Q8_0 file that stays on int8 tiles ran the
+  `sdot` kernel. `q8_08_gemm_i8mm` runs whole groups of four activation rows on `smmla` (a tile
+  window is two output rows of eight codes, two activation rows joined are the other operand) and
+  leaves the 1–3-row tail and the GEMV on `sdot`; `MatKernels::kq_tiles_q8_0` picks it on the
+  `i8mm` tier, and `kernels_for(Q8_0)` lists that tier. The bits cannot move — the integer sums
+  are exact in any grouping, and the fold is `kq::dot_q8_08_ref`'s `(d·dk)` and one fused
+  multiply-add per block, block by block in the tile's order. Tests compare it with the `sdot`
+  body and the reference bit for bit at every row count 1..=40 plus 63/64/65, 127/128/129 and
+  511/512/513, at widths that are and are not multiples of the block, on -128/127/alternating
+  codes, a zero scale and activations at the int8 limits; no golden changed. The kernel is 3.05×
+  the `sdot` body at 8, 64 and 512 rows, one thread and ten (37.9 → 115.8 GMAC/s on an X925, 4 096
+  weights). On the four Q8_0 files that stay on the tile — EmbeddingGemma 300M, Qwen3-Embedding
+  0.6B, Nemotron 3.5 Embed 1B and bge-m3 — the whole pass gains 1.48–2.59× (10 threads pinned to
+  the Cortex-X925 cluster, five interleaved rounds, medians, cache off, a co-tenant on the host).
+  Every returned float is bit-identical between the arms; the cosine against llama.cpp is
+  unchanged. **No cell of the four files is below 1.0× llama.cpp any more** — before, ten were:
+  bge-m3 at 128 tokens 0.98×, at 512 0.98×, batch 0.95× and mixed 0.96×; EmbeddingGemma's batch
+  of 32 0.95× and its mixed batch 0.99×; Qwen3-Embedding at 512 0.94×, batch 0.98×, mixed 0.98×
+  and 2 000 tokens 0.67×. The narrowest now is Qwen3-Embedding at 2 000 tokens, 1.33×. See `docs/design/s4.9-sota.md` §18 and
+  `benchmarks/results/spark-arm-2026-11-12-q8-i8mm/`.
+
+- **Chat without tools on Qwen 3.5 and Bonsai 2 files uses the template's own prompt**: these
+  files' template opens the thinking block at the end of the prompt, trims each message and
+  writes earlier turns' thinking back, which the built-in ChatML did not. With thinking on, the
+  2B model answered at once on Peregrine where llama.cpp's prompt made it reason first. Every
+  chat request on such a file is now rendered by the format's renderer, tools or not, so
+  `peregrine serve` builds llama.cpp's prompt (the same token counts in the four cases checked:
+  thinking on and off, with and without a system message) and returns the reasoning in
+  `reasoning_content`. A model that thinks spends tokens on it: send
+  `"chat_template_kwargs": {"enable_thinking": false}` for the old behaviour of a direct answer.
+  Requests on other files are unchanged.
+- **`peregrine run` uses Qwen 3.5's own prompt too (S6.3c)**: a file with that template is now
+  the `qwen35` chat template (also a name for `--chat-template`), detected by the template's
+  exact text; any other template with a thinking switch is still read as Qwen 3's. The prompt
+  ends inside the opened thinking block (or after the empty one with `--no-thinking`), messages
+  are trimmed, and an earlier turn is replayed without its thinking. The command prints the
+  opening `<think>` the prompt wrote before the model's reasoning, and `--json`'s `text` starts
+  with it. On Qwen 3.5 2B and Bonsai 2 2B the prompt is 16 tokens with thinking and 18 without,
+  as in llama.cpp, and both models now reason before they answer unless told not to.
+
+
 ## [0.2.0] - 2026-11-12
 
 This release adds tool calling, embedding models, rerank and classify, decision models and
