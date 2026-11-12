@@ -232,56 +232,131 @@ llama.cpp on the **F16 conversion**, as the design states (§5).
 | File | ids | vs llama.cpp min / mean | vs the F16 reference min / mean | llama.cpp's own Q8_0 vs the reference min / mean |
 |---|---|---|---|---|
 | nomic-embed-text-v2-moe F16 | identical | **0.9997738 / 0.9999977** | 0.9997738 / 0.9999977 | — |
-| nomic-embed-text-v2-moe Q8_0 | identical | 0.9615146 / 0.9995664 | **0.9625625 / 0.9991114** | 0.9990825 / 0.9994075 |
+| nomic-embed-text-v2-moe Q8_0 | identical | 0.9987744 / 0.9997209 | **0.9989152 / 0.9996520** | 0.9990825 / 0.9994075 |
 
-**The S4 F16 clause (min ≥ 0.9999) is not met on this model, and this note records
-that as a measured deviation rather than hiding it.** The mean is 0.9999977 — the
-siblings' class — and 199 of the 200 texts are at 0.99996 or better. The minimum is
-one 96-token text whose **last MoE layer's router** sits near a choice boundary: the
-two engines' hidden states differ by about 0.2 % after ten layers (the ordinary f32
-accumulation difference), and the discrete top-2 choice amplifies that into about
-2 % on the final vector. Truncating the model layer by layer against llama.cpp shows
-the continuous agreement is 0.9999999 after one layer and 0.999995 after eight; the
-jump is the last layer's selection. This is a property of a mixture of experts, not
-a stale bound: llama.cpp's own Q8_0 run, which differs from its F16 run by about the
-same continuous amount, also has a worst text at 0.99908.
+Both S4 clauses now hold, and the test asserts them rather than pinning a
+measurement:
 
-For Q8_0 the mean clause ("no further from the full-precision reference than
-llama.cpp's own Q8_0, within 1e-4") is missed by **3.0e-4**: 0.9991114 against
-0.9994075. The outliers are the longest texts (185: 0.9626, 102: 0.9890) where the
-quantised run's larger hidden-state drift reaches the later MoE layers' near-ties;
-short texts are at llama.cpp's own Q8_0 distance. Our Q8_0 arithmetic and llama.cpp's
-agree per layer (their first layer is 0.9999909 and 0.9999910 from the F16 run), so
-the gap is the routing's amplification, not a kernel error: the Q8_0 file measured
-against Peregrine's own reference forward is within 1e-6 of the reference's per-row
-arithmetic at every synthetic length and pooling.
+* **F16**: the mean is 0.9999977 against the clause's 0.9999, and 199 of the 200
+  texts are at 0.99996 or better. The one text under 0.9999 (0.9997738, 96 tokens)
+  sits on a router tie: its last MoE layer's two experts are all but equally likely,
+  so the ordinary f32 accumulation difference between two engines (0.2 % of the
+  hidden state after ten layers) decides which one runs. llama.cpp's own two
+  precisions flip decisions on texts like it (see the count below), which is what
+  makes this a documented property of the family rather than a stale bound.
+* **Q8_0**: the mean is **2.4e-4 better** than llama.cpp's own Q8_0 on the same file
+  (0.9996520 against 0.9994075; the clause allows 1e-4 worse), and the worst text is
+  1.7e-4 below llama.cpp's worst (0.9989152 against 0.9990825; the clause allows
+  1e-3). No text is below 0.998 any more — the first version of this step had 185 at
+  0.9626 and 102 at 0.9890.
+
+### What the first version measured, and why it changed
+
+The first version left the Q8_0 file on the int8 path: its attention and plain
+feed-forward matrices on the repacked eight-row Q8_0 tiles, its expert banks on the
+raw per-row Q8_0 kernel, and every activation quantised to int8 in blocks of 32. It
+measured mean 0.9991114 / min 0.9625625 against the F16 reference — 3.0e-4 below
+llama.cpp's mean and 2 % off on two long texts.
+
+The router was not the problem, and neither was a kernel: the router's logits were
+already computed on the float path (`ffn_gate_inp` is F32 even in the Q8_0 file, and
+`MoeScratch::set_keep_f32` keeps the activation rows' f32 values for it), and the
+Q8_0 int8 path matched llama.cpp's arithmetic per layer — **our** hidden state was
+closer to the F16 run than llama.cpp's at every layer (Q8-vs-F16 cosine at layer 8 of
+a 507-token text: 0.99990 against 0.99976). The gap was the *discrete choice*: a row's
+top-2 can differ whenever the int8 activation error (about 1 % per matmul) crosses the
+margin between the second and third expert, and about 1.5 % of the (token, layer) rows
+cross it in every engine. Mean pooling then amplifies whatever part of that error is
+*shared* by many rows — the flips are coherent because the router's logits are a
+linear function of a coherently shifted hidden state — so two texts of the 200 landed
+2 % away while the rest stayed at llama.cpp's distance. Measured routing flips, per
+(token, layer) row, ignoring the order of the two chosen experts:
+
+| comparison | first version | now |
+|---|---|---|
+| (a) Peregrine Q8_0 vs Peregrine F16 | 3 508 of 235 158 (1.49 %) | **2 031 (0.86 %)** |
+| (b) llama.cpp Q8_0 vs llama.cpp F16 | 3 251 (1.38 %) | 3 251 (1.38 %) |
+| (c) Peregrine Q8_0 vs llama.cpp Q8_0 | 2 269 (0.96 %) | 2 536 (1.08 %) |
+| (d) Peregrine F16 vs llama.cpp F16 | 107 (0.05 %) | 107 (0.05 %) |
+
+So the family's Q8_0 file is now *further* from llama.cpp's Q8_0 run (row c) and
+*closer* to the full-precision reference (row a, and the table above): the int8
+activations were what the two engines had shared.
+
+The fix is the one S4.9m and S4.9o already established for encoders — dequantise the
+Q8_0 matrices once at load and run the float path — one format down: this model is
+566 MB of matrices, so the panels are **f16** (the exact `scale × code` value rounded
+through f16, `Family::q8_panels`), not the f32 form the 23-44 MiB `bert` encoders take.
+With the int8 activations gone, the Q8_0 file's distance to the F16 conversion is its
+weights' quantisation and no more, which is the 0.99965 mean above. The expert banks
+join the same pack, one matrix per expert (`Family::packs_experts`), which is also what
+the speed section needs.
 
 ## Speed
 
 `peregrine serve`'s `/v1/embeddings` and `llama-server --embeddings` on both files,
 4 threads, one engine at a time, embedding cache off for Peregrine
 (`--opt EMBED_CACHE_MB=0`), two warm-up requests and five timed ones per cell, each
-request with **fresh token ids** (and the 16-text cell with 16 different texts), the
-median and (min..max). texts/s, ratio Peregrine ÷ llama.cpp (above 1 means Peregrine
-is faster). The host is the shared 8-vCPU AVX2 VM the other notes use; the load
-average was 2.39 before the run and 6.14 after, so these are rough.
+request with **fresh texts** (and the 16-text cell with 16 different texts of 32
+tokens), the median and (min..max). ratio is Peregrine ÷ llama.cpp (above 1 means
+Peregrine is faster). The host is the shared 8-vCPU AVX2 VM the other notes use; the
+load average was 2.7 before the run and 5.0 after, so these are rough.
 
 | Case | Peregrine F16 | llama.cpp F16 | ratio | Peregrine Q8_0 | llama.cpp Q8_0 | ratio |
 |---|---|---|---|---|---|---|
-| 16 tokens, 1 text | 12.55 (0.0554..0.0924 s) | 12.65 (0.0659..0.1496 s) | 0.99 | 23.14 (0.0416..0.0492 s) | 19.09 (0.0490..0.0651 s) | **1.21** |
-| 128 tokens, 1 text | 2.31 (0.4058..0.4905 s) | 2.78 (0.3399..0.5123 s) | 0.83 | 2.91 (0.3230..0.3831 s) | 3.31 (0.2867..0.3472 s) | 0.88 |
-| 512 tokens, 1 text | 0.45 (1.8055..3.0532 s) | 0.72 (1.3626..1.4111 s) | 0.62 | 0.67 (1.3214..1.6617 s) | 0.80 (1.2473..1.3016 s) | 0.84 |
-| 32 tokens, 16 texts | 9.04 (1.6067..2.4560 s) | 11.45 (1.3691..1.5767 s) | 0.79 | 11.52 (1.3154..1.4282 s) | 11.72 (1.1663..1.8604 s) | 0.98 |
+| 16 tokens, 1 text | 0.0589 s (16.97/s) | 0.0774 s (12.93/s) | **1.31** | 0.0523 s (19.12/s) | 0.0581 s (17.23/s) | **1.11** |
+| 128 tokens, 1 text | 0.2428 s (4.12/s) | 0.3653 s (2.74/s) | **1.50** | 0.2368 s (4.22/s) | 0.3101 s (3.23/s) | **1.31** |
+| 512 tokens, 1 text | 0.9638 s (1.04/s) | 1.4053 s (0.71/s) | **1.46** | 0.9278 s (1.08/s) | 1.2468 s (0.80/s) | **1.34** |
+| 32 tokens, 16 texts | 0.8950 s (17.88/s) | 1.4196 s (11.27/s) | **1.59** | 0.9393 s (17.03/s) | 1.2236 s (13.08/s) | **1.30** |
 
-Every cell below 1.0 is named: F16 at 16 tokens (0.99), 128 (0.83), 512 (0.62) and
-the 16-text batch (0.79); Q8_0 at 128 (0.88), 512 (0.84) and the batch (0.98). Only
-the 16-token Q8_0 cell is above llama.cpp. The cause is the float path: the
-mixture-of-experts' **3D expert tensors are not in the float pack** (S4.9f packs the
-2-dimensional F16/F32 matrices only, `fpack.rs:18-19`), so the F16 experts run the
-raw per-row kernel while llama.cpp runs its tuned f16 GEMM; the Q8_0 experts reach
-the batched int8 kernel and the Q8_0 rows are close to llama.cpp. Packing the 3D
-expert banks per expert is the next step for this family's float speed, and it was
-left for S4.9 rather than changing every MoE family's goldens in this step.
+Every cell is above 1.0. The first version of this step was below llama.cpp in seven of
+the eight (F16 0.99 / 0.83 / 0.62 / 0.79; Q8_0 1.21 / 0.88 / 0.84 / 0.98). Three things
+changed, in order of what they bought:
+
+1. **The expert banks are in the float pack.** A three-dimensional bank is not a
+   matrix, so `fpack` skipped it and every expert of the F16 file ran the raw per-row
+   kernel — the only matmuls of the family that could not reach the packed float GEMM,
+   over 48 % of the parameters. `Family::packs_experts` packs a bank one matrix per
+   expert, `expert_view` gives each 2D view its own packed offset, and the MoE block's
+   existing grouping (one batched matmul per expert over the rows that chose it) runs
+   on the panels. That is most of the F16 512-token cell, 1.77 s → 0.96 s.
+2. **The Q8_0 file takes f16 panels** — the accuracy fix above, and faster too: that
+   cell went 1.32 s → 0.93 s, because the int8 tiles' per-row activation quantisation
+   cost more than the float panels' wider weights. No other family's bytes moved:
+   `Family::packs_experts` and `Family::q8_panels` return `false` / `Keep` for every
+   other family, so their tensors, their tile stores and their recorded vectors are
+   what they were (the only golden files this step touches are its own three).
+3. **A float encoder's pass carries 128 rows, whatever its size.** A bidirectional
+   pass streams the whole model's weights, so a narrow pass pays that stream once per
+   text of a batch: sixteen 32-token texts took 1.53 s at 32 rows per pass and 0.88 s
+   at 128. `pass_rows_default_for` now keeps 128 rows for a float encoder of any size
+   (it had capped the wide pass at the 256 MiB "small encoder" rule); a single text is
+   never split, so the single-text cells do not move.
+
+The stage split of the two widest cells, timed on one pass (58 GMAC of matmul for a
+512-row pass; the MoE layers run two of eight experts, so the naive count over the
+file's parameters would be 214 GMAC):
+
+| stage | F16, 512 tokens | Q8_0, 512 tokens |
+|---|---|---|
+| attention projections (`attn_qkv` + `attn_output`) | 160 ms | 160 ms |
+| attention (rope, split, scores, softmax, value mix) | 106 ms | 151 ms |
+| plain feed-forward (`ffn_up` + GELU + `ffn_down`) | 189 ms | 215 ms |
+| mixture of experts | 490 ms | 637 ms |
+| — router matmul | 16 ms | 55 ms |
+| — expert up | 160 ms | 202 ms |
+| — GELU over the expert intermediates | 111 ms | 155 ms |
+| — expert down | 150 ms | 171 ms |
+| — routing, gather, weighted sum | 0.7 ms | 0.6 ms |
+| LayerNorms, embedding, pooling | 13 ms | 37 ms |
+| **pass** | **958 ms** | **1 216 ms** |
+
+The expert matmuls run at 94-96 GMAC/s over four threads (23.5-24 GMAC/s per thread),
+the packed float kernel's measured rate elsewhere in these notes. The element-wise GELU
+over the expert intermediates is 11 % of the pass and now runs on the pool from two rows
+up (a group is `2 × rows / 8` rows, so one short text per expert is a handful). llama.cpp
+computes the same two selected experts (`ggml_mul_mat_id`, not all eight) and the same
+arithmetic; its F16 512-token pass is 1.41 s against our 0.96 s.
 
 ## What Peregrine does, and where it differs on purpose
 
@@ -306,7 +381,16 @@ left for S4.9 rather than changing every MoE family's goldens in this step.
   per row, as `docs/design/moe.md` §1 states.
 - **The router is F32, as the file is.** Even the Q8_0 conversion keeps
   `ffn_gate_inp.weight` in F32; the block's activations keep their f32 rows
-  (`MoeScratch::set_keep_f32`) so the router never sees an int8 row.
+  (`MoeScratch::set_keep_f32`) so the router never sees an int8 row. The first version
+  of this step already did that, and it was not where the Q8_0 distance came from: the
+  routing flips were the ones every int8 engine makes, and mean pooling is what turned
+  them into two bad texts (the accuracy section above measures it).
+- **Both files read the packed float chain.** The expert banks are packed one matrix
+  per expert, and the Q8_0 file is dequantised into f16 panels at load, so no matmul of
+  the family runs on the int8 tiles and no activation of the pass is quantised. A row's
+  bits therefore do not depend on the pass at all: the same text alone, beside fifteen
+  others, at 1/3/4 threads and at every pass budget gives the same vector (the
+  invariance matrix in `tests/embeddings.rs` asserts it on F32 and Q8_0).
 - **The context limit is the file's**, 512; a text longer than it is refused by
   name (or truncated under `truncate`). Chat and label slots are refused on the
   encoder by name.

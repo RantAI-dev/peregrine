@@ -49,7 +49,7 @@ curl -s http://127.0.0.1:PORT/v1/embeddings -H 'content-type: application/json' 
 | File | ids | vs llama.cpp min / mean | vs the F16 reference min / mean |
 |---|---|---|---|
 | F16 | identical | 0.9997738 / 0.9999977 | 0.9997738 / 0.9999977 |
-| Q8_0 | identical | 0.9615146 / 0.9995664 | 0.9625625 / 0.9991114 (llama.cpp's own Q8_0: 0.9990825 / 0.9994075) |
+| Q8_0 | identical | 0.9987744 / 0.9997209 | 0.9989152 / 0.9996520 (llama.cpp's own Q8_0: 0.9990825 / 0.9994075) |
 
 `docs/reference/nomic-bert-moe.md` has the reading of llama.cpp's graph, why the
 F16 minimum is one text at the last MoE layer's router boundary, and the speed.
