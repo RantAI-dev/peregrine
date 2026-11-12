@@ -20,6 +20,7 @@ pub mod format;
 pub mod fpack;
 pub mod hadamard;
 pub mod kq;
+pub mod kq8;
 #[cfg(target_arch = "x86_64")]
 pub mod kqsimd;
 #[cfg(target_arch = "aarch64")]

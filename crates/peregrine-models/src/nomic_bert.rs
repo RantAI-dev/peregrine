@@ -751,6 +751,7 @@ impl Architecture for NomicBert {
                 &mut st.xb,
                 &spans,
                 None,
+                None,
                 1.0,
                 &mut st.attn.bidir,
                 pool,

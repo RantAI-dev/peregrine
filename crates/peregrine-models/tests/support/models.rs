@@ -1380,6 +1380,157 @@ pub fn write_nomic_bert(dir: &Path, fmt: Format, seed: u64, s: NomicBertConfig) 
     path
 }
 
+/// The shape of a synthetic `jina-bert-v2` encoder (roadmap S4.8c).
+///
+/// The defaults are tiny: four layers of 128 with 4 heads and a 192-wide GEGLU pair, a
+/// 64-token context, and the separate `ffn_gate`/`ffn_up` matrices the reference files
+/// carry. `fused_gate` writes the fused `2·n_ff` layout the graph also accepts;
+/// `qk_norm` and `attn_norm_2` write the optional branches; `token_types` and
+/// `context_length` can be turned off to test the loader's refusals.
+#[derive(Clone, Copy, Debug)]
+pub struct JinaBertConfig {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    pub pooling_type: u32,
+    pub fused_gate: bool,
+    pub qk_norm: bool,
+    pub attn_norm_2: bool,
+    /// Write `ffn_up.bias` (the reference files do not; llama.cpp marks it optional).
+    pub up_bias: bool,
+    pub token_types: bool,
+    pub context_length: bool,
+    /// Override the `ffn_up` width, to make a file the loader must refuse.
+    pub up_rows: Option<usize>,
+    pub eps: f32,
+}
+
+impl Default for JinaBertConfig {
+    fn default() -> Self {
+        JinaBertConfig {
+            d_model: 128,
+            n_layer: 4,
+            n_head: 4,
+            n_ff: 192,
+            ctx: 64,
+            pooling_type: 1,
+            fused_gate: false,
+            qk_norm: false,
+            attn_norm_2: false,
+            up_bias: true,
+            token_types: true,
+            context_length: true,
+            up_rows: None,
+            eps: 1e-12,
+        }
+    }
+}
+
+/// Write a synthetic `jina-bert-v2` encoder: separate q/k/v with biases, no position
+/// table (ALiBi's bias comes from `f_max_alibi_bias = 8`), the token-type embedding's
+/// row 0, LayerNorms with a bias, the GEGLU pair (separate or fused), and the layer's
+/// own `layer_output_norm` as its output — the graph `src/models/bert.cpp` builds for
+/// `LLM_ARCH_JINA_BERT_V2`.
+///
+/// Every matrix is `fmt` (F32 or Q8_0, both multiples of the block size); the norms and
+/// the biases are F32, as the converter writes them.
+pub fn write_jina_bert(dir: &Path, fmt: Format, seed: u64, s: JinaBertConfig) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let arch = "jina-bert-v2";
+    w.str("general.architecture", arch);
+    w.str(
+        "general.name",
+        &format!("synthetic-jina-bert-v2-{}", fmt.label()),
+    );
+    let k = |x: &str| format!("{arch}.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    if s.context_length {
+        w.u32(&k("context_length"), s.ctx as u32);
+    }
+    w.u32(&k("vocab_size"), VOCAB_SIZE as u32);
+    w.f32(&k("attention.layer_norm_epsilon"), s.eps);
+    w.u32(&k("pooling_type"), s.pooling_type);
+    w.bool(&k("attention.causal"), false);
+    vocab::add_jina_bert_tokenizer_metadata(&mut w);
+
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    // Never zero: a bias the engine forgot to add must move the vector.
+    let bias = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        let mut out = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            let v = rng.f32_range(-0.05, 0.05);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        w.add_tensor(name, &[n as u64], Format::F32, out);
+    };
+
+    mat(&mut w, &mut rng, "token_embd.weight", s.d_model, VOCAB_SIZE);
+    if s.token_types {
+        mat(&mut w, &mut rng, "token_types.weight", s.d_model, 2);
+    }
+    norm(&mut w, &mut rng, "token_embd_norm.weight", s.d_model);
+    bias(&mut w, &mut rng, "token_embd_norm.bias", s.d_model);
+
+    let up_rows = s
+        .up_rows
+        .unwrap_or(if s.fused_gate { 2 * s.n_ff } else { s.n_ff });
+    for i in 0..s.n_layer {
+        let p = |x: &str| format!("blk.{i}.{x}");
+        for (name, cols, rows) in [
+            ("attn_q", s.d_model, s.d_model),
+            ("attn_k", s.d_model, s.d_model),
+            ("attn_v", s.d_model, s.d_model),
+            ("attn_output", s.d_model, s.d_model),
+        ] {
+            mat(&mut w, &mut rng, &p(&format!("{name}.weight")), cols, rows);
+            bias(&mut w, &mut rng, &p(&format!("{name}.bias")), rows);
+        }
+        if !s.fused_gate {
+            mat(&mut w, &mut rng, &p("ffn_gate.weight"), s.d_model, s.n_ff);
+        }
+        mat(&mut w, &mut rng, &p("ffn_up.weight"), s.d_model, up_rows);
+        if s.up_bias {
+            bias(&mut w, &mut rng, &p("ffn_up.bias"), up_rows);
+        }
+        mat(&mut w, &mut rng, &p("ffn_down.weight"), s.n_ff, s.d_model);
+        bias(&mut w, &mut rng, &p("ffn_down.bias"), s.d_model);
+        norm(&mut w, &mut rng, &p("attn_output_norm.weight"), s.d_model);
+        bias(&mut w, &mut rng, &p("attn_output_norm.bias"), s.d_model);
+        if s.qk_norm {
+            norm(&mut w, &mut rng, &p("attn_q_norm.weight"), s.d_model);
+            bias(&mut w, &mut rng, &p("attn_q_norm.bias"), s.d_model);
+            norm(&mut w, &mut rng, &p("attn_k_norm.weight"), s.d_model);
+            bias(&mut w, &mut rng, &p("attn_k_norm.bias"), s.d_model);
+        }
+        if s.attn_norm_2 {
+            norm(&mut w, &mut rng, &p("attn_norm_2.weight"), s.d_model);
+            bias(&mut w, &mut rng, &p("attn_norm_2.bias"), s.d_model);
+        }
+        norm(&mut w, &mut rng, &p("layer_output_norm.weight"), s.d_model);
+        bias(&mut w, &mut rng, &p("layer_output_norm.bias"), s.d_model);
+    }
+
+    let path = unique_path(dir, &format!("jina-bert-v2-{}-{seed}", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// The shape of a synthetic `mistral3` embedder (roadmap S4.14).
 ///
 /// The default has query heads wider than the residual (6 × 32 over 128), two key/value

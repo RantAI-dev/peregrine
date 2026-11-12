@@ -24,7 +24,16 @@ All notable changes to this project are documented here. The format follows
   `GetLogicalProcessorInformationEx`, hand-written in `crates/peregrine-core/src/win32.rs` (no
   dependency); and the tests that only needed a Unix signal got a Windows counterpart where the
   behaviour exists. `serve --background`, `status` and `stop` are S7.3 and say so on Windows.
-
+- **The 8-bit prompt kernel (S5.4a)**, the first build step of the opt-in fast prompt mode:
+  `crates/peregrine-kernels/src/kq8.rs` holds the form's layout, its scalar twin and the
+  requantisation, `kqsimd.rs` the AVX-512 bodies of both (asserted bit for bit equal to the twin
+  at every width from 1 to 40 and at 63, 64, 65, 127, 128, 129, 511, 512 and 513 activation
+  rows), and `KQBENCH_PROMPT=1` measures them. On one real layer the resident form runs at
+  91.9 GMAC/s against the exact Q4_K kernel's 66.2 at 512 activation rows, the per-pass
+  conversion only pays above about 128 rows, the codes and scales are identical to
+  ik_llama.cpp's arithmetic on 1.44 M weights of a real file, and the form costs 1.19 GiB on
+  Llama 3.2 1B. **Nothing is wired in**: the engine's default path is untouched and no golden
+  moved. Numbers: `benchmarks/results/desktop-zen5-2026-11-12-s5.4a/`.
 - **Design: macOS and Windows (S7)**: `docs/design/s7-platforms.md` sets what "supported" means on a
   platform (CI on every PR, a release archive, an installer, `upgrade`, the lifetime commands,
   goldens), the targets (macOS on Apple Silicon and Windows x86-64 first; Intel Macs not planned,
@@ -59,8 +68,55 @@ All notable changes to this project are documented here. The format follows
   passes). `nomic-bert-moe` (nomic-embed-text-v2-moe) and the jina BERT variants are not
   in this step; a `nomic-bert-moe` file is refused by name as roadmap S4.8b.
 
+- **The `jina-bert-v2` family (S4.8c)**: jina-embeddings-v2-base-en (and -small-en) are
+  served on `/v1/embeddings` and `peregrine embed`, transcribed from llama.cpp v0.9.0's
+  `LLM_ARCH_JINA_BERT_V2` graph: ALiBi's additive `slope·(−|i−j|)` attention bias instead
+  of position embeddings, the token-type row, optional per-token query/key LayerNorms, the
+  GEGLU feed-forward (separate `ffn_gate`/`ffn_up` or the fused `2·n_ff` layout), one
+  LayerNorm between the attention residual and the feed-forward plus the optional
+  `attn_norm_2`, and the layer's own output norm with no final norm. The bias is a new
+  input to the shared attention block (`peregrine_kernels::bidir::alibi_slopes`/`alibi_row`,
+  scalar, with its own tests and the whole path held bit for bit to a row-by-row
+  reference); the other families pass `None`, so their goldens did not move. On
+  jina-embeddings-v2-base-en against llama.cpp, 200 texts of 16–8180 tokens: token ids
+  identical. F16 cosine vs llama.cpp's F16 min **0.9999999**, mean **1.0000000**. Q8_0 vs
+  llama.cpp's F16 reference min **0.9993389**, mean **0.9996382** (llama.cpp's own Q8_0:
+  min 0.9992368, mean 0.9996404, so Peregrine is 2.2e-6 below on the mean, inside the S4
+  gate's 1e-4); Q8_0 vs llama.cpp's own Q8_0 min 0.9998662, mean 0.9999650. Speed on the
+  shared 8-vCPU VM (rough), 4 threads, Q8_0, cache off, five runs, texts/s: 16 tokens
+  **33.75 vs 22.55 (1.50×)**; 128 tokens **4.654 vs 4.201 (1.11×)**; 512 tokens **0.888 vs
+  0.857 (1.04×, the worst cell)**; one request of sixteen different 32-token texts **20.9
+  vs 15.8 (1.32×)**, both engines putting the whole request through (a request of sixteen
+  copies of one text answers faster still — 309 texts/s — because identical texts are
+  computed once in it, which is deduplication, not a batch ratio). Synthetic
+  goldens on scalar, AVX2 and AVX-512 under SDE, a no-allocation pass, server and CLI
+  cases, and an `#[ignore]`d real-file gate. `docs/reference/jina-bert.md` holds the
+  transcription and says what `jina-bert-v3` (RoPE, plain GELU, LoRA adapters) would take;
+  it is not built.
+
 ### Changed
 
+- **The Qwen3-Embedding 0.6B Q8_0 long-text "slowdown" of S4.9q does not reproduce
+  (2026-11-12).** Both ends of the reported fall were rebuilt side by side and measured
+  interleaved (five rounds each, 10 threads pinned to the Cortex-X925 cluster, embedding cache
+  off): on a quiet host `3030172` gives 0.360 texts/s and main 0.380 on the single 2 000-token
+  cell, and under a co-tenant (load average 8.2–9.1) the same two binaries give 0.179 and 0.191.
+  Main is 2.5–8.1 % ahead in all eight cells (16/512/2000 tokens single and 128-token batch 32,
+  in both host states), so there is no commit to bisect and no code change. The reported
+  0.213 → 0.177 step happened with no source change at all: one commit spans 0.360 quiet to
+  0.179 loaded, and the earlier standings record shows the load. The only causal-prefill change
+  between the commits is S5.1's wide pass (64 rows instead of 16 with no decoding row), and
+  flipping it back on main leaves the cell at 0.19 either way. See
+  `benchmarks/results/spark-arm-2026-11-12-qwen3-embed-regression/` and
+  `docs/design/s4.9-sota.md` §20.
+- **Correction to the ARM embedding table.** The same study found that the first ARM standings
+  run (`spark-2026-11-12-embeddings`) measured its batch cells with the exact result cache on:
+  the batch cell followed the single-text cell in one process, and the cache served 20 of the 32
+  texts (Qwen3-Embedding Q8_0, 32 texts of 128 tokens: 10.74 texts/s with the cache, 3.98–4.27
+  without). The batch-of-32 ratios published from that run (2.2–3.2× llama.cpp) were therefore
+  overstated; single-text cells were not affected. `docs/benchmark.md` now carries only cache-off
+  numbers in that column (1.9–2.6× for the Q8_0 files) and marks the one row that has not been
+  re-measured.
 - **The halved-precision float panel is widened once, and the small-BERT gap is measured
   against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
   and the prefetch guard inside its `k` loop and widened sixteen weights per weight step, on the

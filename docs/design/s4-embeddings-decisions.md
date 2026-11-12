@@ -63,7 +63,7 @@ Why Peregrine should win here, and where the work is:
 | S4.5 | tokenizers | WordPiece (`bert`), SentencePiece unigram (`t5`, the XLM-R vocabulary) | two tokenizers |
 | S4.6 | `bert` | all-MiniLM-L6/L12, bge-small/base/large-en-v1.5, e5, gte, bge-m3, multilingual-e5; bge-reranker-v2-m3 with its `cls` head | post-norm encoder, absolute positions, the classifier head |
 | S4.7 | `modern-bert` | ModernBERT, gte-modernbert, mmBERT, Granite Embedding R2, and their fine-tuned classifiers (`classifier.output_labels`) | alternating local and global attention, the labelled head |
-| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand; **S4.8a done** (`nomic-bert` = nomic-embed-text v1.5), see §9 |
+| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand; **S4.8a done** (`nomic-bert` = nomic-embed-text v1.5), see §12; **S4.8c done** (`jina-bert-v2` = jina-embeddings-v2), see §11 |
 | S4.14 | `mistral3`, non-causal | Nemotron 3.5 Embed 1B and Nemotron 3 Embed 1B (the same text model; mean pooling, 2048 dimensions); the 8B sizes load by the same code | the Tekken pre-tokenizer, the Mistral 3 block in the dense family, a bidirectional pass for dense models |
 
 Out of scope for this stage: `neo-bert`, `eurobert`, DeBERTa (Prompt Guard 2; llama.cpp does not
@@ -358,7 +358,7 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
 | S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
 | S4.7 | `modern-bert` and labelled classifier heads. **Done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; S4.7b adds its classifier head on `/v1/rerank`, `/v1/classify` and `peregrine rerank` from the same `Want::Head` interface, measured on gte-reranker-modernbert-base F16 and Q8_0 (§9) | S4.6 |
-| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3`. **Part a done**: the `nomic-bert` family — token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused `attn_qkv`, NeoX RoPE at base 1000, SwiGLU (`ffn_gate` through SiLU times `ffn_up`), mean pooling and no final norm — against llama.cpp v0.9.0 on nomic-embed-text v1.5 F16 and Q8_0 (§9); `nomic-bert-moe` and the jina variants remain S4.8b | S4.6 |
+| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3`. **Part a done**: the `nomic-bert` family — token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused `attn_qkv`, NeoX RoPE at base 1000, SwiGLU (`ffn_gate` through SiLU times `ffn_up`), mean pooling and no final norm — against llama.cpp v0.9.0 on nomic-embed-text v1.5 F16 and Q8_0 (§12). **Part b done (S4.8c)**: the `jina-bert-v2` family (ALiBi instead of positions, the GEGLU pair separate or fused, one LayerNorm between the attention residual and the feed-forward plus the optional `attn_norm_2`, optional q/k LayerNorms, the token-type row, no final output norm, mean/cls pooling) against llama.cpp v0.9.0 on jina-embeddings-v2-base-en F16 and Q8_0 (§11); the id/pair/headless rules as the other encoders. S4.8c also writes down what `jina-bert-v3` would take (a nomic-bert-shaped block with RoPE and a plain GELU, plus the LoRA-adapter files) and does not build it; `nomic-bert-moe` remains S4.8b | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
 | S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |
 | S4.12 | System One, part 3: **laya** and Julia-1 on `modern-bert` with the decision head | S4.7 |
@@ -524,7 +524,55 @@ and compare each one's vector with its one-model server.
 **Shutdown.** The drain timeout is the process's: SIGTERM stops accepting, lets the requests
 in flight on every engine finish, then exits. `peregrine stop` and `--background` are unchanged.
 
-## 9. S4.8a as built: the `nomic-bert` family
+## 11. S4.8c as built: the jina-bert-v2 family
+
+`crates/peregrine-models/src/jina_bert.rs` is the family, transcribed from llama.cpp
+v0.9.0's `src/models/bert.cpp:68-225` (`LLM_ARCH_JINA_BERT_V2`), with the hparams and
+tensor list of `src/models/jina-bert-v2.cpp`: token + token-type row 0, the embedding
+LayerNorm, then per layer `attn_q/k/v` (+ biases), optional q/k LayerNorms, attention
+with **ALiBi** and no RoPE, the attention residual and `attn_output_norm`, the optional
+second residual and `attn_norm_2`, the **GEGLU pair** (separate `ffn_gate`/`ffn_up`, or
+the fused `2·n_ff` layout whose first half is the gate), and `layer_output_norm` as the
+layer's output. There is no final output norm and no head. `docs/reference/jina-bert.md`
+holds the reading.
+
+Four decisions the note left open, now settled:
+
+1. **ALiBi is a kernel input, not a family trick.** `attend_texts` takes
+   `Option<&[f32]>` (per-query-head slopes) and adds
+   `slope · (−|i − j|)` to the row's band after `scores_tile` has applied the scale and
+   before the maximum — llama.cpp's order (`ops.cpp:5809-5900`). The slope list is
+   `peregrine_kernels::bidir::alibi_slopes(n_head, 8.0)`, computed once at load with
+   llama.cpp's two-group `powf` formula. Every other family passes `None`, so no
+   existing golden moved; the kernel has its own tests, and `blocks/bidir.rs` holds the
+   full ALiBi path to a row-by-row reference bit for bit at 1, 3 and 4 threads.
+2. **The attention scale is not folded into Q.** The other encoders multiply Q by
+   `1/√head_dim`; this family passes the scale to the block so that "score × scale,
+   then ALiBi" is llama.cpp's arithmetic exactly. It is a different f32 product from
+   the folded form, and the reference forward mirrors it.
+3. **The GELU is `vmath::geglu` (the tanh form), not the erf form**, and it is evaluated
+   as the function rather than through llama.cpp's `GGML_GELU_FP16` table. That is the
+   same deliberate ADR 0003 difference the `bert` reranker gate measured; the F16
+   vectors are still at 0.9999999 against llama.cpp.
+4. **`jina-bert-v3` is not a small step and was not built.** Its graph is the
+   `nomic-bert` one (RoPE, a plain GELU feed-forward, no ALiBi) plus a LoRA-adapter
+   file per task; `docs/reference/jina-bert.md` says what it would take.
+
+What was measured: on jina-embeddings-v2-base-en (gpustack's F16 and Q8_0 conversions,
+SHA-256 in the fixtures' README), ids identical to llama.cpp on all 200 texts (16 to
+8180 tokens). F16 cosine against llama.cpp's F16: min 0.9999999 / mean 1.0000000.
+Q8_0 against llama.cpp's **F16** reference: min 0.9993389 / mean 0.9996382, while
+llama.cpp's own Q8_0 is min 0.9992368 / mean 0.9996404 (Peregrine 2.2e-6 below on the
+mean, inside the 1e-4 clause); against llama.cpp's own Q8_0 vectors it is min 0.9998662
+/ mean 0.9999650. Speed on the shared 8-vCPU VM, 4 threads, Q8_0, cache off, five runs,
+texts/s: 16 tokens 33.75 vs 22.55 (1.50×); 128 tokens 4.654 vs 4.201 (1.11×); 512
+tokens 0.888 vs 0.857 (1.04×, the worst cell); sixteen different 32-token texts in one
+request 20.9 vs 15.8 (1.32×), both engines putting the whole request through — the batch
+lead is in the same range as the single-short-text lead. A request whose texts repeat is
+answered faster because identical texts are computed once in it (sixteen copies of one
+text: 309 texts/s), and that is in-request deduplication, not a batch ratio.
+
+## 12. S4.8a as built: the `nomic-bert` family
 
 `crates/peregrine-models/src/nomic_bert.rs` (`NomicBert::load`, `forward_texts`)
 registers `nomic-bert` behind `arch-nomic-bert`; the reading, the tensor table and

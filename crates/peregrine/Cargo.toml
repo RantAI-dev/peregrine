@@ -48,6 +48,7 @@ default = [
     "arch-bert",
     "arch-modern-bert",
     "arch-nomic-bert",
+    "arch-jina-bert",
     "arch-qwen3moe",
     "arch-gpt-oss",
     "arch-phi3",
@@ -75,6 +76,7 @@ arch-gemma-embedding = ["peregrine-models/arch-gemma-embedding"]
 arch-bert = ["peregrine-models/arch-bert"]
 arch-modern-bert = ["peregrine-models/arch-modern-bert"]
 arch-nomic-bert = ["peregrine-models/arch-nomic-bert"]
+arch-jina-bert = ["peregrine-models/arch-jina-bert"]
 arch-qwen3moe = ["peregrine-models/arch-qwen3moe"]
 arch-gpt-oss = ["peregrine-models/arch-gpt-oss"]
 arch-phi3 = ["peregrine-models/arch-phi3"]
