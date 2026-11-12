@@ -655,8 +655,8 @@ Goldens are stored per effective tier (`cpu::tier_name()`), so a forced run is c
 goldens. Two machines must agree on a shared tier: the AVX-512 host forced to `avx2` reproduces the AVX2
 host's goldens. The `x86_64-avx2-vnni256` tier aliases directly to `x86_64-avx2` goldens to check bit-identity.
 
-CI runs the native tier on x86-64 Linux, aarch64 Linux and aarch64 macOS, and the `scalar` and `avx2` tiers
-on x86-64 Linux.
+CI runs the native tier on x86-64 Linux, aarch64 Linux, aarch64 macOS and x86-64 Windows, and the
+`scalar` and `avx2` tiers on x86-64 Linux.
 
 GitHub's x86-64 runners have AVX2 but no AVX-512 or AVX-VNNI, so the SDE jobs run the kernel tests and the
 synthetic models under Intel's Software Development Emulator:
@@ -669,6 +669,45 @@ SDE is free of charge for any type of use under the Intel Simplified Software Li
 live under `tests/golden/synthetic/x86_64-avx2-avx512-vnni-gfni-vbmi/` and are recorded under
 `sde64 -spr`. The real-model goldens under `tests/golden/<tier>/` need the model files, which CI does
 not have, so an AVX-512 host still records those itself.
+
+## Windows
+
+`test (windows-x86_64)` in `ci.yml` runs on `windows-2025` with the MSVC toolchain, the same
+release-mode suite as the x86-64 Linux entry (`cargo test --workspace --release --locked`), then a
+smoke step and an installer step: `peregrine.exe --version`, `peregrine.exe tier` (the first line
+must be `kernel tier   x86_64-avx2…`), `peregrine.exe run` on a model that
+`cargo run -p peregrine-bench --example write_synthetic -- <dir>` writes, then
+`scripts/release/build.ps1` builds the Windows zip that `scripts/install.ps1` installs into a
+throwaway directory, and the installed `peregrine.exe` must answer `--version` and `tier`. A green
+job takes about ten minutes.
+
+Run it on a branch without waiting for the pull request: a temporary workflow with
+`on: push` for that branch and the same steps. The suite stops at the first failing target
+unless `--no-fail-fast` is passed, which is what the development loop uses.
+
+What is different there:
+
+- **Goldens.** The synthetic and real goldens are keyed by tier and, off Linux, by system
+  (`-macos` since S7.1, `-windows` since S7.2), so the Windows job compares against
+  `tests/golden/…-windows/` and **skips** while those directories do not exist. The job does not
+  set `PEREGRINE_GOLDEN=require`; recording Windows' goldens is S7.4. The session fixture
+  (`tests/fixtures/session/`) is keyed the same way and also skips.
+- **Signals.** Windows has no `SIGTERM`. `serve_lifetime.rs` and `server_multi_model.rs` run a
+  Windows counterpart of their clean-shutdown test that writes the stop file and gets the same
+  drain (in-flight requests finish, new connections are refused, exit status 0). The Unix `SIGTERM`
+  tests are unchanged. `serve --background`, `status`, `stop` and `upgrade` work on Windows; a
+  foreground `serve` also stops cleanly on Ctrl-C.
+- **What still skips on Windows.** Only the goldens: the synthetic and session fixtures are keyed
+  `-windows` and are recorded in S7.4 (`PEREGRINE_GOLDEN=require` is never set in the Windows job).
+  Measurement on real Windows hardware is S7.4 too.
+- **Mapped files.** Windows refuses to rewrite, rename over or delete a file that is mapped, so a
+  test that writes a synthetic model a loaded model still has mapped gets a fresh file name
+  (`write_*` in `tests/support/models.rs` returns a new path each time), and the pack cache keeps
+  a file already published for a key rather than replacing it.
+- **Paths.** The model cache and the pack cache default to `%LOCALAPPDATA%\peregrine`; the tests
+  that need a private cache pass `PEREGRINE_CACHE_DIR`.
+- **Threads.** `physical_cores()` reads the processor topology with
+  `GetLogicalProcessorInformationEx` (`crates/peregrine-core/src/win32.rs`), not `/proc`.
 
 ## OpenAI API compatibility
 

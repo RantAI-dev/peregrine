@@ -86,6 +86,8 @@ pub mod template;
 pub mod tokenizer;
 pub mod tools;
 mod unicode_data;
+#[cfg(windows)]
+pub mod win32;
 
 pub use gguf::{Format, Gguf};
 // The kernels live in `peregrine-kernels`; they keep their paths here.

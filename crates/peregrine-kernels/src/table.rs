@@ -377,10 +377,10 @@ impl MatKernels {
     /// `r` for activation row `b`. The form is format-agnostic (Q4_K and Q6_K
     /// produce the same object), so one entry point multiplies both.
     ///
-    /// The AVX-512 body is [`crate::kqsimd::q8k_gemm_zmm`], the AVX2 body is
-    /// [`crate::kqsimd::q8k_gemm_avx2`], and a tier with neither (and NEON, until
-    /// S5.4d's ARM half) runs the scalar twin, [`crate::kq8::gemm_q8k`]. They are
-    /// bit-identical on the same tier (`crates/peregrine-kernels/src/kqsimd.rs`'s
+    /// The AVX-512 body is `crate::kqsimd::q8k_gemm_zmm`, the AVX2 body is
+    /// `crate::kqsimd::q8k_gemm_avx2`, and a tier with neither (and ARM, until S5.4d's
+    /// NEON bodies are wired in) runs the scalar twin, [`crate::kq8::gemm_q8k`]. They
+    /// are bit-identical on the same tier (`crates/peregrine-kernels/src/kqsimd.rs`'s
     /// tests), so this choice moves time, never a number.
     pub fn q8k_gemm(&self, form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
         assert!(

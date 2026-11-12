@@ -67,6 +67,11 @@ jobs:
           - { os: ubuntu-24.04, name: linux-x86_64 }
           - { os: ubuntu-24.04-arm, name: linux-aarch64 }
           - { os: macos-15, name: macos-aarch64 }
+          # Windows x86-64 (roadmap S7.2): the MSVC toolchain, the same release-mode suite as
+          # Linux, and a smoke check of the binary afterwards. Its goldens are Windows' own
+          # (`<tier>-windows`) and are recorded in S7.4, so the golden tests skip there; the job
+          # never sets `PEREGRINE_GOLDEN=require`.
+          - { os: windows-2025, name: windows-x86_64 }
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     steps:
@@ -83,6 +88,46 @@ jobs:
       - name: test (non-x86, lib + bins + tests)
         if: runner.arch != 'X64'
         run: cargo test --workspace --lib --bins --tests --release --locked
+      # The binary itself, on the system the release will ship (S7.2): it starts, the tier it
+      # picked is the AVX2 one this runner has, and `run` answers on a synthetic model.
+      - name: smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --release --locked -p peregrine
+          $exe = "target\release\peregrine.exe"
+          & $exe --version
+          $tier = (& $exe tier | Select-Object -First 1)
+          Write-Host $tier
+          if ($tier -notmatch '^kernel tier\s+x86_64-avx2') {
+            throw "the run-time tier is not the AVX2 one this runner has: $tier"
+          }
+          $out = Join-Path $env:RUNNER_TEMP "synthetic"
+          $model = (& cargo run -q --release --locked -p peregrine-bench --example write_synthetic -- $out | Select-Object -Last 1).Trim()
+          Write-Host "synthetic model: $model"
+          & $exe run -m $model --max-tokens 4 --no-profile "hello"
+      # The installer, against the archive this runner just built (S7.3): PowerShell 5.1, no
+      # administrator rights, a local `-BaseUrl`, a throwaway `-InstallDir`, then the installed
+      # binary runs and reports its tier.
+      - name: installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/build.ps1 x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = "v" + ((Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$' |
+            Select-Object -First 1).Matches.Groups[1].Value)
+          $dir = Join-Path $env:RUNNER_TEMP "peregrine-install"
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Version $version -BaseUrl (Join-Path $PWD "dist") -InstallDir $dir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $dir "peregrine.exe") --version
+          $tier = (& (Join-Path $dir "peregrine.exe") tier | Select-Object -First 1)
+          Write-Host $tier
+          if ($tier -notmatch '^kernel tier\s+x86_64-avx2') {
+            throw "the installed binary picked an unexpected tier: $tier"
+          }
       # The synthetic goldens are per tier and the native tier above already compares its own.
       # Compare the lower aarch64 tiers too, so a stale golden fails here instead of on the next
       # re-record (the aarch64-neon-dotprod goldens were stale for months). A golden that is

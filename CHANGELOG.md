@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Prompt processing: the attention value mix takes two rows per V pass (S5.2b)**: on a
+  4096-token prompt attention is 35-45 % of a pass and the value mix alone is twice the score
+  stage, running at 8.6-9.3 GMAC/s per core, a sixth of this machine's f32 FMA roof. Two query
+  rows of one KV head see the same positions, so the prefill tile now loads and widens each V
+  half-vector once and feeds both rows' fused multiply-adds from it; each row keeps its own
+  accumulators and its own ascending position order, so no result bit moves (no golden file
+  changed; the Llama 1B real-model golden passes on all three tiers). Measured on Llama 3.2 1B and Qwen 2.5 0.5B Q4_K_M, 4096 tokens:
+  **+5.7 % at twelve threads on both models**, +2-4 % at one and six, the mix's own time
+  29.3 -> 23.6 s at one thread. Decode (0.99-1.01) and ten users on one pool are unchanged.
+  **Still below ik_llama.cpp**: 0.66 (Llama) and 0.58 (Qwen) at 4096, twelve threads, and 0.57
+  and 0.47 at 512, where the prompt takes the widened f32 tile and this body does not apply;
+  the remaining gap is the weight matmul (the fork runs a requantising kernel at 91 GMAC/s
+  against Peregrine's exact 72-75, §11.3-11.4 of `docs/design/s5-prefill-avx512.md`).
+
 ### Added
 
 - **An AVX2 body for the fast prompt mode's 8-bit kernel (S5.4d)**: `--fast-prompt` had one
@@ -28,6 +44,56 @@ All notable changes to this project are documented here. The format follows
   form). The option's help text and `docs/design/s5.4-fast-prompt.md` §5d say so; the mode
   stays off by default. Form build +0.83 s and +987 MiB on the 1B. Numbers:
   `benchmarks/results/bluefin-2026-11-12-s5.4d/`.
+- **Windows lifetime commands, `upgrade`, installer and release archive (roadmap S7.3)**:
+  `serve --background`, `status`, `stop` and `upgrade` work on Windows. Windows has no `SIGTERM`,
+  so `peregrine stop` writes `serve-<port>.stop` in the state directory; the server notices it
+  within about 250 ms, removes it and runs the same drain a Unix `SIGTERM` starts, and `stop` ends
+  the process with `TerminateProcess` only after the 40 s drain timeout. `status` reads the same
+  state file and checks liveness with hand-written `OpenProcess`/`GetExitCodeProcess` calls (one
+  more declaration in `crates/peregrine-core/src/win32.rs`, no new dependency); `--background`
+  starts the child with `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` and logs to the same log file
+  as Unix. `upgrade` maps Windows x86-64 to `windows-x86_64`, verifies the zip against
+  `SHA256SUMS` with `certutil`, renames the running `peregrine.exe` to `peregrine.exe.old` before
+  putting the new one in place (removed at the next start), and restarts a managed server after it
+  drains (a short gap: Windows has no `SO_REUSEPORT`). `scripts/install.ps1` is a PowerShell 5.1
+  installer (`irm … | iex`) that verifies `Get-FileHash`, installs to
+  `%LOCALAPPDATA%\Programs\peregrine`, adds that directory to the user `Path`, refuses ARM64 and
+  prints how to undo it. `release.yml` gains a `windows-2025` / `x86_64-pc-windows-msvc` job that
+  builds `peregrine-vX.Y.Z-windows-x86_64.zip` with `-C target-feature=+crt-static` (no Visual C++
+  redistributable needed), and a `workflow_dispatch` dry run that builds artefacts without
+  publishing. CI's Windows job runs the installer against the archive it just built. Windows
+  counterparts of the `SIGTERM` drain tests go through the stop file with the same assertions.
+- **NEON bodies for the 8-bit prompt kernel (S5.4d, ARM)**: `crates/peregrine-kernels/src/neon.rs`
+  gains the vectorised build of the Q4_K/Q6_K/Q5_0 forms (`q8k_build_*_neon`) and the multiply on
+  `sdot` (`q8k_gemm_sdot`) and `smmla` (`q8k_gemm_i8mm`), with `q8k_gemm` picking the tier's body.
+  The form stores `code + 128` for x86's unsigned `vpdpbusd`; `sdot`/`smmla` are signed, so the
+  kernel flips bit 7 and sums `code·a` directly, and the epilogue is the twin's `d·dk` and one
+  fused multiply-add per (row, super-block) in the twin's order. Builds are byte-identical to the
+  twin on every edge tile S5.4a defines and both bodies are bit-identical to `kq8::dot_q8k` at
+  every width 1..=40 plus 63/64/65, 127/128/129 and 511/512/513. One Cortex-X925: the resident
+  form is 176–182 GMAC/s on `sdot` and 292–303 on `smmla` at 512 rows, against the exact Q4_K
+  kernel's 76/123, Q6_K's 52/77 and Q5_0's 35/55; it wins at every width of eight rows and above
+  (2.3× Q4_K, 3.5× Q6_K, 5.1× Q5_0 at 512 rows on the resident shape), loses at one row on the
+  8 192-weight streamed shape (0.63–0.70× for Q4_K), and costs 1.187 GiB on Llama 3.2 1B.
+  **Nothing is wired in**: no default-path file changes and no golden moves. Numbers:
+  `benchmarks/results/spark-arm-2026-11-12-s5.4d-neon/`.
+- **Windows x86-64 builds and passes the suite (roadmap S7.2)**: a `test (windows-x86_64)` job on
+  `windows-2025` runs the whole workspace in release mode on every pull request, beside the Linux
+  and macOS entries, and a smoke step checks `peregrine.exe --version`, `peregrine.exe tier`
+  (AVX2 on the runner's CPU) and `run` on a synthetic model. Getting there: `*.jsonl`,
+  `*.golden`, `*.jinja`, `*.txt` and `*.tsv` are pinned to LF in `.gitattributes`; a synthetic
+  model is never written over a file a loaded model still maps, the pack cache keeps a pack
+  already published for a key when Windows refuses to rename over it (and `Gguf::read_data` uses
+  positioned reads there, not the mapping), and the `hf:` download drops its header mapping
+  before the final rename; the forward path uses the engine's own `exp`/`ln`/`sin`/`cos`/`pow`
+  off Linux as aarch64 already did, so Windows results are the arithmetic's and not the UCRT's,
+  and every golden directory that keyed `-macos` now keys `-windows` too (recorded in S7.4, so
+  those tests skip there until then); the cache and state directories default to
+  `%LOCALAPPDATA%\peregrine`; the pool's default width counts physical cores with
+  `GetLogicalProcessorInformationEx`, hand-written in `crates/peregrine-core/src/win32.rs` (no
+  dependency); and the tests that only needed a Unix signal got a Windows counterpart where the
+  behaviour exists. `serve --background`, `status` and `stop` are S7.3 and say so on Windows.
+
 - **`--fast-prompt`, the opt-in 8-bit prompt pass (S5.4b)**: with the option on, a prompt
   row's Q4_K and Q6_K weights are read from an 8-bit form built once per matrix at load
   (one f32 scale and one int8 code per weight, per 256-weight super-block), while generated
@@ -52,7 +118,8 @@ All notable changes to this project are documented here. The format follows
 - **Design: macOS and Windows (S7)**: `docs/design/s7-platforms.md` sets what "supported" means on a
   platform (CI on every PR, a release archive, an installer, `upgrade`, the lifetime commands,
   goldens), the targets (macOS on Apple Silicon and Windows x86-64 first; Intel Macs not planned,
-  Windows on ARM later) and the steps S7.1 to S7.5. Nothing is built yet.
+  Windows on ARM later) and the steps S7.1 to S7.5. S7.2 (Windows x86-64 in CI) is built; the
+  rest is not.
 - **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
   `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
   embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused
@@ -110,6 +177,47 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The ARM embedding table re-measured with the result cache off.** The DGX Spark embedding
+  table had timed its batch cells with Peregrine's exact embedding-vector cache on, so a repeated
+  text list inside a cell was answered by a lookup after the first wave. Every row is now measured
+  with `--opt EMBED_CACHE_MB=0`: the four Q8_0 files, Qwen3-Embedding 0.6B F16, both
+  `gte-modernbert-base` files (now with 2 000-token, 32 × 128 and mixed cells), `all-MiniLM-L6-v2`
+  in F16 and Q8_0, and `bge-reranker-v2-m3` Q8_0 on `/v1/rerank` (8 and 32 documents of 124–128
+  tokens, 1.38× and 1.35× llama.cpp). Qwen3-Embedding 0.6B F16's batch of 32 falls from the
+  cache-on 2.72–3.21× to **1.17×** and its mixed batch is 1.10×; one cell is now below 1.0×,
+  that file at a single 2 000-token text (0.96×). The other eight rows are 1.33–3.20× ahead on
+  every cell. Three interleaved rounds, medians, both engines pinned to the Cortex-X925 cluster,
+  a co-tenant on the host. See `benchmarks/results/spark-arm-2026-11-12-embeddings-cache-off/`.
+- **The encoder's element-wise block: threaded and batched, same bits (S4.9r).** The S4.9p
+  account put 9.26 ms of a 512-token MiniLM pass (18.05 bge-small) in everything around the
+  matrix products against OpenVINO's 0.55 / 1.14 ms. Three changes close what the arithmetic
+  allows. The softmax denominator is an ascending `f64` sum per row, one four-cycle-latency chain
+  with three cycles idle; a global layer's rows share their band, so four rows now take one
+  kernel (`bidir::exp_rows4_sums`) that runs `exp8` per row and advances four ascending folds
+  interleaved — 5.30 → 3.18 ms on MiniLM's 512 attention and 10.50 → 6.46 on bge-small, each
+  row's bits untouched. The q/k/v bias adds and query scale, and the two residual+bias reads
+  after `attn_output` and `ffn_down`, ran on the calling thread and now take one fork-join over
+  rows each (0.80 → 0.22 and 0.70 → 0.35 ms on MiniLM, 1.77 → 0.49 and 1.37 → 0.70 on bge).
+  F16 embedding rows widen sixteen halves per step with `vcvtph2ps` instead of a scalar `f16`
+  loop, with the scalar twin as the definition and a NaN-payload fallback (0.92 → 0.12 ms).
+  Element-wise is 9.31 → **7.54 ms** and 17.78 → **15.98 ms**; attention 12.74 → **10.77** and
+  25.48 → **21.40**; the pass 53.4 → **49.5 ms** and 104.4 → **98.8 ms**. Every output vector is
+  bit-identical (the same text gives the same floats at 1 and 4 threads, alone and in a batch;
+  `exp_rows4_sums` is pinned to `exp_row`+`sum_row` for every length 0–40 and
+  127/128/129/383/384/385/511/512/513 and the edge values; the F16 widening to the scalar loop
+  over all 65 536 half patterns) and no golden file changed. Medians of three interleaved
+  rounds: MiniLM's F16 row 0.82× → **0.99×** at L512 b1, 0.91× → **1.00×** at b8, 0.93× →
+  **1.01×** at b32, 1.04× → **1.09×** at L16 b32, 1.46× → **1.65×** on the mixed batch; bge
+  F32 0.85× → **0.92×**, 0.86× → **0.94×**, 0.90× → **0.95×** at 512 b1/b8/b32 and 1.24× →
+  **1.31×** mixed. The exact-`erf` GELU is deliberately unchanged (3.6 / 8.9 ms): it is a
+  dependency chain on `f64` FMAs and every faster formulation moves a bit. **Still below 1.0× on
+  this 4-core host**, by cell: MiniLM f16 at 128 b8 (0.97×) and 512 b1/b8 (0.99×/0.996×);
+  MiniLM q8_0 at 512 b1/b8 (0.99×/0.996×); bge-small f32 at 16 b32 (0.95×), 128 b1/b8
+  (0.95×/0.93×) and 512 b1/b8/b32 (0.92×/0.94×/0.95×); bge-small q8_0 at 16 b32 (0.98×), 128
+  b1/b8 (0.97×/0.94×) and 512 b1/b8/b32 (0.90×/0.95×/0.95×). The other four embedding families
+  and both rerankers did not move. See
+  `benchmarks/results/bluefin-2026-11-12-s4.9r/README.md` and `docs/design/s4.9-sota.md` §21.
+
 - **The Qwen3-Embedding 0.6B Q8_0 long-text "slowdown" of S4.9q does not reproduce
   (2026-11-12).** Both ends of the reported fall were rebuilt side by side and measured
   interleaved (five rounds each, 10 threads pinned to the Cortex-X925 cluster, embedding cache
@@ -131,6 +239,7 @@ All notable changes to this project are documented here. The format follows
   overstated; single-text cells were not affected. `docs/benchmark.md` now carries only cache-off
   numbers in that column (1.9–2.6× for the Q8_0 files) and marks the one row that has not been
   re-measured.
+
 - **The halved-precision float panel is widened once, and the small-BERT gap is measured
   against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
   and the prefetch guard inside its `k` loop and widened sixteen weights per weight step, on the
@@ -317,6 +426,142 @@ several models in one server. Read these before upgrading:
   one; attention grows from 11 % to 27 %. The fixtures are under
   `crates/peregrine-models/tests/fixtures/modern-bert/`.
 
+### Changed
+
+- **AVX2 bodies for the modern-bert element-wise kernels (S4.9n).** `geglu_erf` and
+  `layer_norm_rows_nobias` were the ModernBERT family's two scalar-only kernels; both now have an
+  AVX2+FMA body that is `to_bits` equal to its scalar twin, so no golden moved on any tier.
+  `geglu_erf` runs sixteen elements per step through the same erf-GELU body `gelu_erf_rows` uses
+  and then the one multiply by the second half; its tail goes through the scalar `gelu_erf`, which
+  is itself bit-identical to the vector `erf`. `layer_norm_rows_nobias` normalises eight rows per
+  step through the bias form's `f64` reduction and ends in one multiply by the weight and no add,
+  so a `-0.0` product stays negative. New tests compare the scalar and dispatched outputs bit for
+  bit at lengths 0, 1, 7, 8, 9, 15, 16, 17, 31, 33, 768, 1152 and 2304, on ±0, subnormals,
+  ±1e30, ±inf and NaN, over a 200 000-value sweep of [-12, 12], and for the norm on several
+  batches, an all-`-0.0` row, a constant row, width 768 and widths that are not a multiple of
+  eight. At ModernBERT-base's 512-token shape the two kernels go 187.9 → 126.9 ms on one thread
+  (1.48×; `geglu_erf` 140.1 → 94.1, the norm 47.3 → 30.6), 5.2 → 3.5 % of a single-thread pass.
+  End to end with 4 threads on a shared, loaded 8-vCPU Xeon the medians move by 1.7 % at 16
+  tokens, 2.9 % at 512 and 0.8 % at 128, and the 16-text batch cell is inside the noise (the
+  per-run spread reaches 2×); single-thread at 512 tokens is 3630 → 3574 ms, 2.4 %, which is the
+  3 % the isolated kernel time predicts. See `docs/design/s4.9-sota.md` §16.
+
+- **The fork's fast wide pass is a requantisation, and an exact one buys nothing (S5.2).** §10.6
+  item 1 proposed copying ik_llama.cpp's trick — convert each block of weight rows to 8 bits once
+  per wide pass — and said it could be bit-identical "if the kernel widens, not requantises".
+  Half right: the fork *does* requantise. `iqk_convert_q4_k_r4_q8_k_r16`
+  (`ggml/src/iqk/iqk_gemm_kquants.cpp:2400`) dequantises each 256-weight row-block to f32, takes
+  its largest magnitude, and rounds every weight onto a new grid of `max/127` with one f32 scale
+  per (row, 256 weights) — a 4-bit code with a 6-bit scale reaches 945 and cannot fold into int8,
+  so nothing of the original grid survives. Worst case half a step, `max/254` = 0.394 % of the
+  block's largest weight. Measured on 40 chunks of 512 tokens with `llama-perplexity`'s
+  log-probability files: `-ub 512` is not bit-identical to `-ub 16` (the files differ at the first
+  predicted position), Mean KLD 0.001087, RMS Δp 0.634 %, same top-1 97.873 % — 44 % of the
+  0.00248 that separates Q4_K_M from the unquantised model. Peregrine's chunk 16 and chunk 64 are
+  identical on a real model, as the invariant requires.
+
+  Built exactly as §10.6 item 1 asked — the tile's nibbles widened to one byte per weight once per
+  tile, the per-32 scale multiply and the min term kept, bit-identical to the narrowed kernel at
+  every width — the wide pass measures **73.5 against 73.4 GMAC/s at 128 activation rows, 72.6
+  against 71.7 at 512** (two runs, ±2 % both signs): the nibble split is free and removing it buys
+  nothing, because the busy ports are the byte dot and the int32 multiplier. An exact wide kernel's
+  ceiling is today's 74-76, not the fork's 91; what separates them is the per-32 scale multiply and
+  the min term (28 % of the kernel), which only the requantisation can remove. Nothing was wired
+  in. The Q5_0 kernel was attacked too, and two exact variants — a cheaper fifth-bit decode with a
+  prefetch (+2.4 % at 64 rows, −1.9 % at 512, inside the noise) and sixteen output rows per fold
+  (42.4 against 53.6 GMAC/s at 128 rows, slower at every width) — were measured and withdrawn:
+  Q5_0's 32-weight block makes its fold eight times more frequent per weight than Q4_K's, and that
+  is the gap, not the kernel. Peregrine is at 0.64 of ik_llama.cpp on Llama 3.2 1B and 0.57 on Qwen
+  2.5 0.5B on prompt processing at the default settings (0.62 and 0.52 at twelve threads), unchanged
+  because nothing shipped. See `docs/design/s5-prefill-avx512.md` §11.
+
+- **The Q4_K kernel is at the machine's byte-dot roof, and the fork's is not faster (S5.1b).** This
+  item was "rebuild the Q4_K kernel with ik_llama.cpp's instruction mix at 120 GMAC/s per core".
+  Both kernels were disassembled instruction for instruction and both were measured, and the target
+  is above what this core does with a byte dot product: a 512-bit `vpdpbusd` costs twice a 256-bit
+  one here, so both widths roof at 106–117 GMAC/s per core (16 accumulators, one barrier per
+  iteration), and Peregrine's kernel is at 77–81 of that (73 %) against the fork's 58–67 (55 %),
+  measured through the fork's own `ggml_mul_mat`. The "134–148 GMAC/s" that set the target does not
+  reproduce. A 256-bit kernel with the fork's shape was built and measured 12 % slower, and
+  removing half the 512-bit broadcasts bought 3 %, so nothing was shipped: the only code change is
+  `kqbench`'s output buffer, sized for the 128 activation rows its width sweep already asked for.
+  Peregrine is at 0.52 of ik_llama.cpp on Qwen 2.5 0.5B (594.0 against 1 132.6 tok/s) and 0.64 on
+  Llama 3.2 1B (338.4 against 530.6) at 512 prompt tokens and twelve threads, so the remaining
+  prompt-time gap is outside the Q4_K kernel. See `docs/design/s5-prefill-avx512.md` §9.
+
+- **A wide prefill pass when no user is decoding (S5.1a).** The chunk was 16 tokens because the
+  chunk is also how long a *decoding* user waits while another user's prompt is read. When
+  nobody is decoding nobody is waiting, and §6 item 3 (PR #209) made a wide pass pay, so the
+  engine now picks the chunk per pass: 64 tokens when no slot is ready to decode, today's rule
+  otherwise (including the 64-token pieces of a prompt over 1024 tokens). `PEREGRINE_PREFILL_CHUNK`
+  still forces one chunk. The rule is the same on the AVX-512 and AVX2 tiers: 64 beat 128 on both
+  1B models on both tiers and lost 5 % (avx512) and 1 % (avx2) to it on Qwen, and 64 is free in
+  memory — the scratch already holds 64 prompt rows for speculation, where 128 would have cost
+  17.6 MiB on the 1B. Single user at 512 prompt tokens, twelve threads: Llama 3.2 1B 305.5 →
+  338.4 tok/s (time to first token 1.68 → 1.51 s), Qwen 2.5 0.5B 488.0 → 594.0 (1.05 → 0.86 s),
+  Gemma 3 1B 277.2 → 326.8 (1.85 → 1.57 s); 4096-token prompts are flat because they were
+  already read in 64-token pieces. At four and ten users the per-user decode rate while another
+  user's prompt is read is unchanged (53.1 → 53.4 and 52.8 → 54.4 tok/s for the 1B; 78.7 → 77.1
+  and 79.9 → 82.9 for Qwen) and total throughput does not drop. Nothing allocates in the pass
+  and no result moves; `prefill_chunk.rs` gains a mid-prompt width switch and an engine test
+  that the pass widens with no decoder, narrows beside one, and widens again. See
+  `docs/design/s5-prefill-avx512.md` §8.
+- **NEON twins for long-text attention and the bert family's element-wise work (S4.9g/S4.9h).**
+  The key-major 16-key panel, its tiled score kernel and the 128-key-blocked value mix now run on
+  aarch64 too, as a four-row × sixteen-key `vfmaq_f32` tile and a six-row × two-vector mix. The
+  bert family's `gelu_erf_rows` and `layer_norm_rows` get NEON bodies: eight elements per step
+  with two `f64` lanes per `erf`, and eight rows per step with one `f64` lane pair per two rows.
+  Both are bit-identical to the scalar twins, on every input and at every width the tests pin,
+  so no golden changed on any tier. One thread at head_dim 64/128 and 512-8 192 keys the score
+  kernel goes from 50-67 % to 77-78 % of the core's FMA peak; Nemotron 3.5 Embed 1B Q8_0 at
+  8 192 tokens goes 75.4 → 47.3 s at 10 threads (attention 98.3 → 42.4 s). The strided float
+  GEMM was already on its NEON store path. See `docs/design/s4.9-sota.md` §9 and §12.
+
+- **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The
+  kernels hand back a tile as row-major (`blk[i · nb + b]`) and the output is transposed
+  (`out[(b0 + b) · rows + row]`), so the write-out used to be `8 · nb` single-float stores per
+  tile with a stride of `rows` floats (32 KiB on the 1B at chunk 128): every store its own cache
+  line, and a wider pass paid for it. Turned around, one activation's tile is eight consecutive
+  floats in both places, so `untile` copies each activation's rows as one slice — `nb` copies
+  instead of `8 · nb` scattered stores, and the tile block stays in L1. The packed-float and
+  per-row paths keep their scatter: their blocks are row-major, so their output would need a real
+  transpose. Nothing allocates and no result moves (`prefill_chunk.rs` passes unchanged). At twelve threads the 1B's
+  prefill at chunk 128 goes 266.2 → 347.7 tok/s against 294.5 → 324.6 at 16, so a wide pass is now
+  the fastest pass where before it was the slowest for the 1B; at one thread chunk 64 goes 35.7 →
+  56.1 (+57 %). The default chunk stays 16: chunk 64 is
+  the best for throughput at twelve threads for both models, but the default also sets how long a
+  decoding user waits behind another user's prompt pass, and that trade was not measured here. See
+  `docs/design/s5.1-wide-pass.md`.
+
+- **A 512-bit Q6_K tile kernel (S5.1).** Q6_K's codes split out of a 64-byte window exactly as
+  Q4_K's nibbles do, so the tile kernel now loads eight rows' eight bytes at a time, builds the
+  six-bit codes from `ql`'s nibble and `qh`'s two bits, and accumulates them with `vpdpbusd`
+  straight into int32 — no int16 stage, so none of the AVX2 kernel's widening every two
+  `vpmaddubsw`. The run stays the unit because the scale does: two `vpdpbusd` per activation row,
+  then one exact int32 scale multiply. The format's `-32` offset is eight `vpdpwssd` of paired
+  scales against paired per-16 sums, shifted by five once per super-block, as the AVX2 kernel has
+  it. Eight activation rows per group, window-major, as the Q4_K kernel. One core, L1 tile: 39.2 →
+  62.0 GMAC/s at sixteen activation rows, 33.9 → 57.2 at one hundred and twenty-eight; on a
+  DRAM-sized tile 31.9 → 46–50. End to end the 1B's prefill gains 1.7 % at twelve threads (Q6_K
+  is 15.4 % of it, but a sixteen-token pass streams the weights). The one-row GEMV is unchanged.
+  No golden moves. See `docs/design/s5.1-q6k-zmm.md`.
+
+- **The AVX-512 Q4_K and Q5_0 kernels work eight activation rows per pass (S5.1).** The prefill
+  group was four rows, and each super-block's weight windows, scale decode and min term were
+  re-done for each of them; a super-block is now decoded once for eight, with the window loop
+  outside the row loop so sixteen `vpdpbusd` chains overlap. The Q4_K min term sums two sub-blocks
+  per `vpdpwssd` against paired sums kept in the interleaved activation (`KqActs::bsp`) instead of
+  eight scalar broadcasts and eight int32 multiplies per row, and both kernels work out a row's
+  activation addressing once per call. All of it is bit-identical: the integer sums are
+  order-free and the fold is unchanged, so no golden moves. One core, L1-resident: Q4_K 76.8 →
+  80.8 GMAC/s at sixteen activation rows and 74.6 → 79.3 at sixty-four, Q5_0 48.4 → 54.2 and
+  47.8 → 54.3; the one-row decode kernel 43.5 → 44.0. End to end at 512 tokens: +6.0 % (Qwen 2.5
+  0.5B) and +2.1 % (Llama 3.2 1B) prefill at twelve threads, +5.8 % / +4.7 % at one, decode
+  unchanged. The kernel was not the engine's limit at a sixteen-token pass — the weights stream
+  from DRAM per pass — which is what the wider-pass work is for. See
+  `docs/design/s5.1-kq-epilogue.md`.
+
+### Added
 - **Rerank and classify for the `modern-bert` family (roadmap S4.7b).** A `modern-bert` file
   with a classifier head now answers `POST /v1/rerank` (and `/rerank`, `/v1/reranking`,
   `/reranking`), `POST /v1/classify`, `/v1/models`' modalities and `peregrine rerank` — the same

@@ -41,7 +41,7 @@ impl State {
 }
 
 /// Where the state file lives: `$PEREGRINE_STATE_DIR`, else `$XDG_STATE_HOME/peregrine`, else
-/// `~/.local/state/peregrine`.
+/// `%LOCALAPPDATA%\peregrine` on Windows, else `~/.local/state/peregrine` (S7.2).
 pub fn state_dir() -> PathBuf {
     if let Ok(d) = std::env::var("PEREGRINE_STATE_DIR") {
         if !d.is_empty() {
@@ -51,6 +51,16 @@ pub fn state_dir() -> PathBuf {
     if let Ok(d) = std::env::var("XDG_STATE_HOME") {
         if !d.is_empty() {
             return PathBuf::from(d).join("peregrine");
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no XDG state directory; the per-user local application data is where a
+        // program keeps state of its own (`%LOCALAPPDATA%\peregrine\serve.json`).
+        if let Ok(d) = std::env::var("LOCALAPPDATA") {
+            if !d.is_empty() {
+                return PathBuf::from(d).join("peregrine");
+            }
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -65,6 +75,26 @@ pub fn state_path() -> PathBuf {
 /// The default log for a background server on `port`.
 pub fn log_path(port: u16) -> PathBuf {
     state_dir().join(format!("serve-{port}.log"))
+}
+
+/// The stop file a Windows server watches, named for its port like the log.
+///
+/// Windows has no `SIGTERM`. `peregrine stop` creates this file; the serving process notices it
+/// within about 250 ms, removes it, and drains exactly as `SIGTERM` makes a Unix server drain
+/// (S7.3). Unix servers never look at it.
+pub fn stop_path(port: u16) -> PathBuf {
+    state_dir().join(format!("serve-{port}.stop"))
+}
+
+/// Ask the Windows server on `port` to drain by creating its stop file.
+#[cfg(windows)]
+pub fn request_stop(port: u16) -> Result<(), String> {
+    let path = stop_path(port);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(&path, b"stop\n").map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// Read the state file. `None` when there is none or it does not parse.
@@ -97,7 +127,17 @@ pub fn remove_if_ours(path: &Path, pid: u32) {
     }
 }
 
+/// Whether a process is running. Linux reads `/proc`; the other Unix systems ask `kill -0`.
+///
+/// Windows has no `/proc` and no `kill`: `win32::process_alive` opens the process and reads its
+/// exit code (S7.3), which is also what `status` and `stop` need.
+#[cfg(windows)]
+pub fn alive(pid: u32) -> bool {
+    peregrine_core::win32::process_alive(pid)
+}
+
 /// Whether a process is running. Linux reads `/proc`; elsewhere `kill -0` is asked.
+#[cfg(not(windows))]
 pub fn alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -115,7 +155,16 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// End a process hard (`TerminateProcess`). The stop file is the graceful path; this is the
+/// last resort `peregrine stop` (and, on Windows, `upgrade`) use after the drain timeout.
+#[cfg(windows)]
+pub fn terminate(pid: u32) -> Result<(), String> {
+    peregrine_core::win32::terminate_process(pid)
+        .map_err(|e| format!("cannot terminate pid {pid}: {e}"))
+}
+
 /// Ask a process to shut down (`SIGTERM`), and say whether the signal was sent.
+#[cfg(not(windows))]
 pub fn terminate(pid: u32) -> Result<(), String> {
     let status = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
@@ -232,10 +281,23 @@ pub fn spawn_server(
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
+        // `CREATE_NEW_PROCESS_GROUP` keeps Ctrl-C in the parent's console from reaching the
+        // detached server; `DETACHED_PROCESS` gives it no console at all (S7.3).
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+        }
     }
+    #[cfg(windows)]
+    let no_inherit = peregrine_core::win32::NoInheritStdHandles::clear();
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
+    #[cfg(windows)]
+    drop(no_inherit);
     let id = child.id();
     let started = Instant::now();
     loop {

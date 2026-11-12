@@ -1,6 +1,7 @@
 # S7: macOS and Windows
 
-- Status: design, decided 2026-11-12. Not built.
+- Status: design, decided 2026-11-12. S7.2 (Windows builds and passes the suite) and S7.3 (Windows
+  lifetime, installer and release archive) built; the rest is not built.
 - Owner request: "add support to windows, mac".
 
 ## 0. Where things stand
@@ -105,6 +106,51 @@ confirmed by the first run rather than assumed:
 - the pool's default width: physical cores through the system's processor information call, not
   the logical count.
 
+**S7.2 as built (2026-11-12).** What the first Windows run showed, and what it took:
+
+- **Fixtures.** `* text=auto eol=lf` was already in `.gitattributes`, so the first run's
+  fixture-comparing tests passed as they were. `*.jsonl`, `*.golden`, `*.jinja`, `*.txt` and
+  `*.tsv` now carry an explicit `text eol=lf` as well, and `*.f32`, `*.gguf`, `*.bin` and
+  `*.slb` stay binary: a checkout with `core.autocrlf=true` cannot re-encode them.
+- **Mapped files.** Two write paths assumed a file can be rewritten or renamed over while it is
+  mapped, which Windows refuses (`ERROR_USER_MAPPED_FILE`, `ERROR_ACCESS_DENIED`):
+  the synthetic-model writers in `crates/peregrine-models/tests/support/models.rs` now give
+  every write a fresh name (`unique_path`), because a test that writes two models of one family
+  and format in one directory kept the first mapped; the pack cache's publish
+  (`crates/peregrine-core/src/packcache.rs`) keeps a file already published for the same key
+  instead of replacing it — the bytes a key names are the same bytes — and drops its temporary
+  copy; the `hf:` download drops the header mapping before the final `.part` rename; and the
+  pack-cache test that touches a model's mtime opens it for writing and drops the model first.
+  `Gguf::read_data` on Windows now uses `seek_read` (positioned `ReadFile`) rather than copying
+  out of the mapping, so the mapping's pages for the repacked matrices are not faulted in.
+- **Numbers off the C runtime** (decision in §3). The `det_*` forward-path helpers in
+  `crates/peregrine-kernels/src/vmath.rs` use the engine's own functions on aarch64 **and on
+  every non-Linux system**; only Linux x86-64 keeps libm, so only its goldens stay put. macOS is
+  aarch64, so this changes nothing there. The first run confirmed the need: several synthetic
+  models and the session fixture differed from the Linux goldens in `logits_fnv` alone (the
+  argmax and greedy tokens were identical), which is exactly the UCRT's rounding.
+- **Goldens.** Every place that keyed a golden directory `-macos` now also keys `-windows`
+  (11 sites in six test files), so Windows compares against its own directories and skips until
+  S7.4 records them. The Windows job never sets `PEREGRINE_GOLDEN=require`.
+- **Paths.** The model cache, the pack cache and the server state directory default to
+  `%LOCALAPPDATA%\peregrine` (and `…\peregrine\packs`) on Windows, after the explicit
+  `PEREGRINE_*`/XDG overrides.
+- **The pool's width.** `physical_cores()` on Windows counts `RelationProcessorCore` records from
+  `GetLogicalProcessorInformationEx` through a hand-written `extern "system"` in the new
+  `crates/peregrine-core/src/win32.rs` (no dependency; SAFETY comments on every `unsafe`), with
+  the logical count as the fallback when the call fails.
+- **Unix-only tests.** `serve_lifetime.rs` now runs its lifetime half (the server outlives the
+  drain timeout and keeps serving) everywhere; the `SIGTERM` half is `#[cfg(unix)]` with the
+  reason. `server_multi_model.rs` lost its file-level `#![cfg(unix)]`: every test except the
+  `SIGTERM` drain runs on Windows.
+- **Lifetime commands are S7.3.** `serve --background`, `status` and `stop` return an explicit
+  "not available on Windows yet (S7.3)" on Windows instead of failing through `kill`; `upgrade`
+  already refuses non-Linux. A foreground `serve` stops on Ctrl-C, through `tokio`.
+- **The job.** `test (windows-x86_64)` on `windows-2025` runs the same release-mode suite as the
+  other x86-64 entries, and a smoke step builds `peregrine.exe`, checks `--version`, `tier`
+  (`x86_64-avx2…` on the runner) and `run` on a model that `write_synthetic` writes. A green run
+  takes about seven minutes.
+
 **S7.3: lifetime, installer, release.**
 
 - `serve` stops cleanly on Ctrl-C (it does today, through `tokio`) and on a stop request.
@@ -146,3 +192,71 @@ llama.cpp's Windows build, for decode, prompt and ten users on the three gate mo
   unsigned `.exe`), need certificates the project does not have.
 - **Windows Defender and mapped model files.** First-run scanning of a multi-gigabyte mapped file
   can dominate load time; measured in S7.4, with the documented exclusion if it does.
+
+## 8. S7.3 as built
+
+Windows x86-64 reaches the bar in §1 for the lifetime commands, `upgrade`, the installer and the
+release archive; the goldens and the measurement are S7.4's.
+
+- **Stop and the drain.** Windows has no `SIGTERM`. `peregrine stop` writes
+  `serve-<port>.stop` in the state directory (beside `serve.json`, named for the port like the
+  log), the server watches it every 250 ms, removes it and runs the same drain a Unix `SIGTERM`
+  starts (`serve_with_drain`, 30 s cap), and exits with the same status. `stop` waits the Unix
+  40 s `DRAIN_TIMEOUT` and only then ends the process with `TerminateProcess`. Ctrl-C still works:
+  the Windows `shutdown_signal` selects over `tokio`'s console handler and the stop-file tick.
+- **Liveness and the background server.** `serve --background` spawns the child with
+  `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`, redirects it to the same log file and writes the
+  same state record; the parent waits for the child's state file (written after `bind`, before
+  `listening on` is logged) before it reports success. `status` reads the record and checks the
+  process with `OpenProcess` + `GetExitCodeProcess`; it also probes `/health` and prints the answer.
+  The two calls are hand-written `extern "system"` declarations in
+  `crates/peregrine-core/src/win32.rs` with SAFETY comments on every `unsafe`, like the S7.2
+  topology call; there is no new dependency.
+- **A detached child and the caller's pipes.** Windows' `CreateProcess(bInheritHandles = TRUE)`
+  handed the detached server the caller's stdin/stdout/stderr pipe handles, so
+  `peregrine serve --background | cat` and a test's `Command::output()` never saw EOF. The spawn
+  now clears `HANDLE_FLAG_INHERIT` on this process's three standard handles for the duration of
+  `CreateProcess` and restores them (`win32::NoInheritStdHandles`); the child's own stdio is passed
+  explicitly to the log file and is unaffected.
+- **Tests.** `serve_lifetime.rs` and `server_multi_model.rs` keep their Unix `SIGTERM` tests
+  unchanged and gain Windows counterparts that ask for the drain through the stop file: the
+  in-flight requests finish, a new connection is refused once the listener closes, and the process
+  exits 0. `serve_lifetime.rs` also exercises `serve --background`, `status` (address and
+  `health     ok`) and `stop` end to end. The Windows job runs all of them.
+- **`upgrade`.** `release_platform(os, arch)` maps `windows`/`x86_64` to `windows-x86_64` (Windows
+  on ARM gets the build-from-source answer), the asset is the `.zip`, and the SHA-256 comes from
+  `certutil -hashfile` where Unix uses `sha256sum`/`shasum`. A running `.exe` cannot be overwritten
+  but can be renamed: the installed binary becomes `peregrine.exe.old` (a unique name if that one
+  is still running), the new one is moved into place, and every start removes `<name>.old` copies.
+  Extraction uses PowerShell 5.1's `Expand-Archive`, the one archive tool every Windows has. The
+  mapping is unit-tested by argument, and the rename swap with ordinary temporary files on every
+  platform.
+- **Installer.** `scripts/install.ps1` is Windows PowerShell 5.1 (no `??`, no ternary), needs no
+  administrator rights, and follows `install.sh`'s shape: GitHub's latest tag (or `-Version`),
+  `peregrine-vX.Y.Z-windows-x86_64.zip` and `SHA256SUMS` from `-BaseUrl` (a URL, a `file://` URL or
+  a local directory, as `PEREGRINE_BASE_URL` is for the shell script), a `Get-FileHash` check, and
+  `Expand-Archive` into `%LOCALAPPDATA%\Programs\peregrine` (or `-InstallDir`). It appends the
+  directory to the **user** `Path` only when it is missing, prints the install and the undo
+  commands, and refuses ARM64 with the build-from-source line.
+- **CI.** `test (windows-x86_64)` gains an installer step after its smoke step: build.ps1 builds
+  the zip, `install.ps1 -BaseUrl <repo>/dist -InstallDir <temp>` installs it, and the installed
+  `peregrine.exe` must answer `--version` and `tier` (`x86_64-avx2…`). The job is green in about
+  ten minutes cold.
+- **Release.** `release.yml`'s matrix has `windows-2025` / `x86_64-pc-windows-msvc` /
+  `windows-x86_64`; `scripts/release/build.ps1` is the PowerShell twin of `build.sh` (the Windows
+  runner has no `strip` or `sha256sum`, and `Compress-Archive` writes `\` as an entry separator, so
+  the zip entries are written with `/` through `System.IO.Compression`). The build sets
+  `RUSTFLAGS=-C target-feature=+crt-static` for the release job only, so the `.exe` needs no Visual
+  C++ redistributable; the binary still has no `target-cpu` and dispatches kernels at run time. The
+  archive carries `peregrine.exe`, `LICENSE` and `NOTICE`, exactly like the Linux archives, and
+  its SHA-256 joins `SHA256SUMS` in the same `hash  name` format. The publish job uploads `*.zip`
+  and `install.ps1` beside `*.tar.gz` and `install.sh`, and is guarded on a tag push.
+- **The dry run.** `gh workflow run release.yml --ref s7.3-windows-lifetime -f dry_run=true` was
+  accepted: the three build jobs ran and uploaded artefacts, and the `release` job was skipped.
+  The Windows build (`build (windows-x86_64)`) took 7 m 38 s and produced
+  `peregrine-v0.2.0-windows-x86_64.zip` (3,111,510 bytes, SHA-256 `f900f0cd…908eb0`); its listing is
+  `peregrine-v0.2.0-windows-x86_64/{LICENSE,NOTICE,peregrine.exe}` (8,186,389 bytes uncompressed).
+- **Not done.** The Windows goldens (`-windows` directories) and a native Windows measurement are
+  S7.4; every golden suite still skips on Windows. The `.exe` is unsigned (Authenticode needs a
+  certificate, §7), and the installer's `irm … | iex` path is the one that avoids SmartScreen's
+  browser-download mark rather than a signature.

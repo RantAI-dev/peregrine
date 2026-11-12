@@ -1,7 +1,18 @@
+# LF on every system, whatever the user's `core.autocrlf` says.
 * text=auto eol=lf
+
+# Byte-exact fixtures. A test compares these bytes (or the engine parses them as
+# `include_str!` input), so git must not re-encode them on checkout: without the
+# explicit `text eol=lf` a Windows checkout with `core.autocrlf=true` writes CRLF,
+# and every fixture-comparing test fails there. `.f32` vectors are little-endian
+# floats, and the model and vocab files are binary.
+*.jsonl text eol=lf
+*.golden text eol=lf
+*.jinja text eol=lf
+*.txt text eol=lf
+*.tsv text eol=lf
+*.f32 binary
 *.gguf binary
 *.bin binary
 *.slb binary
-# raw f32 fixture vectors and score files: little-endian floats, not text
-*.f32 binary
 Cargo.lock linguist-generated=false
