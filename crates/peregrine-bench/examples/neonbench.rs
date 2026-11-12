@@ -427,4 +427,138 @@ fn main() {
             black_box(out[0]);
         });
     }
+
+    // The 8-bit prompt form (S5.4d): the resident form against the exact tile
+    // kernels, on `sdot` and on `smmla`, at the widths the design note lists.
+    // `n_tiles` is `rows / 8`, capped at 256: at `rows=2048` and `n=8192` the
+    // 17 MB of forms stream from L3/DRAM on every iteration, which is the
+    // 2048 × 8192 shape; at `n=4096, rows=512` the same loop is L2/L3-resident.
+    {
+        use peregrine_kernels::kq8;
+        let n_tiles = (rows / 8).clamp(1, 256);
+        let mut form4 = vec![0u8; n_sb * kq8::Q8K_SIZE];
+        let mut form6 = vec![0u8; n_sb * kq8::Q8K_SIZE];
+        let n_sb5 = n_blk.div_ceil(8);
+        let mut form5 = vec![0u8; n_sb5 * kq8::Q8K_SIZE];
+        unsafe {
+            peregrine_kernels::neon::q8k_build_q4k_neon(&tile, n_sb, &mut form4);
+            peregrine_kernels::neon::q8k_build_q6k_neon(&q6_tile, n_sb, &mut form6);
+            peregrine_kernels::neon::q8k_build_q5_0_neon(&q5_tile, n_blk, &mut form5);
+        }
+        let forms4 = vec![form4.clone(); n_tiles];
+        let forms6 = vec![form6.clone(); n_tiles];
+        let forms5 = vec![form5.clone(); n_tiles];
+        let tiles4 = vec![tile; n_tiles];
+        let tiles6 = vec![q6_tile; n_tiles];
+        let tiles5 = vec![q5_tile; n_tiles];
+        let mut kq512 = KqActs::default();
+        kq512.fill(&wide);
+        let macs = |nb: usize| 8 * n_tiles * nb;
+        println!(
+            "8-bit form: n={n} n_tiles={n_tiles} ({} KiB of Q4_K form per iteration)",
+            n_tiles * form4.len() / 1024
+        );
+        for nb in [1usize, 8, 16, 64, 128, 512] {
+            bench(&format!("Q4_K exact sdot, {nb}"), macs(nb), &mut || {
+                for t in tiles4.iter() {
+                    unsafe { peregrine_kernels::neon::q4k8_gemm(t, n_sb, &kq512, nb, &mut out) };
+                }
+                black_box(out[0]);
+            });
+            bench(&format!("Q4_K form sdot, {nb}"), macs(nb), &mut || {
+                for f in forms4.iter() {
+                    unsafe {
+                        peregrine_kernels::neon::q8k_gemm_sdot(f, n_sb, &kq512, nb, &mut out)
+                    };
+                }
+                black_box(out[0]);
+            });
+            bench(&format!("Q6_K exact sdot, {nb}"), macs(nb), &mut || {
+                for t in tiles6.iter() {
+                    unsafe { peregrine_kernels::neon::q6k8_gemm(t, n_sb, &kq512, nb, &mut out) };
+                }
+                black_box(out[0]);
+            });
+            bench(&format!("Q6_K form sdot, {nb}"), macs(nb), &mut || {
+                for f in forms6.iter() {
+                    unsafe {
+                        peregrine_kernels::neon::q8k_gemm_sdot(f, n_sb, &kq512, nb, &mut out)
+                    };
+                }
+                black_box(out[0]);
+            });
+            bench(&format!("Q5_0 exact sdot, {nb}"), macs(nb), &mut || {
+                for t in tiles5.iter() {
+                    unsafe {
+                        peregrine_kernels::neon::q5_08_gemm(t, n_blk, &wide[..nb], nb, &mut out)
+                    };
+                }
+                black_box(out[0]);
+            });
+            bench(&format!("Q5_0 form sdot, {nb}"), macs(nb), &mut || {
+                for f in forms5.iter() {
+                    unsafe {
+                        peregrine_kernels::neon::q8k_gemm_sdot(f, n_sb5, &kq512, nb, &mut out)
+                    };
+                }
+                black_box(out[0]);
+            });
+            if peregrine_kernels::cpu::have_i8mm() {
+                bench(&format!("Q4_K exact i8mm, {nb}"), macs(nb), &mut || {
+                    for t in tiles4.iter() {
+                        unsafe {
+                            peregrine_kernels::neon::q4k8_gemm_i8mm(t, n_sb, &kq512, nb, &mut out)
+                        };
+                    }
+                    black_box(out[0]);
+                });
+                bench(&format!("Q4_K form i8mm, {nb}"), macs(nb), &mut || {
+                    for f in forms4.iter() {
+                        unsafe {
+                            peregrine_kernels::neon::q8k_gemm_i8mm(f, n_sb, &kq512, nb, &mut out)
+                        };
+                    }
+                    black_box(out[0]);
+                });
+                bench(&format!("Q6_K exact i8mm, {nb}"), macs(nb), &mut || {
+                    for t in tiles6.iter() {
+                        unsafe {
+                            peregrine_kernels::neon::q6k8_gemm_i8mm(t, n_sb, &kq512, nb, &mut out)
+                        };
+                    }
+                    black_box(out[0]);
+                });
+                bench(&format!("Q6_K form i8mm, {nb}"), macs(nb), &mut || {
+                    for f in forms6.iter() {
+                        unsafe {
+                            peregrine_kernels::neon::q8k_gemm_i8mm(f, n_sb, &kq512, nb, &mut out)
+                        };
+                    }
+                    black_box(out[0]);
+                });
+                bench(&format!("Q5_0 exact i8mm, {nb}"), macs(nb), &mut || {
+                    for t in tiles5.iter() {
+                        unsafe {
+                            peregrine_kernels::neon::q5_08_gemm_i8mm(
+                                t,
+                                n_blk,
+                                &wide[..nb],
+                                nb,
+                                &mut out,
+                            )
+                        };
+                    }
+                    black_box(out[0]);
+                });
+                bench(&format!("Q5_0 form i8mm, {nb}"), macs(nb), &mut || {
+                    for f in forms5.iter() {
+                        unsafe {
+                            peregrine_kernels::neon::q8k_gemm_i8mm(f, n_sb5, &kq512, nb, &mut out)
+                        };
+                    }
+                    black_box(out[0]);
+                });
+            }
+        }
+    }
 }
