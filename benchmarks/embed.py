@@ -179,6 +179,7 @@ def run_cell(
     budget: float,
     max_requests: int,
     request_timeout: float,
+    repeat_texts: bool = False,
 ) -> Dict[str, Any]:
     if len(texts) < batch:
         batch = len(texts)
@@ -188,6 +189,10 @@ def run_cell(
     n_texts = 0
     waves = 0
     t_start = time.perf_counter()
+    if repeat_texts:
+        # The repeated-traffic table wants the warm steady state: keep asking
+        # until max_requests rather than stopping after the cold wave.
+        budget = float("inf")
     pool = futures.ThreadPoolExecutor(max_workers=clients)
     try:
         while True:
@@ -202,7 +207,13 @@ def run_cell(
             futs = []
             for c in range(clients):
                 idx = (waves * clients + c)
-                start = (idx * batch) % max(1, len(texts) - batch + 1) if len(texts) > batch else 0
+                if repeat_texts:
+                    # The cache-on table repeats the same request on purpose: the
+                    # first wave computes, later waves are exact hits.
+                    start = 0
+                else:
+                    start = ((idx * batch) % max(1, len(texts) - batch + 1)
+                             if len(texts) > batch else 0)
                 chunk = texts[start:start + batch]
                 cal = calib_tokens[start:start + batch]
                 futs.append((pool.submit(timed_embed, adapter, chunk), sum(cal)))
@@ -299,12 +310,18 @@ def run_bench(args) -> None:
             row = dict(row)
             model["max_tokens"] = args.ctx_tokens
             row["_ctx"] = args.ctx_tokens
-        if row["engine"] == "llama_cpp" and (args.llama_batch or args.llama_ubatch):
+        if row["engine"] == "llama_cpp" and (
+            args.llama_batch or args.llama_ubatch or args.llama_parallel or args.llama_ctx
+        ):
             row = dict(row)
             if args.llama_batch:
                 row["batch"] = args.llama_batch
             if args.llama_ubatch:
                 row["ubatch"] = args.llama_ubatch
+            if args.llama_parallel:
+                row["parallel"] = args.llama_parallel
+            if args.llama_ctx:
+                row["server_ctx"] = args.llama_ctx
         fp = path_fingerprint(row["path"])
         sha, size = fp["sha256"], fp["size_bytes"]
 
@@ -391,11 +408,14 @@ def run_bench(args) -> None:
                             max_reqs = max(clients * 6, clients)
                         elif batch > 1 and single_s[L] * batch > args.budget:
                             max_reqs = 1
+                        if args.repeat_texts and batch > 1:
+                            max_reqs = max(5, max_reqs)
                         t0 = time.perf_counter()
                         res = run_cell(
                             adapter, all_texts, all_tokens, batch, clients,
                             budget=budget, max_requests=max_reqs,
                             request_timeout=args.request_timeout,
+                            repeat_texts=args.repeat_texts,
                         )
                         res.update({
                             "length": L,
@@ -422,6 +442,7 @@ def run_bench(args) -> None:
                 res = run_cell(
                     adapter, all_texts, all_tokens, args.mixed_batch, 1,
                     budget=0.0, max_requests=2, request_timeout=args.request_timeout,
+                    repeat_texts=args.repeat_texts,
                 )
                 res.update({
                     "length": "mixed",
@@ -596,6 +617,9 @@ def parse_args():
     ap.add_argument("--texts-dir", default="/var/tmp/embed-texts")
     ap.add_argument("--output-dir", default="benchmarks/results/bluefin-embed-2026-11-10")
     ap.add_argument("--mode", choices=["bench", "accuracy"], default="bench")
+    ap.add_argument("--repeat-texts", action="store_true",
+                    help="send the same text window on every wave (the cache-on "
+                         "'repeated traffic' table; the timing grid rotates instead)")
     ap.add_argument("--mixed-cell", action="store_true",
                     help="also time one batch of the texts file's mixed-length set (S4.9b)")
     ap.add_argument("--mixed-batch", type=int, default=32)
@@ -609,6 +633,11 @@ def parse_args():
                          "the whole prompt in one ubatch, so L2000 needs -ub 2048")
     ap.add_argument("--llama-ubatch", type=int, default=0,
                     help="llama.cpp -ub (physical batch)")
+    ap.add_argument("--llama-parallel", type=int, default=0,
+                    help="llama.cpp -np slots; a causal model's 2 000-token texts need "
+                         "enough slots to hold one request's whole prompt batch")
+    ap.add_argument("--llama-ctx", type=int, default=0,
+                    help="llama.cpp -c (the whole KV pool; -np x per-slot context)")
     ap.add_argument("--llama-fa", choices=["auto", "on", "off"], default="auto",
                     help="llama.cpp -fa; the published ratio uses the faster setting")
     ap.add_argument("--ref-label", default="torch-fp32")

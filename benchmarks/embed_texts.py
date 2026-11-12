@@ -124,10 +124,38 @@ def main():
                     help="also emit this many texts of lengths drawn from 8..512, under the "
                          "\"mixed\" key (S4.9b: the mixed-length cell)")
     ap.add_argument("--mixed-seed", type=int, default=20261111)
+    ap.add_argument("--prefix", default="",
+                    help="prepend this text to every calibrated text (the retrieval "
+                         "instructions some embedders train with, e.g. 'passage: '); the "
+                         "token count includes the prefix")
+    ap.add_argument("--mixed-prefixes", default="",
+                    help="comma-separated prefixes cycled over the mixed set only; overrides "
+                         "--prefix for that set (e.g. 'query: ,passage: ')")
     args = ap.parse_args()
 
     lengths = [int(x) for x in args.lengths.split(",") if x]
     tok = AutoTokenizer.from_pretrained(args.tokenizer_dir, local_files_only=True)
+
+    def prefix_cost(pfx):
+        """Tokens a prefix really adds to a text (special tokens counted once)."""
+        if not pfx:
+            return 0
+        one = len(tok("a", add_special_tokens=True)["input_ids"])
+        return len(tok(pfx + "a", add_special_tokens=True)["input_ids"]) - one
+
+    def calibrate(stream, start, target, prefix):
+        """build_text aims at the requested length with the prefix already included."""
+        cap = args.max_tokens - prefix_cost(prefix)
+        inner = max(1, target - prefix_cost(prefix))
+        body, _ = build_text(tok, stream, start, inner, cap)
+        text = prefix + body
+        n = len(tok(text, add_special_tokens=True)["input_ids"])
+        return text, n
+
+    prefix_tokens = prefix_cost(args.prefix)
+    mixed_prefixes = [p for p in args.mixed_prefixes.split(",") if p]
+    if not mixed_prefixes:
+        mixed_prefixes = [args.prefix] if args.prefix else [""]
     words = load_words(args.corpus)
     if len(words) < 300:
         raise SystemExit(f"corpus too short: {len(words)} words")
@@ -141,6 +169,7 @@ def main():
         "tokenizer": str(Path(args.tokenizer_dir).resolve()),
         "per_length": args.per_length,
         "max_tokens": args.max_tokens,
+        "prefix": args.prefix,
         "lengths": {},
     }
     bad = 0
@@ -148,7 +177,7 @@ def main():
         texts = []
         for i in range(args.per_length):
             start = (i * 31 + L * 7) % span
-            text, n = build_text(tok, stream, start, L, args.max_tokens)
+            text, n = calibrate(stream, start, L, args.prefix)
             if not (0.95 * L <= n <= 1.05 * L):
                 bad += 1
                 print(f"[warn] L={L} text {i}: {n} tokens outside 5%", file=sys.stderr)
@@ -168,9 +197,11 @@ def main():
         for i in range(args.mixed_set):
             target = rng.choice(pool)
             start = (i * 53 + target * 11) % span
-            text, n = build_text(tok, stream, start, target, args.max_tokens)
+            pfx = mixed_prefixes[i % len(mixed_prefixes)]
+            text, n = calibrate(stream, start, target, pfx)
             texts.append({"text": text, "tokens": n})
         out["mixed_seed"] = args.mixed_seed
+        out["mixed_prefixes"] = mixed_prefixes
         out["mixed_lengths"] = sorted({t["tokens"] for t in texts})
         out["lengths"]["mixed"] = texts
         toks = [t["tokens"] for t in texts]
