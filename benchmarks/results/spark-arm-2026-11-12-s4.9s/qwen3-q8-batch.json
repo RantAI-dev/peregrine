@@ -1,0 +1,57 @@
+{
+ "qwen3-embed-0.6b-q8_0": {
+  "path": "~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+  "pooling": "last",
+  "ctx": 2048,
+  "cells": {
+   "batch": {
+    "texts": 32,
+    "tokens_per_text": 225.12,
+    "peregrine": [
+     2.231,
+     2.122,
+     1.677
+    ],
+    "llama.cpp": [
+     1.152,
+     1.204,
+     1.144
+    ],
+    "peregrine_median": 2.122,
+    "llama_median": 1.152,
+    "ratio": 1.842,
+    "peregrine_spread_pct": 26.11,
+    "llama_spread_pct": 5.21
+   },
+   "mixed": {
+    "texts": 32,
+    "tokens_per_text": 398.69,
+    "peregrine": [
+     1.096,
+     0.924,
+     0.942
+    ],
+    "llama.cpp": [
+     0.757,
+     0.576,
+     0.753
+    ],
+    "peregrine_median": 0.942,
+    "llama_median": 0.753,
+    "ratio": 1.251,
+    "peregrine_spread_pct": 18.26,
+    "llama_spread_pct": 24.04
+   }
+  },
+  "peregrine": {
+   "cmd": "~/peregrine/target/release/peregrine serve -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf --host 127.0.0.1 --port 18401 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf --embedding --pooling last -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18402",
+   "version": []
+  }
+ }
+}

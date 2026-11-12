@@ -1,0 +1,40 @@
+=== round 1 main load 10.92
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.052,"tokens_per_s":103.4,"wall_s":19.3475,"tokenise_s":0.003182,"tokenise_ms_per_text":3.182,"stats_ms":{"matmul":7601.011,"head":0.000,"attention":3984.245,"other":7729.273,"total":19314.528,"barriers":32256},"prof_ms":{}}
+=== round 1 branch load 12.62
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.060,"tokens_per_s":120.4,"wall_s":16.6150,"tokenise_s":0.003126,"tokenise_ms_per_text":3.126,"stats_ms":{"matmul":6987.569,"head":0.000,"attention":3131.691,"other":6462.549,"total":16581.809,"barriers":32256},"prof_ms":{}}
+=== round 2 branch load 12.67
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.088,"tokens_per_s":176.1,"wall_s":11.3587,"tokenise_s":0.003126,"tokenise_ms_per_text":3.126,"stats_ms":{"matmul":5056.561,"head":0.000,"attention":2677.675,"other":3585.096,"total":11319.332,"barriers":32256},"prof_ms":{}}
+=== round 2 main load 13.52
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.064,"tokens_per_s":127.6,"wall_s":15.6787,"tokenise_s":0.003261,"tokenise_ms_per_text":3.261,"stats_ms":{"matmul":6693.711,"head":0.000,"attention":3689.296,"other":5261.378,"total":15644.384,"barriers":32256},"prof_ms":{}}
+=== round 3 main load 14.69
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.075,"tokens_per_s":150.3,"wall_s":13.3079,"tokenise_s":0.003132,"tokenise_ms_per_text":3.132,"stats_ms":{"matmul":5662.059,"head":0.000,"attention":3540.326,"other":4068.541,"total":13270.926,"barriers":32256},"prof_ms":{}}
+=== round 3 branch load 14.40
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.083,"tokens_per_s":166.1,"wall_s":12.0374,"tokenise_s":0.003224,"tokenise_ms_per_text":3.224,"stats_ms":{"matmul":5349.550,"head":0.000,"attention":2384.890,"other":4260.158,"total":11994.598,"barriers":32256},"prof_ms":{}}
+=== round 4 branch load 15.46
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.171,"tokens_per_s":341.9,"wall_s":5.8504,"tokenise_s":0.003129,"tokenise_ms_per_text":3.129,"stats_ms":{"matmul":3170.337,"head":0.000,"attention":1552.457,"other":1094.672,"total":5817.466,"barriers":32256},"prof_ms":{}}
+=== round 4 main load 14.91
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.107,"tokens_per_s":214.3,"wall_s":9.3319,"tokenise_s":0.003182,"tokenise_ms_per_text":3.182,"stats_ms":{"matmul":4372.831,"head":0.000,"attention":2551.501,"other":2374.293,"total":9298.625,"barriers":32256},"prof_ms":{}}
+=== round 5 main load 14.46
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.061,"tokens_per_s":121.2,"wall_s":16.4970,"tokenise_s":0.003149,"tokenise_ms_per_text":3.149,"stats_ms":{"matmul":6578.971,"head":0.000,"attention":3681.953,"other":6202.556,"total":16463.480,"barriers":32256},"prof_ms":{}}
+=== round 5 branch load 13.98
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.085,"tokens_per_s":169.3,"wall_s":11.8126,"tokenise_s":0.003163,"tokenise_ms_per_text":3.163,"stats_ms":{"matmul":5301.053,"head":0.000,"attention":2584.107,"other":3892.466,"total":11777.626,"barriers":32256},"prof_ms":{}}
+=== round 6 branch load 14.57
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.101,"tokens_per_s":202.9,"wall_s":9.8595,"tokenise_s":0.003220,"tokenise_ms_per_text":3.220,"stats_ms":{"matmul":4878.758,"head":0.000,"attention":2078.344,"other":2869.312,"total":9826.414,"barriers":32256},"prof_ms":{}}
+=== round 6 main load 14.36
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.173,"tokens_per_s":345.5,"wall_s":5.7895,"tokenise_s":0.003183,"tokenise_ms_per_text":3.183,"stats_ms":{"matmul":2957.039,"head":0.000,"attention":1878.045,"other":921.324,"total":5756.407,"barriers":32256},"prof_ms":{}}
+=== round 7 main load 14.52
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.063,"tokens_per_s":126.2,"wall_s":15.8519,"tokenise_s":0.003161,"tokenise_ms_per_text":3.161,"stats_ms":{"matmul":6570.786,"head":0.000,"attention":4556.209,"other":4683.990,"total":15810.984,"barriers":32256},"prof_ms":{}}
+=== round 7 branch load 16.72
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.129,"tokens_per_s":257.3,"wall_s":7.7728,"tokenise_s":0.003173,"tokenise_ms_per_text":3.173,"stats_ms":{"matmul":3959.134,"head":0.000,"attention":1695.987,"other":2084.258,"total":7739.379,"barriers":32256},"prof_ms":{}}
+=== round 8 branch load 15.59
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.062,"tokens_per_s":123.2,"wall_s":16.2279,"tokenise_s":0.003125,"tokenise_ms_per_text":3.125,"stats_ms":{"matmul":7042.323,"head":0.000,"attention":2983.149,"other":6167.717,"total":16193.189,"barriers":32256},"prof_ms":{}}
+=== round 8 main load 15.50
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.084,"tokens_per_s":168.5,"wall_s":11.8694,"tokenise_s":0.003209,"tokenise_ms_per_text":3.209,"stats_ms":{"matmul":5075.488,"head":0.000,"attention":4117.910,"other":2642.351,"total":11835.750,"barriers":32256},"prof_ms":{}}
+=== round 9 main load 16.03
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.045,"tokens_per_s":90.6,"wall_s":22.0724,"tokenise_s":0.003220,"tokenise_ms_per_text":3.220,"stats_ms":{"matmul":10162.816,"head":0.000,"attention":5470.105,"other":6398.325,"total":22031.246,"barriers":32256},"prof_ms":{}}
+=== round 9 branch load 19.51
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.084,"tokens_per_s":168.6,"wall_s":11.8651,"tokenise_s":0.003113,"tokenise_ms_per_text":3.113,"stats_ms":{"matmul":5660.777,"head":0.000,"attention":3422.539,"other":2747.779,"total":11831.096,"barriers":32256},"prof_ms":{}}
+=== round 10 branch load 17.75
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.093,"tokens_per_s":186.9,"wall_s":10.7010,"tokenise_s":0.003175,"tokenise_ms_per_text":3.175,"stats_ms":{"matmul":5438.482,"head":0.000,"attention":3392.293,"other":1833.938,"total":10664.714,"barriers":32256},"prof_ms":{}}
+=== round 10 main load 18.22
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.056,"tokens_per_s":111.4,"wall_s":17.9560,"tokenise_s":0.003164,"tokenise_ms_per_text":3.164,"stats_ms":{"matmul":7286.641,"head":0.000,"attention":4115.905,"other":6520.282,"total":17922.828,"barriers":32256},"prof_ms":{}}

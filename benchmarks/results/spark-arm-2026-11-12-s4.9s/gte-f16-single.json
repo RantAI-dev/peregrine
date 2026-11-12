@@ -1,0 +1,95 @@
+{
+ "gte-modernbert-base-f16": {
+  "path": "~/models/gte-modernbert-base-F16.gguf",
+  "pooling": "cls",
+  "ctx": 2048,
+  "cells": {
+   "16": {
+    "texts": 1,
+    "tokens_per_text": 36,
+    "peregrine": [
+     7.416,
+     23.873,
+     14.89
+    ],
+    "llama.cpp": [
+     7.934,
+     6.554,
+     3.216
+    ],
+    "peregrine_median": 14.89,
+    "llama_median": 6.554,
+    "ratio": 2.272,
+    "peregrine_spread_pct": 110.52,
+    "llama_spread_pct": 71.99
+   },
+   "128": {
+    "texts": 1,
+    "tokens_per_text": 259,
+    "peregrine": [
+     4.596,
+     5.484,
+     4.407
+    ],
+    "llama.cpp": [
+     3.728,
+     3.331,
+     2.5
+    ],
+    "peregrine_median": 4.596,
+    "llama_median": 3.331,
+    "ratio": 1.38,
+    "peregrine_spread_pct": 23.43,
+    "llama_spread_pct": 36.87
+   },
+   "512": {
+    "texts": 1,
+    "tokens_per_text": 903,
+    "peregrine": [
+     1.095,
+     1.403,
+     1.168
+    ],
+    "llama.cpp": [
+     1.374,
+     0.822,
+     0.916
+    ],
+    "peregrine_median": 1.168,
+    "llama_median": 0.916,
+    "ratio": 1.275,
+    "peregrine_spread_pct": 26.37,
+    "llama_spread_pct": 60.26
+   },
+   "2000": {
+    "texts": 1,
+    "tokens_per_text": 2000,
+    "peregrine": [
+     0.698,
+     0.535,
+     0.376
+    ],
+    "llama.cpp": [
+     0.434,
+     0.397,
+     0.351
+    ],
+    "peregrine_median": 0.535,
+    "llama_median": 0.397,
+    "ratio": 1.348,
+    "peregrine_spread_pct": 60.19,
+    "llama_spread_pct": 20.91
+   }
+  },
+  "peregrine": {
+   "cmd": "~/peregrine/target/release/peregrine serve -m ~/models/gte-modernbert-base-F16.gguf --host 127.0.0.1 --port 18401 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/gte-modernbert-base-F16.gguf --embedding --pooling cls -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18402",
+   "version": []
+  }
+ }
+}

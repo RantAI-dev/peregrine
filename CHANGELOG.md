@@ -21,6 +21,22 @@ All notable changes to this project are documented here. The format follows
   against 0.1–0.3 s for the second one, which is Defender's first-open scan; the numbers and the
   caveats are in `docs/design/s7-platforms.md` §10. A change that adds a golden now records it for
   macOS and for both Windows tiers (`docs/dev/testing.md`).
+- **Qwen3-Embedding F16 at long text: the value mix shares V across two rows (S4.9s, ARM)**:
+  the one cell still behind 1.0 in the cache-off ARM table (Qwen3-Embedding 0.6B F16, one
+  2 000-token text, 0.96× llama.cpp) spends 24 % of its pass in the attention value mix, at
+  12.8 GMAC/s — 19 % of this core's f32 roof — because `mix_f16` walks one row's positions
+  outermost, reloading the row's output once per key, and reads every stored V half once per
+  row where llama.cpp's flash-attention tile reads it once per 64. `neon.rs` gains
+  `mix_f16_pair` beside its scalar twin and `attn.rs` calls it when two rows of one KV head see
+  the same F16 positions: both rows' output slices stay in registers while the keys walk and
+  each V half is widened once for both. Same bits (each row's own accumulator, α multiply and
+  ascending multiply-then-add; a test holds the pair to the single-row body and the twin at
+  every length 1..=70, 127/128/129, 511/512/513 and five widths — no golden moved). One thread,
+  five interleaved rounds of two builds: the mix 8.93 → 5.39 s (−39.7 %), attention 13.00 →
+  9.43 s (−27.5 %), the 2 000-token pass 36.76 → 32.97 s (−10.3 %), the 512-token pass −5.2 %.
+  In the paired ten-thread window the cell moves 0.67× → 0.75× against llama.cpp; the row's
+  quiet-host re-read is owed (the host's co-tenant swung one arm 3.8×). Numbers and the stage
+  account: `benchmarks/results/spark-arm-2026-11-12-s4.9s/`; design §22.
 - **The fast prompt mode takes the NEON 8-bit kernel on ARM (S5.4e)**: `--fast-prompt`'s
   dispatch now calls `crates/peregrine-kernels/src/neon.rs` on aarch64 — `smmla` on
   `neon-i8mm`, `sdot` on `neon-dotprod`, the scalar twin on `neon`/`scalar` — and its NEON

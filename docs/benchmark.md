@@ -302,7 +302,7 @@ computes every text; three interleaved rounds, medians.
 |---|---|---|---|---|
 | EmbeddingGemma 300M | Q8_0 | **2.02–2.13×** | **1.99×** | **1.96×** |
 | Qwen3-Embedding 0.6B | Q8_0 | **1.38–3.20×** | **1.99×** | **1.80×** |
-| Qwen3-Embedding 0.6B | F16 | 0.96–1.57× | **1.17×** | **1.10×** |
+| Qwen3-Embedding 0.6B | F16 | 0.96–1.57×† | **1.17×** | **1.10×** |
 | Nemotron 3.5 Embed 1B | Q8_0 | **2.40–2.72×** | **2.70×** | **2.62×** |
 | bge-m3 | Q8_0 | **1.99–2.19×** | **2.08×** | **2.07×** |
 | gte-modernbert-base | F16 | **1.34–1.59×** | **1.33×** | **1.37×** |
@@ -322,6 +322,18 @@ narrowest wins above 1.0 are MiniLM F16 batch and gte F16 batch at 1.33× and th
 32-document cell at 1.35×. S4.9q's `i8mm` body for the Q8_0 int8 tile (`smmla` instead of `sdot`,
 3.05× the kernel) and S4.9o's load-time widening of small Q8_0 ModernBERT files still stand; the
 Q8_0 rows here are measured on the same main as those changes.
+
+† **S4.9s** is the step aimed at that cell. Its account put 35 % of a 2 000-token pass in
+attention and 24 % in the value mix alone, at 12.8 GMAC/s — 19 % of this core's f32 roof —
+because the mix read V once per query row where llama.cpp's flash-attention tile reads it once
+per 64 rows. The mix now shares each loaded V half-vector across two rows and keeps both rows'
+outputs in registers: same bits (every length and width held to the scalar twin; no golden
+changed), the mix 8.93 → 5.39 s and the one-thread pass 36.76 → 32.97 s (−10.3 %). In the paired
+window of that step the 2 000-token cell moved 0.67× → 0.75× against llama.cpp; on the quiet
+host that −10.3 % puts it at about **1.05–1.07×**, but the cell has not been re-read on a quiet
+host, so the table keeps 0.96× until it is. The Q8_0 file of the same model moves 0.82× → 0.93×
+on the same cell; `gte-modernbert-base` F16 is an encoder and does not call this kernel.
+`benchmarks/results/spark-arm-2026-11-12-s4.9s/`.
 
 Full details: [`spark-arm-2026-11-12-embeddings-cache-off`](../benchmarks/results/spark-arm-2026-11-12-embeddings-cache-off/README.md)
 (every row of this table, cache off, with the per-cell spreads),

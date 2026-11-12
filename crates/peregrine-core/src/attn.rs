@@ -849,11 +849,13 @@ pub(crate) fn run_range<O: RowSink>(
         // Two rows of one KV head that see the same positions are mixed in one pass
         // over V, with each row's own accumulators and its own ascending positions —
         // the sharing cannot move a bit, and the second row's FMAs ride loads the first
-        // row already paid for. Both tiles have the pair body (x86); the other
-        // architectures mix a row at a time.
+        // row already paid for. On x86 both tiles have the pair body; on aarch64 the
+        // F16-direct tile has one (S4.9s); the other architectures mix a row at a time.
         #[cfg(target_arch = "x86_64")]
         let pair_mix = pairs;
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        let pair_mix = v16.is_some() && pairs;
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let pair_mix = false;
         let mut lr = 0;
         while lr < sub {
@@ -924,7 +926,35 @@ pub(crate) fn run_range<O: RowSink>(
                                     mix_f16(&mut sc.o[lr * hd..][..hd], alpha[0], s, halves, hd)
                                 }
                             }
-                            #[cfg(not(target_arch = "x86_64"))]
+                            #[cfg(target_arch = "aarch64")]
+                            if two {
+                                let s0 = &sc.s_tile[lr * BLOCK + base..][..len];
+                                let s1 = &sc.s_tile[(lr + 1) * BLOCK + base..][..len];
+                                let (lo, hi) = sc.o.split_at_mut((lr + 1) * hd);
+                                // SAFETY: NEON is this target's baseline (`f16_direct`
+                                // also checked it); `v` holds the tile's halves and each
+                                // `s` its row's scores for the positions mixed.
+                                unsafe {
+                                    peregrine_kernels::neon::mix_f16_pair(
+                                        &mut lo[lr * hd..],
+                                        &mut hi[..hd],
+                                        alpha[0],
+                                        alpha[1],
+                                        s0,
+                                        s1,
+                                        halves,
+                                        hd,
+                                    )
+                                };
+                            } else {
+                                let s = &sc.s_tile[lr * BLOCK + base..][..len];
+                                // SAFETY: F16 directness checked; `v` holds the tile's
+                                // halves and `s` the row's scores for the positions mixed.
+                                unsafe {
+                                    mix_f16(&mut sc.o[lr * hd..][..hd], alpha[0], s, halves, hd)
+                                }
+                            }
+                            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                             {
                                 let s = &sc.s_tile[lr * BLOCK + base..][..len];
                                 // SAFETY: F16 directness checked; `v` holds the tile's
@@ -3962,6 +3992,72 @@ mod tests {
                 }
                 assert!(same_bits(&x0, &y0), "long row 0 at hd {hd} vis {n}");
                 assert!(same_bits(&x1, &y1), "long row 1 at hd {hd} vis {n}");
+            }
+        }
+    }
+
+    /// S4.9s: the aarch64 two-row mix is each row's own single-row mix — same
+    /// operands, same ascending positions, per-row accumulators in registers. Only
+    /// the loaded V half-vector and its widening are shared, and the output stays in
+    /// a register while the keys walk instead of being reloaded per key.
+    ///
+    /// The same coverage as the x86 pair test: every visible length 1..=70,
+    /// 127/128/129 and 511/512/513, the widths the models use (64, 128), widths that
+    /// take the eight-lane body and a scalar tail (72, 80, 16), and the edge alphas
+    /// a softmax can produce.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn the_neon_pair_mix_is_each_rows_own_mix() {
+        let mut vis: Vec<usize> = (1..=70).collect();
+        vis.extend([127, 128, 129, 511, 512, 513]);
+        for hd in [64usize, 128, 72, 80, 16] {
+            for &n in &vis {
+                let mut c = KvCache::new(KvPrec::F16, 1, 1, hd, n + 2);
+                for p in 0..n {
+                    let k = prng((p * 13 + 3) as u64 + hd as u64, hd);
+                    let v = prng((p * 29 + 5) as u64 + hd as u64, hd);
+                    c.put(0, 0, p, &k, &v);
+                }
+                c.advance(n);
+                let vb = c.block_bytes(false, 0, 0, 0, n);
+                let p0: Vec<f32> = prng(91 + hd as u64, n)
+                    .iter()
+                    .map(|x| x.abs() + 0.01)
+                    .collect();
+                let p1: Vec<f32> = prng(92 + hd as u64, n)
+                    .iter()
+                    .map(|x| (x * 3.0).abs() + 0.001)
+                    .collect();
+                let cases: [(&[f32], &[f32], f32, f32); 5] = [
+                    (&p0, &p1, 0.75, 0.25),
+                    (&p0, &p1, 1.0, 1.0),
+                    (&p0, &p1, 0.0, 0.0),
+                    (&p0[..], &p0[..], 1.0, 0.5),
+                    (&p0, &p1, -0.0, 3.5),
+                ];
+                for (a, b, al0, al1) in cases {
+                    let o0 = prng(123 + hd as u64, hd);
+                    let o1 = prng(124 + hd as u64, hd);
+                    let (mut x0, mut x1) = (o0.clone(), o1.clone());
+                    let (mut y0, mut y1) = (o0.clone(), o1.clone());
+                    // SAFETY: NEON is this target's baseline; `vb` holds `n · hd` halves.
+                    unsafe {
+                        mix_f16(&mut x0, al0, a, vb, hd);
+                        mix_f16(&mut x1, al1, b, vb, hd);
+                        peregrine_kernels::neon::mix_f16_pair(
+                            &mut y0, &mut y1, al0, al1, a, b, vb, hd,
+                        );
+                        // The scalar twin of the pair kernel agrees too.
+                        let (mut z0, mut z1) = (o0.clone(), o1.clone());
+                        peregrine_kernels::neon::mix_f16_pair_scalar(
+                            &mut z0, &mut z1, al0, al1, a, b, vb, hd,
+                        );
+                        assert!(same_bits(&z0, &y0), "twin row 0 at hd {hd} vis {n}");
+                        assert!(same_bits(&z1, &y1), "twin row 1 at hd {hd} vis {n}");
+                    }
+                    assert!(same_bits(&x0, &y0), "row 0 at hd {hd} vis {n}");
+                    assert!(same_bits(&x1, &y1), "row 1 at hd {hd} vis {n}");
+                }
             }
         }
     }
