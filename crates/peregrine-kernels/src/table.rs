@@ -375,8 +375,9 @@ impl MatKernels {
     /// read. A format belongs here only when the form's kernel is at least 1.10×
     /// this tier's exact kernel for that format at prompt widths (64 activation
     /// rows and up); the measurements behind each entry are in
-    /// `docs/design/s5.4-fast-prompt.md` §5g and
-    /// `benchmarks/results/bluefin-2026-11-12-s5.4f/`.
+    /// `docs/design/s5.4-fast-prompt.md` §5g, §5h and
+    /// `benchmarks/results/bluefin-2026-11-12-s5.4f/` and
+    /// `benchmarks/results/spark-arm-2026-11-12-s5.4h/`.
     ///
     /// * **AVX-512** (unchanged by S5.4f: it cannot be measured on the AVX2 host):
     ///   Q4_K and Q6_K.
@@ -384,9 +385,15 @@ impl MatKernels {
     ///   Q5_0 is level at 2048 weights (1.00×) and 0.88× at Qwen 2.5's 896-wide
     ///   rows, where the form pays a padded fourth super-block — below the 1.10×
     ///   bar both ways.
-    /// * **aarch64**: Q4_K and Q6_K on every cap — S5.4e's set and its recorded
-    ///   behavior (a NEON body under `dotprod`/`i8mm`, the scalar twin otherwise);
-    ///   S5.4f adds no format there and removes none.
+    /// * **aarch64**: Q4_K and Q6_K on every cap (S5.4e's set), and Q5_0 where the
+    ///   multiply is a NEON body (`neon-dotprod` and `neon-i8mm`; S5.4h). The form
+    ///   is 2.4–2.7× the exact Q4_K kernel, 3.4–4.1× Q6_K and 4.7–5.7× Q5_0 from
+    ///   64 activation rows up at one and ten workers, on a whole 2048-weight row
+    ///   and on Qwen 2.5's 896-wide one (the padded fourth super-block costs
+    ///   13.7 % of the rate, and the form is still 4.8× there). The `neon` cap
+    ///   keeps S5.4e's two
+    ///   formats: its multiply *is* the scalar twin, which is no faster than the
+    ///   exact kernel for any format, so another format would only add memory.
     /// * **Scalar, and any tier without a SIMD body**: nothing. The mode then
     ///   computes exactly what the exact engine computes.
     #[inline]
@@ -408,7 +415,13 @@ impl MatKernels {
         }
         #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
         {
-            &[Format::Q4_K, Format::Q6_K]
+            // S5.4h: Q5_0 joins where the multiply is a NEON body. The `neon` cap
+            // runs the scalar twin, which gains nothing from a third format.
+            if crate::cpu::have_dotprod() && cfg!(feature = "fmt-legacy") {
+                &[Format::Q4_K, Format::Q6_K, Format::Q5_0]
+            } else {
+                &[Format::Q4_K, Format::Q6_K]
+            }
         }
         #[cfg(not(all(target_arch = "aarch64", feature = "fmt-kquant")))]
         {
