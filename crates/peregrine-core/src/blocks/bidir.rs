@@ -185,13 +185,37 @@ pub fn attend_texts(
                                 j0 = j1;
                             }
                             // Then the row's maximum, weights and denominator, once per
-                            // row over its exact band.
-                            for r in 0..cnt {
-                                let (lo, hi) = k::band(local0 + r, n, half_window);
-                                let s = &mut buf[r * n..(r + 1) * n];
+                            // row over its exact band. A global layer's rows share their
+                            // band, so four of them take one batched exponential and
+                            // four interleaved `f64` denominators (S4.9r): each row keeps
+                            // its own ascending fold, and the four chains keep the add
+                            // units busy instead of waiting on one chain's latency.
+                            let mut r = 0usize;
+                            if half_window.is_none() {
+                                while r + 4 <= cnt {
+                                    let mut mx = [0.0f32; 4];
+                                    for g in 0..4 {
+                                        mx[g] =
+                                            k::max_row(&buf[(r + g) * n..(r + g + 1) * n], 0, n);
+                                    }
+                                    let mut sums = [0.0f64; 4];
+                                    k::exp_rows4_sums(&mut buf[r * n..], n, n, mx, &mut sums);
+                                    for g in 0..4 {
+                                        inv[r + g] = if sums[g] > 0.0 {
+                                            (1.0 / sums[g]) as f32
+                                        } else {
+                                            0.0
+                                        };
+                                    }
+                                    r += 4;
+                                }
+                            }
+                            for rr in r..cnt {
+                                let (lo, hi) = k::band(local0 + rr, n, half_window);
+                                let s = &mut buf[rr * n..(rr + 1) * n];
                                 let max = k::max_row(s, lo, hi);
                                 let l = k::exp_row(s, lo, hi, max);
-                                inv[r] = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
+                                inv[rr] = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
                             }
                             k::mix_rows(
                                 buf,
