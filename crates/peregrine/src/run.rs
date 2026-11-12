@@ -60,14 +60,17 @@ pub struct RunArgs {
     /// Run projections a LittleBit sidecar covers from it (off by default, as in `serve`).
     #[arg(long, default_value_t = false)]
     pub littlebit: bool,
-    /// Experimental and lossy: prompt tokens read the weights of the formats whose
+    /// Experimental, lossy, and off by default: prompt tokens read the weights of the formats whose
     /// 8-bit form beats this CPU tier's exact kernel from an 8-bit copy built at
     /// load (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so
-    /// the option changes nothing), so a reply can differ from the default engine's;
-    /// the accuracy report is not published yet (roadmap S5.4c). Generated tokens
-    /// keep the exact kernels. `peregrine tier` names the formats this CPU takes;
-    /// the numbers are in `docs/design/s5.4-fast-prompt.md` section 5g. Off by
-    /// default.
+    /// the option changes nothing). A prompt pass is 1.18-1.46x the exact engine's
+    /// speed on AVX-512, 1.05-1.08x on an AVX2 host (S5.4f). On Llama 3.2 1B Q4_K_M
+    /// (AVX-512) the prompt's logits move 0.0035 nats of mean KL divergence from the
+    /// default engine's and 96.7 % of positions keep the same top token (the report:
+    /// benchmarks/results/desktop-zen5-2026-11-12-s5.4c/). Generated tokens keep the
+    /// exact kernels, on a cache the 8-bit prompt wrote, so a reply can differ.
+    /// `peregrine tier` names the formats this CPU takes; the numbers are in
+    /// `docs/design/s5.4-fast-prompt.md` sections 5c and 5g.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
     /// Print one JSON object (text, token counts and timings) instead of streaming text.

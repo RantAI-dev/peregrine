@@ -98,7 +98,7 @@ Common flags (all are listed by `peregrine run --help`):
 | `--system TEXT` | A system message for the chat template |
 | `--chat-template NAME` | Render a named template when the file declares none |
 | `--kv f16\|f32\|i8` | KV-cache precision (default f16) |
-| `--fast-prompt` | Experimental and lossy: prompt tokens read the weights of the formats whose 8-bit form beats this CPU tier's exact kernel (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so the option changes nothing) from an 8-bit copy built at load. Faster prompts; a reply can differ from the default engine's, and the accuracy report is not published yet (generated tokens keep the exact kernels; off by default) |
+| `--fast-prompt` | Experimental, lossy and off by default (its accuracy bound is under review: see the design's section 5c): prompt tokens read the weights of the formats whose 8-bit form beats this CPU tier's exact kernel (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so the option changes nothing) from an 8-bit copy built at load, 1.18-1.46× faster prompts on AVX-512 (1.05-1.08× on an AVX2 host). On Llama 3.2 1B Q4_K_M the prompt's logits move 0.0035 nats of mean KL divergence and 96.7 % of positions keep the same top token (report: `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`); generated tokens keep the exact kernels, so a reply can still differ |
 | `--no-thinking` | Answer without the reasoning block (reasoning models only) |
 | `--speculate` | Lossless prompt-lookup speculation (off by default) |
 | `--json` | Print one JSON object (text, token counts, prefill/decode tok/s, TTFT, wall time) |
@@ -386,8 +386,13 @@ fastembed and text-embeddings-inference):
   llama.cpp, and `/v1/systemone` decisions **1.33–1.84×**.
 
 - **Where Peregrine is behind:** the ik_llama.cpp fork processes prompts about twice as fast on the
-  AVX-512 desktop (Peregrine at 0.39–0.58×). Decode is level with it (0.89–1.06×) and Peregrine is ahead
-  with 10 users (1.05–3.09×). For embeddings, OpenVINO and ONNX Runtime are faster on the two small BERT
+  AVX-512 desktop with its defaults (Peregrine at 0.39–0.58×). Its repacked `-rtr` path is faster
+  still. The opt-in fast prompt mode closes most of the gap without changing the default engine:
+  `--fast-prompt` (lossy, off by default) is **1.18–1.46×** Peregrine's exact prompt pass and
+  **0.94–1.01×** ik_llama.cpp at its defaults, while remaining **0.74–0.94×** the fork's `-rtr`
+  path; its cost is 0.0035 nats of mean KL divergence on Llama 3.2 1B (96.75 % same top token) and
+  +957 MiB of memory. Decode is level with ik (0.89–1.06×) and Peregrine is ahead with 10 users
+  (1.05–3.09×). For embeddings, OpenVINO and ONNX Runtime are faster on the two small BERT
   encoders at 128 and 512 tokens (Peregrine at 0.85–0.99×).
 
 Full tables, charts, accuracy verification, and machine records are in [docs/benchmark.md](docs/benchmark.md).

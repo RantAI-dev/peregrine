@@ -1,0 +1,12 @@
+{"model":"Llama-3.2-1B-Instruct-Q4_K_M","run":1,"fast":"off","wall_s":0.88,"rss_kb":1013636,"load1":7.17}
+{"model":"Llama-3.2-1B-Instruct-Q4_K_M","run":1,"fast":"on","wall_s":4.29,"rss_kb":2003200,"load1":7.17}
+{"model":"Llama-3.2-1B-Instruct-Q4_K_M","run":2,"fast":"off","wall_s":0.88,"rss_kb":1013832,"load1":6.75}
+{"model":"Llama-3.2-1B-Instruct-Q4_K_M","run":2,"fast":"on","wall_s":2.54,"rss_kb":2003340,"load1":6.75}
+{"model":"Llama-3.2-1B-Instruct-Q4_K_M","run":3,"fast":"off","wall_s":0.84,"rss_kb":1014128,"load1":6.75}
+{"model":"Llama-3.2-1B-Instruct-Q4_K_M","run":3,"fast":"on","wall_s":2.45,"rss_kb":2002268,"load1":6.29}
+{"model":"Qwen3-1.7B-Q4_K_M","run":1,"fast":"off","wall_s":1.08,"rss_kb":1583480,"load1":6.29}
+{"model":"Qwen3-1.7B-Q4_K_M","run":1,"fast":"on","wall_s":6.09,"rss_kb":3325240,"load1":5.87}
+{"model":"Qwen3-1.7B-Q4_K_M","run":2,"fast":"off","wall_s":0.92,"rss_kb":1584784,"load1":5.87}
+{"model":"Qwen3-1.7B-Q4_K_M","run":2,"fast":"on","wall_s":4.84,"rss_kb":3325000,"load1":5.48}
+{"model":"Qwen3-1.7B-Q4_K_M","run":3,"fast":"off","wall_s":0.92,"rss_kb":1584432,"load1":6.08}
+{"model":"Qwen3-1.7B-Q4_K_M","run":3,"fast":"on","wall_s":5.60,"rss_kb":3325836,"load1":5.67}

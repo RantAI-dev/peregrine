@@ -125,6 +125,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The accuracy report and speed table of `--fast-prompt` (S5.4c)**: the mode's measured
+  trade on the five gate models, with wikitext-2 (40 chunks of 512 tokens, 10 200 scored
+  positions, each chunk read as a prompt), the unquantised (F16) file of each model, the
+  task-accuracy suite and the prompt speed table. Fast against the exact default is
+  **0.003514 nats of mean KL divergence on Llama 3.2 1B** (median 0.0025, 99 % 0.024, RMS Δp
+  1.41 %, 96.75 % same top token) and 0.0026-0.0171 on the other four; the option adds 1.16 %
+  of the 1B's own distance from F16 (two models' share is negative, i.e. not measurable);
+  no task score moves significantly (largest +7.5 points at n = 80, every paired McNemar
+  p ≥ 0.15, and the suite's run-to-run spread on this host is 0.0 because greedy replies are
+  deterministic); prompts are **1.18-1.46× the default engine's** speed on AVX-512 (1.05-1.08× on an
+  AVX2 host, where only Q6_K takes the form — S5.4f), 0.94-1.01×
+  ik_llama.cpp at its defaults and 0.74-0.94× the fork's `-rtr` path; and the form costs
+  +957 MiB and 0.5-1.7 s of load on the 1B. **The design's 0.0015 bound on the 1B is not
+  met, and the report shows why it is the bound that is wrong**: 0.0015 was calibrated on
+  the fork's default wide path (`Q8_1`/`Q8_0`, one scale per 32 weights, 0.000945 here),
+  while the `q8_k_r16` arithmetic the form implements is the fork's `-rtr` path and measures
+  0.003401 against Peregrine's 0.003514. Nothing was tuned; the decision to re-baseline the
+  bound or widen the form is the owner's. The `kld` tool grew `--fast-prompt`, `--ref-self`
+  and `--ref-model` (with unit tests) to compare one Peregrine mode against another and
+  against an F16 file, and now builds its state through `Model::new_state` so a float-only
+  reference file runs. Numbers, raw output and commands:
+  `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`; public wording in `README.md`,
+  `docs/targets.md`, `docs/benchmark.md` and the option's help.
 - **macOS on Apple Silicon is a supported platform (roadmap S7.1)**: `release.yml` builds and tests
   `peregrine-vX.Y.Z-macos-aarch64.tar.gz` on the `macos-15` runner (`MACOSX_DEPLOYMENT_TARGET=11.0`,
   `strip -x`, then ad-hoc signed with `codesign --force --sign -`; not notarised), and a

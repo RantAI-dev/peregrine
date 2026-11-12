@@ -416,18 +416,18 @@ pub struct EngineOptions {
     pub tb_span: usize,
     /// `PEREGRINE_EXACT=1`: ternary matmuls in f32 against decoded weights (slow reference path).
     pub exact: bool,
-    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): a *prompt* row's weights are
-    /// read from an 8-bit form built at load, one scale per 256 weights, instead of
-    /// the file's own codes — for the weight formats whose form's kernel is faster
-    /// than the tier's exact kernel for that format
-    /// ([`peregrine_kernels::table::MatKernels::q8k_uses_form`], S5.4f). On AVX-512
-    /// that is Q4_K and Q6_K; on AVX2 Q6_K (Q4_K's exact kernel is the stronger one
-    /// there, and Q5_0 is level); on aarch64 Q4_K and Q6_K (S5.4e's set, on every
-    /// cap); on x86 with no SIMD body, none, so the option changes nothing. Prompt
-    /// passes get faster where a format takes it and their logits move (the accuracy
-    /// report that says by how much is roadmap S5.4c, not published yet); generated
-    /// rows, embeddings, rerank and decisions keep the exact kernels. Off by default
-    /// (ADR 0003); `docs/design/s5.4-fast-prompt.md`.
+    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): a *prompt* row reads the weights
+    /// of the formats whose 8-bit form beats this CPU tier's exact kernel from a form
+    /// built at load (AVX-512: Q4_K and Q6_K, one f32 scale per 256 weights; AVX2:
+    /// Q6_K; a tier with no SIMD body: none, so the option computes exactly what the
+    /// exact engine computes). Prompt passes get 1.18-1.46× faster on AVX-512
+    /// (1.05-1.08× on an AVX2 host, S5.4f) and their logits move: on Llama 3.2 1B
+    /// Q4_K_M, measured on AVX-512, the prompt's mean KL divergence from the default
+    /// engine is 0.0035 and 96.7 % of positions keep the same top token (the report:
+    /// `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`). Generated rows keep the
+    /// exact kernels, on a cache the 8-bit prompt wrote; embeddings, rerank and
+    /// decisions keep the exact kernels throughout. Off by default (ADR 0003);
+    /// `docs/design/s5.4-fast-prompt.md`.
     pub fast_prompt: bool,
 
     // Memory.
