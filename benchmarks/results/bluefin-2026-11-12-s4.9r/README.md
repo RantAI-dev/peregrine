@@ -351,8 +351,11 @@ b32 1.03→**1.07**; L512 b1 0.88→**0.99**, b8 0.92→**1.00**, b32 0.93→**1
 
 The raw texts/s moved **+21.7 % at L512 b1** (16.76 → 20.40), +10.4 % at b8, +8.5 % at b32,
 +11.8 % on the mixed batch, and +3.6 to +4.5 % at 128. The last 1 % of the L512 b1
-cell is this host's run-to-run spread: 20.4 against openvino's 20.6 is inside the ±3 % band the
-three rounds of that cell span. The 16-token cells lost 2–9 % in one round and gained in the others (their three
+cell is this host's spread: the before binary's three rounds span 16.40–18.75 texts/s (its
+per-round ratios 0.79, 0.99, 0.82), the after binary's span 19.86–20.53 (1.01, 1.00, 0.96), and
+20.4 against openvino's 20.6 is the median of a cell that is level. The other 512-token cells are
+tight in both arms (b8: 0.92/0.93/0.91 before, 1.00/0.99/1.00 after; b32: 0.92/0.93/0.93 before,
+0.98/1.01/1.04 after). The 16-token cells lost 2–9 % in one round and gained in the others (their three
 rounds span 628–740 texts/s at L16 b32); that is the cell's noise, not a direction.
 
 ### 3.2 bge-small-en-v1.5, every row, texts/s (median of three interleaved rounds)
