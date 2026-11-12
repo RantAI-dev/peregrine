@@ -60,6 +60,11 @@ pub struct RunArgs {
     /// Run projections a LittleBit sidecar covers from it (off by default, as in `serve`).
     #[arg(long, default_value_t = false)]
     pub littlebit: bool,
+    /// Trade exactness for speed on prompt tokens: their Q4_K and Q6_K weights are read
+    /// from an 8-bit copy built at load, so logits move within the accuracy report's
+    /// numbers (generated tokens stay exact; off by default).
+    #[arg(long = "fast-prompt", default_value_t = false)]
+    pub fast_prompt: bool,
     /// Print one JSON object (text, token counts and timings) instead of streaming text.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -85,7 +90,11 @@ pub fn run(args: &RunArgs) -> Result<(), String> {
     if profile.is_some() {
         eprintln!("peregrine: {prof_msg}");
     }
-    let opts = engine_options(&args.opts, profile.as_ref())?;
+    let mut cli_opts = args.opts.clone();
+    if args.fast_prompt {
+        cli_opts.push("FAST_PROMPT=1".into());
+    }
+    let opts = engine_options(&cli_opts, profile.as_ref())?;
     options::init(opts).map_err(|e| format!("engine options: {e}"))?;
 
     let template = match args.chat_template.as_deref() {

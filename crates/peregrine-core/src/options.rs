@@ -126,6 +126,37 @@ pub fn wide_chunk_default_for(_tier: crate::cpu::Tier) -> usize {
     WIDE_CHUNK_DEFAULT
 }
 
+/// The prompt tokens one pass carries when no slot is decoding, with `--fast-prompt` on:
+/// 256 (S5.4b's first look; the mode reads the weights from the resident 8-bit form, so a
+/// wider pass amortises that read further than the exact one).
+///
+/// Measured on the desktop on Llama 3.2 1B Q4_K_M, one round of interleaved runs per cell,
+/// 1-minute load recorded (`benchmarks/results/desktop-zen5-2026-11-12-s5.4b/`). Prompt tok/s:
+///
+/// | threads | tokens | default | 64 | 128 | 256 | 512 |
+/// |---|---|---|---|---|---|---|
+/// | 12 | 512 | 327.0 | 410.8 | **437.6** | 428.3 | 402.9 |
+/// | 12 | 4096 | 226.7 | 273.2 | 283.2 | 285.0 | **288.2** |
+/// | 1 | 512 | 46.0 | 53.8 | 67.5 | 67.5 | **67.6** |
+/// | 1 | 4096 | 25.7 | 34.1 | 33.7 | 36.6 | **42.5** |
+///
+/// 256 is within 2.2 % of the best on three of the four rows (128 wins the short 12-thread
+/// row, 512 the long ones) and 14 % off on the fourth; 512 loses 8 % on the short 12-thread
+/// row. Both are inside this first look's noise on the 12-thread rows. 256 is the balanced
+/// choice and its scratch is half the size. S5.4c re-measures this in a quiet window.
+pub const WIDE_CHUNK_DEFAULT_FAST: usize = 256;
+
+/// [`wide_chunk_default_for`] for the process's mode: the fast prompt mode widens further
+/// (`WIDE_CHUNK_DEFAULT_FAST`), because a prompt row read from the 8-bit form pays one scale
+/// multiply per 256 weights and wants more rows under it.
+pub fn wide_chunk_default_for_mode(tier: crate::cpu::Tier, fast_prompt: bool) -> usize {
+    if fast_prompt {
+        WIDE_CHUNK_DEFAULT_FAST
+    } else {
+        wide_chunk_default_for(tier)
+    }
+}
+
 /// The largest prompt chunk one weight pass may carry: the matmul scratch's row limit
 /// (`blocks::linear::MAX_BATCH`). The engine lowers it further when the decode rows of the
 /// other users need the room.
@@ -277,6 +308,13 @@ pub fn pass_rows_default_for(
     }
 }
 
+/// Whether the fast prompt mode's 8-bit form has a SIMD body on this tier (AVX-512
+/// today; AVX2 and NEON are S5.4d). A tier without one runs the mode correctly
+/// through the scalar twin, just no faster than the exact kernel.
+pub fn fast_prompt_simd() -> bool {
+    peregrine_kernels::table::MatKernels::get().q8k_simd()
+}
+
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 /// The k-quant repack is on by default on every tier, the AVX-512 tier included
 /// ([`EngineOptions::kq_repack_note`] says whether the switch overrode it).
@@ -334,6 +372,13 @@ pub struct EngineOptions {
     pub tb_span: usize,
     /// `PEREGRINE_EXACT=1`: ternary matmuls in f32 against decoded weights (slow reference path).
     pub exact: bool,
+    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): the Q4_K and Q6_K weights of a
+    /// *prompt* row are read from an 8-bit form built at load, one scale per 256
+    /// weights, instead of the file's own codes. Prompt passes get faster and
+    /// their logits move within the accuracy report's numbers; generated rows,
+    /// embeddings, rerank and decisions stay exact. Off by default (ADR 0003);
+    /// `docs/design/s5.4-fast-prompt.md`.
+    pub fast_prompt: bool,
 
     // Memory.
     /// `PEREGRINE_HUGEPAGES=1`: copy the model into huge-page-backed memory at load (Linux).
@@ -449,6 +494,7 @@ impl Default for EngineOptions {
             tq_span: 16,
             tb_span: 32,
             exact: false,
+            fast_prompt: false,
             hugepages: false,
             tile_hugepages: true,
             pack_cache: PackCacheSetting::Default,
@@ -624,6 +670,7 @@ impl EngineOptions {
                 .filter(|v| [32, 64, 128].contains(v))
                 .unwrap_or(d.tb_span),
             exact: only("EXACT", "1"),
+            fast_prompt: only("FAST_PROMPT", "1"),
             hugepages: only("HUGEPAGES", "1"),
             tile_hugepages: unless("TILE_HUGEPAGES", "0"),
             pack_cache: match s("PACK_CACHE").as_deref() {
@@ -757,6 +804,7 @@ impl EngineOptions {
             ("wide", self.wide.to_string()),
             ("tiles", self.tiles.to_string()),
             ("kq_repack", self.kq_repack.to_string()),
+            ("fast_prompt", self.fast_prompt.to_string()),
             ("fpack", self.fpack.to_string()),
             ("dynamic_rows", self.dynamic_rows.to_string()),
             ("prefetch_bytes", self.prefetch_bytes.to_string()),
@@ -837,6 +885,7 @@ pub const NAMES: &[&str] = &[
     "TQ_SPAN",
     "TB_SPAN",
     "EXACT",
+    "FAST_PROMPT",
     "HUGEPAGES",
     "TILE_HUGEPAGES",
     "PACK_CACHE",
@@ -947,6 +996,19 @@ mod tests {
             assert!(wide >= PREFILL_CHUNK_DEFAULT, "{tier}");
             assert!(wide <= MAX_PREFILL_CHUNK, "{tier}");
         }
+    }
+
+    #[test]
+    fn the_fast_prompt_mode_is_off_unless_asked_for() {
+        assert!(!with(&[]).fast_prompt);
+        assert!(with(&[("FAST_PROMPT", "1")]).fast_prompt);
+        assert!(!with(&[("FAST_PROMPT", "0")]).fast_prompt);
+        assert!(!with(&[("FAST_PROMPT", "yes")]).fast_prompt);
+        // It is recorded with the other options, so `/metrics`, `tier` and `bench --json` see it.
+        assert!(with(&[("FAST_PROMPT", "1")])
+            .pairs()
+            .iter()
+            .any(|&(k, ref v)| k == "fast_prompt" && v == "true"));
     }
 
     #[test]

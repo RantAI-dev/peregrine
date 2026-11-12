@@ -118,6 +118,11 @@ pub struct Args {
     /// Prompt-lookup speculation on greedy requests (off by default: it applies only to greedy requests).
     #[arg(long, default_value_t = false)]
     pub speculate: bool,
+    /// Trade exactness for speed on prompt tokens: their Q4_K and Q6_K weights are read
+    /// from an 8-bit copy built at load, so logits move within the accuracy report's
+    /// numbers (generated tokens stay exact; off by default).
+    #[arg(long = "fast-prompt", default_value_t = false)]
+    pub fast_prompt: bool,
     /// Memory (MB) for snapshots of finished conversations' caches, so a prompt that shares a long beginning with an
     /// earlier one (not only the last) is not prefilled again; 0 = off. Not used with a DSpark drafter.
     #[arg(long = "prefix-cache-mb", default_value_t = 768)]
@@ -210,7 +215,13 @@ pub async fn run(a: Args) {
     let (profile, prof_msg) =
         peregrine_core::profile::resolve(first, a.profile.as_deref(), a.no_profile);
     println!("{prof_msg}");
-    let opts = match engine_options(&a.opts, profile.as_ref()) {
+    // `--fast-prompt` is the command-line spelling of the engine option; the ordered
+    // `--opt` list keeps its precedence (a later `--opt FAST_PROMPT=0` wins).
+    let mut cli_opts = a.opts.clone();
+    if a.fast_prompt {
+        cli_opts.push("FAST_PROMPT=1".into());
+    }
+    let opts = match engine_options(&cli_opts, profile.as_ref()) {
         Ok(o) => {
             if profile.is_some() {
                 let p_path = a
@@ -264,6 +275,20 @@ pub async fn run(a: Args) {
     );
     peregrine_core::options::init(opts)
         .expect("engine options are set once, before the model loads");
+    if peregrine_core::options::get().fast_prompt {
+        // One line, at start: what the mode trades, and whether this tier has the
+        // SIMD body (S5.4b; AVX2 and NEON are S5.4d).
+        tracing::info!(
+            "fast prompt mode: prompt tokens read Q4_K/Q6_K weights from the resident 8-bit \
+             form ({}); results differ from the exact mode, generated tokens, embeddings, \
+             rerank and decisions stay exact",
+            if peregrine_core::options::fast_prompt_simd() {
+                "AVX-512 body"
+            } else {
+                "scalar twin: correct, but not faster than the exact kernels on this tier"
+            }
+        );
+    }
     let threads = a
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));

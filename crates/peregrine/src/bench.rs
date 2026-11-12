@@ -36,13 +36,21 @@ pub struct BenchArgs {
     /// comparing against an engine started with `-t N`.
     #[arg(long)]
     pub threads: Option<usize>,
+    /// Trade exactness for speed on prompt tokens: their Q4_K and Q6_K weights are read
+    /// from an 8-bit copy built at load, so logits move within the accuracy report's
+    /// numbers (generated tokens stay exact; off by default).
+    #[arg(long = "fast-prompt", default_value_t = false)]
+    pub fast_prompt: bool,
 }
 
 /// Run `peregrine bench`.
 pub fn run(args: &BenchArgs) -> Result<(), String> {
     let (prof, prof_msg) = profile::resolve(&args.model, args.profile.as_deref(), args.no_profile);
 
-    let opts = EngineOptions::from_env_and_profile(prof.as_ref());
+    let mut opts = EngineOptions::from_env_and_profile(prof.as_ref());
+    if args.fast_prompt {
+        opts.fast_prompt = true;
+    }
     peregrine_core::options::init(opts.clone()).map_err(|e| format!("engine options: {e}"))?;
     let effective_opts = peregrine_core::options::get();
 

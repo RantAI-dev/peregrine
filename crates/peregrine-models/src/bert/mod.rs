@@ -510,7 +510,7 @@ fn linear_rows(
     kq: &mut peregrine_kernels::kq::KqActs,
     mut post: impl FnMut(&mut [f32], usize),
 ) {
-    let step = peregrine_core::blocks::linear::MAX_BATCH;
+    let step = peregrine_core::blocks::linear::DEFAULT_BATCH;
     let mut r0 = 0;
     while r0 < nb {
         let r1 = (r0 + step).min(nb);
@@ -562,7 +562,7 @@ fn linear_rows_shared(
 ) {
     debug_assert!(!jobs.is_empty() && jobs.len() <= 4);
     let njobs = jobs.len();
-    let step = peregrine_core::blocks::linear::MAX_BATCH;
+    let step = peregrine_core::blocks::linear::DEFAULT_BATCH;
     let mut r0 = 0;
     while r0 < nb {
         let r1 = (r0 + step).min(nb);

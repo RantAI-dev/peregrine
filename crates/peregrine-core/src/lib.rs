@@ -63,6 +63,7 @@ pub mod kq;
 pub mod kv;
 #[cfg(feature = "littlebit")]
 pub mod lbq;
+pub mod q8form;
 #[cfg(not(feature = "littlebit"))]
 pub mod lbq {
     pub struct Slb;
