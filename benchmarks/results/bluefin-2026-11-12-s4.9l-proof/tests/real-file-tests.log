@@ -1,0 +1,97 @@
+=== the_bert_real_files_match_llama_cpp_and_the_fp32_reference
+
+running 1 test
+test the_bert_real_files_match_llama_cpp_and_the_fp32_reference ... all-MiniLM-L6-v2-ggml-model-f16.gguf is not on this machine; skipped
+all-MiniLM-L6-v2-Q8_0.gguf is not on this machine; skipped
+bge-small-en-v1.5-f32.gguf is not on this machine; skipped
+bge-small-en-v1.5-q8_0.gguf is not on this machine; skipped
+bge-m3-Q8_0.gguf is not on this machine; skipped
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+=== embeddinggemma_real_file_is_within_the_bound_of_llama_cpp
+
+running 1 test
+test embeddinggemma_real_file_is_within_the_bound_of_llama_cpp ... embeddinggemma-300M-Q8_0.gguf is not on this machine; skipped
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+=== embeddinggemma_real_file_is_batch_invariant
+
+running 1 test
+test embeddinggemma_real_file_is_batch_invariant ... embeddinggemma-300M-Q8_0.gguf is not on this machine; skipped
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+=== qwen3_embedding_real_file_matches_the_reference_and_is_batch_invariant
+
+running 1 test
+test qwen3_embedding_real_file_matches_the_reference_and_is_batch_invariant ... Qwen3-Embedding-0.6B-Q8_0.gguf is not on this machine; skipped
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+=== the_bert_real_files_match_llama_cpp_and_the_fp32_reference
+
+running 1 test
+test the_bert_real_files_match_llama_cpp_and_the_fp32_reference ... all-MiniLM-L6-v2-ggml-model-f16.gguf: 200 texts, 384-d, vs llama.cpp min 0.9999960 mean 0.9999979
+all-MiniLM-L6-v2-ggml-model-f16.gguf: vs fp32 reference min 0.9999996 mean 0.9999998 (llama.cpp min 0.9999952 mean 0.9999975)
+all-MiniLM-L6-v2-Q8_0.gguf: 200 texts, 384-d, vs llama.cpp min 0.9995759 mean 0.9997501
+all-MiniLM-L6-v2-Q8_0.gguf: vs fp32 reference min 0.9995207 mean 0.9997637 (llama.cpp min 0.9991341 mean 0.9994718)
+bge-small-en-v1.5-f32.gguf: 200 texts, 384-d, vs llama.cpp min 0.9999963 mean 0.9999987
+bge-small-en-v1.5-f32.gguf: vs fp32 reference min 1.0000000 mean 1.0000000 (llama.cpp min 0.9999963 mean 0.9999987)
+bge-small-en-v1.5-q8_0.gguf: 200 texts, 384-d, vs llama.cpp min 0.9998713 mean 0.9999097
+bge-small-en-v1.5-q8_0.gguf: vs fp32 reference min 0.9998793 mean 0.9999283 (llama.cpp min 0.9997560 mean 0.9998390)
+bge-m3-Q8_0.gguf: 200 texts, 1024-d, vs llama.cpp min 0.9992233 mean 0.9997594
+bge-m3-Q8_0.gguf: vs fp32 reference min 0.9968882 mean 0.9991393 (llama.cpp min 0.9966748 mean 0.9991207)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 89.16s
+
+=== embeddinggemma_real_file_is_within_the_bound_of_llama_cpp
+
+running 1 test
+test embeddinggemma_real_file_is_within_the_bound_of_llama_cpp ... 768-d: vs llama.cpp Q8_0 min 0.999099 mean 0.9996390; vs the F16 reference Peregrine min 0.997989 mean 0.9994629, llama.cpp min 0.998013 mean 0.9994734
+256-d: vs llama.cpp Q8_0 min 0.999166 mean 0.9997002; vs the F16 reference Peregrine min 0.998218 mean 0.9995477, llama.cpp min 0.998398 mean 0.9995551
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 30.83s
+
+=== embeddinggemma_real_file_is_batch_invariant
+
+running 1 test
+test embeddinggemma_real_file_is_batch_invariant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.33s
+
+=== qwen3_embedding_real_file_matches_the_reference_and_is_batch_invariant
+
+running 1 test
+test qwen3_embedding_real_file_matches_the_reference_and_is_batch_invariant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 2.87s
+
+=== nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp
+
+running 1 test
+test nemotron_3_5_embed_1b_is_within_the_bound_of_llama_cpp ... F16 2048-d vs llama.cpp F16: min 0.9999998 mean 0.99999994
+F16 1024-d vs llama.cpp F16: min 0.9999996 mean 0.99999992
+F16 512-d vs llama.cpp F16: min 0.9999992 mean 0.99999989
+Q8_0 2048-d: vs llama.cpp Q8_0 min 0.999944 mean 0.9999777; vs the F16 reference Peregrine min 0.999775 mean 0.9998594, llama.cpp min 0.999762 mean 0.9998549
+Q8_0 1024-d: vs llama.cpp Q8_0 min 0.999944 mean 0.9999774; vs the F16 reference Peregrine min 0.999686 mean 0.9998428, llama.cpp min 0.999680 mean 0.9998384
+Q8_0 512-d: vs llama.cpp Q8_0 min 0.999940 mean 0.9999766; vs the F16 reference Peregrine min 0.999519 mean 0.9998107, llama.cpp min 0.999507 mean 0.9998062
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 127.23s
+
+=== nemotron_3_5_embed_1b_by_text_matches_the_fixture_and_the_ids_path
+
+running 1 test
+test nemotron_3_5_embed_1b_by_text_matches_the_fixture_and_the_ids_path ... by text: 64 ids match llama.cpp; 8 vectors bit-identical to the ids path
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 36.29s
+

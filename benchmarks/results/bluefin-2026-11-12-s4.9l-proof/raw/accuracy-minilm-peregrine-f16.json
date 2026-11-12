@@ -1,0 +1,55 @@
+{
+ "benchmark": "peregrine-s4.2-embed-accuracy",
+ "timestamp": "2026-11-11T22:54:34.372478+00:00",
+ "model": {
+  "name": "minilm",
+  "hf": "sentence-transformers/all-MiniLM-L6-v2",
+  "pooling": "mean"
+ },
+ "row": {
+  "engine": "peregrine",
+  "precision": "f16",
+  "path": "~/models/embed/minilm/minilm-f16.gguf",
+  "kind": "file",
+  "sha256": "797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662",
+  "size_bytes": 45949216
+ },
+ "reference": {
+  "label": "torch-fp32",
+  "backend": "torch-fp32",
+  "dim": 384,
+  "count": 200
+ },
+ "engine": {
+  "name": "peregrine",
+  "binary": "/var/tmp/target-s49l/release/peregrine",
+  "worktree": "~/peregrine",
+  "commit": "2a5e9f6149cca9467365b912a219ca38d4ef9b1c",
+  "branch": "bench-bluefin-s4.9l-proof",
+  "server_version": "peregrine 0.1.2"
+ },
+ "host_before": {
+  "loadavg": [
+   4.25634765625,
+   4.68994140625,
+   4.841796875
+  ],
+  "mem_available_gb": 7.55,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.28
+ },
+ "cosine": {
+  "mean": 1.0,
+  "min": 1.0,
+  "p1": 1.0,
+  "p50": 1.0
+ },
+ "norm": {
+  "min": 1.0,
+  "max": 1.0,
+  "mean": 1.0
+ },
+ "dim": 384,
+ "n": 200
+}
