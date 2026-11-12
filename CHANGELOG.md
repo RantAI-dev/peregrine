@@ -8,41 +8,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- **nomic-bert and jina-bert-v2 against every engine on bluefin (S4.9u)**: the two newest
-  encoder families had only been timed against llama.cpp, on a noisy shared VM. This run puts
-  them through the S4.9l proof — llama.cpp v0.9.0, ONNX Runtime 1.31, OpenVINO 2026.4,
-  fastembed 0.9 and TEI 1.9.4 beside Peregrine on the same F16/Q8_0 GGUF and the fp32/published
-  int8 ONNX, 16/128/512/2 000 tokens × batch 1/8/32 and the mixed batch, three interleaved
-  rounds, cache off, accuracy against the fp32 ONNX export. Peregrine is the fastest
-  equal-accuracy engine in **24 of the 36 cells** they add (13 before S4.9u, 21 before the
-  re-read below): **1.04–1.11×** at 512 and **1.07–1.09×** at 2 000 for nomic, **1.00–1.06×**
-  and **1.01–1.21×** for jina, and **1.71×/1.69×** on the mixed batch. Twelve cells remain
-  behind, all at 128 tokens or in the 16-token batch cells, where the GEMM is 89–90 % of the
-  pass and MLAS's 128-row path runs at 202–206 GMAC/s against Peregrine's 180–181. What the
-  account allowed was closed with every vector bit-identical: `bidir::alibi_row` gains an AVX2
-  body beside its scalar twin (jina's attention 48.8 → 37.3 ms, its 512-token cells 0.96–1.00 →
-  1.01–1.06×), and both families' single-thread q/k/v bias, query-scale and residual walks take
-  the pool (element-wise 46.9 → 38.2 ms on nomic, 33.6 → 26.8 on jina). No golden moved; the
-  real-file gates still pass. S4.8b's wider float pass (128 rows where 32 was the rule) landed
-  on `main` while this was open, and the merged build's re-read of the batch cells moves nomic's
-  16-token cells to **1.02/1.09×** and jina's to 0.94/0.96× (a 128-row pass packs eight 16-token
-  texts; a 128-token text is one pass either way, so the 128-token cells do not move). Tables,
-  both engines' own profiles, file hashes and commands:
-  `benchmarks/results/bluefin-2026-11-12-s4.9u/` and the re-read's
-  `benchmarks/results/bluefin-2026-11-13-s4.9u-merge/`; design §25.
-- **The pass width of large float encoders is right for ARM (S4.9, measured)**: #251 gave a
-  bidirectional encoder whose weights are all float and larger than 256 MiB 128 rows per pass
-  instead of 32, measured on x86 only. Re-measured on the ARM host with both settings of one
-  build (`--opt PASS_ROWS=32` against `128`, alternating inside every round, cache off, fresh
-  texts per request) on five such encoders — bge-m3 F16, EmbeddingGemma 300M F32,
-  gte-modernbert-base F16, nomic-embed-text v1.5 F16 (260.9 MiB) and jina-embeddings-v2-base-en
-  F16 (261.0 MiB) — the rule holds: at one thread the single-text cells are level (0.996-1.008,
-  a text is never split) and every batch gains, **16 × 32 tokens 1.084-1.289**, 32 × 128
-  1.038-1.081, 8 × 512 1.064-1.142, the mixed batch 1.004-1.010. The ten-thread cells are
-  host-contaminated (load 5.7-32.5); the two below 1.0 there (bge-m3 512 0.817, jina 8 × 512
-  0.896) are 0.999 and 1.085 at one thread. **No code changed and no golden moved**: the pass
-  budget is scheduling, and the size rule is the smallest that fits. Numbers and harness:
-  `benchmarks/results/spark-arm-2026-11-12-pass-rows/`; design §24.
+- **The float GEMM at small row counts: the tile is not the deficit (S4.9v)**: S4.9u left the
+  128-token cells to "a small-M tile in `fpack`", on 180–181 GMAC/s against MLAS's 202–206 at
+  128 rows. Measured from both ends, that is not where the loss is. A new kernel bench
+  (`peregrine-bench`'s `mgemm`) calls the packed float GEMM as the engine does — units of two
+  panels over a spinning four-thread pool, the strided output, three sweeps of 15 calls — and
+  MLAS is timed on the same shapes through ONNX Runtime's `MatMul` with the weight packed once:
+  at 128 rows the 6-row × 16-column tile runs at **199–228 GMAC/s** against MLAS's **208–222**
+  (0.99–1.08×, ahead on the wide matrices, level on the narrow), and **MLAS only leads at 512
+  rows** (0.85–0.99×) — the crossing is the opposite of the small-M story. The rate falls below
+  ~64 rows because a unit streams its panels once per call (`M/2` MAC per weight byte: 8 at 16
+  rows, where 23 GB/s of L2/L3 is the measured limit), a pass-width question S4.8b already
+  answered. The engine's own counters put the *pass* at 180 (128 tokens) and 179 (512), a flat
+  12–14 % above its own isolated kernel, and the parts were measured one at a time: activation
+  copy 1 ms of the 80 ms matmul bucket, unit granularity (2 → 4 panels) neutral end to end, the
+  store layout identical, the 21-row block for `n_in` 3 072 level with the rest. What is left is
+  the per-layer dispatch (48 calls, 3 456 units, 289 barriers per 128-row pass) — same-bits work
+  in `peregrine-core`, which this account names as the next step. The only way to widen the tile
+  is a second accumulator per output (8 rows × 16 columns needs 19 `ymm` registers), which
+  changes the summation order and the bits. **No engine file changed**, no golden moved, and
+  every standings cell stands: 24 of 36 for these two families, 79 of 104. Numbers, raw sweeps
+  and the ONNX Runtime script: `benchmarks/results/bluefin-2026-11-13-s4.9v/`; design §26.
 - **The fast prompt pass at long prompts on ARM: the account, and it is attention (S5.4k)**:
   S5.4h left `--fast-prompt` behind ik_llama.cpp at 4 096-token prompts (Qwen 2.5 0.5B 0.86× at
   one thread, 0.91× at ten; Llama 3.2 1B 0.74× at ten) and named the form's 385.9 MiB of

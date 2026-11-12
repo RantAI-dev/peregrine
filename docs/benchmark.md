@@ -374,7 +374,13 @@ way). nomic's Q8_0 file is 0.9983 against the fp32 reference — below the 0.999
 both engines — so its row is listed without ratios; the F16 row is the standings row. The two
 families' 2 000-token cells run on all five engines; nomic's GGUF declares a 2 048-token context
 (not 8 192), and TEI's jina row caps its copy at 2 048 because candle's 8 192² ALiBi mask does
-not fit this 13 GB host.
+not fit this 13 GB host. S4.9v then measured the claim that paragraph leaves — a small-M tile
+in `fpack` — with a kernel bench and ONNX Runtime's `MatMul` on the same shapes and row counts:
+at 128 rows the 6-row × 16-column tile runs at 199–228 GMAC/s against MLAS's 208–222 (0.99–1.08×)
+and MLAS only leads at 512 rows (0.85–0.99×); the rate falls below ~64 rows because a unit
+streams its panels once per call, not because of the tile; and the pass's flat 12–14 % over its
+own kernel is the per-layer dispatch in `peregrine-core`, not the kernel. **No row moves**: no
+engine file changed, so every cell here is the S4.9u re-read's.
 
 Accuracy on the same texts: Q8_0 agrees with llama.cpp's Q8_0 within 3e-4 cosine and is closer to the
 fp32 reference on all three BERT models; the F16 and F32 rows are exact against the fp32 engines;
