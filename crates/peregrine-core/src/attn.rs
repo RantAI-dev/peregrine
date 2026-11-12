@@ -1331,6 +1331,29 @@ fn softmax_rows(
     rows: usize,
     alpha: &mut [f32; 4],
 ) {
+    if rows == 4 {
+        let mut m_new = [0.0f32; 4];
+        let mut sums = [0.0f64; 4];
+        for (r, m) in m_new.iter_mut().enumerate() {
+            let row = lr + r;
+            let s = &sc.s_tile[row * BLOCK + base..row * BLOCK + base + len];
+            *m = sc.m[row].max(crate::vmath::max(s));
+        }
+        peregrine_kernels::bidir::exp_rows4_sums(
+            &mut sc.s_tile[lr * BLOCK + base..],
+            BLOCK,
+            len,
+            m_new,
+            &mut sums,
+        );
+        for r in 0..4 {
+            let row = lr + r;
+            alpha[r] = crate::vmath::det_exp(sc.m[row] - m_new[r]);
+            sc.l[row] = sc.l[row] * alpha[r] as f64 + sums[r];
+            sc.m[row] = m_new[r];
+        }
+        return;
+    }
     for (r, row) in (lr..lr + rows).enumerate() {
         let s = &mut sc.s_tile[row * BLOCK + base..row * BLOCK + base + len];
         let m_old = sc.m[row];
@@ -4346,6 +4369,127 @@ mod tests {
                                 );
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The four-row online soft-max (S4.9t) is each row's own: the same running
+    /// maximum, the same exponentials in the tile, and the same ascending `f64`
+    /// denominator as row-at-a-time; only the four add chains are interleaved.
+    ///
+    /// Checked twice: the kernel on every length 1..=70 and 127/128/129, 511/512/513 at
+    /// a padded stride, and the tile walk itself at every piece length up to `BLOCK`.
+    #[test]
+    fn the_four_row_softmax_is_each_rows_own_softmax() {
+        let mut vis: Vec<usize> = (1..=70).collect();
+        vis.extend([127, 128, 129, 511, 512, 513]);
+        for &n in &vis {
+            for edge in [false, true] {
+                let stride = n + 5;
+                let raw: Vec<f32> = (0..4 * stride)
+                    .map(|i| {
+                        let x = prng(0x5e + (i * 7) as u64, 1)[0] * 3.0;
+                        if edge {
+                            const EDGE: [f32; 8] =
+                                [0.0, -0.0, 3.5, -3.5, -88.0, -1.0e30, 88.0, 0.5];
+                            if i % 11 == 0 {
+                                EDGE[i % EDGE.len()]
+                            } else {
+                                x
+                            }
+                        } else {
+                            x
+                        }
+                    })
+                    .collect();
+                let maxes = [
+                    crate::vmath::max(&raw[..n]) + 0.25,
+                    crate::vmath::max(&raw[stride..stride + n]) - 0.5,
+                    crate::vmath::max(&raw[2 * stride..2 * stride + n]),
+                    crate::vmath::max(&raw[3 * stride..3 * stride + n]) + 1.0,
+                ];
+                let mut four = raw.clone();
+                let mut sums4 = [0.0f64; 4];
+                peregrine_kernels::bidir::exp_rows4_sums(&mut four, stride, n, maxes, &mut sums4);
+                for r in 0..4 {
+                    let mut one = raw.clone();
+                    let sum =
+                        crate::vmath::exp_shift_sum(&mut one[r * stride..r * stride + n], maxes[r]);
+                    assert_eq!(
+                        sum.to_bits(),
+                        sums4[r].to_bits(),
+                        "row {r} denominator at n={n} edge={edge}"
+                    );
+                    for j in 0..n {
+                        assert_eq!(
+                            four[r * stride + j].to_bits(),
+                            one[r * stride + j].to_bits(),
+                            "row {r} key {j} at n={n} edge={edge}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // The tile walk: four rows at `BLOCK` stride against the same rows one at a
+        // time, with the prior `m`/`l` a previous tile leaves.
+        let mut sc = Scratch::new(4, 16);
+        for n in 1..=BLOCK {
+            for edge in [false, true] {
+                let fill: Vec<f32> = (0..MAX_PARTIAL_ROWS * BLOCK)
+                    .map(|i| {
+                        let x = prng(0x77 + (i * 13) as u64, 1)[0] * 5.0;
+                        if edge && i % 17 == 0 {
+                            -88.0
+                        } else {
+                            x
+                        }
+                    })
+                    .collect();
+                let m0 = [-2.0f32, 1.5, f32::NEG_INFINITY, 0.25];
+                let l0 = [3.5f64, 0.0, 1.0e-30, 7.25];
+
+                sc.s_tile.copy_from_slice(&fill);
+                sc.m[..4].copy_from_slice(&m0);
+                sc.l[..4].copy_from_slice(&l0);
+                let mut four_alpha = [1.0f32; 4];
+                softmax_rows(&mut sc, 0, 0, n, 4, &mut four_alpha);
+                let four_tile = sc.s_tile.clone();
+                let (four_m, four_l) = (sc.m[..4].to_vec(), sc.l[..4].to_vec());
+
+                sc.s_tile.copy_from_slice(&fill);
+                sc.m[..4].copy_from_slice(&m0);
+                sc.l[..4].copy_from_slice(&l0);
+                let mut one_alpha = [1.0f32; 4];
+                for r in 0..4 {
+                    let mut a = [1.0f32; 4];
+                    softmax_rows(&mut sc, r, 0, n, 1, &mut a);
+                    one_alpha[r] = a[0];
+                }
+                for r in 0..4 {
+                    assert_eq!(
+                        four_alpha[r].to_bits(),
+                        one_alpha[r].to_bits(),
+                        "row {r} alpha at n={n} edge={edge}"
+                    );
+                    assert_eq!(
+                        four_m[r].to_bits(),
+                        sc.m[r].to_bits(),
+                        "row {r} max at n={n} edge={edge}"
+                    );
+                    assert_eq!(
+                        four_l[r].to_bits(),
+                        sc.l[r].to_bits(),
+                        "row {r} l at n={n} edge={edge}"
+                    );
+                    for j in 0..n {
+                        assert_eq!(
+                            four_tile[r * BLOCK + j].to_bits(),
+                            sc.s_tile[r * BLOCK + j].to_bits(),
+                            "row {r} key {j} at n={n} edge={edge}"
+                        );
                     }
                 }
             }
