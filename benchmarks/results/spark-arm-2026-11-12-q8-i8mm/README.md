@@ -111,9 +111,9 @@ The bge-m3 file was not on this machine. It is `bge-m3-Q8_0.gguf` from
 `950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167`.
 
 **Cells below 1.0×: none.** Every cell of every file is now ahead of llama.cpp; the narrowest
-is Qwen3-Embedding Q8_0 at one 2 000-token text, 1.33×. Before this change nine cells of these
-four files were at or below 1.0× (bge-m3 128 / 512 / batch / mixed at 0.95–0.98×,
-EmbeddingGemma's batch of 32 at 0.95×, Qwen3's 512-token, batch and mixed cells at
+is Qwen3-Embedding Q8_0 at one 2 000-token text, 1.33×. Before this change ten cells of these
+four files were below 1.0× (bge-m3 128 / 512 / batch / mixed at 0.95–0.98×, EmbeddingGemma's
+batch of 32 at 0.95× and its mixed batch at 0.99×, Qwen3's 512-token, batch and mixed cells at
 0.94–0.98×, and Qwen3's 2 000-token cell at 0.67×).
 
 ## The vectors did not move

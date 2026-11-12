@@ -67,10 +67,10 @@ All notable changes to this project are documented here. The format follows
   0.6B, Nemotron 3.5 Embed 1B and bge-m3 — the whole pass gains 1.48–2.59× (10 threads pinned to
   the Cortex-X925 cluster, five interleaved rounds, medians, cache off, a co-tenant on the host).
   Every returned float is bit-identical between the arms; the cosine against llama.cpp is
-  unchanged. **No cell of the four files is below 1.0× llama.cpp any more** — before, nine were:
+  unchanged. **No cell of the four files is below 1.0× llama.cpp any more** — before, ten were:
   bge-m3 at 128 tokens 0.98×, at 512 0.98×, batch 0.95× and mixed 0.96×; EmbeddingGemma's batch
-  of 32 0.95×; Qwen3-Embedding at 512 0.94×, batch 0.98×, mixed 0.98× and 2 000 tokens 0.67×. The
-  narrowest now is Qwen3-Embedding at 2 000 tokens, 1.33×. See `docs/design/s4.9-sota.md` §18 and
+  of 32 0.95× and its mixed batch 0.99×; Qwen3-Embedding at 512 0.94×, batch 0.98×, mixed 0.98×
+  and 2 000 tokens 0.67×. The narrowest now is Qwen3-Embedding at 2 000 tokens, 1.33×. See `docs/design/s4.9-sota.md` §18 and
   `benchmarks/results/spark-arm-2026-11-12-q8-i8mm/`.
 
 - **Chat without tools on Qwen 3.5 and Bonsai 2 files uses the template's own prompt**: these
