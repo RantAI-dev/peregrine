@@ -8,7 +8,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-<<<<<<< HEAD
 - **Windows has its own goldens, and both systems compare theirs on every pull request (S7.4).** The
   synthetic set for Windows' three x86-64 tiers (scalar, AVX2 and AVX-512) and its session fixture
   were recorded on `windows-2025` by the **Record goldens** workflow, which now takes an `isa` input
@@ -27,6 +26,35 @@ All notable changes to this project are documented here. The format follows
   it wins, so the fast test compares against the exact engine and the exact golden on those tiers.
   A second sweep after S5.4h merged recorded nothing on either system: macOS's `llama-Q5_0-fast`
   golden came with #257, and no x86 tier takes Q5_0 in the form.
+- **The fast prompt pass measured against ik_llama.cpp's `-rtr` path, and a per-32 form as a
+  prototype (S5.4i)**: the opt-in 8-bit prompt pass was 0.74-0.94× the fork's `-rtr` path on all
+  eight cells (S5.4c), and this step accounts for it. **The 8-bit kernel is not where the pass
+  loses**: in situ, on Llama 3.2 1B Q4_K_M at 512 tokens and one thread, it runs at **96.2 GMAC/s
+  (Q4_K) and 103.9 (Q6_K)** against the fork's own `q8_k_r16` at **94.9 GMAC/s** at 512 activation
+  rows (85.1 at 256), measured by calling the fork's `libggml.so` — and at 79 % of this core's
+  byte-dot roof of 121 GMAC/s, the same fraction as the fork's. At 12 threads **36 % of a
+  512-token fast pass is not the kernel** (barrier wait 10.4 %, the caller's serial steps 13.5 %,
+  attention 9.1 %, the activation's fill and the output's untile 3 %); at 4096 tokens **attention
+  is 38 % of the pass against 20.5 % of the fork's own** (`-fa 0`: 399.9 → 317.9 tok/s), 2.1× the
+  fork's attention in absolute time. Three same-bits candidates were built and measured and
+  **none ships**: a sixteen-output-row kernel (the fork's `r16` shape, bit-identical to two
+  eight-row calls, +2 to +8 % isolated but -3.6 % on the cell furthest below the bar), a 128-row
+  prompt chunk (+3-5 % at 512 tokens, -2.4 % at 4096), and the head's one-row kernel (0.7 % of a
+  512-token pass). The eight cells are **0.80-0.95× ik's `-rtr`** and 0.99-1.21× its defaults,
+  with every cell below 1.0 named; the fast mode is 1.23-1.46× the exact engine and 1.60-1.92×
+  llama.cpp. The finer arithmetic is available as a **kernel prototype only**
+  (`peregrine-kernels/src/p32.rs`, called by nothing in the engine): **0.61-0.63× the per-256
+  form's speed** (66.0 against 104.3 GMAC/s at 64 activation rows), 1.25 bytes per weight (1 164
+  MiB against 957 on the 1B) and a per-weight RMS only **1.39×** smaller (1.048e-4 against
+  1.458e-4) — at that rate a per-32 fast pass would be 0.86× the *exact* engine, so the choice
+  between the two arithmetics is the owner's and now has numbers on both sides. The quiet
+  re-measure of the exact engine: **every one of the four cells is above llama.cpp** (Llama 3.2 1B
+  1.20× at 512 and 1.36× at 4096; Qwen 2.5 0.5B 1.34× and 1.48×) and below ik at its defaults
+  (0.61-0.81×; the Qwen file is 44 % Q5_0 by bytes, and Q5_0's exact kernel runs at
+  47.9-52.0 GMAC/s against Q4_K's 74.0, which is where its larger gap comes from). Report: `benchmarks/results/desktop-zen5-2026-11-12-s5.4i/`; design:
+  `docs/design/s5.4-fast-prompt.md` §5i/§5j. No golden file moves; the default engine and the
+  fast mode's bits are unchanged.
+
 - **Q5_0 takes the 8-bit form in the fast prompt mode on ARM (S5.4h)**: S5.4f's per-tier table
   left aarch64 at S5.4e's Q4_K/Q6_K because it was written on an AVX2 machine, and Qwen 2.5 0.5B
   — 165 MiB of Q5_0 and the file the mode was aimed at — gained only 1.07-1.91×. Measured on the

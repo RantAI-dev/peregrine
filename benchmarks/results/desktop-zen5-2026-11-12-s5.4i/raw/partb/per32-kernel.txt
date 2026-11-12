@@ -1,0 +1,41 @@
+gemm(64) x12: best thread 89.1 GMAC/s/core, aggregate 1068.8 GMAC/s, wall 0.03s
+--- the per-32 form against the per-256 one (S5.4i, part B): 2048 weights x 8192 output rows, one layer streamed, GMAC/s per core over 1 and 12 cores; bytes per weight 1.03125 (per 256) and 1.25000 (per 32); the file's Q4_K is 0.5625 ---
+  8 acts: exact  80.5 /  921.8   per-256 102.2 / 1249.7   per-32  44.3 /  561.5  GMAC/s (1 core / 12 cores)   per-32 ÷ per-256 0.433 / 0.449   per-32 ÷ exact 0.550 / 0.609
+ 64 acts: exact  81.1 /  967.4   per-256 104.3 / 1252.5   per-32  66.0 /  763.3  GMAC/s (1 core / 12 cores)   per-32 ÷ per-256 0.633 / 0.609   per-32 ÷ exact 0.814 / 0.789
+128 acts: exact  74.3 /  972.0   per-256 104.4 / 1259.2   per-32  64.8 /  808.7  GMAC/s (1 core / 12 cores)   per-32 ÷ per-256 0.621 / 0.642   per-32 ÷ exact 0.872 / 0.832
+256 acts: exact  79.2 /  900.9   per-256 105.7 / 1296.6   per-32  65.2 /  816.5  GMAC/s (1 core / 12 cores)   per-32 ÷ per-256 0.617 / 0.630   per-32 ÷ exact 0.823 / 0.906
+512 acts: exact  77.9 /  848.2   per-256 107.5 / 1279.8   per-32  65.1 /  706.7  GMAC/s (1 core / 12 cores)   per-32 ÷ per-256 0.606 / 0.552   per-32 ÷ exact 0.837 / 0.833
+build (scalar builders, dequantise + requantise, 8 layers): per-256 0.08 G weights/s, per-32 0.65 G weights/s (8.155×)
+gemm(4): 37.80 ns/(tile*act*sb)  54.2 GMAC/s/core
+gemm(64): 37.06 ns/(tile*act*sb)  55.3 GMAC/s/core
+gemv(1): 63.45 ns/(tile*act*sb)  32.3 GMAC/s/core
+q4k   1 acts: row   22.8  tile(avx2)   32.8  tile(zmm)   47.1  GMAC/s/core
+q4k   4 acts: row   32.9  tile(avx2)   55.1  tile(zmm)   84.5  GMAC/s/core
+q4k  16 acts: row   39.4  tile(avx2)   56.4  tile(zmm)   87.8  GMAC/s/core
+q4k  64 acts: row   34.0  tile(avx2)   56.6  tile(zmm)   80.8  GMAC/s/core
+q4k 128 acts: row   25.6  tile(avx2)   53.9  tile(zmm)   87.6  GMAC/s/core
+zmm gemm(4): 24.34 ns/(tile*act*sb)  84.1 GMAC/s/core
+zmm gemm(64): 23.82 ns/(tile*act*sb)  86.0 GMAC/s/core
+zmm gemv(1): 44.69 ns/(tile*act*sb)  45.8 GMAC/s/core
+--- the per-32 form against the per-256 one (S5.4i, part B): 2048 weights x 8192 output rows, one layer streamed, GMAC/s per core over 1 and 1 cores; bytes per weight 1.03125 (per 256) and 1.25000 (per 32); the file's Q4_K is 0.5625 ---
+  8 acts: exact  79.9 /    0.0   per-256 101.6 /    0.0   per-32  47.0 /    0.0  GMAC/s (1 core / 1 cores)   per-32 ÷ per-256 0.462 / 1.000   per-32 ÷ exact 0.588 / 1.000
+ 64 acts: exact  69.0 /    0.0   per-256 100.9 /    0.0   per-32  56.4 /    0.0  GMAC/s (1 core / 1 cores)   per-32 ÷ per-256 0.559 / 1.000   per-32 ÷ exact 0.818 / 1.000
+128 acts: exact  79.2 /    0.0   per-256  95.8 /    0.0   per-32  67.2 /    0.0  GMAC/s (1 core / 1 cores)   per-32 ÷ per-256 0.701 / 1.000   per-32 ÷ exact 0.847 / 1.000
+256 acts: exact  72.5 /    0.0   per-256 107.1 /    0.0   per-32  64.3 /    0.0  GMAC/s (1 core / 1 cores)   per-32 ÷ per-256 0.601 / 1.000   per-32 ÷ exact 0.887 / 1.000
+512 acts: exact  76.4 /    0.0   per-256 109.6 /    0.0   per-32  63.9 /    0.0  GMAC/s (1 core / 1 cores)   per-32 ÷ per-256 0.583 / 1.000   per-32 ÷ exact 0.837 / 1.000
+build (scalar builders, dequantise + requantise, 8 layers): per-256 0.08 G weights/s, per-32 0.65 G weights/s (8.510×)
+q5   1 acts: avx2 22.4 G  zmm 26.5 G MAC/s/core  (+18%)
+q5   4 acts: avx2 39.2 G  zmm 53.0 G MAC/s/core  (+35%)
+q5  16 acts: avx2 39.2 G  zmm 60.0 G MAC/s/core  (+53%)
+q5  64 acts: avx2 37.9 G  zmm 60.0 G MAC/s/core  (+58%)
+q5 128 acts: avx2 37.7 G  zmm 59.5 G MAC/s/core  (+58%)
+q6k   1 acts: row   20.9 G  tile   21.5 G  zmm   26.3 G MAC/s/core  (zmm +22%)
+q6k   4 acts: row   28.8 G  tile   34.9 G  zmm   55.3 G MAC/s/core  (zmm +58%)
+q6k  16 acts: row   40.9 G  tile   41.1 G  zmm   65.7 G MAC/s/core  (zmm +60%)
+q6k  64 acts: row   36.8 G  tile   41.2 G  zmm   66.0 G MAC/s/core  (zmm +60%)
+q6k 128 acts: row   36.4 G  tile   40.1 G  zmm   66.2 G MAC/s/core  (zmm +65%)
+q5k   1 acts: row   14.0 G  tile   13.8 G MAC/s/core  (-2%)
+q5k   4 acts: row   22.7 G  tile   28.3 G MAC/s/core  (+24%)
+q5k  16 acts: row   40.2 G  tile   49.2 G MAC/s/core  (+22%)
+q5k  64 acts: row   35.0 G  tile   49.3 G MAC/s/core  (+41%)
+q5k 128 acts: row   37.2 G  tile   49.3 G MAC/s/core  (+33%)
