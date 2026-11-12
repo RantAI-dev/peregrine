@@ -1381,12 +1381,16 @@ int8, so nothing about the original grid survives except that `dq` is a real num
 
 **The error.** Each weight is off by at most half a step, `dq/2 = block_max/254`, i.e.
 **0.394 % of the block's largest weight** (RMS `dq/√12` = 0.227 %, for uniformly distributed
-fractional parts; a weight at half the block's maximum is off by at most 0.79 % of itself). Q6_K
-is the same construction (`convert_to_q8_k_r8`, `ggml/src/iqk/iqk_common.h:638-687`) with one
-more twist: it computes the maximum of `|q·sc|` in int16 *before* multiplying by the block's
-`d`, and if that scaled maximum is below 127 it stores the codes **exactly** with a scale of
-`1.0` (`:648-651`) — so Q6_K's conversion is exact for blocks whose weights are small and
-rounds to `max/254` otherwise. Q4_K has no such case.
+fractional parts; a weight at half the block's maximum is off by at most 0.79 % of itself). This
+is not only arithmetic: `requant_error.py` in the results directory repeats the conversion's own
+steps on the Q4_K tensors of the two models (a 64th of the super-blocks, 12.98 M weights of the
+1B and 0.82 M of Qwen), and finds the mean per-block error at **0.197 %** of the block's maximum
+(blocks range 0.126-0.271 %), the worst single weight at **0.394 %** — exactly the bound — and
+0.42 % of weights landing exactly on the grid. Q6_K is the same construction (`convert_to_q8_k_r8`,
+`ggml/src/iqk/iqk_common.h:638-687`) with one more twist: it computes the maximum of `|q·sc|` in
+int16 *before* multiplying by the block's `d`, and if that scaled maximum is below 127 it stores
+the codes **exactly** with a scale of `1.0` (`:648-651`) — so Q6_K's conversion is exact for
+blocks whose weights are small and rounds to `max/254` otherwise. Q4_K has no such case.
 
 For comparison, the 4-bit format's own rounding is `0.5·d·sc` against a within-sub-block maximum
 of about `15·d·sc`: ~3 % per weight. The requantisation adds about an eighth of that in RMS
@@ -1553,8 +1557,8 @@ and none was run for Part A; the two structural Q5_0 variants were reverted afte
 - **The requantisation's effect on the matmul alone** was not isolated from attention: a probe
   that called the fork's 4-bit and 8-bit paths on the same matrix would change the activation
   quantisation too (`q8_2_x4` against `q8_k`), and the fork does not export its conversion
-  entry point, so the per-weight error in 11.1 is arithmetic from the source (worst case
-  `block_max/254`) rather than sampled from real weights.
+  entry point. The per-weight error in 11.1 is therefore arithmetic from the source, confirmed
+  on sampled real weights (`requant_error.py`) rather than measured through the engine.
 - **The Q5_0 kernel's 42 GMAC/s paired variant** is reported, not explained: no `perf` is
   available under WSL2, and the guess (two weight streams and two accumulators per activation
   row spilling) was not confirmed.

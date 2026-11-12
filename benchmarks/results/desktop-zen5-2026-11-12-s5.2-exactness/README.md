@@ -61,6 +61,14 @@ produced (`u512.logits`, `u16.logits` for the fork; `l512.logits`, `l16.logits` 
 v0.9.0) and are **not** committed; what is committed is the tool's own summary (`kl.txt`), the
 byte comparison of the two files (`bitcmp.txt`) and the commands above.
 
+The per-weight error of that requantisation, sampled from the models' own Q4_K tensors:
+`requant_error.py`, whose output is `requant_error.txt` (a 64th of the super-blocks, 12.98 M
+weights of the 1B and 0.82 M of Qwen).
+
+```sh
+python3 requant_error.py ~/.cache/peregrine-bench/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf 64
+```
+
 ## Part 2: the widened exact wide pass
 
 `kqbench`'s `KQBENCH_WIDE` mode (this branch) widens a real layer's tile (2048 x 8192, 1024
