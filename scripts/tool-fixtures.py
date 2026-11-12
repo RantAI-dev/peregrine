@@ -69,6 +69,11 @@ def main():
     ap.add_argument("--set", help="also run the cases of this named set (for one template family)")
     ap.add_argument("--out")
     ap.add_argument("--check", help="compare with this fixture file instead of writing one")
+    ap.add_argument(
+        "--label",
+        help="write this as each record's \"template\" field (a fixture that mixes "
+        "several wordings of one template names the wording of each line)",
+    )
     a = ap.parse_args()
     if bool(a.out) == bool(a.check):
         sys.exit("give exactly one of --out and --check")
@@ -105,7 +110,8 @@ def main():
             req.update(case.get("extra", {}))
             body = json.dumps(req, ensure_ascii=False)
             status, text = post(port, "/apply-template", body)
-            rec = {"name": case["name"], "request": body}
+            rec = {"template": a.label} if a.label else {}
+            rec.update({"name": case["name"], "request": body})
             if status == 200:
                 rec["prompt"] = json.loads(text)["prompt"]
             else:
