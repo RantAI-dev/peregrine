@@ -166,9 +166,33 @@ pub fn q4k_weights(t: &[u8], row: usize) -> [f32; Q8K_WEIGHTS] {
     w
 }
 
+/// The f32 weights of one row of a repacked Q6_K super-block, in file order.
+///
+/// Q6_K's products are the integer `(q − 32)·L` (the six-bit code is signed and the
+/// format's `−32` is inside the product, `crate::kq8::q6k_products`), and the
+/// super-block's `d` is the only float: the weight is one multiply of a product by
+/// `d`. Exported for the same reason as [`q4k_weights`]: the error tables of
+/// `docs/design/s5.4-fast-prompt.md` §5i/§5j measure against the file's own numbers.
+///
+/// # Panics
+///
+/// If `row` is not one of the tile's eight rows.
+pub fn q6k_weights(t: &[u8], row: usize) -> [f32; Q8K_WEIGHTS] {
+    assert!(row < Q8K_ROWS, "a tile holds eight rows");
+    let d = f16(u16::from_le_bytes([
+        t[crate::kq::q6_d() + row * 2],
+        t[crate::kq::q6_d() + row * 2 + 1],
+    ]));
+    let p = q6k_products(t, row);
+    let mut w = [0.0f32; Q8K_WEIGHTS];
+    for (x, &q) in w.iter_mut().zip(p.iter()) {
+        *x = q as f32 * d;
+    }
+    w
+}
+
 /// The f32 weights of one row of a repacked Q5_0 super-block (`n_blk` blocks of
 /// 32, at most eight), in file order; a short tail is zero.
-///
 /// The format's formula is `w = d · (q − 16)` with `q` the five-bit code; the
 /// multiply is the only rounding, and `q − 16` is the seed of the exact kernel's
 /// `−16·Σa` offset.
@@ -548,6 +572,37 @@ pub fn gemm_q8k(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f
     for b in 0..nb {
         for row in 0..Q8K_ROWS {
             out[b * Q8K_ROWS + row] = dot_q8k(form, n_sb, row, acts, b);
+        }
+    }
+}
+
+/// Sixteen output rows — two adjacent eight-row tiles — against a batch of
+/// activation rows: the scalar twin of the AVX-512 `q8k_gemm16_zmm`
+/// (`crate::kqsimd`).
+///
+/// `out[b · 16 + r]` is tile 0's row `r` for `r < 8` and tile 1's row `r − 8`
+/// otherwise. It is two calls of [`gemm_q8k`] into one buffer, so it is that
+/// function's bits by construction: the pair's body differs only in which
+/// activation broadcast feeds which `vpdpbusd`, and every row's integer sum and
+/// epilogue are unchanged.
+///
+/// # Panics
+///
+/// As [`gemm_q8k`], with `2 · n_sb` super-blocks and `nb · 16` floats.
+pub fn gemm_q8k_pair(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    let stride = n_sb * Q8K_SIZE;
+    assert!(
+        form.len() >= 2 * stride,
+        "the pair holds fewer than two tiles of super-blocks"
+    );
+    assert!(
+        out.len() >= nb * 2 * Q8K_ROWS,
+        "the output holds fewer than sixteen rows"
+    );
+    for b in 0..nb {
+        for row in 0..Q8K_ROWS {
+            out[b * 2 * Q8K_ROWS + row] = dot_q8k(form, n_sb, row, acts, b);
+            out[b * 2 * Q8K_ROWS + Q8K_ROWS + row] = dot_q8k(&form[stride..], n_sb, row, acts, b);
         }
     }
 }

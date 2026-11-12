@@ -470,6 +470,27 @@ impl MatKernels {
         crate::kq8::gemm_q8k(form, n_sb, acts, nb, out)
     }
 
+    /// Sixteen output rows — two adjacent tiles of the form — against a batch of
+    /// activation rows (S5.4i).
+    ///
+    /// `form` holds two tiles of `n_sb` super-blocks, the second first at
+    /// `n_sb * Q8K_SIZE`; `out[b · 16 + r]` is tile 0's row `r` for `r < 8` and tile
+    /// 1's row `r − 8` otherwise. It is exactly two [`MatKernels::q8k_gemm`] calls
+    /// into one buffer, row for row and bit for bit: the sixteen-row AVX-512 body
+    /// shares each activation broadcast between the two tiles and changes nothing
+    /// else. A tier without that body takes the scalar pair, which is two calls of
+    /// the twin.
+    pub fn q8k_gemm16(&self, form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        if crate::kqsimd::have_zmm512() {
+            // SAFETY: `have_zmm512()` checked; `q8k_gemm16_zmm` checks the same
+            // bounds this wrapper does.
+            unsafe { crate::kqsimd::q8k_gemm16_zmm(form, n_sb, acts, nb, out) };
+            return;
+        }
+        crate::kq8::gemm_q8k_pair(form, n_sb, acts, nb, out)
+    }
+
     /// Build the 8-bit form of one run of eight output rows from a repacked tile:
     /// the AVX-512 builder when the tier has it, the AVX2 one next, the NEON
     /// builder on aarch64, the scalar twin otherwise (S5.4b, S5.4d, S5.4e, Q5_0
