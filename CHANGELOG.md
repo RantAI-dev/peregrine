@@ -19,8 +19,10 @@ All notable changes to this project are documented here. The format follows
   2.5 0.5B) of what it was, and the 512-token prompt gains **+3.3 % and +2.7 %**; at six and
   twelve threads the pass does not resolve the 4-6 % bucket it lives in (both arm orders
   straddle 1.0). 4096 tokens, decode and ten users are unchanged. **Still below
-  ik_llama.cpp**: 0.37-0.60 of it at twelve threads (and 0.62 of llama.cpp on Qwen at 512),
-  unchanged in cause from S5.2b — the fork's requantising weight kernel.
+  ik_llama.cpp**: 0.37-0.60 of it at twelve threads, unchanged in cause from S5.2b — the fork's
+  requantising weight kernel. Against llama.cpp the same round reads 1.00-1.43 except Qwen at 512
+  tokens, 0.89 on a host loaded at 16-22 where the rounds overlap; that cell is to be measured
+  again on a quiet host.
 - **Prompt processing: the attention value mix takes two rows per V pass (S5.2b)**: on a
   4096-token prompt attention is 35-45 % of a pass and the value mix alone is twice the score
   stage, running at 8.6-9.3 GMAC/s per core, a sixth of this machine's f32 FMA roof. Two query

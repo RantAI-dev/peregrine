@@ -329,11 +329,13 @@ two at 4096 (load 16–22 throughout, which the `±` in the raw files shows):
 |---|---:|---:|---:|---:|---:|---:|
 | Llama 1B | 512 | 238.1 | 397.0 | 238.9 | **0.60** | 1.00 |
 | | 4096 | 204.1 | 385.3 | 185.0 | **0.53** | 1.10 |
-| Qwen 0.5B | 512 | 332.9 | 896.6 | 372.0 | **0.37** | **0.62** |
+| Qwen 0.5B | 512 | 332.9 | 896.6 | 372.0 | **0.37** | **0.89** |
 | | 4096 | 361.5 | 642.3 | 252.6 | **0.56** | 1.43 |
 
 Every cell below 1.0 is named: **Peregrine is below ik_llama.cpp in all four cells** (0.37–0.60)
-and **below llama.cpp in one (Qwen 512, 0.62)**; at 4096 it is above llama.cpp on both. The
+and **below llama.cpp in one (Qwen 512, 0.89: 332.9 against 372.0, medians of three rounds in
+which Peregrine read 333/292/480 and llama.cpp 389/372/330, so the two are not separated here)**;
+at 4096 it is above llama.cpp on both. The
 spread on this host is large (ik's Qwen 512 cells read 765/955/897, Peregrine's 333/292/480),
 so these are the medians of a noisy window, not a settled ranking; §12.4's account of *why*
 ik leads (its 512-row requantising kernel at 91 GMAC/s against Peregrine's exact 72–75, and

@@ -1895,11 +1895,13 @@ Twelve threads, interleaved with both engines in the same rounds, medians of thr
 |---|---:|---:|---:|---:|---:|---:|
 | Llama 1B | 512 | 238.1 | 397.0 | 238.9 | **0.60** | 1.00 |
 | | 4096 | 204.1 | 385.3 | 185.0 | **0.53** | 1.10 |
-| Qwen 0.5B | 512 | 332.9 | 896.6 | 372.0 | **0.37** | **0.62** |
+| Qwen 0.5B | 512 | 332.9 | 896.6 | 372.0 | **0.37** | **0.89** |
 | | 4096 | 361.5 | 642.3 | 252.6 | **0.56** | 1.43 |
 
 Every cell below 1.0 is named: **all four against ik_llama.cpp** and **Qwen's 512 against
-llama.cpp**. At 4096 Peregrine is now above llama.cpp on both models. The ranking against ik is
+llama.cpp** (0.89 on the medians; the three rounds read 333/292/480 against 389/372/330 at a load
+of 16–22, so that cell does not separate the two engines and is to be measured again on a quiet
+host). At 4096 Peregrine is now above llama.cpp on both models. The ranking against ik is
 not settled by this window (its own Qwen 512 cells read 765/955/897), and §12.4's explanation
 is unchanged: the fork's lead is the weight pass — its requantising kernel at 91 GMAC/s against
 Peregrine's exact 72–75 — plus 512-bit kernels throughout, which is a different arithmetic.
