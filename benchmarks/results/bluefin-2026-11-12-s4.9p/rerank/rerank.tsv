@@ -1,0 +1,25 @@
+# engine	file	tokens	docs	pairs_per_s
+peregrine	bge-reranker-v2-m3-Q8_0	123	1	3.87
+peregrine	bge-reranker-v2-m3-Q8_0	123	8	3.91
+peregrine	bge-reranker-v2-m3-Q8_0	123	32	3.92
+llama.cpp	bge-reranker-v2-m3-Q8_0	123	1	3.31
+llama.cpp	bge-reranker-v2-m3-Q8_0	123	8	2.77
+llama.cpp	bge-reranker-v2-m3-Q8_0	123	32	2.76
+peregrine	bge-reranker-v2-m3-Q8_0	449	1	0.96
+peregrine	bge-reranker-v2-m3-Q8_0	449	8	0.96
+peregrine	bge-reranker-v2-m3-Q8_0	449	32	0.96
+llama.cpp	bge-reranker-v2-m3-Q8_0	449	1	0.78
+llama.cpp	bge-reranker-v2-m3-Q8_0	449	8	0.73
+llama.cpp	bge-reranker-v2-m3-Q8_0	449	32	0.73
+peregrine	bge-reranker-base-q8_0	123	1	12.37
+peregrine	bge-reranker-base-q8_0	123	8	13.11
+peregrine	bge-reranker-base-q8_0	123	32	13.14
+llama.cpp	bge-reranker-base-q8_0	123	1	11.10
+llama.cpp	bge-reranker-base-q8_0	123	8	9.66
+llama.cpp	bge-reranker-base-q8_0	123	32	9.68
+peregrine	bge-reranker-base-q8_0	449	1	3.25
+peregrine	bge-reranker-base-q8_0	449	8	3.26
+peregrine	bge-reranker-base-q8_0	449	32	3.25
+llama.cpp	bge-reranker-base-q8_0	449	1	2.76
+llama.cpp	bge-reranker-base-q8_0	449	8	2.52
+llama.cpp	bge-reranker-base-q8_0	449	32	2.52
