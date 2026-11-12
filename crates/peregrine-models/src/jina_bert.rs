@@ -548,33 +548,172 @@ fn gelu_fused_fill(
     }
 }
 
-/// `out[row][i] += bias[i]` for every row, skipping an all-zero bias so a `-0.0` from
-/// the projection stays.
-fn add_bias(out: &mut [f32], dim: usize, nb: usize, bias: &[f32]) {
+/// [`add_bias`] over the pool (S4.9u): a row's add is the same operation on the same
+/// values whatever thread runs it, and the all-zero bias still skips so `-0.0` stays.
+fn add_bias_par(
+    pool: &Pool,
+    stats: &mut StepStats,
+    out: &mut [f32],
+    dim: usize,
+    nb: usize,
+    bias: &[f32],
+) {
     if bias.iter().all(|&b| b == 0.0) {
         return;
     }
-    for r in 0..nb {
-        let row = &mut out[r * dim..(r + 1) * dim];
-        for (o, &b) in row.iter_mut().zip(bias) {
-            *o += b;
-        }
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    peregrine_core::blocks::par::for_row_chunks(
+        pool,
+        parallel,
+        out,
+        dim,
+        nb,
+        Sched::Static,
+        |_wk, _rows, oc| {
+            for row in oc.chunks_mut(dim) {
+                for (o, &b) in row.iter_mut().zip(bias) {
+                    *o += b;
+                }
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
     }
 }
 
-/// `out[row][i] = (out[row][i] + bias[i]) + residual[row][i]`, llama.cpp's bias add
-/// followed by the residual add, in one walk.
-fn add_bias_residual(out: &mut [f32], residual: &[f32], bias: &[f32], dim: usize) {
-    if bias.iter().all(|&b| b == 0.0) {
-        for (o, &r) in out.iter_mut().zip(residual) {
-            *o += r;
-        }
+/// The q/k/v bias adds of one layer in one fork-join (S4.9u), with the zero-bias skip
+/// of [`add_bias`] on each projection.
+#[allow(clippy::too_many_arguments)]
+fn add_bias3_par(
+    pool: &Pool,
+    stats: &mut StepStats,
+    q: &mut [f32],
+    qd: usize,
+    k: &mut [f32],
+    kvd: usize,
+    v: &mut [f32],
+    nb: usize,
+    bq: &[f32],
+    bk: &[f32],
+    bv: &[f32],
+) {
+    let has_q = !bq.iter().all(|&b| b == 0.0);
+    let has_k = !bk.iter().all(|&b| b == 0.0);
+    let has_v = !bv.iter().all(|&b| b == 0.0);
+    if !(has_q || has_k || has_v) {
         return;
     }
-    for (row, res) in out.chunks_mut(dim).zip(residual.chunks_exact(dim)) {
-        for ((o, &b), &r) in row.iter_mut().zip(bias).zip(res) {
-            *o = (*o + b) + r;
-        }
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    for_row_chunks_3(
+        pool,
+        parallel,
+        q,
+        qd,
+        k,
+        kvd,
+        v,
+        kvd,
+        nb,
+        Sched::Static,
+        |_wk, _rows, qc, kc, vc| {
+            if has_q {
+                for row in qc.chunks_mut(qd) {
+                    for (o, &b) in row.iter_mut().zip(bq) {
+                        *o += b;
+                    }
+                }
+            }
+            if has_k {
+                for row in kc.chunks_mut(kvd) {
+                    for (o, &b) in row.iter_mut().zip(bk) {
+                        *o += b;
+                    }
+                }
+            }
+            if has_v {
+                for row in vc.chunks_mut(kvd) {
+                    for (o, &b) in row.iter_mut().zip(bv) {
+                        *o += b;
+                    }
+                }
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
+}
+
+/// [`add_bias_residual`] over the pool (S4.9u): the bias walk and the residual walk of
+/// one row stay on one worker, and the operation order (`(o + b) + r`) is unchanged.
+fn add_bias_residual_par(
+    pool: &Pool,
+    stats: &mut StepStats,
+    out: &mut [f32],
+    residual: &mut [f32],
+    bias: &[f32],
+    dim: usize,
+    nb: usize,
+) {
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    let has_bias = !bias.iter().all(|&b| b == 0.0);
+    for_row_chunks_2(
+        pool,
+        parallel,
+        out,
+        dim,
+        residual,
+        dim,
+        nb,
+        Sched::Static,
+        |_wk, _rows, oc, rc| {
+            if has_bias {
+                for (row, res) in oc.chunks_mut(dim).zip(rc.chunks_exact(dim)) {
+                    for ((o, &b), &r) in row.iter_mut().zip(bias).zip(res) {
+                        *o = (*o + b) + r;
+                    }
+                }
+            } else {
+                for (o, &r) in oc.iter_mut().zip(rc.iter()) {
+                    *o += r;
+                }
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
+}
+
+/// `out[row][i] += residual[row][i]` over the pool (S4.9u), for the optional second
+/// residual (`attn_norm_2`) this family's code path can carry.
+fn add_residual_par(
+    pool: &Pool,
+    stats: &mut StepStats,
+    out: &mut [f32],
+    residual: &mut [f32],
+    dim: usize,
+    nb: usize,
+) {
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    for_row_chunks_2(
+        pool,
+        parallel,
+        out,
+        dim,
+        residual,
+        dim,
+        nb,
+        Sched::Static,
+        |_wk, _rows, oc, rc| {
+            for (o, &r) in oc.iter_mut().zip(rc.iter()) {
+                *o += r;
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
     }
 }
 
@@ -834,9 +973,9 @@ impl Architecture for JinaBert {
                     &mut st.kq,
                 );
             }
-            add_bias(&mut st.q, qd, nb, &l.bq);
-            add_bias(&mut st.k, kvd, nb, &l.bk);
-            add_bias(&mut st.v, kvd, nb, &l.bv);
+            add_bias3_par(
+                pool, stats, &mut st.q, qd, &mut st.k, kvd, &mut st.v, nb, &l.bq, &l.bk, &l.bv,
+            );
 
             // ---- optional q/k LayerNorm over each token's whole row ----
             if let Some((qw, qb)) = &l.q_norm {
@@ -890,7 +1029,15 @@ impl Architecture for JinaBert {
                     &mut st.kq,
                 );
             }
-            add_bias_residual(&mut st.xb2[..nb * dm], &st.x[..nb * dm], &l.bo, dm);
+            add_bias_residual_par(
+                pool,
+                stats,
+                &mut st.xb2[..nb * dm],
+                &mut st.x[..nb * dm],
+                &l.bo,
+                dm,
+                nb,
+            );
             norm_fill(
                 pool,
                 stats,
@@ -904,9 +1051,14 @@ impl Architecture for JinaBert {
                 &mut st.acts,
             );
             if let Some((nw, nbias)) = &l.attn_norm_2 {
-                for i in 0..nb * dm {
-                    st.xb[i] += st.x[i];
-                }
+                add_residual_par(
+                    pool,
+                    stats,
+                    &mut st.xb[..nb * dm],
+                    &mut st.x[..nb * dm],
+                    dm,
+                    nb,
+                );
                 norm_fill(
                     pool,
                     stats,
@@ -951,7 +1103,7 @@ impl Architecture for JinaBert {
                 );
                 // `ffn_up.bias` is added to the up matrix's own output (`hb2`); the
                 // gate matrix has no bias in llama.cpp's loader for this family.
-                add_bias(&mut st.hb2, ff, nb, &l.up_b);
+                add_bias_par(pool, stats, &mut st.hb2, ff, nb, &l.up_b);
                 gelu_gate_fill(pool, stats, &mut st.hb, &st.hb2, ff, nb, &mut st.acts);
             } else {
                 let scratch = st
@@ -980,7 +1132,7 @@ impl Architecture for JinaBert {
                         &mut st.kq,
                     );
                 }
-                add_bias(&mut scratch.buf, 2 * ff, nb, &l.up_b);
+                add_bias_par(pool, stats, &mut scratch.buf, 2 * ff, nb, &l.up_b);
                 gelu_fused_fill(
                     pool,
                     stats,
@@ -1013,7 +1165,15 @@ impl Architecture for JinaBert {
                 );
             }
             // `x = down + ffn_inp`, where `ffn_inp` is the normed row in `st.xb`.
-            add_bias_residual(&mut st.xb2[..nb * dm], &st.xb[..nb * dm], &l.down_b, dm);
+            add_bias_residual_par(
+                pool,
+                stats,
+                &mut st.xb2[..nb * dm],
+                &mut st.xb[..nb * dm],
+                &l.down_b,
+                dm,
+                nb,
+            );
 
             // `layer_output_norm` is the layer's output: this family has no final norm.
             norm_fill(
