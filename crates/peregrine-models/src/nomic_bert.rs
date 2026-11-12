@@ -106,6 +106,31 @@ impl Family for NomicBertMoeFamily {
     fn embedding_only(&self) -> bool {
         true
     }
+
+    /// The Q8_0 file is dequantised into f16 panels at load (S4.8b).
+    ///
+    /// This family's arithmetic is more sensitive to the int8 activation path than a
+    /// dense encoder's: a mixture of experts makes a discrete choice per row, and the
+    /// *mean* pooling of a bidirectional pass turns an error shared by many rows into a
+    /// large one in the pooled vector (the reference note has the measurements). f16
+    /// panels hold the whole model in 566 MB — half the f32 form the small `bert`
+    /// encoders take — and remove the int8 activations, so what is left of the file's
+    /// distance to the F16 conversion is its weights' quantisation and no more.
+    fn q8_panels(&self) -> peregrine_core::fpack::Q8Panels {
+        peregrine_core::fpack::Q8Panels::Half
+    }
+
+    /// The expert banks take the float pack, one matrix per expert (S4.8b).
+    ///
+    /// A mixture-of-experts layer runs two of eight experts per row, and the rows a
+    /// pass routes to one expert are a contiguous group, so the experts are ordinary
+    /// GEMMs of `n_ff` rows — the same shape as the plain layer's feed-forward. Left
+    /// unpacked they are the only matmuls of the family that cannot reach the packed
+    /// float kernel; packed per expert they take the same path as everything else.
+    /// Only this family opts in: every other mixture's bytes stay where they were.
+    fn packs_experts(&self) -> bool {
+        true
+    }
 }
 
 /// One layer's feed-forward: the branch that separates the two families.

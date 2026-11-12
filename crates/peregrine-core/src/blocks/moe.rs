@@ -20,7 +20,6 @@
 use crate::blocks::ffn::{swiglu_oai_rows, swiglu_rows};
 use crate::blocks::linear::{matmul_group, MatJob};
 use crate::blocks::par::{for_row_chunks_2, OutPtr, Sched};
-use crate::blocks::ROW_PARALLEL;
 use crate::gguf::TensorInfo;
 use crate::model::{StepStats, Weights};
 use crate::pool::Pool;
@@ -280,7 +279,11 @@ fn gelu_rows(
     pool: &Pool,
     st: &mut StepStats,
 ) {
-    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    // One row of an expert's intermediate is `n_ff` tanh-GELUs, and a GELU expert
+    // runs only the rows the router chose, so a group of two rows is already worth
+    // handing to the pool; the arithmetic is elementwise, so who runs a row cannot
+    // reach its bits.
+    let parallel = nb >= 1 && pool.width() > 1;
     for_row_chunks_2(
         pool,
         parallel,
@@ -340,6 +343,15 @@ pub fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
         ));
     }
     let bytes = per_expert / block * t.kind.block_bytes() as u64;
+    // A bank in the float pack (S4.8b: the families that ask for it) holds one
+    // packed matrix per expert, laid out in expert order. Each expert's panels are
+    // whole (a matrix's last panel is zero-padded), so the stride is the packed
+    // length of one expert matrix.
+    let fp = t.fp_off.map(|base| {
+        let kind = t.fp_kind.unwrap_or(t.kind);
+        let stride = peregrine_kernels::fpack::packed_len(kind, rows as usize, cols as usize);
+        base + e * stride
+    });
     Ok(TensorInfo {
         name: format!("{}[{e}]", t.name),
         dims: vec![cols, rows],
@@ -348,8 +360,8 @@ pub fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
         tile_off: None,
         q8_off: None,
         kq_off: None,
-        fp_off: None,
-        fp_kind: None,
+        fp_off: fp,
+        fp_kind: t.fp_kind,
     })
 }
 

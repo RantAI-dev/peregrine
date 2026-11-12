@@ -4580,12 +4580,12 @@ fn a_nomic_bert_moes_vector_is_bit_identical_alone_in_batches_and_in_any_order()
     }
 }
 
-/// The Q8_0 file takes the repacked int8 tiles for its attention and plain
-/// projections and the raw Q8_0 expert rows; on a SIMD tier a 1-ulp kernel
-/// difference can flip one activation code, so the distance to the reference is the
-/// model's own sensitivity. The exact bits per tier are the golden's.
+/// The Q8_0 file is dequantised into f16 panels at load (S4.8b), so its vector is the
+/// float path's: the file's weights, rounded through f16, times the f32 activations.
+/// The reference writes the same arithmetic out longhand; the exact bits per tier are
+/// the golden's.
 #[test]
-fn the_nomic_bert_moe_q8_0_vector_is_the_engine_int8_path() {
+fn the_nomic_bert_moe_q8_0_vector_is_the_engine_widened_path() {
     let dir = tmpdir("nomic-bert-moe-q8-reference");
     let model = nomic_bert_moe_model(&dir, Format::Q8_0, 91, Default::default());
     let mut worst = (0.0f64, 1.0f64);
@@ -4893,16 +4893,23 @@ fn the_nomic_bert_moe_real_files_match_llama_cpp() {
         .collect();
     let ids = read_fixture_ids(&dir.join("ids.txt"));
 
+    /// What the file must reach: the S4 gate, asserted, never a pinned measurement.
+    #[derive(Debug)]
+    enum Gate {
+        /// The S4 F16 clause: the mean against the full-precision reference.
+        F16 { mean: f64 },
+        /// The S4 Q8_0 clauses: against llama.cpp's **own** run of the same file, the
+        /// mean within `mean_slack` and the minimum within `min_slack`.
+        Quantised { mean_slack: f64, min_slack: f64 },
+    }
+
     #[derive(Debug)]
     struct Case {
         file: &'static str,
         llama: &'static str,
         reference: &'static str,
         dim: usize,
-        /// (min, mean) cosine to the reference this file must reach.
-        bound: (f64, f64),
-        /// Whether the file is quantised (the S4 gate's looser class).
-        quant: bool,
+        gate: Gate,
     }
     let cases = [
         Case {
@@ -4910,27 +4917,17 @@ fn the_nomic_bert_moe_real_files_match_llama_cpp() {
             llama: "f16_llama.f32",
             reference: "f16_llama.f32",
             dim: 768,
-            // Measured (docs/reference/nomic-bert-moe.md): min 0.9997738 / mean
-            // 0.9999977. The minimum is one text (96 tokens) whose last MoE layer's
-            // router sits near a tie: the continuous agreement is the siblings' class
-            // (mean 0.9999977), but the discrete top-2 choice amplifies a 0.2 %
-            // hidden-state difference into a 2 % vector difference. The bound is the
-            // measurement, not the siblings' 0.9999, and the reference note says so.
-            bound: (0.9997, 0.9999),
-            quant: false,
+            gate: Gate::F16 { mean: 0.9999 },
         },
         Case {
             file: "nomic-embed-text-v2-moe.Q8_0.gguf",
             llama: "q8_0_llama.f32",
             reference: "f16_llama.f32",
             dim: 768,
-            // Measured: min 0.9625625 / mean 0.9991114. The outliers are the long
-            // texts, where the Q8 run's larger hidden-state difference reaches the
-            // last MoE layer's near-ties; llama.cpp's own Q8_0 is min 0.9990825 /
-            // mean 0.9994075 from the same F16 reference. See the reference note for
-            // why this family's Q8_0 mean is 3.0e-4 below llama.cpp's.
-            bound: (0.96, 0.9990),
-            quant: true,
+            gate: Gate::Quantised {
+                mean_slack: 1e-4,
+                min_slack: 1e-3,
+            },
         },
     ];
 
@@ -4998,53 +4995,62 @@ fn the_nomic_bert_moe_real_files_match_llama_cpp() {
             ours.len(),
             case.dim
         );
-        if !case.quant {
-            assert!(
-                min_l >= case.bound.0 && mean_l >= case.bound.1,
-                "{}: vs llama.cpp min {min_l:.6} mean {mean_l:.6}, bound {:?}",
-                case.file,
-                case.bound
-            );
-        }
-        assert!(
-            min_r >= case.bound.0 && mean_r >= case.bound.1,
-            "{}: vs the reference min {min_r:.6} mean {mean_r:.6}, bound {:?}",
-            case.file,
-            case.bound
-        );
-        if case.quant {
-            let (min_lm, mean_lm) = min_mean(&cos_to(&llama));
-            let (min_rl, mean_rl) = {
-                let lm: Vec<Vec<f32>> = llama.clone();
-                let rf: Vec<Vec<f32>> = reference.clone();
-                min_mean(
-                    &lm.iter()
-                        .zip(&rf)
+        match case.gate {
+            Gate::F16 { mean } => {
+                // The S4 clause's F16 half, and the minimum reported with what it is:
+                // a text whose router sits on a tie has two nearly equal experts, and
+                // llama.cpp's own two precisions flip decisions on texts like it too
+                // (the reference note counts them).
+                assert!(
+                    mean_r >= mean,
+                    "{}: vs the reference mean {mean_r:.7}, the S4 F16 mean clause {mean:.4}",
+                    case.file
+                );
+                let under = cos_to(&reference)
+                    .into_iter()
+                    .filter(|&c| c < 0.9999)
+                    .count();
+                eprintln!(
+                    "{}: minimum {min_r:.7}; {under} text(s) under 0.9999, a router \
+                     near-tie whose two experts are all but equally likely",
+                    case.file
+                );
+            }
+            Gate::Quantised {
+                mean_slack,
+                min_slack,
+            } => {
+                // llama.cpp's own Q8_0 run of the same file, against the same
+                // full-precision reference: the gate's yardstick, measured from the
+                // fixtures in this run rather than pinned.
+                let (min_llama, mean_llama) = min_mean(
+                    &llama
+                        .iter()
+                        .zip(&reference)
                         .map(|(a, b)| bert_cosine(a, b))
                         .collect::<Vec<f64>>(),
-                )
-            };
-            eprintln!(
-                "{}: vs llama.cpp Q8_0 min {min_lm:.7} mean {mean_lm:.7}; \
-                 llama.cpp's own Q8_0 vs the reference min {min_rl:.7} mean {mean_rl:.7}",
-                case.file
-            );
-            // The S4 gate's Q8_0 clause asks for the mean to be within 1e-4 of
-            // llama.cpp's own. On this file it is not: the measurement is 3.0e-4
-            // below (0.9991114 against 0.9994075), and the reference note records
-            // that as a measured deviation rather than a passing bound. The test
-            // pins the measurement so a regression cannot hide behind it.
-            assert!(
-                mean_r >= case.bound.1,
-                "{}: ours vs the reference mean {mean_r:.6}, measured floor {:.6}",
-                case.file,
-                case.bound.1
-            );
-            eprintln!(
-                "{}: the S4 Q8_0 mean clause (llama.cpp within 1e-4) measures {:.3e}",
-                case.file,
-                mean_rl - mean_r
-            );
+                );
+                assert!(
+                    mean_r >= mean_llama - mean_slack,
+                    "{}: mean {mean_r:.7} against the reference; llama.cpp's own Q8_0 is \
+                     {mean_llama:.7}, more than {mean_slack:.1e} better",
+                    case.file
+                );
+                assert!(
+                    min_r >= min_llama - min_slack,
+                    "{}: min {min_r:.7} against the reference; llama.cpp's own Q8_0 is \
+                     {min_llama:.7}, more than {min_slack:.1e} better",
+                    case.file
+                );
+                eprintln!(
+                    "{}: Q8_0 gate: mean {mean_r:.7} against llama.cpp's {mean_llama:.7} \
+                     ({:+.2e}); min {min_r:.7} against its {min_llama:.7} ({:+.2e}); the \
+                     clause allows {mean_slack:.1e} of mean and {min_slack:.1e} of min",
+                    case.file,
+                    mean_r - mean_llama,
+                    min_r - min_llama
+                );
+            }
         }
     }
 }

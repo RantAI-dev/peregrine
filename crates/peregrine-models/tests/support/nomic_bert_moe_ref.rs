@@ -50,12 +50,6 @@ struct Mat {
     bytes: Vec<u8>,
     d_in: usize,
     d_out: usize,
-    /// Whether the engine reads this matrix as a raw row (`mk.row`, i.e.
-    /// `quant::dot_batch`) rather than through the float panels it packs for the
-    /// model's declared linear groups. The expert banks and the router are 3D views
-    /// or extra matrices the family does not report as linears, so they take the raw
-    /// row kernel; the attention and plain feed-forward matrices are packed.
-    raw_row: bool,
 }
 
 impl Mat {
@@ -69,38 +63,23 @@ impl Mat {
     }
     fn apply(&self, x: &[f32], out: &mut [f32]) {
         match self.kind {
-            // A raw F32 row goes through the engine's per-row kernel, exactly as
-            // `matmul_block`'s PerRow path calls it.
-            Format::F32 if self.raw_row => {
-                let mut a = peregrine_core::quant::QuantAct::with_capacity(self.d_in);
-                a.keep_f32 = true;
-                a.fill(x);
-                let mut one = [0.0f32; 1];
-                let rb = self.d_in * 4;
-                for (r, o) in out[..self.d_out].iter_mut().enumerate() {
-                    peregrine_kernels::quant::dot_batch(
-                        Format::F32,
-                        &self.bytes[r * rb..(r + 1) * rb],
-                        std::slice::from_ref(&a),
-                        &mut one,
-                    );
-                    *o = one[0];
-                }
-            }
             Format::F32 => {
                 for (r, o) in out[..self.d_out].iter_mut().enumerate() {
                     *o = row_dot(self.row(r), x);
                 }
             }
-            Format::Q8_0 => {
-                let mut a = peregrine_core::quant::QuantAct::with_capacity(self.d_in);
-                a.fill(x);
-                for (r, o) in out[..self.d_out].iter_mut().enumerate() {
-                    let row = self.row(r).to_vec();
-                    *o = peregrine_kernels::quant::dot_scalar(Format::Q8_0, &row, &a);
-                }
-            }
-            _ => unreachable!(),
+            _ => unreachable!("a widened matrix is f32 in the reference"),
+        }
+    }
+}
+
+/// One row of weights in the reference's f32 form: the file's values, rounded
+/// through f16 when the engine reads them from f16 panels (`q8_panels`).
+fn widen_row(src: &[u8], kind: Format, vals: &mut [f32], f16_panels: bool) {
+    dequant_row(kind, src, vals);
+    if f16_panels {
+        for v in vals.iter_mut() {
+            *v = peregrine_kernels::format::f16(peregrine_core::quant::f32_to_f16(*v));
         }
     }
 }
@@ -109,13 +88,16 @@ fn mat(g: &Gguf, name: &str) -> Mat {
     let t = g.tensor(name).unwrap_or_else(|e| panic!("{name}: {e}"));
     let d_in = t.dims[0] as usize;
     let d_out = t.dims.get(1).copied().unwrap_or(1) as usize;
-    if t.fp_kind.is_some() {
+    // This family widens every Q8_0 matrix at load (S4.8b), so a Q8_0 file is f32
+    // here, its weights the file's `scale × code` rounded through f16.
+    if t.fp_kind.is_some() || t.kind == Format::Q8_0 {
+        let f16_panels = t.kind == Format::Q8_0 && t.fp_kind == Some(Format::F16);
         let src_rb = peregrine_core::quant::row_bytes(t.kind, d_in);
         let mut bytes = vec![0u8; d_out * d_in * 4];
         let mut row = vec![0.0f32; d_in];
         for r in 0..d_out {
             let src = &g.bytes(t)[r * src_rb..(r + 1) * src_rb];
-            dequant_row(t.kind, src, &mut row);
+            widen_row(src, t.kind, &mut row, f16_panels);
             for (i, &v) in row.iter().enumerate() {
                 bytes[(r * d_in + i) * 4..(r * d_in + i + 1) * 4].copy_from_slice(&v.to_le_bytes());
             }
@@ -125,7 +107,6 @@ fn mat(g: &Gguf, name: &str) -> Mat {
             bytes,
             d_in,
             d_out,
-            raw_row: false,
         };
     }
     Mat {
@@ -133,7 +114,6 @@ fn mat(g: &Gguf, name: &str) -> Mat {
         bytes: g.bytes(t).to_vec(),
         d_in,
         d_out,
-        raw_row: false,
     }
 }
 
@@ -144,24 +124,29 @@ fn expert_mat(g: &Gguf, name: &str, e: usize, d_in: usize, d_out: usize) -> Mat 
     let t = g.tensor(name).unwrap_or_else(|err| panic!("{name}: {err}"));
     assert_eq!(t.dims[0] as usize, d_in, "{name}");
     assert_eq!(t.dims[1] as usize, d_out, "{name}");
-    let rb = match t.kind {
-        Format::F32 => d_in * 4,
-        Format::Q8_0 => peregrine_core::quant::row_bytes(Format::Q8_0, d_in),
-        other => panic!("the nomic-bert-moe reference has no {other:?} expert path"),
-    };
+    let rb = peregrine_core::quant::row_bytes(t.kind, d_in);
     let per = d_out * rb;
+    let src = &g.bytes(t)[e * per..(e + 1) * per];
+    let f16_panels = t.kind == Format::Q8_0;
+    let mut bytes = vec![0u8; d_out * d_in * 4];
+    let mut row = vec![0.0f32; d_in];
+    for r in 0..d_out {
+        widen_row(&src[r * rb..(r + 1) * rb], t.kind, &mut row, f16_panels);
+        for (i, &v) in row.iter().enumerate() {
+            bytes[(r * d_in + i) * 4..(r * d_in + i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+        }
+    }
     Mat {
-        kind: t.kind,
-        bytes: g.bytes(t)[e * per..(e + 1) * per].to_vec(),
+        kind: Format::F32,
+        bytes,
         d_in,
         d_out,
-        raw_row: true,
     }
 }
 
 /// The router: a 2D float matrix, which the loader's float pack (`fpack::eligible`)
 /// turns into panels like every other 2D float matrix, so its rows take the packed
-/// chain (`row_dot`), not the raw-row kernel.
+/// chain (`row_dot`).
 fn router_mat(g: &Gguf, name: &str) -> Mat {
     mat(g, name)
 }
