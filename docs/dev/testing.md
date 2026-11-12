@@ -673,11 +673,13 @@ not have, so an AVX-512 host still records those itself.
 ## Windows
 
 `test (windows-x86_64)` in `ci.yml` runs on `windows-2025` with the MSVC toolchain, the same
-release-mode suite as the x86-64 Linux entry (`cargo test --workspace --release --locked`), and
-then a smoke step: `peregrine.exe --version`, `peregrine.exe tier` (the first line must be
-`kernel tier   x86_64-avx2…`), and `peregrine.exe run` on a model that
-`cargo run -p peregrine-bench --example write_synthetic -- <dir>` writes. A green job takes
-about seven minutes.
+release-mode suite as the x86-64 Linux entry (`cargo test --workspace --release --locked`), then a
+smoke step and an installer step: `peregrine.exe --version`, `peregrine.exe tier` (the first line
+must be `kernel tier   x86_64-avx2…`), `peregrine.exe run` on a model that
+`cargo run -p peregrine-bench --example write_synthetic -- <dir>` writes, then
+`scripts/release/build.ps1` builds the Windows zip that `scripts/install.ps1` installs into a
+throwaway directory, and the installed `peregrine.exe` must answer `--version` and `tier`. A green
+job takes about ten minutes.
 
 Run it on a branch without waiting for the pull request: a temporary workflow with
 `on: push` for that branch and the same steps. The suite stops at the first failing target
@@ -690,11 +692,14 @@ What is different there:
   `tests/golden/…-windows/` and **skips** while those directories do not exist. The job does not
   set `PEREGRINE_GOLDEN=require`; recording Windows' goldens is S7.4. The session fixture
   (`tests/fixtures/session/`) is keyed the same way and also skips.
-- **Signals.** Windows has no `SIGTERM`. `serve_lifetime.rs` runs its lifetime half everywhere
-  (the server outlives the drain timeout and keeps serving) and its clean-shutdown half only on
-  Unix; `server_multi_model.rs` runs every test but the `SIGTERM` drain there. The
-  `serve --background` / `status` / `stop` lifetime commands are S7.3 and say so on Windows; a
-  foreground `serve` stops cleanly on Ctrl-C.
+- **Signals.** Windows has no `SIGTERM`. `serve_lifetime.rs` and `server_multi_model.rs` run a
+  Windows counterpart of their clean-shutdown test that writes the stop file and gets the same
+  drain (in-flight requests finish, new connections are refused, exit status 0). The Unix `SIGTERM`
+  tests are unchanged. `serve --background`, `status`, `stop` and `upgrade` work on Windows; a
+  foreground `serve` also stops cleanly on Ctrl-C.
+- **What still skips on Windows.** Only the goldens: the synthetic and session fixtures are keyed
+  `-windows` and are recorded in S7.4 (`PEREGRINE_GOLDEN=require` is never set in the Windows job).
+  Measurement on real Windows hardware is S7.4 too.
 - **Mapped files.** Windows refuses to rewrite, rename over or delete a file that is mapped, so a
   test that writes a synthetic model a loaded model still has mapped gets a fresh file name
   (`write_*` in `tests/support/models.rs` returns a new path each time), and the pack cache keeps

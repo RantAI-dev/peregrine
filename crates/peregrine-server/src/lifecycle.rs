@@ -77,6 +77,26 @@ pub fn log_path(port: u16) -> PathBuf {
     state_dir().join(format!("serve-{port}.log"))
 }
 
+/// The stop file a Windows server watches, named for its port like the log.
+///
+/// Windows has no `SIGTERM`. `peregrine stop` creates this file; the serving process notices it
+/// within about 250 ms, removes it, and drains exactly as `SIGTERM` makes a Unix server drain
+/// (S7.3). Unix servers never look at it.
+pub fn stop_path(port: u16) -> PathBuf {
+    state_dir().join(format!("serve-{port}.stop"))
+}
+
+/// Ask the Windows server on `port` to drain by creating its stop file.
+#[cfg(windows)]
+pub fn request_stop(port: u16) -> Result<(), String> {
+    let path = stop_path(port);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(&path, b"stop\n").map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 /// Read the state file. `None` when there is none or it does not parse.
 pub fn read(path: &Path) -> Option<State> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -109,12 +129,11 @@ pub fn remove_if_ours(path: &Path, pid: u32) {
 
 /// Whether a process is running. Linux reads `/proc`; the other Unix systems ask `kill -0`.
 ///
-/// Windows is S7.3: liveness there is `OpenProcess` plus `GetExitCodeProcess`, which arrives
-/// with the stop file and `status`/`stop`. Until then a state file found on Windows is
-/// treated as stale, and the commands that would act on it say what is missing.
+/// Windows has no `/proc` and no `kill`: `win32::process_alive` opens the process and reads its
+/// exit code (S7.3), which is also what `status` and `stop` need.
 #[cfg(windows)]
-pub fn alive(_pid: u32) -> bool {
-    false
+pub fn alive(pid: u32) -> bool {
+    peregrine_core::win32::process_alive(pid)
 }
 
 /// Whether a process is running. Linux reads `/proc`; elsewhere `kill -0` is asked.
@@ -136,13 +155,12 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
-/// Ask a process to shut down (`SIGTERM`), and say whether the signal was sent.
-///
-/// Unix only: Windows has no `SIGTERM`. `peregrine stop` there asks the server to drain
-/// through the per-user stop file, and that is S7.3.
+/// End a process hard (`TerminateProcess`). The stop file is the graceful path; this is the
+/// last resort `peregrine stop` (and, on Windows, `upgrade`) use after the drain timeout.
 #[cfg(windows)]
-pub fn terminate(_pid: u32) -> Result<(), String> {
-    Err("peregrine stop: Windows has no SIGTERM; the stop file arrives in S7.3".into())
+pub fn terminate(pid: u32) -> Result<(), String> {
+    peregrine_core::win32::terminate_process(pid)
+        .map_err(|e| format!("cannot terminate pid {pid}: {e}"))
 }
 
 /// Ask a process to shut down (`SIGTERM`), and say whether the signal was sent.
@@ -262,6 +280,15 @@ pub fn spawn_server(
         {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
+        }
+        // `CREATE_NEW_PROCESS_GROUP` keeps Ctrl-C in the parent's console from reaching the
+        // detached server; `DETACHED_PROCESS` gives it no console at all (S7.3).
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
         }
     }
     let mut child = cmd

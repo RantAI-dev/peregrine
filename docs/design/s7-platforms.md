@@ -1,7 +1,7 @@
 # S7: macOS and Windows
 
-- Status: design, decided 2026-11-12. S7.2 built (Windows x86-64 builds and passes the suite in
-  CI); the rest is not built.
+- Status: design, decided 2026-11-12. S7.2 (Windows builds and passes the suite) and S7.3 (Windows
+  lifetime, installer and release archive) built; the rest is not built.
 - Owner request: "add support to windows, mac".
 
 ## 0. Where things stand

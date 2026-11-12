@@ -4,10 +4,11 @@
 //!
 //! `PEREGRINE_DRAIN_TIMEOUT_MS` is the override (`docs/dev/testing.md`); users never set it.
 //!
-//! The lifetime check runs everywhere. The clean-shutdown half is Unix-only: it sends `SIGTERM`,
-//! which Windows does not have. On Windows the clean shutdown today is Ctrl-C (a console control
-//! event the test harness cannot deliver to another process group without its own Win32 code), and
-//! the stop file that replaces `SIGTERM` is S7.3 (design `docs/design/s7-platforms.md` §5).
+//! The lifetime check runs everywhere. The clean-shutdown half sends `SIGTERM` on Unix and
+//! creates the stop file on Windows (S7.3: there is no `SIGTERM`, and `peregrine stop` asks the
+//! server to drain through a per-user file); both are the same drain. Ctrl-C is the other clean
+//! shutdown on Windows, but the test harness cannot deliver a console control event to another
+//! process group without its own Win32 code.
 
 #[path = "../../peregrine-models/tests/support/mod.rs"]
 mod support;
@@ -90,16 +91,24 @@ fn read_log(path: &Path) -> String {
 
 /// Start a server on a free port and wait until it answers `/health`. Its log is `dir/serve.log`.
 fn start(dir: &Path, model: &Path) -> (Guard, u16, PathBuf) {
+    start_with_drain(dir, model, 1000)
+}
+
+/// [`start`] with the drain timeout in milliseconds. The default is 1 s instead of the 30 s users
+/// get: a regression that ties the server's lifetime to the drain timeout then shows up in seconds
+/// rather than half a minute. The Windows stop-file test needs long enough for an in-flight
+/// request, so it asks for more.
+fn start_with_drain(dir: &Path, model: &Path, drain_ms: u64) -> (Guard, u16, PathBuf) {
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
+    let state = dir.join("state");
+    std::fs::create_dir_all(&state).unwrap();
     let listen = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listen.local_addr().unwrap().port();
     drop(listen);
     let log = dir.join("serve.log");
     let log_file = std::fs::File::create(&log).unwrap();
 
-    // 1 s instead of the 30 s users get: a regression that ties the server's lifetime to the drain
-    // timeout then shows up in seconds rather than half a minute.
     let mut serve = Command::new(env!("CARGO_BIN_EXE_peregrine"));
     let child = serve
         .args([
@@ -116,7 +125,9 @@ fn start(dir: &Path, model: &Path) -> (Guard, u16, PathBuf) {
             "-c",
             "128",
         ])
-        .env("PEREGRINE_DRAIN_TIMEOUT_MS", "1000")
+        .env("PEREGRINE_DRAIN_TIMEOUT_MS", drain_ms.to_string())
+        // The Windows stop file lives in the state directory; give every test its own.
+        .env("PEREGRINE_STATE_DIR", &state)
         .env("HOME", &home)
         .env_remove("XDG_STATE_HOME")
         .stdout(Stdio::from(log_file.try_clone().unwrap()))
@@ -211,5 +222,92 @@ fn a_shutdown_signal_drains_and_exits_cleanly() {
         !read_log(&log).contains("shutdown took longer"),
         "an idle drain hit the timeout\nlog:\n{}",
         read_log(&log)
+    );
+}
+
+/// A clean shutdown on Windows: the stop file drains and exits with status 0, an in-flight
+/// request finishes, and a request made after the drain starts is refused.
+///
+/// Same behaviour as the `SIGTERM` test above, through the mechanism Windows has (S7.3). The
+/// server watches `serve-<port>.stop` in its state directory every 250 ms.
+#[cfg(windows)]
+#[test]
+fn a_stop_file_drains_and_exits_cleanly() {
+    let dir = tmpdir("stopfile");
+    let model = write_dense(&dir, "llama", Format::F16, 11, Dense::default());
+    // Long enough that the in-flight request below is not cut off by the drain timeout.
+    let (mut guard, port, log) = start_with_drain(&dir, &model, 20_000);
+    let stop = dir.join("state").join(format!("serve-{port}.stop"));
+
+    // A request that is still generating when the stop file appears.
+    let body = r#"{"model":"peregrine","messages":[{"role":"user","content":"hi"}],"max_tokens":128,"temperature":0}"#;
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let in_flight = thread::spawn(move || http_request(port, &request));
+    thread::sleep(Duration::from_millis(100));
+    std::fs::write(&stop, b"stop\n").expect("write the stop file");
+
+    // The server removes the file as it starts the drain, then closes the listener.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stop.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the server never noticed the stop file\nlog:\n{}",
+            read_log(&log)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "a new connection was still accepted while draining\nlog:\n{}",
+            read_log(&log)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let finished = in_flight
+        .join()
+        .expect("the in-flight request thread")
+        .unwrap_or_else(|| {
+            panic!(
+                "the in-flight request got no response\nlog:\n{}",
+                read_log(&log)
+            )
+        });
+    assert!(
+        finished.starts_with("HTTP/1.1 200"),
+        "the in-flight request was cut off: {finished:?}\nlog:\n{}",
+        read_log(&log)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = guard.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "serve did not exit after the stop file\nlog:\n{}",
+            read_log(&log)
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        status.success(),
+        "serve exited with {status} after the stop file\nlog:\n{}",
+        read_log(&log)
+    );
+    assert!(
+        !read_log(&log).contains("shutdown took longer"),
+        "the drain hit the timeout\nlog:\n{}",
+        read_log(&log)
+    );
+    assert!(
+        !stop.exists(),
+        "the server must remove the stop file it acted on"
     );
 }

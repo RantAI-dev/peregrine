@@ -3,8 +3,9 @@
 Run a model, call it. About five minutes: one binary (or one container), one small model, one
 request — the same requests then work against any bigger model file.
 
-You need Linux on x86-64 or aarch64 (macOS: build from source below), and about 300 MB of disk for
-the example model.
+You need Linux on x86-64 or aarch64, macOS on Apple Silicon, or Windows on x86-64 (Intel Macs:
+build from source below), and about 300 MB of disk for the example model. macOS on Apple Silicon is
+covered below; the Windows install is PowerShell.
 
 ## 1. Get Peregrine
 
@@ -24,6 +25,44 @@ repository at `scripts/install.sh`, and works with `sh` as well as `bash`.
 Pass `--version vX.Y.Z` to pin a release and `--prefix /usr/local` for a system-wide install;
 `PEREGRINE_REPO` and `PEREGRINE_BASE_URL` point the script at a fork or a mirror.
 
+### Windows x86-64
+
+Windows 10 or 11 on x86-64. In PowerShell (the version every Windows ships, 5.1, is enough):
+
+```powershell
+irm https://peregrine.rantai.dev/install.ps1 | iex
+peregrine tier   # the kernel tier picked for this CPU (AVX-512 / AVX2 / scalar)
+```
+
+The script finds the newest release (or `-Version vX.Y.Z`), downloads
+`peregrine-vX.Y.Z-windows-x86_64.zip` and `SHA256SUMS`, checks the hash with `Get-FileHash`, and
+installs `peregrine.exe` to `%LOCALAPPDATA%\Programs\peregrine` (override with `-InstallDir DIR`).
+It adds that directory to your **user** `Path` when it is missing and prints how to undo both; no
+administrator rights are needed, and the machine `Path` is never touched. `-BaseUrl` points the
+script at a mirror or a local directory, as `PEREGRINE_BASE_URL` does for `install.sh`. There is no
+Windows ARM64 archive yet; the installer refuses ARM64 with the build-from-source line.
+
+The `.exe` is **unsigned** (there is no Authenticode certificate yet). An `.exe` or `.zip`
+downloaded with a browser carries Windows' zone identifier, and SmartScreen may say *"Windows
+protected your PC — Microsoft Defender SmartScreen prevented an unrecognized app from starting"*;
+choose *More info → Run anyway*. The install script fetches the archive itself and writes the
+binary without that mark, so `irm … | iex` does not show the prompt. Verify a download by hand with
+`Get-FileHash peregrine-vX.Y.Z-windows-x86_64.zip -Algorithm SHA256` against `SHA256SUMS`.
+
+The model and packed-weight caches follow the platform: `%LOCALAPPDATA%\peregrine\models` and
+`%LOCALAPPDATA%\peregrine\packs` (`PEREGRINE_CACHE_DIR`, `PEREGRINE_PACK_CACHE` and the other
+overrides in step 2 work unchanged). The managed server's state is
+`%LOCALAPPDATA%\peregrine\serve.json`, its log `serve-<port>.log` there.
+
+**Background server.** `serve --background`, `status`, `stop` and `upgrade` work on Windows through
+a per-user mechanism instead of signals: `peregrine stop` writes `serve-<port>.stop` beside the
+state file, the server notices it within about 250 ms, drains in-flight requests and exits, and
+`stop` ends the process only if the drain timeout (40 s) passes. A foreground `serve` still stops on
+Ctrl-C. `upgrade` replaces the binary by renaming the running one to `peregrine.exe.old` (Windows
+cannot overwrite a running `.exe`) and removes it at the next start; it restarts a managed server
+after draining the old one, so a Windows upgrade has a short gap where Linux and macOS hand over
+with no refused connection.
+
 ### Release binary
 
 Download the archive for your architecture from the
@@ -40,7 +79,9 @@ peregrine tier   # the kernel tier picked for your CPU (AVX-512 / AVX2 / NEON / 
 
 The binary is built for the plain baseline of each architecture: AVX2, AVX-VNNI and AVX-512 are
 picked at run time on x86-64, NEON variants on aarch64 — the same file runs on any CPU of its
-architecture. `peregrine tier` prints what it picked.
+architecture. `peregrine tier` prints what it picked. On Windows the archive is
+`peregrine-vX.Y.Z-windows-x86_64.zip` (unzip it and run `peregrine.exe`), and `install.ps1` is the
+installer described above.
 
 ### Docker
 

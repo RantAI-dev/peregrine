@@ -16,12 +16,20 @@ own memory-bandwidth ceiling.
 
 ## Install
 
-Linux x86-64 and aarch64 are supported. The installer detects the architecture, downloads the matching
-release archive, verifies it against `SHA256SUMS`, and installs `peregrine` to `~/.local/bin`:
+Linux x86-64, Linux aarch64, macOS on Apple Silicon and Windows on x86-64 are supported. On Linux
+and macOS the installer detects the architecture, downloads the matching release archive, verifies
+it against `SHA256SUMS`, and installs `peregrine` to `~/.local/bin`:
 
 ```sh
 curl -fsSL https://peregrine.rantai.dev/install.sh | sh
 peregrine tier      # the SIMD tier picked for this CPU: AVX-512, AVX2, NEON, i8mm, or scalar
+```
+
+On Windows, in PowerShell (no administrator rights; the installer uses your user `Path`):
+
+```powershell
+irm https://peregrine.rantai.dev/install.ps1 | iex
+peregrine tier      # the SIMD tier picked for this CPU: AVX-512, AVX2, or scalar
 ```
 
 Pin a release or choose the install directory by passing arguments to `sh`:
@@ -32,11 +40,16 @@ curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --prefix /usr/loca
 peregrine upgrade            # self-update in place to the newest release
 ```
 
-The release archives (`peregrine-v0.2.0-linux-x86_64.tar.gz` and
-`peregrine-v0.2.0-linux-aarch64.tar.gz` on the
-[releases page](https://github.com/RantAI-dev/peregrine/releases)) contain portable binaries built for
-the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and i8mm are selected at run time,
-so one binary runs on every CPU of that architecture; `peregrine tier` prints what it picked.
+On Windows pass `-Version v0.2.0` to the script and `-InstallDir DIR` to choose the directory.
+
+The release archives (`peregrine-v0.2.0-linux-x86_64.tar.gz`,
+`peregrine-v0.2.0-linux-aarch64.tar.gz` and `peregrine-v0.2.0-windows-x86_64.zip` on the
+[releases page](https://github.com/RantAI-dev/peregrine/releases)) contain portable binaries built
+for the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and i8mm are selected at
+run time, so one binary runs on every CPU of that architecture; `peregrine tier` prints what it
+picked. The Windows build links the C runtime statically, so it needs no Visual C++ redistributable;
+it is unsigned (no Authenticode certificate yet), and the
+[quickstart](docs/quickstart.md#windows-x86-64) says what SmartScreen shows for a browser download.
 
 **Docker** builds the server image (see [Docker](docs/docker.md)):
 
@@ -161,9 +174,11 @@ peregrine status       # pid, version, URL, model, log path
 peregrine stop         # drain in-flight requests, then exit
 ```
 
-`peregrine upgrade` replaces the running background server with zero downtime: it starts the new binary
-beside the old one (`SO_REUSEPORT`), waits for it to report ready, then drains and stops the old process.
-`kill -HUP <pid>` does the same handoff for a rebuilt or replaced binary. See
+`peregrine upgrade` replaces the running background server: on Linux and macOS it starts the new
+binary beside the old one (`SO_REUSEPORT`), waits for it to report ready, then drains and stops the
+old process, so no connection is refused. On Windows it uses the stop file to drain the old server
+and then starts the new one (a short gap), because Windows has neither `SIGTERM` nor
+`SO_REUSEPORT`. `kill -HUP <pid>` does the zero-downtime handoff for a rebuilt binary on Unix. See
 [Service & upgrades](docs/service.md).
 
 ## Embeddings
