@@ -40,19 +40,42 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    CI's pinned tiers (scalar, AVX2 and the AVX-512 tier under SDE) run with `PEREGRINE_GOLDEN=require`,
    so a new model or format must commit its goldens for all three; `PEREGRINE_GOLDEN=record` writes the
    missing ones (the AVX-512 ones on an AVX-512 machine). The directory is per tier and carries the
-   system when it is not Linux: on macOS it is `tests/golden/synthetic/aarch64-neon-dotprod-macos/`
-   (and the session fixture `tests/fixtures/session/aarch64-neon-dotprod-macos.txt`). Record on the
-   platform itself with the manually started **Record goldens** workflow
-   (`.github/workflows/record-goldens.yml`): `gh workflow run record-goldens.yml --ref <branch>
-   -f runner=macos-15` runs the suite once with `PEREGRINE_GOLDEN=record` and
+   system when it is not Linux: `tests/golden/synthetic/aarch64-neon-dotprod-macos/` on macOS (and the
+   session fixture `tests/fixtures/session/aarch64-neon-dotprod-macos.txt`), and
+   `tests/golden/synthetic/x86_64-avx2-windows/` on Windows. Record on the platform itself with the
+   manually started **Record goldens** workflow (`.github/workflows/record-goldens.yml`); its `isa`
+   input pins the tier (`PEREGRINE_ISA`; empty is the runner's own tier) and names the artefact after
+   it. A change that adds a synthetic model or a format thus does three recordings — macOS as it is,
+   and Windows twice, because the Windows pool draws both AVX2 and AVX-512 machines and the pinned
+   AVX2 set is the one every runner of the pool reproduces:
+
+   ```sh
+   gh workflow run record-goldens.yml --ref <branch> -f runner=macos-15
+   gh workflow run record-goldens.yml --ref <branch> -f runner=windows-2025 -f isa=scalar
+   gh workflow run record-goldens.yml --ref <branch> -f runner=windows-2025 -f isa=avx2
+   gh run list --workflow record-goldens.yml --branch <branch> --limit 3   # the run ids
+   gh run watch <id> --exit-status             # repeat while a run is still going
+   gh run download <id> -n goldens-macos-15-native -D /tmp/s7-goldens
+   gh run download <id> -n goldens-windows-2025-scalar -D /tmp/s7-goldens
+   gh run download <id> -n goldens-windows-2025-avx2 -D /tmp/s7-goldens
+   tar -xzf /tmp/s7-goldens/goldens.tar.gz -C .   # each artefact unpacks over the checkout
+   git status --porcelain -- crates/peregrine-models/tests/golden crates/peregrine-models/tests/fixtures
+   ```
+
+   The workflow runs the suite once with `PEREGRINE_GOLDEN=record` and
    `PEREGRINE_SESSION_FIXTURE=record`, runs it again without the switch to prove the values reproduce,
-   counts the skips before and after, and uploads the changed files as an artefact:
-   `gh run download <id> -n goldens-macos-15 -D /tmp/s7-goldens`, then unpack
-   `goldens.tar.gz` over the checkout and commit the files by name. Real-model goldens
+   and counts and prints the "no golden for tier" / "no recording for tier" skips before and after;
+   the second run fails if one is left. Commit the downloaded files by name, under the `-macos` and
+   `-windows` directories only. Real-model goldens
    (`tests/golden.rs`) need model files and a machine of that platform; until one exists they are
    skipped there, and CI has no model files anywhere. The workflow's runner choices are `macos-15`,
    `ubuntu-24.04`, `ubuntu-24.04-arm` and `windows-2025` (the Windows steps run under Git Bash);
-   recording the Windows golden set itself is S7.4, so no `-windows` goldens are committed yet. For the real-model goldens, `require` fails a
+   the Windows AVX-512 tier (`x86_64-avx2-avx512-vnni-gfni-vbmi-windows`) is recorded only when a
+   native run happens to draw an AVX-512 runner, and until then its golden tests skip there. On every
+   pull request `ci.yml` compares the committed sets on both systems on a pinned tier and fails on any
+   skip line (`synthetic goldens (Windows, pinned AVX2, no skips)` and
+   `synthetic goldens (macOS, pinned, no skips)`), so a golden added on Linux without its macOS and
+   Windows counterparts fails instead of skipping silently. For the real-model goldens, `require` fails a
    model file that is present but has no golden for the tier, and still skips a file that is absent. A golden pins one upload, byte for byte: a different upload of the same quant (the Qwen official `qwen2.5-0.5b-instruct-q4_k_m.gguf` is not bartowski's `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf`) fails at the golden's `model … bytes` line, so check the SHA-256 listed here before reading a mismatch as a regression.
    `tests/runtime_parity.rs` pins what the session and a one-slot engine must agree on, since ADR 0007
    made the engine the only runtime: the same prompt through `Session` and through a one-slot `Engine`
@@ -206,6 +229,29 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    texts (20–2040 tokens) and llama.cpp's ids and vectors under `tests/fixtures/nomic-bert/` for
    nomic-embed-text v1.5 F16 and Q8_0, and skips a file that is absent: the files are looked for
    in `models/`, `~/models/` and `/var/tmp/models-s48a`.
+   S4.8b's `nomic-bert-moe` family (nomic-embed-text-v2-moe) is covered the same way: a
+   synthetic four-layer file with four experts (two used), MoE on the odd layers and the
+   plain GELU feed-forward on the even ones, the attention/plain-FFN biases, the XLM-R
+   unigram tokenizer, and malformed variants (wrong expert count, wrong router rows, a
+   missing expert tensor); the vector against `tests/support/nomic_bert_moe_ref.rs`'s
+   independent scalar forward, whose routing is written out longhand (bit for bit for
+   F32, and for Q8_0 on the f16 panels the family widens the file into at load); the
+   batch/thread/pass-budget invariance matrix on
+   F32 and Q8_0; the refusals by name; the no-allocation pass; the server and CLI cases
+   (`a_nomic_bert_moe_encoder_*`); and
+   `tests/golden/synthetic/<tier>/nomic-bert-moe-Q8_0.golden`, recorded on scalar, AVX2
+   and AVX-512 under SDE (no aarch64 golden yet). Its ignored real-file test uses 200
+   `search_document: ` texts (17–511 tokens, 24 languages) and llama.cpp's ids and vectors
+   under `tests/fixtures/nomic-bert-moe/` for the F16 and Q8_0 files, looks for the models
+   in `models/`, `~/models/` and `/var/tmp/s48b-models`, and skips one that is absent. The
+   F16 minimum is 0.9997738 (not 0.9999): one text's last MoE layer sits on a top-2
+   boundary, and the note names it — do not read it as a stale bound, and do not lower the
+   continuous agreement by "fixing" the GELU table. Its Q8_0 clauses are relative to
+   llama.cpp's own run of the same file (mean within 1e-4, minimum within 1e-3) and are
+   computed from the fixtures in the same run, so a change of engine arithmetic shows up
+   as a comparison rather than as a pinned number; the family must keep reading the
+   packed float path (its banks per expert, its Q8_0 matrices widened to f16 panels) or
+   both clauses go with the int8 activations.
    The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
@@ -702,18 +748,23 @@ unless `--no-fail-fast` is passed, which is what the development loop uses.
 What is different there:
 
 - **Goldens.** The synthetic and real goldens are keyed by tier and, off Linux, by system
-  (`-macos` since S7.1, `-windows` since S7.2), so the Windows job compares against
-  `tests/golden/…-windows/` and **skips** while those directories do not exist. The job does not
-  set `PEREGRINE_GOLDEN=require`; recording Windows' goldens is S7.4. The session fixture
-  (`tests/fixtures/session/`) is keyed the same way and also skips.
+  (`-macos` since S7.1, `-windows` since S7.4), so the Windows job compares against
+  `tests/golden/…-windows/`; its own set is `x86_64-avx2-windows` and `x86_64-windows`, and the
+  AVX-512 one exists only if a native recording drew an AVX-512 runner. The job runs the
+  golden-bearing targets a second time with `PEREGRINE_ISA=avx2` and fails on any
+  "no golden for tier" / "no recording for tier" line, so every runner of the pool compares the
+  pinned AVX2 set and a missing Windows golden fails CI. The session fixture
+  (`tests/fixtures/session/`) is keyed the same way. `PEREGRINE_GOLDEN=require` is not set by the
+  job: a real-model golden must still skip without its model file.
 - **Signals.** Windows has no `SIGTERM`. `serve_lifetime.rs` and `server_multi_model.rs` run a
   Windows counterpart of their clean-shutdown test that writes the stop file and gets the same
   drain (in-flight requests finish, new connections are refused, exit status 0). The Unix `SIGTERM`
   tests are unchanged. `serve --background`, `status`, `stop` and `upgrade` work on Windows; a
   foreground `serve` also stops cleanly on Ctrl-C.
-- **What still skips on Windows.** Only the goldens: the synthetic and session fixtures are keyed
-  `-windows` and are recorded in S7.4 (`PEREGRINE_GOLDEN=require` is never set in the Windows job).
-  Measurement on real Windows hardware is S7.4 too.
+- **What still skips on Windows.** Real-model goldens (`tests/golden.rs`), which need model files CI
+  does not have, and the AVX-512 tier's synthetic goldens until an AVX-512 runner is drawn for a
+  native recording. The AVX2 and scalar sets are committed and compared on every PR (S7.4).
+  Measurement on real Windows hardware (rather than a GitHub runner) is still open.
 - **Mapped files.** Windows refuses to rewrite, rename over or delete a file that is mapped, so a
   test that writes a synthetic model a loaded model still has mapped gets a fresh file name
   (`write_*` in `tests/support/models.rs` returns a new path each time), and the pack cache keeps

@@ -1,0 +1,91 @@
+base file    base/smollm2.base.bin
+  n_ctx 512, n_vocab 49152, n_chunk 40
+  255 scored positions per chunk (the second half, the last one excluded), 10200 in total
+model        models/SmolLM2-360M-Instruct.Q4_K_M.gguf
+  n_vocab 49152, add_bos false
+  KV cache    f16
+  prompt rows unmarked (the exact default)
+  8-bit form  0 bytes
+reference    the same model, no row marked (exact)
+  8-bit form  0 bytes
+   1    PPL    8.6808    KLD   0.00000    same top p 100.000 %
+   2    PPL   13.7953    KLD   0.00000    same top p 100.000 %
+   3    PPL   12.2862    KLD   0.00000    same top p 100.000 %
+   4    PPL   12.9709    KLD   0.00000    same top p 100.000 %
+   5    PPL   13.0635    KLD   0.00000    same top p 100.000 %
+   6    PPL   13.4986    KLD   0.00000    same top p 100.000 %
+   7    PPL   13.8399    KLD   0.00000    same top p 100.000 %
+   8    PPL   14.6692    KLD   0.00000    same top p 100.000 %
+   9    PPL   15.7767    KLD   0.00000    same top p 100.000 %
+  10    PPL   16.1433    KLD   0.00000    same top p 100.000 %
+  11    PPL   16.1985    KLD   0.00000    same top p 100.000 %
+  12    PPL   16.4428    KLD   0.00000    same top p 100.000 %
+  13    PPL   16.5672    KLD   0.00000    same top p 100.000 %
+  14    PPL   16.9383    KLD   0.00000    same top p 100.000 %
+  15    PPL   17.1942    KLD   0.00000    same top p 100.000 %
+  16    PPL   17.3807    KLD   0.00000    same top p 100.000 %
+  17    PPL   16.4105    KLD   0.00000    same top p 100.000 %
+  18    PPL   16.5296    KLD   0.00000    same top p 100.000 %
+  19    PPL   16.7356    KLD   0.00000    same top p 100.000 %
+  20    PPL   16.7591    KLD   0.00000    same top p 100.000 %
+  21    PPL   16.6227    KLD   0.00000    same top p 100.000 %
+  22    PPL   16.3549    KLD   0.00000    same top p 100.000 %
+  23    PPL   15.8681    KLD   0.00000    same top p 100.000 %
+  24    PPL   15.4976    KLD   0.00000    same top p 100.000 %
+  25    PPL   15.0343    KLD   0.00000    same top p 100.000 %
+  26    PPL   14.6427    KLD   0.00000    same top p 100.000 %
+  27    PPL   14.2275    KLD   0.00000    same top p 100.000 %
+  28    PPL   14.2001    KLD   0.00000    same top p 100.000 %
+  29    PPL   13.8977    KLD   0.00000    same top p 100.000 %
+  30    PPL   13.6947    KLD   0.00000    same top p 100.000 %
+  31    PPL   13.7434    KLD   0.00000    same top p 100.000 %
+  32    PPL   13.7136    KLD   0.00000    same top p 100.000 %
+  33    PPL   13.8110    KLD   0.00000    same top p 100.000 %
+  34    PPL   13.8898    KLD   0.00000    same top p 100.000 %
+  35    PPL   13.9538    KLD   0.00000    same top p 100.000 %
+  36    PPL   14.0568    KLD   0.00000    same top p 100.000 %
+  37    PPL   14.2562    KLD   0.00000    same top p 100.000 %
+  38    PPL   14.3548    KLD   0.00000    same top p 100.000 %
+  39    PPL   14.2641    KLD   0.00000    same top p 100.000 %
+  40    PPL   14.2492    KLD   0.00000    same top p 100.000 %
+
+====== Perplexity statistics ======
+reference: this model's exact mode (no row marked)
+Mean PPL(Q)                   :  14.249246 ±   0.410623
+Mean PPL(base)                :   1.000000 ±   0.000000
+Cor(ln(PPL(Q)), ln(PPL(base))):    inf%
+Mean ln(PPL(Q)/PPL(base))     :   2.656704 ±        NaN
+Mean PPL(Q)/PPL(base)         :  14.249246 ±        NaN
+Mean PPL(Q)-PPL(base)         :  13.249246 ±   0.353869
+
+====== KL divergence statistics ======
+Mean    KLD:   0.000000 ±   0.000000
+Maximum KLD:   0.000000
+99.9%   KLD:   0.000000
+99.0%   KLD:   0.000000
+95.0%   KLD:   0.000000
+90.0%   KLD:   0.000000
+Median  KLD:   0.000000
+10.0%   KLD:   0.000000
+ 5.0%   KLD:   0.000000
+ 1.0%   KLD:   0.000000
+ 0.1%   KLD:   0.000000
+Minimum KLD:   0.000000
+
+====== Token probability statistics ======
+Mean    Δp:  0.000 ± 0.000 %
+Maximum Δp:  0.000%
+99.9%   Δp:  0.000%
+99.0%   Δp:  0.000%
+95.0%   Δp:  0.000%
+90.0%   Δp:  0.000%
+75.0%   Δp:  0.000%
+Median  Δp:  0.000%
+25.0%   Δp:  0.000%
+10.0%   Δp:  0.000%
+ 5.0%   Δp:  0.000%
+ 1.0%   Δp:  0.000%
+ 0.1%   Δp:  0.000%
+Minimum Δp:  0.000%
+RMS Δp    :  0.000 ±   NaN %
+Same top p: 100.000 ± 0.000 %

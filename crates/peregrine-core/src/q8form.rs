@@ -1,20 +1,25 @@
-//! The resident 8-bit prompt form (S5.4b): a per-matrix copy of the Q4_K and Q6_K
-//! weights re-rounded onto one 8-bit grid per 256-weight super-block, built at load
-//! when `--fast-prompt` is on.
+//! The resident 8-bit prompt form (S5.4b): a per-matrix copy of the Q4_K, Q6_K and
+//! (since S5.4f, where the tier's table says so) Q5_0 weights re-rounded onto one
+//! 8-bit grid per 256-weight super-block, built at load when `--fast-prompt` is on.
 //!
 //! The form is `peregrine_kernels::kq8`'s layout: eight output rows interleaved per
 //! super-block, one f32 scale and one biased byte per weight. The kernel that
 //! multiplies it is the opt-in fast prompt mode's; the design and its measurements
 //! are `docs/design/s5.4-fast-prompt.md`. This module is the load-time half: it
 //! picks the matrices, lays the runs of eight rows out and fills the store with the
-//! scalar twin (`build_q4k`, `build_q6k`), which is the definition (ADR 0005).
+//! scalar twin (`build_q4k`, `build_q6k`, `build_q5_0`), which is the definition
+//! (ADR 0005).
 //!
 //! # Which matrices
 //!
-//! Every two-dimensional Q4_K and Q6_K matrix except the token embedding, which is
-//! gathered and never multiplied. Q5_0, Q5_K, Q8_0, the ternary formats and the
-//! float formats have no form in this step: their prompt rows keep the exact
-//! kernels (Q5_0's own line is S5.4c's call).
+//! Every two-dimensional matrix of a format the tier's table selects
+//! ([`peregrine_kernels::table::MatKernels::q8k_uses_form`]), except the token
+//! embedding, which is gathered and never multiplied. On AVX2 that is Q6_K only;
+//! on AVX-512 Q4_K and Q6_K (unchanged by S5.4f); on a tier without a SIMD body,
+//! nothing, so the mode computes exactly what the exact engine computes. Q5_0 is
+//! in the form's set: aarch64's `dotprod`/`i8mm` caps select it (S5.4h, §5h),
+//! no x86 tier does (level with AVX2's exact kernel at 2048 weights and 0.88×
+//! at Qwen 2.5's 896-wide rows, §5g).
 //!
 //! # Which rows
 //!
@@ -41,6 +46,7 @@ use crate::gguf::{Format, Gguf, TensorInfo};
 use crate::kq::TILE_ROWS;
 use crate::model::KqStore;
 use peregrine_kernels::kq8::Q8K_SIZE;
+use peregrine_kernels::table::MatKernels;
 
 /// The token embedding: gathered row by row, never multiplied, so it has no form.
 const EMBEDDING: &str = "token_embd.weight";
@@ -50,7 +56,7 @@ const EMBEDDING: &str = "token_embd.weight";
 pub struct Q8Entry {
     /// The tensor's name in the file.
     pub name: String,
-    /// The matrix's format: Q4_K or Q6_K.
+    /// The matrix's format: Q4_K, Q6_K or Q5_0.
     pub kind: Format,
     /// Where the matrix's form starts in the store.
     pub offset: usize,
@@ -64,18 +70,36 @@ pub struct Q8Entry {
 
 impl Q8Entry {
     /// The 256-weight super-blocks of one row.
+    ///
+    /// Q4_K and Q6_K rows are always whole super-blocks; a Q5_0 row may stop
+    /// inside one (Qwen 2.5 0.5B's 896-wide rows), and the form's last super-block
+    /// is then short — its missing codes are zero.
     pub fn super_blocks(&self) -> usize {
-        self.cols / 256
+        self.cols.div_ceil(256)
     }
 }
 
-/// Whether a tensor gets a form in this step.
+/// Whether a tensor's format has a form on this tier (S5.4f's table), and its
+/// shape allows one.
+///
+/// Q4_K and Q6_K matrices must be whole 256-weight super-blocks wide (their exact
+/// kernels are). Q5_0's rows are multiples of its 32-weight block, and a row that
+/// stops inside a super-block keeps a short last one.
 fn eligible(t: &TensorInfo) -> bool {
-    matches!(t.kind, Format::Q4_K | Format::Q6_K)
-        && t.dims.len() == 2
-        && t.name != EMBEDDING
-        && t.dims[1] as usize >= TILE_ROWS
-        && t.dims[0] as usize % 256 == 0
+    if t.dims.len() != 2
+        || t.name == EMBEDDING
+        || (t.dims[1] as usize) < TILE_ROWS
+        || !MatKernels::get().q8k_uses_form(t.kind)
+    {
+        return false;
+    }
+    let cols = t.dims[0] as usize;
+    match t.kind {
+        Format::Q4_K | Format::Q6_K => cols % 256 == 0,
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q5_0 => cols % 32 == 0,
+        _ => false,
+    }
 }
 
 /// The matrices the form store holds, in store order (the file's tensor order, so
@@ -89,7 +113,7 @@ pub fn layout(g: &Gguf) -> Vec<Q8Entry> {
     for (name, t) in mats {
         let rows = (t.dims[1] as usize / TILE_ROWS) * TILE_ROWS;
         let cols = t.dims[0] as usize;
-        let n_sb = cols / 256;
+        let n_sb = cols.div_ceil(256);
         let len = (rows / TILE_ROWS) * n_sb * Q8K_SIZE;
         entries.push(Q8Entry {
             name: name.clone(),
@@ -111,6 +135,15 @@ pub fn layout(g: &Gguf) -> Vec<Q8Entry> {
 /// k-quant store: the form does not depend on `PEREGRINE_KREPACK`, and a scalar
 /// tier (where the repack is off by default) still gets the mode.
 pub fn build(g: &mut Gguf, entries: &[Q8Entry]) -> KqStore {
+    // A Q5_0 matrix whose row stops inside its last 256-weight super-block (Qwen
+    // 2.5's 896-wide rows) is multiplied against a padded activation buffer, which
+    // `QuantAct::fill` builds only when it knows the form will read it (S5.4h).
+    if entries
+        .iter()
+        .any(|e| e.kind == Format::Q5_0 && !e.cols.is_multiple_of(256))
+    {
+        peregrine_kernels::kq8::note_padded_q5_form();
+    }
     let total: usize = entries.iter().map(|e| e.len).sum();
     let mut store = KqStore::new(total);
     {
@@ -139,32 +172,60 @@ pub fn build(g: &mut Gguf, entries: &[Q8Entry]) -> KqStore {
 fn build_matrix(file: &Gguf, e: &Q8Entry, t: &TensorInfo, dst: &mut [u8]) {
     let blk = e.kind.block_bytes();
     let n_sb = e.super_blocks();
-    let rb = n_sb * blk;
+    let rb = (e.cols / e.kind.block()) * blk;
     let groups = e.rows / TILE_ROWS;
-    let tile_bytes = match e.kind {
-        Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
-        _ => peregrine_kernels::kq::Q6K8::SIZE,
-    };
-    let mk = peregrine_kernels::table::MatKernels::get();
+    let mk = MatKernels::get();
     let mut rows = vec![0u8; TILE_ROWS * rb];
-    let mut tile = vec![0u8; n_sb * tile_bytes];
-    for gr in 0..groups {
-        let at = t.offset as usize + gr * TILE_ROWS * rb;
-        file.read_data(at, &mut rows)
-            .expect("the matrix's bytes are in the file");
-        for sb in 0..n_sb {
-            let mut blocks: [&[u8]; TILE_ROWS] = [&[]; TILE_ROWS];
-            for (r, b) in blocks.iter_mut().enumerate() {
-                *b = &rows[r * rb + sb * blk..r * rb + sb * blk + blk];
-            }
-            let out = &mut tile[sb * tile_bytes..(sb + 1) * tile_bytes];
-            match e.kind {
-                Format::Q4_K => peregrine_kernels::kq::repack_q4k8(&blocks, out),
-                _ => peregrine_kernels::kq::repack_q6k8(&blocks, out),
+    match e.kind {
+        Format::Q4_K | Format::Q6_K => {
+            let tile_bytes = match e.kind {
+                Format::Q4_K => peregrine_kernels::kq::Q4K8::SIZE,
+                _ => peregrine_kernels::kq::Q6K8::SIZE,
+            };
+            let mut tile = vec![0u8; n_sb * tile_bytes];
+            for gr in 0..groups {
+                let at = t.offset as usize + gr * TILE_ROWS * rb;
+                file.read_data(at, &mut rows)
+                    .expect("the matrix's bytes are in the file");
+                for sb in 0..n_sb {
+                    let mut blocks: [&[u8]; TILE_ROWS] = [&[]; TILE_ROWS];
+                    for (r, b) in blocks.iter_mut().enumerate() {
+                        *b = &rows[r * rb + sb * blk..r * rb + sb * blk + blk];
+                    }
+                    let out = &mut tile[sb * tile_bytes..(sb + 1) * tile_bytes];
+                    match e.kind {
+                        Format::Q4_K => peregrine_kernels::kq::repack_q4k8(&blocks, out),
+                        _ => peregrine_kernels::kq::repack_q6k8(&blocks, out),
+                    }
+                }
+                let out = &mut dst[gr * n_sb * Q8K_SIZE..(gr + 1) * n_sb * Q8K_SIZE];
+                mk.q8k_build(e.kind, &tile, n_sb, out);
             }
         }
-        let out = &mut dst[gr * n_sb * Q8K_SIZE..(gr + 1) * n_sb * Q8K_SIZE];
-        mk.q8k_build(e.kind, &tile, n_sb, out);
+        #[cfg(feature = "fmt-legacy")]
+        Format::Q5_0 => {
+            // One Q5_0 block is 32 weights and the tile holds one block per row, so
+            // the tile count is the row's block count, not its super-block count.
+            let n_blk = e.cols / 32;
+            let tile_bytes = peregrine_kernels::kq::Q5_08::SIZE;
+            let mut tile = vec![0u8; n_blk * tile_bytes];
+            for gr in 0..groups {
+                let at = t.offset as usize + gr * TILE_ROWS * rb;
+                file.read_data(at, &mut rows)
+                    .expect("the matrix's bytes are in the file");
+                for b in 0..n_blk {
+                    let mut blocks: [&[u8]; TILE_ROWS] = [&[]; TILE_ROWS];
+                    for (r, out) in blocks.iter_mut().enumerate() {
+                        *out = &rows[r * rb + b * blk..r * rb + b * blk + blk];
+                    }
+                    let out = &mut tile[b * tile_bytes..(b + 1) * tile_bytes];
+                    peregrine_kernels::kq::repack_q5_08(&blocks, out);
+                }
+                let out = &mut dst[gr * n_sb * Q8K_SIZE..(gr + 1) * n_sb * Q8K_SIZE];
+                mk.q8k_build(Format::Q5_0, &tile, n_blk, out);
+            }
+        }
+        _ => unreachable!("the layout holds only formats with a form"),
     }
 }
 
@@ -173,7 +234,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_two_dimensional_q4k_and_q6k_matrices_other_than_the_embedding_are_taken() {
+    fn only_the_tier_formats_other_than_the_embedding_are_taken() {
         let t = |name: &str, kind: Format, dims: Vec<u64>| TensorInfo {
             name: name.into(),
             dims,
@@ -185,17 +246,50 @@ mod tests {
             fp_kind: None,
             q8_off: None,
         };
-        assert!(eligible(&t("a", Format::Q4_K, vec![256, 8])));
-        assert!(eligible(&t("b", Format::Q6_K, vec![512, 16])));
+        let mk = MatKernels::get();
+        assert_eq!(
+            eligible(&t("a", Format::Q4_K, vec![256, 8])),
+            mk.q8k_uses_form(Format::Q4_K)
+        );
+        assert_eq!(
+            eligible(&t("b", Format::Q6_K, vec![512, 16])),
+            mk.q8k_uses_form(Format::Q6_K)
+        );
+        // Q5_0 joins the set when the tier's table says so; its rows need not be a
+        // whole number of 256-weight super-blocks (Qwen 2.5's are 896 wide).
+        assert_eq!(
+            eligible(&t("c", Format::Q5_0, vec![256, 8])),
+            mk.q8k_uses_form(Format::Q5_0)
+        );
+        assert_eq!(
+            eligible(&t("c896", Format::Q5_0, vec![896, 8])),
+            mk.q8k_uses_form(Format::Q5_0)
+        );
         assert!(!eligible(&t(
             "token_embd.weight",
             Format::Q6_K,
             vec![256, 8]
         )));
-        assert!(!eligible(&t("c", Format::Q5_0, vec![256, 8])));
         assert!(!eligible(&t("d", Format::Q8_0, vec![256, 8])));
         assert!(!eligible(&t("e", Format::Q4_K, vec![256, 4])));
         assert!(!eligible(&t("f", Format::Q4_K, vec![128, 8])));
         assert!(!eligible(&t("g", Format::F16, vec![256, 8])));
+    }
+
+    #[test]
+    fn a_q5_0_row_that_stops_inside_a_super_block_gets_a_short_last_one() {
+        let e = Q8Entry {
+            name: "x".into(),
+            kind: Format::Q5_0,
+            offset: 0,
+            len: 4 * Q8K_SIZE,
+            rows: 8,
+            cols: 896,
+        };
+        assert_eq!(e.super_blocks(), 4);
+        let e = Q8Entry { cols: 1024, ..e };
+        assert_eq!(e.super_blocks(), 4);
+        let e = Q8Entry { cols: 4864, ..e };
+        assert_eq!(e.super_blocks(), 19);
     }
 }

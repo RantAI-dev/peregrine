@@ -297,6 +297,12 @@ pub const Q8_FLOAT_MAX_BYTES: u64 = 64 << 20;
 /// take the same route.
 pub const Q8_FLOAT_MAX_BYTES_ARM: u64 = 256 << 20;
 
+/// The largest Q8_0 file a **bidirectional mixture of experts** dequantises into f16
+/// panels (S4.8b): the experts are 48 % of nomic-embed-text-v2-moe's parameters and
+/// their int8 activations cost more accuracy than the file's byte saving is worth
+/// ([`crate::fpack::Q8Panels::Half`] keeps the panels at twice the weights).
+pub const Q8_FLOAT_MAX_BYTES_MOE: u64 = 512 << 20;
+
 /// [`pass_rows_default_for`] with the model's weight bytes, for the small-float-encoder rule.
 pub fn pass_rows_default_for(
     d_model: usize,
@@ -309,7 +315,16 @@ pub fn pass_rows_default_for(
     let ridge = (bytes_per_param.max(0.1) * ROWS_PER_WEIGHT_BYTE) as usize;
     let rows = l2_rows.min(ridge);
     if bidirectional {
-        let floor = if float_only && weight_bytes <= SMALL_FLOAT_ENCODER_BYTES {
+        let floor = if float_only && weight_bytes > SMALL_FLOAT_ENCODER_BYTES {
+            // A **large** float encoder is the same case as the small one below, only
+            // more so: its pass streams every weight it owns, so a narrow pass pays
+            // that stream once per text of a batch. Measured on nomic-embed-text-v2-moe
+            // (566 MB of f16 panels, S4.8b): sixteen 32-token texts take 1.53 s at 32
+            // rows per pass and 0.90 s at 128, with the single-text cells unchanged
+            // (a text is never split). The packed float kernel blocks at 128 rows
+            // anyway, so the pass cannot usefully be wider.
+            PASS_ROWS_DEFAULT
+        } else if float_only && weight_bytes <= SMALL_FLOAT_ENCODER_BYTES {
             PASS_ROWS_DEFAULT / 2
         } else {
             PASS_ROWS_DEFAULT / 8
@@ -331,6 +346,32 @@ pub fn fast_prompt_simd() -> bool {
 /// the scalar twin.
 pub fn fast_prompt_body() -> Option<&'static str> {
     peregrine_kernels::table::MatKernels::get().q8k_body()
+}
+
+/// The weight formats whose prompt rows take the 8-bit form on this tier (S5.4f).
+///
+/// Empty where the tier has no faster 8-bit kernel: the option then computes
+/// exactly what the exact engine computes, and the startup line says so.
+pub fn fast_prompt_formats() -> &'static [peregrine_kernels::format::Format] {
+    peregrine_kernels::table::MatKernels::get().q8k_formats()
+}
+
+/// [`fast_prompt_formats`] as the human-readable list the startup line, `peregrine
+/// tier` and the option's help quote (`"Q6_K and Q5_0"`, or `"none"`).
+pub fn fast_prompt_format_list() -> String {
+    let formats = fast_prompt_formats();
+    match formats {
+        [] => "none".to_string(),
+        [one] => one.label().to_string(),
+        [.., last] => {
+            let head = formats[..formats.len() - 1]
+                .iter()
+                .map(|f| f.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{head} and {}", last.label())
+        }
+    }
 }
 
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
@@ -390,12 +431,19 @@ pub struct EngineOptions {
     pub tb_span: usize,
     /// `PEREGRINE_EXACT=1`: ternary matmuls in f32 against decoded weights (slow reference path).
     pub exact: bool,
-    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): the Q4_K and Q6_K weights of a
-    /// *prompt* row are read from an 8-bit form built at load, one scale per 256
-    /// weights, instead of the file's own codes. Prompt passes get faster and
-    /// their logits move (the accuracy report that says by how much is roadmap
-    /// S5.4c, not published yet); generated rows, embeddings, rerank and
-    /// decisions keep the exact kernels. Off by default (ADR 0003);
+    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): a *prompt* row reads the weights
+    /// of the formats whose 8-bit form beats this CPU tier's exact kernel from a form
+    /// built at load (AVX-512: Q4_K and Q6_K, one f32 scale per 256 weights; AVX2:
+    /// Q6_K; aarch64: Q4_K and Q6_K, and Q5_0 where the multiply is a NEON body
+    /// (`neon-dotprod`, `neon-i8mm`, S5.4h); a tier with no SIMD body: none, so the
+    /// option computes exactly what the exact engine computes). Prompt passes get
+    /// 1.18-1.46× faster on AVX-512 (1.05-1.08× on an AVX2 host, S5.4f; 1.72-2.73×
+    /// on Qwen 2.5 0.5B on ARM, S5.4h) and their logits move: on Llama 3.2 1B
+    /// Q4_K_M, measured on AVX-512, the prompt's mean KL divergence from the default
+    /// engine is 0.0035 and 96.7 % of positions keep the same top token (the report:
+    /// `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`). Generated rows keep the
+    /// exact kernels, on a cache the 8-bit prompt wrote; embeddings, rerank and
+    /// decisions keep the exact kernels throughout. Off by default (ADR 0003);
     /// `docs/design/s5.4-fast-prompt.md`.
     pub fast_prompt: bool,
 
@@ -944,6 +992,7 @@ impl EngineOptions {
             exact: self.exact,
             kq_repack: self.kq_repack,
             fpack: self.fpack,
+            fast_prompt: self.fast_prompt,
         }
     }
 }
@@ -1143,12 +1192,14 @@ mod tests {
         assert!(pass_rows_default_for(1024, 2.0, false, 0, true) >= 16);
         assert!(pass_rows_default_for(4096, 4.0, false, 0, true) <= 64);
         assert!(pass_rows_default_for(1024, 1.06, true, 0, false) >= 32);
-        // A small float encoder takes whole 128-row blocks; a Q8_0 one or a large float
-        // model keeps the 32-row floor.
+        // A float encoder takes whole 128-row blocks, of any size (S4.8b measured a
+        // 566 MB mixture of experts at 1.53 s -> 0.90 s on a sixteen-text batch); a
+        // Q8_0 one keeps the 32-row floor.
         assert_eq!(pass_rows_default_for(384, 2.0, true, 22 << 20, true), 128);
         assert_eq!(pass_rows_default_for(384, 4.0, true, 132 << 20, true), 128);
+        assert_eq!(pass_rows_default_for(384, 2.0, true, 600 << 20, true), 128);
         assert!(pass_rows_default_for(384, 1.06, true, 34 << 20, false) <= 32);
-        assert!(pass_rows_default_for(384, 2.0, true, 600 << 20, true) <= 32);
+        assert!(pass_rows_default_for(384, 2.0, true, 600 << 20, false) <= 32);
         if l2_bytes() >= 64 << 10 {
             assert!(
                 pass_rows_default_for(1024, 4.0, false, 0, true)

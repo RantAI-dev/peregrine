@@ -165,9 +165,9 @@ pub fn matmul_group(
     // else, so the batch is split into runs of one kind and each run is multiplied
     // as it would be alone. With no mixed pass — the default engine, a decode step,
     // a prompt with no decoder beside it — the split makes one call, as before.
-    let split = jobs.iter().any(|j| j.w.q8_off.is_some())
-        && acts[..nb].iter().any(|a| a.prompt)
-        && acts[..nb].iter().any(|a| !a.prompt);
+    let has_form = jobs.iter().any(|j| j.w.q8_off.is_some());
+    let split =
+        has_form && acts[..nb].iter().any(|a| a.prompt) && acts[..nb].iter().any(|a| !a.prompt);
     let mut b0 = 0usize;
     while b0 < nb {
         let run_end = if split {
@@ -181,8 +181,10 @@ pub fn matmul_group(
             nb
         };
         // A fast prompt pass reads the weights once for up to `MAX_BATCH` rows; every
-        // other pass keeps the 128-row split it had before S5.4b.
-        let cap = if acts[b0].prompt {
+        // other pass keeps the 128-row split it had before S5.4b. A group with no
+        // resident form — every format outside the tier's table — keeps that split
+        // too, so the mode runs the exact engine's own kernel calls (S5.4f).
+        let cap = if acts[b0].prompt && has_form {
             MAX_BATCH
         } else {
             DEFAULT_BATCH
@@ -244,20 +246,31 @@ fn matmul_block(
     // The interleaved activation is built once for the group, from the
     // activation the group shares: every output row of the group reads it, so
     // building it per matrix would multiply the work by the group's size. Only
-    // the k-quant tiles need it — the Q5_0 and Q8_0 tiles read the per-32 layout
-    // the activation already has — and its fill requires a whole number of 256-weight
-    // super-blocks, which a Q5_0 or Q8_0 matrix's 896-wide rows are not.
+    // the k-quant tiles need it — the Q5_0 and Q8_0 exact tiles read the per-32
+    // layout the activation already has — and its fill requires a whole number of
+    // 256-weight super-blocks, which a Q5_0 exact matrix's 896-wide rows are not.
     let kq_fill = jobs.iter().zip(paths).any(|(j, &p)| {
         p == MatPath::KqTiles && matches!(j.w.kind, Format::Q4_K | Format::Q5_K | Format::Q6_K)
     });
     // The 8-bit form reads the interleaved activation at every width, even one row
-    // (S5.4b); the exact k-quant kernels only need it from four rows up.
-    let q8_fill = acts[0].prompt
+    // (S5.4b); the exact k-quant kernels only need it from four rows up. A form
+    // matrix whose row stops inside its last 256-weight super-block (Q5_0's
+    // 896-wide rows) needs a padded buffer of its own, so the exact kernels keep
+    // the unpadded one they had (S5.4f).
+    let q8_plain = acts[0].prompt
         && jobs
             .iter()
-            .any(|j| matches!(j.w.kind, Format::Q4_K | Format::Q6_K) && j.w.q8_off.is_some());
-    if (kq_fill && nb >= 4) || q8_fill {
-        kq.fill_with(&acts[..nb], q8_fill);
+            .any(|j| j.w.q8_off.is_some() && (j.w.dims[0] as usize).is_multiple_of(256));
+    let q8_pad = acts[0].prompt
+        && jobs
+            .iter()
+            .any(|j| j.w.q8_off.is_some() && !(j.w.dims[0] as usize).is_multiple_of(256));
+    if (kq_fill && nb >= 4) || q8_plain {
+        kq.fill_with(&acts[..nb], q8_plain);
+    }
+    let mut kq_pad = peregrine_kernels::kq::KqActs::default();
+    if q8_pad {
+        kq_pad.fill_padded(&acts[..nb], true);
     }
     // The rows `lo..hi` of the concatenated row space.
     let rows_range = |lo: usize, hi: usize, tmp: &mut [f32; MAX_BATCH]| {
@@ -334,13 +347,9 @@ fn matmul_block(
                     let store = w.kq();
                     let rows = j.rows();
                     // The fast prompt mode's resident form, when this matrix has one
-                    // and the pass's rows are prompt rows (S5.4b). Q5_K, Q5_0 and
-                    // Q8_0 keep their kernels: they have no form in this step.
-                    let q8_off = if fast_row && matches!(j.w.kind, Format::Q4_K | Format::Q6_K) {
-                        j.w.q8_off
-                    } else {
-                        None
-                    };
+                    // and the pass's rows are prompt rows (S5.4b; Q5_0 joins where the
+                    // tier's table selects it, S5.4f).
+                    let q8_off = if fast_row { j.w.q8_off } else { None };
                     let repacked = (rows / KQ_TILE_ROWS) * KQ_TILE_ROWS;
                     // The tiles that cover the rows of this range. A tile is
                     // computed whole, so a range that starts inside one costs
@@ -356,9 +365,15 @@ fn matmul_block(
                             let tile = &store[at..at + n_sb * tile_bytes];
                             let out = &mut blk[..KQ_TILE_ROWS * nb];
                             if let Some(qo) = q8_off {
-                                let q = qo + t * n_sb * peregrine_kernels::kq8::Q8K_SIZE;
-                                let form = &w.q8()[q..q + n_sb * peregrine_kernels::kq8::Q8K_SIZE];
-                                mk.q8k_gemm(form, n_sb, kq, nb, out);
+                                let form_sb = n.div_ceil(256);
+                                let q = qo + t * form_sb * peregrine_kernels::kq8::Q8K_SIZE;
+                                let form =
+                                    &w.q8()[q..q + form_sb * peregrine_kernels::kq8::Q8K_SIZE];
+                                // A row whose width is not a whole number of
+                                // super-blocks reads the padded activation buffer.
+                                let fa: &peregrine_kernels::kq::KqActs =
+                                    if n % 256 == 0 { kq } else { &kq_pad };
+                                mk.q8k_gemm(form, form_sb, fa, nb, out);
                             } else {
                                 match j.w.kind {
                                     Format::Q5_0 => {
@@ -477,16 +492,14 @@ fn matmul_block(
                 MatPath::PerRow => {
                     let bytes = w.bytes(j.w);
                     let mut r = r;
-                    // A prompt row of a Q4_K or Q6_K matrix with a resident form
-                    // (S5.4b). This path is the Q6_K prompt kernel on x86 (its tile
-                    // GEMV loses there) and both formats on a tier whose k-quant
-                    // tiles are off; the form's own kernel is 8-row, so whole runs
-                    // are multiplied from it and a short tail stays exact.
-                    if let Some(q8_off) =
-                        j.w.q8_off
-                            .filter(|_| fast_row && matches!(j.w.kind, Format::Q4_K | Format::Q6_K))
-                    {
-                        let n_sb = n / j.w.kind.block();
+                    // A prompt row of a matrix with a resident form (S5.4b; Q5_0
+                    // joins where the tier's table selects it, S5.4f). This path is
+                    // the Q6_K prompt kernel on x86 (its tile GEMV loses there) and
+                    // every form format on a tier whose k-quant tiles are off; the
+                    // form's own kernel is 8-row, so whole runs are multiplied from
+                    // it and a short tail stays exact.
+                    if let Some(q8_off) = j.w.q8_off.filter(|_| fast_row) {
+                        let form_sb = n.div_ceil(256);
                         let rows = j.rows();
                         let repacked = (rows / KQ_TILE_ROWS) * KQ_TILE_ROWS;
                         let lo = r.min(repacked);
@@ -496,10 +509,13 @@ fn matmul_block(
                             let first = lo / KQ_TILE_ROWS;
                             let last = hi.div_ceil(KQ_TILE_ROWS);
                             for t in first..last {
-                                let q = q8_off + t * n_sb * peregrine_kernels::kq8::Q8K_SIZE;
-                                let form = &w.q8()[q..q + n_sb * peregrine_kernels::kq8::Q8K_SIZE];
+                                let q = q8_off + t * form_sb * peregrine_kernels::kq8::Q8K_SIZE;
+                                let form =
+                                    &w.q8()[q..q + form_sb * peregrine_kernels::kq8::Q8K_SIZE];
                                 let out = &mut blk[..KQ_TILE_ROWS * nb];
-                                mk.q8k_gemm(form, n_sb, kq, nb, out);
+                                let fa: &peregrine_kernels::kq::KqActs =
+                                    if n % 256 == 0 { kq } else { &kq_pad };
+                                mk.q8k_gemm(form, form_sb, fa, nb, out);
                                 let lo = r.max(t * KQ_TILE_ROWS) - t * KQ_TILE_ROWS;
                                 let hi = rz.min((t + 1) * KQ_TILE_ROWS) - t * KQ_TILE_ROWS;
                                 let u = Untiler {

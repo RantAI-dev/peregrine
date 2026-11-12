@@ -19,8 +19,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use support::models::{
     write_dense_pooled, write_gemma_embedding, write_jina_bert, write_modern_bert,
-    write_nomic_bert, Dense, GemmaEmbeddingConfig, JinaBertConfig, ModernBertConfig,
-    NomicBertConfig,
+    write_nomic_bert, write_nomic_bert_moe, Dense, GemmaEmbeddingConfig, JinaBertConfig,
+    ModernBertConfig, NomicBertConfig, NomicBertMoeConfig,
 };
 
 const WIDTH: usize = 256;
@@ -579,6 +579,88 @@ fn a_modern_bert_encoder_serves_embeddings_and_refuses_chat() {
 fn a_nomic_bert_encoder_serves_embeddings_and_refuses_chat() {
     let dir = tmpdir("nomic-bert");
     let model = write_nomic_bert(&dir, Format::F16, 74, NomicBertConfig::default());
+    let (child, port) = common::start(
+        &dir,
+        &[],
+        &[
+            "serve",
+            "-m",
+            model.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            common::PORT,
+            "--ctx",
+            "64",
+            "--threads",
+            "2",
+            "--slots",
+            "4",
+            "--no-profile",
+        ],
+    );
+    let _guard = Guard(child);
+    wait_for_health(port);
+
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": ["hello world", "the test of a paris city", "hello world"]}),
+    );
+    assert_eq!(status, 200, "{body}");
+    for i in 0..3 {
+        let v = embedding(&body, i);
+        assert_eq!(v.len(), 128, "width");
+        assert!((norm(&v) - 1.0).abs() < 1e-4, "normalised");
+    }
+    assert_eq!(
+        bits(&embedding(&body, 0)),
+        bits(&embedding(&body, 2)),
+        "the same text has one vector"
+    );
+    // Matryoshka: truncate, then normalise.
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": "hello", "dimensions": 32}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(embedding(&body, 0).len(), 32);
+    assert!((norm(&embedding(&body, 0)) - 1.0).abs() < 1e-4);
+
+    let (status, body) = post(
+        port,
+        "/v1/chat/completions",
+        json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("embedding model"));
+
+    let long: Vec<u32> = (5..90).collect();
+    let (status, body) = post(port, "/v1/embeddings", json!({"input": long}));
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("64"), "message: {message}");
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": long, "truncate": true}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["usage"]["prompt_tokens"].as_u64().unwrap(), 64);
+}
+
+/// The `nomic-bert-moe` family served (roadmap S4.8b): a synthetic file with mean
+/// pooling and the mixture of experts answers `/v1/embeddings` for strings (the XLM-R
+/// unigram tokenizer's `<s> … </s>`), truncates to `dimensions` before normalising,
+/// refuses chat by name, and names its context as the text limit.
+#[test]
+fn a_nomic_bert_moe_encoder_serves_embeddings_and_refuses_chat() {
+    let dir = tmpdir("nomic-bert-moe");
+    let model = write_nomic_bert_moe(&dir, Format::F16, 76, NomicBertMoeConfig::default());
     let (child, port) = common::start(
         &dir,
         &[],

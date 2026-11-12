@@ -2,12 +2,20 @@
 //!
 //! ```text
 //! cargo run --release -p peregrine-bench --example neonbench -- [n] [rows] [reps]
+//! cargo run --release -p peregrine-bench --example neonbench -- table [n_sb] [reps] [threads] [whole|row896|both]
 //! ```
 //!
 //! One thread, synthetic weights and activations, L1/L2-resident. Reports GMAC/s per core for the
 //! per-row Q8_0 and Q4_K kernels, the eight-row Q8_0 decode kernel, and the repacked Q4_K tile
 //! GEMV and GEMM, each beside the scalar reference it replaces. The ratio is what `docs/design/
 //! s2.8-neon.md` §7.3 asks for: it separates "the kernel is faster" from "the model got faster".
+//!
+//! The second form is S5.4h's decision table: the *exact* tile kernel against the *8-bit form*,
+//! for Q4_K, Q6_K and Q5_0, at 8/64/128/512 activation rows, at one and `threads` workers, on
+//! the whole-block shape and on Qwen 2.5's 896-wide row (three and a half super-blocks, so the
+//! form pads a fourth). It goes through `MatKernels`' own entry points, so each tier's table
+//! selects the body it would in the engine: run it under `PEREGRINE_ISA=neon-dotprod` and
+//! `PEREGRINE_ISA=neon-i8mm` to get the two aarch64 rows of the table.
 
 #[cfg(not(target_arch = "aarch64"))]
 fn main() {
@@ -16,6 +24,11 @@ fn main() {
 
 #[cfg(target_arch = "aarch64")]
 fn main() {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().is_some_and(|a| a == "table") {
+        form_kernel_table(&raw[1..]);
+        return;
+    }
     use peregrine_kernels::format::Format;
     use peregrine_kernels::kq::{
         dot_q4k8_ref, dot_q5_08_ref, dot_q6k8_ref, repack_q4k8, repack_q5_08, repack_q6k8,
@@ -558,6 +571,240 @@ fn main() {
                     }
                     black_box(out[0]);
                 });
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S5.4h: the table that decides which formats take the 8-bit form on this tier
+// ---------------------------------------------------------------------------
+
+/// The exact tile kernel against the 8-bit form, per format and tier, at the
+/// widths a prompt pass has (8, 64, 128 and 512 activation rows), on the
+/// whole-block shape and on Qwen 2.5's 896-wide row.
+///
+/// One "row" of work is eight output rows of a tile over `n_sb` 256-weight
+/// super-blocks (a Q5_0 tile is `8·n_sb` 32-weight blocks) against `nb`
+/// activation rows, so the wide-pass ratio is the kernel's own and not the
+/// model's. Both sides go through `MatKernels`, so the exact side is the body the
+/// engine runs on this cap and the form side is the body S5.4h is deciding about.
+///
+/// Each worker holds its own copy of the tile and the form (the engine splits
+/// *output* rows across workers), so the multi-worker column is the aggregate
+/// rate of `threads` independent copies.
+#[cfg(target_arch = "aarch64")]
+fn form_kernel_table(args: &[String]) {
+    use peregrine_kernels::format::Format;
+    use peregrine_kernels::kq::{
+        repack_q4k8, repack_q5_08, repack_q6k8, KqActs, Q4K8, Q5_08, Q6K8,
+    };
+    use peregrine_kernels::kq8::Q8K_SIZE;
+    use peregrine_kernels::quant::{f32_to_f16, QuantAct};
+    use peregrine_kernels::table::MatKernels;
+    use std::time::Instant;
+
+    let num = |i: usize, d: usize| -> usize {
+        args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d).max(1)
+    };
+    let n_sb = num(0, 8);
+    let reps = num(1, 20);
+    let threads = num(2, 10);
+    let which = args.get(3).map(String::as_str).unwrap_or("both");
+    let mk = MatKernels::get();
+    if !peregrine_kernels::cpu::have_dotprod() {
+        eprintln!("this CPU (or PEREGRINE_ISA cap) has no asimddp; nothing to measure");
+        return;
+    }
+    println!(
+        "S5.4h form table: tier={} body={} n_sb={n_sb} reps={reps} threads={threads} shape={which}",
+        peregrine_kernels::cpu::tier_name(),
+        mk.q8k_body().unwrap_or("none")
+    );
+    // The shapes: a whole 2048-weight row (`n_sb` super-blocks), and Qwen 2.5's
+    // 896-weight row — 28 Q5_0 blocks, which the form rounds up to four
+    // super-blocks, so a quarter of its codes are padding.
+    let mut shapes: Vec<(&str, usize, usize, usize, bool)> = Vec::new();
+    if which == "whole" || which == "both" {
+        shapes.push(("whole", n_sb * 256, n_sb, n_sb * 8, false));
+    }
+    if which == "row896" || which == "both" {
+        shapes.push(("row896", 896, 4, 28, true));
+    }
+    let mut prng = {
+        let mut s = 0x243f_6a88_85a3_08d3u64;
+        move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 24) as u8
+        }
+    };
+    for &(shape, n, form_sb, n_blk, _padded) in shapes.iter() {
+        // The activation buffer: 896 real weights are padded to 1024 codes, and the
+        // fill of the padded 256-block leaves the missing codes zero.
+        let n_act = form_sb * 256;
+        for fmt in ["q4k", "q6k", "q5_0"] {
+            // Q4_K and Q6_K rows are whole 256-weight super-blocks by format; only
+            // Q5_0 has a 896-wide row that stops inside one.
+            if shape == "row896" && fmt != "q5_0" {
+                continue;
+            }
+            // The exact tile, eight rows, as the engine's store lays it out.
+            let (tile, blocks) = match fmt {
+                "q4k" => {
+                    let rows: Vec<Vec<u8>> = (0..8)
+                        .map(|_| {
+                            let mut w = Vec::new();
+                            for _ in 0..n_sb {
+                                w.extend_from_slice(&f32_to_f16(0.01).to_le_bytes());
+                                w.extend_from_slice(&f32_to_f16(0.005).to_le_bytes());
+                                for _ in 0..12 {
+                                    w.push(prng());
+                                }
+                                for _ in 0..128 {
+                                    w.push(prng());
+                                }
+                            }
+                            w
+                        })
+                        .collect();
+                    let mut tile = vec![0u8; n_sb * Q4K8::SIZE];
+                    for sb in 0..n_sb {
+                        let src: Vec<&[u8]> = rows.iter().map(|r| &r[sb * 144..][..144]).collect();
+                        repack_q4k8(&src, &mut tile[sb * Q4K8::SIZE..]);
+                    }
+                    (tile, n_sb)
+                }
+                "q6k" => {
+                    let rows: Vec<Vec<u8>> = (0..8)
+                        .map(|_| {
+                            let mut w = Vec::new();
+                            for _ in 0..n_sb {
+                                for _ in 0..192 {
+                                    w.push(prng());
+                                }
+                                for _ in 0..16 {
+                                    w.push(prng() % 17);
+                                }
+                                w.extend_from_slice(&f32_to_f16(0.01).to_le_bytes());
+                            }
+                            w
+                        })
+                        .collect();
+                    let mut tile = vec![0u8; n_sb * Q6K8::SIZE];
+                    for sb in 0..n_sb {
+                        let src: Vec<&[u8]> = rows.iter().map(|r| &r[sb * 210..][..210]).collect();
+                        repack_q6k8(&src, &mut tile[sb * Q6K8::SIZE..]);
+                    }
+                    (tile, n_sb)
+                }
+                _ => {
+                    let rows: Vec<Vec<u8>> = (0..8)
+                        .map(|_| {
+                            let mut w = Vec::new();
+                            for _ in 0..n_blk {
+                                w.extend_from_slice(&f32_to_f16(0.02).to_le_bytes());
+                                for _ in 0..20 {
+                                    w.push(prng());
+                                }
+                            }
+                            w
+                        })
+                        .collect();
+                    let mut tile = vec![0u8; n_blk * Q5_08::SIZE];
+                    for b in 0..n_blk {
+                        let src: Vec<&[u8]> = rows.iter().map(|r| &r[b * 22..][..22]).collect();
+                        repack_q5_08(&src, &mut tile[b * Q5_08::SIZE..]);
+                    }
+                    (tile, n_blk)
+                }
+            };
+            // The form of the same tile. `n_blocks` is the super-block count for
+            // Q4_K/Q6_K and the 32-weight block count for Q5_0, as `q8k_build` takes it.
+            let kind = match fmt {
+                "q4k" => Format::Q4_K,
+                "q6k" => Format::Q6_K,
+                _ => Format::Q5_0,
+            };
+            let mut form = vec![0u8; form_sb * Q8K_SIZE];
+            mk.q8k_build(kind, &tile, blocks, &mut form);
+            let useful = n;
+            for &nb in &[8usize, 64, 128, 512] {
+                let acts: Vec<QuantAct> = (0..nb)
+                    .map(|i| {
+                        let y: Vec<f32> = (0..n_act)
+                            .map(|j| (((i * 331 + j) as f32) * 0.0013).sin())
+                            .collect();
+                        let mut a = QuantAct::with_capacity(n_act);
+                        a.fill(&y);
+                        a
+                    })
+                    .collect();
+                let mut kq = KqActs::default();
+                kq.fill(&acts);
+                let macs = 8.0 * useful as f64 * nb as f64;
+                let mut rates = Vec::new();
+                for body in ["exact", "form"] {
+                    let mut best = f64::MAX;
+                    for _round in 0..3 {
+                        let hs: Vec<_> = (0..threads)
+                            .map(|_| {
+                                let tile = tile.clone();
+                                let form = form.clone();
+                                let kq = kq.clone();
+                                let acts = acts.clone();
+                                std::thread::spawn(move || {
+                                    let mut o = vec![0.0f32; nb * 8];
+                                    // The table's own entry points: the exact
+                                    // tile kernel the engine runs on this cap, and
+                                    // the form's body. Both check their bounds.
+                                    let run = |o: &mut [f32]| {
+                                        let o = &mut o[..nb * 8];
+                                        if body == "exact" {
+                                            match fmt {
+                                                "q4k" => mk.kq_tiles_q4k(&tile, n_sb, &kq, nb, o),
+                                                "q6k" => mk.kq_tiles_q6k(&tile, n_sb, &kq, nb, o),
+                                                _ => mk.kq_tiles_q5_0(
+                                                    &tile,
+                                                    n_blk,
+                                                    &acts[..nb],
+                                                    nb,
+                                                    o,
+                                                ),
+                                            }
+                                        } else {
+                                            mk.q8k_gemm(&form, form_sb, &kq, nb, o);
+                                        }
+                                    };
+                                    run(&mut o);
+                                    let mut b = f64::MAX;
+                                    for _ in 0..2 {
+                                        let t0 = Instant::now();
+                                        for _ in 0..reps {
+                                            run(&mut o);
+                                        }
+                                        b = b.min(t0.elapsed().as_secs_f64());
+                                    }
+                                    b
+                                })
+                            })
+                            .collect();
+                        let wall = hs
+                            .into_iter()
+                            .map(|h| h.join().unwrap())
+                            .fold(0.0f64, f64::max);
+                        best = best.min(wall);
+                    }
+                    rates.push(macs * reps as f64 * threads as f64 / best / 1e9);
+                }
+                let (exact, form) = (rates[0], rates[1]);
+                println!(
+                    "{shape:>6} {fmt:>4} {nb:>3} acts  exact {exact:6.1}  form {form:6.1}  \
+                     form/exact {:5.2}x  ({threads} worker{})",
+                    form / exact,
+                    if threads == 1 { "" } else { "s" }
+                );
             }
         }
     }

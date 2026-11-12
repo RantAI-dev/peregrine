@@ -1,0 +1,63 @@
+--- hd 128, 64 keys
+mix_pair_8   0.6 us, 28.4 GMAC/s
+mix_pair_16  0.5 us, 33.7 GMAC/s
+mix_pair_32  0.5 us, 34.0 GMAC/s
+mix_quad_8   0.7 us, 44.9 GMAC/s
+mix_quad_16  0.7 us, 46.4 GMAC/s
+mix_rows4   1.2 us, 54.8 GMAC/s
+mix_rows8   2.5 us, 53.2 GMAC/s
+mix_rows16   5.4 us, 48.1 GMAC/s
+scores 2r2k  0.5 us, 31.5 GMAC/s
+scores 2r4k  0.5 us, 33.0 GMAC/s
+scores 2r8k  0.7 us, 23.7 GMAC/s
+scores 4r2k  0.8 us, 40.3 GMAC/s
+scores 4r4k  1.3 us, 25.8 GMAC/s
+scores 1r8k  0.3 us, 24.2 GMAC/s
+--- hd 128, 32 keys
+mix_pair_8   0.3 us, 28.3 GMAC/s
+mix_pair_16  0.2 us, 33.4 GMAC/s
+mix_pair_32  0.2 us, 33.8 GMAC/s
+mix_quad_8   0.4 us, 44.5 GMAC/s
+mix_quad_16  0.4 us, 46.0 GMAC/s
+mix_rows4   0.6 us, 53.3 GMAC/s
+mix_rows8   1.3 us, 52.3 GMAC/s
+mix_rows16   2.8 us, 47.6 GMAC/s
+scores 2r2k  0.3 us, 31.7 GMAC/s
+scores 2r4k  0.2 us, 33.0 GMAC/s
+scores 2r8k  0.3 us, 23.8 GMAC/s
+scores 4r2k  0.4 us, 40.5 GMAC/s
+scores 4r4k  0.6 us, 25.8 GMAC/s
+scores 1r8k  0.2 us, 24.2 GMAC/s
+--- hd 64, 64 keys
+mix_pair_8   0.3 us, 28.5 GMAC/s
+mix_pair_16  0.2 us, 33.8 GMAC/s
+mix_pair_32  0.2 us, 34.0 GMAC/s
+mix_quad_8   0.4 us, 44.9 GMAC/s
+mix_quad_16  0.4 us, 46.4 GMAC/s
+mix_rows4   0.6 us, 54.6 GMAC/s
+mix_rows8   1.2 us, 52.9 GMAC/s
+mix_rows16   2.7 us, 48.1 GMAC/s
+scores 2r2k  0.3 us, 28.9 GMAC/s
+scores 2r4k  0.3 us, 29.8 GMAC/s
+scores 2r8k  0.4 us, 21.5 GMAC/s
+scores 4r2k  0.5 us, 34.8 GMAC/s
+scores 4r4k  0.7 us, 23.1 GMAC/s
+scores 1r8k  0.2 us, 22.7 GMAC/s
+--- hd 64, 32 keys
+mix_pair_8   0.1 us, 28.3 GMAC/s
+mix_pair_16  0.1 us, 33.6 GMAC/s
+mix_pair_32  0.1 us, 33.9 GMAC/s
+mix_quad_8   0.2 us, 44.6 GMAC/s
+mix_quad_16  0.2 us, 46.1 GMAC/s
+mix_rows4   0.3 us, 53.0 GMAC/s
+mix_rows8   0.6 us, 52.0 GMAC/s
+mix_rows16   1.4 us, 47.4 GMAC/s
+scores 2r2k  0.1 us, 29.1 GMAC/s
+scores 2r4k  0.1 us, 29.8 GMAC/s
+scores 2r8k  0.2 us, 21.5 GMAC/s
+scores 4r2k  0.2 us, 35.0 GMAC/s
+scores 4r4k  0.4 us, 23.1 GMAC/s
+scores 1r8k  0.1 us, 22.6 GMAC/s
+max          per row of 64: 10.1 ns (0.158 ns/element) [1]
+max+exp_sum  per row of 64: 56.8 ns (0.887 ns/element)
+rows4 exp    per row of 64: 36.3 ns (0.567 ns/element) [1830832.6]

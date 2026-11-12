@@ -1,14 +1,19 @@
-//! The opt-in fast prompt mode (S5.4b): what `--fast-prompt` guarantees.
+//! The opt-in fast prompt mode (S5.4b; the per-format table is S5.4f): what
+//! `--fast-prompt` guarantees.
 //!
-//! With the option on, a *prompt* row's Q4_K and Q6_K weights are read from an 8-bit
-//! form built at load (one scale per 256-weight super-block), while a *generated*
-//! row, an embedding, a rerank and a decision keep the exact kernels
+//! With the option on, a *prompt* row's weights are read from an 8-bit form built
+//! at load (one scale per 256-weight super-block) for the formats whose form's
+//! kernel beats this tier's exact kernel (`MatKernels::q8k_uses_form`: Q4_K and
+//! Q6_K on AVX-512, Q6_K on AVX2, Q4_K/Q6_K and — since S5.4h — Q5_0 on aarch64's
+//! `dotprod`/`i8mm` caps, none on a scalar tier), while a *generated* row,
+//! an embedding, a rerank and a decision keep the exact kernels
 //! (`docs/design/s5.4-fast-prompt.md` §3). This file pins each part of that:
 //!
 //! * the same prompt gives the same cache and logits at prefill chunks 16, 32, 64
 //!   and 128 and at 1, 2 and 4 threads, alone and beside a decoding user;
 //! * decode from a cache a fast-mode prefill produced is the exact engine;
-//! * the option is not a no-op: the prompt's logits differ from the exact mode's;
+//! * the option is not a no-op: the prompt's logits differ from the exact mode's
+//!   for every format the tier's table selects;
 //! * the per-weight error bound holds through the engine's own load path;
 //! * embeddings, decisions and the prefix store behave as documented.
 //!
@@ -28,6 +33,18 @@ use peregrine_core::serve::{Engine, Finish, SlotCfg, SlotId};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{write_dense, Dense};
+
+/// The formats the tier's table gives an 8-bit form (S5.4f, S5.4h). On AVX2 that is
+/// Q6_K alone; on AVX-512 Q4_K and Q6_K; on aarch64 Q4_K and Q6_K on every cap and
+/// Q5_0 where the multiply is a NEON body; on a tier with no SIMD body, none, so
+/// these tests have nothing to check there (the synthetic goldens assert the
+/// no-op).
+fn form_formats() -> Vec<Format> {
+    [Format::Q4_K, Format::Q6_K, Format::Q5_0]
+        .into_iter()
+        .filter(|&f| peregrine_kernels::table::MatKernels::get().q8k_uses_form(f))
+        .collect()
+}
 
 /// The chunk sizes `crates/peregrine-models/tests/prefill_chunk.rs` measures: the
 /// mode's bits must not depend on any of them.
@@ -224,7 +241,7 @@ fn bits(xs: &[f32]) -> Vec<u32> {
 fn fast_mode_is_prompt_invariant() {
     let dir = tmpdir("invariant");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    for (i, fmt) in form_formats().into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9150 + i as u64, Dense::default());
         let model = load_fast(&path);
         if model.q8_form().is_empty() {
@@ -285,13 +302,102 @@ fn fast_mode_is_prompt_invariant() {
     );
 }
 
+/// A Q5_0 model whose rows are *not* a whole number of 256-weight super-blocks
+/// (S5.4h): Qwen 2.5 0.5B's 896-wide shape, where the form pads a fourth
+/// super-block. The prompt must still be the same bits at every chunk and thread
+/// count and beside a decoder, and the prompt logits must differ from the exact
+/// engine's (the form is in use, not silently skipped).
+#[test]
+fn a_q5_0_row_that_is_not_a_whole_super_block_is_prompt_invariant() {
+    if !peregrine_kernels::table::MatKernels::get().q8k_uses_form(Format::Q5_0) {
+        return;
+    }
+    let dir = tmpdir("invariant-padded");
+    // 896 = 28 Q5_0 blocks = three and a half super-blocks; the head is 64 wide.
+    let shape = Dense {
+        d_model: 896,
+        n_layer: 2,
+        n_head: 14,
+        n_head_kv: 2,
+        n_ff: 1024,
+        ctx: 512,
+        tied: false,
+    };
+    let path = write_dense(&dir, "llama", Format::Q5_0, 9400, shape);
+    let model = load_fast(&path);
+    assert!(!model.q8_form().is_empty(), "no form was built");
+    // Every 896-wide matrix's form is four super-blocks, one of them half padding.
+    let t = model
+        .tensor("blk.0.attn_q.weight")
+        .expect("the synthetic model has the matrix");
+    let off = t.q8_off.expect("the 896-wide matrix has a form");
+    let cols = t.dims[0] as usize;
+    assert_eq!(cols, 896);
+    assert_eq!(
+        model.tensor("blk.0.ffn_gate.weight").unwrap().dims[0] as usize,
+        896
+    );
+    let ranges = peregrine_core::q8form::layout(&Gguf::open(&path).unwrap());
+    let entry = ranges
+        .iter()
+        .find(|e| e.name == t.name)
+        .expect("the layout holds the matrix");
+    assert_eq!(
+        entry.super_blocks(),
+        4,
+        "896 weights pad to four super-blocks"
+    );
+    assert_eq!(off, entry.offset);
+
+    let toks = prompt();
+    let mut failures = Vec::new();
+    let (cache0, logits0) = read_in_pieces(&model, CHUNKS[0], 4, &toks);
+    for &chunk in &CHUNKS[1..] {
+        let (cache, logits) = read_in_pieces(&model, chunk, 4, &toks);
+        if cache != cache0 {
+            failures.push(format!("the cache differs at chunk {chunk}"));
+        }
+        if logits != logits0 {
+            failures.push(format!("the logits differ at chunk {chunk}"));
+        }
+    }
+    for threads in [1usize, 2] {
+        let (cache, logits) = read_in_pieces(&model, CHUNKS[1], threads, &toks);
+        if cache != cache0 {
+            failures.push(format!("the cache differs at {threads} threads"));
+        }
+        if logits != logits0 {
+            failures.push(format!("the logits differ at {threads} threads"));
+        }
+    }
+    for &chunk in &CHUNKS {
+        let cache = read_beside_a_decoder(&model, chunk, 4, &toks);
+        if cache != cache0 {
+            failures.push(format!(
+                "the cache differs beside a decoder at chunk {chunk}"
+            ));
+        }
+    }
+    let exact = load_exact(&path);
+    let (_, logits_exact) = read_in_pieces(&exact, CHUNKS[2], 4, &toks);
+    if logits0 == logits_exact {
+        failures.push("the fast mode gave the exact mode's logits".to_string());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "a padded Q5_0 row is not prompt-invariant:\n{}",
+        failures.join("\n")
+    );
+}
+
 /// Starting from the cache a fast-mode prefill produced, decode is the exact engine:
 /// the two models' generated tokens and logits are the same bits.
 #[test]
 fn fast_mode_decode_is_the_exact_engine() {
     let dir = tmpdir("decode");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    for (i, fmt) in form_formats().into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9200 + i as u64, Dense::default());
         let fast = load_fast(&path);
         let exact = load_exact(&path);
@@ -348,7 +454,7 @@ fn fast_mode_decode_is_the_exact_engine() {
 fn fast_mode_differs_from_exact_mode_on_prompt_rows() {
     let dir = tmpdir("differs");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    for (i, fmt) in form_formats().into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9250 + i as u64, Dense::default());
         let fast = load_fast(&path);
         let exact = load_exact(&path);
@@ -378,7 +484,14 @@ fn every_rerounded_weight_is_within_half_a_step_after_loading() {
     let dir = tmpdir("bound");
     let mut failures = Vec::new();
     let mut checked = 0usize;
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    let bound_formats: Vec<Format> = form_formats()
+        .into_iter()
+        .filter(|f| matches!(f, Format::Q4_K | Format::Q6_K))
+        .collect();
+    if bound_formats.is_empty() {
+        return;
+    }
+    for (i, fmt) in bound_formats.into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9300 + i as u64, Dense::default());
         let model = load_fast(&path);
         let t = model
@@ -472,7 +585,7 @@ fn embeddings_and_decisions_are_untouched() {
     use peregrine_core::embed::Pooling;
     let dir = tmpdir("pooled");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    for (i, fmt) in form_formats().into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9400 + i as u64, Dense::default());
         let model = Arc::new(load_fast(&path));
         let text: Vec<u32> = (0..24u32).map(|i| (i * 13 + 5) % 300).collect();
@@ -532,7 +645,10 @@ fn embeddings_and_decisions_are_untouched() {
 #[test]
 fn a_multi_user_pass_serves_each_slot_alone() {
     let dir = tmpdir("multi");
-    let path = write_dense(&dir, "llama", Format::Q4_K, 9450, Dense::default());
+    let Some(fmt) = form_formats().first().copied() else {
+        return;
+    };
+    let path = write_dense(&dir, "llama", fmt, 9450, Dense::default());
     let model = Arc::new(load_fast(&path));
     let long: Vec<u32> = (0..200u32).map(|i| (i * 37 + 11) % 300).collect();
     let short: Vec<u32> = (0..8u32).map(|i| (i * 7 + 3) % 300).collect();
@@ -609,7 +725,10 @@ fn a_multi_user_pass_serves_each_slot_alone() {
 #[test]
 fn a_restored_prefix_gives_the_prompt_read_again() {
     let dir = tmpdir("prefix");
-    let path = write_dense(&dir, "llama", Format::Q4_K, 9500, Dense::default());
+    let Some(fmt) = form_formats().first().copied() else {
+        return;
+    };
+    let path = write_dense(&dir, "llama", fmt, 9500, Dense::default());
     let model = Arc::new(load_fast(&path));
     let opening: Vec<u32> = (0..40u32).map(|i| (i * 13) % 900 % 300).collect();
     let run = |engine: &mut Engine, tail: u32| -> Vec<u32> {
@@ -660,7 +779,10 @@ fn a_restored_prefix_gives_the_prompt_read_again() {
 #[test]
 fn a_generated_tokens_cache_entry_differs_from_the_same_token_read_as_prompt() {
     let dir = tmpdir("exception");
-    let path = write_dense(&dir, "llama", Format::Q4_K, 9550, Dense::default());
+    let Some(fmt) = form_formats().first().copied() else {
+        return;
+    };
+    let path = write_dense(&dir, "llama", fmt, 9550, Dense::default());
     let model = load_fast(&path);
     let c = model.cfg;
     let pool = Pool::new(2);

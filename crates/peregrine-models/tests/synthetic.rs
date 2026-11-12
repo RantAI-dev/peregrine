@@ -2295,12 +2295,19 @@ fn gpt_oss_synthetic_file_runs_in_llama_cpp() {
     );
 }
 
-/// The fast prompt mode's own goldens (S5.4b): one Q4_K and one Q6_K synthetic model,
-/// its prompt read as prompt rows (the 8-bit form) and its decode rows exact, on each
-/// pinned x86 tier. The integer sums are exact, so the three tiers' goldens are made
-/// from the same numbers; recording them separately is what pins that.
+/// The fast prompt mode's own goldens (S5.4b; one format at a time since S5.4f):
+/// one Q4_K, one Q6_K and one Q5_0 synthetic model, its prompt read as prompt rows
+/// and its decode rows exact, on each pinned x86 tier.
 ///
-/// `PEREGRINE_GOLDEN=record` writes them, as the other synthetic goldens:
+/// Which formats take the 8-bit form is the tier's table
+/// (`MatKernels::q8k_uses_form`). A format the tier uses has a fast golden here; a
+/// format it does not (Q4_K on AVX2 and scalar, Q5_0 on every x86 tier and on
+/// aarch64's `neon`/`scalar` caps) is
+/// asserted to be **bit-identical to the exact engine**, which is the mode's
+/// guarantee for a format outside the table: the option changes nothing.
+///
+/// `PEREGRINE_GOLDEN=record` writes the goldens of the formats the tier uses, as
+/// the other synthetic goldens:
 ///
 ///   PEREGRINE_GOLDEN=record cargo test --release --test synthetic -- fast_prompt_mode
 #[test]
@@ -2328,8 +2335,16 @@ fn fast_prompt_mode_matches_its_golden_for_the_tier() {
     let record = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record");
     let require = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "require");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
-        let path = write_dense(&dir, "llama", fmt, 1004 + i as u64, Dense::default());
+    for fmt in [Format::Q4_K, Format::Q6_K, Format::Q5_0] {
+        // The seed the exact goldens were recorded with (`dense_models_in_every_format`),
+        // so a format outside the table can be compared with its exact golden.
+        let seed = match fmt {
+            Format::Q4_K => 1004,
+            Format::Q6_K => 1005,
+            _ => 1003,
+        };
+        let uses_form = peregrine_kernels::table::MatKernels::get().q8k_uses_form(fmt);
+        let path = write_dense(&dir, "llama", fmt, seed, Dense::default());
         let model = match Gguf::open(&path).and_then(peregrine_models::load_with_fast) {
             Ok(m) => m,
             Err(e) => {
@@ -2337,18 +2352,50 @@ fn fast_prompt_mode_matches_its_golden_for_the_tier() {
                 continue;
             }
         };
+        let name = format!("llama-{}-fast", fmt.label());
+        if !uses_form {
+            // Outside the tier's table: the fast mode is the exact engine, bit for
+            // bit, and there is no fast golden to carry.
+            if !model.q8_form().is_empty() {
+                failures.push(format!(
+                    "{name}: a form was built for a format outside the tier's table"
+                ));
+                continue;
+            }
+            let exact = run(&model, 4);
+            let fast = run_fast(&model, 4);
+            if exact != fast {
+                failures.push(format!("{name}: fast mode differs from the exact engine"));
+            }
+            // And the exact run is the tier's own exact golden, so the fast test
+            // shows in CI that the mode is the exact engine for this format.
+            let exact_golden = dir_golden.join(format!("llama-{}.golden", fmt.label()));
+            if let Ok(want) = std::fs::read_to_string(&exact_golden) {
+                if exact != want {
+                    failures.push(format!(
+                        "{name}: the exact engine differs from {}",
+                        exact_golden.display()
+                    ));
+                }
+            } else if require {
+                failures.push(format!(
+                    "{name}: no exact golden to compare with for tier {tier} ({})",
+                    exact_golden.display()
+                ));
+            }
+            if run_fast(&model, 1) != fast {
+                failures.push(format!("{name}: 1 thread differs from 4"));
+            }
+            continue;
+        }
         if model.q8_form().is_empty() {
-            failures.push(format!("llama-{}-fast: no form was built", fmt.label()));
+            failures.push(format!("{name}: no form was built"));
             continue;
         }
         let a = run_fast(&model, 4);
         if run_fast(&model, 1) != a {
-            failures.push(format!(
-                "llama-{}-fast: 1 thread differs from 4",
-                fmt.label()
-            ));
+            failures.push(format!("{name}: 1 thread differs from 4"));
         }
-        let name = format!("llama-{}-fast", fmt.label());
         let gpath = dir_golden.join(format!("{name}.golden"));
         if record && tier != "x86_64-avx2-vnni256" {
             std::fs::create_dir_all(&dir_golden).unwrap();

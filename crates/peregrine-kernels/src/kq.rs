@@ -802,12 +802,20 @@ pub struct KqActs {
     pub rows: usize,
     /// The activation width.
     pub n: usize,
+    /// The super-blocks per row the buffers hold: `n / 256`, or one more when the
+    /// fast prompt mode padded a row whose width is not a whole number of them
+    /// (S5.4f, Q5_0 at 896).
+    pub n_sb: usize,
 }
 
 impl KqActs {
     /// The super-blocks one activation holds.
     pub fn super_blocks(&self) -> usize {
-        self.n / 256
+        if self.n_sb > 0 {
+            self.n_sb
+        } else {
+            self.n / 256
+        }
     }
 
     /// The groups of four rows the buffer holds.
@@ -836,20 +844,42 @@ impl KqActs {
     /// exact kernels do exactly the work they did before S5.4a, which is what
     /// keeps the option off free of any slowdown.
     pub fn fill_with(&mut self, acts: &[QuantAct], sum256: bool) {
+        self.fill_impl(acts, sum256, false)
+    }
+
+    /// [`KqActs::fill_with`] for a row whose per-256 layout was padded to a whole
+    /// super-block (`QuantAct::fill`'s `pad_k_layout`, S5.4f).
+    ///
+    /// `acts` must carry `ceil(n/256)` super-blocks of `qk`, `dk` and `bsums`; the
+    /// padded codes are zero, so they contribute nothing to any sum.
+    ///
+    /// # Panics
+    ///
+    /// If the activations are not padded to a whole number of super-blocks.
+    pub fn fill_padded(&mut self, acts: &[QuantAct], sum256: bool) {
+        self.fill_impl(acts, sum256, true)
+    }
+
+    fn fill_impl(&mut self, acts: &[QuantAct], sum256: bool, padded: bool) {
         assert!(!acts.is_empty(), "no activation to interleave");
         let n = acts[0].n;
+        let n_sb = if n.is_multiple_of(256) {
+            n / 256
+        } else {
+            assert!(
+                padded,
+                "a k-quant activation is a whole number of super-blocks"
+            );
+            n.div_ceil(256)
+        };
         assert!(
-            n % 256 == 0,
-            "a k-quant activation is a whole number of super-blocks"
-        );
-        assert!(
-            acts.iter().all(|a| a.n == n && !a.qk.is_empty()),
+            acts.iter().all(|a| a.n == n && a.qk.len() == n_sb * 256),
             "the activations are not in the per-256 layout"
         );
-        let n_sb = n / 256;
         let groups = acts.len().div_ceil(ACT_GROUP);
         self.rows = acts.len();
         self.n = n;
+        self.n_sb = n_sb;
         self.q.clear();
         self.q.resize(groups * n_sb * 1024, 0);
         self.d.clear();

@@ -2916,6 +2916,320 @@ pub unsafe fn mix_f16_pair(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The attention tile's four query rows (S4.9t)
+// ---------------------------------------------------------------------------
+//
+// Every query row of a prefill block scores and mixes the same tile of positions,
+// and the row pair could only share the loads between two of them. The two bodies
+// below take **four** rows over one tile. Neither changes any arithmetic: each row
+// keeps its own accumulators, its own reduction tree and its own ascending walk over
+// the keys; only the loads and widenings of K and V are shared, four rows at a time.
+//
+// Why four, and why it pays:
+//
+// * The score body keeps two four-lane accumulators per row (dimensions `i..i+4` and
+//   `i+4..i+8` of each ascending eight-wide block), so it is one chain of `fma` per
+//   accumulator: a row-pair has eight chains in flight and a four-row tile sixteen,
+//   which covers the core's four vector FMA pipes at the dependency latency. Two
+//   keys per pass — eight keys need thirty-two accumulators and the compiler spills,
+//   measured 24.7 GMAC/s against this body's 40.
+// * The mix body keeps two accumulators per row over an eight-dimension slice of the
+//   output, so it too is chain-bound: a row-pair has four chains (28 GMAC/s), four
+//   rows have eight (55). Sixteen chains (four rows over sixteen dimensions) measure
+//   the same 46–55, so eight is the knee.
+
+/// The canonical aarch64 score tree in scalar Rust: two four-lane accumulators
+/// (dimensions `0..4` and `4..8` of each ascending eight-wide block), reduced as
+/// `((a0+a1)+(a2+a3)) + ((b0+b1)+(b2+b3))`. This is `attn.rs`'s `canonical_score`
+/// written against a widened F16 tile, and the definition the NEON body below is
+/// held to.
+#[cfg(target_arch = "aarch64")]
+fn score_tree_scalar(q: &[f32], k: &[f32]) -> f32 {
+    let mut a0 = [0.0f32; 4];
+    let mut a1 = [0.0f32; 4];
+    let mut i = 0;
+    while i + 8 <= q.len() {
+        for l in 0..4 {
+            a0[l] = q[i + l].mul_add(k[i + l], a0[l]);
+            a1[l] = q[i + 4 + l].mul_add(k[i + 4 + l], a1[l]);
+        }
+        i += 8;
+    }
+    ((a0[0] + a0[1]) + (a0[2] + a0[3])) + ((a1[0] + a1[1]) + (a1[2] + a1[3]))
+}
+
+/// [`scores_f16_tile4`]'s scalar definition: every row's own canonical tree over the
+/// same stored halves.
+///
+/// `q` holds four query rows of `hd` floats; `k` a tile of `vis` keys of `hd` halves;
+/// `s` holds four score rows, row `r` at `s[r · stride ..]`.
+#[cfg(target_arch = "aarch64")]
+pub fn scores_f16_tile4_scalar(
+    q: &[f32],
+    k: &[u8],
+    vis: usize,
+    hd: usize,
+    scale: f32,
+    s: &mut [f32],
+    stride: usize,
+) {
+    assert!(q.len() >= 4 * hd, "four query rows are needed");
+    assert!(
+        k.len() >= vis * hd * 2,
+        "the K tile is shorter than vis · hd"
+    );
+    assert!(
+        s.len() >= 3 * stride + vis,
+        "four score rows need 3 · stride + vis floats"
+    );
+    let halves: Vec<f32> = (0..vis * hd)
+        .map(|i| f16(u16::from_le_bytes([k[i * 2], k[i * 2 + 1]])))
+        .collect();
+    for r in 0..4 {
+        for j in 0..vis {
+            s[r * stride + j] =
+                score_tree_scalar(&q[r * hd..(r + 1) * hd], &halves[j * hd..][..hd]) * scale;
+        }
+    }
+}
+
+/// Four query rows scored against one F16 K tile, two keys per pass.
+///
+/// Each row's accumulators, reduction tree and ascending key order are its own, so
+/// every score is the single-row kernel's bit for bit; only the loaded and widened
+/// key is shared.
+///
+/// # Safety
+/// The CPU must have NEON; `q` must hold four rows of `hd` floats, `k` at least
+/// `vis · hd · 2` bytes, `s` four rows of `vis` floats at `stride`, and `hd` must be a
+/// multiple of eight.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn scores_f16_tile4(
+    q: &[f32],
+    k: &[u8],
+    vis: usize,
+    hd: usize,
+    scale: f32,
+    s: &mut [f32],
+    stride: usize,
+) {
+    use std::arch::aarch64::*;
+    assert!(q.len() >= 4 * hd, "four query rows are needed");
+    assert!(
+        k.len() >= vis * hd * 2,
+        "the K tile is shorter than vis · hd"
+    );
+    assert!(
+        s.len() >= 3 * stride + vis,
+        "four score rows need 3 · stride + vis floats"
+    );
+    assert!(
+        hd.is_multiple_of(8),
+        "the tile body walks eight dims at a time"
+    );
+    let qs = [
+        q.as_ptr(),
+        q.as_ptr().add(hd),
+        q.as_ptr().add(2 * hd),
+        q.as_ptr().add(3 * hd),
+    ];
+    let sc = vdupq_n_f32(scale);
+    let kp = k.as_ptr();
+    let mut j = 0;
+    while j + 2 <= vis {
+        // One accumulator pair per row and key: sixteen independent chains.
+        let mut a = [[[vdupq_n_f32(0.0); 2]; 4]; 2];
+        let mut i = 0;
+        while i < hd {
+            let qv = [
+                (vld1q_f32(qs[0].add(i)), vld1q_f32(qs[0].add(i + 4))),
+                (vld1q_f32(qs[1].add(i)), vld1q_f32(qs[1].add(i + 4))),
+                (vld1q_f32(qs[2].add(i)), vld1q_f32(qs[2].add(i + 4))),
+                (vld1q_f32(qs[3].add(i)), vld1q_f32(qs[3].add(i + 4))),
+            ];
+            for (u, keyslot) in a.iter_mut().enumerate() {
+                let at = ((j + u) * hd + i) * 2;
+                // SAFETY: `k` holds vis · hd halves and j + u < vis, i + 8 <= hd.
+                let k0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16)));
+                let k1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16)));
+                for (r, qrow) in qv.iter().enumerate() {
+                    keyslot[r][0] = vfmaq_f32(keyslot[r][0], qrow.0, k0);
+                    keyslot[r][1] = vfmaq_f32(keyslot[r][1], qrow.1, k1);
+                }
+            }
+            i += 8;
+        }
+        for (u, keyslot) in a.iter().enumerate() {
+            for (r, slot) in keyslot.iter().enumerate() {
+                let v = vaddq_f32(hsum4_pairwise(slot[0]), hsum4_pairwise(slot[1]));
+                *s.get_unchecked_mut(r * stride + j + u) = vgetq_lane_f32(vmulq_f32(v, sc), 0);
+            }
+        }
+        j += 2;
+    }
+    // One key at a time: the same tree, so a key's score does not depend on the
+    // block boundaries.
+    while j < vis {
+        for (r, qp) in qs.iter().enumerate() {
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut i = 0;
+            while i < hd {
+                let at = ((j * hd) + i) * 2;
+                // SAFETY: k holds vis · hd halves, i + 8 <= hd.
+                let k0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16)));
+                let k1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16)));
+                a0 = vfmaq_f32(a0, vld1q_f32(qp.add(i)), k0);
+                a1 = vfmaq_f32(a1, vld1q_f32(qp.add(i + 4)), k1);
+                i += 8;
+            }
+            let v = vaddq_f32(hsum4_pairwise(a0), hsum4_pairwise(a1));
+            *s.get_unchecked_mut(r * stride + j) = vgetq_lane_f32(vmulq_f32(v, sc), 0);
+        }
+        j += 1;
+    }
+}
+
+/// `((v0+v1)+(v2+v3))` in every lane: the score tree's four-lane reduction.
+#[inline(always)]
+unsafe fn hsum4_pairwise(v: float32x4_t) -> float32x4_t {
+    let t = vpaddq_f32(v, v);
+    vpaddq_f32(t, t)
+}
+
+/// [`mix_f16_quad`]'s scalar definition: four rows' own `α·o + Σ_j p_j · v_j`, one
+/// separate multiply and one separate add per ascending key.
+///
+/// `o` holds four output rows of `hd` floats; `p` four weight rows of `n` weights, row
+/// `r` at `p[r · p_stride ..]`; `v` the tile's halves.
+#[cfg(target_arch = "aarch64")]
+pub fn mix_f16_quad_scalar(
+    o: &mut [f32],
+    alphas: &[f32; 4],
+    p: &[f32],
+    p_stride: usize,
+    n: usize,
+    v: &[u8],
+    hd: usize,
+) {
+    assert!(o.len() >= 4 * hd, "four output rows are needed");
+    assert!(
+        p.len() >= 3 * p_stride + n,
+        "four score rows of n floats are needed"
+    );
+    assert!(v.len() >= n * hd * 2, "the V tile is shorter than n");
+    for r in 0..4 {
+        if alphas[r] != 1.0 {
+            o[r * hd..(r + 1) * hd]
+                .iter_mut()
+                .for_each(|x| *x *= alphas[r]);
+        }
+    }
+    for j in 0..n {
+        for d in 0..hd {
+            let at = (j * hd + d) * 2;
+            let value = f16(u16::from_le_bytes([v[at], v[at + 1]]));
+            for r in 0..4 {
+                o[r * hd + d] += p[r * p_stride + j] * value;
+            }
+        }
+    }
+}
+
+/// Four rows mixed over one F16 V tile: each row's output slice stays in registers
+/// while the keys walk ascending, and each stored V half-vector is widened once for
+/// all four rows.
+///
+/// The arithmetic is [`mix_f16_quad_scalar`]'s element for element — a separate
+/// multiply and a separate add per key, in ascending key order, with `α·o` first — so
+/// a row's bits are the single-row body's. All four rows mix the same `n` positions:
+/// a row cut at another row's position would take an extra soft-max step, which moves
+/// its denominator's summation, so the caller groups rows that share their context.
+///
+/// # Safety
+/// The CPU must have NEON; `o` must hold four rows of `hd` floats, `p` four rows of
+/// `n` weights at `p_stride`, `v` at least `n · hd · 2` bytes, and `hd` a multiple of
+/// eight.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn mix_f16_quad(
+    o: &mut [f32],
+    alphas: &[f32; 4],
+    p: &[f32],
+    p_stride: usize,
+    n: usize,
+    v: &[u8],
+    hd: usize,
+) {
+    use std::arch::aarch64::*;
+    assert!(o.len() >= 4 * hd, "four output rows are needed");
+    assert!(
+        p.len() >= 3 * p_stride + n,
+        "four score rows of n floats are needed"
+    );
+    assert!(v.len() >= n * hd * 2, "the V tile is shorter than n");
+    assert!(
+        hd.is_multiple_of(8),
+        "the tile body walks eight dims at a time"
+    );
+    for r in 0..4 {
+        if alphas[r] != 1.0 {
+            let mut d = 0;
+            while d < hd {
+                let at = r * hd + d;
+                vst1q_f32(
+                    o.as_mut_ptr().add(at),
+                    vmulq_f32(vld1q_f32(o.as_ptr().add(at)), vdupq_n_f32(alphas[r])),
+                );
+                d += 4;
+            }
+        }
+    }
+    let vp = v.as_ptr();
+    let mut d = 0;
+    while d + 8 <= hd {
+        let mut a = [[vdupq_n_f32(0.0); 2]; 4];
+        for (r, acc) in a.iter_mut().enumerate() {
+            acc[0] = vld1q_f32(o.as_ptr().add(r * hd + d));
+            acc[1] = vld1q_f32(o.as_ptr().add(r * hd + d + 4));
+        }
+        for j in 0..n {
+            let at = (j * hd + d) * 2;
+            // SAFETY: `v` holds n · hd halves and d + 8 <= hd.
+            let v0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at) as *const u16)));
+            let v1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at + 8) as *const u16)));
+            for (r, acc) in a.iter_mut().enumerate() {
+                let w = vdupq_n_f32(*p.get_unchecked(r * p_stride + j));
+                acc[0] = vaddq_f32(acc[0], vmulq_f32(w, v0));
+                acc[1] = vaddq_f32(acc[1], vmulq_f32(w, v1));
+            }
+        }
+        for (r, acc) in a.iter().enumerate() {
+            vst1q_f32(o.as_mut_ptr().add(r * hd + d), acc[0]);
+            vst1q_f32(o.as_mut_ptr().add(r * hd + d + 4), acc[1]);
+        }
+        d += 8;
+    }
+    // A head width that is not a multiple of eight never reaches this body (the
+    // caller's gate), but the tail keeps the definition total.
+    while d < hd {
+        for r in 0..4 {
+            let mut x = *o.get_unchecked(r * hd + d);
+            for j in 0..n {
+                let at = (j * hd + d) * 2;
+                let value = f16(u16::from_le_bytes([*vp.add(at), *vp.add(at + 1)]));
+                x += p[r * p_stride + j] * value;
+            }
+            *o.get_unchecked_mut(r * hd + d) = x;
+        }
+        d += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3824,13 +4138,178 @@ mod tests {
         }
     }
 
+    /// S5.4h: a Q5_0 row that stops inside its last 256-weight super-block —
+    /// Qwen 2.5 0.5B's 896-wide rows, 28 blocks padded to four super-blocks — is
+    /// the twin's, byte for byte and bit for bit, at every width class and at the
+    /// extremes of Q5_0's own codes.
+    ///
+    /// This is the shape S5.4f introduced, no x86 tier selects (S5.4f) and both
+    /// NEON caps do (S5.4h): the form's
+    /// fourth super-block holds only 128 real weights, and the multiply still walks
+    /// its other four 32-weight groups. That costs about an eighth of the kernel's
+    /// rate (the table's `row896` cells) and none of the result: the last
+    /// assertion rewrites those four groups with codes that are not zero and gets
+    /// the same bits, because their activation codes are zero and an integer dot
+    /// product adds exactly zero for them in any grouping. The epilogue is per
+    /// super-block, and the short super-block keeps its real half. So a body that
+    /// stopped at the real width would be bit-identical too; the measurement is
+    /// what says it is not worth the layout change (S5.4h, `docs/design/
+    /// s5.4-fast-prompt.md` §5h).
+    #[test]
+    fn a_q5_0_row_that_stops_inside_a_super_block_is_the_twins_bits() {
+        if !crate::cpu::have_dotprod() {
+            return;
+        }
+        #[cfg(feature = "fmt-legacy")]
+        {
+            use crate::kq::Q5_0_BLOCK;
+            use crate::kq8::tiles::{q5_08_tile, Rng as TileRng};
+            use crate::kq8::{code_at, form_size, scale_at};
+
+            // A tile whose blocks alternate Q5_0's extremes: every code at +15
+            // (31 in the file's five-bit code, so the requantisation saturates at
+            // +127), every code at -16 (the other end), all-zero weights, and a
+            // random block.
+            let mut trng = TileRng(0x8A8A_7777);
+            let extreme = |b: usize, rng: &mut TileRng| {
+                let mut v = match b % 4 {
+                    0 => vec![0xFFu8; Q5_0_BLOCK],
+                    1 => vec![0x00u8; Q5_0_BLOCK],
+                    2 => vec![0x00u8; Q5_0_BLOCK],
+                    _ => crate::kq8::tiles::q5_0_block(rng),
+                };
+                let d = match b % 4 {
+                    0 => 0.5,
+                    1 => 0.5,
+                    2 => 0.0,
+                    _ => 0.02,
+                };
+                v[0..2].copy_from_slice(&crate::quant::f32_to_f16(d).to_le_bytes());
+                v
+            };
+            for n_blk in [7usize, 8, 15, 16, 21, 28, 29, 31, 32] {
+                let tile = q5_08_tile(&mut trng, n_blk);
+                let n_sb = n_blk.div_ceil(8);
+                let mut want = vec![0u8; form_size(n_sb)];
+                let mut got = vec![0u8; form_size(n_sb)];
+                crate::kq8::build_q5_0(&tile, n_blk, &mut want);
+                unsafe { q8k_build_q5_0_neon(&tile, n_blk, &mut got) };
+                assert_eq!(want, got, "the Q5_0 build differs on {n_blk} blocks");
+            }
+            // The Qwen shape, on the extreme blocks, through both builders.
+            let n_blk = 28usize;
+            let n_sb = 4usize;
+            let mut tile = vec![0u8; n_blk * Q5_08::SIZE];
+            for b in 0..n_blk {
+                let mut rows: Vec<Vec<u8>> = (0..8).map(|_| extreme(b, &mut trng)).collect();
+                let refs: Vec<&[u8]> = rows.iter_mut().map(|v| v.as_slice()).collect();
+                repack_q5_08(&refs, &mut tile[b * Q5_08::SIZE..(b + 1) * Q5_08::SIZE]);
+            }
+            let mut form = vec![0u8; form_size(n_sb)];
+            let mut twin = vec![0u8; form_size(n_sb)];
+            crate::kq8::build_q5_0(&tile, n_blk, &mut twin);
+            unsafe { q8k_build_q5_0_neon(&tile, n_blk, &mut form) };
+            assert_eq!(form, twin, "the 896-wide Q5_0 build is not the twin's");
+            // The padding is zero: the last super-block's groups 4..8 hold the
+            // form's biased zero code (0x80) and no weight.
+            for row in 0..crate::kq8::Q8K_ROWS {
+                // 128 real weights of the fourth super-block are groups 0..16.
+                for g in 16..crate::kq8::Q8K_GROUPS {
+                    for k in 0..8 {
+                        assert_eq!(
+                            form[code_at(3, g, row, k)],
+                            0x80,
+                            "row {row}, group {g}: the padded code is not zero"
+                        );
+                    }
+                }
+                // The short super-block's scale is its real half's, not zero.
+                let at = scale_at(3, row);
+                let d = f32::from_le_bytes(form[at..at + 4].try_into().unwrap());
+                assert!(d > 0.0, "row {row}: the padded super-block lost its scale");
+            }
+            // Every width class against the twin, on the padded activation.
+            let real = 28 * 32;
+            let padded = n_sb * 256;
+            // The engine's padded layout: a 1024-wide activation whose codes past
+            // 896 are zero, quantised in whole super-blocks. Its codes for the
+            // first 896 weights are exactly a 896-wide activation's.
+            let mut arng = Rng(0x8A8A_8888);
+            let many: Vec<QuantAct> = (0..513)
+                .map(|_| {
+                    let mut x: Vec<f32> = (0..padded).map(|_| arng.f32()).collect();
+                    for v in x.iter_mut().skip(real) {
+                        *v = 0.0;
+                    }
+                    let mut a = QuantAct::with_capacity(padded);
+                    a.fill(&x);
+                    a
+                })
+                .collect();
+            let mut widths = vec![1usize, 2, 3, 4, 5, 8, 9];
+            widths.extend_from_slice(&[63, 64, 65, 127, 128, 129, 511, 512, 513]);
+            for &nb in widths.iter() {
+                let mut kq = KqActs::default();
+                kq.fill(&many[..nb]);
+                for body in ["sdot", "i8mm"] {
+                    if body == "i8mm" && !crate::cpu::have_i8mm() {
+                        continue;
+                    }
+                    let mut got = vec![0.0f32; nb * 8];
+                    unsafe {
+                        if body == "i8mm" {
+                            q8k_gemm_i8mm(&form, n_sb, &kq, nb, &mut got)
+                        } else {
+                            q8k_gemm_sdot(&form, n_sb, &kq, nb, &mut got)
+                        }
+                    };
+                    for b in 0..nb {
+                        for r in 0..8 {
+                            let want = crate::kq8::dot_q8k(&form, n_sb, r, &kq, b);
+                            assert_eq!(
+                                got[b * 8 + r].to_bits(),
+                                want.to_bits(),
+                                "{body}, width {nb}, row {r}, activation {b}: {} against {want}",
+                                got[b * 8 + r]
+                            );
+                        }
+                    }
+                }
+            }
+            // And the padded groups add exactly zero: overwrite their codes with
+            // an arbitrary pattern and the result cannot move, because every
+            // activation code they would meet is zero. The integer sums are exact
+            // in any grouping, so a body that skipped these groups is
+            // bit-identical; what it would save is the 12–14 % of the rate the
+            // table's `row896` cells show.
+            let mut rewritten = form.clone();
+            for g in 16..crate::kq8::Q8K_GROUPS {
+                for row in 0..crate::kq8::Q8K_ROWS {
+                    for k in 0..8 {
+                        rewritten[code_at(3, g, row, k)] = 0x3C;
+                    }
+                }
+            }
+            let nb = 512usize;
+            let mut kq = KqActs::default();
+            kq.fill(&many[..nb]);
+            let mut a = vec![0.0f32; nb * 8];
+            let mut b = vec![0.0f32; nb * 8];
+            unsafe {
+                q8k_gemm_sdot(&form, n_sb, &kq, nb, &mut a);
+                q8k_gemm_sdot(&rewritten, n_sb, &kq, nb, &mut b);
+            }
+            assert_eq!(
+                a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "the padded groups are not multiplied by zero activation codes"
+            );
+        }
+    }
+
     /// The NEON multiply is the twin's, bit for bit, at every activation width:
     /// every width from one to forty, the rows either side of the four-row group,
     /// and 63/64/65, 127/128/129 and 511/512/513.
-    ///
-    /// The Q4_K random form, the tie tile and the Q6_K block just outside the exact
-    /// case all carry codes at the int8 limits; the Q5_0 form is built from random
-    /// blocks through the same construction.
     #[test]
     fn the_eight_bit_kernel_is_bit_identical_to_the_twin_on_neon() {
         if !crate::cpu::have_dotprod() {
@@ -3995,11 +4474,24 @@ mod tests {
                 mk.q8k_body().is_some_and(|b| b.starts_with("NEON")),
                 "a tier with dotprod must report a NEON body"
             );
+            // S5.4h: Q5_0 takes the form exactly where the multiply is a NEON body.
+            // The twin caps keep S5.4e's set: the twin is no faster than the exact
+            // kernel, so another format there would only cost memory.
+            assert_eq!(
+                mk.q8k_uses_form(Format::Q5_0),
+                cfg!(feature = "fmt-legacy"),
+                "a NEON body takes Q5_0's form"
+            );
+            assert!(mk.q8k_uses_form(Format::Q4_K) && mk.q8k_uses_form(Format::Q6_K));
         } else {
             assert_eq!(
                 (sdot, i8mm),
                 (0, 0),
                 "a tier without dotprod must stay on the scalar twin"
+            );
+            assert!(
+                !mk.q8k_uses_form(Format::Q5_0),
+                "the scalar twin gains nothing from Q5_0's form (S5.4h)"
             );
         }
         for b in 0..4 {
