@@ -267,7 +267,15 @@ cases checked (thinking on and off, with and without a system message: 16, 25, 1
 and the model reasons as it does there. Such a request is validated as before (the last message
 must be the user's) and nothing in its reply is read as a call. Qwen 2.5's template is the
 ordinary ChatML with a default system message, so its requests without tools are unchanged.
-`peregrine run` still builds its prompt the ordinary way for these files; that is the next step.
+`peregrine run` and the session take the same prompt from the `qwen35` chat template
+(`Template::Qwen35`, S6.3c): the template is recognised by its exact text, its pieces (system
+block, user turn, earlier assistant turns without their thinking, the opened block) are tested
+equal to this renderer on 180 conversations, and the command shows the opening tag the prompt
+wrote, so the output reads as a whole thinking block. On the two real files the prompt of
+"Say hi in three words." is 16 tokens with thinking and 18 without, llama.cpp's counts. A
+conversation continued in one session keeps the earlier turns' thinking in its cache, as it
+does for Qwen 3 (the template drops it when a client resends the history); it is rendered
+without it only when the oldest turns are dropped and the prompt is rebuilt.
 
 **Bonsai 2** (`Ternary-Bonsai-2-2B-PQ2_0.gguf`, Peregrine only: llama.cpp does not load the
 format; same requests):
@@ -281,8 +289,8 @@ format; same requests):
 The miss with thinking on is the same question as on Qwen 3.5 (the football result, answered
 from memory, here correctly). Every call's arguments are valid for its tool's schema.
 
-**Not built.** The template of unsloth's `*-MTP` conversions; the same renderer for
-`peregrine run`; Qwen 3's template (thinking opened by the model, `hermes`-style calls).
+**Not built.** The template of unsloth's `*-MTP` conversions; Qwen 3's template (thinking
+opened by the model, `hermes`-style calls); tool calling in `peregrine run`.
 
 **Tests.** `tools.rs`: the four texts are recognised and a changed one is not; a rendered prompt
 says whether it ends inside a thinking block (on, off, a continued assistant text, the `hermes`
