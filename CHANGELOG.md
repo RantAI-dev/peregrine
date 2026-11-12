@@ -20,7 +20,10 @@ All notable changes to this project are documented here. The format follows
   CPU model and tier, and put the first load of a freshly downloaded 271 MB model at 2.3–3.6 s
   against 0.1–0.3 s for the second one, which is Defender's first-open scan; the numbers and the
   caveats are in `docs/design/s7-platforms.md` §10. A change that adds a golden now records it for
-  macOS and for both Windows tiers (`docs/dev/testing.md`).
+  macOS and for both Windows tiers (`docs/dev/testing.md`). The sweep after the S4.8b and S5.4f
+  merges recorded `nomic-bert-moe-Q8_0` for macOS and all three Windows tiers, and removed the three
+  Windows `*-fast` goldens the scalar and AVX2 tiers no longer read: S5.4f takes the form only where
+  it wins, so the fast test compares against the exact engine and the exact golden on those tiers.
 - **Long-context attention on ARM reads a query-tile row group once, same bits (S4.9t)**:
   S4.9s's account left the score kernel at 29.0 GMAC/s and the value mix at 21.3 (bucket, soft-max
   included) against this core's 66 GMAC/s f32 roof, both limited by how many accumulation chains

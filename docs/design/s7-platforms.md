@@ -339,7 +339,8 @@ real-model goldens (CI has no model files) and a published performance compariso
   showed: an apostrophe inside `${VAR:-word}` in a double-quoted bash line opens a single-quoted
   string there (the CPU step died on it), and the runner's `tar` reads an archive path of the form
   `D:\…` as a remote host (`D:`), so the archive is made from the shell's POSIX path.
-- **The Windows sets.** Three sets of 61 synthetic goldens plus the session fixture
+- **The Windows sets.** Three sets of synthetic goldens, as many as each tier's Linux directory
+  (60, 61 and 62, in the table's order) plus the session fixture
   (`tests/fixtures/session/x86_64-*-windows.txt`), each recorded with the workflow's own verify run
   reporting **0 skips against 52 before** (`no golden for tier` / `no recording for tier`), and each
   proven by a later run of the same tier on a different runner and CPU, with 0 skips before and
@@ -356,6 +357,17 @@ real-model goldens (CI has no model files) and a published performance compariso
   AVX-512 set was found by the first native start and proven by a fourth (the pool's AVX-512 draws
   were an Intel 8370C and an Intel 8573C; its AVX2 draws were EPYC 7763/9V74/9V45 machines). The
   sweep after merging S5.4e recorded nothing on any of the three: 0 skips before, 0 after.
+  The final sweep, after `main` moved under the branch (S4.8b's `nomic-bert-moe` and S5.4f's
+  form-only-where-it-wins), recorded `nomic-bert-moe-Q8_0` for the scalar set (AMD EPYC 7763), the
+  AVX2 set (EPYC 7763) and the AVX-512 set (a third native start drew an Intel Xeon 6973P-C), and
+  nothing else; each run's verify step reported 0 skips before and after, and the next recordings of
+  macOS, scalar and AVX2 recorded nothing at all (EPYC 9V74, EPYC 7763, EPYC 7763). It also removed
+  three Windows files nothing read any more: `llama-Q4_K-fast` and `llama-Q6_K-fast` from
+  `x86_64-windows` and `llama-Q4_K-fast` from `x86_64-avx2-windows`. S5.4f takes the 8-bit form only
+  where it wins on the tier — no format on the scalar tier, Q6_K only on AVX2 — so the fast test
+  compares the fast run with the exact engine and the tier's exact golden there and has no fast
+  golden of its own. The AVX-512 set's two fast goldens are still read and reproduced byte for byte
+  in that recording.
 - **The pool and the pin.** The Windows pool draws AVX2-only and AVX-512 machines, and
   `PEREGRINE_ISA` takes capability names, not tier names. `ci.yml` therefore runs the
   golden-bearing targets (`synthetic`, `embeddings`, `bert_heads`, `modern_bert_heads`,
@@ -369,7 +381,12 @@ real-model goldens (CI has no model files) and a published performance compariso
   fails a PR. The S7.4 sweep on `macos-15` (Apple M1) recorded nothing: 0 skips before, 0 after,
   the set had kept up with the new families and the `*-fast` goldens. It was swept again after the
   S5.4e merge, which added `*-fast` goldens for the four aarch64 tiers; those already existed here
-  and are byte-identical to the `aarch64-neon-dotprod` ones, so nothing was added.
+  and are byte-identical to the `aarch64-neon-dotprod` ones, so nothing was added. The final sweep,
+  after S4.8b merged, added `nomic-bert-moe-Q8_0` and nothing else (0 skips before and after; the
+  next recording added nothing). The macOS directory is a superset of the `aarch64-neon-dotprod`
+  one: `jina-bert-Q8_0`, `nomic-bert-Q8_0` and now `nomic-bert-moe-Q8_0` exist only here, recorded
+  in earlier macOS sweeps, and their tests skip on the aarch64 Linux tiers, which record no golden
+  for them.
 - **The installer.** `scripts/install.ps1` read the user `Path` with
   `[Environment]::GetEnvironmentVariable("Path","User")` — which expands `%VARIABLES%` — and wrote it
   back with `[Environment]::SetEnvironmentVariable`, which stores a plain `REG_SZ`, so
