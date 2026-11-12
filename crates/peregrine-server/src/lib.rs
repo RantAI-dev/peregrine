@@ -785,7 +785,9 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
     // `server-common.cpp:207-241`): a native decision model answers decisions, not text, and an
     // `openjev` file has no text generation even though it carries an LM head. A file with a
     // classifier head answers rerank or classify (S4.6b): one output with no labels is a
-    // reranker's score, several outputs or named labels are a classifier's.
+    // reranker's score, several outputs or named labels are a classifier's. One output
+    // with a label is both: converters write a dummy `LABEL_0` into a reranker's file
+    // (gte-reranker-modernbert-base), and both endpoints serve it.
     let data: Vec<Value> = s
         .models
         .iter()
@@ -794,10 +796,10 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
                 json!(["decisions"])
             } else if m.model.has_head() {
                 let n_out = m.model.head_width();
-                if n_out == 1 && m.model.head_labels().is_empty() {
-                    json!(["rerank"])
-                } else {
-                    json!(["classify"])
+                match (n_out, m.model.head_labels().is_empty()) {
+                    (1, true) => json!(["rerank"]),
+                    (1, false) => json!(["rerank", "classify"]),
+                    _ => json!(["classify"]),
                 }
             } else {
                 json!(["text"])

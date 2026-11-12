@@ -493,6 +493,38 @@ fn a_modern_bert_reranker_is_served_on_rerank() {
     );
 }
 
+/// A reranker whose converter wrote a dummy label (gte-reranker-modernbert-base carries
+/// `LABEL_0`): both endpoints serve it, and `/v1/models` says so.
+#[test]
+fn a_one_output_head_with_a_dummy_label_is_listed_as_both() {
+    let dir = tmpdir("modern-bert-dummy-label");
+    let model = modern_bert_head(
+        &dir,
+        "mb-dummy-label",
+        support::models::ModernBertHeadConfig {
+            n_out: 1,
+            labels: vec!["LABEL_0".into()],
+            ..Default::default()
+        },
+    );
+    let (_guard, port) = serve(&dir, &model);
+    let models = get(port, "/v1/models");
+    assert_eq!(
+        models["data"][0]["architecture"]["output_modalities"],
+        json!(["rerank", "classify"])
+    );
+    let (status, ranked) = post(
+        port,
+        "/v1/rerank",
+        json!({"query": "where is the cat?", "documents": ["the cat sat", "taxes"]}),
+    );
+    assert_eq!(status, 200, "{ranked}");
+    assert_eq!(ranked["results"].as_array().unwrap().len(), 2);
+    let (status, classified) = post(port, "/v1/classify", json!({"input": ["hello world"]}));
+    assert_eq!(status, 200, "{classified}");
+    assert_eq!(classified["results"][0]["label"], "LABEL_0");
+}
+
 #[test]
 fn a_modern_bert_labelled_head_is_served_on_classify() {
     let dir = tmpdir("modern-bert-classify");

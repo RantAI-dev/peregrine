@@ -450,9 +450,10 @@ points the note left to the implementer, now settled:
 1. **The head is a property of the tensors, not of `<arch>.pooling_type`.** The judge of
    rerank-vs-classify is the same as `bert`'s: one output and no labels is a reranker; more
    outputs, or a named label, is a classifier. gte-reranker-modernbert-base carries the
-   dummy `classifier.output_labels = ["LABEL_0"]` its converter wrote, so `/v1/models`
-   lists it as a classifier while `/v1/rerank` serves it as the reranker it is — the same
-   rule `bert` files with a dummy label get.
+   dummy `classifier.output_labels = ["LABEL_0"]` its converter wrote, and both endpoints
+   serve such a file (`/v1/rerank` returns the one score, `/v1/classify` the one label), so
+   `/v1/models` lists it with both: `["rerank", "classify"]` — the same rule `bert` files
+   with a dummy label get.
 2. **The dense layer and the head norm are bias-less.** llama.cpp's modern-bert loader
    creates `cls.bias`/`cls.norm.bias` only for a decision model, so a sequence-classifier
    file that carries them (only possible with `classifier_bias` / `norm_bias` on, which
