@@ -1,0 +1,61 @@
+=== rounds-slow.jsonl ===
+
+--- Llama 3.2 1B  prompt 4096  threads 1  pg-exact  41.5 tok/s  wall 98.705 s  end to end 46.0 GMAC/s  4095 rows  load 5.85-5.85 ---
+  StepStats: matmul  63.8 %  head   0.1 %  attention  32.0 %  other   4.3 %  barriers 4161
+  weight matmul by group (per prompt row):
+         qkv    6.3 %    6.210 s   412.2 GMAC   66.4 GMAC/s in situ
+          wo    3.8 %    3.728 s   274.8 GMAC   73.7 GMAC/s in situ
+     gate/up   29.7 %   29.324 s  2198.5 GMAC   75.0 GMAC/s in situ
+        down   24.0 %   23.653 s  1099.2 GMAC   46.5 GMAC/s in situ
+        head    0.1 %    0.121 s   0.263 GMAC    2.2 GMAC/s in situ (1 row of 128256)
+  weight matmul by format:
+     Q4_K   45.7 %   45.109 s  3400.8 GMAC   75.4 GMAC/s in situ  (467 MB)
+     Q6_K   17.8 %   17.528 s   584.0 GMAC   33.3 GMAC/s in situ  (117 MB)
+  attention  32.0 %:  scores 11.8 %  softmax  0.0 %  mix 19.6 %  (worker sums / 1 workers)
+    scores  274.95 GMAC   23.6 GMAC/s/core;  mix  274.95 GMAC   14.2 GMAC/s/core
+  caller: quantise  1.4 %  swiglu  2.3 %  residual  0.1 %  rope  0.2 %  kv write  0.2 %  norms  0.1 %  barrier wait  0.0 %  other  0.0 %
+
+--- Llama 3.2 1B  prompt 4096  threads 1  pg-fast  53.5 tok/s  wall 76.571 s  end to end 59.2 GMAC/s  4095 rows  load 1.13-1.13 ---
+  StepStats: matmul  53.5 %  head   0.1 %  attention  41.0 %  other   5.6 %  barriers 1089
+  weight matmul by group (per prompt row):
+         qkv    5.6 %    4.299 s   412.2 GMAC   95.9 GMAC/s in situ
+          wo    3.7 %    2.815 s   274.8 GMAC   97.6 GMAC/s in situ
+     gate/up   30.0 %   22.959 s  2198.5 GMAC   95.8 GMAC/s in situ
+        down   14.2 %   10.849 s  1099.2 GMAC  101.3 GMAC/s in situ
+        head    0.1 %    0.043 s   0.263 GMAC    6.2 GMAC/s in situ (1 row of 128256)
+  weight matmul by format:
+     Q4_K   45.5 %   34.861 s  3400.8 GMAC   97.6 GMAC/s in situ  (467 MB)
+     Q6_K    7.3 %    5.624 s   584.0 GMAC  103.8 GMAC/s in situ  (117 MB)
+  attention  41.0 %:  scores 15.1 %  softmax  0.0 %  mix 25.0 %  (worker sums / 1 workers)
+    scores  274.95 GMAC   23.8 GMAC/s/core;  mix  274.95 GMAC   14.3 GMAC/s/core
+  caller: quantise  1.9 %  swiglu  3.0 %  residual  0.1 %  rope  0.2 %  kv write  0.2 %  norms  0.2 %  barrier wait  0.0 %  other  0.0 %
+
+--- Qwen3 1.7B  prompt 4096  threads 1  pg-exact  27.5 tok/s  wall 148.773 s  end to end 45.3 GMAC/s  4095 rows  load 2.00-2.00 ---
+  StepStats: matmul  62.5 %  head   0.0 %  attention  32.5 %  other   5.1 %  barriers 7281
+  weight matmul by group (per prompt row):
+         qkv   10.5 %   15.667 s   961.8 GMAC   61.4 GMAC/s in situ
+          wo    4.5 %    6.638 s   480.9 GMAC   72.4 GMAC/s in situ
+     gate/up   26.5 %   39.447 s  2885.5 GMAC   73.1 GMAC/s in situ
+        down   20.9 %   31.114 s  1442.8 GMAC   46.4 GMAC/s in situ
+        head    0.0 %    0.058 s   0.311 GMAC    5.4 GMAC/s in situ (1 row of 151936)
+  weight matmul by format:
+     Q4_K   45.0 %   66.938 s  4929.4 GMAC   73.6 GMAC/s in situ  (677 MB)
+     Q6_K   17.1 %   25.494 s   841.6 GMAC   33.0 GMAC/s in situ  (169 MB)
+  attention  32.5 %:  scores 13.6 %  softmax  0.0 %  mix 18.3 %  (worker sums / 1 workers)
+    scores  481.15 GMAC   23.8 GMAC/s/core;  mix  481.15 GMAC   17.7 GMAC/s/core
+  caller: quantise  1.7 %  swiglu  2.0 %  residual  0.1 %  rope  0.7 %  kv write  0.5 %  norms  0.2 %  barrier wait  0.0 %  other  0.0 %
+
+--- Qwen3 1.7B  prompt 4096  threads 1  pg-fast  35.2 tok/s  wall 116.309 s  end to end 57.9 GMAC/s  4095 rows  load 1.14-1.14 ---
+  StepStats: matmul  52.2 %  head   0.1 %  attention  41.5 %  other   6.5 %  barriers 1905
+  weight matmul by group (per prompt row):
+         qkv    8.7 %   10.068 s   961.8 GMAC   95.5 GMAC/s in situ
+          wo    4.5 %    5.186 s   480.9 GMAC   92.7 GMAC/s in situ
+     gate/up   26.2 %   30.468 s  2885.5 GMAC   94.7 GMAC/s in situ
+        down   12.7 %   14.809 s  1442.8 GMAC   97.4 GMAC/s in situ
+        head    0.1 %    0.069 s   0.311 GMAC    4.5 GMAC/s in situ (1 row of 151936)
+  weight matmul by format:
+     Q4_K   44.2 %   51.431 s  4929.4 GMAC   95.8 GMAC/s in situ  (677 MB)
+     Q6_K    7.3 %    8.439 s   841.6 GMAC   99.7 GMAC/s in situ  (169 MB)
+  attention  41.5 %:  scores 17.3 %  softmax  0.0 %  mix 23.6 %  (worker sums / 1 workers)
+    scores  481.15 GMAC   24.0 GMAC/s/core;  mix  481.15 GMAC   17.6 GMAC/s/core
+  caller: quantise  2.2 %  swiglu  2.6 %  residual  0.1 %  rope  0.8 %  kv write  0.4 %  norms  0.2 %  barrier wait  0.0 %  other  0.0 %

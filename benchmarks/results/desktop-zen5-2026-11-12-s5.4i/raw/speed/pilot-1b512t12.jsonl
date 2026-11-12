@@ -1,0 +1,10 @@
+{"engine": "pg-exact", "round": 1, "tok_s": 352.36242111294456, "load1": 0.16, "tries": 1}
+{"engine": "pg-fast", "round": 1, "tok_s": 476.6103055059584, "load1": 0.16, "tries": 1}
+{"engine": "ik-default", "round": 1, "tok_s": 458.794723, "load1": 0.23, "tries": 1}
+{"engine": "ik-rtr", "round": 1, "tok_s": 562.698275, "load1": 0.23, "tries": 1}
+{"engine": "llama", "round": 1, "tok_s": 297.923801, "load1": 1.17, "tries": 1}
+{"engine": "pg-exact", "round": 2, "tok_s": 355.51671806985917, "load1": 2.04, "tries": 1}
+{"engine": "pg-fast", "round": 2, "tok_s": 468.9871021200674, "load1": 2.04, "tries": 1}
+{"engine": "ik-default", "round": 2, "tok_s": 441.103543, "load1": 1.95, "tries": 1}
+{"engine": "ik-rtr", "round": 2, "tok_s": 575.907284, "load1": 1.95, "tries": 1}
+{"engine": "llama", "round": 2, "tok_s": 298.920625, "load1": 2.36, "tries": 1}
