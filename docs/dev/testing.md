@@ -39,7 +39,19 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    under a test that has it memory-mapped (SIGBUS, most visibly on macOS).
    CI's pinned tiers (scalar, AVX2 and the AVX-512 tier under SDE) run with `PEREGRINE_GOLDEN=require`,
    so a new model or format must commit its goldens for all three; `PEREGRINE_GOLDEN=record` writes the
-   missing ones (the AVX-512 ones on an AVX-512 machine). For the real-model goldens (`tests/golden.rs`), `require` fails a model file that is present but has no golden for the tier, and still skips a file that is absent. A golden pins one upload, byte for byte: a different upload of the same quant (the Qwen official `qwen2.5-0.5b-instruct-q4_k_m.gguf` is not bartowski's `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf`) fails at the golden's `model … bytes` line, so check the SHA-256 listed here before reading a mismatch as a regression.
+   missing ones (the AVX-512 ones on an AVX-512 machine). The directory is per tier and carries the
+   system when it is not Linux: on macOS it is `tests/golden/synthetic/aarch64-neon-dotprod-macos/`
+   (and the session fixture `tests/fixtures/session/aarch64-neon-dotprod-macos.txt`). Record on the
+   platform itself with the manually started **Record goldens** workflow
+   (`.github/workflows/record-goldens.yml`): `gh workflow run record-goldens.yml --ref <branch>
+   -f runner=macos-15` runs the suite once with `PEREGRINE_GOLDEN=record` and
+   `PEREGRINE_SESSION_FIXTURE=record`, runs it again without the switch to prove the values reproduce,
+   counts the skips before and after, and uploads the changed files as an artefact:
+   `gh run download <id> -n goldens-macos-15 -D /tmp/s7-goldens`, then unpack
+   `goldens.tar.gz` over the checkout and commit the files by name. Real-model goldens
+   (`tests/golden.rs`) need model files and a machine of that platform; until one exists they are
+   skipped there, and CI has no model files anywhere. For the real-model goldens, `require` fails a
+   model file that is present but has no golden for the tier, and still skips a file that is absent. A golden pins one upload, byte for byte: a different upload of the same quant (the Qwen official `qwen2.5-0.5b-instruct-q4_k_m.gguf` is not bartowski's `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf`) fails at the golden's `model … bytes` line, so check the SHA-256 listed here before reading a mismatch as a regression.
    `tests/runtime_parity.rs` pins what the session and a one-slot engine must agree on, since ADR 0007
    made the engine the only runtime: the same prompt through `Session` and through a one-slot `Engine`
    (greedy: the same tokens; sampled: the session counts conversation turns into the sampling key and the

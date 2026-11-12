@@ -1185,46 +1185,126 @@ impl Drop for TurnGuard<'_> {
     }
 }
 
-/// Contiguous share of `total` items belonging to worker `w` of `n`.
-///
-/// Balanced to within one item, and every index belongs to exactly one worker —
-/// which is the precondition the disjoint writes in `matmul` rely on.
-#[inline]
-/// physical cores (distinct (package, core id) pairs in /proc/cpuinfo), when the OS says.
+/// The physical cores — distinct `(package, core id)` pairs in `/proc/cpuinfo` on Linux, the
+/// performance cores on Apple Silicon — when the OS says.
 ///
 /// Linux on aarch64 does not print `physical id`/`core id` in `/proc/cpuinfo` (S2.8), so a host
 /// that names neither falls back to the CPUs this process may actually run on. On the ARM
 /// machines this was written for there is no SMT, so that number is the physical core count too;
 /// the fallback also honours a `taskset` mask, which is what the benchmark's affinity runs need.
+///
+/// On macOS an Apple chip mixes performance and efficiency cores, and a synchronous pool as wide
+/// as every core is slower than one on the performance cores: the efficiency cores take a share
+/// of each fork–join and finish it later. The default width is `hw.perflevel0.physicalcpu`, the
+/// performance-core count, falling back to `hw.physicalcpu` and then to the CPUs this process may
+/// run on (a VM can cap them below the host's count).
 pub fn physical_cores() -> Option<usize> {
-    let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-    let mut seen = std::collections::HashSet::new();
-    let (mut pkg, mut core) = (None::<String>, None::<String>);
-    for line in info.lines().chain(std::iter::once("")) {
-        if line.trim().is_empty() {
-            if let (Some(p), Some(c)) = (pkg.take(), core.take()) {
-                seen.insert((p, c));
+    #[cfg(target_os = "macos")]
+    {
+        let available = std::thread::available_parallelism().ok().map(|n| n.get());
+        let cores = macos_sysctl_i32("hw.perflevel0.physicalcpu")
+            .or_else(|| macos_sysctl_i32("hw.physicalcpu"))
+            .map(|n| n as usize)
+            .filter(|n| *n > 0);
+        cores.map_or(available, |n| {
+            Some(available.map_or(n, |max| n.min(max).max(1)))
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        let mut seen = std::collections::HashSet::new();
+        let (mut pkg, mut core) = (None::<String>, None::<String>);
+        for line in info.lines().chain(std::iter::once("")) {
+            if line.trim().is_empty() {
+                if let (Some(p), Some(c)) = (pkg.take(), core.take()) {
+                    seen.insert((p, c));
+                }
+                continue;
             }
-            continue;
+            let mut kv = line.splitn(2, ':');
+            let (k, v) = (
+                kv.next().unwrap_or("").trim(),
+                kv.next().unwrap_or("").trim().to_string(),
+            );
+            match k {
+                "physical id" => pkg = Some(v),
+                "core id" => core = Some(v),
+                _ => {}
+            }
         }
-        let mut kv = line.splitn(2, ':');
-        let (k, v) = (
-            kv.next().unwrap_or("").trim(),
-            kv.next().unwrap_or("").trim().to_string(),
-        );
-        match k {
-            "physical id" => pkg = Some(v),
-            "core id" => core = Some(v),
-            _ => {}
+        if seen.is_empty() {
+            return std::thread::available_parallelism().ok().map(|n| n.get());
         }
+        Some(seen.len())
     }
-    if seen.is_empty() {
-        return std::thread::available_parallelism().ok().map(|n| n.get());
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        std::thread::available_parallelism().ok().map(|n| n.get())
     }
-    Some(seen.len())
 }
 
-/// the pool for one-row steps (single-user decode), when it should be narrower than the main one.
+/// One integer `sysctl` value, e.g. `hw.perflevel0.physicalcpu`.
+///
+/// `libSystem`'s `sysctlbyname` is not in the standard library, and adding a crate for one call
+/// is not worth a dependency (ADR 0002).
+#[cfg(target_os = "macos")]
+fn macos_sysctl_i32(name: &str) -> Option<i32> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_void};
+    extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+    let name = CString::new(name).ok()?;
+    let mut value: i32 = 0;
+    let mut len = size_of::<i32>();
+    // SAFETY: `name` is a live NUL-terminated string; `value` and `len` are a live `i32` and its
+    // byte length, and the call writes at most `len` bytes into `value`. No pointer outlives the
+    // call.
+    let rc = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            (&mut value as *mut i32).cast::<c_void>(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && len as usize == size_of::<i32>()).then_some(value)
+}
+
+/// Contiguous share of `total` items belonging to worker `w` of `n`.
+///
+/// Balanced to within one item, and every index belongs to exactly one worker —
+/// which is the precondition the disjoint writes in `matmul` rely on.
+#[inline]
+pub fn share(total: usize, w: usize, n: usize) -> (usize, usize) {
+    let lo = total * w / n;
+    let hi = total * (w + 1) / n;
+    (lo, hi)
+}
+
+/// The width of the narrower pool for one-row steps, given the explicit setting and the cores.
+///
+/// Split out from [`narrow_pool`] so the precedence is testable by argument, not by the process's
+/// environment: an explicit `PEREGRINE_DECODE_THREADS` (or `--threads` at the call sites that
+/// use it) always wins over the physical-core default.
+fn narrow_width(
+    decode_threads: Option<usize>,
+    threads: usize,
+    cores: Option<usize>,
+) -> Option<usize> {
+    let want = decode_threads.or(cores)?;
+    (want < threads).then_some(want)
+}
+
+/// The pool for one-row steps (single-user decode), when it should be narrower than the main one.
 ///
 /// A one-row step is bound by memory, and workers beyond the physical cores spin on SMT siblings of the cores doing
 /// the work, taking their cycles: measured on the 9B (Ryzen AI 9 HX 370), one user decodes at 24.0-24.5 tok/s with
@@ -1232,16 +1312,12 @@ pub fn physical_cores() -> Option<usize> {
 /// (after its spin window) instead of spinning beside the other. `PEREGRINE_DECODE_THREADS` sets the width
 /// (default: the physical cores); `None` when it would not be narrower than `threads`.
 pub fn narrow_pool(threads: usize) -> Option<Pool> {
-    let want = crate::options::get()
-        .decode_threads
-        .or_else(physical_cores)?;
-    (want < threads).then(|| Pool::new(want))
-}
-
-pub fn share(total: usize, w: usize, n: usize) -> (usize, usize) {
-    let lo = total * w / n;
-    let hi = total * (w + 1) / n;
-    (lo, hi)
+    let want = narrow_width(
+        crate::options::get().decode_threads,
+        threads,
+        physical_cores(),
+    )?;
+    Some(Pool::new(want))
 }
 
 #[cfg(test)]
@@ -1342,6 +1418,34 @@ mod tests {
             "a logical CPU is listed under two cores"
         );
         assert!(map.iter().all(|core| !core.is_empty()));
+    }
+
+    /// On Apple Silicon the default is the performance-core count: a plausible number of cores,
+    /// never more than this process may run on (`hw.perflevel0.physicalcpu` can name the host's
+    /// cores when a VM caps the runner).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_performance_core_count_is_a_plausible_default() {
+        let available = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let cores = physical_cores().expect("macOS reports a core count");
+        eprintln!(
+            "physical_cores (performance cores) = {cores}, available_parallelism = {available}"
+        );
+        assert!(
+            (1..=available).contains(&cores),
+            "performance cores {cores} is not between 1 and the {available} CPUs this process may use"
+        );
+    }
+
+    /// An explicit width always beats the physical-core default, and a default that would not
+    /// narrow the pool gives no second pool at all.
+    #[test]
+    fn an_explicit_narrow_width_wins_over_the_physical_cores() {
+        assert_eq!(narrow_width(Some(2), 8, Some(6)), Some(2));
+        assert_eq!(narrow_width(Some(7), 8, Some(6)), Some(7));
+        assert_eq!(narrow_width(None, 8, Some(6)), Some(6));
+        assert_eq!(narrow_width(None, 4, Some(6)), None);
+        assert_eq!(narrow_width(None, 8, None), None);
     }
 
     #[test]

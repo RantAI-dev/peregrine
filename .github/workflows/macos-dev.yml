@@ -1,0 +1,103 @@
+# TEMPORARY (S7.1): iterate on the macOS archive, installer, core counts and goldens without
+# waiting for a pull request. Delete before the PR is ready.
+name: macos-dev
+on:
+  push:
+    branches: [s7.1-macos]
+permissions:
+  contents: read
+concurrency:
+  group: macos-dev-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: the tier and both core counts
+        run: |
+          cargo build --release --locked -p peregrine
+          ./target/release/peregrine tier
+          sysctl hw.physicalcpu hw.perflevel0.physicalcpu hw.ncpu
+          cargo test -p peregrine-core --release --locked --lib \
+            the_performance_core_count -- --nocapture
+      - name: build the archive
+        run: |
+          scripts/release/build.sh aarch64-apple-darwin
+          ls -l dist
+          tar -tzvf dist/*.tar.gz
+          shasum -a 256 dist/*.tar.gz
+      - name: install the archive with install.sh and run it
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          PEREGRINE_BASE_URL="file://$PWD/dist" \
+            sh scripts/install.sh --version "v$version" --prefix "$RUNNER_TEMP/prefix"
+          "$RUNNER_TEMP/prefix/bin/peregrine" --version
+          "$RUNNER_TEMP/prefix/bin/peregrine" tier
+          codesign --verify --strict "$RUNNER_TEMP/prefix/bin/peregrine"
+          codesign -dv "$RUNNER_TEMP/prefix/bin/peregrine" 2>&1 || true
+      - name: install.sh platform matrix (stubs)
+        run: scripts/install-test.sh
+      - name: a synthetic run from the release binary
+        run: |
+          model=$(cargo run -q --release --locked -p peregrine-bench --example write_synthetic \
+            -- "$RUNNER_TEMP/synthetic")
+          ./target/release/peregrine run -m "$model" --threads 3 --max-tokens 8 "Say hello."
+      - name: count the goldens missing before recording
+        run: |
+          set -o pipefail
+          cargo test -p peregrine-models --release --locked \
+            --test synthetic --test embeddings --test bert_heads \
+            --test modern_bert_heads --test session_fixture -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/before.log"
+          echo "skips before: $(grep -E -c 'no golden for tier|no recording for tier' "$RUNNER_TEMP/before.log" || true)"
+      - name: record the synthetic goldens
+        env:
+          PEREGRINE_GOLDEN: record
+          PEREGRINE_SESSION_FIXTURE: record
+        run: |
+          set -o pipefail
+          cargo test -p peregrine-models --release --locked \
+            --test synthetic --test embeddings --test bert_heads \
+            --test modern_bert_heads --test session_fixture -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/record.log"
+      - name: the same run without the record switch must reproduce them
+        run: |
+          set -o pipefail
+          cargo test -p peregrine-models --release --locked \
+            --test synthetic --test embeddings --test bert_heads \
+            --test modern_bert_heads --test session_fixture -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/verify.log"
+          if grep -E -q 'no golden for tier|no recording for tier' "$RUNNER_TEMP/verify.log"; then
+            echo "a golden was still missing after recording:" >&2
+            grep -E 'no golden for tier|no recording for tier' "$RUNNER_TEMP/verify.log" >&2
+            exit 1
+          fi
+          echo "skips after:  $(grep -E -c 'no golden for tier|no recording for tier' "$RUNNER_TEMP/verify.log" || true)"
+      - name: collect the recorded files
+        run: |
+          git add -A crates/peregrine-models/tests
+          git diff --cached --name-only | tee "$RUNNER_TEMP/recorded.txt"
+          tar -czf "$RUNNER_TEMP/goldens.tar.gz" -T "$RUNNER_TEMP/recorded.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-goldens
+          path: |
+            ${{ runner.temp }}/goldens.tar.gz
+            ${{ runner.temp }}/recorded.txt
+            ${{ runner.temp }}/before.log
+            ${{ runner.temp }}/record.log
+            ${{ runner.temp }}/verify.log
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-dist
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error

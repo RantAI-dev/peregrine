@@ -22,6 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo fmt --all --check
+      - run: scripts/install-test.sh
       - run: cargo clippy --workspace --all-targets --release --locked -- -D warnings
       - run: cargo doc --workspace --no-deps --locked
         env:
@@ -83,6 +84,18 @@ jobs:
       - name: test (non-x86, lib + bins + tests)
         if: runner.arch != 'X64'
         run: cargo test --workspace --lib --bins --tests --release --locked
+      # S7.1 smoke on Apple Silicon: the release binary runs, reports its version and the kernel
+      # tier it picked, and generates from a synthetic model the repository writes itself (the
+      # bench examples are x86-only; write_synthetic is the one that is not).
+      - name: smoke (macOS: version, tier, a synthetic run)
+        if: matrix.name == 'macos-aarch64'
+        run: |
+          cargo build --release --locked -p peregrine
+          ./target/release/peregrine --version
+          ./target/release/peregrine tier
+          model=$(cargo run -q --release --locked -p peregrine-bench --example write_synthetic \
+            -- "$RUNNER_TEMP/synthetic")
+          ./target/release/peregrine run -m "$model" --threads 3 --max-tokens 8 "Say hello."
       # The synthetic goldens are per tier and the native tier above already compares its own.
       # Compare the lower aarch64 tiers too, so a stale golden fails here instead of on the next
       # re-record (the aarch64-neon-dotprod goldens were stale for months). A golden that is

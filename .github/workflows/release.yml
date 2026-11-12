@@ -3,15 +3,25 @@
 # binaries and their checksums to the GitHub release. Nothing else publishes (crates stay
 # `publish = false`; there is no container push yet).
 #
-# The first release ships Linux binaries: linux-x86_64 (the portable x86-64 baseline with
-# run-time ISA dispatch) and linux-aarch64. macOS comes in a later release. Each target is
+# The release ships linux-x86_64 (the portable x86-64 baseline with run-time ISA dispatch),
+# linux-aarch64 and macos-aarch64 (Apple Silicon; ad-hoc signed, not notarised). Each target is
 # built natively on its own runner, and the tagged commit runs the full test suite in release
-# mode, as it ships. The AVX2-only physical host (H2) runs the suite on every release
-# candidate before the tag is cut (docs/dev/releasing.md, S0.5).
+# mode, as it ships. The AVX2-only physical host (H2) runs the suite on every release candidate
+# before the tag is cut (docs/dev/releasing.md, S0.5).
+#
+# A manual start is a dry run (the `dry_run` input defaults to true): the build jobs run and
+# upload their archives as workflow artefacts, and the publish job cannot run — it is guarded on
+# a tag push, not on the input, so no manual start can ever create a release.
 name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and upload the archives as workflow artefacts; never publish"
+        type: boolean
+        default: true
 permissions:
   contents: read
 concurrency:
@@ -28,6 +38,7 @@ jobs:
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, name: linux-x86_64 }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, name: linux-aarch64 }
+          - { os: macos-15, target: aarch64-apple-darwin, name: macos-aarch64 }
     name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     permissions:
@@ -35,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      # The tagged commit must pass the suite in release mode on both targets (mirrors ci.yml's
+      # The tagged commit must pass the suite in release mode on every target (mirrors ci.yml's
       # `test` job: the kernels are tested as they ship).
       - name: test (x86-64, every target)
         if: runner.arch == 'X64'
@@ -54,6 +65,11 @@ jobs:
           echo "native tier of the portable binary: $tier"
           grep -q '^x86_64-avx2' <<< "$tier"
           PEREGRINE_ISA=scalar ./target/release/peregrine tier | grep -q '^kernel tier   x86_64$'
+      - name: run-time tier (macOS)
+        if: matrix.name == 'macos-aarch64'
+        run: |
+          cargo build --release --locked -p peregrine
+          ./target/release/peregrine tier
       - name: build archive
         run: scripts/release/build.sh ${{ matrix.target }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -65,11 +81,13 @@ jobs:
           if-no-files-found: error
 
   # Creates the GitHub release with the notes generated from PR labels (.github/release.yml)
-  # and uploads both archives, the combined SHA256SUMS and install.sh. The installer is an asset
+  # and uploads every archive, the combined SHA256SUMS and install.sh. The installer is an asset
   # so get.peregrine.rantai.dev/install.sh can redirect to
-  # releases/latest/download/install.sh, the lakehouse pattern.
+  # releases/latest/download/install.sh, the lakehouse pattern. Guarded on a tag push, so a
+  # manual (dry) run builds and uploads artefacts but never publishes.
   release:
     needs: [build]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write

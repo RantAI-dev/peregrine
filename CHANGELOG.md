@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **macOS on Apple Silicon is a supported platform (roadmap S7.1)**: `release.yml` builds and tests
+  `peregrine-vX.Y.Z-macos-aarch64.tar.gz` on the `macos-15` runner (`MACOSX_DEPLOYMENT_TARGET=11.0`,
+  `strip -x`, then ad-hoc signed with `codesign --force --sign -`; not notarised), and a
+  `workflow_dispatch` dry run builds and uploads the archives without publishing. `scripts/install.sh`
+  accepts Darwin arm64 (and refuses Intel Macs with the build-from-source line; it uses `shasum -a 256`
+  where `sha256sum` is absent), `peregrine upgrade` maps macOS aarch64 to `macos-aarch64`, and the
+  default decode width on Apple Silicon is the performance-core count
+  (`hw.perflevel0.physicalcpu`, read with `sysctlbyname`), not every core. The synthetic goldens are
+  recorded on the runner for its macOS tier, `.github/workflows/record-goldens.yml` records them for
+  any platform, the macOS CI job smoke-tests the release binary and a synthetic generation, and the
+  quickstart and release checklist have the macOS commands, the quarantine note and the dry run.
+  `docs/design/s7-platforms.md` has the step's "as built" section.
+
 - **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
   `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
   embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused

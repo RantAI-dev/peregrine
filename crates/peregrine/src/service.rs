@@ -105,13 +105,14 @@ pub fn current_version() -> &'static str {
 }
 
 pub fn upgrade(args: &UpgradeArgs) -> Result<String, String> {
-    if std::env::consts::OS != "linux" {
-        return Err(format!(
-            "release archives are Linux-only; on {} build from source",
-            std::env::consts::OS
-        ));
-    }
-    let arch = asset_arch()?;
+    let platform =
+        release_platform(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
+            format!(
+                "no release archive for {} on {}; build from source: cargo build --release",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )
+        })?;
     let explicit = args
         .base_url
         .clone()
@@ -148,7 +149,7 @@ pub fn upgrade(args: &UpgradeArgs) -> Result<String, String> {
             target.display()
         ));
     }
-    let asset = format!("peregrine-{tag}-linux-{arch}.tar.gz");
+    let asset = format!("peregrine-{tag}-{platform}.tar.gz");
     let tmp = std::env::temp_dir().join(format!("peregrine-upgrade-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
@@ -250,11 +251,16 @@ fn wait_gone(pid: u32, timeout: Duration) -> Result<(), String> {
     Ok(())
 }
 
-fn asset_arch() -> Result<&'static str, String> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok("x86_64"),
-        "aarch64" => Ok("aarch64"),
-        other => Err(format!("no release archive for {other}; build from source")),
+/// The release asset's platform name for a system and architecture, e.g. `macos-aarch64`.
+///
+/// The names match the release archives' (`scripts/release/build.sh`). Intel Macs have no
+/// archive: they build from source.
+fn release_platform(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        ("linux", "aarch64") => Some("linux-aarch64"),
+        ("macos", "aarch64") => Some("macos-aarch64"),
+        _ => None,
     }
 }
 
@@ -359,7 +365,7 @@ fn install(base: &str, tag: &str, asset: &str, tmp: &Path, target: &Path) -> Res
         return Err("the archive did not extract".into());
     }
     let staged = tmp
-        .join(format!("peregrine-{tag}-linux-{}", archive_arch(asset)?))
+        .join(asset.trim_end_matches(".tar.gz"))
         .join("peregrine");
     if !staged.is_file() {
         return Err(format!("the archive has no {}", staged.display()));
@@ -380,16 +386,59 @@ fn install(base: &str, tag: &str, asset: &str, tmp: &Path, target: &Path) -> Res
     Ok(())
 }
 
-fn archive_arch(asset: &str) -> Result<&str, String> {
-    if asset.contains("-linux-x86_64.") {
-        Ok("x86_64")
-    } else if asset.contains("-linux-aarch64.") {
-        Ok("aarch64")
+/// The SHA-256 of a file as hex, with `sha256sum` (Linux) or `shasum -a 256` (macOS).
+fn sha256_hex(path: &Path) -> Result<String, String> {
+    let (program, args): (&str, &[&str]) = if command_exists("sha256sum") {
+        ("sha256sum", &[])
+    } else if command_exists("shasum") {
+        ("shasum", &["-a", "256"])
     } else {
-        Err(format!("{asset}: cannot tell the architecture"))
+        return Err("neither sha256sum nor shasum is installed".into());
+    };
+    let out = Command::new(program)
+        .args(args)
+        .arg(path)
+        .output()
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{program} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string())
 }
 
+fn command_exists(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn verify_checksum(archive: &Path, asset: &str, sums: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(sums).map_err(|e| format!("cannot read checksums: {e}"))?;
+    let expected = text.lines().find_map(|line| {
+        let mut it = line.split_whitespace();
+        let hash = it.next()?;
+        let name = it.next()?.trim_start_matches('*').rsplit('/').next()?;
+        (name == asset).then(|| hash.to_string())
+    });
+    let expected = expected.ok_or_else(|| format!("SHA256SUMS has no entry for {asset}"))?;
+    let actual = sha256_hex(archive)?;
+    if actual != expected {
+        return Err(format!(
+            "checksum mismatch for {asset}: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(())
+}
 fn curl(args: &[&str]) -> Result<(), String> {
     let out = Command::new("curl")
         .arg("-fsSL")
@@ -404,32 +453,6 @@ fn curl(args: &[&str]) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
-}
-
-fn verify_checksum(archive: &Path, asset: &str, sums: &Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(sums).map_err(|e| format!("cannot read checksums: {e}"))?;
-    let expected = text.lines().find_map(|line| {
-        let mut it = line.split_whitespace();
-        let hash = it.next()?;
-        let name = it.next()?.trim_start_matches('*').rsplit('/').next()?;
-        (name == asset).then(|| hash.to_string())
-    });
-    let expected = expected.ok_or_else(|| format!("SHA256SUMS has no entry for {asset}"))?;
-    let out = Command::new("sha256sum")
-        .arg(archive)
-        .output()
-        .map_err(|e| format!("cannot run sha256sum: {e}"))?;
-    let actual = String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if actual != expected {
-        return Err(format!(
-            "checksum mismatch for {asset}: expected {expected}, got {actual}"
-        ));
-    }
-    Ok(())
 }
 
 fn verify(binary: &Path) -> Result<(), String> {
@@ -475,15 +498,28 @@ mod tests {
     }
 
     #[test]
-    fn the_archive_names_its_architecture() {
+    fn the_archive_names_the_platform() {
+        // All four cases the task names, by argument: the mapping is a function of the system and
+        // architecture, not of the machine this test runs on.
+        assert_eq!(release_platform("linux", "x86_64"), Some("linux-x86_64"));
+        assert_eq!(release_platform("linux", "aarch64"), Some("linux-aarch64"));
+        assert_eq!(release_platform("macos", "aarch64"), Some("macos-aarch64"));
+        assert_eq!(release_platform("macos", "x86_64"), None);
+        assert_eq!(release_platform("windows", "x86_64"), None);
+    }
+
+    #[test]
+    fn the_release_asset_is_named_after_the_platform() {
+        let tag = "v0.2.0";
+        let platform = release_platform("macos", "aarch64").unwrap();
         assert_eq!(
-            archive_arch("peregrine-v0.1.0-linux-x86_64.tar.gz").unwrap(),
-            "x86_64"
+            format!("peregrine-{tag}-{platform}.tar.gz"),
+            "peregrine-v0.2.0-macos-aarch64.tar.gz"
         );
+        let platform = release_platform("linux", "x86_64").unwrap();
         assert_eq!(
-            archive_arch("peregrine-v0.1.0-linux-aarch64.tar.gz").unwrap(),
-            "aarch64"
+            format!("peregrine-{tag}-{platform}.tar.gz"),
+            "peregrine-v0.2.0-linux-x86_64.tar.gz"
         );
-        assert!(archive_arch("peregrine.tar.gz").is_err());
     }
 }

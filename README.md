@@ -16,8 +16,9 @@ own memory-bandwidth ceiling.
 
 ## Install
 
-Linux x86-64 and aarch64 are supported. The installer detects the architecture, downloads the matching
-release archive, verifies it against `SHA256SUMS`, and installs `peregrine` to `~/.local/bin`:
+Linux x86-64, Linux aarch64 and macOS on Apple Silicon are supported. The installer detects the
+architecture, downloads the matching release archive, verifies it against `SHA256SUMS`, and installs
+`peregrine` to `~/.local/bin`:
 
 ```sh
 curl -fsSL https://peregrine.rantai.dev/install.sh | sh
@@ -32,11 +33,14 @@ curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --prefix /usr/loca
 peregrine upgrade            # self-update in place to the newest release
 ```
 
-The release archives (`peregrine-v0.2.0-linux-x86_64.tar.gz` and
-`peregrine-v0.2.0-linux-aarch64.tar.gz` on the
-[releases page](https://github.com/RantAI-dev/peregrine/releases)) contain portable binaries built for
-the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and i8mm are selected at run time,
-so one binary runs on every CPU of that architecture; `peregrine tier` prints what it picked.
+The release archives (`peregrine-v0.2.0-linux-x86_64.tar.gz`,
+`peregrine-v0.2.0-linux-aarch64.tar.gz` and `peregrine-v0.2.0-macos-aarch64.tar.gz` on the
+[releases page](https://github.com/RantAI-dev/peregrine/releases)) contain portable binaries built
+for the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and i8mm are selected at run
+time, so one binary runs on every CPU of that architecture; `peregrine tier` prints what it picked.
+The macOS archive is ad-hoc signed, not notarised: installed with `curl` it runs as is; see the
+[quickstart](docs/quickstart.md#macos-on-apple-silicon) for a browser download. Intel Macs build from
+source.
 
 **Docker** builds the server image (see [Docker](docs/docker.md)):
 
