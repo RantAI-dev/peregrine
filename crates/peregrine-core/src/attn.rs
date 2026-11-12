@@ -130,9 +130,9 @@ pub struct Shape<'a> {
     /// Which batch rows are **fast prompt rows** (S5.4j): one flag per row of this
     /// call, `None` when no row of it is a prompt row of the opt-in fast prompt mode
     /// or when this tier keeps the exact order. A flagged row computes its attention
-    /// in the fast order of [`fast::DEFINITION`] — its own scores' tree, its own
-    /// denominator fold — which is lossy rounding-wise and is why only the mode's
-    /// prompt rows take it. Every other row, every read-out and every tier without
+    /// in the fast order `fast` documents (its own scores' tree, its own denominator
+    /// fold) — which is lossy rounding-wise and is why only the mode's prompt rows
+    /// take it. Every other row, every read-out and every tier without
     /// the flag keeps the exact engine's attention bit for bit.
     pub fast: Option<&'a [bool]>,
 }
@@ -1777,14 +1777,14 @@ fn avx512_attn(head_dim: usize) -> bool {
 /// result by rounding only — orders of magnitude below the form's error — so a prompt
 /// row of the mode may score its keys, fold its soft-max denominator and mix its
 /// values in a tiled order that shares each loaded K and V vector between up to
-/// [`FAST_ROWS`] query rows. Generated rows, embeddings, rerank, decisions and every
+/// `FAST_ROWS` query rows. Generated rows, embeddings, rerank, decisions and every
 /// pass with the option off keep the exact engine's attention, bit for bit.
 ///
 /// # The definition
 ///
 /// A fast prompt row's attention is defined by these three pieces, and by nothing
-/// else. Each is implemented twice: [`scores_twin`], [`mix_twin`] and
-/// [`denom_twin`] are the definition (plain loops, ADR 0005), and the `*_zmm`
+/// else. Each is implemented twice: `scores_twin`, `mix_twin` and
+/// `denom_twin` are the definition (plain loops, ADR 0005), and the `*_zmm`
 /// bodies must equal them bit for bit at every length (the tests sweep the grid
 /// S5.2b used). The **order is a function of the row's own visible key range alone**:
 /// pieces are the `BLOCK`-key tiles on the absolute position grid (and a sliding
@@ -1808,7 +1808,7 @@ fn avx512_attn(head_dim: usize) -> bool {
 ///    number of rescales is a function of the row's range too.
 /// 3. **Value mix.** Per element, one `f32` chain in ascending key order,
 ///    `o = fma(p_j, v_j, α·o)`. This is the exact tier's own mix formula; what the
-///    fast order changes here is only that up to [`FAST_ROWS`] rows share one pass
+///    fast order changes here is only that up to `FAST_ROWS` rows share one pass
 ///    over V (each row keeps its own chain, so the sharing moves no bit).
 ///
 /// Nothing else changes: the causal and sliding-window ranges, the sinks, the

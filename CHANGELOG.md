@@ -8,6 +8,36 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The fast prompt mode's attention order, and the pass's non-kernel share (S5.4j)**: the opt-in
+  8-bit prompt pass was 0.80-0.95× ik_llama.cpp's `-rtr` path on all eight cells and the account
+  put 9.1 % of a 512-token pass and 38 % of a 4096-token one in **attention** (2.1× the fork's
+  absolute time). This step gives a prompt row of the mode its **own summation order** for
+  attention on AVX-512 and takes the pass's other terms apart. The order is a written definition
+  implemented twice — a scalar twin that *is* the definition and a 16-lane body, bit-identical to
+  it on the whole grid (every key count 1…70, 127/128/129, 511/512/513, 4 095/4 096, head dims
+  64/128/80/72/16, random and soft-max-edge values): a score is one accumulator chain over
+  ascending 16-lane dimension blocks, reduced by `T16(v) = T8(v[l] + v[l+8])`; the denominator
+  folds 16-key groups from the piece's first key, in `f32`, into the row's `f64`; the mix is the
+  exact formula. A row's pieces are the absolute 64-key tiles, so its bits cannot depend on the
+  batch, the chunk, the pass budget or the pool — the invariance test passes unchanged and grew a
+  4 096-token case. Up to four rows share one pass over K and V. Attention is **16.8 % faster at
+  512 tokens and 12 threads and 3.0 % at 4 096** in situ (10-16 % in isolation at 512; level at one
+  thread, where the bucket is the tile's decode), which is **2-6 % of a pass**;
+  the mean KL divergence of fast against exact on the 1B moved 0.003514 → 0.003464 (invisible at
+  the reported precision) and the same top token 96.75 % → 96.67 %. The mode's **accuracy bound is
+  re-baselined to 0.0040** on the project lead's recommendation (the arithmetic it implements
+  measures 0.0035; the fork's `-rtr` 0.0034), with the owner's confirmation pending, so the
+  option stays labelled Experimental. The pass's **non-kernel share** is taken apart: the only
+  serial steps are the KV write and the form's interleaved activation fill, and the largest wait
+  is workers parking between fork–joins. The pool's spin window **follows the measured gap
+  between joins** (a prompt pass's gaps are 1-5 ms, its configured window was 1 ms): +3.3 % on the
+  fast 512-token 12-thread cell and the exact engine level. The eight cells are 0.82-0.97× ik's
+  `-rtr` and 1.04-1.22× its defaults, 1.26-1.46× the exact engine and 1.58-1.99× llama.cpp, with
+  every cell below 1.0 named. One fast golden per tier moved (the AVX-512 `llama-Q6_K-fast`); the
+  exact engine, the AVX2 and scalar fast goldens, decode and the ten-user cell did not. Report:
+  `benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`; design:
+  `docs/design/s5.4-fast-prompt.md` §5k/§5l.
+
 - **The fast prompt pass measured against ik_llama.cpp's `-rtr` path, and a per-32 form as a
   prototype (S5.4i)**: the opt-in 8-bit prompt pass was 0.74-0.94× the fork's `-rtr` path on all
   eight cells (S5.4c), and this step accounts for it. **The 8-bit kernel is not where the pass
