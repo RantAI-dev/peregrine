@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Design: macOS and Windows (S7)**: `docs/design/s7-platforms.md` sets what "supported" means on a
+  platform (CI on every PR, a release archive, an installer, `upgrade`, the lifetime commands,
+  goldens), the targets (macOS on Apple Silicon and Windows x86-64 first; Intel Macs not planned,
+  Windows on ARM later) and the steps S7.1 to S7.5. Nothing is built yet.
+- **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
+  `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
+  embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused
+  `attn_qkv`, NeoX RoPE at base 1000 (no position table), full bidirectional attention, the
+  SwiGLU pair (`silu(ffn_gate) ⊙ ffn_up`) and `ffn_down`, and no final norm — the last
+  `layer_output_norm` is the vector, mean-pooled as the file says. `/v1/embeddings` and
+  `peregrine embed` serve it with no endpoint change (the Matryoshka `dimensions` field
+  truncates before normalising), and chat or label requests are refused by name. The
+  line-cited reading of llama.cpp v0.9.0's graph, the tensor table and the client's task
+  prefixes (`search_document: `, `search_query: `) are in `docs/reference/nomic-bert.md`.
+  On 200 `search_document: ` texts of 20–2040 tokens against llama.cpp v0.9.0 on
+  `nomic-embed-text-v1.5.f16.gguf` (SHA-256 `f7af6f66802f4df86eda10fe9bbcfc75c39562bed48ef6ace719a251cf1c2fdb`)
+  and `.Q8_0.gguf` (`3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7`),
+  the token ids are identical on every text; the F16 vectors are 0.9999995 min /
+  0.9999998 mean cosine to llama.cpp's; the Q8_0 vectors are 0.9978348 / 0.9982994 against
+  the F16 conversion (llama.cpp's own Q8_0: 0.9978020 / 0.9982981), and 0.9997719 /
+  0.9998660 against llama.cpp's Q8_0. The synthetic file, its independent scalar reference
+  forward, the batch/thread invariance matrix, the no-allocation pass, the missing-tensor
+  and unknown-pooling refusals and a `nomic-bert-Q8_0` golden on the scalar, AVX2 and
+  AVX-512-under-SDE tiers are in the test suite; the real-file test is `#[ignore]`d and
+  skips a missing file. Speed, 4 threads on the shared 8-vCPU Xeon E5-2680 v4 (AVX2), 5
+  runs, median (min..max) texts/s, Peregrine / llama.cpp: 16 tokens one text 34.5
+  (33.7..36.1) / 20.9 (20.0..21.6) = 1.65×; 128 tokens 5.70 (5.60..5.82) / 4.02
+  (3.90..4.04) = 1.42×; 512 tokens 1.31 (1.22..1.31) / 0.96 (0.94..0.97) = 1.36×; 16 texts
+  of 32 tokens in one request 20.8 (20.4..21.2) / 15.9 (15.6..15.9) = 1.31× (the worst
+  cell — Peregrine's embedding pass budget is 32 rows, so that request is several weight
+  passes). `nomic-bert-moe` (nomic-embed-text-v2-moe) and the jina BERT variants are not
+  in this step; a `nomic-bert-moe` file is refused by name as roadmap S4.8b.
+
 ### Changed
 
 - **The encoder's element-wise block: threaded and batched, same bits (S4.9r).** The S4.9p
@@ -36,7 +71,29 @@ All notable changes to this project are documented here. The format follows
   (0.95×/0.93×) and 512 b1/b8/b32 (0.92×/0.94×/0.95×); bge-small q8_0 at 16 b32 (0.98×), 128
   b1/b8 (0.97×/0.94×) and 512 b1/b8/b32 (0.90×/0.95×/0.95×). The other four embedding families
   and both rerankers did not move. See
-  `benchmarks/results/bluefin-2026-11-12-s4.9r/README.md` and `docs/design/s4.9-sota.md` §19.
+  `benchmarks/results/bluefin-2026-11-12-s4.9r/README.md` and `docs/design/s4.9-sota.md` §21.
+
+- **The Qwen3-Embedding 0.6B Q8_0 long-text "slowdown" of S4.9q does not reproduce
+  (2026-11-12).** Both ends of the reported fall were rebuilt side by side and measured
+  interleaved (five rounds each, 10 threads pinned to the Cortex-X925 cluster, embedding cache
+  off): on a quiet host `3030172` gives 0.360 texts/s and main 0.380 on the single 2 000-token
+  cell, and under a co-tenant (load average 8.2–9.1) the same two binaries give 0.179 and 0.191.
+  Main is 2.5–8.1 % ahead in all eight cells (16/512/2000 tokens single and 128-token batch 32,
+  in both host states), so there is no commit to bisect and no code change. The reported
+  0.213 → 0.177 step happened with no source change at all: one commit spans 0.360 quiet to
+  0.179 loaded, and the earlier standings record shows the load. The only causal-prefill change
+  between the commits is S5.1's wide pass (64 rows instead of 16 with no decoding row), and
+  flipping it back on main leaves the cell at 0.19 either way. See
+  `benchmarks/results/spark-arm-2026-11-12-qwen3-embed-regression/` and
+  `docs/design/s4.9-sota.md` §20.
+- **Correction to the ARM embedding table.** The same study found that the first ARM standings
+  run (`spark-2026-11-12-embeddings`) measured its batch cells with the exact result cache on:
+  the batch cell followed the single-text cell in one process, and the cache served 20 of the 32
+  texts (Qwen3-Embedding Q8_0, 32 texts of 128 tokens: 10.74 texts/s with the cache, 3.98–4.27
+  without). The batch-of-32 ratios published from that run (2.2–3.2× llama.cpp) were therefore
+  overstated; single-text cells were not affected. `docs/benchmark.md` now carries only cache-off
+  numbers in that column (1.9–2.6× for the Q8_0 files) and marks the one row that has not been
+  re-measured.
 
 - **The halved-precision float panel is widened once, and the small-BERT gap is measured
   against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
@@ -67,7 +124,49 @@ All notable changes to this project are documented here. The format follows
   104.4 ms against 1.14 ms on bge-small — so the remainder is the per-element passes (and, on
   bge-small, the attention strip), not the matrix kernel. Rerank is 1.11–1.42× llama.cpp on both
   bge-reranker files. See `benchmarks/results/bluefin-2026-11-12-s4.9p/README.md` and
-  `docs/design/s4.9-sota.md` §18.
+  `docs/design/s4.9-sota.md` §19.
+
+- **An `i8mm` body for the Q8_0 tile (S4.9q).** The Q8_0 repacked eight-row tile was the one tile
+  with no `smmla` body, so on `aarch64-neon-i8mm` every Q8_0 file that stays on int8 tiles ran the
+  `sdot` kernel. `q8_08_gemm_i8mm` runs whole groups of four activation rows on `smmla` (a tile
+  window is two output rows of eight codes, two activation rows joined are the other operand) and
+  leaves the 1–3-row tail and the GEMV on `sdot`; `MatKernels::kq_tiles_q8_0` picks it on the
+  `i8mm` tier, and `kernels_for(Q8_0)` lists that tier. The bits cannot move — the integer sums
+  are exact in any grouping, and the fold is `kq::dot_q8_08_ref`'s `(d·dk)` and one fused
+  multiply-add per block, block by block in the tile's order. Tests compare it with the `sdot`
+  body and the reference bit for bit at every row count 1..=40 plus 63/64/65, 127/128/129 and
+  511/512/513, at widths that are and are not multiples of the block, on -128/127/alternating
+  codes, a zero scale and activations at the int8 limits; no golden changed. The kernel is 3.05×
+  the `sdot` body at 8, 64 and 512 rows, one thread and ten (37.9 → 115.8 GMAC/s on an X925, 4 096
+  weights). On the four Q8_0 files that stay on the tile — EmbeddingGemma 300M, Qwen3-Embedding
+  0.6B, Nemotron 3.5 Embed 1B and bge-m3 — the whole pass gains 1.48–2.59× (10 threads pinned to
+  the Cortex-X925 cluster, five interleaved rounds, medians, cache off, a co-tenant on the host).
+  Every returned float is bit-identical between the arms; the cosine against llama.cpp is
+  unchanged. **No cell of the four files is below 1.0× llama.cpp any more** — before, ten were:
+  bge-m3 at 128 tokens 0.98×, at 512 0.98×, batch 0.95× and mixed 0.96×; EmbeddingGemma's batch
+  of 32 0.95× and its mixed batch 0.99×; Qwen3-Embedding at 512 0.94×, batch 0.98×, mixed 0.98×
+  and 2 000 tokens 0.67×. The narrowest now is Qwen3-Embedding at 2 000 tokens, 1.33×. See `docs/design/s4.9-sota.md` §18 and
+  `benchmarks/results/spark-arm-2026-11-12-q8-i8mm/`.
+
+- **Chat without tools on Qwen 3.5 and Bonsai 2 files uses the template's own prompt**: these
+  files' template opens the thinking block at the end of the prompt, trims each message and
+  writes earlier turns' thinking back, which the built-in ChatML did not. With thinking on, the
+  2B model answered at once on Peregrine where llama.cpp's prompt made it reason first. Every
+  chat request on such a file is now rendered by the format's renderer, tools or not, so
+  `peregrine serve` builds llama.cpp's prompt (the same token counts in the four cases checked:
+  thinking on and off, with and without a system message) and returns the reasoning in
+  `reasoning_content`. A model that thinks spends tokens on it: send
+  `"chat_template_kwargs": {"enable_thinking": false}` for the old behaviour of a direct answer.
+  Requests on other files are unchanged.
+- **`peregrine run` uses Qwen 3.5's own prompt too (S6.3c)**: a file with that template is now
+  the `qwen35` chat template (also a name for `--chat-template`), detected by the template's
+  exact text; any other template with a thinking switch is still read as Qwen 3's. The prompt
+  ends inside the opened thinking block (or after the empty one with `--no-thinking`), messages
+  are trimmed, and an earlier turn is replayed without its thinking. The command prints the
+  opening `<think>` the prompt wrote before the model's reasoning, and `--json`'s `text` starts
+  with it. On Qwen 3.5 2B and Bonsai 2 2B the prompt is 16 tokens with thinking and 18 without,
+  as in llama.cpp, and both models now reason before they answer unless told not to.
+
 
 ## [0.2.0] - 2026-11-12
 

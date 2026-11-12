@@ -10,6 +10,7 @@ pub mod dspark;
 pub mod embed_ref;
 pub mod models;
 pub mod modern_bert_ref;
+pub mod nomic_bert_ref;
 pub mod vocab;
 pub mod weights;
 pub mod writer;

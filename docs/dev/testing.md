@@ -151,7 +151,10 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    read, labels with no projection, a bare `cls.norm`); the head slot's refusal by name on a file
    without one; and one tier golden
    (`tests/golden/synthetic/<tier>/modern-bert-heads-Q8_0.golden`, recorded on scalar, AVX2 and
-   AVX-512 under SDE; no aarch64 golden). `tests/no_alloc.rs` passes a head text through the
+   AVX-512 under SDE, and on the ARM host for `aarch64`, `aarch64-neon`,
+   `aarch64-neon-dotprod` and `aarch64-neon-i8mm` — the two lower tiers hash together, and the
+   two int8 tiers hash together because the Q8_0 file takes the f32-panel route there (S4.9o)).
+   `tests/no_alloc.rs` passes a head text through the
    whole-text pass. `crates/peregrine/tests/server_rerank.rs` serves a synthetic modern-bert
    reranker and a labelled classifier over `/v1/rerank`, `/v1/classify` and `/v1/models`, and
    `cli_rerank.rs` runs `peregrine rerank` on the reranker. The 100 real-file pairs live in
@@ -162,6 +165,18 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    conversion are in `~/models/embed/` (or `MODERN_BERT_DIR`), and
    `a_real_modern_bert_scores_are_bit_identical_in_any_batch` checks the batch invariance on the
    real file. Both are `#[ignore]`d and skip, with a notice, without the files.
+   S4.8a's `nomic-bert` family (nomic-embed-text v1.5) is covered the same way: a synthetic
+   four-layer file with a fused q/k/v, NeoX RoPE at base 1000, epsilon 1e-12, the SwiGLU pair, a
+   with-bias variant, F32 and Q8_0; the vector against `tests/support/nomic_bert_ref.rs`'s
+   independent scalar forward (bit for bit for F32; for Q8_0 exactly on the scalar tier and within
+   the measured int8 distance on SIMD tiers); the invariance matrix; the missing-tensor and
+   unknown-pooling refusals by name; the context limit; the no-allocation pass; the server and CLI
+   cases (`a_nomic_bert_encoder_*`); and
+   `tests/golden/synthetic/<tier>/nomic-bert-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
+   under SDE (no aarch64 golden yet). Its ignored real-file test uses 200 `search_document: `
+   texts (20–2040 tokens) and llama.cpp's ids and vectors under `tests/fixtures/nomic-bert/` for
+   nomic-embed-text v1.5 F16 and Q8_0, and skips a file that is absent: the files are looked for
+   in `models/`, `~/models/` and `/var/tmp/models-s48a`.
    The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
@@ -225,6 +240,7 @@ including the retry.
 | Phi-4 14B Q4_K_M (`phi-4-Q4_K_M.gguf`) | `~/models/` |
 | `bge-m3-Q2_K.gguf` (encoder-tokenizer XLM-R oracle; optional) | `models/` or `~/models/` |
 | `Nemotron-3.5-Embed-1B-Q4_K_M.gguf` (Tekken tokenizer oracle; optional) | `models/nemotron/` or `~/models/nemotron/` |
+| `nomic-embed-text-v1.5.f16.gguf` / `.Q8_0.gguf` (encoder parity, optional) | `models/`, `~/models/` or `/var/tmp/models-s48a` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 2B PQ2_0 | `models/bonsai2-2b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
@@ -606,6 +622,19 @@ PEREGRINE_ISA=scalar   cargo xtest    # portable code only
 PEREGRINE_ISA=avx2     cargo xtest    # the AVX2 tier, also on an AVX-512 machine
 PEREGRINE_ISA=avx-vnni cargo xtest    # the AVX-VNNI-256 tier, also on an AVX-512 machine
 ```
+
+On aarch64 the caps are `scalar`, `neon`, `neon-dotprod` and `neon-i8mm` (`aarch64`,
+`aarch64-neon`, `aarch64-neon-dotprod` and `aarch64-neon-i8mm` as tier names), so
+`PEREGRINE_ISA=neon-dotprod cargo test --release -p peregrine-kernels -p peregrine-models`
+reproduces the dotprod goldens; passing a tier *name* instead of a cap is silently no cap at all.
+
+The repacked tile kernels are checked against their scalar twins and against the `sdot` body they
+replace: the `q4k8_…`, `q5_08_…` and `q6k8_…` bit-identity tests, and (S4.9q)
+`q8_08_i8mm_gemm_is_bit_identical_to_the_sdot_gemm`, which sweeps every row count 1..=40 plus
+63/64/65, 127/128/129 and 511/512/513 at widths that are and are not multiples of the block, with
+`q8_08_i8mm_gemm_holds_the_extremes` covering -128/127/alternating codes, a zero row scale and
+activations at the int8 limits. `table::tests::the_q8_0_tile_takes_the_smmla_body_on_the_i8mm_tier_only`
+checks that the `aarch64-neon-i8mm` table takes the new body and a lower tier's table does not.
 
 Goldens are stored per effective tier (`cpu::tier_name()`), so a forced run is compared with that tier's
 goldens. Two machines must agree on a shared tier: the AVX-512 host forced to `avx2` reproduces the AVX2

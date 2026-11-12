@@ -239,6 +239,7 @@ for every timed row, so every engine computes every text.
 tokens at batch 1, 8 and 32, a mixed-length batch of 32 texts (8–512 tokens), and 2 000 tokens for the
 models that accept them. Engines: llama.cpp v0.9.0, OpenVINO 2026.4, ONNX Runtime 1.31, fastembed 0.9
 and text-embeddings-inference 1.9. The four larger families are the S4.9l proof run at `2a5e9f6`; the
+
 two small BERT rows are re-measured at `4500a6f` plus S4.9p and S4.9r
 ([`bluefin-2026-11-12-s4.9r`](../benchmarks/results/bluefin-2026-11-12-s4.9r/README.md)).
 
@@ -246,10 +247,12 @@ two small BERT rows are re-measured at `4500a6f` plus S4.9p and S4.9r
 |---|---|---|---|---|---|---|---|
 | all-MiniLM-L6-v2 | F16, Q8_0 | OpenVINO, ONNX Runtime, llama.cpp | **1.01–1.46×** | 0.97–1.08× | 0.99–1.03× | n/a | **1.60–1.65×** |
 | bge-small-en-v1.5 | F32, Q8_0 | OpenVINO, ONNX Runtime, fastembed | 0.95–1.23× | 0.93–1.01× | 0.90–0.95× | n/a | **1.31×** |
+
 | bge-m3 | Q8_0 | llama.cpp | **1.18–1.53× across every cell** | | | **1.35×** | |
 | EmbeddingGemma 300M | Q8_0 | llama.cpp | **1.30–1.51× across every cell** | | | | |
 | Qwen3-Embedding 0.6B | Q8_0, F16 | llama.cpp | **1.25–1.51×** (Q8_0), **1.24–1.44×** (F16) | | | | |
 | Nemotron 3.5 Embed 1B | Q8_0 | llama.cpp | **1.34–1.62× across every cell** | | | | |
+
 
 The four larger families are ahead in every cell (1.05× and up). The two small BERT encoders are
 now level on MiniLM at 512 tokens (0.99–1.03×) and still behind on bge-small (0.90–0.95× at 512,
@@ -263,6 +266,7 @@ every vector bit-identical. Element-wise is now **7.5 ms** and **16.0 ms**, atte
 (from 12.7 and 25.5), and MiniLM's 512-token cells reached level (0.82→0.99×, 0.91→1.00×, 0.93→1.01×). What still holds bge-small back is now one step: its exact-`erf` GELU, 10.7 ms of a
 98.8 ms pass, against OpenVINO's fused approximation, which costs 0 ms as a node because oneDNN
 fuses it into the GEMM epilogue; and its 25 LayerNorms against the `MVN` nodes' 0.8 ms. The
+
 mixed-length batch is a win on both models because Peregrine never pads: the padding engines are
 1.6–4.5× slower there.
 
@@ -294,24 +298,35 @@ Full details, per-cell tables, stage profiles and the excluded rows:
 
 | Model | File | One text (16 to 2 000 tokens) | Batch of 32 | Mixed batch of 32 |
 |---|---|---|---|---|
-| EmbeddingGemma 300M | Q8_0 | **1.11–1.40×** | **2.24–2.51×** | 0.97× |
-| Qwen3-Embedding 0.6B | Q8_0 | 0.98–1.18× | **2.36–2.71×** | 0.95× |
-| Qwen3-Embedding 0.6B | F16 | **1.05–1.52×** | **2.72–3.21×** | **1.11×** |
-| Nemotron 3.5 Embed 1B | Q8_0 | **1.12–1.23×** | **2.68–2.80×** | **1.07×** |
+| EmbeddingGemma 300M | Q8_0 | **1.98–2.47×** | **1.91×** | **1.94×** |
+| Qwen3-Embedding 0.6B | Q8_0 | **1.33–2.20×** | **2.02×** | **1.93×** |
+| Qwen3-Embedding 0.6B | F16 | **1.05–1.52×** | not re-measured¹ | not re-measured¹ |
+| Nemotron 3.5 Embed 1B | Q8_0 | **2.37–2.65×** | **2.63×** | **2.63×** |
+| bge-m3 | Q8_0 | **1.83–2.10×** | **2.03×** | **2.02×** |
 | gte-modernbert-base | F16 | **1.42–1.56×** | **1.15×** (16 texts) | n/a |
 | gte-modernbert-base | Q8_0 | **1.43–1.77×** (16 to 512 tokens) | **1.55×** (16 texts) | n/a |
 
-The batch cells are the largest wins because llama.cpp runs one embedding task at a time inside a
-request while Peregrine shares weight passes across the texts. The cells behind are four near-parity
-cells of the first two models (0.95–0.99×). Q8_0 ModernBERT was behind from 128 tokens up
-(0.77–0.94×) until S4.9o: the Q8_0 int8 kernel on ARM has no `i8mm` body, so a Q8_0 ModernBERT file
-of up to 256 MiB now has its matrices widened to float at load, which is both faster (1.28–2.04×
-the old pass) and closer to the full-precision vectors, at four times the weight memory.
+¹ The first ARM standings run measured its batch cells with the exact result cache on, which served
+20 of the 32 texts, so its batch ratios (2.2–3.2×) were overstated; the single-text cells were not
+affected. Every batch number in this table is now from a cache-off run, and this row's batch cells
+have not been measured again.
 
-Full details: [`spark-2026-11-12-embeddings`](../benchmarks/results/spark-2026-11-12-embeddings/README.md),
+No cell in this table is behind
+after S4.9q, which added the missing `i8mm` body for the Q8_0 int8 tile (`smmla` instead of
+`sdot`, 3.05× the kernel, 1.5–2.6× the whole pass) — before it, nine cells of these four Q8_0
+files were at or below 1.0×. The narrowest now is Qwen3-Embedding Q8_0 at one 2 000-token text
+(1.33×), whose attention-heavy pass and llama.cpp's CPU flash attention are the reason it is
+close. Q8_0 ModernBERT was behind from 128 tokens up (0.77–0.94×) until S4.9o: a Q8_0
+ModernBERT file of up to 256 MiB now has its matrices widened to float at load, which is both
+faster (1.28–2.04× the old pass) and closer to the full-precision vectors, at four times the
+weight memory.
+
+Full details: [`spark-arm-2026-11-12-q8-i8mm`](../benchmarks/results/spark-arm-2026-11-12-q8-i8mm/README.md)
+(the Q8_0 int8-tile rows, before/after the `i8mm` body),
+[`spark-2026-11-12-embeddings`](../benchmarks/results/spark-2026-11-12-embeddings/README.md),
 [`spark-arm-2026-11-12-modern-bert`](../benchmarks/results/spark-arm-2026-11-12-modern-bert/README.md)
 (the F16 row) and [`spark-arm-2026-11-12-q8-encoders`](../benchmarks/results/spark-arm-2026-11-12-q8-encoders/README.md)
-(the Q8_0 row).
+(the Q8_0 ModernBERT row).
 
 ### Rerank
 
