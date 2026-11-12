@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Long-context attention on ARM reads a query-tile row group once, same bits (S4.9t)**:
+  S4.9s's account left the score kernel at 29.0 GMAC/s and the value mix at 21.3 (bucket, soft-max
+  included) against this core's 66 GMAC/s f32 roof, both limited by how many accumulation chains
+  their loop shape keeps in flight, not by their products. `neon.rs` gains a four-query-row score
+  tile and a four-row value mix (each beside its scalar twin) and `attn.rs` groups four rows of one
+  KV head that see the same part of the tile and, for the mix and soft-max, the same context; the
+  decoder's four-row soft-max reuses S4.9r's `exp_rows4_sums`, interleaving four `f64`
+  denominators. A row's bits are still its own (ascending keys, the canonical tree, a separate
+  multiply-then-add), and the three new tests hold each body to its single-row kernel and its twin
+  over every length 1..=70, 127/128/129 and 511/512/513, five head widths, the saturated soft-max
+  values and the edge alphas; no golden moved. One thread, five interleaved rounds: the score tile
+  takes Qwen3-Embedding's scores −20.2 % at 2 000 tokens and −18.4 % at 528, attention −8.2 %; the
+  2 000-token pass −3.6 % there and −3.4 % on the Q8_0 file of the same model, with the
+  gte-modernbert encoder guard flat. The four-row mix and soft-max cannot form on that model (two
+  query heads per KV head) and are measured where they can: Llama 3.2 1B's 4 096-token prompt
+  attention gains +4.3 % and +9.4 %, and the same prompt through the engine goes 63.97 → 69.02
+  tok/s at one thread (+7.9 %). The pair's 16-dimension slice was measured and dropped (+0.8 % in
+  the pass). The ten-thread engine table against llama.cpp is owed — no window of this round had
+  the load under 4. Numbers: `benchmarks/results/spark-arm-2026-11-12-s4.9t/`; design §23.
+
 - **Qwen3-Embedding F16 at long text: the value mix shares V across two rows (S4.9s, ARM)**:
   the one cell still behind 1.0 in the cache-off ARM table (Qwen3-Embedding 0.6B F16, one
   2 000-token text, 0.96× llama.cpp) spends 24 % of its pass in the attention value mix, at
