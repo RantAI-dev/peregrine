@@ -1,0 +1,4 @@
+{"round": 0, "model": "llama1b", "series": "ikgrid", "load": "27.63 19.84 12.85", "len": 4096, "threads": 1, "ub": null, "ik": {"ts": 46.84, "samples": [46.0, 47.7], "ub": 512, "_wall_s": 198.0, "_cpu_s": 178.44}}
+{"round": 0, "model": "llama1b", "series": "ikgrid", "load": "42.70 28.19 17.87", "len": 4096, "threads": 1, "ub": 64, "ik": {"ts": 34.95, "samples": [35.2, 34.7], "ub": 64, "_wall_s": 263.95, "_cpu_s": 233.29}}
+{"round": 0, "model": "llama1b", "series": "ikgrid", "load": "22.93 24.17 19.78", "len": 4096, "threads": 1, "ub": 64, "ik": {"ts": 33.85, "samples": [34.0, 33.7], "ub": 64, "_wall_s": 269.89, "_cpu_s": 232.65}}
+{"round": 1, "model": "llama1b", "series": "ikgrid", "load": "25.75 27.83 22.67", "len": 4096, "threads": 1, "ub": 64, "ik": {"ts": 32.72, "samples": [32.1, 33.3], "ub": 64, "_wall_s": 279.55, "_cpu_s": 234.36}}
