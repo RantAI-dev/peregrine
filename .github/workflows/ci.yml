@@ -193,6 +193,10 @@ jobs:
       - name: synthetic goldens (Windows, pinned AVX2, no skips)
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          # A missing golden fails here instead of skipping: the tests only print the skip line
+          # they are grepped for under `require`.
+          PEREGRINE_GOLDEN: require
         run: |
           set -o pipefail
           PEREGRINE_ISA=avx2 cargo test -p peregrine-models --release --locked \
@@ -210,6 +214,8 @@ jobs:
       - name: synthetic goldens (macOS, pinned, no skips)
         if: matrix.name == 'macos-aarch64'
         shell: bash
+        env:
+          PEREGRINE_GOLDEN: require
         run: |
           set -o pipefail
           PEREGRINE_ISA=neon-dotprod cargo test -p peregrine-models --release --locked \

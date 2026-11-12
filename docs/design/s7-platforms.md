@@ -373,9 +373,10 @@ real-model goldens (CI has no model files) and a published performance compariso
   golden-bearing targets (`synthetic`, `embeddings`, `bert_heads`, `modern_bert_heads`,
   `session_fixture`) a second time with `PEREGRINE_ISA=avx2`, so the job compares
   `x86_64-avx2-windows` whatever CPU it drew, and fails if a "no golden for tier" / "no recording
-  for tier" line appears — counted the way the recorder counts them. The rest of the suite still
-  runs natively. `PEREGRINE_GOLDEN=require` is still not set there, so a real-model golden skips
-  without its file, as everywhere in CI.
+  for tier" line appears — counted the way the recorder counts them. The step sets
+  `PEREGRINE_GOLDEN=require`, without which the embedding families' golden tests skip silently and
+  the grep would have nothing to match. The rest of the suite still runs natively, where
+  `PEREGRINE_GOLDEN` is unset, so a real-model golden skips without its file, as everywhere in CI.
 - **macOS.** The guard is the same step at `aarch64-neon-dotprod` (the `macos-15` runner reports
   that tier and stays there under the cap), so a golden added on Linux and not swept onto macOS
   fails a PR. The S7.4 sweep on `macos-15` (Apple M1) recorded nothing: 0 skips before, 0 after,
