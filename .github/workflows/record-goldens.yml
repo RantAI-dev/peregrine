@@ -58,7 +58,7 @@ jobs:
             macOS) sysctl -n machdep.cpu.brand_string ;;
             *) grep -m1 'model name' /proc/cpuinfo || true ;;
           esac
-          echo "PEREGRINE_ISA=${PEREGRINE_ISA:-<unset: the runner's own tier>}"
+          echo "PEREGRINE_ISA=${PEREGRINE_ISA:-native}"
       - name: count the missing goldens before recording
         shell: bash
         run: |
