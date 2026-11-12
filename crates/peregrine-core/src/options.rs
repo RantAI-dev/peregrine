@@ -422,8 +422,9 @@ pub struct EngineOptions {
     /// than the tier's exact kernel for that format
     /// ([`peregrine_kernels::table::MatKernels::q8k_uses_form`], S5.4f). On AVX-512
     /// that is Q4_K and Q6_K; on AVX2 Q6_K (Q4_K's exact kernel is the stronger one
-    /// there, and Q5_0 is level); on aarch64 Q4_K and Q6_K (S5.4e's set, on every
-    /// cap); on x86 with no SIMD body, none, so the option changes nothing. Prompt
+    /// there, and Q5_0 is level); on aarch64 Q4_K and Q6_K on every cap, and Q5_0
+    /// where the multiply is a NEON body (`neon-dotprod`, `neon-i8mm`; S5.4h); on a
+    /// tier with no SIMD body, none, so the option changes nothing. Prompt
     /// passes get faster where a format takes it and their logits move (the accuracy
     /// report that says by how much is roadmap S5.4c, not published yet); generated
     /// rows, embeddings, rerank and decisions keep the exact kernels. Off by default

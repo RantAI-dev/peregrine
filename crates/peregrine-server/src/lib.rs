@@ -122,11 +122,12 @@ pub struct Args {
     pub speculate: bool,
     /// Experimental and lossy: prompt tokens read the weights of the formats whose
     /// 8-bit form beats this CPU tier's exact kernel from an 8-bit copy built at
-    /// load (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so
-    /// the option changes nothing), so a reply can differ from the default engine's;
+    /// load (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; aarch64 with `dotprod`/`i8mm`:
+    /// Q4_K, Q6_K and Q5_0; aarch64 without them, and every tier with no SIMD body:
+    /// the formats it had, so the option changes nothing there), so a reply can differ from the default engine's;
     /// the accuracy report is not published yet (roadmap S5.4c). Generated tokens
     /// keep the exact kernels. `peregrine tier` names the formats this CPU takes;
-    /// the numbers are in `docs/design/s5.4-fast-prompt.md` section 5g. Off by
+    /// the numbers are in `docs/design/s5.4-fast-prompt.md` section 5g (and 5h for ARM's Q5_0). Off by
     /// default.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,

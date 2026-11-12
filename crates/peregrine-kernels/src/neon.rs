@@ -3824,13 +3824,178 @@ mod tests {
         }
     }
 
+    /// S5.4h: a Q5_0 row that stops inside its last 256-weight super-block —
+    /// Qwen 2.5 0.5B's 896-wide rows, 28 blocks padded to four super-blocks — is
+    /// the twin's, byte for byte and bit for bit, at every width class and at the
+    /// extremes of Q5_0's own codes.
+    ///
+    /// This is the shape S5.4f introduced, no x86 tier selects (S5.4f) and both
+    /// NEON caps do (S5.4h): the form's
+    /// fourth super-block holds only 128 real weights, and the multiply still walks
+    /// its other four 32-weight groups. That costs about an eighth of the kernel's
+    /// rate (the table's `row896` cells) and none of the result: the last
+    /// assertion rewrites those four groups with codes that are not zero and gets
+    /// the same bits, because their activation codes are zero and an integer dot
+    /// product adds exactly zero for them in any grouping. The epilogue is per
+    /// super-block, and the short super-block keeps its real half. So a body that
+    /// stopped at the real width would be bit-identical too; the measurement is
+    /// what says it is not worth the layout change (S5.4h, `docs/design/
+    /// s5.4-fast-prompt.md` §5h).
+    #[test]
+    fn a_q5_0_row_that_stops_inside_a_super_block_is_the_twins_bits() {
+        if !crate::cpu::have_dotprod() {
+            return;
+        }
+        #[cfg(feature = "fmt-legacy")]
+        {
+            use crate::kq::Q5_0_BLOCK;
+            use crate::kq8::tiles::{q5_08_tile, Rng as TileRng};
+            use crate::kq8::{code_at, form_size, scale_at};
+
+            // A tile whose blocks alternate Q5_0's extremes: every code at +15
+            // (31 in the file's five-bit code, so the requantisation saturates at
+            // +127), every code at -16 (the other end), all-zero weights, and a
+            // random block.
+            let mut trng = TileRng(0x8A8A_7777);
+            let extreme = |b: usize, rng: &mut TileRng| {
+                let mut v = match b % 4 {
+                    0 => vec![0xFFu8; Q5_0_BLOCK],
+                    1 => vec![0x00u8; Q5_0_BLOCK],
+                    2 => vec![0x00u8; Q5_0_BLOCK],
+                    _ => crate::kq8::tiles::q5_0_block(rng),
+                };
+                let d = match b % 4 {
+                    0 => 0.5,
+                    1 => 0.5,
+                    2 => 0.0,
+                    _ => 0.02,
+                };
+                v[0..2].copy_from_slice(&crate::quant::f32_to_f16(d).to_le_bytes());
+                v
+            };
+            for n_blk in [7usize, 8, 15, 16, 21, 28, 29, 31, 32] {
+                let tile = q5_08_tile(&mut trng, n_blk);
+                let n_sb = n_blk.div_ceil(8);
+                let mut want = vec![0u8; form_size(n_sb)];
+                let mut got = vec![0u8; form_size(n_sb)];
+                crate::kq8::build_q5_0(&tile, n_blk, &mut want);
+                unsafe { q8k_build_q5_0_neon(&tile, n_blk, &mut got) };
+                assert_eq!(want, got, "the Q5_0 build differs on {n_blk} blocks");
+            }
+            // The Qwen shape, on the extreme blocks, through both builders.
+            let n_blk = 28usize;
+            let n_sb = 4usize;
+            let mut tile = vec![0u8; n_blk * Q5_08::SIZE];
+            for b in 0..n_blk {
+                let mut rows: Vec<Vec<u8>> = (0..8).map(|_| extreme(b, &mut trng)).collect();
+                let refs: Vec<&[u8]> = rows.iter_mut().map(|v| v.as_slice()).collect();
+                repack_q5_08(&refs, &mut tile[b * Q5_08::SIZE..(b + 1) * Q5_08::SIZE]);
+            }
+            let mut form = vec![0u8; form_size(n_sb)];
+            let mut twin = vec![0u8; form_size(n_sb)];
+            crate::kq8::build_q5_0(&tile, n_blk, &mut twin);
+            unsafe { q8k_build_q5_0_neon(&tile, n_blk, &mut form) };
+            assert_eq!(form, twin, "the 896-wide Q5_0 build is not the twin's");
+            // The padding is zero: the last super-block's groups 4..8 hold the
+            // form's biased zero code (0x80) and no weight.
+            for row in 0..crate::kq8::Q8K_ROWS {
+                // 128 real weights of the fourth super-block are groups 0..16.
+                for g in 16..crate::kq8::Q8K_GROUPS {
+                    for k in 0..8 {
+                        assert_eq!(
+                            form[code_at(3, g, row, k)],
+                            0x80,
+                            "row {row}, group {g}: the padded code is not zero"
+                        );
+                    }
+                }
+                // The short super-block's scale is its real half's, not zero.
+                let at = scale_at(3, row);
+                let d = f32::from_le_bytes(form[at..at + 4].try_into().unwrap());
+                assert!(d > 0.0, "row {row}: the padded super-block lost its scale");
+            }
+            // Every width class against the twin, on the padded activation.
+            let real = 28 * 32;
+            let padded = n_sb * 256;
+            // The engine's padded layout: a 1024-wide activation whose codes past
+            // 896 are zero, quantised in whole super-blocks. Its codes for the
+            // first 896 weights are exactly a 896-wide activation's.
+            let mut arng = Rng(0x8A8A_8888);
+            let many: Vec<QuantAct> = (0..513)
+                .map(|_| {
+                    let mut x: Vec<f32> = (0..padded).map(|_| arng.f32()).collect();
+                    for v in x.iter_mut().skip(real) {
+                        *v = 0.0;
+                    }
+                    let mut a = QuantAct::with_capacity(padded);
+                    a.fill(&x);
+                    a
+                })
+                .collect();
+            let mut widths = vec![1usize, 2, 3, 4, 5, 8, 9];
+            widths.extend_from_slice(&[63, 64, 65, 127, 128, 129, 511, 512, 513]);
+            for &nb in widths.iter() {
+                let mut kq = KqActs::default();
+                kq.fill(&many[..nb]);
+                for body in ["sdot", "i8mm"] {
+                    if body == "i8mm" && !crate::cpu::have_i8mm() {
+                        continue;
+                    }
+                    let mut got = vec![0.0f32; nb * 8];
+                    unsafe {
+                        if body == "i8mm" {
+                            q8k_gemm_i8mm(&form, n_sb, &kq, nb, &mut got)
+                        } else {
+                            q8k_gemm_sdot(&form, n_sb, &kq, nb, &mut got)
+                        }
+                    };
+                    for b in 0..nb {
+                        for r in 0..8 {
+                            let want = crate::kq8::dot_q8k(&form, n_sb, r, &kq, b);
+                            assert_eq!(
+                                got[b * 8 + r].to_bits(),
+                                want.to_bits(),
+                                "{body}, width {nb}, row {r}, activation {b}: {} against {want}",
+                                got[b * 8 + r]
+                            );
+                        }
+                    }
+                }
+            }
+            // And the padded groups add exactly zero: overwrite their codes with
+            // an arbitrary pattern and the result cannot move, because every
+            // activation code they would meet is zero. The integer sums are exact
+            // in any grouping, so a body that skipped these groups is
+            // bit-identical; what it would save is the 12–14 % of the rate the
+            // table's `row896` cells show.
+            let mut rewritten = form.clone();
+            for g in 16..crate::kq8::Q8K_GROUPS {
+                for row in 0..crate::kq8::Q8K_ROWS {
+                    for k in 0..8 {
+                        rewritten[code_at(3, g, row, k)] = 0x3C;
+                    }
+                }
+            }
+            let nb = 512usize;
+            let mut kq = KqActs::default();
+            kq.fill(&many[..nb]);
+            let mut a = vec![0.0f32; nb * 8];
+            let mut b = vec![0.0f32; nb * 8];
+            unsafe {
+                q8k_gemm_sdot(&form, n_sb, &kq, nb, &mut a);
+                q8k_gemm_sdot(&rewritten, n_sb, &kq, nb, &mut b);
+            }
+            assert_eq!(
+                a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "the padded groups are not multiplied by zero activation codes"
+            );
+        }
+    }
+
     /// The NEON multiply is the twin's, bit for bit, at every activation width:
     /// every width from one to forty, the rows either side of the four-row group,
     /// and 63/64/65, 127/128/129 and 511/512/513.
-    ///
-    /// The Q4_K random form, the tie tile and the Q6_K block just outside the exact
-    /// case all carry codes at the int8 limits; the Q5_0 form is built from random
-    /// blocks through the same construction.
     #[test]
     fn the_eight_bit_kernel_is_bit_identical_to_the_twin_on_neon() {
         if !crate::cpu::have_dotprod() {
@@ -3995,11 +4160,24 @@ mod tests {
                 mk.q8k_body().is_some_and(|b| b.starts_with("NEON")),
                 "a tier with dotprod must report a NEON body"
             );
+            // S5.4h: Q5_0 takes the form exactly where the multiply is a NEON body.
+            // The twin caps keep S5.4e's set: the twin is no faster than the exact
+            // kernel, so another format there would only cost memory.
+            assert_eq!(
+                mk.q8k_uses_form(Format::Q5_0),
+                cfg!(feature = "fmt-legacy"),
+                "a NEON body takes Q5_0's form"
+            );
+            assert!(mk.q8k_uses_form(Format::Q4_K) && mk.q8k_uses_form(Format::Q6_K));
         } else {
             assert_eq!(
                 (sdot, i8mm),
                 (0, 0),
                 "a tier without dotprod must stay on the scalar twin"
+            );
+            assert!(
+                !mk.q8k_uses_form(Format::Q5_0),
+                "the scalar twin gains nothing from Q5_0's form (S5.4h)"
             );
         }
         for b in 0..4 {

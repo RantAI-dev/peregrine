@@ -1,0 +1,6 @@
+== Write one sentence about the sea.
+exact: The sea, with its vast expanse and endless blue, is a vast and mysterious place where the ocean's depths are filled with life and the winds and waves create a symphony of sound. 
+fast: The sea, a vast and boundless expanse of blue and white, is a natural wonder of the world, a place where life and nature coexist in harmony, and where humans can explore and enjoy its beauty and wonder. 
+== List three colours, comma separated.
+exact: Red, Yellow, Blue 
+fast: Red, Yellow, Blue 

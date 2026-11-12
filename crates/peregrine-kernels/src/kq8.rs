@@ -108,6 +108,32 @@ pub const fn form_size(n_sb: usize) -> usize {
     n_sb * Q8K_SIZE
 }
 
+/// Whether this process holds a form for a Q5_0 matrix whose rows stop inside a
+/// 256-weight super-block (S5.4f, S5.4h): Qwen 2.5 0.5B's 896-wide rows.
+///
+/// Such a matrix is multiplied against a *padded* activation buffer —
+/// [`KqActs::fill_padded`](crate::kq::KqActs::fill_padded), which needs the
+/// per-256 layout of the short last super-block with its missing codes zero —
+/// rather than the plain one. [`crate::quant::QuantAct::fill`] builds that layout
+/// for a width that is a whole number of super-blocks always, and for a shorter
+/// width only when the mode will read it: `--fast-prompt` from the environment,
+/// or a form built through the library's `load_with_fast`, which is what this
+/// flag records. It is process-wide like the mode itself, and a matrix without a
+/// form never reads the extra codes, so it cannot move a number.
+static PADDED_Q5_FORM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that a form for a Q5_0 matrix with a short last super-block was built
+/// (see [`padded_q5_form`]); called by the form's loader.
+pub fn note_padded_q5_form() {
+    PADDED_Q5_FORM.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether this process holds a form for a Q5_0 matrix whose rows stop inside a
+/// 256-weight super-block (see [`note_padded_q5_form`]).
+pub fn padded_q5_form() -> bool {
+    PADDED_Q5_FORM.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The byte offset of (super-block `sb`, group `g`, row `row`, code `k`) in a form.
 pub const fn code_at(sb: usize, g: usize, row: usize, k: usize) -> usize {
     sb * Q8K_SIZE + g * 64 + row * 8 + k
