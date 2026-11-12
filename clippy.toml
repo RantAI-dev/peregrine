@@ -1,0 +1,18 @@
+# Functions whose results depend on the host's C library and so may not decide a result.
+#
+# glibc 2.40 and 2.41 replaced these single-precision functions with correctly rounded
+# versions, so the same model gave different bits on Ubuntu 24.04 and Fedora 42 (issue #64;
+# the classifier heads' `tanh` in v0.2.0's release gate). The engine's own definitions are in
+# `peregrine_kernels::vmath` (`tanh`, `exp_scalar`, the erf GELU); a reference value in a test
+# may use the `f64` function, which did not change.
+disallowed-methods = [
+    { path = "f32::tanh", reason = "tanhf differs between glibc versions; use peregrine_kernels::vmath::tanh" },
+    { path = "f32::sinh", reason = "sinhf differs between glibc versions; build it on vmath::exp_scalar" },
+    { path = "f32::cosh", reason = "coshf differs between glibc versions; build it on vmath::exp_scalar" },
+    { path = "f32::atanh", reason = "atanhf differs between glibc versions" },
+    { path = "f32::asinh", reason = "asinhf differs between glibc versions" },
+    { path = "f32::acosh", reason = "acoshf differs between glibc versions" },
+    { path = "f32::exp_m1", reason = "expm1f differs between glibc versions" },
+    { path = "f32::ln_1p", reason = "log1pf differs between glibc versions" },
+    { path = "f32::cbrt", reason = "cbrtf differs between glibc versions" },
+]

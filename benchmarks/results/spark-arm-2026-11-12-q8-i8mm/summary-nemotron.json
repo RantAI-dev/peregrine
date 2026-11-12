@@ -1,0 +1,433 @@
+{
+ "runs": 5,
+ "threads": 10,
+ "pin_cpus": "5-9,15-19",
+ "cells": [
+  "t16",
+  "t128",
+  "t512",
+  "t2000",
+  "b32x128",
+  "mixed"
+ ],
+ "host_before": {
+  "loadavg": [
+   9.2333984375,
+   9.06103515625,
+   7.361328125
+  ],
+  "MemAvailable_gb": 36.2
+ },
+ "models": {
+  "Nemotron-3.5-Embed-1B-Q8_0": {
+   "path": "~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
+   "bytes": 1220296800,
+   "sha256": "27c8e82c48828017c29f16fa87eb8958b19d3e35d8f25d73bf51b61efb2ec298",
+   "cell_tokens": {
+    "t16": 16,
+    "t128": 128,
+    "t512": 528,
+    "t2000": 2000,
+    "b32x128": 4094,
+    "mixed": 3564
+   },
+   "engines": {
+    "peregrine-before": {
+     "cmd": "taskset -c 5-9,15-19 ~/wt-s49q-before/target/release/peregrine serve -m ~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf --host 127.0.0.1 --port 18410 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_ISA=native PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "t16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        18.6279,
+        18.7602,
+        18.7684,
+        18.8703,
+        18.5964
+       ],
+       "median": 18.7602,
+       "min": 18.5964,
+       "max": 18.8703,
+       "spread_pct": 1.46
+      },
+      "t128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        2.3857,
+        2.4252,
+        2.401,
+        2.412,
+        2.4097
+       ],
+       "median": 2.4097,
+       "min": 2.3857,
+       "max": 2.4252,
+       "spread_pct": 1.64
+      },
+      "t512": {
+       "texts": 1,
+       "tokens": 528,
+       "texts_per_s": [
+        0.5807,
+        0.5875,
+        0.5864,
+        0.5855,
+        0.5865
+       ],
+       "median": 0.5864,
+       "min": 0.5807,
+       "max": 0.5875,
+       "spread_pct": 1.16
+      },
+      "t2000": {
+       "texts": 1,
+       "tokens": 2000,
+       "texts_per_s": [
+        0.1383,
+        0.1396,
+        0.1393,
+        0.1392,
+        0.1394
+       ],
+       "median": 0.1393,
+       "min": 0.1383,
+       "max": 0.1396,
+       "spread_pct": 0.93
+      },
+      "b32x128": {
+       "texts": 32,
+       "tokens": 4094,
+       "texts_per_s": [
+        2.4047,
+        2.4315,
+        2.4265,
+        2.4311,
+        2.4279
+       ],
+       "median": 2.4279,
+       "min": 2.4047,
+       "max": 2.4315,
+       "spread_pct": 1.1
+      },
+      "mixed": {
+       "texts": 32,
+       "tokens": 3564,
+       "texts_per_s": [
+        2.7788,
+        2.7953,
+        2.7997,
+        2.7994,
+        2.8096
+       ],
+       "median": 2.7994,
+       "min": 2.7788,
+       "max": 2.8096,
+       "spread_pct": 1.1
+      }
+     },
+     "cosine_vs_llama": {
+      "t16": {
+       "min": 0.9996776030379569,
+       "mean": 0.9996776030379569,
+       "n": 1
+      },
+      "t128": {
+       "min": 0.9999586170603096,
+       "mean": 0.9999586170603096,
+       "n": 1
+      },
+      "t512": {
+       "min": 0.9999844415587038,
+       "mean": 0.9999844415587038,
+       "n": 1
+      },
+      "t2000": {
+       "min": 0.9999955375507357,
+       "mean": 0.9999955375507357,
+       "n": 1
+      },
+      "b32x128": {
+       "min": 0.9997039722210389,
+       "mean": 0.999923793708274,
+       "n": 32
+      },
+      "mixed": {
+       "min": 0.9993188390556902,
+       "mean": 0.9997999701179892,
+       "n": 32
+      }
+     }
+    },
+    "peregrine-after": {
+     "cmd": "taskset -c 5-9,15-19 ~/wt-s49q/target/release/peregrine serve -m ~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf --host 127.0.0.1 --port 18411 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+     "env": "PEREGRINE_ISA=native PEREGRINE_PACK_CACHE=0",
+     "binary_version": "peregrine 0.1.2",
+     "cells": {
+      "t16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        40.6023,
+        41.0692,
+        40.9917,
+        39.9051,
+        40.0032
+       ],
+       "median": 40.6023,
+       "min": 39.9051,
+       "max": 41.0692,
+       "spread_pct": 2.87
+      },
+      "t128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        6.1769,
+        6.2161,
+        6.2481,
+        6.266,
+        6.2407
+       ],
+       "median": 6.2407,
+       "min": 6.1769,
+       "max": 6.266,
+       "spread_pct": 1.43
+      },
+      "t512": {
+       "texts": 1,
+       "tokens": 528,
+       "texts_per_s": [
+        1.4534,
+        1.4507,
+        1.4482,
+        1.4559,
+        1.4669
+       ],
+       "median": 1.4534,
+       "min": 1.4482,
+       "max": 1.4669,
+       "spread_pct": 1.29
+      },
+      "t2000": {
+       "texts": 1,
+       "tokens": 2000,
+       "texts_per_s": [
+        0.2994,
+        0.3009,
+        0.301,
+        0.3011,
+        0.3022
+       ],
+       "median": 0.301,
+       "min": 0.2994,
+       "max": 0.3022,
+       "spread_pct": 0.93
+      },
+      "b32x128": {
+       "texts": 32,
+       "tokens": 4094,
+       "texts_per_s": [
+        6.2121,
+        6.2648,
+        6.243,
+        6.2381,
+        6.2854
+       ],
+       "median": 6.243,
+       "min": 6.2121,
+       "max": 6.2854,
+       "spread_pct": 1.17
+      },
+      "mixed": {
+       "texts": 32,
+       "tokens": 3564,
+       "texts_per_s": [
+        6.9715,
+        7.0166,
+        7.0244,
+        7.0212,
+        7.0725
+       ],
+       "median": 7.0212,
+       "min": 6.9715,
+       "max": 7.0725,
+       "spread_pct": 1.44
+      }
+     },
+     "cosine_vs_llama": {
+      "t16": {
+       "min": 0.9996776030379569,
+       "mean": 0.9996776030379569,
+       "n": 1
+      },
+      "t128": {
+       "min": 0.9999586170603096,
+       "mean": 0.9999586170603096,
+       "n": 1
+      },
+      "t512": {
+       "min": 0.9999844415587038,
+       "mean": 0.9999844415587038,
+       "n": 1
+      },
+      "t2000": {
+       "min": 0.9999955375507357,
+       "mean": 0.9999955375507357,
+       "n": 1
+      },
+      "b32x128": {
+       "min": 0.9997039722210389,
+       "mean": 0.999923793708274,
+       "n": 32
+      },
+      "mixed": {
+       "min": 0.9993188390556902,
+       "mean": 0.9997999701179892,
+       "n": 32
+      }
+     }
+    },
+    "llama.cpp": {
+     "cmd": "taskset -c 5-9,15-19 ~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf --embedding --pooling mean -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18412",
+     "env": "CUDA_VISIBLE_DEVICES=",
+     "binary_version": "version: 0.9.0-dev (build 1, commit cd959ba)",
+     "cells": {
+      "t16": {
+       "texts": 1,
+       "tokens": 16,
+       "texts_per_s": [
+        16.9418,
+        17.101,
+        17.1058,
+        17.2496,
+        16.9639
+       ],
+       "median": 17.101,
+       "min": 16.9418,
+       "max": 17.2496,
+       "spread_pct": 1.8
+      },
+      "t128": {
+       "texts": 1,
+       "tokens": 128,
+       "texts_per_s": [
+        2.3382,
+        2.3668,
+        2.352,
+        2.3503,
+        2.3667
+       ],
+       "median": 2.352,
+       "min": 2.3382,
+       "max": 2.3668,
+       "spread_pct": 1.22
+      },
+      "t512": {
+       "texts": 1,
+       "tokens": 528,
+       "texts_per_s": [
+        0.5494,
+        0.5533,
+        0.5534,
+        0.5541,
+        0.5547
+       ],
+       "median": 0.5534,
+       "min": 0.5494,
+       "max": 0.5547,
+       "spread_pct": 0.96
+      },
+      "t2000": {
+       "texts": 1,
+       "tokens": 2000,
+       "texts_per_s": [
+        0.1253,
+        0.1259,
+        0.126,
+        0.1261,
+        0.1261
+       ],
+       "median": 0.126,
+       "min": 0.1253,
+       "max": 0.1261,
+       "spread_pct": 0.63
+      },
+      "b32x128": {
+       "texts": 32,
+       "tokens": 4094,
+       "texts_per_s": [
+        2.3645,
+        2.373,
+        2.3741,
+        2.3769,
+        2.3863
+       ],
+       "median": 2.3741,
+       "min": 2.3645,
+       "max": 2.3863,
+       "spread_pct": 0.92
+      },
+      "mixed": {
+       "texts": 32,
+       "tokens": 3564,
+       "texts_per_s": [
+        2.6619,
+        2.6621,
+        2.6708,
+        2.6711,
+        2.6721
+       ],
+       "median": 2.6708,
+       "min": 2.6619,
+       "max": 2.6721,
+       "spread_pct": 0.38
+      }
+     }
+    }
+   },
+   "vectors_before_after": {
+    "t16": {
+     "identical": true,
+     "n": 1,
+     "elements": 2048
+    },
+    "t128": {
+     "identical": true,
+     "n": 1,
+     "elements": 2048
+    },
+    "t512": {
+     "identical": true,
+     "n": 1,
+     "elements": 2048
+    },
+    "t2000": {
+     "identical": true,
+     "n": 1,
+     "elements": 2048
+    },
+    "b32x128": {
+     "identical": true,
+     "n": 32,
+     "elements": 65536
+    },
+    "mixed": {
+     "identical": true,
+     "n": 32,
+     "elements": 65536
+    }
+   }
+  }
+ },
+ "host_after": {
+  "loadavg": [
+   9.9013671875,
+   9.529296875,
+   8.29931640625
+  ],
+  "MemAvailable_gb": 36.3
+ }
+}
