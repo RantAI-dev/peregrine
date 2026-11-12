@@ -182,7 +182,7 @@ so far come from WSL2 on it) against llama.cpp's Windows build is still to be ta
 | S7.1 | macOS on Apple Silicon: release job with a dry run, installer, `upgrade`, performance-core default, synthetic goldens, quickstart | — |
 | S7.2 | Windows x86-64 builds and passes the suite in CI | — |
 | S7.3 | Windows lifetime commands, `upgrade`, `install.ps1`, release job | S7.2 |
-| S7.4 | Windows goldens, docs for both systems, native Windows measurement on the desktop | S7.3 |
+| S7.4 | Windows goldens, docs for both systems, the first measurement (GitHub's runners; native hardware still open) | S7.3 |
 | S7.5 | A release that ships all four archives | S7.1, S7.4 |
 
 ## 7. Open points
@@ -191,8 +191,14 @@ so far come from WSL2 on it) against llama.cpp's Windows build is still to be ta
 - **Signing.** Unsigned binaries run when fetched by the installers. A Developer ID signature and
   notarisation for macOS, and Authenticode for Windows (SmartScreen warns on a downloaded
   unsigned `.exe`), need certificates the project does not have.
-- **Windows Defender and mapped model files.** First-run scanning of a multi-gigabyte mapped file
-  can dominate load time; measured in S7.4, with the documented exclusion if it does.
+- **Windows Defender and mapped model files (closed by S7.4).** Measured on GitHub's Windows
+  runners: the first open of a freshly downloaded 271 MB model took 2.3–3.6 s against 0.1–0.3 s for
+  the second open on the same machine, about 9–13 ms per MB, and the second open was 1.2–1.3×
+  Linux's. That is Defender's real-time scan of a file it has not seen, and it is paid once per
+  file: a multi-gigabyte model costs tens of seconds on its first run after a download and nothing
+  afterwards. Where that matters, exclude the model directory from real-time scanning
+  (`Add-MpPreference -ExclusionPath '<dir with the models>'`), the documented exclusion; the engine
+  needs no change (§10).
 
 ## 8. S7.1 as built
 
@@ -320,3 +326,102 @@ installer ship from the release after v0.2.0: v0.2.0 has no Windows zip.
   S7.4; every golden suite still skips on Windows. The `.exe` is unsigned (Authenticode needs a
   certificate, §7), and the installer's `irm … | iex` path is the one that avoids SmartScreen's
   browser-download mark rather than a signature.
+
+## 10. S7.4 as built
+
+Windows has its own goldens and both systems compare theirs on every pull request; the first
+numbers from GitHub's runners are in. The bar in §1 holds for both platforms except item 5's
+real-model goldens (CI has no model files) and a published performance comparison (§7).
+
+- **The recorder.** `record-goldens.yml` takes an `isa` input that sets `PEREGRINE_ISA` for every
+  step (`scalar`, `avx2`, …; empty is the runner's own tier) and names its artefact
+  `goldens-<runner>-<isa|native>`, and it prints the runner's CPU. Two defects only a Windows run
+  showed: an apostrophe inside `${VAR:-word}` in a double-quoted bash line opens a single-quoted
+  string there (the CPU step died on it), and the runner's `tar` reads an archive path of the form
+  `D:\…` as a remote host (`D:`), so the archive is made from the shell's POSIX path.
+- **The Windows sets.** Three sets of 61 synthetic goldens plus the session fixture
+  (`tests/fixtures/session/x86_64-*-windows.txt`), each recorded with the workflow's own verify run
+  reporting **0 skips against 52 before** (`no golden for tier` / `no recording for tier`), and each
+  proven by a later run of the same tier on a different runner and CPU, with 0 skips before and
+  after:
+
+  | tier (input) | recorded on | proven on |
+  |---|---|---|
+  | `x86_64-windows` (`isa=scalar`) | AMD EPYC 7763 | AMD EPYC 9V74 |
+  | `x86_64-avx2-windows` (`isa=avx2`) | Intel Xeon Platinum 8573C (an AVX-512 machine, capped) | AMD EPYC 9V45, and again on an EPYC 7763 drawn natively |
+  | `x86_64-avx2-avx512-vnni-gfni-vbmi-windows` (native) | Intel Xeon Platinum 8370C | Intel Xeon Platinum 8573C |
+
+  The recordings crossing CPU families are the point: the scalar and AVX2 sets came out identical on
+  an AMD and an Intel machine, which is what §3's "the arithmetic's, not the C runtime's" buys. The
+  AVX-512 set was found by the first native start and proven by a fourth (the pool's AVX-512 draws
+  were an Intel 8370C and an Intel 8573C; its AVX2 draws were EPYC 7763/9V74/9V45 machines). The
+  sweep after merging S5.4e recorded nothing on any of the three: 0 skips before, 0 after.
+- **The pool and the pin.** The Windows pool draws AVX2-only and AVX-512 machines, and
+  `PEREGRINE_ISA` takes capability names, not tier names. `ci.yml` therefore runs the
+  golden-bearing targets (`synthetic`, `embeddings`, `bert_heads`, `modern_bert_heads`,
+  `session_fixture`) a second time with `PEREGRINE_ISA=avx2`, so the job compares
+  `x86_64-avx2-windows` whatever CPU it drew, and fails if a "no golden for tier" / "no recording
+  for tier" line appears — counted the way the recorder counts them. The rest of the suite still
+  runs natively. `PEREGRINE_GOLDEN=require` is still not set there, so a real-model golden skips
+  without its file, as everywhere in CI.
+- **macOS.** The guard is the same step at `aarch64-neon-dotprod` (the `macos-15` runner reports
+  that tier and stays there under the cap), so a golden added on Linux and not swept onto macOS
+  fails a PR. The S7.4 sweep on `macos-15` (Apple M1) recorded nothing: 0 skips before, 0 after,
+  the set had kept up with the new families and the `*-fast` goldens. It was swept again after the
+  S5.4e merge, which added `*-fast` goldens for the four aarch64 tiers; those already existed here
+  and are byte-identical to the `aarch64-neon-dotprod` ones, so nothing was added.
+- **The installer.** `scripts/install.ps1` read the user `Path` with
+  `[Environment]::GetEnvironmentVariable("Path","User")` — which expands `%VARIABLES%` — and wrote it
+  back with `[Environment]::SetEnvironmentVariable`, which stores a plain `REG_SZ`, so
+  `%USERPROFILE%\bin` became a literal path and the value's kind changed. It now reads the raw value
+  from `HKCU:\Environment` (`GetValue('Path','','DoNotExpandEnvironmentNames')`), compares entries by
+  what they expand to, appends the install directory and writes it back with
+  `RegistryValueKind::ExpandString`; the broadcast is a no-op `[Environment]::SetEnvironmentVariable`
+  on a scratch name, the one PowerShell 5.1 has without `Add-Type`. The undo text is unchanged. The
+  CI installer step starts from a user `Path` of `%USERPROFILE%\peregrine-test-bin`, and after the
+  install checks the raw value still contains the literal `%USERPROFILE%`, contains the install
+  directory, and is still typed `ExpandString`; it restores the runner's value in a `finally`.
+- **The measurements.** Informational, on GitHub's runners, not standings: the two jobs are
+  different machines and the pool draws vary. Both fetched SmolLM2-360M-Instruct Q4_K_M (271 MB, the
+  `compat` job's pinned SHA-256), ran `peregrine bench --prompt-tokens 512 --tokens 64 --threads 4`
+  five times, and the load is `serve --background`'s wall clock to ready and its own
+  `loaded in … s` line. Pairs where both jobs drew the same CPU model and tier:
+
+  | cell | Windows | Linux | W ÷ L |
+  |---|---|---|---|
+  | prefill tok/s, AMD EPYC 9V45, AVX-512 | 626.1 (545.0–642.1) | 661.0 (659.5–678.8) | 0.95 |
+  | decode tok/s, AMD EPYC 9V45, AVX-512 | 114.2 (109.4–121.0) | 121.1 (114.2–127.8) | 0.94 |
+  | prefill tok/s, AMD EPYC 7763, AVX2 | 253.6 (248.2–255.7) | 282.4 (240.9–283.8) | 0.90 |
+  | decode tok/s, AMD EPYC 7763, AVX2 | 74.1 (70.3–75.2) | 92.7 (91.8–93.5) | 0.80 |
+
+  Medians with the min–max of the five runs in brackets. The other Windows draw was an Intel Xeon
+  Platinum 8370C (AVX-512: 310.8 prefill, 58.5 decode) and the other Linux draw an AMD EPYC 7763 at
+  AVX2; a cross-CPU ratio only says "not grossly different", and these are between 0.80 and 0.95 on
+  the same CPU, so nothing points at the pool's wait path and it was not changed.
+
+  **Load and Defender** (the §7 open point): first open of the freshly downloaded 271 MB file, then
+  the second.
+
+  | machine | first load | second load |
+  |---|---|---|
+  | Windows, AMD EPYC 7763 | 3.26 s | 0.24 s |
+  | Windows, AMD EPYC 9V45 | 3.64 s | 0.13 s |
+  | Windows, Intel Xeon 8370C | 2.45 s | 0.25 s |
+  | Linux, AMD EPYC 7763 | 0.30 s | 0.20 s |
+  | Linux, AMD EPYC 9V45 | 0.30 s | 0.10 s |
+
+  Wall clock from `serve --background` to ready, which includes process start (the engine's own line
+  reads 2.3–3.5 s against 0.0–0.1 s). Windows ÷ Linux is 10.7× and 12.0× on the first load and 1.2×
+  and 1.3× on the second: the first open of an unseen file is Defender's real-time scan, about
+  9–13 ms per MB, paid once. See §7 for the exclusion and what it means for multi-gigabyte files.
+
+  **The Windows lifetime commands**, timed on the runners: from `serve --background` to `/health`
+  0.31 s (EPYC 7763), 0.16 s (EPYC 9V45) and 0.30 s (Xeon 8370C); one 8-token chat request 0.21 s,
+  0.11 s and 0.21 s; `stop` 0.14 s, 0.13 s and 0.15 s; `status` reported no managed server after
+  each.
+- **Docs.** `docs/dev/testing.md` and `CONTRIBUTING.md` carry the three recording commands and what
+  a golden-adding change owes macOS and Windows; `docs/dev/releasing.md` has the pre-release golden
+  sweep and the archive smoke tests; `CHANGELOG.md`, `docs/roadmap.md` and §7 record the rest.
+- **Not done.** No native measurement on real Windows hardware (these are shared CI runners, three
+  or four cores of a large machine, and not a benchmark host, so `docs/benchmark.md` gains no row),
+  and no signing or notarisation (§7).
