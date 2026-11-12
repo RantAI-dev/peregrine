@@ -291,9 +291,13 @@ pub fn spawn_server(
             cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
         }
     }
+    #[cfg(windows)]
+    let no_inherit = peregrine_core::win32::NoInheritStdHandles::clear();
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
+    #[cfg(windows)]
+    drop(no_inherit);
     let id = child.id();
     let started = Instant::now();
     loop {

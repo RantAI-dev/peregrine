@@ -21,6 +21,13 @@ const PROCESS_TERMINATE: u32 = 0x0001;
 /// `STILL_ACTIVE`: the exit-code value `GetExitCodeProcess` reports for a running process.
 const STILL_ACTIVE: u32 = 259;
 
+/// `GetStdHandle`'s pseudo-handle numbers for the three standard streams.
+const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+/// `HANDLE_FLAG_INHERIT`: the flag `CreateProcess(bInheritHandles = TRUE)` honours.
+const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+
 /// `ERROR_INSUFFICIENT_BUFFER`: the topology query needs a larger buffer.
 const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
 
@@ -51,6 +58,68 @@ extern "system" {
     fn TerminateProcess(process: isize, exit_code: u32) -> i32;
     /// `BOOL CloseHandle(HANDLE hObject)`.
     fn CloseHandle(object: isize) -> i32;
+    /// `HANDLE GetStdHandle(DWORD nStdHandle)`.
+    fn GetStdHandle(which: u32) -> isize;
+    /// `BOOL GetHandleInformation(HANDLE hObject, LPDWORD lpdwFlags)`.
+    fn GetHandleInformation(object: isize, flags: *mut u32) -> i32;
+    /// `BOOL SetHandleInformation(HANDLE hObject, DWORD dwMask, DWORD dwFlags)`.
+    fn SetHandleInformation(object: isize, mask: u32, flags: u32) -> i32;
+}
+
+/// Keeps this process's stdin/stdout/stderr out of a child's inherited handle table until it is
+/// dropped, then restores their flags.
+///
+/// `CreateProcess(bInheritHandles = TRUE)` hands every inheritable handle to the child. A
+/// detached server started with `serve --background` would then hold the *caller's* pipe write
+/// ends open for as long as it runs, so `peregrine serve --background | cat` (or a test's
+/// `Command::output`) never sees EOF. The child's own stdio is passed explicitly, so it does not
+/// need these.
+pub struct NoInheritStdHandles {
+    saved: [(isize, u32); 3],
+}
+
+impl NoInheritStdHandles {
+    /// Clear `HANDLE_FLAG_INHERIT` on the three standard handles.
+    pub fn clear() -> Self {
+        let mut saved = [(0isize, 0u32); 3];
+        for (slot, which) in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+            .into_iter()
+            .enumerate()
+        {
+            // SAFETY: `GetStdHandle` returns this process's handle for a fixed pseudo-number and
+            // writes nothing; an invalid handle is checked below. `GetHandleInformation` writes
+            // only to the live `flags` local.
+            let handle = unsafe { GetStdHandle(which) };
+            if handle == 0 || handle == -1 {
+                continue;
+            }
+            let mut flags: u32 = 0;
+            // SAFETY: `handle` is a live standard handle and `flags` is a live `u32`.
+            let ok = unsafe { GetHandleInformation(handle, &mut flags) };
+            if ok == 0 || flags & HANDLE_FLAG_INHERIT == 0 {
+                continue;
+            }
+            // SAFETY: `handle` is live; clearing one flag only changes inheritance for children
+            // created while this guard lives.
+            let cleared = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+            if cleared != 0 {
+                saved[slot] = (handle, HANDLE_FLAG_INHERIT);
+            }
+        }
+        NoInheritStdHandles { saved }
+    }
+}
+
+impl Drop for NoInheritStdHandles {
+    fn drop(&mut self) {
+        for (handle, flag) in self.saved {
+            if handle != 0 {
+                // SAFETY: the entry was successfully cleared in `clear`, so the handle is live
+                // and restoring the flag returns it to the state this process started with.
+                let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flag) };
+            }
+        }
+    }
 }
 
 /// Whether `pid` names a running process.
