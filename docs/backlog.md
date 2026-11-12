@@ -78,7 +78,6 @@ the stage profile of 2026-11-11 that `docs/design/s4.9-sota.md` is built on.
 | Idea | Why | Size |
 |---|---|---|
 | **Fuzz the request parsers** | `json.rs`, the GGUF header and decision-metadata readers and the tokenizers take untrusted input in a server. `cargo fuzz` targets with a short CI run. | S |
-| **A server test waits for its own server** | The server tests pick a free port by binding port 0 and releasing it, then wait for `/health` on that port. Two tests running in parallel can be handed the same port: the second server fails to bind, its test talks to the first test's server, and gets an empty reply when that test ends and kills it (seen once in CI on aarch64). Wait for the child's own "listening" line and retry on a bind failure. | S |
 | **Per-test directories as a helper** | Two tests sharing a temp path caused a SIGBUS in CI. One helper that names a directory after the test, used everywhere. | S |
 
 ## Not planned
