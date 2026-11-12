@@ -334,6 +334,12 @@ impl Matcher {
         }
     }
 
+    /// The compiled grammar's identity: two matchers from different `Constraint`s never
+    /// share a compiled arena, and a mask computed for one must not be served to the other.
+    pub(crate) fn program_id(&self) -> usize {
+        Arc::as_ptr(&self.prog) as usize
+    }
+
     /// The structural key of the state, for a cache. Two matchers with the same key have
     /// the same allowed set.
     pub fn state_hash(&self) -> u64 {

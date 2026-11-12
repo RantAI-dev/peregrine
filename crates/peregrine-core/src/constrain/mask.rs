@@ -195,7 +195,7 @@ pub struct Vocabulary {
     /// The closing tokens whose remainder the stack below the string accepts, by that
     /// stack. A closing token's validity after the quote depends on the parent, not on the
     /// string's character count.
-    closing_parents: Mutex<HashMap<u64, (Vec<super::matcher::Item>, TokenMask)>>,
+    closing_parents: Mutex<HashMap<u64, (usize, Vec<super::matcher::Item>, TokenMask)>>,
     /// Cumulative `plain` masks: index `c` holds the tokens with a plain character count
     /// at most `c` (`c < COUNT_CAP`); longer ones are in `long_plain`.
     plain_by_count: Vec<TokenMask>,
@@ -518,8 +518,10 @@ impl Vocabulary {
     fn closing_parent_bits(&self, matcher: &Matcher, below: &[super::matcher::Item]) -> TokenMask {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+        let program = matcher.program_id();
         let key = {
             let mut h = DefaultHasher::new();
+            program.hash(&mut h);
             below.hash(&mut h);
             h.finish()
         };
@@ -528,8 +530,8 @@ impl Vocabulary {
                 .closing_parents
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some((state, mask)) = cache.get(&key) {
-                if state.as_slice() == below {
+            if let Some((state_program, state, mask)) = cache.get(&key) {
+                if *state_program == program && state.as_slice() == below {
                     return mask.clone();
                 }
             }
@@ -557,7 +559,7 @@ impl Vocabulary {
         if cache.len() >= 64 {
             cache.clear();
         }
-        cache.insert(key, (below.to_vec(), mask.clone()));
+        cache.insert(key, (program, below.to_vec(), mask.clone()));
         mask
     }
 
