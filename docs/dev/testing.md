@@ -165,6 +165,18 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    conversion are in `~/models/embed/` (or `MODERN_BERT_DIR`), and
    `a_real_modern_bert_scores_are_bit_identical_in_any_batch` checks the batch invariance on the
    real file. Both are `#[ignore]`d and skip, with a notice, without the files.
+   S4.8a's `nomic-bert` family (nomic-embed-text v1.5) is covered the same way: a synthetic
+   four-layer file with a fused q/k/v, NeoX RoPE at base 1000, epsilon 1e-12, the SwiGLU pair, a
+   with-bias variant, F32 and Q8_0; the vector against `tests/support/nomic_bert_ref.rs`'s
+   independent scalar forward (bit for bit for F32; for Q8_0 exactly on the scalar tier and within
+   the measured int8 distance on SIMD tiers); the invariance matrix; the missing-tensor and
+   unknown-pooling refusals by name; the context limit; the no-allocation pass; the server and CLI
+   cases (`a_nomic_bert_encoder_*`); and
+   `tests/golden/synthetic/<tier>/nomic-bert-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
+   under SDE (no aarch64 golden yet). Its ignored real-file test uses 200 `search_document: `
+   texts (20–2040 tokens) and llama.cpp's ids and vectors under `tests/fixtures/nomic-bert/` for
+   nomic-embed-text v1.5 F16 and Q8_0, and skips a file that is absent: the files are looked for
+   in `models/`, `~/models/` and `/var/tmp/models-s48a`.
    The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
@@ -228,6 +240,7 @@ including the retry.
 | Phi-4 14B Q4_K_M (`phi-4-Q4_K_M.gguf`) | `~/models/` |
 | `bge-m3-Q2_K.gguf` (encoder-tokenizer XLM-R oracle; optional) | `models/` or `~/models/` |
 | `Nemotron-3.5-Embed-1B-Q4_K_M.gguf` (Tekken tokenizer oracle; optional) | `models/nemotron/` or `~/models/nemotron/` |
+| `nomic-embed-text-v1.5.f16.gguf` / `.Q8_0.gguf` (encoder parity, optional) | `models/`, `~/models/` or `/var/tmp/models-s48a` |
 | Bonsai 2 9B PQ2_0 | `$PEREGRINE_BONSAI9`, or `models/bonsai2-9b/` |
 | Bonsai 2 2B PQ2_0 | `models/bonsai2-2b/` |
 | Bonsai 2 4B PQ2_0 with MTP | `$PEREGRINE_BONSAI4_MTP`, or `models/bonsai2-4b/` |
