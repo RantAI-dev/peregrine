@@ -18,7 +18,19 @@ const FP_UNIT_PANELS: usize = 2;
 
 /// Largest batch one matmul call accepts. A stack array of this many scratch floats
 /// holds one row's results; `PEREGRINE_PREFILL_CHUNK` and `draft_len + 1` are both far below it.
-pub const MAX_BATCH: usize = 128;
+///
+/// S5.4b raises it from 128 to 512 so the fast prompt mode can measure the widest
+/// useful prompt chunk (64 to 512): a wider pass is what reads the weights once for
+/// more rows, and the driver split it into 128-row blocks before. A row's bits do not
+/// depend on the batch (ADR 0003), so this moves time, never a number: with the option
+/// off the default chunk is 64 and no pass changes.
+pub const MAX_BATCH: usize = 512;
+
+/// The rows one matmul call takes by default. Every batch the engine built before
+/// S5.4b was split at this width; the fast prompt mode is what asks for more, and
+/// widening a pass is the whole point of its wide chunk, so only a marked pass goes
+/// past it. With the option off the split is exactly today's.
+pub const DEFAULT_BATCH: usize = 128;
 
 /// whether matmul rows are handed out in chunks from a counter (default) or in equal shares
 /// (`PEREGRINE_DYNAMIC=0`, the static partition).
@@ -147,16 +159,47 @@ pub fn matmul_group(
         let n = j.w.dims[0] as usize;
         st.bytes_weights += (j.rows() * row_bytes(j.w.kind, n)) as u64;
     }
+    // A pass can carry prompt rows and generated rows: the fast prompt mode computes
+    // the prompt rows from the resident 8-bit form and the generated rows with the
+    // exact kernels (S5.4b). A row's kernel depends on its own kind and on nothing
+    // else, so the batch is split into runs of one kind and each run is multiplied
+    // as it would be alone. With no mixed pass — the default engine, a decode step,
+    // a prompt with no decoder beside it — the split makes one call, as before.
+    let split = jobs.iter().any(|j| j.w.q8_off.is_some())
+        && acts[..nb].iter().any(|a| a.prompt)
+        && acts[..nb].iter().any(|a| !a.prompt);
     let mut b0 = 0usize;
     while b0 < nb {
-        let n = MAX_BATCH.min(nb - b0);
-        matmul_block(w, jobs, &acts[b0..b0 + n], n, b0, pool, st, kq);
-        b0 += n;
+        let run_end = if split {
+            let kind = acts[b0].prompt;
+            let mut e = b0 + 1;
+            while e < nb && acts[e].prompt == kind {
+                e += 1;
+            }
+            e
+        } else {
+            nb
+        };
+        // A fast prompt pass reads the weights once for up to `MAX_BATCH` rows; every
+        // other pass keeps the 128-row split it had before S5.4b.
+        let cap = if acts[b0].prompt {
+            MAX_BATCH
+        } else {
+            DEFAULT_BATCH
+        };
+        let mut p = b0;
+        while p < run_end {
+            let n = cap.min(run_end - p);
+            matmul_block(w, jobs, &acts[p..p + n], n, p, pool, st, kq);
+            p += n;
+        }
+        b0 = run_end;
     }
     st.ns_matmul += t0.elapsed().as_nanos() as u64;
 }
 
-/// [`matmul_group`] for one block of at most `MAX_BATCH` activation rows, starting at batch row
+/// [`matmul_group`] for one block of at most `MAX_BATCH` activation rows (a fast prompt
+/// pass's width; the default is [`DEFAULT_BATCH`]), starting at batch row
 /// `b0` of the caller's batch. `b0` only shifts where the results are written: a row's value is
 /// a function of the activation row and the weight row alone.
 #[allow(clippy::too_many_arguments)]
@@ -176,6 +219,9 @@ fn matmul_block(
     );
     let total: usize = jobs.iter().map(|j| j.rows()).sum();
     let acts = &acts[..nb];
+    // Every activation row of this block carries the same kind (matmul_group splits
+    // a mixed pass into runs): true is a prompt row the fast mode may re-round.
+    let fast_row = acts[0].prompt;
     // Each matrix's kernel is chosen once, from the kernel table: by format, storage (tiles or rows),
     // activation layout and CPU. Tiled matrices are worked in whole 16-row tiles, so every range below
     // starts and ends on one.
@@ -204,8 +250,14 @@ fn matmul_block(
     let kq_fill = jobs.iter().zip(paths).any(|(j, &p)| {
         p == MatPath::KqTiles && matches!(j.w.kind, Format::Q4_K | Format::Q5_K | Format::Q6_K)
     });
-    if kq_fill && nb >= 4 {
-        kq.fill(&acts[..nb]);
+    // The 8-bit form reads the interleaved activation at every width, even one row
+    // (S5.4b); the exact k-quant kernels only need it from four rows up.
+    let q8_fill = acts[0].prompt
+        && jobs
+            .iter()
+            .any(|j| matches!(j.w.kind, Format::Q4_K | Format::Q6_K) && j.w.q8_off.is_some());
+    if (kq_fill && nb >= 4) || q8_fill {
+        kq.fill_with(&acts[..nb], q8_fill);
     }
     // The rows `lo..hi` of the concatenated row space.
     let rows_range = |lo: usize, hi: usize, tmp: &mut [f32; MAX_BATCH]| {
@@ -281,6 +333,14 @@ fn matmul_block(
                     };
                     let store = w.kq();
                     let rows = j.rows();
+                    // The fast prompt mode's resident form, when this matrix has one
+                    // and the pass's rows are prompt rows (S5.4b). Q5_K, Q5_0 and
+                    // Q8_0 keep their kernels: they have no form in this step.
+                    let q8_off = if fast_row && matches!(j.w.kind, Format::Q4_K | Format::Q6_K) {
+                        j.w.q8_off
+                    } else {
+                        None
+                    };
                     let repacked = (rows / KQ_TILE_ROWS) * KQ_TILE_ROWS;
                     // The tiles that cover the rows of this range. A tile is
                     // computed whole, so a range that starts inside one costs
@@ -295,44 +355,50 @@ fn matmul_block(
                             let at = kq_off + t * n_sb * tile_bytes;
                             let tile = &store[at..at + n_sb * tile_bytes];
                             let out = &mut blk[..KQ_TILE_ROWS * nb];
-                            match j.w.kind {
-                                Format::Q5_0 => {
-                                    // The Q5_0 tile reads the per-32 activation
-                                    // layout, the same one decode uses.
-                                    if nb >= 4 {
-                                        mk.kq_tiles_q5_0(tile, n_sb, &acts[..nb], nb, out);
-                                    } else {
-                                        mk.kq_tiles_q5_0_gemv(tile, n_sb, &acts[..nb], nb, out);
+                            if let Some(qo) = q8_off {
+                                let q = qo + t * n_sb * peregrine_kernels::kq8::Q8K_SIZE;
+                                let form = &w.q8()[q..q + n_sb * peregrine_kernels::kq8::Q8K_SIZE];
+                                mk.q8k_gemm(form, n_sb, kq, nb, out);
+                            } else {
+                                match j.w.kind {
+                                    Format::Q5_0 => {
+                                        // The Q5_0 tile reads the per-32 activation
+                                        // layout, the same one decode uses.
+                                        if nb >= 4 {
+                                            mk.kq_tiles_q5_0(tile, n_sb, &acts[..nb], nb, out);
+                                        } else {
+                                            mk.kq_tiles_q5_0_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                        }
                                     }
-                                }
-                                Format::Q8_0 => {
-                                    // Q8_0 also reads the per-32 layout: no
-                                    // interleaved activation to build.
-                                    if nb >= 4 {
-                                        mk.kq_tiles_q8_0(tile, n_sb, &acts[..nb], nb, out);
-                                    } else {
-                                        mk.kq_tiles_q8_0_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    Format::Q8_0 => {
+                                        // Q8_0 also reads the per-32 layout: no
+                                        // interleaved activation to build.
+                                        if nb >= 4 {
+                                            mk.kq_tiles_q8_0(tile, n_sb, &acts[..nb], nb, out);
+                                        } else {
+                                            mk.kq_tiles_q8_0_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                        }
                                     }
-                                }
-                                Format::Q6_K => {
-                                    if nb >= 4 {
-                                        mk.kq_tiles_q6k(tile, n_sb, kq, nb, out);
-                                    } else {
-                                        mk.kq_tiles_q6k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    Format::Q6_K => {
+                                        if nb >= 4 {
+                                            mk.kq_tiles_q6k(tile, n_sb, kq, nb, out);
+                                        } else {
+                                            mk.kq_tiles_q6k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                        }
                                     }
-                                }
-                                Format::Q5_K => {
-                                    if nb >= 4 {
-                                        mk.kq_tiles_q5k(tile, n_sb, kq, nb, out);
-                                    } else {
-                                        mk.kq_tiles_q5k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    Format::Q5_K => {
+                                        if nb >= 4 {
+                                            mk.kq_tiles_q5k(tile, n_sb, kq, nb, out);
+                                        } else {
+                                            mk.kq_tiles_q5k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                        }
                                     }
-                                }
-                                _ => {
-                                    if nb >= 4 {
-                                        mk.kq_tiles_q4k(tile, n_sb, kq, nb, out);
-                                    } else {
-                                        mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                    _ => {
+                                        if nb >= 4 {
+                                            mk.kq_tiles_q4k(tile, n_sb, kq, nb, out);
+                                        } else {
+                                            mk.kq_tiles_q4k_gemv(tile, n_sb, &acts[..nb], nb, out);
+                                        }
                                     }
                                 }
                             }
@@ -411,6 +477,59 @@ fn matmul_block(
                 MatPath::PerRow => {
                     let bytes = w.bytes(j.w);
                     let mut r = r;
+                    // A prompt row of a Q4_K or Q6_K matrix with a resident form
+                    // (S5.4b). This path is the Q6_K prompt kernel on x86 (its tile
+                    // GEMV loses there) and both formats on a tier whose k-quant
+                    // tiles are off; the form's own kernel is 8-row, so whole runs
+                    // are multiplied from it and a short tail stays exact.
+                    if let Some(q8_off) =
+                        j.w.q8_off
+                            .filter(|_| fast_row && matches!(j.w.kind, Format::Q4_K | Format::Q6_K))
+                    {
+                        let n_sb = n / j.w.kind.block();
+                        let rows = j.rows();
+                        let repacked = (rows / KQ_TILE_ROWS) * KQ_TILE_ROWS;
+                        let lo = r.min(repacked);
+                        let hi = rz.min(repacked);
+                        if lo < hi {
+                            let mut blk = [0.0f32; KQ_TILE_ROWS * MAX_BATCH];
+                            let first = lo / KQ_TILE_ROWS;
+                            let last = hi.div_ceil(KQ_TILE_ROWS);
+                            for t in first..last {
+                                let q = q8_off + t * n_sb * peregrine_kernels::kq8::Q8K_SIZE;
+                                let form = &w.q8()[q..q + n_sb * peregrine_kernels::kq8::Q8K_SIZE];
+                                let out = &mut blk[..KQ_TILE_ROWS * nb];
+                                mk.q8k_gemm(form, n_sb, kq, nb, out);
+                                let lo = r.max(t * KQ_TILE_ROWS) - t * KQ_TILE_ROWS;
+                                let hi = rz.min((t + 1) * KQ_TILE_ROWS) - t * KQ_TILE_ROWS;
+                                let u = Untiler {
+                                    out: &j.out,
+                                    b0,
+                                    rows,
+                                    nb,
+                                };
+                                // SAFETY: those rows of this job belong to this
+                                // worker, and the tile's rows are the job's.
+                                unsafe { u.untile(t * KQ_TILE_ROWS, out, KQ_TILE_ROWS, lo, hi) };
+                            }
+                        }
+                        let tail = r.max(repacked);
+                        if tail < rz {
+                            for rr in tail..rz {
+                                mk.row(
+                                    j.w.kind,
+                                    &bytes[rr * rb..(rr + 1) * rb],
+                                    acts,
+                                    &mut tmp[..nb],
+                                );
+                                for (b, &v) in tmp[..nb].iter().enumerate() {
+                                    // SAFETY: the row belongs to this worker.
+                                    unsafe { j.out.set((b0 + b) * rows + rr, v) };
+                                }
+                            }
+                        }
+                        r = rz;
+                    }
                     // A decode step (one activation) runs a Q5_0/Q8_0 row eight at a
                     // time: the activation block (and, for Q5_0, its lane sums) is then
                     // loaded once for eight rows instead of once per row. Each row is
@@ -701,11 +820,12 @@ fn one_row_outputs(
     let n = head.dims[0] as usize;
     let n_out = head.dims[1] as usize;
     let rb = row_bytes(head.kind, n);
-    // The matmul driver splits a wide pass into blocks of at most `MAX_BATCH`
-    // activation rows, and a block's kernel call is the one the full path makes:
-    // take the block that holds this row, and the row's place in it.
-    let b0 = (b / MAX_BATCH) * MAX_BATCH;
-    let nb = MAX_BATCH.min(acts.len() - b0);
+    // The matmul driver splits a wide pass into blocks of at most `DEFAULT_BATCH`
+    // activation rows (a label row is never a fast row), and a block's kernel call is
+    // the one the full path makes: take the block that holds this row, and the row's
+    // place in it.
+    let b0 = (b / DEFAULT_BATCH) * DEFAULT_BATCH;
+    let nb = DEFAULT_BATCH.min(acts.len() - b0);
     let block = &acts[b0..b0 + nb];
     let b = b - b0;
     let mk = MatKernels::get();
@@ -723,7 +843,8 @@ fn one_row_outputs(
         && head.kq_off.is_some()
         && mk.kq_tiles_for(head.kind)
     {
-        kq.fill(block);
+        // A label row is never a fast row: no whole-block sums are built (S5.4b).
+        kq.fill_with(block, false);
     }
     let bytes = w.bytes(head);
     let mut blk = [0.0f32; 16 * MAX_BATCH];
@@ -1031,7 +1152,7 @@ pub fn lb_group(
     // counted once, in the loop after the blocks.
     let mut b0 = 0usize;
     while b0 < nb {
-        let n = MAX_BATCH.min(nb - b0);
+        let n = DEFAULT_BATCH.min(nb - b0);
         lb_block(
             slb0,
             jobs,
@@ -1052,7 +1173,7 @@ pub fn lb_group(
     st.ns_matmul += t0.elapsed().as_nanos() as u64;
 }
 
-/// [`lb_group`] for one block of at most `MAX_BATCH` activation rows starting at batch row `b0`.
+/// [`lb_group`] for one block of at most `DEFAULT_BATCH` activation rows starting at batch row `b0`.
 #[cfg(feature = "littlebit")]
 #[allow(clippy::too_many_arguments)]
 fn lb_block(

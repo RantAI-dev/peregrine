@@ -61,8 +61,11 @@ fn prefill_chunk(threads: usize) -> usize {
 /// `PEREGRINE_PREFILL_CHUNK` forces one chunk, so an explicit chunk is also the wide one.
 fn wide_prefill_chunk(threads: usize) -> usize {
     crate::options::get().prefill_chunk.unwrap_or_else(|| {
-        crate::options::wide_chunk_default_for(crate::cpu::resolved())
-            .max(crate::options::prefill_chunk_default_for(threads))
+        crate::options::wide_chunk_default_for_mode(
+            crate::cpu::resolved(),
+            crate::options::get().fast_prompt,
+        )
+        .max(crate::options::prefill_chunk_default_for(threads))
     })
 }
 
@@ -560,6 +563,13 @@ pub struct Engine {
     /// The rows one weight pass carries for work that never decodes: pooled and label slots
     /// (S4.9b, `PEREGRINE_PASS_ROWS`).
     pass_rows: usize,
+    /// The opt-in fast prompt mode (S5.4b, `--fast-prompt`): a prompt chunk's rows are
+    /// marked so the matrix dispatch reads the Q4_K/Q6_K weights from the resident
+    /// 8-bit form; generated rows, embeddings, rerank and decisions stay exact.
+    fast_prompt: bool,
+    /// One flag per row of the pass being built: the engine's buffer, reused, so a
+    /// marked pass allocates nothing (S5.4b).
+    fast_rows: Vec<bool>,
     /// Bytes of non-decoding caches the engine admits at once (S4.9b).
     work_cache_bytes: u64,
     /// Caches of finished requests, so a prompt that shares a beginning with one of them (the system prompt
@@ -906,6 +916,8 @@ impl Engine {
             prefill_chunk,
             wide_chunk,
             pass_rows: budget_rows,
+            fast_prompt: crate::options::get().fast_prompt,
+            fast_rows: Vec::new(),
             work_cache_bytes,
             prefixes: PrefixStore::new(prefix_cache_bytes),
             next_id: 1,
@@ -934,6 +946,22 @@ impl Engine {
             draft_rate: None,
             drafted_rounds: 0,
         }
+    }
+
+    /// The opt-in fast prompt mode (S5.4b): whether this engine marks its prompt
+    /// chunks' rows for the 8-bit form.
+    ///
+    /// The process's `--fast-prompt` sets it at construction. This setter is for the
+    /// mode's own tests and A/B, which compare the two in one process on a model
+    /// loaded with [`Model::load_with_fast`]; a model without a form computes the
+    /// exact kernels whatever this says.
+    pub fn set_fast_prompt(&mut self, on: bool) {
+        self.fast_prompt = on;
+    }
+
+    /// Whether the fast prompt mode is on for this engine.
+    pub fn fast_prompt(&self) -> bool {
+        self.fast_prompt
     }
 
     /// Whether a lone user's decode speculates with the model's MTP block.
@@ -2292,6 +2320,15 @@ impl Engine {
         // A drafter that needs the target's hidden states gets them: the MTP
         // block's rows read the hidden state of the position before them.
         self.state.want_hidden = self.wants_hidden();
+        // Which rows are prompt rows (S5.4b): the decode rows this pass carries are
+        // generated, the prefilled ones are prompt tokens of a token slot. Pooled,
+        // label and head slots are never fast rows. One weight pass, two kernels.
+        self.fast_rows.clear();
+        self.fast_rows.resize(n_dec, false);
+        for &(i, take, _) in &pre {
+            let fast = self.fast_prompt && self.slots[i].wants_tokens();
+            self.fast_rows.resize(self.fast_rows.len() + take, fast);
+        }
         let r = {
             let mut refs: Vec<Option<&mut KvCache>> =
                 self.slots.iter_mut().map(|s| Some(&mut s.kv)).collect();
@@ -2304,13 +2341,14 @@ impl Engine {
             } else {
                 &self.pool
             };
-            self.model.forward_rows(
+            self.model.forward_rows_marked(
                 &mut self.state,
                 &mut Caches::Mapped(&mut caches, &map),
                 p,
                 &tokens,
                 &positions,
                 &want,
+                &self.fast_rows,
                 &mut self.stats,
             )
         };
@@ -2495,13 +2533,20 @@ impl Engine {
             self.state.label_rows.push((0, 0, s.labels.len()));
         }
         self.state.want_hidden = self.wants_hidden();
-        self.model.forward(
+        // The chunk's rows are prompt rows of a token slot: the fast prompt mode
+        // computes them from the 8-bit form. A pooled or label slot's rows are never
+        // fast rows (their answer is read off the prompt), and a decode row never is.
+        let fast = self.fast_prompt && self.slots[i].wants_tokens();
+        self.fast_rows.clear();
+        self.fast_rows.resize(take, fast);
+        self.model.forward_marked(
             &mut self.state,
             &mut self.slots[i].kv,
             &self.pool,
             &chunk,
             start,
             want_logits,
+            &self.fast_rows,
             &mut self.stats,
         )?;
         // The prefilled rows are committed positions too: a drafter is told about them.

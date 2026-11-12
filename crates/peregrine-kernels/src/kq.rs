@@ -826,6 +826,16 @@ impl KqActs {
     /// If the activations are not a whole number of super-blocks, or do not carry
     /// the per-256 layout a k-quant matmul needs.
     pub fn fill(&mut self, acts: &[QuantAct]) {
+        self.fill_with(acts, true)
+    }
+
+    /// [`KqActs::fill`], with the whole-super-block sums built only when asked.
+    ///
+    /// `sum256` is read only by the 8-bit prompt form (`crate::kq8`). With the
+    /// fast prompt mode off — the default — the engine passes `false` and the
+    /// exact kernels do exactly the work they did before S5.4a, which is what
+    /// keeps the option off free of any slowdown.
+    pub fn fill_with(&mut self, acts: &[QuantAct], sum256: bool) {
         assert!(!acts.is_empty(), "no activation to interleave");
         let n = acts[0].n;
         assert!(
@@ -851,7 +861,9 @@ impl KqActs {
         self.bsp.clear();
         self.bsp.resize(groups * n_sb * ACT_GROUP * 4, 0);
         self.sum256.clear();
-        self.sum256.resize(groups * n_sb * ACT_GROUP, 0);
+        if sum256 {
+            self.sum256.resize(groups * n_sb * ACT_GROUP, 0);
+        }
         for g in 0..groups {
             for sb in 0..n_sb {
                 let base = (g * n_sb + sb) * 1024;
@@ -893,12 +905,15 @@ impl KqActs {
                     }
                     // The whole super-block's sum of codes, for the 8-bit form's
                     // 128 bias (`crate::kq8`). Eight int32 adds per (row, block),
-                    // and the exact k-quant kernels never read it.
-                    let mut total = 0i32;
-                    for j in 0..8 {
-                        total += self.bs[bbase + t * 8 + j];
+                    // and the exact k-quant kernels never read it — so it is built
+                    // only when the fast prompt mode is on.
+                    if sum256 {
+                        let mut total = 0i32;
+                        for j in 0..8 {
+                            total += self.bs[bbase + t * 8 + j];
+                        }
+                        self.sum256[dbase + t] = total;
                     }
-                    self.sum256[dbase + t] = total;
                 }
             }
         }

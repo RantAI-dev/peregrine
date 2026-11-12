@@ -49,6 +49,16 @@ use crate::format::{f16, Format};
 #[derive(Clone)]
 pub struct QuantAct {
     pub n: usize,
+    /// Whether this row carries a *prompt* token for the opt-in fast prompt mode
+    /// (`docs/design/s5.4-fast-prompt.md`, S5.4b). The engine sets it on the rows
+    /// of a prompt chunk and leaves it false on generated (decode) rows and on
+    /// every row of an embedding, rerank or decision pass. It changes nothing
+    /// unless the process's `PEREGRINE_FAST_PROMPT` is on and the matrix has a
+    /// resident 8-bit form (`kq8`): with the option off the field is always false.
+    ///
+    /// `fill` does not touch it, so the flag survives the re-quantisation of each
+    /// layer's activation.
+    pub prompt: bool,
     /// int8 codes, `n` of them.
     pub q: Vec<i8>,
     /// One scale per 32-block: `a_i ≈ q_i · d[i/32]`.
@@ -158,6 +168,7 @@ impl QuantAct {
     pub fn with_capacity(n: usize) -> QuantAct {
         QuantAct {
             n: 0,
+            prompt: false,
             q: Vec::with_capacity(n),
             d: Vec::with_capacity(n / 32 + 1),
             sums: Vec::with_capacity(n / 32 + 1),
