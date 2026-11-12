@@ -1,0 +1,28 @@
+# The decoder-side guard: Llama 3.2 1B Q4_K_M, prompt 4 096 tokens, through the engine.
+#
+#   promptbench <llama-3.2-1b-q4_k_m.gguf> corpus.txt 4096 1,10 --decode 8
+#
+# corpus.txt is the S5.2 recipe (this repository's own documentation, no template).
+# Both arms pinned to the X925 cluster (taskset -c 5-9,15-19). The "base" arm is
+# origin/s4.9s-qwen3-embed-f16-long (cab27cd); "cur" is the branch with this round's
+# three commits. One round is one base run followed by one cur run.
+#
+# Round 1 (load 22.08 -> 20.82)
+base load 22.08
+{"len":4096,"threads":1,"slots":1,"decode_want":8,"width":1,"prefill_rows":4096,"prefill_s":64.044560,"prefill_tok_s":63.96,"decode_rows":8,"decode_s":0.509113,"decode_tok_s":15.71,"wall_s":64.553894,"steps_pre":64,"steps_dec":8,"stats_ms":{"matmul":37176.916,"head":159.223,"attention":24797.102,"other":2418.547,"total":64551.789,"barriers":4616},"prof_ms":{}}
+{"len":4096,"threads":10,"slots":1,"decode_want":8,"width":10,"prefill_rows":4096,"prefill_s":20.372255,"prefill_tok_s":201.06,"decode_rows":8,"decode_s":0.477972,"decode_tok_s":16.74,"wall_s":20.850437,"steps_pre":64,"steps_dec":8,"stats_ms":{"matmul":9029.705,"head":18.740,"attention":5357.090,"other":6442.867,"total":20848.402,"barriers":13064},"prof_ms":{}}
+cur load 20.82
+{"len":4096,"threads":1,"slots":1,"decode_want":8,"width":1,"prefill_rows":4096,"prefill_s":59.445890,"prefill_tok_s":68.90,"decode_rows":8,"decode_s":0.441178,"decode_tok_s":18.13,"wall_s":59.887238,"steps_pre":64,"steps_dec":8,"stats_ms":{"matmul":37200.836,"head":94.490,"attention":20296.220,"other":2293.843,"total":59885.389,"barriers":4616},"prof_ms":{}}
+{"len":4096,"threads":10,"slots":1,"decode_want":8,"width":10,"prefill_rows":4096,"prefill_s":22.151584,"prefill_tok_s":184.91,"decode_rows":8,"decode_s":0.256555,"decode_tok_s":31.18,"wall_s":22.408354,"steps_pre":64,"steps_dec":8,"stats_ms":{"matmul":10222.662,"head":18.249,"attention":5542.280,"other":6623.079,"total":22406.269,"barriers":13064},"prof_ms":{}}
+
+# Rounds 2 and 3, one thread only (the ten-thread cell was host state all window):
+base load 8.58 t1 tok/s 63.97 attn_ms 24824.984
+cur load 6.47 t1 tok/s 69.02 attn_ms 20298.517
+base load 5.47 t1 tok/s 64.02 attn_ms 24815.809
+cur load 4.33 t1 tok/s 69.03 attn_ms 20220.154
+
+# Medians, one thread: prompt 63.97 -> 69.02 tok/s (+7.9 %), attention 24.80 -> 20.30 s
+# (-18.2 %), matmul 37.18 -> 37.20 s (untouched). Every cell was measured with the
+# 1-minute load above 4, so the row is marked loaded; the one-thread cells are stable
+# (+-0.2 % across rounds), the ten-thread cell is not (the same arm swings 1.4x and its
+# untouched matmul moves 13 % between arms).

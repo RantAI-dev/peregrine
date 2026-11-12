@@ -37,6 +37,25 @@ All notable changes to this project are documented here. The format follows
   `docs/design/s5.4-fast-prompt.md` §5i/§5j. No golden file moves; the default engine and the
   fast mode's bits are unchanged.
 
+- **Long-context attention on ARM reads a query-tile row group once, same bits (S4.9t)**:
+  S4.9s's account left the score kernel at 29.0 GMAC/s and the value mix at 21.3 (bucket, soft-max
+  included) against this core's 66 GMAC/s f32 roof, both limited by how many accumulation chains
+  their loop shape keeps in flight, not by their products. `neon.rs` gains a four-query-row score
+  tile and a four-row value mix (each beside its scalar twin) and `attn.rs` groups four rows of one
+  KV head that see the same part of the tile and, for the mix and soft-max, the same context; the
+  decoder's four-row soft-max reuses S4.9r's `exp_rows4_sums`, interleaving four `f64`
+  denominators. A row's bits are still its own (ascending keys, the canonical tree, a separate
+  multiply-then-add), and the three new tests hold each body to its single-row kernel and its twin
+  over every length 1..=70, 127/128/129 and 511/512/513, five head widths, the saturated soft-max
+  values and the edge alphas; no golden moved. One thread, five interleaved rounds: the score tile
+  takes Qwen3-Embedding's scores −20.2 % at 2 000 tokens and −18.4 % at 528, attention −8.2 %; the
+  2 000-token pass −3.6 % there and −3.4 % on the Q8_0 file of the same model, with the
+  gte-modernbert encoder guard flat. The four-row mix and soft-max cannot form on that model (two
+  query heads per KV head) and are measured where they can: Llama 3.2 1B's 4 096-token prompt
+  attention gains +4.3 % and +9.4 %, and the same prompt through the engine goes 63.97 → 69.02
+  tok/s at one thread (+7.9 %). The pair's 16-dimension slice was measured and dropped (+0.8 % in
+  the pass). The ten-thread engine table against llama.cpp is owed — no window of this round had
+  the load under 4. Numbers: `benchmarks/results/spark-arm-2026-11-12-s4.9t/`; design §23.
 - **The fast prompt mode takes the 8-bit form only where it wins on the tier (S5.4f)**: on
   AVX2 the form's body runs at 59.7 GMAC/s for every format, while this tier's exact Q4_K kernel
   is 77.4 and a Q4_K_M file is mostly Q4_K — so `--fast-prompt`, which took the form for Q4_K
@@ -73,6 +92,7 @@ All notable changes to this project are documented here. The format follows
   In the paired ten-thread window the cell moves 0.67× → 0.75× against llama.cpp; the row's
   quiet-host re-read is owed (the host's co-tenant swung one arm 3.8×). Numbers and the stage
   account: `benchmarks/results/spark-arm-2026-11-12-s4.9s/`; design §22.
+
 - **The fast prompt mode takes the NEON 8-bit kernel on ARM (S5.4e)**: `--fast-prompt`'s
   dispatch now calls `crates/peregrine-kernels/src/neon.rs` on aarch64 — `smmla` on
   `neon-i8mm`, `sdot` on `neon-dotprod`, the scalar twin on `neon`/`scalar` — and its NEON
@@ -133,6 +153,33 @@ All notable changes to this project are documented here. The format follows
   `docs/design/s5-prefill-avx512.md` §13.
 
 ### Added
+
+- **The `nomic-bert-moe` family: nomic-embed-text-v2-moe (S4.8b)**: a GGUF with
+  `general.architecture = "nomic-bert-moe"` now loads and serves `/v1/embeddings` and
+  `peregrine embed`. It is llama.cpp v0.9.0's shared `bert` graph with its two
+  `LLM_ARCH_NOMIC_BERT_MOE` branches: the fused `attn_qkv`, NeoX RoPE at base 10000,
+  post-norm blocks, a plain GELU feed-forward on the even layers and a mixture of 8
+  experts (top 2, softmax gating, raw probabilities, no renormalisation, GELU experts,
+  summed in the router's order) on the odd ones, the token-type row and no final norm.
+  The family lives beside `nomic-bert` in `crates/peregrine-models/src/nomic_bert.rs`
+  (`NomicFfn` is the only branch); the shared MoE block gained a gate-less `Gelu` act.
+  The XLM-R SentencePiece-unigram tokenizer is the one `bge-m3` already used. Registered
+  behind `arch-nomic-bert-moe`; chat and label requests are refused by name. Measured
+  against llama.cpp v0.9.0 on 200 texts of 17-511 tokens in 24 languages
+  (`docs/reference/nomic-bert-moe.md`): ids identical; F16 mean 0.9999977 (one text at
+  0.9997738, a router tie, reported); Q8_0 against the F16 reference mean 0.9996520 /
+  min 0.9989152, which is 2.4e-4 better than llama.cpp's own Q8_0 mean (0.9994075) and
+  1.7e-4 worse than its minimum (0.9990825) - both inside the S4 clauses, which the
+  test asserts. The family's matmuls all take the packed float path: its 3D expert
+  banks are packed one matrix per expert (48 % of the parameters, previously the raw
+  per-row kernel) and the Q8_0 file is dequantised into f16 panels at load, which is
+  both closer to the F16 conversion and faster than its int8 tiles here; no other
+  family's bytes or bits move. Every measured cell is ahead of llama.cpp: 1.31-1.59x on
+  F16 and 1.11-1.34x on Q8_0 (16/128/512 tokens and sixteen 32-token texts). Tests: a
+  synthetic file with malformed variants, an independent scalar reference that writes
+  the routing out longhand, batch/thread/pass-budget invariance on F32 and Q8_0,
+  refusals by name, the no-allocation pass, server and CLI cases, and a Q8_0 golden on
+  scalar, AVX2 and AVX-512 under SDE.
 
 - **The accuracy report and speed table of `--fast-prompt` (S5.4c)**: the mode's measured
   trade on the five gate models, with wikitext-2 (40 chunks of 512 tokens, 10 200 scored

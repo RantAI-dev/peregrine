@@ -223,8 +223,12 @@ impl PackCache {
         }
         for e in fp {
             text.push_str(&format!(
-                "fp_entry={}|{}|{}|{}|{}|{}|{}\n",
+                "fp_entry={}|{}|{}|{}|{}|{}|{}|{}\n",
                 e.name,
+                match e.expert {
+                    Some(x) => x.to_string(),
+                    None => "-".into(),
+                },
                 e.kind.label(),
                 e.source.label(),
                 e.rows,
