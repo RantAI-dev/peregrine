@@ -9,9 +9,11 @@
 #
 # The zip is verified against the release's SHA256SUMS with Get-FileHash before anything is
 # installed. It installs to %LOCALAPPDATA%\Programs\peregrine (no admin rights), adds that
-# directory to the *user* Path when it is missing, and says how to undo both. A running
-# peregrine.exe cannot be overwritten on Windows, so the old one is renamed to
-# peregrine.exe.old first and the next start removes it.
+# directory to the *user* Path when it is missing, and says how to undo both. The Path is edited
+# in the registry with its REG_EXPAND_SZ kind intact, so an entry that uses %VARIABLES% (such as
+# %USERPROFILE%\bin) is neither expanded nor flattened. A running peregrine.exe cannot be
+# overwritten on Windows, so the old one is renamed to peregrine.exe.old first and the next start
+# removes it.
 #
 # Written for Windows PowerShell 5.1, the version every supported Windows ships.
 #
@@ -163,13 +165,34 @@ try {
     }
 
     # User scope only: never the machine Path, and no admin rights.
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    #
+    # The value is read and written in the registry, not through
+    # [Environment]::GetEnvironmentVariable("Path","User"): that call *expands* %VARIABLES%
+    # (so %USERPROFILE%\bin comes back as C:\Users\me\bin) and [Environment]::SetEnvironmentVariable
+    # writes it back as a plain REG_SZ, flattening every entry that carried a variable. The raw
+    # value from HKCU:\Environment with DoNotExpandEnvironmentNames keeps what the user wrote, and
+    # writing with RegistryValueKind::ExpandString keeps the value's kind (REG_EXPAND_SZ), so the
+    # variables keep expanding for every program that reads the Path, our install directory included.
+    $envKey = Get-Item -LiteralPath 'HKCU:\Environment'
+    $rawPath = $envKey.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+    $installKey = $InstallDir.TrimEnd('\')
     $entries = @()
-    if ($userPath) { $entries = @($userPath -split ";" | Where-Object { $_ -ne "" }) }
-    $have = @($entries | Where-Object { $_.TrimEnd("\") -ieq $InstallDir.TrimEnd("\") })
+    if ($rawPath) { $entries = @($rawPath -split ";" | Where-Object { $_ -ne "" }) }
+    # Compare what each entry resolves to, so %LOCALAPPDATA%\Programs\peregrine counts as the
+    # install directory when -InstallDir names the expanded path (and the reverse).
+    $have = @($entries | Where-Object {
+        $_.TrimEnd("\") -ieq $installKey -or
+        ([Environment]::ExpandEnvironmentVariables($_.TrimEnd("\"))) -ieq $installKey
+    })
     if ($have.Count -eq 0) {
         $newPath = (@($entries) + $InstallDir) -join ";"
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        $envKey.SetValue('Path', $newPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        # The registry write above is what keeps the kind; a new process still has to be told the
+        # environment changed. [Environment]::SetEnvironmentVariable broadcasts WM_SETTINGCHANGE
+        # ("Environment") after it writes, and PowerShell 5.1 has no other way to broadcast without
+        # Add-Type. Removing a scratch name that does not exist writes nothing and still broadcasts,
+        # so Path is left exactly as written above.
+        [Environment]::SetEnvironmentVariable('PEREGRINE_PATH_REFRESH', $null, 'User')
         Write-Host "Added $InstallDir to your user PATH (open a new terminal to pick it up)."
     } else {
         Write-Host "$InstallDir is already on your user PATH."
