@@ -216,30 +216,38 @@ its vector is in the same class as the rest (the minimum above is not that text)
 
 ## Speed
 
-`/v1/embeddings` on `jina-embeddings-v2-base-en-Q8_0.gguf`, both engines on the same
-**shared 8-vCPU VM** (timings here are rough: other jobs were running), 4 threads,
-embedding cache off (`--opt EMBED_CACHE_MB=0`), five runs after two warm-ups, medians;
-the cell is one request. A text of N tokens; `32×16` is one request of sixteen
-32-token texts:
+Bluefin (AMD Ryzen 3 PRO 4350G, 4 cores, AVX2+FMA), 4 threads, three interleaved
+rounds, medians, embedding cache off (`PEREGRINE_EMBED_CACHE_MB=0`). Every engine
+on the host that can load the model, the same F16 and Q8_0 GGUFs, 128 distinct
+texts per length and a new text window per timed request. The ratio is Peregrine
+÷ the best other engine at equal accuracy (cosine ≥ 0.999 to the fp32 ONNX
+reference, within 0.0005 of Peregrine's row). Full tables, spreads, hashes and
+profiles: [`benchmarks/results/bluefin-2026-11-12-s4.9u`](../../benchmarks/results/bluefin-2026-11-12-s4.9u/README.md).
 
-| Cell | llama.cpp texts/s [spread] | Peregrine texts/s [spread] | Peregrine ÷ llama.cpp |
-|---|---|---|---|
-| 16 tokens | 22.55 [22.50–23.29] | **33.75** [32.31–36.71] | 1.50 |
-| 128 tokens | 4.201 [4.122–4.248] | **4.654** [4.314–4.789] | 1.11 |
-| 512 tokens | 0.857 [0.825–0.870] | **0.888** [0.873–0.912] | **1.04** (the worst cell) |
-| 32 tokens × 16 (different texts) | 15.8 [15.4–16.5] | **20.9** [20.4–21.1] | **1.32** |
+| cell | Peregrine F16 | best other (after) | ratio |
+|---|---:|---|---:|
+| 16 tokens, 1 text | 70.88 | fastembed fp32 52.80 | **1.34×** |
+| 16 tokens × 8 / 32 | 78.62 / 79.28 | OpenVINO 88.47 / ONNX Runtime 88.95 | 0.89× |
+| 128 tokens, 1 text | 10.99 | ONNX Runtime fp32 12.06 | 0.91× |
+| 128 tokens × 8 / 32 | 11.12 / 11.08 | fastembed fp32 12.14 / 12.05 | 0.92× |
+| 512 tokens, 1 / 8 / 32 | 2.58 / 2.59 / 2.59 | OpenVINO fp32 2.44 / 2.56 / 2.51 | **1.01–1.06×** |
+| 2 000 tokens, 1 / 8 | 0.49 / 0.50 | OpenVINO fp32 0.41 / 0.49 | **1.01–1.21×** |
+| mixed batch of 32 | 12.31 | fastembed fp32 7.39 | **1.67×** |
 
-The 512-token cell is the worst ratio and still ahead. On the sixteen-text request
-both engines put the whole request through, and Peregrine's 1.32× there is in the same
-range as its 1.50× lead on a single 16-token text, not a scheduling effect. One thing
-does answer faster: a request whose texts repeat, because identical texts are computed
-once in it — sixteen copies of one text measure 309 texts/s — and that is in-request
-deduplication, not a batch ratio. A 512-token text is dominated by its own `n²`
-attention.
+The Q8_0 file (0.9996 against the reference) has the same row shape: 1.45× at one
+16-token text, 0.90–0.97× at 128 and the 16-token batches, **1.01–1.06×** at 512,
+**1.00–1.21×** at 2 000 and **1.68×** on the mixed batch. llama.cpp's F16/Q8_0
+rows are 1.45–1.95 texts/s at 512 and 6.0–8.2 at 128, so Peregrine is 1.6–1.8×
+llama.cpp there; the engines to beat on this host are ONNX Runtime and OpenVINO.
 
-Stage split is not repeated here: the family has the same projection-heavy shape as
-`modern-bert`, and the ALiBi bias is one extra `f32` multiply-add per score (less than
-the exponential beside it).
+S4.9u closed what this family's own profile named. `alibi_row` was a scalar
+multiply-add over every score (37.7 M entries at 512 tokens), and attention was
+48.8 ms against nomic-bert's 33.3 for the same shape; the AVX2 body is bit-equal
+to the scalar twin and attention is 37.3 ms, which moved the 512-token cells from
+0.96–1.00× to **1.01–1.06×**. The q/k/v and `ffn_up` biases and the two residuals
+now run on the pool (element-wise 33.6 → 26.8 ms at 512). The cells still behind
+at 128 tokens are matmul-bound: the GEMM is 90 % of the pass and runs at 181
+GMAC/s against MLAS's 206 for 128 rows.
 
 ## What Peregrine does, and where it differs on purpose
 
@@ -251,7 +259,9 @@ the exponential beside it).
   each score by `kq_scale` and *then* adds ALiBi's bias, which is llama.cpp's order. The
   other families fold the scale into Q for historical reasons; this one does not need to.
 - The ALiBi bias is `peregrine_kernels::bidir::alibi_row`: `x[j] += slope·(−|j − qpos|)`
-  on the row's own band, scalar, with the slope list built once at load by
+  on the row's own band, eight keys per AVX2 step since S4.9u (`alibi_row_scalar` is the
+  twin and the definition; the negation is a sign-bit flip and the multiply and add stay
+  separate, so no bit moves), with the slope list built once at load by
   `alibi_slopes` (`f32::powf`, llama.cpp's own formula). `attend_texts` takes
   `Option<&[f32]>`; every other family passes `None`, so their goldens did not move.
 - **The GELU is the tanh form** (`vmath::geglu`), matching `ggml_gelu_f32`, but without

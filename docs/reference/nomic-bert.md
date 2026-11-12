@@ -216,28 +216,39 @@ engines' Q8_0 vectors agree to 0.99987 mean.
 
 ## Speed
 
-`peregrine serve`'s `/v1/embeddings` and `llama-server --embeddings` on the F16 file,
-4 threads, one engine at a time, embedding cache off for Peregrine
-(`--opt EMBED_CACHE_MB=0`), 5 runs per cell, median and (min..max). One text of N
-tokens, and a batch of 16 texts of 32 tokens in one request; texts/s, ratio
-Peregrine ÷ llama.cpp (above 1 means Peregrine is faster). The host is H0, the
-shared 8-vCPU Xeon E5-2680 v4 (AVX2+FMA) the other notes use; these timings are
-rough because other jobs run on it.
+Bluefin (AMD Ryzen 3 PRO 4350G, 4 cores, AVX2+FMA), 4 threads, three interleaved
+rounds, medians, embedding cache off (`PEREGRINE_EMBED_CACHE_MB=0`). Every engine
+on the host that can load the model, the same F16 and Q8_0 GGUFs, the same texts
+(`search_document: ` in front of every text, once, for every engine), 128 distinct
+texts per length and a new text window per timed request. The ratio is Peregrine
+÷ the best other engine at equal accuracy (cosine ≥ 0.999 to the fp32 ONNX
+reference, within 0.0005 of Peregrine's row). Full tables, spreads, hashes and
+profiles: [`benchmarks/results/bluefin-2026-11-12-s4.9u`](../../benchmarks/results/bluefin-2026-11-12-s4.9u/README.md).
 
-| Case | Peregrine | llama.cpp | ratio |
-|---|---|---|---|
-| 16 tokens, 1 text | 34.5 (33.7..36.1) | 20.9 (20.0..21.6) | **1.65** |
-| 128 tokens, 1 text | 5.70 (5.60..5.82) | 4.02 (3.90..4.04) | 1.42 |
-| 512 tokens, 1 text | 1.31 (1.22..1.31) | 0.96 (0.94..0.97) | 1.36 |
-| 32 tokens, 16 texts | 20.8 (20.4..21.2) | 15.9 (15.6..15.9) | **1.31** (worst) |
+| cell | Peregrine F16 | best other (after) | ratio |
+|---|---:|---|---:|
+| 16 tokens, 1 text | 71.74 | ONNX Runtime fp32 47.37 | **1.52×** |
+| 16 tokens × 8 | 78.13 | ONNX Runtime fp32 83.51 | 0.94× |
+| 16 tokens × 32 | 79.31 | ONNX Runtime fp32 80.99 | 0.98× |
+| 128 tokens, 1 text | 10.62 | fastembed fp32 11.43 | 0.93× |
+| 128 tokens × 8 / 32 | 10.87 / 10.88 | fastembed fp32 11.50 / 11.48 | 0.95× |
+| 512 tokens, 1 / 8 / 32 | 2.49 / 2.49 / 2.50 | fastembed/OpenVINO 2.40 / 2.31 / 2.25 | **1.04–1.11×** |
+| 2 000 tokens, 1 / 8 | 0.50 / 0.49 | OpenVINO fp32 0.46 / 0.46 | **1.07–1.09×** |
+| mixed batch of 32 | 12.04 | fastembed fp32 7.05 | **1.71×** |
 
-The inputs are token-id arrays, so the token count is exact; the two tokenizers are
-the same, and the text path is not what separates the engines at these sizes. The
-16-text batch is 512 rows and Peregrine's embedding scheduler runs 32 rows per pass
-(the calibrated default), so the batch pays several weight passes; llama.cpp runs
-the request as one ubatch. Even so Peregrine is 1.31× ahead on that cell, the worst
-of the four, and 1.65× on the short single text, where per-request overhead
-dominates.
+The Q8_0 file reaches 0.9983 against the fp32 reference (llama.cpp's own Q8_0
+0.9983 too), below the 0.999 class floor, so its row is listed without ratios:
+74.7 / 81.0 / 79.2 texts/s at 16 tokens b1/b8/b32, 10.3 / 10.4 / 10.3 at 128,
+2.37 / 2.33 / 2.38 at 512, 0.47 / 0.48 at 2 000 and 11.5 on the mixed batch,
+against llama.cpp's Q8_0 at 37.2–63.8, 5.9–8.1, 1.4–1.9 and 6.9.
+
+The cells behind 1.0 are all matmul-bound: at 128 tokens the GEMM is 89 % of the
+pass, Peregrine runs it at 180–181 GMAC/s (69 % of this core's 259.6 GMAC/s
+4-thread roof) and MLAS at 202–206 GMAC/s for 128 rows. The element-wise block is
+not the cause: at 128 tokens it is 6.4 ms against ONNX Runtime's 20.1 ms of
+non-matmul nodes, and at 512 it is 38.2 ms after S4.9u's threading (46.9 before)
+against ORT's 314.9 ms of matmul. At 512 tokens the GEMM is level (179 against
+184–190) and Peregrine is ahead.
 
 ## What Peregrine does, and where it differs on purpose
 
