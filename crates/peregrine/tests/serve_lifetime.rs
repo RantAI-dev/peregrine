@@ -3,8 +3,11 @@
 //! so this runs the real binary past a short, test-only drain timeout.
 //!
 //! `PEREGRINE_DRAIN_TIMEOUT_MS` is the override (`docs/dev/testing.md`); users never set it.
-
-#![cfg(unix)]
+//!
+//! The lifetime check runs everywhere. The clean-shutdown half is Unix-only: it sends `SIGTERM`,
+//! which Windows does not have. On Windows the clean shutdown today is Ctrl-C (a console control
+//! event the test harness cannot deliver to another process group without its own Win32 code), and
+//! the stop file that replaces `SIGTERM` is S7.3 (design `docs/design/s7-platforms.md` §5).
 
 #[path = "../../peregrine-models/tests/support/mod.rs"]
 mod support;
@@ -85,10 +88,8 @@ fn read_log(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-#[test]
-fn the_server_outlives_the_drain_timeout_and_stops_on_sigterm() {
-    let dir = tmpdir("sigterm");
-    let model = write_dense(&dir, "llama", Format::F16, 11, Dense::default());
+/// Start a server on a free port and wait until it answers `/health`. Its log is `dir/serve.log`.
+fn start(dir: &Path, model: &Path) -> (Guard, u16, PathBuf) {
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
     let listen = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -122,14 +123,21 @@ fn the_server_outlives_the_drain_timeout_and_stops_on_sigterm() {
         .stderr(Stdio::from(log_file))
         .spawn()
         .expect("spawn peregrine serve");
-    let mut guard = Guard(child);
-
+    let guard = Guard(child);
     wait_for_health(port, Duration::from_secs(60)).unwrap_or_else(|e| {
         panic!(
             "serve did not answer /health: {e}\nlog:\n{}",
             read_log(&log)
         )
     });
+    (guard, port, log)
+}
+
+#[test]
+fn the_server_outlives_the_drain_timeout() {
+    let dir = tmpdir("lifetime");
+    let model = write_dense(&dir, "llama", Format::F16, 11, Dense::default());
+    let (mut guard, port, log) = start(&dir, &model);
 
     // Well past the drain timeout, with no signal sent: the v0.1.1 server exited here.
     thread::sleep(Duration::from_millis(2500));
@@ -160,8 +168,21 @@ fn the_server_outlives_the_drain_timeout_and_stops_on_sigterm() {
         "serve exited before the shutdown signal\nlog:\n{}",
         read_log(&log)
     );
+    // The guard kills the process when the test ends. The clean shutdown is the next test.
+}
 
-    // A clean shutdown: SIGTERM drains and exits with status 0.
+/// A clean shutdown: `SIGTERM` drains and exits with status 0.
+///
+/// Unix only: Windows has no `SIGTERM`, and the stop file that replaces it is S7.3. There,
+/// Ctrl-C is the clean shutdown and a test cannot send it without the console APIs (see the
+/// module comment); the guard's `kill` only checks that the process was still serving above.
+#[cfg(unix)]
+#[test]
+fn a_shutdown_signal_drains_and_exits_cleanly() {
+    let dir = tmpdir("sigterm");
+    let model = write_dense(&dir, "llama", Format::F16, 11, Dense::default());
+    let (mut guard, _port, log) = start(&dir, &model);
+
     let pid = guard.0.id();
     let sent = Command::new("kill")
         .args(["-TERM", &pid.to_string()])

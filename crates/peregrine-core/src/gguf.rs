@@ -462,9 +462,27 @@ impl Gguf {
             }
             Ok(())
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            // Without the file handle, the mapping is the only way in: its
+            // `seek_read` is `ReadFile` with an explicit offset — pread on a handle — so the
+            // file's shared pointer is untouched and the mapping's pages are not faulted in.
+            use std::os::windows::fs::FileExt;
+            let f = self.file.as_ref().ok_or("gguf: the file is not mapped")?;
+            let mut done = 0;
+            while done < buf.len() {
+                let n = f
+                    .seek_read(&mut buf[done..], (self.data_start + offset + done) as u64)
+                    .map_err(|e| format!("gguf: read: {e}"))?;
+                if n == 0 {
+                    return Err("gguf: the file ended inside a tensor".into());
+                }
+                done += n;
+            }
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            // Without a positioned read, the mapping is the only way in: its
             // pages become resident, and the model costs twice what it should.
             let s = self.data_start + offset;
             buf.copy_from_slice(&self.map[s..s + buf.len()]);

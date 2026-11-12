@@ -237,8 +237,9 @@ fn the_session_s_token_streams_are_the_recorded_ones() {
     }
 
     let tier = peregrine_core::cpu::tier_name();
-    // Goldens are recorded on Linux; macOS libm (sin, cos, exp) rounds differently, so macOS
-    // keys its own directory and skips until one is recorded there.
+    // Goldens are recorded on Linux; macOS and Windows round the forward path their own way
+    // (their own libm / the engine's own functions off Linux), so each keys its own directory
+    // and skips until one is recorded there (S7.2; Windows' are recorded in S7.4).
     let golden_tier = format!(
         "{}{}",
         if tier == "x86_64-avx2-vnni256" {
@@ -248,6 +249,8 @@ fn the_session_s_token_streams_are_the_recorded_ones() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }

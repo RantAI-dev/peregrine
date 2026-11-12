@@ -46,6 +46,22 @@ pub enum Rope {
     Linear { factor: f32 },
 }
 
+/// A fresh `{stem}.gguf` path in `dir`, never one an earlier write took.
+///
+/// Two synthetic models of one family and format can live in one test directory (the
+/// allocation test writes two BERTs), and a loaded model keeps its file mapped; Windows
+/// refuses to open a mapped file for writing, so every write gets a name of its own
+/// (S7.2). The first write keeps the plain name, so a developer sees the familiar file.
+fn unique_path(dir: &Path, stem: &str) -> PathBuf {
+    let mut path = dir.join(format!("{stem}.gguf"));
+    let mut n = 0usize;
+    while path.exists() {
+        n += 1;
+        path = dir.join(format!("{stem}-{n}.gguf"));
+    }
+    path
+}
+
 /// Write a dense `arch` model ("llama", "qwen2" or "qwen3") whose matrices are all `fmt`, seeded by
 /// `seed`. `qwen2` carries the attention biases and NeoX rotary pairing its loader requires.
 pub fn write_dense(dir: &Path, arch: &str, fmt: Format, seed: u64, s: Dense) -> PathBuf {
@@ -428,7 +444,7 @@ fn write_dense_impl(
         (false, Rope::Freqs) => format!("{arch}-rope-freqs-{}", fmt.label()),
         (false, Rope::Linear { .. }) => format!("{arch}-rope-linear-{}", fmt.label()),
     };
-    let path = dir.join(format!("{name}.gguf"));
+    let path = unique_path(dir, &name);
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -616,7 +632,7 @@ pub fn write_gemma3_named(
     let file_stem = custom_name
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("gemma3-{}", fmt.label()));
-    let path = dir.join(format!("{file_stem}.gguf"));
+    let path = unique_path(dir, &file_stem);
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -800,7 +816,7 @@ pub fn write_gemma_embedding(
     mat(&mut w, &mut rng, "dense_2.weight", s.d_model, s.dense_width);
     mat(&mut w, &mut rng, "dense_3.weight", s.dense_width, s.d_model);
 
-    let path = dir.join(format!("gemma-embedding-{}.gguf", fmt.label()));
+    let path = unique_path(dir, &format!("gemma-embedding-{}", fmt.label()));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -1000,11 +1016,11 @@ pub fn write_bert(dir: &Path, fmt: Format, seed: u64, s: BertConfig) -> PathBuf 
     }
 
     let name = if s.unigram {
-        format!("bert-unigram-{}.gguf", fmt.label())
+        format!("bert-unigram-{}", fmt.label())
     } else {
-        format!("bert-{}.gguf", fmt.label())
+        format!("bert-{}", fmt.label())
     };
-    let path = dir.join(name);
+    let path = unique_path(dir, &name);
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -1207,7 +1223,7 @@ pub fn write_modern_bert(dir: &Path, fmt: Format, seed: u64, s: ModernBertConfig
         }
     }
 
-    let path = dir.join(format!("modern-bert-{}.gguf", fmt.label()));
+    let path = unique_path(dir, &format!("modern-bert-{}", fmt.label()));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -1359,7 +1375,7 @@ pub fn write_nomic_bert(dir: &Path, fmt: Format, seed: u64, s: NomicBertConfig) 
         }
     }
 
-    let path = dir.join(format!("nomic-bert-{}.gguf", fmt.label()));
+    let path = unique_path(dir, &format!("nomic-bert-{}", fmt.label()));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -1536,7 +1552,7 @@ pub fn write_mistral3(dir: &Path, fmt: Format, seed: u64, s: Mistral3Config) -> 
     }
     norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
 
-    let path = dir.join(format!("mistral3-{}.gguf", fmt.label()));
+    let path = unique_path(dir, &format!("mistral3-{}", fmt.label()));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -1838,7 +1854,7 @@ fn write_hybrid_impl(
     } else {
         format!("qwen35-plain-{}", fmt.label())
     };
-    let path = dir.join(format!("{name}.gguf"));
+    let path = unique_path(dir, &name);
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -2014,7 +2030,7 @@ pub fn write_moe(dir: &Path, fmt: Format, seed: u64, s: MoeShape) -> PathBuf {
     }
     norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
     mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
-    let path = dir.join(format!("qwen3moe-{}.gguf", fmt.label()));
+    let path = unique_path(dir, &format!("qwen3moe-{}", fmt.label()));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -2277,7 +2293,7 @@ pub fn write_gpt_oss_with_template(
     }
     norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
     mat16(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
-    let path = dir.join(format!("gpt-oss-{}.gguf", fmt.label()));
+    let path = unique_path(dir, &format!("gpt-oss-{}", fmt.label()));
     w.write_to_file(&path).expect("write synthetic model");
     path
 }
@@ -2385,8 +2401,7 @@ pub fn write_phi3_named(
     norm(&mut w, &mut rng, "output_norm.weight", s.d_model);
     mat(&mut w, &mut rng, "output.weight", s.d_model, VOCAB_SIZE);
 
-    let file_name = format!("{name}.gguf");
-    let path = dir.join(file_name);
+    let path = unique_path(dir, &name);
     w.write_to_file(&path).expect("write synthetic phi3 model");
     path
 }

@@ -617,6 +617,8 @@ fn the_synthetic_mistral3_matches_its_golden_for_the_tier() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }
@@ -1270,6 +1272,8 @@ fn the_synthetic_encoder_matches_its_golden_for_the_tier() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }
@@ -2161,6 +2165,8 @@ fn the_synthetic_bert_matches_its_golden_for_the_tier() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }
@@ -2899,6 +2905,8 @@ fn the_synthetic_modern_bert_matches_its_golden_for_the_tier() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }
@@ -3519,6 +3527,8 @@ fn the_synthetic_nomic_bert_matches_its_golden_for_the_tier() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }
