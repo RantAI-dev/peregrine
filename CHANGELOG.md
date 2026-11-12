@@ -15,8 +15,8 @@ All notable changes to this project are documented here. The format follows
   take the form is now one table (`MatKernels::q8k_uses_form`): AVX-512 keeps Q4_K and Q6_K
   (unchanged), AVX2 takes **Q6_K only** (1.28-1.34× its exact kernel; Q4_K is 0.79-0.85 and
   Q5_0 0.99-1.03), aarch64 keeps S5.4e's Q4_K/Q6_K, and on x86 a tier with no SIMD body takes
-  none, so the option then changes nothing and says so. Q5_0 joins the form's supported set — `q8form.rs`, the dispatch and a
-  new bit-identical AVX2 builder (`q8k_build_q5_0_avx2`) handle its short last super-block —
+  none, so the option then changes nothing and says so. Q5_0 joins the form's supported set — `q8form.rs`, the dispatch and
+  a new bit-identical AVX2 builder (`q8k_build_q5_0_avx2`) handle its short last super-block —
   but no x86 tier selects it: at Qwen 2.5's 896-wide rows the padding costs 12 % (0.88×). The
   form is built only for the tier's formats: Llama 3.2 1B Q4_K_M carries **140.2 MiB** instead
   of 957.0, its fast load **+0.16 s / +151 MiB** instead of +1.7 s / +987 MiB. End to end the
@@ -28,6 +28,22 @@ All notable changes to this project are documented here. The format follows
   AVX-512 fast goldens pass unchanged under Intel SDE. `peregrine tier`, the server's startup
   line and the `--fast-prompt` help now name the formats the CPU takes.
 
+- **Qwen3-Embedding F16 at long text: the value mix shares V across two rows (S4.9s, ARM)**:
+  the one cell still behind 1.0 in the cache-off ARM table (Qwen3-Embedding 0.6B F16, one
+  2 000-token text, 0.96× llama.cpp) spends 24 % of its pass in the attention value mix, at
+  12.8 GMAC/s — 19 % of this core's f32 roof — because `mix_f16` walks one row's positions
+  outermost, reloading the row's output once per key, and reads every stored V half once per
+  row where llama.cpp's flash-attention tile reads it once per 64. `neon.rs` gains
+  `mix_f16_pair` beside its scalar twin and `attn.rs` calls it when two rows of one KV head see
+  the same F16 positions: both rows' output slices stay in registers while the keys walk and
+  each V half is widened once for both. Same bits (each row's own accumulator, α multiply and
+  ascending multiply-then-add; a test holds the pair to the single-row body and the twin at
+  every length 1..=70, 127/128/129, 511/512/513 and five widths — no golden moved). One thread,
+  five interleaved rounds of two builds: the mix 8.93 → 5.39 s (−39.7 %), attention 13.00 →
+  9.43 s (−27.5 %), the 2 000-token pass 36.76 → 32.97 s (−10.3 %), the 512-token pass −5.2 %.
+  In the paired ten-thread window the cell moves 0.67× → 0.75× against llama.cpp; the row's
+  quiet-host re-read is owed (the host's co-tenant swung one arm 3.8×). Numbers and the stage
+  account: `benchmarks/results/spark-arm-2026-11-12-s4.9s/`; design §22.
 - **The fast prompt mode takes the NEON 8-bit kernel on ARM (S5.4e)**: `--fast-prompt`'s
   dispatch now calls `crates/peregrine-kernels/src/neon.rs` on aarch64 — `smmla` on
   `neon-i8mm`, `sdot` on `neon-dotprod`, the scalar twin on `neon`/`scalar` — and its NEON
