@@ -1,5 +1,14 @@
 # DGX Spark embedding standings: Peregrine vs llama.cpp
 
+> **Correction (2026-11-12).** The batch-of-32 and mixed-batch cells of this run were measured with
+> Peregrine's exact embedding result cache on (the 64 MiB default): each batch cell followed the
+> single-text cell in one server process, and the cache served 20 of the 32 texts. Those Peregrine
+> batch numbers, and the 2.2–3.2× ratios derived from them, are overstated. The single-text cells
+> are not affected. Cache-off numbers for the same files are in
+> [`spark-arm-2026-11-12-q8-i8mm`](../spark-arm-2026-11-12-q8-i8mm/README.md), and how this was
+> found is in
+> [`spark-arm-2026-11-12-qwen3-embed-regression`](../spark-arm-2026-11-12-qwen3-embed-regression/README.md).
+
 The published embedding table compares Peregrine with every engine on x86. This run
 measures the same `/v1/embeddings` path on the project's ARM host: EmbeddingGemma 300M
 Q8_0, Qwen3-Embedding 0.6B in F16 and Q8_0, and Nemotron 3.5 Embed 1B Q8_0, against
