@@ -51,6 +51,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **macOS on Apple Silicon is a supported platform (roadmap S7.1)**: `release.yml` builds and tests
+  `peregrine-vX.Y.Z-macos-aarch64.tar.gz` on the `macos-15` runner (`MACOSX_DEPLOYMENT_TARGET=11.0`,
+  `strip -x`, then ad-hoc signed with `codesign --force --sign -`; not notarised), and a
+  `workflow_dispatch` dry run builds and uploads the archives without publishing. `scripts/install.sh`
+  accepts Darwin arm64 (and refuses Intel Macs with the build-from-source line; it uses `shasum -a 256`
+  where `sha256sum` is absent), `peregrine upgrade` maps macOS aarch64 to `macos-aarch64`, and the
+  default decode width on Apple Silicon is the performance-core count
+  (`hw.perflevel0.physicalcpu`, read with `sysctlbyname`), not every core. The synthetic goldens are
+  recorded on the runner for its macOS tier, `.github/workflows/record-goldens.yml` records them for
+  any platform, the macOS CI job smoke-tests the release binary and a synthetic generation, and the
+  quickstart and release checklist have the macOS commands, the quarantine note and the dry run.
+  `docs/design/s7-platforms.md` has the step's "as built" section.
 - **An AVX2 body for the fast prompt mode's 8-bit kernel (S5.4d)**: `--fast-prompt` had one
   SIMD body (AVX-512); on an AVX2 machine the mode ran through the scalar twin, correct and
   about as fast as the exact kernels. `crates/peregrine-kernels/src/kqsimd.rs` now has
@@ -120,7 +132,6 @@ All notable changes to this project are documented here. The format follows
   `GetLogicalProcessorInformationEx`, hand-written in `crates/peregrine-core/src/win32.rs` (no
   dependency); and the tests that only needed a Unix signal got a Windows counterpart where the
   behaviour exists. `serve --background`, `status` and `stop` are S7.3 and say so on Windows.
-
 - **`--fast-prompt`, the opt-in 8-bit prompt pass (S5.4b)**: with the option on, a prompt
   row's Q4_K and Q6_K weights are read from an 8-bit form built once per matrix at load
   (one f32 scale and one int8 code per weight, per 256-weight super-block), while generated

@@ -3,9 +3,11 @@
 Run a model, call it. About five minutes: one binary (or one container), one small model, one
 request — the same requests then work against any bigger model file.
 
-You need Linux on x86-64 or aarch64, or Windows on x86-64 (macOS: build from source below), and
-about 300 MB of disk for the example model. The Windows archive and installer ship from the release
-after v0.2.0; until then build from source on Windows too.
+You need Linux on x86-64 or aarch64, or macOS on Apple Silicon, or Windows on x86-64 (Intel Macs:
+build from source below), and about 300 MB of disk for the example model. Linux x86-64 and aarch64
+have release archives today; the macOS on Apple Silicon and Windows on x86-64 archives and
+installers ship **from the release after v0.2.0**, and both platforms build and pass the suite on
+every change in the meantime.
 
 ## 1. Get Peregrine
 
@@ -24,6 +26,42 @@ repository at `scripts/install.sh`, and works with `sh` as well as `bash`.
 
 Pass `--version vX.Y.Z` to pin a release and `--prefix /usr/local` for a system-wide install;
 `PEREGRINE_REPO` and `PEREGRINE_BASE_URL` point the script at a fork or a mirror.
+
+### macOS on Apple Silicon
+
+macOS on Apple Silicon has no archive in v0.2.0: its archive and this installer line ship **from
+the release after v0.2.0**. Against v0.2.0 the installer stops and says so — no macOS archive in
+that release, build from source (`cargo build --release`) or wait for the next release — instead of
+fetching a 404. So build from source (below) until then. From the next release the same line
+installs the Apple Silicon archive:
+
+```sh
+curl -fsSL https://peregrine.rantai.dev/install.sh | sh
+peregrine tier   # the NEON tier picked for this chip (dotprod, i8mm, or plain NEON)
+```
+
+**Intel Macs are not released**; build from source (below). The installer refuses `x86_64` Darwin
+with that message rather than downloading an archive that would not run.
+
+The archive is **ad-hoc signed, not notarised**. A binary fetched by the install script with `curl`
+carries no quarantine flag and runs as it is. If you downloaded the `.tar.gz` with a browser,
+Gatekeeper blocks it at first run; clear the flag once:
+
+```sh
+xattr -d com.apple.quarantine ~/.local/bin/peregrine
+```
+
+The model and packed-weight caches follow the same XDG convention as on Linux — `~/.cache/peregrine`
+(`~/.cache/peregrine/models` and `~/.cache/peregrine/packs`), overridden by `PEREGRINE_CACHE_DIR`,
+`XDG_CACHE_HOME` or `PEREGRINE_PACK_CACHE`, exactly as described in step 2. The background server
+(`serve --background`, `status`, `stop`, `upgrade`) uses the Unix lifetime path on macOS too.
+
+**Threads.** Apple chips mix performance and efficiency cores, and a pool as wide as every core runs
+slower on one token: the efficiency cores take a share of each step and finish it later. The default
+decode width is therefore the performance-core count (`hw.perflevel0.physicalcpu`), not
+`hw.ncpu`. An explicit `-t/--threads` (or `PEREGRINE_DECODE_THREADS`) always wins; the startup
+calibration and `peregrine tune`, when enabled, sweep around the same default. `sysctl
+hw.perflevel0.physicalcpu hw.ncpu` shows both counts.
 
 ### Windows x86-64
 
@@ -80,7 +118,9 @@ peregrine tier   # the kernel tier picked for your CPU (AVX-512 / AVX2 / NEON / 
 
 The binary is built for the plain baseline of each architecture: AVX2, AVX-VNNI and AVX-512 are
 picked at run time on x86-64, NEON variants on aarch64 — the same file runs on any CPU of its
-architecture. `peregrine tier` prints what it picked. On Windows the archive is
+architecture. `peregrine tier` prints what it picked. On macOS, from the release after v0.2.0,
+replace `linux-$ARCH` with `macos-aarch64` (and see the quarantine note above); v0.2.0 has no macOS
+archive. On Windows, from that same release, the archive is
 `peregrine-vX.Y.Z-windows-x86_64.zip` (unzip it and run `peregrine.exe`), and `install.ps1` is the
 installer described above.
 
