@@ -357,7 +357,7 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.5 | WordPiece and unigram tokenizers against `llama-tokenize` | |
 | S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
 | S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
-| S4.7 | `modern-bert` and labelled classifier heads. **Part a done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; a classifier head is read and ignored until S4.6b serves heads | S4.6 |
+| S4.7 | `modern-bert` and labelled classifier heads. **Done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; S4.7b adds its classifier head on `/v1/rerank`, `/v1/classify` and `peregrine rerank` from the same `Want::Head` interface, measured on gte-reranker-modernbert-base F16 and Q8_0 (§9) | S4.6 |
 | S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3` | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
 | S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |
@@ -427,7 +427,57 @@ rerank throughput level with llama.cpp at 123-token pairs and 5-6 % ahead at 449
 `cls` tensors), so `/v1/classify` is covered end to end by the synthetic labelled file and the
 server tests, not by a real-file gate.
 
-## 9. S4.10 as built
+## 9. S4.7b as built: the modern-bert head, rerank and classify
+
+The head of a `modern-bert` file is `ModernBertHead` in
+`crates/peregrine-models/src/modern_bert.rs`, transcribed from `build_pooling`'s rank
+branch (`src/llama-graph.cpp:4185-4220`) in
+[`docs/reference/modern-bert.md`](../reference/modern-bert.md):
+
+```text
+h = mean(output_norm rows)       // the file's classifier.pooling_type: mean by default
+h = cls.weight · h               // no bias: llama.cpp creates no cls.bias here
+h = act(h)                       // classifier.activation, GELU_ERF by default (not tanh)
+h = layer_norm(h, cls.norm.w)    // weight only
+y = cls.output.weight · h + cls.output.bias
+```
+
+`Want::Head`, `TextWant::Head`, `head_width()` and `head_labels()` were already the
+family-agnostic interface S4.6b added, so `/v1/rerank`, `/v1/classify`, `/v1/models`
+(modalities) and `peregrine rerank` serve this family with **no endpoint change**. Three
+points the note left to the implementer, now settled:
+
+1. **The head is a property of the tensors, not of `<arch>.pooling_type`.** The judge of
+   rerank-vs-classify is the same as `bert`'s: one output and no labels is a reranker; more
+   outputs, or a named label, is a classifier. gte-reranker-modernbert-base carries the
+   dummy `classifier.output_labels = ["LABEL_0"]` its converter wrote, so `/v1/models`
+   lists it as a classifier while `/v1/rerank` serves it as the reranker it is — the same
+   rule `bert` files with a dummy label get.
+2. **The dense layer and the head norm are bias-less.** llama.cpp's modern-bert loader
+   creates `cls.bias`/`cls.norm.bias` only for a decision model, so a sequence-classifier
+   file that carries them (only possible with `classifier_bias` / `norm_bias` on, which
+   Transformers defaults off) is read without them. The loader accepts them silently and
+   a test pins that the row is the same as a file without them.
+3. **The rerank pair** is `format_prompt_rerank`'s `[bos] q [eos] [sep] d [eos]` with both
+   halves tokenized with `parse_special = false`; `Tokenizer::encode_pair` gained that
+   branch for byte-level BPE (`[CLS]` in a query is text, `[unused3]` is still a token).
+   gte's file sets `add_sep_token = false`, so its pairs are `[CLS] q [SEP] d [SEP]`.
+
+What was measured: ids identical to llama.cpp on all 100 pairs (36–445 tokens, 51 past the
+128-token window). At F16 the 100 scores differ by 0.00067 mean / 0.00273 max and all ten
+query rankings are identical; the Q8_0 file is 0.01141 / 0.07430 from llama.cpp's Q8_0 and
+0.02173 / 0.07970 from its **F16** run, while llama.cpp's own Q8_0 is 0.02310 / 0.09370
+from that F16 run — the quantisation moves the scores further than the engines differ.
+Order swaps at Q8_0 happen between documents 2.2e-2 apart or less (4 of 10 queries), and
+llama.cpp's own Q8_0 and F16 runs disagree on 5. Rerank throughput on a shared 8-vCPU VM,
+4 threads, eight pairs per request: 1.14× llama.cpp at 128-token pairs and 1.24× at
+512-token ones. No published `modern-bert` GGUF with real `classifier.output_labels`
+turned up (searches for prompt-guard, router, sentiment and generic classifier
+conversions found PyTorch checkpoints only), so `/v1/classify` is covered end to end by
+the synthetic labelled file and the server tests, as `bert`'s is. The decision-model head
+blocks (Laya, Julia-1) are refused by name until S4.12.
+
+## 10. S4.10 as built
 
 `serve -m a.gguf -m b.gguf` loads every file at start, each as its own `Engine` on its own
 engine thread. The engine options are process-wide (thread count, pass rows, kernel switches,

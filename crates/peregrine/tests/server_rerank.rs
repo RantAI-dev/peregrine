@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::thread;
 use std::time::{Duration, Instant};
-use support::models::{write_bert, BertConfig, BertHeadConfig};
+use support::models::{write_bert, write_modern_bert, BertConfig, BertHeadConfig};
 
 fn tmpdir(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
@@ -414,5 +414,137 @@ fn models_reports_what_a_file_can_do() {
     assert_eq!(
         models["data"][0]["architecture"]["output_modalities"],
         json!(["classify"])
+    );
+}
+
+/// The same endpoints on the `modern-bert` family (roadmap S4.7b): a synthetic file with
+/// the head's `cls`/`cls.norm`/`cls.output` tensors and no `classifier.*` keys at all
+/// (mean pooling and the erf GELU are this family's defaults).
+fn modern_bert_head(
+    dir: &Path,
+    name: &str,
+    head: support::models::ModernBertHeadConfig,
+) -> PathBuf {
+    let path = write_modern_bert(
+        dir,
+        Format::F32,
+        73,
+        support::models::ModernBertConfig {
+            head: Some(head),
+            ..Default::default()
+        },
+    );
+    let to = dir.join(format!("{name}.gguf"));
+    std::fs::rename(&path, &to).unwrap();
+    to
+}
+
+#[test]
+fn a_modern_bert_reranker_is_served_on_rerank() {
+    let dir = tmpdir("modern-bert-rerank");
+    let model = modern_bert_head(
+        &dir,
+        "mb-reranker",
+        support::models::ModernBertHeadConfig {
+            n_out: 1,
+            ..Default::default()
+        },
+    );
+    let (_guard, port) = serve(&dir, &model);
+    let documents = json!([
+        "the cat sat on the mat",
+        "a completely unrelated sentence about taxes",
+        "hello world",
+        "the quick brown fox jumps over the lazy dog",
+    ]);
+    let (status, body) = post(
+        port,
+        "/v1/rerank",
+        json!({"query": "where is the cat?", "documents": documents}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let got = results(&body);
+    assert_eq!(got.len(), 4);
+    let mut indices: Vec<usize> = got.iter().map(|(i, _)| *i).collect();
+    indices.sort_unstable();
+    assert_eq!(indices, [0, 1, 2, 3]);
+    for w in got.windows(2) {
+        assert!(w[0].1 >= w[1].1, "results are not sorted: {got:?}");
+    }
+    let tokens = body["usage"]["prompt_tokens"].as_u64().unwrap();
+    assert!(tokens > 4, "every pair's tokens are counted: {tokens}");
+
+    // A pair's score is the same alone and in the batch, as the whole-text pass claims.
+    let (status, one) = post(
+        port,
+        "/v1/rerank",
+        json!({"query": "where is the cat?", "documents": ["hello world"]}),
+    );
+    assert_eq!(status, 200);
+    let alone = results(&one)[0].1;
+    let at = got.iter().position(|(i, _)| *i == 2).unwrap();
+    assert_eq!(alone.to_bits(), got[at].1.to_bits());
+
+    // `/v1/models` reports the head: one output and no labels is a reranker.
+    let models = get(port, "/v1/models");
+    assert_eq!(
+        models["data"][0]["architecture"]["output_modalities"],
+        json!(["rerank"])
+    );
+}
+
+#[test]
+fn a_modern_bert_labelled_head_is_served_on_classify() {
+    let dir = tmpdir("modern-bert-classify");
+    let model = modern_bert_head(
+        &dir,
+        "mb-classifier",
+        support::models::ModernBertHeadConfig {
+            n_out: 3,
+            labels: vec!["negative".into(), "neutral".into(), "positive".into()],
+            ..Default::default()
+        },
+    );
+    let (_guard, port) = serve(&dir, &model);
+    let (status, body) = post(
+        port,
+        "/v1/classify",
+        json!({"input": ["hello world", "a second text"]}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(r["index"], i);
+        let scores = r["scores"].as_object().expect("a scores object");
+        assert_eq!(scores.len(), 3);
+        let sum: f64 = scores.values().map(|v| v.as_f64().unwrap()).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "softmax sums to 1: {sum}");
+        assert!(["negative", "neutral", "positive"].contains(&r["label"].as_str().unwrap()));
+    }
+    let models = get(port, "/v1/models");
+    assert_eq!(
+        models["data"][0]["architecture"]["output_modalities"],
+        json!(["classify"])
+    );
+    // A reranker's one-output head is refused here by name.
+    let dir = tmpdir("modern-bert-classify-rank");
+    let rank = modern_bert_head(
+        &dir,
+        "mb-rank",
+        support::models::ModernBertHeadConfig {
+            n_out: 1,
+            ..Default::default()
+        },
+    );
+    let (_guard, port) = serve(&dir, &rank);
+    let (status, body) = post(port, "/v1/classify", json!({"input": "hello"}));
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reranker"),
+        "{body}"
     );
 }
