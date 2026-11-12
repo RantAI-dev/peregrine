@@ -38,6 +38,23 @@ All notable changes to this project are documented here. The format follows
   8 192-weight streamed shape (0.63–0.70× for Q4_K), and costs 1.187 GiB on Llama 3.2 1B.
   **Nothing is wired in**: no default-path file changes and no golden moves. Numbers:
   `benchmarks/results/spark-arm-2026-11-12-s5.4d-neon/`.
+- **Windows x86-64 builds and passes the suite (roadmap S7.2)**: a `test (windows-x86_64)` job on
+  `windows-2025` runs the whole workspace in release mode on every pull request, beside the Linux
+  and macOS entries, and a smoke step checks `peregrine.exe --version`, `peregrine.exe tier`
+  (AVX2 on the runner's CPU) and `run` on a synthetic model. Getting there: `*.jsonl`,
+  `*.golden`, `*.jinja`, `*.txt` and `*.tsv` are pinned to LF in `.gitattributes`; a synthetic
+  model is never written over a file a loaded model still maps, the pack cache keeps a pack
+  already published for a key when Windows refuses to rename over it (and `Gguf::read_data` uses
+  positioned reads there, not the mapping), and the `hf:` download drops its header mapping
+  before the final rename; the forward path uses the engine's own `exp`/`ln`/`sin`/`cos`/`pow`
+  off Linux as aarch64 already did, so Windows results are the arithmetic's and not the UCRT's,
+  and every golden directory that keyed `-macos` now keys `-windows` too (recorded in S7.4, so
+  those tests skip there until then); the cache and state directories default to
+  `%LOCALAPPDATA%\peregrine`; the pool's default width counts physical cores with
+  `GetLogicalProcessorInformationEx`, hand-written in `crates/peregrine-core/src/win32.rs` (no
+  dependency); and the tests that only needed a Unix signal got a Windows counterpart where the
+  behaviour exists. `serve --background`, `status` and `stop` are S7.3 and say so on Windows.
+
 - **`--fast-prompt`, the opt-in 8-bit prompt pass (S5.4b)**: with the option on, a prompt
   row's Q4_K and Q6_K weights are read from an 8-bit form built once per matrix at load
   (one f32 scale and one int8 code per weight, per 256-weight super-block), while generated
@@ -62,7 +79,8 @@ All notable changes to this project are documented here. The format follows
 - **Design: macOS and Windows (S7)**: `docs/design/s7-platforms.md` sets what "supported" means on a
   platform (CI on every PR, a release archive, an installer, `upgrade`, the lifetime commands,
   goldens), the targets (macOS on Apple Silicon and Windows x86-64 first; Intel Macs not planned,
-  Windows on ARM later) and the steps S7.1 to S7.5. Nothing is built yet.
+  Windows on ARM later) and the steps S7.1 to S7.5. S7.2 (Windows x86-64 in CI) is built; the
+  rest is not.
 - **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
   `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
   embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused
@@ -120,6 +138,36 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The encoder's element-wise block: threaded and batched, same bits (S4.9r).** The S4.9p
+  account put 9.26 ms of a 512-token MiniLM pass (18.05 bge-small) in everything around the
+  matrix products against OpenVINO's 0.55 / 1.14 ms. Three changes close what the arithmetic
+  allows. The softmax denominator is an ascending `f64` sum per row, one four-cycle-latency chain
+  with three cycles idle; a global layer's rows share their band, so four rows now take one
+  kernel (`bidir::exp_rows4_sums`) that runs `exp8` per row and advances four ascending folds
+  interleaved — 5.30 → 3.18 ms on MiniLM's 512 attention and 10.50 → 6.46 on bge-small, each
+  row's bits untouched. The q/k/v bias adds and query scale, and the two residual+bias reads
+  after `attn_output` and `ffn_down`, ran on the calling thread and now take one fork-join over
+  rows each (0.80 → 0.22 and 0.70 → 0.35 ms on MiniLM, 1.77 → 0.49 and 1.37 → 0.70 on bge).
+  F16 embedding rows widen sixteen halves per step with `vcvtph2ps` instead of a scalar `f16`
+  loop, with the scalar twin as the definition and a NaN-payload fallback (0.92 → 0.12 ms).
+  Element-wise is 9.31 → **7.54 ms** and 17.78 → **15.98 ms**; attention 12.74 → **10.77** and
+  25.48 → **21.40**; the pass 53.4 → **49.5 ms** and 104.4 → **98.8 ms**. Every output vector is
+  bit-identical (the same text gives the same floats at 1 and 4 threads, alone and in a batch;
+  `exp_rows4_sums` is pinned to `exp_row`+`sum_row` for every length 0–40 and
+  127/128/129/383/384/385/511/512/513 and the edge values; the F16 widening to the scalar loop
+  over all 65 536 half patterns) and no golden file changed. Medians of three interleaved
+  rounds: MiniLM's F16 row 0.82× → **0.99×** at L512 b1, 0.91× → **1.00×** at b8, 0.93× →
+  **1.01×** at b32, 1.04× → **1.09×** at L16 b32, 1.46× → **1.65×** on the mixed batch; bge
+  F32 0.85× → **0.92×**, 0.86× → **0.94×**, 0.90× → **0.95×** at 512 b1/b8/b32 and 1.24× →
+  **1.31×** mixed. The exact-`erf` GELU is deliberately unchanged (3.6 / 8.9 ms): it is a
+  dependency chain on `f64` FMAs and every faster formulation moves a bit. **Still below 1.0× on
+  this 4-core host**, by cell: MiniLM f16 at 128 b8 (0.97×) and 512 b1/b8 (0.99×/0.996×);
+  MiniLM q8_0 at 512 b1/b8 (0.99×/0.996×); bge-small f32 at 16 b32 (0.95×), 128 b1/b8
+  (0.95×/0.93×) and 512 b1/b8/b32 (0.92×/0.94×/0.95×); bge-small q8_0 at 16 b32 (0.98×), 128
+  b1/b8 (0.97×/0.94×) and 512 b1/b8/b32 (0.90×/0.95×/0.95×). The other four embedding families
+  and both rerankers did not move. See
+  `benchmarks/results/bluefin-2026-11-12-s4.9r/README.md` and `docs/design/s4.9-sota.md` §21.
+
 - **The Qwen3-Embedding 0.6B Q8_0 long-text "slowdown" of S4.9q does not reproduce
   (2026-11-12).** Both ends of the reported fall were rebuilt side by side and measured
   interleaved (five rounds each, 10 threads pinned to the Cortex-X925 cluster, embedding cache
@@ -141,6 +189,7 @@ All notable changes to this project are documented here. The format follows
   overstated; single-text cells were not affected. `docs/benchmark.md` now carries only cache-off
   numbers in that column (1.9–2.6× for the Q8_0 files) and marks the one row that has not been
   re-measured.
+
 - **The halved-precision float panel is widened once, and the small-BERT gap is measured
   against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
   and the prefetch guard inside its `k` loop and widened sixteen weights per weight step, on the
