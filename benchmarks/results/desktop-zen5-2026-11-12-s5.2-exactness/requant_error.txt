@@ -1,4 +1,4 @@
-model /home/uaa/.cache/peregrine-bench/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+model ~/.cache/peregrine-bench/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 Q4_K super-blocks sampled: 50688 (every 64th), weights 12976128
 mean of the per-block mean |error| / block max: 0.00197
 that ratio across blocks: 0.00126 .. 0.00271
@@ -10,7 +10,7 @@ is the largest |w| in that row's 256-weight super-block, the number the fork div
 by 127. A weight of average size is off by more than this fraction of *itself*: the
 figures above are relative to the block's maximum, as the design note's bound is.
 
-model /home/uaa/.cache/peregrine-bench/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+model ~/.cache/peregrine-bench/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 Q4_K super-blocks sampled: 3192 (every 64th), weights 817152
 mean of the per-block mean |error| / block max: 0.00197
 that ratio across blocks: 0.00139 .. 0.00267
