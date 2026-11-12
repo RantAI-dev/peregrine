@@ -4,10 +4,11 @@
 # `publish = false`; there is no container push yet).
 #
 # The release ships linux-x86_64 (the portable x86-64 baseline with run-time ISA dispatch),
-# linux-aarch64 and windows-x86_64 (the MSVC build with a static C runtime). Each target is built
-# natively on its own runner, and the tagged commit runs the full test suite in release mode, as
-# it ships. The AVX2-only physical host (H2) runs the suite on every release candidate before the
-# tag is cut (docs/dev/releasing.md, S0.5).
+# linux-aarch64, macos-aarch64 (Apple Silicon; ad-hoc signed, not notarised) and windows-x86_64
+# (the MSVC build with a static C runtime). Each target is built natively on its own runner, and
+# the tagged commit runs the full test suite in release mode, as it ships. The AVX2-only physical
+# host (H2) runs the suite on every release candidate before the tag is cut
+# (docs/dev/releasing.md, S0.5).
 #
 # A manual start is a dry run (the `dry_run` input defaults to true): the build jobs run and
 # upload their archives as workflow artefacts, and the publish job cannot run — it is guarded on
@@ -38,6 +39,7 @@ jobs:
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, name: linux-x86_64 }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, name: linux-aarch64 }
+          - { os: macos-15, target: aarch64-apple-darwin, name: macos-aarch64 }
           - { os: windows-2025, target: x86_64-pc-windows-msvc, name: windows-x86_64 }
     name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -69,7 +71,14 @@ jobs:
           echo "native tier of the portable binary: $tier"
           grep -q '^x86_64-avx2' <<< "$tier"
           PEREGRINE_ISA=scalar ./target/release/peregrine tier | grep -q '^kernel tier   x86_64$'
-      - name: build archive (Linux)
+      # Apple Silicon has one tier: the NEON kernels are unconditional there, so the step prints
+      # the tier the shipped binary reports.
+      - name: run-time tier (macOS)
+        if: matrix.name == 'macos-aarch64'
+        run: |
+          cargo build --release --locked -p peregrine
+          ./target/release/peregrine tier
+      - name: build archive (Linux, macOS)
         if: runner.os != 'Windows'
         run: scripts/release/build.sh ${{ matrix.target }}
       # The Windows archive is built with -C target-feature=+crt-static, so users need no Visual

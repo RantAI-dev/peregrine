@@ -1,0 +1,38 @@
+{
+ "qwen3-embed-0.6b-q8_0": {
+  "path": "~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf",
+  "pooling": "last",
+  "ctx": 2048,
+  "cells": {
+   "2000": {
+    "texts": 1,
+    "tokens_per_text": 2000,
+    "peregrine": [
+     0.123,
+     0.129,
+     0.064
+    ],
+    "llama.cpp": [
+     0.125,
+     0.138,
+     0.133
+    ],
+    "peregrine_median": 0.123,
+    "llama_median": 0.133,
+    "ratio": 0.925,
+    "peregrine_spread_pct": 52.85,
+    "llama_spread_pct": 9.77
+   }
+  },
+  "peregrine": {
+   "cmd": "~/peregrine/target/release/peregrine serve -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf --host 127.0.0.1 --port 18401 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-q8_0.gguf --embedding --pooling last -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18402",
+   "version": []
+  }
+ }
+}

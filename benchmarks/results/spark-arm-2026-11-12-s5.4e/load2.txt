@@ -1,0 +1,12 @@
+Llama-3.2-1B-Instruct-Q4_K_M exact run1 wall_s 0.58 rss_mib 898096
+Llama-3.2-1B-Instruct-Q4_K_M exact run2 wall_s 0.60 rss_mib 898148
+Llama-3.2-1B-Instruct-Q4_K_M exact run3 wall_s 0.60 rss_mib 898564
+Llama-3.2-1B-Instruct-Q4_K_M fast run1 wall_s 1.12 rss_mib 1887636
+Llama-3.2-1B-Instruct-Q4_K_M fast run2 wall_s 1.08 rss_mib 1887244
+Llama-3.2-1B-Instruct-Q4_K_M fast run3 wall_s 1.06 rss_mib 1887352
+Qwen2.5-0.5B-Instruct-Q4_K_M exact run1 wall_s 0.65 rss_mib 669736
+Qwen2.5-0.5B-Instruct-Q4_K_M exact run2 wall_s 0.61 rss_mib 669576
+Qwen2.5-0.5B-Instruct-Q4_K_M exact run3 wall_s 0.69 rss_mib 669588
+Qwen2.5-0.5B-Instruct-Q4_K_M fast run1 wall_s 0.44 rss_mib 781836
+Qwen2.5-0.5B-Instruct-Q4_K_M fast run2 wall_s 0.79 rss_mib 781856
+Qwen2.5-0.5B-Instruct-Q4_K_M fast run3 wall_s 0.81 rss_mib 781852

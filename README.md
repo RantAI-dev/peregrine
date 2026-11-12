@@ -16,11 +16,11 @@ own memory-bandwidth ceiling.
 
 ## Install
 
-Linux x86-64 and aarch64 are supported and have release archives today. Windows on x86-64 builds
-and passes the whole suite on every change, and its archive and installer ship **from the release
-after v0.2.0**; until then build it from source (`cargo build --release`). On Linux the installer
-detects the architecture, downloads the matching release archive, verifies it against
-`SHA256SUMS`, and installs `peregrine` to `~/.local/bin`:
+Linux x86-64 and Linux aarch64 have release archives today. macOS on Apple Silicon and Windows on
+x86-64 build and pass the whole suite on every change, and their archives and installers ship
+**from the release after v0.2.0**; until then build either from source (`cargo build --release`).
+On Linux and macOS the installer detects the architecture, downloads the matching release archive,
+verifies it against `SHA256SUMS`, and installs `peregrine` to `~/.local/bin`:
 
 ```sh
 curl -fsSL https://peregrine.rantai.dev/install.sh | sh
@@ -45,13 +45,16 @@ peregrine upgrade            # self-update in place to the newest release
 
 On Windows pass `-Version vX.Y.Z` to the script and `-InstallDir DIR` to choose the directory.
 
-The release archives (`peregrine-v0.2.0-linux-x86_64.tar.gz` and
-`peregrine-v0.2.0-linux-aarch64.tar.gz` on the
-[releases page](https://github.com/RantAI-dev/peregrine/releases); `peregrine-vX.Y.Z-windows-x86_64.zip`
-from the next release) contain portable binaries built for the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and i8mm are selected at
-run time, so one binary runs on every CPU of that architecture; `peregrine tier` prints what it
-picked. The Windows build links the C runtime statically, so it needs no Visual C++ redistributable;
-it is unsigned (no Authenticode certificate yet), and the
+The release archives on the [releases page](https://github.com/RantAI-dev/peregrine/releases) are
+`peregrine-v0.2.0-linux-x86_64.tar.gz` and `peregrine-v0.2.0-linux-aarch64.tar.gz`; they contain
+portable binaries built for the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and
+i8mm are selected at run time, so one binary runs on every CPU of that architecture;
+`peregrine tier` prints what it picked. From the release after v0.2.0 the page also carries
+`peregrine-vX.Y.Z-macos-aarch64.tar.gz` and `peregrine-vX.Y.Z-windows-x86_64.zip`. The macOS archive
+is ad-hoc signed, not notarised: installed with `curl` it runs as is; see the
+[quickstart](docs/quickstart.md#macos-on-apple-silicon) for a browser download, and Intel Macs
+build from source. The Windows build links the C runtime statically, so it needs no Visual C++
+redistributable; it is unsigned (no Authenticode certificate yet), and the
 [quickstart](docs/quickstart.md#windows-x86-64) says what SmartScreen shows for a browser download.
 
 **Docker** builds the server image (see [Docker](docs/docker.md)):

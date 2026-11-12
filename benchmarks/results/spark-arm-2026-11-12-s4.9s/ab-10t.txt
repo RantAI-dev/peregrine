@@ -1,0 +1,30 @@
+=== round 1 main load 5.38
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.873,"tokens_per_s":461.0,"wall_s":1.1454,"tokenise_s":0.001413,"tokenise_ms_per_text":1.413,"stats_ms":{"matmul":745.870,"head":0.000,"attention":151.028,"other":239.754,"total":1136.652,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.144,"tokens_per_s":288.4,"wall_s":6.9346,"tokenise_s":0.003186,"tokenise_ms_per_text":3.186,"stats_ms":{"matmul":3285.915,"head":0.000,"attention":1958.437,"other":1657.176,"total":6901.528,"barriers":32256},"prof_ms":{}}
+=== round 1 branch load 6.32
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.813,"tokens_per_s":429.3,"wall_s":1.2300,"tokenise_s":0.001399,"tokenise_ms_per_text":1.399,"stats_ms":{"matmul":799.366,"head":0.000,"attention":126.654,"other":294.974,"total":1220.994,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.071,"tokens_per_s":142.8,"wall_s":14.0036,"tokenise_s":0.003141,"tokenise_ms_per_text":3.141,"stats_ms":{"matmul":6000.788,"head":0.000,"attention":2840.178,"other":5129.558,"total":13970.524,"barriers":32256},"prof_ms":{}}
+=== round 2 main load 7.19
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.355,"tokens_per_s":187.6,"wall_s":2.8149,"tokenise_s":0.001411,"tokenise_ms_per_text":1.411,"stats_ms":{"matmul":1537.323,"head":0.000,"attention":372.428,"other":896.101,"total":2805.852,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.049,"tokens_per_s":98.4,"wall_s":20.3178,"tokenise_s":0.003180,"tokenise_ms_per_text":3.180,"stats_ms":{"matmul":7916.703,"head":0.000,"attention":4445.532,"other":7917.515,"total":20279.750,"barriers":32256},"prof_ms":{}}
+=== round 2 branch load 9.83
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.603,"tokens_per_s":318.2,"wall_s":1.6591,"tokenise_s":0.001424,"tokenise_ms_per_text":1.424,"stats_ms":{"matmul":1036.554,"head":0.000,"attention":231.182,"other":382.371,"total":1650.107,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.089,"tokens_per_s":177.6,"wall_s":11.2612,"tokenise_s":0.003167,"tokenise_ms_per_text":3.167,"stats_ms":{"matmul":5302.281,"head":0.000,"attention":3075.039,"other":2849.702,"total":11227.022,"barriers":32256},"prof_ms":{}}
+=== round 3 main load 11.13
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.635,"tokens_per_s":335.1,"wall_s":1.5757,"tokenise_s":0.001405,"tokenise_ms_per_text":1.405,"stats_ms":{"matmul":959.322,"head":0.000,"attention":184.485,"other":423.057,"total":1566.864,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.085,"tokens_per_s":169.9,"wall_s":11.7706,"tokenise_s":0.003187,"tokenise_ms_per_text":3.187,"stats_ms":{"matmul":4970.212,"head":0.000,"attention":3080.863,"other":3684.375,"total":11735.450,"barriers":32256},"prof_ms":{}}
+=== round 3 branch load 11.45
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.423,"tokens_per_s":223.1,"wall_s":2.3666,"tokenise_s":0.001358,"tokenise_ms_per_text":1.358,"stats_ms":{"matmul":1387.612,"head":0.000,"attention":299.224,"other":670.554,"total":2357.390,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.084,"tokens_per_s":168.8,"wall_s":11.8507,"tokenise_s":0.003191,"tokenise_ms_per_text":3.191,"stats_ms":{"matmul":5225.555,"head":0.000,"attention":2301.774,"other":4290.181,"total":11817.510,"barriers":32256},"prof_ms":{}}
+=== round 4 main load 12.28
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.450,"tokens_per_s":237.7,"wall_s":2.2216,"tokenise_s":0.001297,"tokenise_ms_per_text":1.297,"stats_ms":{"matmul":1278.809,"head":0.000,"attention":275.855,"other":658.082,"total":2212.746,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.120,"tokens_per_s":240.5,"wall_s":8.3143,"tokenise_s":0.003158,"tokenise_ms_per_text":3.158,"stats_ms":{"matmul":3771.925,"head":0.000,"attention":2331.216,"other":2177.487,"total":8280.628,"barriers":32256},"prof_ms":{}}
+=== round 4 branch load 13.31
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.340,"tokens_per_s":179.4,"wall_s":2.9428,"tokenise_s":0.001378,"tokenise_ms_per_text":1.378,"stats_ms":{"matmul":1424.756,"head":0.000,"attention":289.839,"other":1219.001,"total":2933.597,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.076,"tokens_per_s":151.9,"wall_s":13.1694,"tokenise_s":0.003096,"tokenise_ms_per_text":3.096,"stats_ms":{"matmul":5961.858,"head":0.000,"attention":3232.318,"other":3940.421,"total":13134.598,"barriers":32256},"prof_ms":{}}
+=== round 5 main load 13.49
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.453,"tokens_per_s":239.1,"wall_s":2.2087,"tokenise_s":0.001368,"tokenise_ms_per_text":1.368,"stats_ms":{"matmul":1256.233,"head":0.000,"attention":253.098,"other":690.497,"total":2199.828,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.064,"tokens_per_s":128.1,"wall_s":15.6127,"tokenise_s":0.003178,"tokenise_ms_per_text":3.178,"stats_ms":{"matmul":6205.368,"head":0.000,"attention":3629.716,"other":5743.597,"total":15578.681,"barriers":32256},"prof_ms":{}}
+=== round 5 branch load 14.75
+{"cell":"L512_b1","batch":1,"tokens":528,"bytes":3328,"texts_per_s":0.268,"tokens_per_s":141.3,"wall_s":3.7374,"tokenise_s":0.001360,"tokenise_ms_per_text":1.360,"stats_ms":{"matmul":1753.618,"head":0.000,"attention":396.906,"other":1578.688,"total":3729.212,"barriers":8736},"prof_ms":{}}
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":12308,"texts_per_s":0.056,"tokens_per_s":112.6,"wall_s":17.7567,"tokenise_s":0.003112,"tokenise_ms_per_text":3.112,"stats_ms":{"matmul":7262.385,"head":0.000,"attention":3505.788,"other":6951.690,"total":17719.864,"barriers":32256},"prof_ms":{}}

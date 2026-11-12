@@ -2454,8 +2454,9 @@ pub unsafe fn q8k_gemm_i8mm(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, 
 /// widest body the CPU tier allows: `smmla` on `neon-i8mm`, `sdot` on
 /// `neon-dotprod`, and the scalar twin on `neon` or `scalar`.
 ///
-/// This is the tier entry point the S5.4d tests call; nothing in the engine
-/// dispatches it yet (the option arrives with S5.4b).
+/// This is the tier entry point the engine's dispatch (`MatKernels::q8k_gemm`)
+/// calls on aarch64 when the CPU has `dotprod` (S5.4e); the S5.4d tests call it
+/// directly.
 ///
 /// # Safety
 /// The form must hold `n_sb` super-blocks, the activation at least as many and at
@@ -2777,6 +2778,141 @@ pub unsafe fn q8k_build_q5_0_neon(tile: &[u8], n_blk: usize, form: &mut [u8]) {
             }
             q8k_requant_store_f32(form, n_sb, sb, row, &w);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The attention value mix's row pair (S4.9s)
+// ---------------------------------------------------------------------------
+//
+// `attn.rs`'s `mix_f16` walks one row's positions outermost and its dimensions
+// innermost: for every key it loads the row's output, multiplies the stored half
+// by the softmax weight, adds, and stores the output back. At a two-thousand-token
+// text that reloads and re-stores the whole output row once per key, and a second
+// row sharing the same KV head reads the same V halves again. The pair body below
+// turns the loop inside out: one eight-dimension slice of both outputs stays in
+// registers while the keys walk ascending, and each stored V half-vector is
+// widened once and used by both rows.
+//
+// The arithmetic is the single-row body's, element for element: `α·o` first (when
+// α is not one), then `o + p_j·v_j` per ascending key, each a separate multiply and
+// a separate add in the same order, so no output bit can move. Only the load and
+// the widening are shared.
+
+/// `o = α·o + Σ_j p_j · v_j` for two rows over one F16 V tile: the scalar
+/// definition the NEON body is held to.
+///
+/// `p0` and `p1` must be the same length; `v` holds at least `p0.len() · hd`
+/// halves.
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+pub fn mix_f16_pair_scalar(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    v: &[u8],
+    hd: usize,
+) {
+    assert_eq!(p0.len(), p1.len(), "a pair mixes the same positions");
+    assert!(v.len() >= p0.len() * hd * 2, "the V tile is shorter than p");
+    if alpha0 != 1.0 {
+        o0[..hd].iter_mut().for_each(|x| *x *= alpha0);
+    }
+    if alpha1 != 1.0 {
+        o1[..hd].iter_mut().for_each(|x| *x *= alpha1);
+    }
+    for (j, (&w0, &w1)) in p0.iter().zip(p1).enumerate() {
+        let row = j * hd;
+        for d in 0..hd {
+            let h = u16::from_le_bytes([v[(row + d) * 2], v[(row + d) * 2 + 1]]);
+            let value = f16(h);
+            o0[d] += w0 * value;
+            o1[d] += w1 * value;
+        }
+    }
+}
+
+/// The NEON body of [`mix_f16_pair_scalar`]: both rows' outputs stay in
+/// registers eight dimensions at a time while the keys walk ascending, and each
+/// stored V half-vector is loaded and widened once for both rows.
+///
+/// # Safety
+/// The CPU must have NEON; `p0` and `p1` must be the same length, `o0` and `o1`
+/// at least `hd` floats, and `v` at least `p0.len() · hd · 2` bytes.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn mix_f16_pair(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    v: &[u8],
+    hd: usize,
+) {
+    use std::arch::aarch64::*;
+    assert_eq!(p0.len(), p1.len(), "a pair mixes the same positions");
+    assert!(v.len() >= p0.len() * hd * 2, "the V tile is shorter than p");
+    assert!(
+        o0.len() >= hd && o1.len() >= hd,
+        "an output row is shorter than hd"
+    );
+    if alpha0 != 1.0 {
+        for d in 0..hd {
+            *o0.get_unchecked_mut(d) *= alpha0;
+        }
+    }
+    if alpha1 != 1.0 {
+        for d in 0..hd {
+            *o1.get_unchecked_mut(d) *= alpha1;
+        }
+    }
+    let vp = v.as_ptr();
+    let mut d = 0;
+    while d + 8 <= hd {
+        let mut a0 = [
+            vld1q_f32(o0.as_ptr().add(d)),
+            vld1q_f32(o0.as_ptr().add(d + 4)),
+        ];
+        let mut a1 = [
+            vld1q_f32(o1.as_ptr().add(d)),
+            vld1q_f32(o1.as_ptr().add(d + 4)),
+        ];
+        for (j, (&w0, &w1)) in p0.iter().zip(p1).enumerate() {
+            let at = (j * hd + d) * 2;
+            let v0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at) as *const u16)));
+            let v1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at + 8) as *const u16)));
+            let wv0 = vdupq_n_f32(w0);
+            a0[0] = vaddq_f32(a0[0], vmulq_f32(wv0, v0));
+            a0[1] = vaddq_f32(a0[1], vmulq_f32(wv0, v1));
+            let wv1 = vdupq_n_f32(w1);
+            a1[0] = vaddq_f32(a1[0], vmulq_f32(wv1, v0));
+            a1[1] = vaddq_f32(a1[1], vmulq_f32(wv1, v1));
+        }
+        vst1q_f32(o0.as_mut_ptr().add(d), a0[0]);
+        vst1q_f32(o0.as_mut_ptr().add(d + 4), a0[1]);
+        vst1q_f32(o1.as_mut_ptr().add(d), a1[0]);
+        vst1q_f32(o1.as_mut_ptr().add(d + 4), a1[1]);
+        d += 8;
+    }
+    while d < hd {
+        let mut x0 = *o0.get_unchecked(d);
+        let mut x1 = *o1.get_unchecked(d);
+        for (j, (&w0, &w1)) in p0.iter().zip(p1).enumerate() {
+            let at = (j * hd + d) * 2;
+            let h = u16::from_le_bytes([*vp.add(at), *vp.add(at + 1)]);
+            let value = f16(h);
+            x0 += w0 * value;
+            x1 += w1 * value;
+        }
+        *o0.get_unchecked_mut(d) = x0;
+        *o1.get_unchecked_mut(d) = x1;
+        d += 1;
     }
 }
 
@@ -3812,5 +3948,69 @@ mod tests {
         // The i8mm body's 1–3-row tail stays on sdot, so the result is still the
         // twin's (checked above at every width); here only the full group is counted.
         let _ = &mut out;
+    }
+
+    /// S5.4e: the engine's dispatch (`MatKernels::q8k_gemm`/`q8k_build`, the
+    /// table's entry points) takes this file's body and builder exactly where
+    /// the table says this tier has them, and the bits stay the twin's.
+    #[test]
+    fn the_engine_dispatch_takes_this_files_bodies() {
+        let mk = crate::table::MatKernels::get();
+        assert_eq!(
+            mk.q8k_simd(),
+            crate::cpu::have_dotprod(),
+            "q8k_simd must say what the tier's multiply does"
+        );
+        let mut rng = Rng(0x8A8A_9999);
+        let n_sb = 2;
+        let n = n_sb * 256;
+        let tile = crate::kq8::tiles::q4k_tile(&mut crate::kq8::tiles::Rng(0x8A8A_AAAA), n_sb);
+        let mut form = vec![0u8; crate::kq8::form_size(n_sb)];
+        let mut twin = vec![0u8; crate::kq8::form_size(n_sb)];
+        crate::kq8::build_q4k(&tile, n_sb, &mut twin);
+        mk.q8k_build(Format::Q4_K, &tile, n_sb, &mut form);
+        assert_eq!(form, twin, "the dispatch's builder is not the twin's bytes");
+        let acts: Vec<QuantAct> = (0..4).map(|_| activations(&mut rng, n)).collect();
+        let mut kq = KqActs::default();
+        kq.fill(&acts);
+        let mut out = vec![0.0f32; 4 * 8];
+        Q8K_SDOT_CALLS.with(|c| c.set(0));
+        Q8K_I8MM_CALLS.with(|c| c.set(0));
+        mk.q8k_gemm(&form, n_sb, &kq, 4, &mut out);
+        let (sdot, i8mm) = (
+            Q8K_SDOT_CALLS.with(|c| c.get()),
+            Q8K_I8MM_CALLS.with(|c| c.get()),
+        );
+        if crate::cpu::have_dotprod() {
+            assert_eq!(
+                (sdot, i8mm),
+                if crate::cpu::have_i8mm() {
+                    (0, 1)
+                } else {
+                    (1, 0)
+                },
+                "the dispatch took another body than the tier's own"
+            );
+            assert!(
+                mk.q8k_body().is_some_and(|b| b.starts_with("NEON")),
+                "a tier with dotprod must report a NEON body"
+            );
+        } else {
+            assert_eq!(
+                (sdot, i8mm),
+                (0, 0),
+                "a tier without dotprod must stay on the scalar twin"
+            );
+        }
+        for b in 0..4 {
+            for r in 0..8 {
+                let want = crate::kq8::dot_q8k(&form, n_sb, r, &kq, b);
+                assert_eq!(
+                    out[b * 8 + r].to_bits(),
+                    want.to_bits(),
+                    "the dispatch, row {r}, activation {b}"
+                );
+            }
+        }
     }
 }
