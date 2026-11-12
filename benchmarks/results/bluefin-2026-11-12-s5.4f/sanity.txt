@@ -1,0 +1,22 @@
+## prompt 1 exact
+The lighthouse keeper, a man named Thomas, had been keeping a ledger for years, meticulously recording every ship that passed the point where the lighthouse stood. He had grown accustomed to the routine, and the ledger had become an integral part of his daily routine.
+
+Thomas's ledger was a simple book, bound in worn
+
+## prompt 2 exact
+That's close to the actual event. In 1847, a chemist in Uppsala, Sweden, named Axel Cronstedt discovered a new element. However, he didn't dissolve a mineral in acid to find it.
+
+Axel Cronstedt actually isolated a new element by reacting a mineral with a mixture
+
+## prompt 1 fast
+The lighthouse keeper, a man named Thomas, had been keeping a ledger for years, meticulously recording every ship that passed the point where the lighthouse stood. He had grown accustomed to the routine, and the rhythmic tick-tock of the lighthouse's beam as it cut through the darkness.
+
+Thomas's ledger was
+
+## prompt 2 fast
+You're referring to the discovery of Radium. 
+
+In 1898, a chemist named Anders Jonas Åkerbiel discovered a new element in the residue of a mineral sample. However, it was not until 1898 that the element was isolated and named Radium.
+
+Åkerbiel was a Swedish
+

@@ -775,9 +775,10 @@ fn prompt_mode(n_sb: usize, threads: usize) {
                     match stringify!($kind) {
                         "q4k" => q8k_build_q4k_avx2($tile, $n_sb, $form),
                         "q6k" => q8k_build_q6k_avx2($tile, $n_sb, $form),
-                        // Q5_0 has no AVX2 builder in S5.4d (it is not in the
-                        // engine's load path); its row is the scalar build.
-                        _ => build_q5_0($tile, $n_sb * 8, $form),
+                        // S5.4f gives Q5_0 the AVX2 builder too.
+                        _ => {
+                            peregrine_kernels::kqsimd::q8k_build_q5_0_avx2($tile, $n_sb * 8, $form)
+                        }
                     }
                 }
             }
@@ -1114,128 +1115,257 @@ fn prompt_mode(n_sb: usize, threads: usize) {
 /// independent copies.
 #[cfg(target_arch = "x86_64")]
 fn prompt_kernel_table(n_sb: usize, threads: usize) {
-    use peregrine_kernels::kq8::{gemm_q8k, Q8K_SIZE};
+    use peregrine_kernels::kq8::Q8K_SIZE;
     let n = n_sb * 256;
-    let nb = 128usize;
     let reps = 40usize;
     let zmm = peregrine_kernels::kqsimd::have_zmm512();
-    let macs = 2048.0 * n_sb as f64 * nb as f64;
-    println!("--- kernel table: {n} weights x 8 output rows x {nb} activation rows; GMAC/s aggregate over {{1, {threads}}} cores ---");
-    for fmt in ["q4k", "q6k"] {
-        // The exact tile.
-        let mut tile = vec![0u8; n_sb * if fmt == "q4k" { Q4K8::SIZE } else { Q6K8::SIZE }];
-        for sb in 0..n_sb {
-            let block = if fmt == "q4k" { Q4K_BLOCK } else { Q6K_BLOCK };
+    let n_blk5 = n_sb * 8;
+    println!(
+        "--- kernel table: {n} weights x 8 output rows, at {{8, 64, 128, 512}} activation rows; \
+         GMAC/s aggregate over {{1, {threads}}} cores (S5.4f's table a) ---"
+    );
+    for fmt in ["q4k", "q6k", "q5_0"] {
+        // The exact tile, as the engine's store lays it out.
+        let tile_bytes = match fmt {
+            "q4k" => Q4K8::SIZE,
+            "q6k" => Q6K8::SIZE,
+            _ => Q5_08::SIZE,
+        };
+        let blocks_per_tile = if fmt == "q5_0" { n_blk5 } else { n_sb };
+        let mut tile = vec![0u8; blocks_per_tile * tile_bytes];
+        for sb in 0..blocks_per_tile {
+            let block = match fmt {
+                "q4k" => Q4K_BLOCK,
+                "q6k" => Q6K_BLOCK,
+                _ => 22,
+            };
             let mut blocks: [Vec<u8>; 8] = Default::default();
             for (r, b) in blocks.iter_mut().enumerate() {
                 let mut v = prng(0x5EED_0000 + (r * 31 + sb) as u64, block);
-                if fmt == "q4k" {
-                    v[0..2]
-                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
-                    v[2..4].copy_from_slice(
-                        &peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes(),
-                    );
-                } else {
-                    v[208..210]
-                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                match fmt {
+                    "q4k" => {
+                        v[0..2].copy_from_slice(
+                            &peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes(),
+                        );
+                        v[2..4].copy_from_slice(
+                            &peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes(),
+                        );
+                    }
+                    "q6k" => v[208..210]
+                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes()),
+                    _ => v[0..2]
+                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.02).to_le_bytes()),
                 }
                 *b = v;
             }
             let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
-            let out = &mut tile[sb * if fmt == "q4k" { Q4K8::SIZE } else { Q6K8::SIZE }..];
-            if fmt == "q4k" {
-                repack_q4k8(&refs, &mut out[..Q4K8::SIZE])
-            } else {
-                repack_q6k8(&refs, &mut out[..Q6K8::SIZE])
+            let out = &mut tile[sb * tile_bytes..(sb + 1) * tile_bytes];
+            match fmt {
+                "q4k" => repack_q4k8(&refs, out),
+                "q6k" => repack_q6k8(&refs, out),
+                _ => repack_q5_08(&refs, out),
             }
         }
         // The 8-bit form of the same tile.
         let mut form = vec![0u8; n_sb * Q8K_SIZE];
         unsafe {
-            if fmt == "q4k" {
-                if zmm {
+            match fmt {
+                "q4k" if zmm => {
                     peregrine_kernels::kqsimd::q8k_build_q4k_zmm(&tile, n_sb, &mut form)
-                } else {
-                    peregrine_kernels::kqsimd::q8k_build_q4k_avx2(&tile, n_sb, &mut form)
                 }
-            } else if zmm {
-                peregrine_kernels::kqsimd::q8k_build_q6k_zmm(&tile, n_sb, &mut form)
-            } else {
-                peregrine_kernels::kqsimd::q8k_build_q6k_avx2(&tile, n_sb, &mut form)
+                "q4k" => peregrine_kernels::kqsimd::q8k_build_q4k_avx2(&tile, n_sb, &mut form),
+                "q6k" if zmm => {
+                    peregrine_kernels::kqsimd::q8k_build_q6k_zmm(&tile, n_sb, &mut form)
+                }
+                "q6k" => peregrine_kernels::kqsimd::q8k_build_q6k_avx2(&tile, n_sb, &mut form),
+                _ if zmm => peregrine_kernels::kqsimd::q8k_build_q5_0_zmm(&tile, n_blk5, &mut form),
+                _ => peregrine_kernels::kqsimd::q8k_build_q5_0_avx2(&tile, n_blk5, &mut form),
             }
         }
-        let batch = acts(nb, n, 0xC0DE_5678);
-        let mut kq = KqActs::default();
-        kq.fill(&batch);
+        for &nb in &[8usize, 64, 128, 512] {
+            let batch = acts(nb, n, 0xC0DE_5678);
+            let mut kq = KqActs::default();
+            kq.fill(&batch);
+            let macs = 2048.0 * n_sb as f64 * nb as f64;
+            for (body, ncores) in [
+                ("exact", 1usize),
+                ("form", 1),
+                ("exact", threads),
+                ("form", threads),
+            ] {
+                let hs: Vec<_> = (0..ncores)
+                    .map(|_| {
+                        let tile = tile.clone();
+                        let form = form.clone();
+                        let kq = kq.clone();
+                        let batch = batch.clone();
+                        std::thread::spawn(move || {
+                            let mut o = vec![0.0f32; nb * 8];
+                            // The warm-up run faults the pages and lifts the clock; the
+                            // best of four rounds is what the table reports.
+                            let mut best = f64::MAX;
+                            for _round in 0..4 {
+                                let t0 = Instant::now();
+                                for _ in 0..reps {
+                                    unsafe {
+                                        match (body, fmt) {
+                                            ("exact", "q4k") => {
+                                                if zmm {
+                                                    q4k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o)
+                                                } else {
+                                                    q4k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                                                }
+                                            }
+                                            ("exact", "q6k") => {
+                                                if zmm {
+                                                    q6k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o)
+                                                } else {
+                                                    q6k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                                                }
+                                            }
+                                            ("exact", _) => {
+                                                if zmm {
+                                                    q5_08_gemm_zmm(
+                                                        &tile,
+                                                        n_blk5,
+                                                        &batch[..nb],
+                                                        nb,
+                                                        &mut o,
+                                                    )
+                                                } else {
+                                                    q5_08_gemm(
+                                                        &tile,
+                                                        n_blk5,
+                                                        &batch[..nb],
+                                                        nb,
+                                                        &mut o,
+                                                    )
+                                                }
+                                            }
+                                            ("form", _) => {
+                                                if zmm {
+                                                    peregrine_kernels::kqsimd::q8k_gemm_zmm(
+                                                        &form, n_sb, &kq, nb, &mut o,
+                                                    )
+                                                } else {
+                                                    peregrine_kernels::kqsimd::q8k_gemm_avx2(
+                                                        &form, n_sb, &kq, nb, &mut o,
+                                                    )
+                                                }
+                                            }
+                                            _ => unreachable!(),
+                                        }
+                                    }
+                                }
+                                best = best.min(t0.elapsed().as_secs_f64());
+                            }
+                            best
+                        })
+                    })
+                    .collect();
+                let wall = hs
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .fold(0.0f64, f64::max);
+                println!(
+                    "{fmt:>4} {nb:>3} acts {body:>5} x{ncores}: {:6.1} GMAC/s",
+                    macs * reps as f64 * ncores as f64 / wall / 1e9
+                );
+            }
+        }
+    }
+    if std::env::var("KQBENCH_Q5_SHAPE").is_ok() {
+        q5_row_shape(threads);
+    }
+}
+
+/// Q5_0 at the shape Qwen 2.5 0.5B's Q4_K_M file has: 896 weights = 28 blocks =
+/// three and a half 256-weight super-blocks. The form needs a padded fourth
+/// super-block, so this is the cell that decides whether Q5_0 joins the AVX2
+/// tier's table (S5.4f; it does not: 0.88× the exact kernel).
+///
+/// The activation is 1024 wide, so the exact kernel reads its row's first 896
+/// codes and the form reads all four super-blocks. GMAC/s counts the useful 896.
+#[cfg(target_arch = "x86_64")]
+fn q5_row_shape(threads: usize) {
+    use peregrine_kernels::kq8::{build_q5_0, Q8K_SIZE};
+    let n_blk = 28usize;
+    let n_sb = n_blk.div_ceil(8);
+    let mut tile = vec![0u8; n_blk * Q5_08::SIZE];
+    for b in 0..n_blk {
+        let mut rows: Vec<Vec<u8>> = (0..8)
+            .map(|r| {
+                let mut v = prng(0x5EED_0000 + (r * 31 + b) as u64, 22);
+                v[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.02).to_le_bytes());
+                v
+            })
+            .collect();
+        let refs: Vec<&[u8]> = rows.iter_mut().map(|v| v.as_slice()).collect();
+        repack_q5_08(&refs, &mut tile[b * Q5_08::SIZE..(b + 1) * Q5_08::SIZE]);
+    }
+    let mut form = vec![0u8; n_sb * Q8K_SIZE];
+    build_q5_0(&tile, n_blk, &mut form);
+    let n = n_sb * 256;
+    let batch: Vec<QuantAct> = (0..512)
+        .map(|i| {
+            let mut a = QuantAct::with_capacity(n);
+            let x: Vec<f32> = prng(0xC0DE_0000 + i as u64, n)
+                .iter()
+                .map(|&b| b as f32 / 64.0 - 2.0)
+                .collect();
+            a.fill(&x);
+            a
+        })
+        .collect();
+    let mut kq = KqActs::default();
+    kq.fill(&batch);
+    println!(
+        "--- Q5_0 at Qwen 2.5's 896-wide row (28 blocks, padded to {n_sb} super-blocks); \
+         GMAC/s of useful weights, aggregate over {{1, {threads}}} cores ---"
+    );
+    for &nb in &[8usize, 64, 128, 512] {
         for (body, ncores) in [
             ("exact", 1usize),
-            ("twin", 1),
-            ("simd", 1),
+            ("form", 1),
             ("exact", threads),
-            ("twin", threads),
-            ("simd", threads),
+            ("form", threads),
         ] {
-            let hs: Vec<_> = (0..ncores)
-                .map(|_| {
-                    let tile = tile.clone();
-                    let form = form.clone();
-                    let mut kq = kq.clone();
-                    std::thread::spawn(move || {
-                        let mut o = vec![0.0f32; nb * 8];
-                        // The warm-up run faults the pages and lifts the clock; the
-                        // best of three is what the table reports.
-                        let mut best = f64::MAX;
-                        for _round in 0..4 {
+            let mut best = f64::MAX;
+            for _ in 0..4 {
+                let hs: Vec<_> = (0..ncores)
+                    .map(|_| {
+                        let tile = tile.clone();
+                        let form = form.clone();
+                        let kq = kq.clone();
+                        let batch = batch.clone();
+                        std::thread::spawn(move || {
+                            let mut o = vec![0.0f32; nb * 8];
                             let t0 = Instant::now();
-                            for _ in 0..reps {
+                            for _ in 0..40 {
                                 unsafe {
-                                    match (body, fmt) {
-                                        ("exact", "q4k") => {
-                                            if zmm {
-                                                q4k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o)
-                                            } else {
-                                                q4k8_gemm(&tile, n_sb, &kq, nb, &mut o)
-                                            }
-                                        }
-                                        ("exact", _) => {
-                                            if zmm {
-                                                q6k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o)
-                                            } else {
-                                                q6k8_gemm(&tile, n_sb, &kq, nb, &mut o)
-                                            }
-                                        }
-                                        ("twin", _) => gemm_q8k(&form, n_sb, &kq, nb, &mut o),
-                                        (_, "q4k") if zmm => {
-                                            peregrine_kernels::kqsimd::q8k_gemm_zmm(
-                                                &form, n_sb, &kq, nb, &mut o,
-                                            )
-                                        }
-                                        (_, "q4k") => peregrine_kernels::kqsimd::q8k_gemm_avx2(
+                                    if body == "exact" {
+                                        q5_08_gemm(&tile, n_blk, &batch[..nb], nb, &mut o)
+                                    } else {
+                                        peregrine_kernels::kqsimd::q8k_gemm_avx2(
                                             &form, n_sb, &kq, nb, &mut o,
-                                        ),
-                                        (_, _) if zmm => peregrine_kernels::kqsimd::q8k_gemm_zmm(
-                                            &form, n_sb, &kq, nb, &mut o,
-                                        ),
-                                        (_, _) => peregrine_kernels::kqsimd::q8k_gemm_avx2(
-                                            &form, n_sb, &kq, nb, &mut o,
-                                        ),
+                                        )
                                     }
                                 }
                             }
-                            let _ = &mut kq;
-                            best = best.min(t0.elapsed().as_secs_f64());
-                        }
-                        best
+                            t0.elapsed().as_secs_f64()
+                        })
                     })
-                })
-                .collect();
-            let wall = hs
-                .into_iter()
-                .map(|h| h.join().unwrap())
-                .fold(0.0f64, f64::max);
+                    .collect();
+                let wall = hs
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .fold(f64::MAX, f64::min);
+                best = best.min(wall);
+            }
+            let macs = 896.0 * 8.0 * nb as f64 * 40.0;
             println!(
-                "{fmt} {body:>5} x{ncores}: {:6.1} GMAC/s",
-                macs * reps as f64 * ncores as f64 / wall / 1e9
+                "q5_0 {nb:>3} acts {body:>5} x{ncores}: {:6.1} GMAC/s (useful)",
+                macs * ncores as f64 / best / 1e9
             );
         }
     }

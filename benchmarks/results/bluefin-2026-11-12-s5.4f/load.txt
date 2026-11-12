@@ -1,0 +1,434 @@
+## Llama-3.2-1B-Instruct-Q4_K_M.gguf
+mode=exact run=1
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1"
+	User time (seconds): 0.34
+	System time (seconds): 0.27
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.62
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1012092
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 88452
+	Voluntary context switches: 7
+	Involuntary context switches: 19
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=exact run=2
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1"
+	User time (seconds): 0.33
+	System time (seconds): 0.29
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.63
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1011824
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 88454
+	Voluntary context switches: 7
+	Involuntary context switches: 19
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=exact run=3
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1"
+	User time (seconds): 0.33
+	System time (seconds): 0.29
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.63
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1012068
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 88456
+	Voluntary context switches: 7
+	Involuntary context switches: 20
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=after run=1
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.40
+	System time (seconds): 0.44
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.85
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1163496
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 108953
+	Voluntary context switches: 7
+	Involuntary context switches: 25
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=after run=2
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.39
+	System time (seconds): 0.46
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.86
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1163468
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 98223
+	Voluntary context switches: 7
+	Involuntary context switches: 21
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=after run=3
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.39
+	System time (seconds): 0.32
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.73
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1163552
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 98226
+	Voluntary context switches: 7
+	Involuntary context switches: 22
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=before run=1
+	Command being timed: "taskset -c 0 /tmp/peregrine-s54d-before bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.80
+	System time (seconds): 1.40
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:02.23
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1999712
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 301184
+	Voluntary context switches: 7
+	Involuntary context switches: 40
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=before run=2
+	Command being timed: "taskset -c 0 /tmp/peregrine-s54d-before bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.77
+	System time (seconds): 1.64
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:02.44
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1999556
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 266954
+	Voluntary context switches: 9
+	Involuntary context switches: 39
+	Swaps: 0
+	File system inputs: 72
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=before run=3
+	Command being timed: "taskset -c 0 /tmp/peregrine-s54d-before bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.78
+	System time (seconds): 1.41
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:02.21
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1999532
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 266947
+	Voluntary context switches: 8
+	Involuntary context switches: 43
+	Swaps: 0
+	File system inputs: 40
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+## Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+mode=exact run=1
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1"
+	User time (seconds): 0.21
+	System time (seconds): 0.20
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.42
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 668084
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 2
+	Minor (reclaiming a frame) page faults: 74032
+	Voluntary context switches: 10
+	Involuntary context switches: 15
+	Swaps: 0
+	File system inputs: 4192
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=exact run=2
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1"
+	User time (seconds): 0.20
+	System time (seconds): 0.21
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.41
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 667932
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 74032
+	Voluntary context switches: 7
+	Involuntary context switches: 18
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=exact run=3
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1"
+	User time (seconds): 0.20
+	System time (seconds): 0.21
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.41
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 668216
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 74036
+	Voluntary context switches: 7
+	Involuntary context switches: 17
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=after run=1
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.22
+	System time (seconds): 0.23
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 727788
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 76093
+	Voluntary context switches: 7
+	Involuntary context switches: 17
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=after run=2
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.23
+	System time (seconds): 0.21
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 727520
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 76097
+	Voluntary context switches: 7
+	Involuntary context switches: 17
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=after run=3
+	Command being timed: "taskset -c 0 target/release/peregrine bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.21
+	System time (seconds): 0.23
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 727524
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 76094
+	Voluntary context switches: 7
+	Involuntary context switches: 15
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=before run=1
+	Command being timed: "taskset -c 0 /tmp/peregrine-s54d-before bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.25
+	System time (seconds): 0.23
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.49
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 779976
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 75980
+	Voluntary context switches: 7
+	Involuntary context switches: 20
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=before run=2
+	Command being timed: "taskset -c 0 /tmp/peregrine-s54d-before bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.24
+	System time (seconds): 0.23
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.49
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 780108
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 75979
+	Voluntary context switches: 7
+	Involuntary context switches: 18
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+mode=before run=3
+	Command being timed: "taskset -c 0 /tmp/peregrine-s54d-before bench -m ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --prompt-tokens 8 --tokens 1 --threads 1 --fast-prompt"
+	User time (seconds): 0.25
+	System time (seconds): 0.22
+	Percent of CPU this job got: 98%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.49
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 780140
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 75979
+	Voluntary context switches: 7
+	Involuntary context switches: 17
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

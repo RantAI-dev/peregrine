@@ -120,12 +120,14 @@ pub struct Args {
     /// Prompt-lookup speculation on greedy requests (off by default: it applies only to greedy requests).
     #[arg(long, default_value_t = false)]
     pub speculate: bool,
-    /// Experimental and lossy: prompt tokens read their Q4_K and Q6_K weights from an
-    /// 8-bit copy built at load, so a reply can differ from the default engine's; the
-    /// accuracy report is not published yet (roadmap S5.4c). Generated tokens keep the
-    /// exact kernels. A prompt pass is faster on AVX-512 and about a tenth slower on
-    /// AVX2, where the exact Q4_K kernel is the stronger one; the numbers are in
-    /// `docs/design/s5.4-fast-prompt.md` section 5d. Off by default.
+    /// Experimental and lossy: prompt tokens read the weights of the formats whose
+    /// 8-bit form beats this CPU tier's exact kernel from an 8-bit copy built at
+    /// load (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so
+    /// the option changes nothing), so a reply can differ from the default engine's;
+    /// the accuracy report is not published yet (roadmap S5.4c). Generated tokens
+    /// keep the exact kernels. `peregrine tier` names the formats this CPU takes;
+    /// the numbers are in `docs/design/s5.4-fast-prompt.md` section 5g. Off by
+    /// default.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
     /// Memory (MB) for snapshots of finished conversations' caches, so a prompt that shares a long beginning with an
@@ -287,20 +289,30 @@ pub async fn run(a: Args) {
     peregrine_core::options::init(opts)
         .expect("engine options are set once, before the model loads");
     if peregrine_core::options::get().fast_prompt {
-        // One line, at start: what the mode trades, and which SIMD body this tier
-        // runs it through (S5.4b; AVX2 since S5.4d, NEON still pending).
-        tracing::info!(
-            "fast prompt mode: prompt tokens read Q4_K/Q6_K weights from the resident 8-bit \
-             form ({}); results differ from the exact mode, generated tokens, embeddings, \
-             rerank and decisions stay exact",
-            match peregrine_core::options::fast_prompt_body() {
-                Some(body) => format!("{body} body"),
-                None => {
-                    "scalar twin: correct, but not faster than the exact kernels on this tier"
-                        .to_string()
+        // One line, at start: what the mode trades, which formats take it on this
+        // tier, and which SIMD body it runs through (S5.4b; the per-format table is
+        // S5.4f).
+        let formats = peregrine_core::options::fast_prompt_format_list();
+        if peregrine_core::options::fast_prompt_formats().is_empty() {
+            tracing::info!(
+                "fast prompt mode is on, but this tier has no faster 8-bit kernel for any \
+                 format: the option changes nothing and the engine computes exactly what the \
+                 exact mode computes"
+            );
+        } else {
+            tracing::info!(
+                "fast prompt mode: prompt tokens read {formats} weights from the resident 8-bit \
+                 form ({}); results differ from the exact mode, generated tokens, embeddings, \
+                 rerank and decisions stay exact",
+                match peregrine_core::options::fast_prompt_body() {
+                    Some(body) => format!("{body} body"),
+                    None => {
+                        "scalar twin: correct, but not faster than the exact kernels on this tier"
+                            .to_string()
+                    }
                 }
-            }
-        );
+            );
+        }
     }
     let threads = a
         .threads

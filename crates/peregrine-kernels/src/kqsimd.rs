@@ -3685,6 +3685,78 @@ pub unsafe fn q8k_build_q6k_avx2(tile: &[u8], n_sb: usize, form: &mut [u8]) {
     }
 }
 
+/// The 8-bit form of `n_blk` repacked Q5_0 blocks, eight to a 256-weight
+/// super-block, on the AVX2 tier (S5.4f).
+///
+/// The format's own formula is `w = d · (q − 16)`; the requantisation that
+/// follows is Q4_K's, so the same kernel multiplies with the result. A short last
+/// super-block (a row whose width is not a multiple of 256) has zero weights where
+/// the row ends, exactly as `crate::kq8::build_q5_0` does.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_avx2`]. The tile must hold `n_blk` blocks
+/// and `form` `ceil(n_blk/8) · Q8K_SIZE` bytes.
+#[cfg(feature = "fmt-legacy")]
+#[target_feature(enable = "avx2,fma,f16c")]
+pub unsafe fn q8k_build_q5_0_avx2(tile: &[u8], n_blk: usize, form: &mut [u8]) {
+    assert!(
+        tile.len() >= n_blk * Q5_08::SIZE,
+        "the tile holds fewer than n_blk blocks"
+    );
+    let n_sb = n_blk.div_ceil(crate::kq8::Q8K_WEIGHTS / Q5_0_WEIGHTS);
+    assert!(
+        form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+        "the form holds fewer than n_blk blocks"
+    );
+    let lownib = _mm_set1_epi8(0x0F);
+    // The bit each of a row's eight codes is tested against, and the value a set
+    // bit adds: `qh`'s bit `k` is the fifth bit of weight `8h + k`.
+    let bit = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, 0, 0, 0, 0, 0, 0, 0, 0);
+    let fifth = _mm_set1_epi8(16);
+    for sb in 0..n_sb {
+        let b0 = sb * 8;
+        let nb = (n_blk - b0).min(8);
+        let ts = &tile[b0 * Q5_08::SIZE..(b0 + nb) * Q5_08::SIZE];
+        let t = ts.as_ptr();
+        for row in 0..ROWS {
+            let mut w = [0.0f32; crate::kq8::Q8K_WEIGHTS];
+            for b in 0..nb {
+                let at = b * Q5_08::SIZE;
+                let d = f16(u16::from_le_bytes([
+                    ts[at + crate::kq::q5_d() + row * 2],
+                    ts[at + crate::kq::q5_d() + row * 2 + 1],
+                ]));
+                let dv = _mm256_set1_ps(d);
+                for h in 0..4 {
+                    let qs = t.add(
+                        at + crate::kq::q5_qs()
+                            + (h % 2) * crate::kq::Q5_WINDOW
+                            + row * crate::kq::Q5_QS_ROW,
+                    );
+                    let bytes = _mm_loadl_epi64(qs as *const __m128i);
+                    let nib = if h < 2 {
+                        _mm_and_si128(bytes, lownib)
+                    } else {
+                        _mm_and_si128(_mm_srli_epi16(bytes, 4), lownib)
+                    };
+                    let qh = _mm_set1_epi8(*t.add(at + crate::kq::q5_qh() + h * 8 + row) as i8);
+                    // `0xFF` where the bit is set, then 16 there.
+                    let set = _mm_cmpeq_epi8(_mm_and_si128(qh, bit), bit);
+                    let code = _mm_or_si128(nib, _mm_and_si128(set, fifth));
+                    let c = _mm256_cvtepu8_epi32(code);
+                    let v = _mm256_mul_ps(
+                        _mm256_cvtepi32_ps(_mm256_sub_epi32(c, _mm256_set1_epi32(16))),
+                        dv,
+                    );
+                    _mm256_storeu_ps(w.as_mut_ptr().add(b * 32 + h * 8), v);
+                }
+            }
+            q8k_requant_store_avx2(form, n_sb, sb, row, &w);
+        }
+    }
+}
+
 /// Eight output rows of an 8-bit form against `N` activation rows, on the AVX2
 /// tier.
 ///
@@ -5538,6 +5610,69 @@ mod tests {
             unsafe { q8k_build_q6k_avx2(tile, n_sb, &mut got) };
             assert_eq!(want, got, "the Q6_K build differs on {n_sb} super-blocks");
         }
+        #[cfg(feature = "fmt-legacy")]
+        {
+            // Q5_0 (S5.4f): whole super-blocks and the short last one a 896-wide
+            // row (Qwen 2.5) ends with.
+            for n_blk in [1usize, 7, 8, 9, 12, 28] {
+                let tile = crate::kq8::tiles::q5_08_tile(&mut rng, n_blk);
+                let n_sb = n_blk.div_ceil(8);
+                let mut want = vec![0u8; n_sb * crate::kq8::Q8K_SIZE];
+                let mut got = vec![0u8; n_sb * crate::kq8::Q8K_SIZE];
+                crate::kq8::build_q5_0(&tile, n_blk, &mut want);
+                unsafe { q8k_build_q5_0_avx2(&tile, n_blk, &mut got) };
+                assert_eq!(want, got, "the Q5_0 build differs on {n_blk} blocks");
+            }
+        }
+    }
+
+    /// A Q5_0 form whose row stops inside its last super-block (Qwen 2.5's
+    /// 896-wide matrices) against the twin, through the padded activation layout
+    /// (`KqActs::fill_padded`): the padded super-block's activation codes meet the
+    /// form's zero codes and change nothing (S5.4f).
+    #[test]
+    fn a_q5_0_form_on_a_padded_row_is_the_twin() {
+        if !have_avx2() {
+            return;
+        }
+        #[cfg(feature = "fmt-legacy")]
+        {
+            let n_blk = 28usize; // 896 weights, three and a half super-blocks
+            let n_sb = n_blk.div_ceil(8);
+            let mut trng = crate::kq8::tiles::Rng(0x8A8A_4444);
+            let tile = crate::kq8::tiles::q5_08_tile(&mut trng, n_blk);
+            let mut form = vec![0u8; crate::kq8::form_size(n_sb)];
+            crate::kq8::build_q5_0(&tile, n_blk, &mut form);
+            let mut arng = Rng(0x8A8A_4545);
+            let batch: Vec<QuantAct> = (0..7)
+                .map(|_| {
+                    let mut a = QuantAct::with_capacity(n_sb * 256);
+                    let x: Vec<f32> = (0..n_sb * 256)
+                        .map(|_| arng.next_u8() as f32 / 64.0 - 2.0)
+                        .collect();
+                    a.fill(&x);
+                    // The real row is 896 wide; its per-256 layout is padded.
+                    a.n = 896;
+                    a
+                })
+                .collect();
+            let mut kq = KqActs::default();
+            kq.fill_padded(&batch, true);
+            assert_eq!(kq.super_blocks(), n_sb);
+            let mut got = vec![0.0f32; batch.len() * 8];
+            unsafe { q8k_gemm_avx2(&form, n_sb, &kq, batch.len(), &mut got) };
+            for b in 0..batch.len() {
+                for r in 0..8 {
+                    let want = crate::kq8::dot_q8k(&form, n_sb, r, &kq, b);
+                    assert_eq!(
+                        got[b * 8 + r].to_bits(),
+                        want.to_bits(),
+                        "activation {b}, row {r}: {} against {want}",
+                        got[b * 8 + r]
+                    );
+                }
+            }
+        }
     }
 
     /// One hand-built form of `n_sb` super-blocks whose codes are all `code` — the
@@ -5701,6 +5836,18 @@ mod tests {
             want_form, got_form,
             "the dispatched builder is not the twin"
         );
+        // Q5_0's build path (S5.4f) is the twin's too, whole blocks and a short
+        // last super-block alike.
+        #[cfg(feature = "fmt-legacy")]
+        for n_blk in [8usize, 12, 28] {
+            let tile5 = crate::kq8::tiles::q5_08_tile(&mut trng, n_blk);
+            let sb5 = n_blk.div_ceil(8);
+            let mut want5 = vec![0u8; crate::kq8::form_size(sb5)];
+            crate::kq8::build_q5_0(&tile5, n_blk, &mut want5);
+            let mut got5 = vec![0u8; crate::kq8::form_size(sb5)];
+            mk.q8k_build(crate::format::Format::Q5_0, &tile5, n_blk, &mut got5);
+            assert_eq!(want5, got5, "the dispatched Q5_0 builder is not the twin");
+        }
         let n = n_sb * 256;
         let mut rng = Rng(0x8A8A_9999);
         let batch = acts(&mut rng, 9, n);
@@ -5718,6 +5865,42 @@ mod tests {
                     got[b * 8 + r]
                 );
             }
+        }
+    }
+
+    /// The per-format table is the tier's measured set, not a list duplicated in
+    /// the engine (S5.4f).
+    #[test]
+    fn the_tiers_form_table_is_the_measured_set() {
+        let mk = crate::table::MatKernels::get();
+        let (q4, q6, q5) = (
+            mk.q8k_uses_form(crate::format::Format::Q4_K),
+            mk.q8k_uses_form(crate::format::Format::Q6_K),
+            mk.q8k_uses_form(crate::format::Format::Q5_0),
+        );
+        match mk.q8k_body() {
+            Some("AVX-512") => {
+                assert!(q4 && q6 && !q5, "AVX-512's set changed (S5.4f must not)");
+                assert_eq!(
+                    mk.q8k_formats(),
+                    [crate::format::Format::Q4_K, crate::format::Format::Q6_K].as_slice()
+                );
+            }
+            Some("AVX2") => {
+                assert!(!q4, "Q4_K's exact kernel is faster than the form on AVX2");
+                assert!(q6, "Q6_K's form is the AVX2 tier's win");
+                assert!(!q5, "Q5_0 is level, and 0.88x at a 896-wide row");
+                assert_eq!(mk.q8k_formats(), [crate::format::Format::Q6_K].as_slice());
+            }
+            None => assert!(!q4 && !q6 && !q5 && mk.q8k_formats().is_empty()),
+            other => panic!("unexpected q8k body {other:?}"),
+        }
+        for f in [
+            crate::format::Format::Q4_K,
+            crate::format::Format::Q6_K,
+            crate::format::Format::Q5_0,
+        ] {
+            assert_eq!(mk.q8k_uses_form(f), mk.q8k_formats().contains(&f));
         }
     }
 
