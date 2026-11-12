@@ -1,0 +1,109 @@
+n=4096 rows=512 reps=3 tier=aarch64-neon-i8mm
+Q8_0 scalar, 1 row                   352624.3 ns       5.9 GMAC/s
+Q8_0 sdot, 1 row                      96468.0 ns      21.7 GMAC/s
+Q8_0 sdot rows8 (decode)              46660.7 ns      44.9 GMAC/s
+Q8_0 sdot batch-4                     52980.7 ns      39.6 GMAC/s
+Q8_0 tile sdot, GEMM 1                  901.3 ns      36.4 GMAC/s
+Q8_0 tile sdot, GEMM 8                 6986.3 ns      37.5 GMAC/s
+Q8_0 tile sdot, GEMM 64               56953.7 ns      36.8 GMAC/s
+Q8_0 tile sdot, GEMM 512             455769.7 ns      36.8 GMAC/s
+Q8_0 tile i8mm, GEMM 1                  901.3 ns      36.4 GMAC/s
+Q8_0 tile i8mm, GEMM 8                 2261.0 ns     115.9 GMAC/s
+Q8_0 tile i8mm, GEMM 64               18421.0 ns     113.8 GMAC/s
+Q8_0 tile i8mm, GEMM 512             148483.3 ns     113.0 GMAC/s
+Q4_K scalar, 1 row                   156349.7 ns      13.4 GMAC/s
+Q4_K sdot, 1 row                      50527.3 ns      41.5 GMAC/s
+Q4_K tile ref, GEMV                  816804.7 ns       2.6 GMAC/s
+Q4_K tile sdot, GEMV                  42628.7 ns      49.2 GMAC/s
+Q4_K tile sdot, GEMM 4               107507.7 ns      78.0 GMAC/s
+Q4_K tile sdot, GEMM 16              215901.0 ns      77.7 GMAC/s
+Q4_K tile i8mm, GEMM 4                67375.0 ns     124.5 GMAC/s
+Q4_K tile i8mm, GEMM 16              133310.3 ns     125.9 GMAC/s
+Q5_0 scalar, 1 row                   192466.7 ns      10.9 GMAC/s
+Q5_0 sdot, 1 row                     113379.7 ns      18.5 GMAC/s
+Q5_0 sdot rows8 (decode)              92095.0 ns      22.8 GMAC/s
+Q5_0 tile ref, GEMV                  859550.7 ns       2.4 GMAC/s
+Q5_0 tile sdot, GEMV                  95892.0 ns      21.9 GMAC/s
+Q5_0 tile sdot, GEMM 4               234866.3 ns      35.7 GMAC/s
+Q5_0 tile i8mm, GEMM 4               150211.0 ns      55.8 GMAC/s
+Q6_K scalar, 1 row                   357190.0 ns       5.9 GMAC/s
+Q6_K sdot, 1 row                      72441.7 ns      28.9 GMAC/s
+Q6_K tile ref, GEMV                 2019630.7 ns       1.0 GMAC/s
+Q6_K tile sdot, GEMV                  59679.3 ns      35.1 GMAC/s
+Q6_K tile sdot, GEMM 4               160248.7 ns      52.3 GMAC/s
+Q6_K tile sdot, GEMM 16              320070.3 ns      52.4 GMAC/s
+Q6_K tile i8mm, GEMM 4               109070.7 ns      76.9 GMAC/s
+Q6_K tile i8mm, GEMM 16              216423.7 ns      77.5 GMAC/s
+8-bit form: n=4096 n_tiles=64 (2112 KiB of Q4_K form per iteration)
+Q4_K exact sdot, 1                    41951.3 ns      50.0 GMAC/s
+Q4_K form sdot, 1                     35093.0 ns      59.8 GMAC/s
+Q6_K exact sdot, 1                    62772.3 ns      33.4 GMAC/s
+Q6_K form sdot, 1                     32847.7 ns      63.8 GMAC/s
+Q5_0 exact sdot, 1                    96899.7 ns      21.6 GMAC/s
+Q5_0 form sdot, 1                     46916.7 ns      44.7 GMAC/s
+Q4_K exact i8mm, 1                    43156.7 ns      48.6 GMAC/s
+Q4_K form i8mm, 1                     32010.3 ns      65.5 GMAC/s
+Q6_K exact i8mm, 1                    62410.0 ns      33.6 GMAC/s
+Q6_K form i8mm, 1                     31802.3 ns      65.9 GMAC/s
+Q5_0 exact i8mm, 1                    99956.0 ns      21.0 GMAC/s
+Q5_0 form i8mm, 1                     30229.0 ns      69.4 GMAC/s
+Q4_K exact sdot, 8                   221586.0 ns      75.7 GMAC/s
+Q4_K form sdot, 8                     98873.0 ns     169.7 GMAC/s
+Q6_K exact sdot, 8                   326790.0 ns      51.3 GMAC/s
+Q6_K form sdot, 8                     97108.0 ns     172.8 GMAC/s
+Q5_0 exact sdot, 8                   476212.0 ns      35.2 GMAC/s
+Q5_0 form sdot, 8                     96425.3 ns     174.0 GMAC/s
+Q4_K exact i8mm, 8                   137998.3 ns     121.6 GMAC/s
+Q4_K form i8mm, 8                     62815.3 ns     267.1 GMAC/s
+Q6_K exact i8mm, 8                   224199.7 ns      74.8 GMAC/s
+Q6_K form i8mm, 8                     62169.7 ns     269.9 GMAC/s
+Q5_0 exact i8mm, 8                   306235.7 ns      54.8 GMAC/s
+Q5_0 form i8mm, 8                     60506.0 ns     277.3 GMAC/s
+Q4_K exact sdot, 16                  440586.0 ns      76.2 GMAC/s
+Q4_K form sdot, 16                   190584.0 ns     176.1 GMAC/s
+Q6_K exact sdot, 16                  647431.0 ns      51.8 GMAC/s
+Q6_K form sdot, 16                   190477.7 ns     176.2 GMAC/s
+Q5_0 exact sdot, 16                  953235.0 ns      35.2 GMAC/s
+Q5_0 form sdot, 16                   189432.0 ns     177.1 GMAC/s
+Q4_K exact i8mm, 16                  273489.3 ns     122.7 GMAC/s
+Q4_K form i8mm, 16                   117283.7 ns     286.1 GMAC/s
+Q6_K exact i8mm, 16                  440570.0 ns      76.2 GMAC/s
+Q6_K form i8mm, 16                   116163.7 ns     288.9 GMAC/s
+Q5_0 exact i8mm, 16                  608887.3 ns      55.1 GMAC/s
+Q5_0 form i8mm, 16                   115705.0 ns     290.0 GMAC/s
+Q4_K exact sdot, 64                 1737794.7 ns      77.2 GMAC/s
+Q4_K form sdot, 64                   745536.3 ns     180.0 GMAC/s
+Q6_K exact sdot, 64                 2574236.3 ns      52.1 GMAC/s
+Q6_K form sdot, 64                   748667.0 ns     179.3 GMAC/s
+Q5_0 exact sdot, 64                 3808187.3 ns      35.2 GMAC/s
+Q5_0 form sdot, 64                   744805.7 ns     180.2 GMAC/s
+Q4_K exact i8mm, 64                 1077814.3 ns     124.5 GMAC/s
+Q4_K form i8mm, 64                   448111.3 ns     299.5 GMAC/s
+Q6_K exact i8mm, 64                 1743805.3 ns      77.0 GMAC/s
+Q6_K form i8mm, 64                   448655.3 ns     299.2 GMAC/s
+Q5_0 exact i8mm, 64                 2418601.0 ns      55.5 GMAC/s
+Q5_0 form i8mm, 64                   446804.3 ns     300.4 GMAC/s
+Q4_K exact sdot, 128                3477813.0 ns      77.2 GMAC/s
+Q4_K form sdot, 128                 1475040.7 ns     182.0 GMAC/s
+Q6_K exact sdot, 128                5138670.3 ns      52.2 GMAC/s
+Q6_K form sdot, 128                 1475393.0 ns     181.9 GMAC/s
+Q5_0 exact sdot, 128                7604604.0 ns      35.3 GMAC/s
+Q5_0 form sdot, 128                 1479185.0 ns     181.5 GMAC/s
+Q4_K exact i8mm, 128                2146519.3 ns     125.1 GMAC/s
+Q4_K form i8mm, 128                  891187.7 ns     301.2 GMAC/s
+Q6_K exact i8mm, 128                3481077.3 ns      77.1 GMAC/s
+Q6_K form i8mm, 128                  889582.3 ns     301.8 GMAC/s
+Q5_0 exact i8mm, 128                4836786.3 ns      55.5 GMAC/s
+Q5_0 form i8mm, 128                  884372.0 ns     303.5 GMAC/s
+Q4_K exact sdot, 512               14066034.7 ns      76.3 GMAC/s
+Q4_K form sdot, 512                 6093563.7 ns     176.2 GMAC/s
+Q6_K exact sdot, 512               20604467.0 ns      52.1 GMAC/s
+Q6_K form sdot, 512                 6080625.3 ns     176.6 GMAC/s
+Q5_0 exact sdot, 512               30855413.3 ns      34.8 GMAC/s
+Q5_0 form sdot, 512                 6055505.3 ns     177.3 GMAC/s
+Q4_K exact i8mm, 512                8702247.7 ns     123.4 GMAC/s
+Q4_K form i8mm, 512                 3653704.0 ns     293.9 GMAC/s
+Q6_K exact i8mm, 512               13943188.7 ns      77.0 GMAC/s
+Q6_K form i8mm, 512                 3655688.0 ns     293.7 GMAC/s
+Q5_0 exact i8mm, 512               19447917.7 ns      55.2 GMAC/s
+Q5_0 form i8mm, 512                 3663421.3 ns     293.1 GMAC/s
