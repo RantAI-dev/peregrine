@@ -212,7 +212,8 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    unigram tokenizer, and malformed variants (wrong expert count, wrong router rows, a
    missing expert tensor); the vector against `tests/support/nomic_bert_moe_ref.rs`'s
    independent scalar forward, whose routing is written out longhand (bit for bit for
-   F32 and the engine's own Q8_0 path); the batch/thread/pass-budget invariance matrix on
+   F32, and for Q8_0 on the f16 panels the family widens the file into at load); the
+   batch/thread/pass-budget invariance matrix on
    F32 and Q8_0; the refusals by name; the no-allocation pass; the server and CLI cases
    (`a_nomic_bert_moe_encoder_*`); and
    `tests/golden/synthetic/<tier>/nomic-bert-moe-Q8_0.golden`, recorded on scalar, AVX2
@@ -222,7 +223,12 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    in `models/`, `~/models/` and `/var/tmp/s48b-models`, and skips one that is absent. The
    F16 minimum is 0.9997738 (not 0.9999): one text's last MoE layer sits on a top-2
    boundary, and the note names it — do not read it as a stale bound, and do not lower the
-   continuous agreement by "fixing" the GELU table.
+   continuous agreement by "fixing" the GELU table. Its Q8_0 clauses are relative to
+   llama.cpp's own run of the same file (mean within 1e-4, minimum within 1e-3) and are
+   computed from the fixtures in the same run, so a change of engine arithmetic shows up
+   as a comparison rather than as a pinned number; the family must keep reading the
+   packed float path (its banks per expert, its Q8_0 matrices widened to f16 panels) or
+   both clauses go with the int8 activations.
    The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
