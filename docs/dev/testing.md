@@ -462,6 +462,29 @@ A text that is not one of these is not served with tools: the template of unslot
 (a `developer` role, two leading system messages merged, no refusals) renders other prompts and is
 left out until it has a fixture set of its own.
 
+Qwen 3 has four published wordings too: the repository's (bartowski and lmstudio-community carry
+it; `tools/qwen3.jinja`), Qwen's own GGUF files (`qwen3-gguf.jinja`), unsloth's up to 1.7B
+(`qwen3-unsloth.jinja`) and unsloth's 4B and larger (`qwen3-unsloth-large.jinja`).
+`tools-qwen3.jsonl` is the common cases and the `qwen35` set rendered with the repository's
+wording; `--check` gives the same 51 records for the other three. They are not one text in
+different words, though: Qwen's GGUF wording takes a user message that contains a
+`<tool_response>` block anywhere for a tool's result (the others only one that is exactly such a
+block), and unsloth's larger wording counts thinking that is only whitespace as none.
+`tools-qwen3-edges.jsonl` holds eleven corner cases rendered with each of the four wordings (each
+line names its wording in `template`), and the renderer follows the rules of the wording the file
+carries (`Qwen3Text`). It is the four renderings of `scripts/tool-cases-qwen3-edges.json`, one
+after another:
+
+```sh
+for t in qwen3 qwen3-gguf qwen3-unsloth qwen3-unsloth-large; do
+  python3 scripts/tool-fixtures.py --server "$LLAMA_SERVER" --model "$ANY_SMALL_CHAT_MODEL" \
+      --template crates/peregrine-core/src/tools/$t.jinja --label $t \
+      --cases scripts/tool-cases-qwen3-edges.json --out /tmp/edges-$t.jsonl
+done
+cat /tmp/edges-qwen3.jsonl /tmp/edges-qwen3-gguf.jsonl /tmp/edges-qwen3-unsloth.jsonl \
+    /tmp/edges-qwen3-unsloth-large.jsonl > crates/peregrine-core/tests/fixtures/tools-qwen3-edges.jsonl
+```
+
 ### System One prompts: fixtures rendered by llama.cpp
 
 `crates/peregrine-core/tests/systemone_render.rs` rebuilds the prompt of every case in

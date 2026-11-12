@@ -1,0 +1,23 @@
+model ~/.cache/peregrine-bench/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+Q4_K super-blocks sampled: 50688 (every 64th), weights 12976128
+mean of the per-block mean |error| / block max: 0.00197
+that ratio across blocks: 0.00126 .. 0.00271
+worst single weight / block max: 0.00394   (bound 0.5/127 = 0.00394)
+weights exactly on the grid: 0.42 %
+
+The grid step is max/127, so the bound is half a step, max/254 = 0.3937 %; 'block max'
+is the largest |w| in that row's 256-weight super-block, the number the fork divides
+by 127. A weight of average size is off by more than this fraction of *itself*: the
+figures above are relative to the block's maximum, as the design note's bound is.
+
+model ~/.cache/peregrine-bench/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+Q4_K super-blocks sampled: 3192 (every 64th), weights 817152
+mean of the per-block mean |error| / block max: 0.00197
+that ratio across blocks: 0.00139 .. 0.00267
+worst single weight / block max: 0.00394   (bound 0.5/127 = 0.00394)
+weights exactly on the grid: 0.44 %
+
+The grid step is max/127, so the bound is half a step, max/254 = 0.3937 %; 'block max'
+is the largest |w| in that row's 256-weight super-block, the number the fork divides
+by 127. A weight of average size is off by more than this fraction of *itself*: the
+figures above are relative to the block's maximum, as the design note's bound is.

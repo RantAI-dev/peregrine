@@ -144,8 +144,8 @@ curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' -
 The reply's `message.tool_calls` holds the call (`get_weather` with `{"city": "Paris"}`) and
 `finish_reason` is `"tool_calls"`. Run the tool, then send the conversation back with the assistant's
 message and a `tool` message carrying the result, and the model answers in text. Supported today:
-Qwen 2.5, Qwen 3.5 and Bonsai 2 chat models; `tool_choice` `"auto"` and `"none"`;
-`parallel_tool_calls`; streaming. A Qwen 3.5 or Bonsai 2 model thinks before it answers, and its
+Qwen 2.5, Qwen 3, Qwen 3.5 and Bonsai 2 chat models; `tool_choice` `"auto"` and `"none"`;
+`parallel_tool_calls`; streaming. A Qwen 3, Qwen 3.5 or Bonsai 2 model thinks before it answers, and its
 thinking comes back in `reasoning_content`, never read for calls; send
 `"chat_template_kwargs": {"enable_thinking": false}` (or `"reasoning_effort": "none"`) to switch
 it off. Other model families, and `tool_choice: "required"` or a named function, are refused with
@@ -381,7 +381,7 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 | Tokenizers | GPT-2 byte-level BPE (smollm, gpt2 / modern-bert, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 | Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
-| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format) and for Qwen 3.5 and Bonsai 2 (the `qwen-xml` format, thinking on or off); the prompt is the one llama.cpp builds from the model's template |
+| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 (the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the prompt is the one llama.cpp builds from the model's template |
 | Rerank and classify | a `bert` file's classifier head (`cls`, `cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3 and bge-reranker-base checked against llama.cpp v0.9.0 |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->
