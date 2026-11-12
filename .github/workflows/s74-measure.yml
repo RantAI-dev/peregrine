@@ -119,6 +119,8 @@ jobs:
           fi
 
           echo "=== verify the download"
-          got=$(sha256sum "$model" | awk '{print $1}')
+          # sha256sum prepends a backslash to the line when the file name has one in it
+          # (the Windows runner's D:\...); the hash itself has none.
+          got=$(sha256sum "$model" | awk '{print $1}' | tr -d '\\')
           echo "sha256 $got"
           [ "$got" = "$sha" ] || { echo "model SHA-256 mismatch" >&2; exit 1; }
