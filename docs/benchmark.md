@@ -33,8 +33,8 @@ compared with OpenVINO, ONNX Runtime, fastembed and text-embeddings-inference. W
   the 4-core Ryzen 3**, against llama.cpp, OpenVINO, ONNX Runtime, fastembed and
   text-embeddings-inference at equal accuracy. bge-m3, EmbeddingGemma, Qwen3-Embedding and Nemotron 3.5
   Embed are **1.18–1.62×** llama.cpp and decisions **1.33–1.84×**. The 13 cells behind are the two small
-  BERT encoders at 128 and 512 tokens (**0.85–0.99×** OpenVINO and ONNX Runtime). On ARM, Q8_0 ModernBERT
-  is behind llama.cpp from 128 tokens up (0.77–0.94×). See
+  BERT encoders at 128 and 512 tokens (**0.85–0.99×** OpenVINO and ONNX Runtime). On ARM every measured
+  model is ahead of llama.cpp except four near-parity cells (0.95–0.99×). See
   [Embeddings, rerank and decisions](#embeddings-rerank-and-decisions).
 
 **For chat models against llama.cpp, no completed throughput row is below 1.0×** on any host. The single remaining loss is time to first
@@ -289,16 +289,19 @@ Full details, per-cell tables, stage profiles and the excluded rows:
 | Qwen3-Embedding 0.6B | F16 | **1.05–1.52×** | **2.72–3.21×** | **1.11×** |
 | Nemotron 3.5 Embed 1B | Q8_0 | **1.12–1.23×** | **2.68–2.80×** | **1.07×** |
 | gte-modernbert-base | F16 | **1.42–1.56×** | **1.15×** (16 texts) | n/a |
-| gte-modernbert-base | Q8_0 | 1.09× at 16 tokens, 0.87–0.94× from 128 | 0.77× (16 texts) | n/a |
+| gte-modernbert-base | Q8_0 | **1.43–1.77×** (16 to 512 tokens) | **1.55×** (16 texts) | n/a |
 
 The batch cells are the largest wins because llama.cpp runs one embedding task at a time inside a
-request while Peregrine shares weight passes across the texts. The cells behind: four near-parity
-cells of the first two models (0.95–0.99×), and Q8_0 ModernBERT from 128 tokens up, where Peregrine's
-Q8_0 pass on the int8 tiers is about 40% slower than its own F16 pass on the same model. That one is
-being worked on (S4.9o).
+request while Peregrine shares weight passes across the texts. The cells behind are four near-parity
+cells of the first two models (0.95–0.99×). Q8_0 ModernBERT was behind from 128 tokens up
+(0.77–0.94×) until S4.9o: the Q8_0 int8 kernel on ARM has no `i8mm` body, so a Q8_0 ModernBERT file
+of up to 256 MiB now has its matrices widened to float at load, which is both faster (1.28–2.04×
+the old pass) and closer to the full-precision vectors, at four times the weight memory.
 
-Full details: [`spark-2026-11-12-embeddings`](../benchmarks/results/spark-2026-11-12-embeddings/README.md)
-and [`spark-arm-2026-11-12-modern-bert`](../benchmarks/results/spark-arm-2026-11-12-modern-bert/README.md).
+Full details: [`spark-2026-11-12-embeddings`](../benchmarks/results/spark-2026-11-12-embeddings/README.md),
+[`spark-arm-2026-11-12-modern-bert`](../benchmarks/results/spark-arm-2026-11-12-modern-bert/README.md)
+(the F16 row) and [`spark-arm-2026-11-12-q8-encoders`](../benchmarks/results/spark-arm-2026-11-12-q8-encoders/README.md)
+(the Q8_0 row).
 
 ### Rerank
 

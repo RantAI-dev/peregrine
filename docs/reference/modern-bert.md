@@ -301,6 +301,15 @@ minimum is printed in the ignored test and only the mean is asserted against
 llama.cpp's. The measured test bounds are min 0.996 / mean 0.9996 for gte Q8_0 and
 min 0.9998 / mean 0.9999 for Granite Q8_0.
 
+The table above is the AVX2 host's. On aarch64 the Q8_0 file is dequantised into f32
+panels at load (S4.9o), so it quantises no activation and its vector is the scalar float
+reference forward's bit for bit on every tier (the synthetic test asserts that with max
+abs 0.0). On the same 200 texts on the ARM host, gte Q8_0 is min/mean 0.9994969/0.9997834
+against the F16 conversion (llama.cpp's own Q8_0: 0.9981270/0.9996284) and
+0.9983872/0.9998352 against llama.cpp's Q8_0 vector; the F16 file is unchanged at
+0.9999936/0.9999997. The numbers in the table are still the x86 measurement, and a
+Granite R2 Q8_0 file on ARM takes the same f32-panel route.
+
 ### The classifier head (S4.7b)
 
 `gte-reranker-modernbert-base` on the 100 pairs in
