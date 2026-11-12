@@ -875,6 +875,25 @@ mod tests {
         let _ = &mut m;
     }
 
+    /// Regression for the seed that found the canonical-string bug: a bounded string
+    /// state with an escape in progress must not be handed a token whose escape plus the
+    /// rest of its content would exceed `maxLength`.
+    #[test]
+    fn a_bounded_string_does_not_allow_an_escape_that_overruns_it() {
+        let mut tokens: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
+        tokens.push(b"\"abc\"".to_vec());
+        tokens.push(b"<end>".to_vec());
+        let v = Vocabulary::from_tokens(tokens);
+        let c = Constraint::from_schema(schema(r#"{"type":"string","maxLength":4}"#));
+        let mut m = Matcher::new(&c).unwrap();
+        assert!(m.advance_bytes(b"\"a\\").is_ok());
+        let mask = v.allowed(&m, &[257]);
+        assert!(
+            !mask.contains(256),
+            "the escape and its content would make five characters"
+        );
+    }
+
     #[test]
     fn a_closed_value_allows_only_end_tokens() {
         let v = vocab();
