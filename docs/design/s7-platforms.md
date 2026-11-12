@@ -373,14 +373,16 @@ real-model goldens (CI has no model files) and a published performance compariso
 - **The installer.** `scripts/install.ps1` read the user `Path` with
   `[Environment]::GetEnvironmentVariable("Path","User")` — which expands `%VARIABLES%` — and wrote it
   back with `[Environment]::SetEnvironmentVariable`, which stores a plain `REG_SZ`, so
-  `%USERPROFILE%\bin` became a literal path and the value's kind changed. It now reads the raw value
-  from `HKCU:\Environment` (`GetValue('Path','','DoNotExpandEnvironmentNames')`), compares entries by
-  what they expand to, appends the install directory and writes it back with
-  `RegistryValueKind::ExpandString`; the broadcast is a no-op `[Environment]::SetEnvironmentVariable`
-  on a scratch name, the one PowerShell 5.1 has without `Add-Type`. The undo text is unchanged. The
-  CI installer step starts from a user `Path` of `%USERPROFILE%\peregrine-test-bin`, and after the
-  install checks the raw value still contains the literal `%USERPROFILE%`, contains the install
-  directory, and is still typed `ExpandString`; it restores the runner's value in a `finally`.
+  `%USERPROFILE%\bin` became a literal path and the value's kind changed. It now opens
+  `HKCU:\Environment` for writing with `[Microsoft.Win32.Registry]::CurrentUser` (the key that
+  `Get-Item` returns is read-only — the first CI run failed on exactly that), reads the raw value with
+  `DoNotExpandEnvironmentNames`, compares entries by what they expand to, appends the install
+  directory and writes it back with `RegistryValueKind::ExpandString`; the broadcast is a no-op
+  `[Environment]::SetEnvironmentVariable` on a scratch name, the one PowerShell 5.1 has without
+  `Add-Type`. The undo text is unchanged. The CI installer step starts from a user `Path` of
+  `%USERPROFILE%\peregrine-test-bin`, and after the install checks the raw value still contains the
+  literal `%USERPROFILE%`, contains the install directory, and is still typed `ExpandString`; it
+  restores the runner's value in a `finally`.
 - **The measurements.** Informational, on GitHub's runners, not standings: the two jobs are
   different machines and the pool draws vary. Both fetched SmolLM2-360M-Instruct Q4_K_M (271 MB, the
   `compat` job's pinned SHA-256), ran `peregrine bench --prompt-tokens 512 --tokens 64 --threads 4`

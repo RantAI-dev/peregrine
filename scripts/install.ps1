@@ -173,29 +173,36 @@ try {
     # value from HKCU:\Environment with DoNotExpandEnvironmentNames keeps what the user wrote, and
     # writing with RegistryValueKind::ExpandString keeps the value's kind (REG_EXPAND_SZ), so the
     # variables keep expanding for every program that reads the Path, our install directory included.
-    $envKey = Get-Item -LiteralPath 'HKCU:\Environment'
-    $rawPath = $envKey.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-    $installKey = $InstallDir.TrimEnd('\')
-    $entries = @()
-    if ($rawPath) { $entries = @($rawPath -split ";" | Where-Object { $_ -ne "" }) }
-    # Compare what each entry resolves to, so %LOCALAPPDATA%\Programs\peregrine counts as the
-    # install directory when -InstallDir names the expanded path (and the reverse).
-    $have = @($entries | Where-Object {
-        $_.TrimEnd("\") -ieq $installKey -or
-        ([Environment]::ExpandEnvironmentVariables($_.TrimEnd("\"))) -ieq $installKey
-    })
-    if ($have.Count -eq 0) {
-        $newPath = (@($entries) + $InstallDir) -join ";"
-        $envKey.SetValue('Path', $newPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
-        # The registry write above is what keeps the kind; a new process still has to be told the
-        # environment changed. [Environment]::SetEnvironmentVariable broadcasts WM_SETTINGCHANGE
-        # ("Environment") after it writes, and PowerShell 5.1 has no other way to broadcast without
-        # Add-Type. Removing a scratch name that does not exist writes nothing and still broadcasts,
-        # so Path is left exactly as written above.
-        [Environment]::SetEnvironmentVariable('PEREGRINE_PATH_REFRESH', $null, 'User')
-        Write-Host "Added $InstallDir to your user PATH (open a new terminal to pick it up)."
-    } else {
-        Write-Host "$InstallDir is already on your user PATH."
+    $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $envKey) { throw "cannot open HKCU:\Environment for writing" }
+    try {
+        $rawPath = $envKey.GetValue('Path', '',
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $installKey = $InstallDir.TrimEnd('\')
+        $entries = @()
+        if ($rawPath) { $entries = @($rawPath -split ";" | Where-Object { $_ -ne "" }) }
+        # Compare what each entry resolves to, so %LOCALAPPDATA%\Programs\peregrine counts as the
+        # install directory when -InstallDir names the expanded path (and the reverse).
+        $have = @($entries | Where-Object {
+            $_.TrimEnd("\") -ieq $installKey -or
+            ([Environment]::ExpandEnvironmentVariables($_.TrimEnd("\"))) -ieq $installKey
+        })
+        if ($have.Count -eq 0) {
+            $newPath = (@($entries) + $InstallDir) -join ";"
+            $envKey.SetValue('Path', $newPath,
+                [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            # The registry write above is what keeps the kind; a new process still has to be told
+            # the environment changed. [Environment]::SetEnvironmentVariable broadcasts
+            # WM_SETTINGCHANGE ("Environment") after it writes, and PowerShell 5.1 has no other way
+            # to broadcast without Add-Type. Removing a scratch name that does not exist writes
+            # nothing and still broadcasts, so Path is left exactly as written above.
+            [Environment]::SetEnvironmentVariable('PEREGRINE_PATH_REFRESH', $null, 'User')
+            Write-Host "Added $InstallDir to your user PATH (open a new terminal to pick it up)."
+        } else {
+            Write-Host "$InstallDir is already on your user PATH."
+        }
+    } finally {
+        $envKey.Dispose()
     }
 
     Write-Host ""

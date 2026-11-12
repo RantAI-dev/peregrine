@@ -131,13 +131,20 @@ jobs:
           # The user Path, as the registry stores it: `%VARIABLES%` unexpanded and REG_EXPAND_SZ
           # (S7.4). The installer must neither expand the entries nor change the value's kind, so
           # the step starts from a value that carries a variable and checks both afterwards.
-          $envKey = Get-Item -LiteralPath 'HKCU:\Environment'
-          $savedPath = $envKey.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-          $savedKind = if ($envKey.GetValueNames() -contains 'Path') {
+          $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+          if (-not $envKey) { throw "cannot open HKCU:\Environment for writing" }
+          $hasPath = $envKey.GetValueNames() -contains 'Path'
+          $savedPath = if ($hasPath) {
+            $envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          } else {
+            $null
+          }
+          $savedKind = if ($hasPath) {
             $envKey.GetValueKind('Path')
           } else {
             [Microsoft.Win32.RegistryValueKind]::String
           }
+          Write-Host "user Path before: $savedPath ($savedKind)"
           try {
             $envKey.SetValue('Path', '%USERPROFILE%\peregrine-test-bin',
               [Microsoft.Win32.RegistryValueKind]::ExpandString)
@@ -154,8 +161,9 @@ jobs:
             if ($tier -notmatch '^kernel tier\s+x86_64-avx2') {
               throw "the installed binary picked an unexpected tier: $tier"
             }
-            $after = Get-Item -LiteralPath 'HKCU:\Environment'
-            $raw = $after.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+            $after = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+            $raw = $after.GetValue('Path', '',
+              [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
             Write-Host "user Path now: $raw"
             if ($raw.IndexOf('%USERPROFILE%', [StringComparison]::Ordinal) -lt 0) {
               throw "the installer expanded the user Path: $raw"
@@ -164,17 +172,19 @@ jobs:
               throw "the installer did not add $dir to the user Path: $raw"
             }
             $kind = $after.GetValueKind('Path')
+            $after.Dispose()
             if ($kind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) {
               throw "the user Path's registry kind is $kind, not ExpandString"
             }
             Write-Host "the user Path kept %USERPROFILE% and its ExpandString kind"
           } finally {
             # Restore the runner's own value, whatever happened above.
-            if ($savedPath) {
+            if ($null -ne $savedPath) {
               $envKey.SetValue('Path', $savedPath, $savedKind)
             } else {
               $envKey.DeleteValue('Path', $false)
             }
+            $envKey.Dispose()
           }
       # The golden-bearing tests on a pinned tier (S7.4). The Windows pool draws both AVX2 and
       # AVX-512 machines, and `x86_64-avx2-windows` is the set every one of them reproduces, so
