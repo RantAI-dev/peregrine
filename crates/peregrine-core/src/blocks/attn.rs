@@ -312,8 +312,12 @@ pub fn attend_scaled_window(
     let gqa = c.gqa();
     let qd = c.q_dim();
     // The rows' flags are the *call's* (`row0..row0 + nb`); a row outside it is never
-    // a fast row of this call.
-    let fast = fast.map(|f| &f[row0..row0 + nb]);
+    // a fast row of this call. A tier whose table keeps the exact attention ignores the
+    // flags entirely (S5.4j) — the engine never sets them there, and this makes that a
+    // property of the tier rather than of every caller.
+    let fast = fast
+        .filter(|_| attn::fast::tier())
+        .map(|f| &f[row0..row0 + nb]);
     let sh = attn::Shape {
         n_head: c.n_head,
         n_kv_head: c.n_kv_head,

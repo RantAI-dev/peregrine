@@ -5867,16 +5867,18 @@ mod tests {
                 "a tier without the fast order moved a row's bits"
             );
         }
-        // The generated rows of the same call (flag false) are the exact engine's.
-        let mixed = [
-            fast_attend(&cfg, &kv, &q, n, 8, false, 2),
-            fast_attend(&cfg, &kv, &q, n, 8, true, 2),
-        ];
-        assert_ne!(
-            mixed[0].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            mixed[1].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            "the two modes agree, so the flags did nothing"
-        );
+        // A second pair, so the check is not one call's luck.
+        if fast::tier() {
+            let mixed = [
+                fast_attend(&cfg, &kv, &q, n, 8, false, 2),
+                fast_attend(&cfg, &kv, &q, n, 8, true, 2),
+            ];
+            assert_ne!(
+                mixed[0].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                mixed[1].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "the two modes agree, so the flags did nothing"
+            );
+        }
     }
 
     /// A fast row's bits do not depend on how many rows share its pass: the same row at
