@@ -26,8 +26,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use support::models::{
     write_bert, write_dense, write_gemma_embedding, write_hybrid, write_jina_bert, write_mistral3,
-    write_modern_bert, write_moe, BertConfig, BertHeadConfig, Dense, GemmaEmbeddingConfig,
-    JinaBertConfig, Mistral3Config, ModernBertConfig, MoeShape,
+    write_modern_bert, write_moe, write_nomic_bert, BertConfig, BertHeadConfig, Dense,
+    GemmaEmbeddingConfig, JinaBertConfig, Mistral3Config, ModernBertConfig, MoeShape,
+    NomicBertConfig,
 };
 
 /// Allocations counted while `COUNTING` was set.
@@ -401,6 +402,23 @@ fn a_decode_step_allocates_nothing() {
         if n != 0 {
             failures.push(format!(
                 "modern-bert whole-text pass, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
+    // NomicBERT (S4.8a): the same whole-text pass with a fused q/k/v, NeoX RoPE,
+    // the SwiGLU pair and LayerNorms with a bias, and no final norm.
+    let nomic = load(&write_nomic_bert(
+        &dir,
+        Format::Q8_0,
+        7010,
+        NomicBertConfig::default(),
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&nomic, threads);
+        if n != 0 {
+            failures.push(format!(
+                "nomic-bert whole-text pass, {threads} threads: {n} allocations per pass"
             ));
         }
     }

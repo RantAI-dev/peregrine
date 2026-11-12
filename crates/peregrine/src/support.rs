@@ -107,6 +107,7 @@ pub fn support_markdown() -> String {
                 "modern-bert" => {
                     "ModernBERT encoder (ModernBERT, gte-modernbert, Granite Embedding R2)"
                 }
+                "nomic-bert" => "NomicBERT encoder (nomic-embed-text v1.5)",
                 "jina-bert-v2" => "Jina BERT v2 encoder (jina-embeddings-v2, ALiBi)",
                 "mistral3" => "Mistral 3 embedding (Nemotron 3.5 Embed)",
                 "phi3" => "Phi-3 / Phi-4",
@@ -139,8 +140,9 @@ ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7)
     // 6. Embeddings
     let embd_str = "causal decoders as embedders (`<arch>.pooling_type`: last or mean), and \
 bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, \
-gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Jina BERT v2 \
-(jina-embeddings-v2: ALiBi, GEGLU, mean/cls), Gemma 3 (EmbeddingGemma: mean/cls with \
+gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), NomicBERT \
+(nomic-embed-text v1.5: mean, RoPE, SwiGLU), Jina BERT v2 (jina-embeddings-v2: ALiBi, \
+GEGLU, mean/cls), Gemma 3 (EmbeddingGemma: mean/cls with \
 `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, \
 `peregrine embed`";
 

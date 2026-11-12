@@ -30,6 +30,7 @@ pub mod dense;
     feature = "arch-gemma-embedding",
     feature = "arch-mistral3",
     feature = "arch-modern-bert",
+    feature = "arch-nomic-bert",
     feature = "arch-jina-bert"
 ))]
 pub(crate) mod encoder;
@@ -53,6 +54,8 @@ pub mod jina_bert;
 pub(crate) mod layer;
 #[cfg(feature = "arch-modern-bert")]
 pub mod modern_bert;
+#[cfg(feature = "arch-nomic-bert")]
+pub mod nomic_bert;
 #[cfg(feature = "arch-qwen35")]
 pub mod qwen35;
 #[cfg(feature = "arch-qwen3moe")]
@@ -85,6 +88,8 @@ pub use gptoss::GptOssFamily;
 pub use jina_bert::JinaBertFamily;
 #[cfg(feature = "arch-modern-bert")]
 pub use modern_bert::ModernBertFamily;
+#[cfg(feature = "arch-nomic-bert")]
+pub use nomic_bert::NomicBertFamily;
 #[cfg(feature = "arch-qwen35")]
 pub use qwen35::Qwen35Family;
 #[cfg(feature = "arch-qwen3moe")]
@@ -126,6 +131,8 @@ pub const ARCHS: &[&str] = &[
     "bert",
     #[cfg(feature = "arch-modern-bert")]
     "modern-bert",
+    #[cfg(feature = "arch-nomic-bert")]
+    "nomic-bert",
     #[cfg(feature = "arch-jina-bert")]
     "jina-bert-v2",
     #[cfg(feature = "arch-qwen3moe")]
@@ -154,6 +161,8 @@ pub static FAMILIES: &[&dyn Family] = &[
     &BertFamily,
     #[cfg(feature = "arch-modern-bert")]
     &ModernBertFamily,
+    #[cfg(feature = "arch-nomic-bert")]
+    &NomicBertFamily,
     #[cfg(feature = "arch-jina-bert")]
     &JinaBertFamily,
     #[cfg(feature = "arch-qwen3moe")]
