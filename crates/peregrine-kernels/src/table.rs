@@ -408,9 +408,12 @@ impl MatKernels {
         }
         #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
         {
-            return &[Format::Q4_K, Format::Q6_K];
+            &[Format::Q4_K, Format::Q6_K]
         }
-        &[]
+        #[cfg(not(all(target_arch = "aarch64", feature = "fmt-kquant")))]
+        {
+            &[]
+        }
     }
 
     /// The resident 8-bit prompt form of one run of eight output rows against a
