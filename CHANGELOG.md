@@ -265,6 +265,27 @@ All notable changes to this project are documented here. The format follows
   over pass budgets, thread counts and admission orders; tier goldens on scalar, AVX2 and AVX-512
   (under SDE); no-allocation coverage; and the ignored real-file gate with llama.cpp's token ids
   and vectors in `crates/peregrine-models/tests/fixtures/nemotron/`. No existing golden moves.
+- **Several models in one server (S4.10)**: `peregrine serve -m a.gguf -m b.gguf -m c.gguf` loads
+  every file at start and serves each as its own model, with its own `Engine` (slots, scheduler,
+  admission, prefix store) and its own id on `/v1/models`. A request's `model` field selects one;
+  an absent or empty field goes to the first `-m`; with several models an unknown id is
+  OpenAI's 404 (`code: model_not_found`). With one `-m` the id is still `peregrine` and the
+  model is served whatever `model` a request names, so a single-model server is unchanged.
+  `/v1/rerank` and `/v1/classify` are routed like the other endpoints. With several, a file without `--alias` is named by its stem, and `--alias` may be
+  repeated one per `-m` in order; equal ids are refused at startup. Each endpoint keeps its
+  existing refusal for something a model cannot do (chat on an encoder, embeddings on a file
+  with no pooling type, `/v1/systemone` on a model that is not a decision model), for the model
+  the request named. `/metrics` keeps its unlabelled lines for the first model and adds
+  `peregrine_model_*{model="<id>"}` lines for every model, plus `peregrine_pass_turns_total` and
+  `peregrine_pass_holders_max`.
+  The engines share one process-wide pool, and a `PassTurn` lets one `Engine::step` run at a time.
+  The next turn goes to the busy engine that has had the least pass time (arrival order breaks
+  ties), so passes interleave and a model with sub-millisecond passes still gets its share instead
+  of one pass per long chat pass; a waiting model waits at most about one pass. A long chat
+  prefill cannot hold an embedding behind it, the machine never carries more than one pass's
+  threads, and a request's output is bit-identical to a single-model server's — greedy chat
+  tokens, embedding vectors and decision answers are tested against one-model servers while all
+  models are busy. The drain timeout and `peregrine stop` cover every engine.
 
 - **The packed float GEMM and the encoder attention strip on aarch64 (S4.9f, S4.9g)**: the float
   F32/F16/BF16 matrices now go through the packed 16-output panels on ARM too, with a NEON kernel

@@ -540,9 +540,12 @@ pub fn chat_prompt(
 /// Several users, one model, one weight pass per step.
 pub struct Engine {
     model: Arc<Model>,
-    pool: Pool,
+    /// The worker pool; `Arc` so several engines in one process can share it (S4.10).
+    /// A shared pool is still run by one caller at a time, which the server's
+    /// `PassTurn` guarantees.
+    pool: Arc<Pool>,
     // the narrower pool for one-row steps (`pool::narrow_pool`); None: use `pool`.
-    pool1: Option<Pool>,
+    pool1: Option<Arc<Pool>>,
     state: State,
     slots: Vec<Slot>,
     max_slots: usize,
@@ -664,6 +667,34 @@ impl Engine {
             prefill_chunk(threads),
             wide_prefill_chunk(threads),
             None,
+            None,
+        )
+    }
+
+    /// The engine with the process's pools (S4.10), and otherwise the defaults of [`Engine::new`].
+    ///
+    /// Only one engine may be inside `step` at a time when the pools are shared; the
+    /// server's `PassTurn` guarantees that.
+    pub fn new_with_pools(
+        model: Arc<Model>,
+        threads: usize,
+        max_ctx: usize,
+        max_slots: usize,
+        kv_prec: KvPrec,
+        prefix_cache_bytes: usize,
+        pools: (Arc<Pool>, Option<Arc<Pool>>),
+    ) -> Engine {
+        Self::build(
+            model,
+            threads,
+            max_ctx,
+            max_slots,
+            kv_prec,
+            prefix_cache_bytes,
+            prefill_chunk(threads),
+            wide_prefill_chunk(threads),
+            None,
+            Some(pools),
         )
     }
 
@@ -723,6 +754,7 @@ impl Engine {
             prefill_chunk,
             prefill_chunk,
             pass_rows,
+            None,
         )
     }
 
@@ -755,6 +787,7 @@ impl Engine {
             prefill_chunk,
             wide_chunk.max(prefill_chunk),
             pass_rows,
+            None,
         )
     }
 
@@ -769,6 +802,7 @@ impl Engine {
         prefill_chunk: usize,
         wide_chunk: usize,
         pass_rows: Option<usize>,
+        pools: Option<(Arc<Pool>, Option<Arc<Pool>>)>,
     ) -> Engine {
         let c = model.cfg;
         let max_slots = max_slots.max(1);
@@ -830,7 +864,17 @@ impl Engine {
         } else {
             max_slots
         };
-        let mut state = model.new_state(max_batch, max_logit_rows, max_ctx, threads);
+        // The pools: this engine's own, or the process's shared pair (S4.10). The sampler
+        // scratch is indexed by the pool's worker number, so its width, not `threads`,
+        // decides how many there are.
+        let (pool, pool1) = match pools {
+            Some((p, n)) => (p, n),
+            None => (
+                Arc::new(Pool::new(threads)),
+                crate::pool::narrow_pool(threads).map(Arc::new),
+            ),
+        };
+        let mut state = model.new_state(max_batch, max_logit_rows, max_ctx, pool.width());
         // A pooled slot asks for every row's final hidden state, and a decode step must not allocate:
         // the buffer is sized once, here. (The hybrid family resizes it per forward, which keeps
         // the capacity.)
@@ -852,8 +896,8 @@ impl Engine {
             last_step: StepReport::default(),
             kept: None,
             model,
-            pool: Pool::new(threads),
-            pool1: crate::pool::narrow_pool(threads),
+            pool: pool.clone(),
+            pool1: pool1.clone(),
             state,
             slots: Vec::with_capacity(max_slots),
             max_slots,
@@ -869,7 +913,7 @@ impl Engine {
             decode_steps: 0,
             decode_rows: 0,
             tap_layers: Vec::new(),
-            samps: (0..threads.max(1))
+            samps: (0..pool.width())
                 .map(|_| std::sync::Mutex::new(crate::sample::Scratch::default()))
                 .collect(),
             // The engine's own drafter needs the MTP feature; without it the
@@ -1248,7 +1292,7 @@ impl Engine {
 
     /// The narrow pool for one-row steps, when there is one.
     pub fn narrow_pool(&self) -> Option<&Pool> {
-        self.pool1.as_ref()
+        self.pool1.as_deref()
     }
 
     /// Refuse a request: the caller's cache goes back to it, held until the
