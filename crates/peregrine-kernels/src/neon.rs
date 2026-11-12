@@ -2916,6 +2916,320 @@ pub unsafe fn mix_f16_pair(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The attention tile's four query rows (S4.9t)
+// ---------------------------------------------------------------------------
+//
+// Every query row of a prefill block scores and mixes the same tile of positions,
+// and the row pair could only share the loads between two of them. The two bodies
+// below take **four** rows over one tile. Neither changes any arithmetic: each row
+// keeps its own accumulators, its own reduction tree and its own ascending walk over
+// the keys; only the loads and widenings of K and V are shared, four rows at a time.
+//
+// Why four, and why it pays:
+//
+// * The score body keeps two four-lane accumulators per row (dimensions `i..i+4` and
+//   `i+4..i+8` of each ascending eight-wide block), so it is one chain of `fma` per
+//   accumulator: a row-pair has eight chains in flight and a four-row tile sixteen,
+//   which covers the core's four vector FMA pipes at the dependency latency. Two
+//   keys per pass — eight keys need thirty-two accumulators and the compiler spills,
+//   measured 24.7 GMAC/s against this body's 40.
+// * The mix body keeps two accumulators per row over an eight-dimension slice of the
+//   output, so it too is chain-bound: a row-pair has four chains (28 GMAC/s), four
+//   rows have eight (55). Sixteen chains (four rows over sixteen dimensions) measure
+//   the same 46–55, so eight is the knee.
+
+/// The canonical aarch64 score tree in scalar Rust: two four-lane accumulators
+/// (dimensions `0..4` and `4..8` of each ascending eight-wide block), reduced as
+/// `((a0+a1)+(a2+a3)) + ((b0+b1)+(b2+b3))`. This is `attn.rs`'s `canonical_score`
+/// written against a widened F16 tile, and the definition the NEON body below is
+/// held to.
+#[cfg(target_arch = "aarch64")]
+fn score_tree_scalar(q: &[f32], k: &[f32]) -> f32 {
+    let mut a0 = [0.0f32; 4];
+    let mut a1 = [0.0f32; 4];
+    let mut i = 0;
+    while i + 8 <= q.len() {
+        for l in 0..4 {
+            a0[l] = q[i + l].mul_add(k[i + l], a0[l]);
+            a1[l] = q[i + 4 + l].mul_add(k[i + 4 + l], a1[l]);
+        }
+        i += 8;
+    }
+    ((a0[0] + a0[1]) + (a0[2] + a0[3])) + ((a1[0] + a1[1]) + (a1[2] + a1[3]))
+}
+
+/// [`scores_f16_tile4`]'s scalar definition: every row's own canonical tree over the
+/// same stored halves.
+///
+/// `q` holds four query rows of `hd` floats; `k` a tile of `vis` keys of `hd` halves;
+/// `s` holds four score rows, row `r` at `s[r · stride ..]`.
+#[cfg(target_arch = "aarch64")]
+pub fn scores_f16_tile4_scalar(
+    q: &[f32],
+    k: &[u8],
+    vis: usize,
+    hd: usize,
+    scale: f32,
+    s: &mut [f32],
+    stride: usize,
+) {
+    assert!(q.len() >= 4 * hd, "four query rows are needed");
+    assert!(
+        k.len() >= vis * hd * 2,
+        "the K tile is shorter than vis · hd"
+    );
+    assert!(
+        s.len() >= 3 * stride + vis,
+        "four score rows need 3 · stride + vis floats"
+    );
+    let halves: Vec<f32> = (0..vis * hd)
+        .map(|i| f16(u16::from_le_bytes([k[i * 2], k[i * 2 + 1]])))
+        .collect();
+    for r in 0..4 {
+        for j in 0..vis {
+            s[r * stride + j] =
+                score_tree_scalar(&q[r * hd..(r + 1) * hd], &halves[j * hd..][..hd]) * scale;
+        }
+    }
+}
+
+/// Four query rows scored against one F16 K tile, two keys per pass.
+///
+/// Each row's accumulators, reduction tree and ascending key order are its own, so
+/// every score is the single-row kernel's bit for bit; only the loaded and widened
+/// key is shared.
+///
+/// # Safety
+/// The CPU must have NEON; `q` must hold four rows of `hd` floats, `k` at least
+/// `vis · hd · 2` bytes, `s` four rows of `vis` floats at `stride`, and `hd` must be a
+/// multiple of eight.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn scores_f16_tile4(
+    q: &[f32],
+    k: &[u8],
+    vis: usize,
+    hd: usize,
+    scale: f32,
+    s: &mut [f32],
+    stride: usize,
+) {
+    use std::arch::aarch64::*;
+    assert!(q.len() >= 4 * hd, "four query rows are needed");
+    assert!(
+        k.len() >= vis * hd * 2,
+        "the K tile is shorter than vis · hd"
+    );
+    assert!(
+        s.len() >= 3 * stride + vis,
+        "four score rows need 3 · stride + vis floats"
+    );
+    assert!(
+        hd.is_multiple_of(8),
+        "the tile body walks eight dims at a time"
+    );
+    let qs = [
+        q.as_ptr(),
+        q.as_ptr().add(hd),
+        q.as_ptr().add(2 * hd),
+        q.as_ptr().add(3 * hd),
+    ];
+    let sc = vdupq_n_f32(scale);
+    let kp = k.as_ptr();
+    let mut j = 0;
+    while j + 2 <= vis {
+        // One accumulator pair per row and key: sixteen independent chains.
+        let mut a = [[[vdupq_n_f32(0.0); 2]; 4]; 2];
+        let mut i = 0;
+        while i < hd {
+            let qv = [
+                (vld1q_f32(qs[0].add(i)), vld1q_f32(qs[0].add(i + 4))),
+                (vld1q_f32(qs[1].add(i)), vld1q_f32(qs[1].add(i + 4))),
+                (vld1q_f32(qs[2].add(i)), vld1q_f32(qs[2].add(i + 4))),
+                (vld1q_f32(qs[3].add(i)), vld1q_f32(qs[3].add(i + 4))),
+            ];
+            for (u, keyslot) in a.iter_mut().enumerate() {
+                let at = ((j + u) * hd + i) * 2;
+                // SAFETY: `k` holds vis · hd halves and j + u < vis, i + 8 <= hd.
+                let k0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16)));
+                let k1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16)));
+                for (r, qrow) in qv.iter().enumerate() {
+                    keyslot[r][0] = vfmaq_f32(keyslot[r][0], qrow.0, k0);
+                    keyslot[r][1] = vfmaq_f32(keyslot[r][1], qrow.1, k1);
+                }
+            }
+            i += 8;
+        }
+        for (u, keyslot) in a.iter().enumerate() {
+            for (r, slot) in keyslot.iter().enumerate() {
+                let v = vaddq_f32(hsum4_pairwise(slot[0]), hsum4_pairwise(slot[1]));
+                *s.get_unchecked_mut(r * stride + j + u) = vgetq_lane_f32(vmulq_f32(v, sc), 0);
+            }
+        }
+        j += 2;
+    }
+    // One key at a time: the same tree, so a key's score does not depend on the
+    // block boundaries.
+    while j < vis {
+        for (r, qp) in qs.iter().enumerate() {
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut i = 0;
+            while i < hd {
+                let at = ((j * hd) + i) * 2;
+                // SAFETY: k holds vis · hd halves, i + 8 <= hd.
+                let k0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16)));
+                let k1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16)));
+                a0 = vfmaq_f32(a0, vld1q_f32(qp.add(i)), k0);
+                a1 = vfmaq_f32(a1, vld1q_f32(qp.add(i + 4)), k1);
+                i += 8;
+            }
+            let v = vaddq_f32(hsum4_pairwise(a0), hsum4_pairwise(a1));
+            *s.get_unchecked_mut(r * stride + j) = vgetq_lane_f32(vmulq_f32(v, sc), 0);
+        }
+        j += 1;
+    }
+}
+
+/// `((v0+v1)+(v2+v3))` in every lane: the score tree's four-lane reduction.
+#[inline(always)]
+unsafe fn hsum4_pairwise(v: float32x4_t) -> float32x4_t {
+    let t = vpaddq_f32(v, v);
+    vpaddq_f32(t, t)
+}
+
+/// [`mix_f16_quad`]'s scalar definition: four rows' own `α·o + Σ_j p_j · v_j`, one
+/// separate multiply and one separate add per ascending key.
+///
+/// `o` holds four output rows of `hd` floats; `p` four weight rows of `n` weights, row
+/// `r` at `p[r · p_stride ..]`; `v` the tile's halves.
+#[cfg(target_arch = "aarch64")]
+pub fn mix_f16_quad_scalar(
+    o: &mut [f32],
+    alphas: &[f32; 4],
+    p: &[f32],
+    p_stride: usize,
+    n: usize,
+    v: &[u8],
+    hd: usize,
+) {
+    assert!(o.len() >= 4 * hd, "four output rows are needed");
+    assert!(
+        p.len() >= 3 * p_stride + n,
+        "four score rows of n floats are needed"
+    );
+    assert!(v.len() >= n * hd * 2, "the V tile is shorter than n");
+    for r in 0..4 {
+        if alphas[r] != 1.0 {
+            o[r * hd..(r + 1) * hd]
+                .iter_mut()
+                .for_each(|x| *x *= alphas[r]);
+        }
+    }
+    for j in 0..n {
+        for d in 0..hd {
+            let at = (j * hd + d) * 2;
+            let value = f16(u16::from_le_bytes([v[at], v[at + 1]]));
+            for r in 0..4 {
+                o[r * hd + d] += p[r * p_stride + j] * value;
+            }
+        }
+    }
+}
+
+/// Four rows mixed over one F16 V tile: each row's output slice stays in registers
+/// while the keys walk ascending, and each stored V half-vector is widened once for
+/// all four rows.
+///
+/// The arithmetic is [`mix_f16_quad_scalar`]'s element for element — a separate
+/// multiply and a separate add per key, in ascending key order, with `α·o` first — so
+/// a row's bits are the single-row body's. All four rows mix the same `n` positions:
+/// a row cut at another row's position would take an extra soft-max step, which moves
+/// its denominator's summation, so the caller groups rows that share their context.
+///
+/// # Safety
+/// The CPU must have NEON; `o` must hold four rows of `hd` floats, `p` four rows of
+/// `n` weights at `p_stride`, `v` at least `n · hd · 2` bytes, and `hd` a multiple of
+/// eight.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn mix_f16_quad(
+    o: &mut [f32],
+    alphas: &[f32; 4],
+    p: &[f32],
+    p_stride: usize,
+    n: usize,
+    v: &[u8],
+    hd: usize,
+) {
+    use std::arch::aarch64::*;
+    assert!(o.len() >= 4 * hd, "four output rows are needed");
+    assert!(
+        p.len() >= 3 * p_stride + n,
+        "four score rows of n floats are needed"
+    );
+    assert!(v.len() >= n * hd * 2, "the V tile is shorter than n");
+    assert!(
+        hd.is_multiple_of(8),
+        "the tile body walks eight dims at a time"
+    );
+    for r in 0..4 {
+        if alphas[r] != 1.0 {
+            let mut d = 0;
+            while d < hd {
+                let at = r * hd + d;
+                vst1q_f32(
+                    o.as_mut_ptr().add(at),
+                    vmulq_f32(vld1q_f32(o.as_ptr().add(at)), vdupq_n_f32(alphas[r])),
+                );
+                d += 4;
+            }
+        }
+    }
+    let vp = v.as_ptr();
+    let mut d = 0;
+    while d + 8 <= hd {
+        let mut a = [[vdupq_n_f32(0.0); 2]; 4];
+        for (r, acc) in a.iter_mut().enumerate() {
+            acc[0] = vld1q_f32(o.as_ptr().add(r * hd + d));
+            acc[1] = vld1q_f32(o.as_ptr().add(r * hd + d + 4));
+        }
+        for j in 0..n {
+            let at = (j * hd + d) * 2;
+            // SAFETY: `v` holds n · hd halves and d + 8 <= hd.
+            let v0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at) as *const u16)));
+            let v1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at + 8) as *const u16)));
+            for (r, acc) in a.iter_mut().enumerate() {
+                let w = vdupq_n_f32(*p.get_unchecked(r * p_stride + j));
+                acc[0] = vaddq_f32(acc[0], vmulq_f32(w, v0));
+                acc[1] = vaddq_f32(acc[1], vmulq_f32(w, v1));
+            }
+        }
+        for (r, acc) in a.iter().enumerate() {
+            vst1q_f32(o.as_mut_ptr().add(r * hd + d), acc[0]);
+            vst1q_f32(o.as_mut_ptr().add(r * hd + d + 4), acc[1]);
+        }
+        d += 8;
+    }
+    // A head width that is not a multiple of eight never reaches this body (the
+    // caller's gate), but the tail keeps the definition total.
+    while d < hd {
+        for r in 0..4 {
+            let mut x = *o.get_unchecked(r * hd + d);
+            for j in 0..n {
+                let at = (j * hd + d) * 2;
+                let value = f16(u16::from_le_bytes([*vp.add(at), *vp.add(at + 1)]));
+                x += p[r * p_stride + j] * value;
+            }
+            *o.get_unchecked_mut(r * hd + d) = x;
+        }
+        d += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
