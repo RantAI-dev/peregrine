@@ -161,7 +161,8 @@ fn main() {
                  \"width\":{width},\"prefill_rows\":{prefill_rows},\"prefill_s\":{prefill_s:.6},\
                  \"prefill_tok_s\":{:.2},\"decode_rows\":{decoded},\"decode_s\":{decode_s:.6},\
                  \"decode_tok_s\":{:.2},\"wall_s\":{wall:.6},\"steps_pre\":{steps_pre},\
-                 \"steps_dec\":{steps_dec},\"stats_ms\":{{\"matmul\":{:.3},\"head\":{:.3},\
+                 \"steps_dec\":{steps_dec},\"macs\":{},\"bytes_weights\":{},\
+                 \"stats_ms\":{{\"matmul\":{:.3},\"head\":{:.3},\
                  \"attention\":{:.3},\"other\":{:.3},\"total\":{:.3},\"barriers\":{}}},\
                  \"prof_ms\":{{{prof_txt}}}}}",
                 if prefill_s > 0.0 {
@@ -174,6 +175,8 @@ fn main() {
                 } else {
                     0.0
                 },
+                st.macs,
+                st.bytes_weights,
                 st.ns_matmul as f64 / 1e6,
                 st.ns_head as f64 / 1e6,
                 st.ns_attn as f64 / 1e6,
