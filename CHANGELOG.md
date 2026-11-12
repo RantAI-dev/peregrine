@@ -125,6 +125,35 @@ All notable changes to this project are documented here. The format follows
   per-run spread reaches 2×); single-thread at 512 tokens is 3630 → 3574 ms, 2.4 %, which is the
   3 % the isolated kernel time predicts. See `docs/design/s4.9-sota.md` §16.
 
+- **The fork's fast wide pass is a requantisation, and an exact one buys nothing (S5.2).** §10.6
+  item 1 proposed copying ik_llama.cpp's trick — convert each block of weight rows to 8 bits once
+  per wide pass — and said it could be bit-identical "if the kernel widens, not requantises".
+  Half right: the fork *does* requantise. `iqk_convert_q4_k_r4_q8_k_r16`
+  (`ggml/src/iqk/iqk_gemm_kquants.cpp:2400`) dequantises each 256-weight row-block to f32, takes
+  its largest magnitude, and rounds every weight onto a new grid of `max/127` with one f32 scale
+  per (row, 256 weights) — a 4-bit code with a 6-bit scale reaches 945 and cannot fold into int8,
+  so nothing of the original grid survives. Worst case half a step, `max/254` = 0.394 % of the
+  block's largest weight. Measured on 40 chunks of 512 tokens with `llama-perplexity`'s
+  log-probability files: `-ub 512` is not bit-identical to `-ub 16` (the files differ at the first
+  predicted position), Mean KLD 0.001087, RMS Δp 0.634 %, same top-1 97.873 % — 44 % of the
+  0.00248 that separates Q4_K_M from the unquantised model. Peregrine's chunk 16 and chunk 64 are
+  identical on a real model, as the invariant requires.
+
+  Built exactly as §10.6 item 1 asked — the tile's nibbles widened to one byte per weight once per
+  tile, the per-32 scale multiply and the min term kept, bit-identical to the narrowed kernel at
+  every width — the wide pass measures **73.5 against 73.4 GMAC/s at 128 activation rows, 72.6
+  against 71.7 at 512** (two runs, ±2 % both signs): the nibble split is free and removing it buys
+  nothing, because the busy ports are the byte dot and the int32 multiplier. An exact wide kernel's
+  ceiling is today's 74-76, not the fork's 91; what separates them is the per-32 scale multiply and
+  the min term (28 % of the kernel), which only the requantisation can remove. Nothing was wired
+  in. The Q5_0 kernel was attacked too, and two exact variants — a cheaper fifth-bit decode with a
+  prefetch (+2.4 % at 64 rows, −1.9 % at 512, inside the noise) and sixteen output rows per fold
+  (42.4 against 53.6 GMAC/s at 128 rows, slower at every width) — were measured and withdrawn:
+  Q5_0's 32-weight block makes its fold eight times more frequent per weight than Q4_K's, and that
+  is the gap, not the kernel. Peregrine is at 0.64 of ik_llama.cpp on Llama 3.2 1B and 0.57 on Qwen
+  2.5 0.5B on prompt processing at the default settings (0.62 and 0.52 at twelve threads), unchanged
+  because nothing shipped. See `docs/design/s5-prefill-avx512.md` §11.
+
 - **The Q4_K kernel is at the machine's byte-dot roof, and the fork's is not faster (S5.1b).** This
   item was "rebuild the Q4_K kernel with ik_llama.cpp's instruction mix at 120 GMAC/s per core".
   Both kernels were disassembled instruction for instruction and both were measured, and the target

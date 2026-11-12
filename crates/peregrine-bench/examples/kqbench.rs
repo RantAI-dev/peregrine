@@ -17,8 +17,8 @@ use peregrine_kernels::kq::{
 };
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::kqsimd::{
-    q4k8_gemm, q4k8_gemm_zmm, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm, q5_08_gemm_zmm, q5k8_gemm,
-    q5k8_gemv, q6k8_gemm, q6k8_gemm_zmm, q6k8_gemv,
+    q4k8_gemm, q4k8_gemm_zmm, q4k8_gemm_zmm_wide, q4k8_gemv, q4k8_gemv_zmm, q5_08_gemm,
+    q5_08_gemm_zmm, q5k8_gemm, q5k8_gemv, q6k8_gemm, q6k8_gemm_zmm, q6k8_gemv,
 };
 #[cfg(target_arch = "x86_64")]
 use peregrine_kernels::quant::QuantAct;
@@ -613,6 +613,103 @@ fn layer_mode(n_sb: usize, reps: usize) {
             macs / best(&mut q6) / 1e9,
             macs / best(&mut q5) / 1e9,
             if zmm { "zmm" } else { "avx2" }
+        );
+    }
+
+    if zmm && std::env::var("KQBENCH_WIDE").is_ok() {
+        wide_layer(n_sb, n_tiles, &kq, &tiles);
+    }
+}
+
+/// The widened-codes wide pass (S5.2): the same tile, its nibbles copied into a
+/// byte buffer once, then `vpdpbusd` over the whole pass — against today's
+/// kernel at the widths a wide pass would run.
+///
+/// ```text
+/// KQBENCH_LAYER=1 KQBENCH_WIDE=1 taskset -c 4 kqbench 8 40 1
+/// ```
+///
+/// Each width is checked bit for bit against `q4k8_gemm_zmm` before it is timed,
+/// because that is the whole claim: the widening may not change one bit.
+#[cfg(target_arch = "x86_64")]
+fn wide_layer(n_sb: usize, n_tiles: usize, kq: &KqActs, tiles: &[u8]) {
+    use peregrine_kernels::kqsimd::Q4K8_WIDE;
+    let mut scratch = vec![0u8; n_sb * Q4K8_WIDE];
+    let n = n_sb * 256;
+    let macs = (n_tiles * 8 * n) as f64;
+    println!("--- wide pass: nibbles widened to bytes once per tile, then 16/32/64 row groups ---");
+    for &nb in &[8usize, 64, 128, 256, 512] {
+        let reps = (320 / nb).max(3);
+        let mut a = vec![0.0f32; nb * 8];
+        let mut b = vec![0.0f32; nb * 8];
+        for t in 0..n_tiles {
+            let at = t * n_sb * Q4K8::SIZE;
+            let tl = &tiles[at..at + n_sb * Q4K8::SIZE];
+            unsafe {
+                q4k8_gemm_zmm(tl, n_sb, kq, nb, &mut a);
+                q4k8_gemm_zmm_wide(tl, n_sb, kq, nb, &mut b, &mut scratch);
+            }
+            assert_eq!(
+                a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "the wide pass changed a bit at {nb} activation rows"
+            );
+        }
+        let mut wide = Vec::new();
+        let mut narrow = Vec::new();
+        let mut widen = Vec::new();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let at = t * n_sb * Q4K8::SIZE;
+                    unsafe {
+                        q4k8_gemm_zmm(&tiles[at..at + n_sb * Q4K8::SIZE], n_sb, kq, nb, &mut a)
+                    }
+                }
+            }
+            narrow.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let at = t * n_sb * Q4K8::SIZE;
+                    unsafe {
+                        q4k8_gemm_zmm_wide(
+                            &tiles[at..at + n_sb * Q4K8::SIZE],
+                            n_sb,
+                            kq,
+                            nb,
+                            &mut b,
+                            &mut scratch,
+                        )
+                    }
+                }
+            }
+            wide.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let at = t * n_sb * Q4K8::SIZE;
+                    unsafe {
+                        peregrine_kernels::kqsimd::q4k8_widen(
+                            &tiles[at..at + n_sb * Q4K8::SIZE],
+                            n_sb,
+                            &mut scratch,
+                        )
+                    }
+                }
+            }
+            widen.push(t0.elapsed().as_secs_f64());
+        }
+        let g = |v: &mut Vec<f64>| macs * nb as f64 * reps as f64 / best(v) / 1e9;
+        println!(
+            "q4k wide {nb:>3} acts: today {:6.1}  widened {:6.1}  ({:+.1}%)  widening alone {:.0} GMAC/s  GMAC/s/core",
+            g(&mut narrow),
+            g(&mut wide),
+            (g(&mut wide) / g(&mut narrow) - 1.0) * 100.0,
+            // The widening moves no multiply-accumulate, so its rate is the
+            // weight bytes it copies per second instead.
+            (n_tiles * 8 * n * reps) as f64 / best(&mut widen) / 1e9,
         );
     }
 }
