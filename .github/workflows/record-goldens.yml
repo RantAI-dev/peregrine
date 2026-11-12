@@ -11,6 +11,10 @@
 # The same run is then repeated without `PEREGRINE_GOLDEN` and must reproduce every recorded
 # value; a file that differs between two runs of the same commit is a determinism bug, not a
 # golden to keep.
+#
+# `isa` pins the tier the goldens are recorded for (`PEREGRINE_ISA`: `scalar`, `avx2`, ...), so a
+# runner pool with mixed CPUs (the Windows one draws either the AVX2 or the AVX-512 tier) records a
+# set every runner of the pool can reproduce. Empty is the runner's own tier.
 name: record-goldens
 on:
   workflow_dispatch:
@@ -24,20 +28,37 @@ on:
           - ubuntu-24.04-arm
           - windows-2025
         default: macos-15
+      isa:
+        description: "PEREGRINE_ISA cap for every step (empty = the runner's own tier)"
+        type: string
+        default: ""
 permissions:
   contents: read
 concurrency:
-  group: record-goldens-${{ inputs.runner }}
+  group: record-goldens-${{ inputs.runner }}-${{ inputs.isa || 'native' }}
   cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # An empty value parses as no cap (the runner's own tier).
+  PEREGRINE_ISA: ${{ inputs.isa }}
 jobs:
   record:
     runs-on: ${{ inputs.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # The pool is mixed: the log must say which CPU and which ISA cap produced the set.
+      - name: the CPU this runner reports
+        shell: bash
+        run: |
+          echo "runner: $RUNNER_OS $RUNNER_ARCH"
+          case "$RUNNER_OS" in
+            Windows) powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name" ;;
+            macOS) sysctl -n machdep.cpu.brand_string ;;
+            *) grep -m1 'model name' /proc/cpuinfo || true ;;
+          esac
+          echo "PEREGRINE_ISA=${PEREGRINE_ISA:-<unset: the runner's own tier>}"
       - name: count the missing goldens before recording
         shell: bash
         run: |
@@ -88,7 +109,7 @@ jobs:
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: goldens-${{ inputs.runner }}
+          name: goldens-${{ inputs.runner }}-${{ inputs.isa || 'native' }}
           path: |
             ${{ runner.temp }}/goldens.tar.gz
             ${{ runner.temp }}/recorded.txt
