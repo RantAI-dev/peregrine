@@ -54,8 +54,10 @@ All notable changes to this project are documented here. The format follows
   gate's 1e-4); Q8_0 vs llama.cpp's own Q8_0 min 0.9998662, mean 0.9999650. Speed on the
   shared 8-vCPU VM (rough), 4 threads, Q8_0, cache off, five runs, texts/s: 16 tokens
   **33.75 vs 22.55 (1.50×)**; 128 tokens **4.654 vs 4.201 (1.11×)**; 512 tokens **0.888 vs
-  0.857 (1.04×, the worst cell)**; one request of sixteen 32-token texts **260.7 vs 16.01
-  (16.3×)**, the ragged batch against llama.cpp's sequence-at-a-time server. Synthetic
+  0.857 (1.04×, the worst cell)**; one request of sixteen different 32-token texts **20.9
+  vs 15.8 (1.32×)**, both engines putting the whole request through (a request of sixteen
+  copies of one text answers faster still — 309 texts/s — because identical texts are
+  computed once in it, which is deduplication, not a batch ratio). Synthetic
   goldens on scalar, AVX2 and AVX-512 under SDE, a no-allocation pass, server and CLI
   cases, and an `#[ignore]`d real-file gate. `docs/reference/jina-bert.md` holds the
   transcription and says what `jina-bert-v3` (RoPE, plain GELU, LoRA adapters) would take;

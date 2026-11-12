@@ -566,9 +566,11 @@ llama.cpp's own Q8_0 is min 0.9992368 / mean 0.9996404 (Peregrine 2.2e-6 below o
 mean, inside the 1e-4 clause); against llama.cpp's own Q8_0 vectors it is min 0.9998662
 / mean 0.9999650. Speed on the shared 8-vCPU VM, 4 threads, Q8_0, cache off, five runs,
 texts/s: 16 tokens 33.75 vs 22.55 (1.50×); 128 tokens 4.654 vs 4.201 (1.11×); 512
-tokens 0.888 vs 0.857 (1.04×, the worst cell); sixteen 32-token texts in one request
-260.7 vs 16.01 (16.3×). The last cell is the engine's ragged batch against llama.cpp's
-one-sequence-at-a-time server, not a kernel claim.
+tokens 0.888 vs 0.857 (1.04×, the worst cell); sixteen different 32-token texts in one
+request 20.9 vs 15.8 (1.32×), both engines putting the whole request through — the batch
+lead is in the same range as the single-short-text lead. A request whose texts repeat is
+answered faster because identical texts are computed once in it (sixteen copies of one
+text: 309 texts/s), and that is in-request deduplication, not a batch ratio.
 
 ## 9. S4.8a as built: the `nomic-bert` family
 

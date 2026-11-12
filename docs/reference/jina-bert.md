@@ -227,13 +227,15 @@ the cell is one request. A text of N tokens; `32×16` is one request of sixteen
 | 16 tokens | 22.55 [22.50–23.29] | **33.75** [32.31–36.71] | 1.50 |
 | 128 tokens | 4.201 [4.122–4.248] | **4.654** [4.314–4.789] | 1.11 |
 | 512 tokens | 0.857 [0.825–0.870] | **0.888** [0.873–0.912] | **1.04** (the worst cell) |
-| 32 tokens × 16 | 16.01 [15.50–16.58] | **260.7** [259.4–264.0] | 16.3 |
+| 32 tokens × 16 (different texts) | 15.8 [15.4–16.5] | **20.9** [20.4–21.1] | **1.32** |
 
-The 512-token cell is the worst ratio and still ahead. The 16-text batch is where the
-engines differ most: Peregrine puts all sixteen texts of the request through one
-weight pass (512 rows, no padding); llama.cpp's server runs a non-causal batch one
-sequence after another, so its 512-token request costs what five 32-token requests
-cost it. A 512-token text is dominated by its own `n²` attention.
+The 512-token cell is the worst ratio and still ahead. On the sixteen-text request
+both engines put the whole request through, and Peregrine's 1.32× there is in the same
+range as its 1.50× lead on a single 16-token text, not a scheduling effect. One thing
+does answer faster: a request whose texts repeat, because identical texts are computed
+once in it — sixteen copies of one text measure 309 texts/s — and that is in-request
+deduplication, not a batch ratio. A 512-token text is dominated by its own `n²`
+attention.
 
 Stage split is not repeated here: the family has the same projection-heavy shape as
 `modern-bert`, and the ALiBi bias is one extra `f32` multiply-add per score (less than
