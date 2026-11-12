@@ -98,6 +98,12 @@ flash-attention setting (`-fa auto` or `-fa off`) for that specific row.**
 | Bluefin | SmolLM2 360M | 512 | 443.2 | 318.9 | **1.39×** |
 | Bluefin | SmolLM2 360M | 4096 | 228.5 | 217.1 | **1.05×** |
 
+Re-measured quiet for S5.4i (medians of three interleaved rounds, 12 threads): Llama 3.2 1B
+**349.1** against 290.7 (1.20×) at 512 tokens and **264.6** against 195.0 (1.36×) at 4096, and
+Qwen 2.5 0.5B **641.1** against 477.5 (1.34×) and **450.1** against 305.1 (1.48×). The Qwen
+512-token cell that S5.2c read at 0.89× on a host loaded at 16-22 is 1.34× here; that window did
+not separate the two engines, as S5.2c said.
+
 ## Multi-user throughput
 
 ![Total throughput, 10 users at once](img/bench-users10.svg)
@@ -137,7 +143,10 @@ faster. Medians of three interleaved rounds.
 
 What this says:
 
-- **Prompt processing: ik_llama.cpp is about twice as fast on every row** (Peregrine at 0.39-0.58×).
+- **Prompt processing: ik_llama.cpp is about twice as fast on every row** (Peregrine at 0.39-0.58×,
+  and 0.61-0.81× of it measured again quiet in S5.4i: Qwen 2.5 0.5B 641.1 against 1 051.0 tok/s at
+  512 tokens and 450.1 against 691.8 at 4096, Llama 3.2 1B 349.1 against 440.2 and 264.6
+  against 326.4).
   This is Peregrine's largest measured loss. The fork repacks the k-quant weights at load (`-rtr`)
   for its own interleaved AVX-512 kernels. Where Peregrine's time goes in comparison has not been
   profiled yet.
@@ -152,6 +161,74 @@ Not measured: OpenVINO GenAI, the 4096-context multi-user rows for SmolLM2 and g
 ik_llama.cpp on bluefin and on ARM. The 4096-context multi-user rows are single rounds. Method,
 settings and raw data: [`benchmarks/results/desktop-zen5-2026-11-11-ik/`](../benchmarks/results/desktop-zen5-2026-11-11-ik/README.md).
 The other tables on this page were measured earlier and against llama.cpp only.
+
+### The opt-in fast prompt mode (`--fast-prompt`, lossy, off by default)
+
+Not the default engine — a separate, opt-in mode, and this table is kept apart from the
+tables above because it trades accuracy for speed. Prompt tokens read their Q4_K and Q6_K
+weights from an 8-bit copy built at load; generated tokens keep the exact kernels.
+2026-11-12/13, desktop, AVX-512, the whole CPU set pinned (`taskset -c 0-23` for 12 threads,
+`taskset -c 0` for 1), five interleaved rounds per 512-token cell, three for the 4096-token
+12-thread cells and one for the two 4096-token 1-thread cells, medians, the 1-minute load
+recorded beside every run. Prompt tok/s:
+
+| Model | prompt / threads | Per. default | Per. fast | ik (defaults) | ik (`-rtr`) | llama.cpp | fast ÷ default | fast ÷ ik | fast ÷ ik `-rtr` | fast ÷ llama |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Llama 3.2 1B | 512 / 12 | 349.1 | **486.5** | 440.2 | 592.3 | 290.7 | **1.39×** | **1.11×** | **0.82×** | **1.67×** |
+| Llama 3.2 1B | 512 / 1 | 55.4 | **80.7** | 67.4 | 85.3 | 42.0 | **1.46×** | **1.20×** | **0.95×** | **1.92×** |
+| Llama 3.2 1B | 4096 / 12 | 264.6 | **339.3** | 326.4 | 388.0 | 195.0 | **1.28×** | **1.04×** | **0.87×** | **1.74×** |
+| Llama 3.2 1B | 4096 / 1 | 41.2 | **53.3** | — | 57.6 | 28.2 | **1.29×** | — | **0.93×** | **1.89×** |
+| Qwen3 1.7B | 512 / 12 | 233.4 | **309.3** | 296.1 | 387.8 | 193.2 | **1.33×** | **1.05×** | **0.80×** | **1.60×** |
+| Qwen3 1.7B | 512 / 1 | 37.6 | **52.6** | 43.5 | 57.9 | 27.6 | **1.40×** | **1.21×** | **0.91×** | **1.91×** |
+| Qwen3 1.7B | 4096 / 12 | 173.8 | **214.1** | 215.5 | 249.5 | 126.0 | **1.23×** | **0.99×** | **0.86×** | **1.70×** |
+| Qwen3 1.7B | 4096 / 1 | 27.6 | **35.4** | — | 38.0 | — | **1.28×** | — | **0.93×** | — |
+
+**Cells below 1.0, named:** against ik_llama.cpp with `-rtr` (its own fast path, the one
+that uses the same `q8_k_r16` arithmetic) the fast mode is behind on **all eight** cells,
+0.80-0.95×; against ik at its defaults it is behind on **one**, Qwen3 1.7B at 4096 tokens
+and 12 threads (0.99×, level). The fast mode is ahead of the exact default everywhere
+(1.23-1.46×) and of llama.cpp everywhere (1.60-1.92×). The design's 0.85× target on Llama 3.2
+1B at 12 threads was written against ik's defaults and is met there (1.11× at 512 tokens,
+1.04× at 4096); against the fork's `-rtr` path it is 0.82-0.87×.
+
+**Where the fast pass loses, measured (S5.4i).** Not in the 8-bit kernel: in situ on
+Llama 3.2 1B at 512 tokens it runs at **96.2 GMAC/s for Q4_K and 103.9 for Q6_K**
+(`PEREGRINE_PROF2`), against the fork's own `q8_k_r16` at **94.9 GMAC/s** at 512 activation
+rows and 85.1 at 256, called through the fork's library. At 12 threads **36 % of the
+512-token pass is not the kernel** (barrier wait 10.4 %, the caller's serial steps 13.5 %,
+attention 9.1 %, the activation's fill and the output's untile 3 %), and at 4096 tokens
+**attention is 38 % of the pass against 20.5 % of the fork's own** (`-fa 0`: 399.9 → 317.9
+tok/s), i.e. 2.1× the fork's attention in absolute time. A sixteen-output-row kernel (the
+fork's `r16` shape) and a 128-row prompt chunk were built and measured as candidates: +4-6 %
+and +2-5 % at one thread and at 512 tokens, -2 to -4 % where it counts, so neither ships.
+The account, both engines' timings and the eight cells:
+[`benchmarks/results/desktop-zen5-2026-11-12-s5.4i/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4i/README.md).
+
+**Accuracy** (the full report and the F16 comparison:
+[`benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4c/README.md)):
+on Llama 3.2 1B Q4_K_M the prompt's logits move **0.0035 nats of mean KL divergence** from
+the default engine's, median 0.0025, 99 % 0.024, with 96.75 % of positions keeping the same
+top token; RMS Δp 1.41 %. That is 1.16 % of the model's distance from F16 (0.0386), and it is
+the same arithmetic ik_llama.cpp's `-rtr` path measures (0.0034 on the same file and corpus).
+The other four gate models: 0.0026-0.0171 nats. Task scores (GSM8K/MMLU/HumanEval+, the four
+gate models) are not significantly different from the default engine's in any cell (largest
++7.5 points at n = 80, all McNemar p ≥ 0.15). The mode costs +957 MiB of resident memory and
+0.5-1.7 s of load on the 1B; decode is unchanged (63.1 → 64.5 tok/s after the prompt).
+It stays off by default. These are the AVX-512 numbers, where the mode takes Q4_K and Q6_K;
+which formats take the form is per tier (S5.4f): AVX2 takes Q6_K only (a fast prompt is
+**1.05-1.08×** the exact one on the 1B there, `benchmarks/results/bluefin-2026-11-12-s5.4f/`),
+aarch64 takes Q4_K and Q6_K, and a tier with no SIMD body takes none, so the option changes
+nothing there.
+
+**The alternative the owner has to choose against:** the same 8-bit codes with one scale per
+**32** weights (the fork's *default* wide path, 0.000945 nats on the 1B against `-rtr`'s
+0.003401). Measured as a kernel prototype (S5.4i §5j, nothing dispatches it):
+**0.61-0.63× the per-256 form's speed** — 66.0 against 104.3 GMAC/s at 64 activation rows,
+0.81-0.84× the exact kernel — for **1.25 bytes per weight** (1 164 MiB on the 1B against 957)
+and a per-weight RMS only **1.39×** smaller (1.048e-4 against 1.458e-4 on the 1B's Q4_K). At
+that rate a per-32 fast prompt mode would be **0.86× the exact engine**, i.e. slower than
+turning the option off. The numbers, side by side:
+[`benchmarks/results/desktop-zen5-2026-11-12-s5.4i/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4i/README.md).
 
 ## Bonsai 2 (ternary) vs PrismML's fork
 

@@ -26,6 +26,7 @@ pub mod kqsimd;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 pub mod options;
+pub mod p32;
 pub mod prof;
 pub mod quant;
 #[cfg(target_arch = "x86_64")]

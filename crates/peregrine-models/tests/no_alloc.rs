@@ -26,9 +26,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use support::models::{
     write_bert, write_dense, write_gemma_embedding, write_hybrid, write_jina_bert, write_mistral3,
-    write_modern_bert, write_moe, write_nomic_bert, BertConfig, BertHeadConfig, Dense,
-    GemmaEmbeddingConfig, JinaBertConfig, Mistral3Config, ModernBertConfig, MoeShape,
-    NomicBertConfig,
+    write_modern_bert, write_moe, write_nomic_bert, write_nomic_bert_moe, BertConfig,
+    BertHeadConfig, Dense, GemmaEmbeddingConfig, JinaBertConfig, Mistral3Config, ModernBertConfig,
+    MoeShape, NomicBertConfig, NomicBertMoeConfig,
 };
 
 /// Allocations counted while `COUNTING` was set.
@@ -419,6 +419,24 @@ fn a_decode_step_allocates_nothing() {
         if n != 0 {
             failures.push(format!(
                 "nomic-bert whole-text pass, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
+    // The nomic-bert-moe family (S4.8b): the mixture-of-experts block routes and runs
+    // its experts in the same whole-text pass; its router and expert buffers are sized
+    // once, at `new_state`, and the pass allocates nothing.
+    let nomic_moe = load(&write_nomic_bert_moe(
+        &dir,
+        Format::Q8_0,
+        7013,
+        NomicBertMoeConfig::default(),
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&nomic_moe, threads);
+        if n != 0 {
+            failures.push(format!(
+                "nomic-bert-moe whole-text pass, {threads} threads: {n} allocations per pass"
             ));
         }
     }

@@ -1,0 +1,17 @@
+{"engine": "pg-exact", "round": 1, "tok_s": 163.81959623652483, "load1": 10.05, "tries": 1}
+{"engine": "pg-fast", "round": 1, "tok_s": 201.39829040306714, "load1": 10.49, "tries": 1}
+{"engine": "ik-default", "round": 1, "tok_s": 216.104988, "load1": 10.24, "tries": 1}
+{"engine": "ik-rtr", "round": 1, "tok_s": 256.747283, "load1": 10.74, "tries": 1}
+{"engine": "llama", "round": 1, "tok_s": 126.127612, "load1": 11.21, "tries": 1}
+{"engine": "pg-exact", "round": 2, "tok_s": 157.5415970706902, "load1": 11.79, "tries": 1}
+{"engine": "pg-fast", "round": 2, "tok_s": 175.04071825948506, "load1": 10.99, "tries": 1}
+{"engine": "ik-default", "round": 2, "tok_s": 210.095572, "load1": 10.31, "tries": 1}
+{"engine": "ik-rtr", "round": 2, "tok_s": 253.537489, "load1": 10.79, "tries": 1}
+{"engine": "llama", "round": 2, "tok_s": 125.381758, "load1": 10.58, "tries": 1}
+{"engine": "pg-exact", "round": 3, "tok_s": 163.90620386619094, "load1": 11.32, "tries": 1}
+{"engine": "pg-fast", "round": 3, "tok_s": 200.6815123778636, "load1": 11.55, "tries": 1}
+{"engine": "ik-default", "round": 3, "tok_s": 213.993277, "load1": 11.08, "tries": 1}
+{"engine": "ik-rtr", "round": 3, "tok_s": 229.914214, "load1": 11.41, "tries": 1}
+{"engine": "llama", "round": 3, "tok_s": 125.393883, "load1": 11.25, "tries": 1}
+{"engine": "pg-exact", "round": 4, "tok_s": 163.16363354760063, "load1": 11.75, "tries": 1}
+{"engine": "pg-fast", "round": 4, "tok_s": 200.02643935411027, "load1": 12.22, "tries": 1}

@@ -2301,7 +2301,8 @@ fn gpt_oss_synthetic_file_runs_in_llama_cpp() {
 ///
 /// Which formats take the 8-bit form is the tier's table
 /// (`MatKernels::q8k_uses_form`). A format the tier uses has a fast golden here; a
-/// format it does not (Q4_K on AVX2 and scalar, Q5_0 on every tier in this step) is
+/// format it does not (Q4_K on AVX2 and scalar, Q5_0 on every x86 tier and on
+/// aarch64's `neon`/`scalar` caps) is
 /// asserted to be **bit-identical to the exact engine**, which is the mode's
 /// guarantee for a format outside the table: the option changes nothing.
 ///

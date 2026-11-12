@@ -1,0 +1,7 @@
+{"arm": "exact", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 41.16688979181907, "load1": 2.5}
+{"arm": "fast-base", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 53.26116871477933, "load1": 1.39}
+{"arm": "ik-rtr", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 57.616343, "load1": 1.57}
+{"arm": "llama", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 28.243042, "load1": 1.15}
+{"arm": "exact", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 27.56616294389163, "load1": 1.0}
+{"arm": "fast-base", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 35.37794786072314, "load1": 1.06}
+{"arm": "ik-rtr", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 38.017756, "load1": 1.21}

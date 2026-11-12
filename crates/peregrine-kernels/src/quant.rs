@@ -55,8 +55,8 @@ use crate::format::{f16, Format};
 #[inline]
 fn pad_k_layout(n: usize) -> bool {
     !n.is_multiple_of(256)
-        && crate::options::get().fast_prompt
         && crate::table::MatKernels::get().q8k_uses_form(Format::Q5_0)
+        && (crate::options::get().fast_prompt || crate::kq8::padded_q5_form())
 }
 
 /// An activation vector quantised to int8 in blocks of 32.

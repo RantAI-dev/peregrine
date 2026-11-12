@@ -98,7 +98,7 @@ Common flags (all are listed by `peregrine run --help`):
 | `--system TEXT` | A system message for the chat template |
 | `--chat-template NAME` | Render a named template when the file declares none |
 | `--kv f16\|f32\|i8` | KV-cache precision (default f16) |
-| `--fast-prompt` | Experimental and lossy: prompt tokens read the weights of the formats whose 8-bit form beats this CPU tier's exact kernel (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so the option changes nothing) from an 8-bit copy built at load. Faster prompts; a reply can differ from the default engine's, and the accuracy report is not published yet (generated tokens keep the exact kernels; off by default) |
+| `--fast-prompt` | Experimental, lossy and off by default (its accuracy bound is under review: see the design's section 5c): prompt tokens read the weights of the formats whose 8-bit form beats this CPU tier's exact kernel (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so the option changes nothing) from an 8-bit copy built at load, 1.18-1.46× faster prompts on AVX-512 (1.05-1.08× on an AVX2 host). On Llama 3.2 1B Q4_K_M the prompt's logits move 0.0035 nats of mean KL divergence and 96.7 % of positions keep the same top token (report: `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`); generated tokens keep the exact kernels, so a reply can still differ |
 | `--no-thinking` | Answer without the reasoning block (reasoning models only) |
 | `--speculate` | Lossless prompt-lookup speculation (off by default) |
 | `--json` | Print one JSON object (text, token counts, prefill/decode tok/s, TTFT, wall time) |
@@ -389,8 +389,13 @@ fastembed and text-embeddings-inference):
   llama.cpp, and `/v1/systemone` decisions **1.33–1.84×**.
 
 - **Where Peregrine is behind:** the ik_llama.cpp fork processes prompts about twice as fast on the
-  AVX-512 desktop (Peregrine at 0.39–0.58×). Decode is level with it (0.89–1.06×) and Peregrine is ahead
-  with 10 users (1.05–3.09×). For embeddings, OpenVINO and ONNX Runtime are faster on the two small BERT
+  AVX-512 desktop with its defaults (Peregrine at 0.39–0.58×). Its repacked `-rtr` path is faster
+  still. The opt-in fast prompt mode closes most of the gap without changing the default engine:
+  `--fast-prompt` (lossy, off by default) is **1.18–1.46×** Peregrine's exact prompt pass and
+  **0.94–1.01×** ik_llama.cpp at its defaults, while remaining **0.74–0.94×** the fork's `-rtr`
+  path; its cost is 0.0035 nats of mean KL divergence on Llama 3.2 1B (96.75 % same top token) and
+  +957 MiB of memory. Decode is level with ik (0.89–1.06×) and Peregrine is ahead with 10 users
+  (1.05–3.09×). For embeddings, OpenVINO and ONNX Runtime are faster on the two small BERT
   encoders at 128 and 512 tokens (Peregrine at 0.85–0.99×).
 
 Full tables, charts, accuracy verification, and machine records are in [docs/benchmark.md](docs/benchmark.md).
@@ -411,12 +416,12 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 <!-- support:begin -->
 | | Supported now |
 |---|---|
-| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Gemma 3 embedding (EmbeddingGemma), BERT encoder (MiniLM, BGE, E5, GTE, bge-m3), ModernBERT encoder (ModernBERT, gte-modernbert, Granite Embedding R2), NomicBERT encoder (nomic-embed-text v1.5), Jina BERT v2 encoder (jina-embeddings-v2, ALiBi), Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4, Mistral 3 embedding (Nemotron 3.5 Embed) |
+| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Gemma 3 embedding (EmbeddingGemma), BERT encoder (MiniLM, BGE, E5, GTE, bge-m3), ModernBERT encoder (ModernBERT, gte-modernbert, Granite Embedding R2), NomicBERT encoder (nomic-embed-text v1.5), NomicBERT-MoE encoder (nomic-embed-text-v2-moe, mixture of experts), Jina BERT v2 encoder (jina-embeddings-v2, ALiBi), Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4, Mistral 3 embedding (Nemotron 3.5 Embed) |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE (smollm, gpt2 / modern-bert, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
-| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), NomicBERT (nomic-embed-text v1.5: mean, RoPE, SwiGLU), Jina BERT v2 (jina-embeddings-v2: ALiBi, GEGLU, mean/cls), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
+| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), NomicBERT (nomic-embed-text v1.5: mean, RoPE, SwiGLU), NomicBERT-MoE (nomic-embed-text-v2-moe: mean, RoPE, a mixture of experts on every second layer), Jina BERT v2 (jina-embeddings-v2: ALiBi, GEGLU, mean/cls), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
 | Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 (the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the prompt is the one llama.cpp builds from the model's template |
 | Rerank and classify | a `bert` or `modern-bert` file's classifier head (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3, bge-reranker-base and gte-reranker-modernbert-base checked against llama.cpp v0.9.0 |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
