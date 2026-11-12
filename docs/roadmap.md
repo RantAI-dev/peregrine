@@ -83,7 +83,7 @@ with no decode.
 | S4.5 | WordPiece and SentencePiece-unigram tokenizers — done (#157) | 0.5 |
 | S4.6 | `bert` family and the classifier head: MiniLM, bge, e5, bge-m3, bge-reranker; `/v1/classify` — part a, the family (post-norm blocks, absolute positions, token types, biases everywhere, LayerNorm, the exact GELU, cls/mean pooling; WordPiece and the XLM-R unigram vocabulary) with the defined `erf`/`gelu_erf`/`layer_norm` kernels: MiniLM-L6-v2, bge-small-en-v1.5 and bge-m3 checked against llama.cpp v0.9.0 and the fp32 PyTorch reference — done; part b, the head: `cls`/`cls.output` with the file's activation and labels, `Want::Head`, `/v1/rerank` (four routes) and `/v1/classify`, `peregrine rerank`, bge-reranker-v2-m3 and bge-reranker-base checked against llama.cpp v0.9.0 (pair ids identical, document order identical, scores within the measured Q8_0 bound) — done | 1.5 |
 | S4.7 | `modern-bert` and labelled classifier heads (guards, routers) — part a, the family: pre-norm blocks with weight-only LayerNorms, fused q/k/v, RoPE with separate local/global bases, alternating 128-token local and global attention, the gated feed-forward (erf GeGLU, tanh GeGLU or SwiGLU), the `modern-bert` GPT-2 pre-tokenizer and cls/mean pooling; gte-modernbert-base and Granite Embedding R2 F16 and Q8_0 checked against llama.cpp v0.9.0, on 200 texts of 16–6976 tokens. Part b, the head: `cls`→erf GELU→`cls.norm`→`cls.output` over the mean (or row 0), served on `/v1/rerank` and `/v1/classify`, with the `[bos] q [eos] [sep] d [eos]` pair; gte-reranker-modernbert-base F16 and Q8_0 on 100 pairs up to 445 tokens, ids identical and F16 order identical — done | 1.0 |
-| S4.8 | `nomic-bert`, `jina-bert-v2/v3` | 1.0 |
+| S4.8 | `nomic-bert`, `jina-bert-v2/v3` — part a, the `nomic-bert` family: token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused q/k/v, NeoX RoPE at base 1000, the SwiGLU feed-forward, mean pooling and no final norm; nomic-embed-text v1.5 F16 and Q8_0 checked against llama.cpp v0.9.0 on 200 texts of 20–2040 tokens (ids identical; F16 0.9999995 min, Q8_0 0.99830 mean vs the F16 reference, llama.cpp's own Q8_0 0.99830) — done; part b, `nomic-bert-moe` (nomic-embed-text-v2-moe) and `jina-bert-v2/v3` | 1.0 |
 | S4.9 | State of the art for embeddings and decision models against every engine (OpenVINO, ONNX Runtime, llama.cpp): the plan and its steps S4.9a-l are in [`docs/design/s4.9-sota.md`](design/s4.9-sota.md): token-budget passes with no padding, the batch-invariant float GEMM, the encoder attention strip, state forking for decision models, threading for small work, and the proof run on three machines | 6.0 |
 | S4.10 | Several models in one server: `-m` repeated, routed by the request's `model`, one engine per model and one weight pass at a time for the process | 1.0 |
 | S4.11 | System One, part 2: Kev (pointer head) and vLLM D3 (non-causal Qwen 3.5) | 1.0 |
@@ -127,6 +127,20 @@ prompt is the one llama.cpp builds from the model's template, byte for byte. Des
 | S6.5 | The `harmony` format (gpt-oss) | 0.5 |
 | S6.6 | Constrained sampling for calls: a JSON-schema matcher and a token mask; `tool_choice: "required"` and named choices | 2.0 |
 | S6.7 | The `generic` format for templates without a tool section | 0.5 |
+
+## Stage 7: macOS and Windows
+
+Peregrine on the two other desktop systems, to the bar Linux is held to: CI on every PR, a release
+archive, an installer, `upgrade`, the server's lifetime commands, goldens. The design is
+[`docs/design/s7-platforms.md`](design/s7-platforms.md).
+
+| ID | Item | pw |
+|---|---|---|
+| S7.1 | macOS on Apple Silicon: release job with a dry run, installer, `upgrade`, performance-core default, synthetic goldens, quickstart | 1.0 |
+| S7.2 | Windows x86-64 builds and passes the suite in CI | 1.5 |
+| S7.3 | Windows lifetime commands, `upgrade`, `install.ps1`, release job | 1.5 |
+| S7.4 | Windows goldens, docs for both systems, a native Windows measurement on the desktop | 1.0 |
+| S7.5 | A release that ships all four archives | 0.3 |
 
 ## Open decisions
 

@@ -760,10 +760,14 @@ impl MatKernels {
             }
         }
         #[cfg(all(target_arch = "aarch64", feature = "fmt-legacy"))]
-        // SAFETY: `kq_tiles` is `have_dotprod()`; the tile holds `n_blk` blocks and the
-        // activation rows the caller says.
+        // SAFETY: `kq_tiles` is `have_dotprod()`; `kq_i8mm` is `have_i8mm()`. The
+        // tile holds `n_blk` blocks and the activation rows the caller says.
         unsafe {
-            crate::neon::q8_08_gemm(tile, n_blk, acts, nb, out)
+            if self.kq_i8mm {
+                crate::neon::q8_08_gemm_i8mm(tile, n_blk, acts, nb, out)
+            } else {
+                crate::neon::q8_08_gemm(tile, n_blk, acts, nb, out)
+            }
         }
         #[cfg(not(any(
             all(target_arch = "x86_64", feature = "fmt-legacy"),
@@ -962,8 +966,7 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
     }
     // aarch64 has the NEON per-row kernels and repacked tiles (S2.8) and the scalar reference
     // for everything else; the x86 tiers are not compiled in there, so they are not listed.
-    // `neon-i8mm` is the same kernels with the tile GEMM on `smmla` (F2); Q8_0 has no tile, so
-    // it stays on the `sdot` batch kernel and is not listed there.
+    // `neon-i8mm` is the same kernels with the tile GEMM on `smmla` (F2, S4.9q).
     #[cfg(target_arch = "aarch64")]
     let tiers: &[Tier] = match fmt {
         // The packed float GEMM's NEON kernel (S4.9f): F32, BF16 and F16 all run on
@@ -971,7 +974,7 @@ pub fn kernels_for(fmt: Format) -> &'static [Tier] {
         // extension.
         Format::F32 | Format::F16 | Format::BF16 => &[Tier::Scalar, Tier::Neon],
         #[cfg(feature = "fmt-legacy")]
-        Format::Q8_0 => &[Tier::Scalar, Tier::NeonDotprod],
+        Format::Q8_0 => &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm],
         #[cfg(feature = "fmt-legacy")]
         Format::Q5_0 => &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm],
         #[cfg(feature = "fmt-kquant")]
@@ -1070,7 +1073,7 @@ mod tests {
         {
             assert_eq!(
                 kernels_for(Format::Q8_0),
-                &[Tier::Scalar, Tier::NeonDotprod]
+                &[Tier::Scalar, Tier::NeonDotprod, Tier::NeonI8mm]
             );
             // Q5_0 has a NEON tile and per-row kernel, and the tile GEMM on i8mm (S2.8 F1/F2).
             assert_eq!(
@@ -1251,5 +1254,90 @@ mod tests {
             scalar.path(Format::F16, false, false, true, false),
             MatPath::PerRow
         );
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "aarch64", feature = "fmt-legacy"))]
+    fn the_q8_0_tile_takes_the_smmla_body_on_the_i8mm_tier_only() {
+        use crate::kq::{dot_q8_08_ref, repack_q8_08, Q8_08};
+
+        let n_blk = 3usize;
+        let n = n_blk * 32;
+        let mut tile = vec![0u8; n_blk * Q8_08::SIZE];
+        for t in 0..n_blk {
+            let rows: Vec<Vec<u8>> = (0..8)
+                .map(|r| {
+                    let mut w = vec![0u8; 34];
+                    let d = crate::quant::f32_to_f16(0.01 + r as f32 * 0.001);
+                    w[..2].copy_from_slice(&d.to_le_bytes());
+                    for (k, c) in w[2..].iter_mut().enumerate() {
+                        *c = (k * 11 + r * 7 + t * 3) as u8;
+                    }
+                    w
+                })
+                .collect();
+            let src: Vec<&[u8]> = rows.iter().map(|r| &r[..34]).collect();
+            repack_q8_08(&src, &mut tile[t * Q8_08::SIZE..]);
+        }
+        let acts: Vec<QuantAct> = (0..8)
+            .map(|b| {
+                let x: Vec<f32> = (0..n)
+                    .map(|i| ((i * 7 + b * 13) % 23) as f32 - 11.0)
+                    .collect();
+                let mut a = QuantAct::with_capacity(n);
+                a.fill(&x);
+                a
+            })
+            .collect();
+        let table = |kq_i8mm: bool| MatKernels {
+            tiles: false,
+            pq2_rows: false,
+            ptq1_rows: false,
+            kq_tiles: true,
+            kq_i8mm,
+            kq_zmm: false,
+            fp_panels: false,
+            exact: false,
+        };
+        // Below the rung the `sdot` body runs; on it, the `smmla` body. Both are the
+        // specification's bits, and only the i8mm table calls the new body.
+        let rungs: &[bool] = if crate::cpu::have_i8mm() {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        for &i8mm in rungs {
+            crate::neon::Q8_08_I8MM_CALLS.with(|c| c.set(0));
+            crate::neon::Q8_08_SDOT_CALLS.with(|c| c.set(0));
+            let t = table(i8mm);
+            let mut got = vec![0.0f32; acts.len() * 8];
+            // The table's wrapper checks its own preconditions: the tile holds the
+            // blocks, the activation the rows, and the output the floats.
+            t.kq_tiles_q8_0(&tile, n_blk, &acts, acts.len(), &mut got);
+            let smmla = crate::neon::Q8_08_I8MM_CALLS.with(|c| c.get());
+            let sdot = crate::neon::Q8_08_SDOT_CALLS.with(|c| c.get());
+            if i8mm {
+                assert!(smmla > 0, "the i8mm tier did not take the smmla body");
+                assert_eq!(sdot, 0, "the i8mm tier also ran the sdot body");
+            } else {
+                assert_eq!(smmla, 0, "a tier below i8mm took the smmla body");
+                assert!(sdot > 0, "the tile below i8mm did not take the sdot body");
+            }
+            for (b, a) in acts.iter().enumerate() {
+                for r in 0..8 {
+                    let want = dot_q8_08_ref(&tile, n_blk, r, a);
+                    assert_eq!(
+                        got[b * 8 + r].to_bits(),
+                        want.to_bits(),
+                        "i8mm={i8mm} b={b} r={r}: {} vs {want}",
+                        got[b * 8 + r]
+                    );
+                }
+            }
+        }
+        // The table this CPU builds follows the rung, and Q8_0 lists it.
+        let k = MatKernels::get();
+        assert_eq!(k.kq_i8mm, k.kq_tiles && crate::cpu::have_i8mm());
+        assert!(MatKernels::kernels_for(Format::Q8_0).contains(&Tier::NeonI8mm));
     }
 }

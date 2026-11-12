@@ -2902,17 +2902,15 @@ pub fn det_ln_f64(x: f64) -> f64 {
     }
 }
 
-/// `tanh` on the forward path; see [`det_exp`] for the platform split.
+/// `tanh` on the forward path: the engine's own [`tanh`] on every platform.
+///
+/// Unlike its neighbours this one has no platform split. The C library's `tanhf` is the
+/// function glibc 2.40 changed, so on x86 the same file gave different bits on two Linux
+/// distributions; the functions that still call the C library off aarch64 are ones whose
+/// results have not moved between glibc versions.
 #[inline]
 pub fn det_tanh(x: f32) -> f32 {
-    #[cfg(target_arch = "aarch64")]
-    {
-        tanh(x)
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        x.tanh()
-    }
+    tanh(x)
 }
 
 /// `(sin x, cos x)`; see [`det_exp`] for the platform split.

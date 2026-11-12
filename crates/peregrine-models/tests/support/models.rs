@@ -1212,6 +1212,158 @@ pub fn write_modern_bert(dir: &Path, fmt: Format, seed: u64, s: ModernBertConfig
     path
 }
 
+/// The shape of a synthetic `nomic-bert` encoder (roadmap S4.8a).
+///
+/// The defaults have four layers, a 64-position context and a SwiGLU feed-forward,
+/// with nomic-embed-text v1.5's shape: a fused `attn_qkv`, RoPE base 1000, mean
+/// pooling, no projection biases, and no final norm (the last `layer_output_norm`
+/// is the encoder's output).
+#[derive(Clone, Copy, Debug)]
+pub struct NomicBertConfig {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    /// `attention.layer_norm_epsilon`: nomic-embed-text's own files say 1e-12.
+    pub eps: f32,
+    /// `rope.freq_base`: nomic-embed-text's own files say 1000.
+    pub rope_base: f32,
+    /// `nomic-bert.pooling_type`: 1 is mean, 2 is cls.
+    pub pooling_type: u32,
+    /// Write the optional q/k/v and `attn_output` biases (the MoE variant's shape,
+    /// which this family reads even though nomic-embed-text v1.5 has none).
+    pub biases: bool,
+    /// Omit this tensor from the file, to test the loader's refusal by name.
+    pub omit: Option<&'static str>,
+}
+
+impl Default for NomicBertConfig {
+    fn default() -> Self {
+        NomicBertConfig {
+            d_model: 128,
+            n_layer: 4,
+            n_head: 4,
+            n_ff: 256,
+            ctx: 64,
+            eps: 1e-12,
+            rope_base: 1000.0,
+            pooling_type: 1,
+            biases: false,
+            omit: None,
+        }
+    }
+}
+
+/// Write a synthetic `nomic-bert` encoder: token embeddings plus token type 0, a
+/// LayerNorm with a weight and a bias, post-norm blocks with a fused `attn_qkv`,
+/// NeoX RoPE, full bidirectional attention and a SwiGLU feed-forward, then the last
+/// block's `layer_output_norm` — the rows pooling reads. There is no position table
+/// and no final norm, exactly the tensor list of nomic-embed-text v1.5's files.
+pub fn write_nomic_bert(dir: &Path, fmt: Format, seed: u64, s: NomicBertConfig) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let arch = "nomic-bert";
+    w.str("general.architecture", arch);
+    w.str(
+        "general.name",
+        &format!("synthetic-nomic-bert-{}", fmt.label()),
+    );
+    let k = |x: &str| format!("{arch}.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.u32(&k("vocab_size"), vocab::BERT_VOCAB_SIZE as u32);
+    w.u32(&k("attention.causal"), 0);
+    w.f32(&k("attention.layer_norm_epsilon"), s.eps);
+    w.f32(&k("rope.freq_base"), s.rope_base);
+    w.u32(&k("rope.dimension_count"), (s.d_model / s.n_head) as u32);
+    w.u32(&k("pooling_type"), s.pooling_type);
+    vocab::add_bert_tokenizer_metadata(&mut w);
+
+    let wanted = |name: &str| s.omit != Some(name);
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    let bias = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        let mut out = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            let v = rng.f32_range(-0.05, 0.05);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        w.add_tensor(name, &[n as u64], Format::F32, out);
+    };
+
+    if wanted("token_embd.weight") {
+        mat(
+            &mut w,
+            &mut rng,
+            "token_embd.weight",
+            s.d_model,
+            vocab::BERT_VOCAB_SIZE,
+        );
+    }
+    if wanted("token_types.weight") {
+        // One token type ("Sentence A"), which llama.cpp hardcodes for every token.
+        mat(&mut w, &mut rng, "token_types.weight", s.d_model, 2);
+    }
+    for name in ["token_embd_norm.weight", "token_embd_norm.bias"] {
+        if wanted(name) {
+            norm(&mut w, &mut rng, name, s.d_model);
+        }
+    }
+
+    for i in 0..s.n_layer {
+        let p = |x: &str| format!("blk.{i}.{x}");
+        for (name, cols, rows) in [
+            ("attn_qkv", s.d_model, 3 * s.d_model),
+            ("attn_output", s.d_model, s.d_model),
+            ("ffn_gate", s.d_model, s.n_ff),
+            ("ffn_up", s.d_model, s.n_ff),
+            ("ffn_down", s.n_ff, s.d_model),
+        ] {
+            let name = p(&format!("{name}.weight"));
+            if wanted(&name) {
+                mat(&mut w, &mut rng, &name, cols, rows);
+            }
+        }
+        for name in [
+            p("attn_output_norm.weight"),
+            p("attn_output_norm.bias"),
+            p("layer_output_norm.weight"),
+            p("layer_output_norm.bias"),
+        ] {
+            if wanted(&name) {
+                norm(&mut w, &mut rng, &name, s.d_model);
+            }
+        }
+        if s.biases {
+            for (name, n) in [
+                (p("attn_qkv.bias"), 3 * s.d_model),
+                (p("attn_output.bias"), s.d_model),
+            ] {
+                if wanted(&name) {
+                    bias(&mut w, &mut rng, &name, n);
+                }
+            }
+        }
+    }
+
+    let path = dir.join(format!("nomic-bert-{}.gguf", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// The shape of a synthetic `mistral3` embedder (roadmap S4.14).
 ///
 /// The default has query heads wider than the residual (6 × 32 over 128), two key/value
