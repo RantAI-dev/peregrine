@@ -1,0 +1,16 @@
+{"engine": "pg-exact", "round": 1, "tok_s": 148.7066651731875, "load1": 1.13, "tries": 1}
+{"engine": "pg-fast", "round": 1, "tok_s": 184.63287925475936, "load1": 5.36, "tries": 1}
+{"engine": "ik-default", "round": 1, "tok_s": 227.621075, "load1": 6.56, "tries": 1}
+{"engine": "ik-rtr", "round": 1, "tok_s": 235.100327, "load1": 7.79, "tries": 1}
+{"engine": "llama", "round": 1, "tok_s": 125.666581, "load1": 9.05, "tries": 1}
+{"engine": "pg-exact", "round": 2, "tok_s": 149.06122834175238, "load1": 10.47, "tries": 1}
+{"engine": "pg-fast", "round": 2, "tok_s": 186.94884207981508, "load1": 10.99, "tries": 1}
+{"engine": "ik-default", "round": 2, "tok_s": 227.971453, "load1": 10.20, "tries": 1}
+{"engine": "ik-rtr", "round": 2, "tok_s": 271.048864, "load1": 10.90, "tries": 1}
+{"engine": "llama", "round": 2, "tok_s": 124.727745, "load1": 10.93, "tries": 1}
+{"engine": "pg-exact", "round": 3, "tok_s": 150.98095884348402, "load1": 11.42, "tries": 1}
+{"engine": "pg-fast", "round": 3, "tok_s": 186.58987695242507, "load1": 11.65, "tries": 1}
+{"engine": "ik-default", "round": 3, "tok_s": 199.190283, "load1": 10.82, "tries": 1}
+{"engine": "ik-rtr", "round": 3, "tok_s": 275.280635, "load1": 11.23, "tries": 1}
+{"engine": "llama", "round": 3, "tok_s": 126.111962, "load1": 9.98, "tries": 1}
+{"engine": "pg-exact", "round": 4, "tok_s": 151.04850884420864, "load1": 11.42, "tries": 1}

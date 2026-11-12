@@ -21,6 +21,45 @@ All notable changes to this project are documented here. The format follows
   against 0.1–0.3 s for the second one, which is Defender's first-open scan; the numbers and the
   caveats are in `docs/design/s7-platforms.md` §10. A change that adds a golden now records it for
   macOS and for both Windows tiers (`docs/dev/testing.md`).
+- **Long-context attention on ARM reads a query-tile row group once, same bits (S4.9t)**:
+  S4.9s's account left the score kernel at 29.0 GMAC/s and the value mix at 21.3 (bucket, soft-max
+  included) against this core's 66 GMAC/s f32 roof, both limited by how many accumulation chains
+  their loop shape keeps in flight, not by their products. `neon.rs` gains a four-query-row score
+  tile and a four-row value mix (each beside its scalar twin) and `attn.rs` groups four rows of one
+  KV head that see the same part of the tile and, for the mix and soft-max, the same context; the
+  decoder's four-row soft-max reuses S4.9r's `exp_rows4_sums`, interleaving four `f64`
+  denominators. A row's bits are still its own (ascending keys, the canonical tree, a separate
+  multiply-then-add), and the three new tests hold each body to its single-row kernel and its twin
+  over every length 1..=70, 127/128/129 and 511/512/513, five head widths, the saturated soft-max
+  values and the edge alphas; no golden moved. One thread, five interleaved rounds: the score tile
+  takes Qwen3-Embedding's scores −20.2 % at 2 000 tokens and −18.4 % at 528, attention −8.2 %; the
+  2 000-token pass −3.6 % there and −3.4 % on the Q8_0 file of the same model, with the
+  gte-modernbert encoder guard flat. The four-row mix and soft-max cannot form on that model (two
+  query heads per KV head) and are measured where they can: Llama 3.2 1B's 4 096-token prompt
+  attention gains +4.3 % and +9.4 %, and the same prompt through the engine goes 63.97 → 69.02
+  tok/s at one thread (+7.9 %). The pair's 16-dimension slice was measured and dropped (+0.8 % in
+  the pass). The ten-thread engine table against llama.cpp is owed — no window of this round had
+  the load under 4. Numbers: `benchmarks/results/spark-arm-2026-11-12-s4.9t/`; design §23.
+- **The fast prompt mode takes the 8-bit form only where it wins on the tier (S5.4f)**: on
+  AVX2 the form's body runs at 59.7 GMAC/s for every format, while this tier's exact Q4_K kernel
+  is 77.4 and a Q4_K_M file is mostly Q4_K — so `--fast-prompt`, which took the form for Q4_K
+  and Q6_K on every tier, was **0.88-0.93× the exact engine** on Llama 3.2 1B. Which formats
+  take the form is now one table (`MatKernels::q8k_uses_form`): AVX-512 keeps Q4_K and Q6_K
+  (unchanged), AVX2 takes **Q6_K only** (1.28-1.34× its exact kernel; Q4_K is 0.79-0.85 and
+  Q5_0 0.99-1.03), aarch64 keeps S5.4e's Q4_K/Q6_K, and on x86 a tier with no SIMD body takes
+  none, so the option then changes nothing and says so. Q5_0 joins the form's supported set — `q8form.rs`, the dispatch and
+  a new bit-identical AVX2 builder (`q8k_build_q5_0_avx2`) handle its short last super-block —
+  but no x86 tier selects it: at Qwen 2.5's 896-wide rows the padding costs 12 % (0.88×). The
+  form is built only for the tier's formats: Llama 3.2 1B Q4_K_M carries **140.2 MiB** instead
+  of 957.0, its fast load **+0.16 s / +151 MiB** instead of +1.7 s / +987 MiB. End to end the
+  mode is now **1.05-1.08× exact on the 1B** (was 0.91-0.93) and 1.00-1.04× on the Qwen (one
+  cell level, none below); decode after a fast prompt is level, and the other engines' cells
+  are unchanged except that the 1B is now ahead of ik_llama.cpp on all four. Only the
+  `*-fast.golden` files of the AVX2 and scalar tiers move: on AVX2 `llama-Q4_K-fast` equals the
+  tier's exact `llama-Q4_K` golden (asserted in the test), on scalar both fast goldens do; the
+  AVX-512 fast goldens pass unchanged under Intel SDE. `peregrine tier`, the server's startup
+  line and the `--fast-prompt` help now name the formats the CPU takes.
+
 - **Qwen3-Embedding F16 at long text: the value mix shares V across two rows (S4.9s, ARM)**:
   the one cell still behind 1.0 in the cache-off ARM table (Qwen3-Embedding 0.6B F16, one
   2 000-token text, 0.96× llama.cpp) spends 24 % of its pass in the attention value mix, at
@@ -37,6 +76,7 @@ All notable changes to this project are documented here. The format follows
   In the paired ten-thread window the cell moves 0.67× → 0.75× against llama.cpp; the row's
   quiet-host re-read is owed (the host's co-tenant swung one arm 3.8×). Numbers and the stage
   account: `benchmarks/results/spark-arm-2026-11-12-s4.9s/`; design §22.
+
 - **The fast prompt mode takes the NEON 8-bit kernel on ARM (S5.4e)**: `--fast-prompt`'s
   dispatch now calls `crates/peregrine-kernels/src/neon.rs` on aarch64 — `smmla` on
   `neon-i8mm`, `sdot` on `neon-dotprod`, the scalar twin on `neon`/`scalar` — and its NEON
@@ -109,6 +149,56 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The `nomic-bert-moe` family: nomic-embed-text-v2-moe (S4.8b)**: a GGUF with
+  `general.architecture = "nomic-bert-moe"` now loads and serves `/v1/embeddings` and
+  `peregrine embed`. It is llama.cpp v0.9.0's shared `bert` graph with its two
+  `LLM_ARCH_NOMIC_BERT_MOE` branches: the fused `attn_qkv`, NeoX RoPE at base 10000,
+  post-norm blocks, a plain GELU feed-forward on the even layers and a mixture of 8
+  experts (top 2, softmax gating, raw probabilities, no renormalisation, GELU experts,
+  summed in the router's order) on the odd ones, the token-type row and no final norm.
+  The family lives beside `nomic-bert` in `crates/peregrine-models/src/nomic_bert.rs`
+  (`NomicFfn` is the only branch); the shared MoE block gained a gate-less `Gelu` act.
+  The XLM-R SentencePiece-unigram tokenizer is the one `bge-m3` already used. Registered
+  behind `arch-nomic-bert-moe`; chat and label requests are refused by name. Measured
+  against llama.cpp v0.9.0 on 200 texts of 17-511 tokens in 24 languages
+  (`docs/reference/nomic-bert-moe.md`): ids identical; F16 mean 0.9999977 (one text at
+  0.9997738, a router tie, reported); Q8_0 against the F16 reference mean 0.9996520 /
+  min 0.9989152, which is 2.4e-4 better than llama.cpp's own Q8_0 mean (0.9994075) and
+  1.7e-4 worse than its minimum (0.9990825) - both inside the S4 clauses, which the
+  test asserts. The family's matmuls all take the packed float path: its 3D expert
+  banks are packed one matrix per expert (48 % of the parameters, previously the raw
+  per-row kernel) and the Q8_0 file is dequantised into f16 panels at load, which is
+  both closer to the F16 conversion and faster than its int8 tiles here; no other
+  family's bytes or bits move. Every measured cell is ahead of llama.cpp: 1.31-1.59x on
+  F16 and 1.11-1.34x on Q8_0 (16/128/512 tokens and sixteen 32-token texts). Tests: a
+  synthetic file with malformed variants, an independent scalar reference that writes
+  the routing out longhand, batch/thread/pass-budget invariance on F32 and Q8_0,
+  refusals by name, the no-allocation pass, server and CLI cases, and a Q8_0 golden on
+  scalar, AVX2 and AVX-512 under SDE.
+
+- **The accuracy report and speed table of `--fast-prompt` (S5.4c)**: the mode's measured
+  trade on the five gate models, with wikitext-2 (40 chunks of 512 tokens, 10 200 scored
+  positions, each chunk read as a prompt), the unquantised (F16) file of each model, the
+  task-accuracy suite and the prompt speed table. Fast against the exact default is
+  **0.003514 nats of mean KL divergence on Llama 3.2 1B** (median 0.0025, 99 % 0.024, RMS Δp
+  1.41 %, 96.75 % same top token) and 0.0026-0.0171 on the other four; the option adds 1.16 %
+  of the 1B's own distance from F16 (two models' share is negative, i.e. not measurable);
+  no task score moves significantly (largest +7.5 points at n = 80, every paired McNemar
+  p ≥ 0.15, and the suite's run-to-run spread on this host is 0.0 because greedy replies are
+  deterministic); prompts are **1.18-1.46× the default engine's** speed on AVX-512 (1.05-1.08× on an
+  AVX2 host, where only Q6_K takes the form — S5.4f), 0.94-1.01×
+  ik_llama.cpp at its defaults and 0.74-0.94× the fork's `-rtr` path; and the form costs
+  +957 MiB and 0.5-1.7 s of load on the 1B. **The design's 0.0015 bound on the 1B is not
+  met, and the report shows why it is the bound that is wrong**: 0.0015 was calibrated on
+  the fork's default wide path (`Q8_1`/`Q8_0`, one scale per 32 weights, 0.000945 here),
+  while the `q8_k_r16` arithmetic the form implements is the fork's `-rtr` path and measures
+  0.003401 against Peregrine's 0.003514. Nothing was tuned; the decision to re-baseline the
+  bound or widen the form is the owner's. The `kld` tool grew `--fast-prompt`, `--ref-self`
+  and `--ref-model` (with unit tests) to compare one Peregrine mode against another and
+  against an F16 file, and now builds its state through `Model::new_state` so a float-only
+  reference file runs. Numbers, raw output and commands:
+  `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`; public wording in `README.md`,
+  `docs/targets.md`, `docs/benchmark.md` and the option's help.
 - **macOS on Apple Silicon is a supported platform (roadmap S7.1)**: `release.yml` builds and tests
   `peregrine-vX.Y.Z-macos-aarch64.tar.gz` on the `macos-15` runner (`MACOSX_DEPLOYMENT_TARGET=11.0`,
   `strip -x`, then ad-hoc signed with `codesign --force --sign -`; not notarised), and a

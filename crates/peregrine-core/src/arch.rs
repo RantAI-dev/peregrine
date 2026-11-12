@@ -221,4 +221,21 @@ pub trait Family: Sync {
     fn embedding_only(&self) -> bool {
         false
     }
+
+    /// What the family wants its Q8_0 matrices dequantised into, when the float pack
+    /// is on ([`crate::fpack::Q8Panels`]). `Keep` leaves the file's bytes on the int8
+    /// kernels, as every family but `bert` and this step's mixture does.
+    fn q8_panels(&self) -> crate::fpack::Q8Panels {
+        crate::fpack::Q8Panels::Keep
+    }
+
+    /// Whether this family's mixture-of-experts banks take the float pack, one matrix
+    /// per expert (S4.8b).
+    ///
+    /// It is a property of the family's weights, not of the block: the experts of a
+    /// family that leaves this false keep the per-row path and their exact bytes,
+    /// which is what the 30B-class mixtures' recorded vectors were taken on.
+    fn packs_experts(&self) -> bool {
+        false
+    }
 }

@@ -1,0 +1,114 @@
+{
+  "created": "2026-11-12T11:29:57+00:00",
+  "dataset": {
+    "sources": {
+      "gsm8k": {
+        "file": "raw/gsm8k-test.jsonl",
+        "revision": "3101c7d5072418e28b9008a6636bde82a006892c",
+        "sha256": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
+        "url": "https://raw.githubusercontent.com/openai/grade-school-math/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/data/test.jsonl"
+      },
+      "humaneval": {
+        "file": "raw/humanevalplus-test.jsonl",
+        "revision": "d32357cf319e50e9c8d8dab5ea876c72b0fd321b",
+        "sha256": "908377f1daf28dcb36846db73a5662b2e05a9907407c2696c89ad9d3b0b04492",
+        "url": "https://huggingface.co/datasets/evalplus/humanevalplus/resolve/d32357cf319e50e9c8d8dab5ea876c72b0fd321b/test.jsonl"
+      },
+      "mmlu_dev": {
+        "file": "raw/mmlu-all-dev.parquet",
+        "revision": "c30699e8356da336a370243923dbaf21066bb9fe",
+        "sha256": "2b19bde1ed8ca6b482fb283abc90e8e0d9d228947029c0b91795d64b28b3bc3f",
+        "url": "https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/all/dev-00000-of-00001.parquet"
+      },
+      "mmlu_test": {
+        "file": "raw/mmlu-all-test.parquet",
+        "revision": "c30699e8356da336a370243923dbaf21066bb9fe",
+        "sha256": "74a41822ce7d3def56e1682f958469c04642a5336a5ce912fa375fdb90fb25d7",
+        "url": "https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/all/test-00000-of-00001.parquet"
+      }
+    },
+    "tasks_sha256": {
+      "gsm8k": "3482e5e429f37a301f6fa2fa161aba4c155c0cd41450ee2b1188c4877a03cf85",
+      "humaneval": "53dd3a4bcb12f4b888d706378fe08531d0075abb338cc08f7adf48076a70ee44",
+      "mmlu": "447f9a233f222c0da8bb42c5978377ebba25cf36e3649206b85ada8f2edad4f0"
+    }
+  },
+  "engine": "peregrine",
+  "engine_version": null,
+  "host": {
+    "arch": "x86_64",
+    "cores": 24,
+    "cpu": "36",
+    "gpu": null,
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "machine": "DESKTOP-4TS2NH4",
+    "python": "3.12.3"
+  },
+  "model": {
+    "file": "<pg>/s54c/models/gemma-3-1b-it-Q4_K_M.gguf",
+    "name": "gemma3-1b",
+    "served_id": "gemma3",
+    "sha256": "8ccc5cd1f1b3602548715ae25a66ed73fd5dc68a210412eea643eb20eb75a135"
+  },
+  "run_id": "gemma3-1b-on",
+  "server": {
+    "args": "peregrine serve --slots 8 -t 12 --fast-prompt",
+    "info": {
+      "health": "{\"status\":\"ok\"}",
+      "models": {
+        "data": [
+          {
+            "architecture": {
+              "input_modalities": [
+                "text"
+              ],
+              "output_modalities": [
+                "text"
+              ]
+            },
+            "id": "gemma3",
+            "object": "model",
+            "owned_by": "peregrine-core",
+            "weights": "dense"
+          }
+        ],
+        "object": "list"
+      },
+      "url": "http://127.0.0.1:8299"
+    },
+    "threads": null,
+    "url": "http://127.0.0.1:8299"
+  },
+  "settings": {
+    "concurrency": 8,
+    "enable_thinking": false,
+    "greedy": true,
+    "limit": {
+      "gsm8k": 150,
+      "humaneval": 100,
+      "mmlu": 300
+    },
+    "mmlu_shots": 5,
+    "note": null,
+    "reasoning_effort": null,
+    "seed": 20261109,
+    "temperature": 0.0
+  },
+  "tasks": {
+    "gsm8k": {
+      "ids_sha256": "21341ccc2a97db562637c34d9a95ca3bad6555acdfde0fdbdcfa80a1a054d653",
+      "items": 150,
+      "max_tokens": 512
+    },
+    "humaneval": {
+      "ids_sha256": "6141112d761ca86e1c9ef983a8756c86b0fa44eb1fb9af4f35de35844f21e8af",
+      "items": 100,
+      "max_tokens": 512
+    },
+    "mmlu": {
+      "ids_sha256": "57e1f04b80727f685d68f302821abad8ac98f362a5d484097fc7a8576a15fb72",
+      "items": 300,
+      "max_tokens": 24
+    }
+  }
+}

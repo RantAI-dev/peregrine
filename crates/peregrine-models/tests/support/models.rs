@@ -1380,6 +1380,249 @@ pub fn write_nomic_bert(dir: &Path, fmt: Format, seed: u64, s: NomicBertConfig) 
     path
 }
 
+/// The shape of a synthetic `nomic-bert-moe` encoder (roadmap S4.8b).
+///
+/// The defaults are nomic-embed-text-v2-moe's graph in miniature: four layers of 128
+/// with 4 heads and a 256-wide feed-forward, a 64-token context, 4 experts of which a
+/// row uses 2, MoE on the odd layers (`moe_every_n_layers = 2`), the attention and
+/// plain-FFN biases the published file carries, and the XLM-R unigram tokenizer.
+/// `omit` and the overrides exist to make the files the loader must refuse.
+#[derive(Clone, Copy, Debug)]
+pub struct NomicBertMoeConfig {
+    pub d_model: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_ff: usize,
+    pub ctx: usize,
+    /// `attention.layer_norm_epsilon`: the published file says 1e-5.
+    pub eps: f32,
+    /// `rope.freq_base`: 10000 in the published file.
+    pub rope_base: f32,
+    /// `nomic-bert-moe.pooling_type`: 1 is mean, 2 is cls.
+    pub pooling_type: u32,
+    /// `moe_every_n_layers`: the layers at `il % n == 1` are MoE (2 → the odd ones).
+    pub moe_every_n_layers: usize,
+    pub n_expert: usize,
+    pub n_expert_used: usize,
+    /// Write `attn_qkv.bias`, `attn_output.bias`, `ffn_up.bias` and `ffn_down.bias`.
+    pub biases: bool,
+    /// Write `token_types.weight` (one row, as the published file does).
+    pub token_types: bool,
+    /// Omit this tensor from the file, to test the loader's refusal by name.
+    pub omit: Option<&'static str>,
+    /// Write `expert_count` with this value rather than [`Self::n_expert`], while the
+    /// expert tensors still hold `n_expert` — a file the loader must refuse.
+    pub expert_count_meta: Option<usize>,
+    /// Write `expert_used_count` with this value (`expert_used_count > expert_count`
+    /// is the malformed case).
+    pub expert_used_meta: Option<usize>,
+    /// Write the expert tensors with this many experts rather than [`Self::n_expert`],
+    /// while the metadata says `n_expert`.
+    pub expert_tensors: Option<usize>,
+    /// Write `ffn_gate_inp.weight` with this many rows (experts) rather than
+    /// [`Self::n_expert`].
+    pub router_rows: Option<usize>,
+}
+
+impl Default for NomicBertMoeConfig {
+    fn default() -> Self {
+        NomicBertMoeConfig {
+            d_model: 128,
+            n_layer: 4,
+            n_head: 4,
+            n_ff: 256,
+            ctx: 64,
+            eps: 1e-5,
+            rope_base: 10_000.0,
+            pooling_type: 1,
+            moe_every_n_layers: 2,
+            n_expert: 4,
+            n_expert_used: 2,
+            biases: true,
+            token_types: true,
+            omit: None,
+            expert_count_meta: None,
+            expert_used_meta: None,
+            expert_tensors: None,
+            router_rows: None,
+        }
+    }
+}
+
+/// Write a synthetic `nomic-bert-moe` encoder: the `nomic-bert` graph (token embeddings
+/// plus token type 0, a LayerNorm with a weight and a bias, post-norm blocks with a
+/// fused `attn_qkv`, NeoX RoPE, full bidirectional attention and `layer_output_norm`),
+/// with a plain GELU feed-forward on the even layers and a mixture of experts on the
+/// odd ones — exactly the tensor list of nomic-embed-text-v2-moe's files
+/// (`src/models/nomic-bert-moe.cpp:14-51`).
+///
+/// Every matrix is `fmt` (F32 or Q8_0, both multiples of the block size); the norms,
+/// the biases, the token types and the router are F32, as the converter writes them.
+pub fn write_nomic_bert_moe(dir: &Path, fmt: Format, seed: u64, s: NomicBertMoeConfig) -> PathBuf {
+    let mut rng = Rng::new(seed);
+    let mut w = GgufWriter::new();
+    let arch = "nomic-bert-moe";
+    w.str("general.architecture", arch);
+    w.str(
+        "general.name",
+        &format!("synthetic-nomic-bert-moe-{}", fmt.label()),
+    );
+    let k = |x: &str| format!("{arch}.{x}");
+    w.u32(&k("block_count"), s.n_layer as u32);
+    w.u32(&k("embedding_length"), s.d_model as u32);
+    w.u32(&k("attention.head_count"), s.n_head as u32);
+    w.u32(&k("feed_forward_length"), s.n_ff as u32);
+    w.u32(&k("context_length"), s.ctx as u32);
+    w.bool(&k("attention.causal"), false);
+    w.f32(&k("attention.layer_norm_epsilon"), s.eps);
+    w.f32(&k("rope.freq_base"), s.rope_base);
+    w.u32(&k("rope.dimension_count"), (s.d_model / s.n_head) as u32);
+    w.u32(&k("pooling_type"), s.pooling_type);
+    w.u32(&k("moe_every_n_layers"), s.moe_every_n_layers as u32);
+    w.u32(
+        &k("expert_count"),
+        s.expert_count_meta.unwrap_or(s.n_expert) as u32,
+    );
+    w.u32(
+        &k("expert_used_count"),
+        s.expert_used_meta.unwrap_or(s.n_expert_used) as u32,
+    );
+    vocab::add_unigram_tokenizer_metadata(&mut w);
+    // The published file has one token type; the helper writes two, so the last key
+    // wins (the GGUF reader keeps the last occurrence).
+    w.u32("tokenizer.ggml.token_type_count", 1);
+
+    let wanted = |name: &str| s.omit != Some(name);
+    let mat = |w: &mut GgufWriter, rng: &mut Rng, name: &str, cols: usize, rows: usize| {
+        w.add_tensor(
+            name,
+            &[cols as u64, rows as u64],
+            fmt,
+            generate_weights(fmt, cols * rows, rng),
+        );
+    };
+    let norm = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        w.add_tensor(name, &[n as u64], Format::F32, generate_norm(n, rng));
+    };
+    // Never zero: a bias the engine forgot to add must move the vector.
+    let bias = |w: &mut GgufWriter, rng: &mut Rng, name: &str, n: usize| {
+        let mut out = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            let v = rng.f32_range(-0.05, 0.05);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        w.add_tensor(name, &[n as u64], Format::F32, out);
+    };
+
+    if wanted("token_embd.weight") {
+        mat(
+            &mut w,
+            &mut rng,
+            "token_embd.weight",
+            s.d_model,
+            vocab::BERT_VOCAB_SIZE,
+        );
+    }
+    if s.token_types && wanted("token_types.weight") {
+        // One token type, written as a 1-d row as the published file is.
+        w.add_tensor(
+            "token_types.weight",
+            &[s.d_model as u64],
+            Format::F32,
+            generate_norm(s.d_model, &mut rng),
+        );
+    }
+    for name in ["token_embd_norm.weight", "token_embd_norm.bias"] {
+        if wanted(name) {
+            norm(&mut w, &mut rng, name, s.d_model);
+        }
+    }
+
+    let experts = s.expert_tensors.unwrap_or(s.n_expert);
+    for i in 0..s.n_layer {
+        let p = |x: &str| format!("blk.{i}.{x}");
+        let is_moe = s.moe_every_n_layers > 0 && i % s.moe_every_n_layers == 1;
+        let name = p("attn_qkv.weight");
+        if wanted(&name) {
+            mat(&mut w, &mut rng, &name, s.d_model, 3 * s.d_model);
+        }
+        let name = p("attn_output.weight");
+        if wanted(&name) {
+            mat(&mut w, &mut rng, &name, s.d_model, s.d_model);
+        }
+        if s.biases {
+            for (name, n) in [
+                (p("attn_qkv.bias"), 3 * s.d_model),
+                (p("attn_output.bias"), s.d_model),
+            ] {
+                if wanted(&name) {
+                    bias(&mut w, &mut rng, &name, n);
+                }
+            }
+        }
+        for name in [
+            p("attn_output_norm.weight"),
+            p("attn_output_norm.bias"),
+            p("layer_output_norm.weight"),
+            p("layer_output_norm.bias"),
+        ] {
+            if wanted(&name) {
+                norm(&mut w, &mut rng, &name, s.d_model);
+            }
+        }
+        if is_moe {
+            let name = p("ffn_gate_inp.weight");
+            if wanted(&name) {
+                let rows = s.router_rows.unwrap_or(s.n_expert);
+                w.add_tensor(
+                    &name,
+                    &[s.d_model as u64, rows as u64],
+                    Format::F32,
+                    generate_weights(Format::F32, s.d_model * rows, &mut rng),
+                );
+            }
+            let name = p("ffn_up_exps.weight");
+            if wanted(&name) {
+                w.add_tensor(
+                    &name,
+                    &[s.d_model as u64, s.n_ff as u64, experts as u64],
+                    fmt,
+                    generate_weights(fmt, s.d_model * s.n_ff * experts, &mut rng),
+                );
+            }
+            let name = p("ffn_down_exps.weight");
+            if wanted(&name) {
+                w.add_tensor(
+                    &name,
+                    &[s.n_ff as u64, s.d_model as u64, experts as u64],
+                    fmt,
+                    generate_weights(fmt, s.n_ff * s.d_model * experts, &mut rng),
+                );
+            }
+        } else {
+            let name = p("ffn_up.weight");
+            if wanted(&name) {
+                mat(&mut w, &mut rng, &name, s.d_model, s.n_ff);
+            }
+            let name = p("ffn_down.weight");
+            if wanted(&name) {
+                mat(&mut w, &mut rng, &name, s.n_ff, s.d_model);
+            }
+            if s.biases {
+                for (name, n) in [(p("ffn_up.bias"), s.n_ff), (p("ffn_down.bias"), s.d_model)] {
+                    if wanted(&name) {
+                        bias(&mut w, &mut rng, &name, n);
+                    }
+                }
+            }
+        }
+    }
+
+    let path = unique_path(dir, &format!("nomic-bert-moe-{}", fmt.label()));
+    w.write_to_file(&path).expect("write synthetic model");
+    path
+}
+
 /// The shape of a synthetic `jina-bert-v2` encoder (roadmap S4.8c).
 ///
 /// The defaults are tiny: four layers of 128 with 4 heads and a 192-wide GEGLU pair, a

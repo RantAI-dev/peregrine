@@ -1,0 +1,32 @@
+# The two Llama-side A/Bs, attention only (attnbench, chunk 16, one thread, 4 096 rows).
+#
+#   attnbench <llama-3.2-1b-q4_k_m.gguf> 4096 1 2 16
+#
+# Llama 3.2 1B has four query heads per KV head, which is the only shape in the gate
+# models where the four-row mix and the four-row soft-max can form.
+
+## A. the mix's four-row pass (base = commit 1, cur = commit 1 + the quad mix)
+base prefill ctx 4096 chunk 16 threads 1: 23189.7 ms  176.6 tok/s  47.4 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 22330.4 ms  183.4 tok/s  49.3 GFLOP/s  (chk 489.092)
+base prefill ctx 4096 chunk 16 threads 1: 23229.6 ms  176.3 tok/s  47.3 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 22271.8 ms  183.9 tok/s  49.4 GFLOP/s  (chk 489.092)
+base prefill ctx 4096 chunk 16 threads 1: 23272.6 ms  176.0 tok/s  47.3 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 22324.4 ms  183.5 tok/s  49.3 GFLOP/s  (chk 489.092)
+base prefill ctx 4096 chunk 16 threads 1: 23266.9 ms  176.0 tok/s  47.3 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 22320.9 ms  183.5 tok/s  49.3 GFLOP/s  (chk 489.092)
+base prefill ctx 4096 chunk 16 threads 1: 23287.7 ms  175.9 tok/s  47.2 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 22257.7 ms  184.0 tok/s  49.4 GFLOP/s  (chk 489.092)
+# medians: 176.0 -> 183.5 tok/s (+4.3 %), load 5.0-6.4 (loaded)
+
+## B. the soft-max's four interleaved denominators (base = commit 2, cur = commit 3)
+base prefill ctx 4096 chunk 16 threads 1: 22316.8 ms  183.5 tok/s  49.3 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 20410.5 ms  200.7 tok/s  53.9 GFLOP/s  (chk 489.092)
+base prefill ctx 4096 chunk 16 threads 1: 22318.3 ms  183.5 tok/s  49.3 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 20389.8 ms  200.9 tok/s  53.9 GFLOP/s  (chk 489.092)
+base prefill ctx 4096 chunk 16 threads 1: 22238.1 ms  184.2 tok/s  49.5 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 20412.4 ms  200.7 tok/s  53.9 GFLOP/s  (chk 489.092)
+base prefill ctx 4096 chunk 16 threads 1: 22394.7 ms  182.9 tok/s  49.1 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 20386.1 ms  200.9 tok/s  53.9 GFLOP/s  (chk 489.092)
+base prefill ctx 4096 chunk 16 threads 1: 22308.8 ms  183.6 tok/s  49.3 GFLOP/s  (chk 489.092)
+cur prefill ctx 4096 chunk 16 threads 1: 20377.6 ms  201.0 tok/s  54.0 GFLOP/s  (chk 489.092)
+# medians: 183.5 -> 200.8 tok/s (+9.4 %), load 6.1-18.4 (loaded)
