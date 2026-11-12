@@ -36,7 +36,7 @@ pub struct BenchArgs {
     /// comparing against an engine started with `-t N`.
     #[arg(long)]
     pub threads: Option<usize>,
-    /// Lossy, and off by default: prompt tokens read the weights of the formats whose
+    /// Experimental, lossy, and off by default: prompt tokens read the weights of the formats whose
     /// 8-bit form beats this CPU tier's exact kernel from an 8-bit copy built at
     /// load (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so
     /// the option changes nothing). A prompt pass is 1.18-1.46x the exact engine's
