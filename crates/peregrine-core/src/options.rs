@@ -392,10 +392,14 @@ pub struct EngineOptions {
     pub exact: bool,
     /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): the Q4_K and Q6_K weights of a
     /// *prompt* row are read from an 8-bit form built at load, one scale per 256
-    /// weights, instead of the file's own codes. Prompt passes get faster and
-    /// their logits move (the accuracy report that says by how much is roadmap
-    /// S5.4c, not published yet); generated rows, embeddings, rerank and
-    /// decisions keep the exact kernels. Off by default (ADR 0003);
+    /// weights, instead of the file's own codes. Prompt passes get 1.18-1.46× faster
+    /// on AVX-512 (0.88-0.92× on AVX2, where the exact Q4_K kernel is the stronger
+    /// one — S5.4d) and their logits move: on Llama 3.2 1B Q4_K_M, measured on
+    /// AVX-512, the prompt's mean KL divergence from the default engine is 0.0035 and
+    /// 96.7 % of positions keep the same top token (the report:
+    /// `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`). Generated rows keep the
+    /// exact kernels, on a cache the 8-bit prompt wrote; embeddings, rerank and
+    /// decisions keep the exact kernels throughout. Off by default (ADR 0003);
     /// `docs/design/s5.4-fast-prompt.md`.
     pub fast_prompt: bool,
 

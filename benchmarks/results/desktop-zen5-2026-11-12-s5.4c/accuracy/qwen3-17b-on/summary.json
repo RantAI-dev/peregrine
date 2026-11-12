@@ -1,0 +1,24 @@
+{
+  "gsm8k": {
+    "accuracy": 0.8625,
+    "correct": 69,
+    "errors": 0,
+    "mean_latency_s": 18.585618857699775,
+    "n": 80
+  },
+  "humaneval": {
+    "accuracy": 0.6,
+    "correct": 30,
+    "errors": 0,
+    "mean_exec_s": 0.8877491852402454,
+    "mean_latency_s": 17.283019377960592,
+    "n": 50
+  },
+  "mmlu": {
+    "accuracy": 0.47333333333333333,
+    "correct": 71,
+    "errors": 0,
+    "mean_latency_s": 5.1033637218341275,
+    "n": 150
+  }
+}

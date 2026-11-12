@@ -36,12 +36,14 @@ pub struct BenchArgs {
     /// comparing against an engine started with `-t N`.
     #[arg(long)]
     pub threads: Option<usize>,
-    /// Experimental and lossy: prompt tokens read their Q4_K and Q6_K weights from an
-    /// 8-bit copy built at load, so a reply can differ from the default engine's; the
-    /// accuracy report is not published yet (roadmap S5.4c). Generated tokens keep the
-    /// exact kernels. A prompt pass is faster on AVX-512 and about a tenth slower on
-    /// AVX2, where the exact Q4_K kernel is the stronger one; the numbers are in
-    /// `docs/design/s5.4-fast-prompt.md` section 5d. Off by default.
+    /// Lossy, and off by default: prompt tokens read their Q4_K and Q6_K weights from
+    /// an 8-bit copy built at load. A prompt pass is 1.2-1.5x faster on AVX-512 and
+    /// about a tenth slower on AVX2, where the exact Q4_K kernel is the stronger one
+    /// (`docs/design/s5.4-fast-prompt.md` sections 5c and 5d). On Llama 3.2 1B Q4_K_M
+    /// (AVX-512) the prompt's logits move 0.0035 nats of mean KL divergence from the
+    /// default engine's and 96.7 % of positions keep the same top token (the report:
+    /// benchmarks/results/desktop-zen5-2026-11-12-s5.4c/). Generated tokens keep the
+    /// exact kernels, on a cache the 8-bit prompt wrote, so a reply can differ.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
 }

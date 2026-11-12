@@ -153,6 +153,49 @@ ik_llama.cpp on bluefin and on ARM. The 4096-context multi-user rows are single 
 settings and raw data: [`benchmarks/results/desktop-zen5-2026-11-11-ik/`](../benchmarks/results/desktop-zen5-2026-11-11-ik/README.md).
 The other tables on this page were measured earlier and against llama.cpp only.
 
+### The opt-in fast prompt mode (`--fast-prompt`, lossy, off by default)
+
+Not the default engine — a separate, opt-in mode, and this table is kept apart from the
+tables above because it trades accuracy for speed. Prompt tokens read their Q4_K and Q6_K
+weights from an 8-bit copy built at load; generated tokens keep the exact kernels.
+2026-11-12, desktop, AVX-512, the whole CPU set pinned (`taskset -c 0-23` for 12 threads,
+`taskset -c 0` for 1), five interleaved rounds per cell (three for the 4096-token 1-thread
+cells), medians, 1-minute load recorded beside every run. Prompt tok/s:
+
+| Model | prompt / threads | Per. default | Per. fast | ik (defaults) | ik (`-rtr`) | llama.cpp | fast ÷ default | fast ÷ ik | fast ÷ ik `-rtr` | fast ÷ llama |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Llama 3.2 1B | 512 / 12 | 356.3 | **453.7** | 450.3 | 577.0 | 292.2 | **1.27×** | 1.01× | **0.79×** | 1.55× |
+| Llama 3.2 1B | 512 / 1 | 55.6 | **78.4** | 67.1 | 86.6 | 42.0 | **1.41×** | 1.17× | **0.91×** | 1.87× |
+| Llama 3.2 1B | 4096 / 12 | 253.2 | **320.6** | 332.2 | 394.7 | 196.9 | **1.27×** | **0.97×** | **0.81×** | 1.63× |
+| Llama 3.2 1B | 4096 / 1 | 35.5 | **44.6** | 49.4 | 56.3 | 28.2 | **1.26×** | **0.90×** | **0.79×** | 1.58× |
+| Qwen3 1.7B | 512 / 12 | 215.6 | **254.9** | 271.0 | 346.5 | 178.3 | **1.18×** | **0.94×** | **0.74×** | 1.43× |
+| Qwen3 1.7B | 512 / 1 | 34.4 | **50.3** | 41.4 | 53.6 | 29.2 | **1.46×** | 1.21× | **0.94×** | 1.72× |
+| Qwen3 1.7B | 4096 / 12 | 163.5 | **200.4** | 214.0 | 253.5 | 125.4 | **1.23×** | **0.94×** | **0.79×** | 1.60× |
+| Qwen3 1.7B | 4096 / 1 | 25.8 | **31.9** | 32.0 | 37.3 | 20.7 | **1.24×** | **1.00×** | **0.85×** | 1.54× |
+
+**Cells below 1.0, named:** against ik_llama.cpp with `-rtr` (its own fast path, the one
+that uses the same `q8_k_r16` arithmetic) the fast mode is behind on **all eight** cells,
+0.74-0.94×; against ik at its defaults it is behind on six, 0.90-1.00×. The fast mode is
+ahead of the exact default everywhere (1.18-1.46×) and of llama.cpp everywhere
+(1.43-1.87×). The design's 0.85× target on Llama 3.2 1B at 12 threads was written against
+ik's defaults and is met there (1.01× at 512 tokens, 0.97× at 4096); against the fork's
+`-rtr` path it is 0.79-0.81×.
+
+**Accuracy** (the full report and the F16 comparison:
+[`benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4c/README.md)):
+on Llama 3.2 1B Q4_K_M the prompt's logits move **0.0035 nats of mean KL divergence** from
+the default engine's, median 0.0025, 99 % 0.024, with 96.75 % of positions keeping the same
+top token; RMS Δp 1.41 %. That is 1.16 % of the model's distance from F16 (0.0386), and it is
+the same arithmetic ik_llama.cpp's `-rtr` path measures (0.0034 on the same file and corpus).
+The other four gate models: 0.0026-0.0171 nats. Task scores (GSM8K/MMLU/HumanEval+, the four
+gate models) are not significantly different from the default engine's in any cell (largest
++7.5 points at n = 80, all McNemar p ≥ 0.15). The mode costs +957 MiB of resident memory and
+0.5-1.7 s of load on the 1B; decode is unchanged (63.1 → 64.5 tok/s after the prompt).
+It stays off by default. These are the AVX-512 numbers; on AVX2 the same mode is
+**0.88-0.92× the exact mode** (the 8-bit dot needs four instructions per 32 products there,
+the 4-bit kernel chains eight deep), so the mode is an AVX-512-and-ARM trade, not an x86 one
+(`benchmarks/results/bluefin-2026-11-12-s5.4d/`).
+
 ## Bonsai 2 (ternary) vs PrismML's fork
 
 Bonsai 2's ternary models (`PQ2_0`, ggml type 142) are compared against

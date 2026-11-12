@@ -82,9 +82,30 @@ outside the repository and delete it afterwards.
 
 Results are recorded in `docs/targets.md` with the date, host, Peregrine commit and llama.cpp version.
 
-## Task accuracy and decoding invariance (S3.3)
+## Comparing two modes of Peregrine
 
-The KL measurement above compares next-token distributions on a corpus. It does not say
+The base file above is the reference *engine*'s log-probabilities. To measure one mode of
+Peregrine against another (S5.4c: the opt-in fast prompt mode against the default, and
+either against an F16 file), `kld` has two more flags, and still uses `--base` for the
+tokens, since that is what fixes the corpus's chunking to llama.cpp's:
+
+```sh
+# the fast prompt mode against the exact mode of the same model
+kld --base m.base.bin --model m-Q4_K_M.gguf --threads 12 --ref-self --fast-prompt
+# the Q4_K_M model (exact, then fast) against the unquantised file
+kld --base m.base.bin --model m-Q4_K_M.gguf --ref-model m-f16.gguf --threads 12
+kld --base m.base.bin --model m-Q4_K_M.gguf --ref-model m-f16.gguf --threads 12 --fast-prompt
+```
+
+`--ref-self` reads each piece twice, once with no row marked (the reference) and once with
+every prompt row marked, and compares the two logit vectors; with `--fast-prompt` off it
+must report exactly `0.000000` on every position, which is the check that the marked run's
+rows really are prompt rows. `--ref-model` reads the reference from another file, in its
+exact mode. Run a kld example with `-h` for the flags; the build names the architectures it
+loads (`--features peregrine-models/arch-llama,...`), since `peregrine-bench`'s dependency
+on them is default-features-off.
+
+## Task accuracy and decoding invariance (S3.3)The KL measurement above compares next-token distributions on a corpus. It does not say
 whether an engine still *answers the task*: a distribution that is close on average can
 still change a greedy answer at a near-tie, and a change of answer changes the score. The
 task-accuracy harness (`benchmarks/accuracy/`, documented in its README) closes that gap and

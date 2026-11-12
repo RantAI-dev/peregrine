@@ -110,6 +110,32 @@ uses its own int8 layouts, and Qwen3's larger normed scores make that difference
 two families. The 7 B models were not re-measured here (each run is about four times the 1.7 B one); their numbers
 above stand.
 
+### The opt-in fast prompt mode (`--fast-prompt`)
+
+Not the default engine: the mode is lossy and off by default, and this is the accuracy report ADR 0003 requires of
+a feature that is (S5.4c, 2026-11-12, desktop H1, branch `s5.4c-fast-prompt-accuracy`, 12 threads; method and raw
+output in `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`). Wikitext-2 test, 40 chunks of 512 tokens, each
+chunk read as a prompt, 10 200 scored positions; "fast vs exact" is the same model and cache with the option on
+against off, "against F16" is the unquantised file of the same upload:
+
+| Model (Q4_K_M) | Fast vs exact: mean KLD | Median / 99 % | RMS Δp | Same top p | Exact vs F16 | Fast vs F16 | Share added |
+|---|---|---|---|---|---|---|---|
+| Llama-3.2-1B-Instruct | 0.003514 ± 0.000049 | 0.002472 / 0.023960 | 1.41 % | 96.75 % | 0.038558 | 0.039006 | +1.16 % |
+| Qwen2.5-0.5B-Instruct | 0.002645 ± 0.000053 | 0.001843 / 0.015386 | 1.23 % | 97.20 % | 0.032525 | 0.032439 | −0.26 % |
+| SmolLM2-360M-Instruct | 0.004504 ± 0.000091 | 0.003078 / 0.029123 | 1.65 % | 95.80 % | 0.035133 | 0.035477 | +0.98 % |
+| Gemma-3-1B-IT | 0.009219 ± 0.000452 | 0.002859 / 0.105939 | 2.70 % | 95.84 % | 0.087227 | 0.088221 | +1.14 % |
+| Qwen3-1.7B | 0.017115 ± 0.000993 | 0.006523 / 0.148500 | 3.75 % | 93.91 % | 0.112264 | 0.111481 | −0.70 % |
+
+The share is `(KL_fast_vs_F16 − KL_exact_vs_F16) / KL_exact_vs_F16`; two of the five are negative, which means the
+addition is smaller than the run's own error, not an improvement. The design's ship bound (mean KLD ≤ 0.0015 on the
+1B) is **not met**: 0.0035 was measured, and the fork's own `q8_k_r16` arithmetic measures 0.0034 on the same file
+and corpus when its repacked path is on (`-rtr`); the 0.000945 that the bound was taken from is the fork's *default*
+wide path, a finer `Q8_1`/`Q8_0` conversion (design §5c, results README §4). Task scores (GSM8K/MMLU/HumanEval+,
+`benchmarks/accuracy/`) move by at most +7.5 points at n = 80, every paired McNemar p ≥ 0.15. Prompt speed is
+1.18-1.46× the default engine's in the eight measured cells (AVX-512; on AVX2 the mode is slower than
+the exact kernel and stays off, S5.4d); the ratio against ik_llama.cpp is in
+`docs/benchmark.md`.
+
 ## 2. Speed
 
 Measured per the method in section 4. Baselines are H1 today.
