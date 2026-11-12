@@ -30,9 +30,9 @@ Pass `--version vX.Y.Z` to pin a release and `--prefix /usr/local` for a system-
 ### macOS on Apple Silicon
 
 macOS on Apple Silicon has no archive in v0.2.0: its archive and this installer line ship **from
-the release after v0.2.0**. Against v0.2.0 the installer stops and says so instead of fetching a
-404 — `release v0.2.0 has no macOS archive …; build from source (cargo build --release) or wait for
-the next release` — so build from source (below) until then. From the next release the same line
+the release after v0.2.0**. Against v0.2.0 the installer stops and says so — no macOS archive in
+that release, build from source (`cargo build --release`) or wait for the next release — instead of
+fetching a 404. So build from source (below) until then. From the next release the same line
 installs the Apple Silicon archive:
 
 ```sh
