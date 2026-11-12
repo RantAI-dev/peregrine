@@ -1,0 +1,5 @@
+/var/tmp/pg/s54c/models/Qwen3-1.7B-Q4_K_M.gguf: 198 Q4_K/Q6_K tensors, every 16th super-block, all eight rows
+   per 256 weights Q4_K: weights  374784  RMS 2.711881e-4  max 1.791656e-3  (mean / super-block max 0.00197, max / super-block max 0.00394)
+   per 256 weights Q6_K: weights   88064  RMS 2.624174e-4  max 9.765625e-4  (mean / super-block max 0.00193, max / super-block max 0.00394)
+    per 32 weights Q4_K: weights  374784  RMS 1.991120e-4  max 1.759056e-3  (mean / super-block max 0.00143, max / super-block max 0.00394)
+    per 32 weights Q6_K: weights   88064  RMS 1.901492e-4  max 9.292811e-4  (mean / super-block max 0.00138, max / super-block max 0.00394)

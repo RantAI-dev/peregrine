@@ -148,6 +148,9 @@ fn main() {
         if std::env::var("KQBENCH_PROMPT").is_ok() {
             prompt_kernel_table(n_sb, threads);
         }
+        if std::env::var("KQBENCH_PER32").is_ok() {
+            per32_mode(n_sb, threads);
+        }
         return;
     }
     let n = n_sb * 256;
@@ -315,6 +318,14 @@ fn main() {
                 2048.0 / ns
             );
         }
+    }
+
+    if std::env::var("KQBENCH_PER32").is_ok() {
+        per32_mode(n_sb, threads);
+    }
+
+    if std::env::var("KQBENCH_PAIR").is_ok() {
+        pair_mode(n_sb, threads);
     }
 
     if std::env::var("KQBENCH_PROMPT").is_ok() {
@@ -1369,4 +1380,307 @@ fn q5_row_shape(threads: usize) {
             );
         }
     }
+}
+
+/// The sixteen-row body against its eight-row twin (S5.4i): two adjacent tiles of
+/// the 8-bit form multiplied at once, sharing each activation broadcast, against two
+/// calls of the eight-row kernel.
+///
+/// ```text
+/// KQBENCH_PAIR=1 taskset -c 0 cargo run --release -p peregrine-bench --example kqbench -- 8 40 1
+/// ```
+///
+/// Both arms read the same forms, the same activation and write the same numbers (the
+/// test `the_sixteen_row_kernel_is_bit_identical_to_two_eight_row_ones` pins that), so
+/// the ratio is the body's alone. The tile stream is 1024 tiles of 8 rows — one real
+/// layer's worth of a 1B's gate or up matrix at `n_sb` 8 — and the pair arm walks it two
+/// tiles at a time.
+#[cfg(target_arch = "x86_64")]
+fn pair_mode(n_sb: usize, threads: usize) {
+    use peregrine_kernels::kq8::Q8K_SIZE;
+    use peregrine_kernels::kqsimd::{q8k_gemm16_zmm, q8k_gemm_zmm};
+    if !peregrine_kernels::kqsimd::have_zmm512() {
+        eprintln!("the sixteen-row body is AVX-512 only; nothing to measure here");
+        return;
+    }
+    let n = n_sb * 256;
+    let n_tiles = 1024;
+    let batch = acts(512, n, 0xC0DE_9012);
+    let mut kq = KqActs::default();
+    kq.fill(&batch);
+    let mut tiles = vec![0u8; n_tiles * n_sb * Q4K8::SIZE];
+    for t in 0..n_tiles {
+        for sb in 0..n_sb {
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = prng(0x9A9A_0000 + (t * 8 + r) as u64 * 31 + sb as u64, Q4K_BLOCK);
+                b[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                b[2..4].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes());
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let at = (t * n_sb + sb) * Q4K8::SIZE;
+            repack_q4k8(&refs, &mut tiles[at..at + Q4K8::SIZE]);
+        }
+    }
+    let stride = n_sb * Q8K_SIZE;
+    let mut forms = vec![0u8; n_tiles * stride];
+    for t in 0..n_tiles {
+        let a = t * n_sb * Q4K8::SIZE;
+        unsafe {
+            peregrine_kernels::kqsimd::q8k_build_q4k_zmm(
+                &tiles[a..a + n_sb * Q4K8::SIZE],
+                n_sb,
+                &mut forms[t * stride..(t + 1) * stride],
+            )
+        };
+    }
+    println!(
+        "--- the sixteen-row body against two eight-row calls (S5.4i): {n} weights x {} output rows, \
+         one layer streamed ({} MB), GMAC/s per core over {threads} cores ---",
+        8 * n_tiles,
+        n_tiles * stride / 1_000_000
+    );
+    for &nb in &[8usize, 16, 64, 128, 256, 512] {
+        let reps = (200 / nb).max(1);
+        let mut out8 = vec![0.0f32; 8 * nb];
+        let mut out16 = vec![0.0f32; 16 * nb];
+        let macs = (n_tiles * 8 * n * nb * reps) as f64;
+        let mut both: Vec<f64> = Vec::new();
+        let mut pair: Vec<f64> = Vec::new();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in 0..n_tiles {
+                    let a = t * stride;
+                    unsafe { q8k_gemm_zmm(&forms[a..a + stride], n_sb, &kq, nb, &mut out8) };
+                }
+            }
+            both.push(t0.elapsed().as_secs_f64());
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for t in (0..n_tiles).step_by(2) {
+                    let a = t * stride;
+                    unsafe { q8k_gemm16_zmm(&forms[a..a + 2 * stride], n_sb, &kq, nb, &mut out16) };
+                }
+            }
+            pair.push(t0.elapsed().as_secs_f64());
+        }
+        let g = |v: &mut Vec<f64>| macs / v.iter().cloned().fold(f64::MAX, f64::min) / 1e9;
+        let (b, p) = (g(&mut both), g(&mut pair));
+        println!(
+            "{nb:>3} acts: two eight-row calls {b:5.1}  sixteen-row body {p:5.1}  ({:+.0} %)  \
+             GMAC/s/core",
+            (p / b - 1.0) * 100.0
+        );
+    }
+}
+
+/// The per-32 form against the per-256 form and against the exact kernel (S5.4i,
+/// part B): GMAC/s at the prompt pass's widths, one core and all cores, plus the
+/// bytes per weight and the build time.
+///
+/// ```text
+/// KQBENCH_PER32=1 taskset -c 0-23 cargo run --release -p peregrine-bench \
+///     --example kqbench -- 8 40 12
+/// ```
+///
+/// One run is 1024 eight-row tiles of 2048 weights — a real layer's gate or up
+/// matrix, 17 MB from the per-256 form's store. The exact arm reads the file's own
+/// repacked tiles, the per-256 arm the form the fast prompt mode ships, and the
+/// per-32 arm the experimental form; all three compute the same 2048 · 8192 · ny
+/// multiply-accumulates, so the GMAC/s are comparable. The two forms' numbers are the
+/// input to the owner's decision between the two arithmetics, and nothing in the
+/// engine dispatches the per-32 one.
+#[cfg(target_arch = "x86_64")]
+fn per32_mode(n_sb: usize, threads: usize) {
+    use peregrine_kernels::kq8::Q8K_SIZE;
+    use peregrine_kernels::kqsimd::{gemm_p32_zmm, q4k8_gemm_zmm, q8k_gemm_zmm};
+    use peregrine_kernels::p32::{build_tile, form_size as p32_size, P32_ROWS};
+    if !peregrine_kernels::kqsimd::have_zmm512() {
+        eprintln!("the per-32 body is AVX-512 only; nothing to measure here");
+        return;
+    }
+    let n = n_sb * 256;
+    let n_tiles = 1024;
+    let n_blk = n / 32;
+    let batch = acts(512, n, 0xC0DE_5150);
+    let mut kq = KqActs::default();
+    kq.fill(&batch);
+    let p32acts = peregrine_kernels::p32::P32Acts::fill(&batch);
+    let mut tiles = vec![0u8; n_tiles * n_sb * Q4K8::SIZE];
+    for t in 0..n_tiles {
+        for sb in 0..n_sb {
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                *b = prng(0x4C4C_0000 + (t * 8 + r) as u64 * 31 + sb as u64, Q4K_BLOCK);
+                b[0..2].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                b[2..4].copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes());
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let at = (t * n_sb + sb) * Q4K8::SIZE;
+            repack_q4k8(&refs, &mut tiles[at..at + Q4K8::SIZE]);
+        }
+    }
+    let stride = n_sb * Q8K_SIZE;
+    let p32stride = p32_size(n_blk);
+    let mut forms = vec![0u8; n_tiles * stride];
+    let mut forms32 = vec![0u8; n_tiles * p32stride];
+    for t in 0..n_tiles {
+        let a = t * n_sb * Q4K8::SIZE;
+        unsafe {
+            peregrine_kernels::kqsimd::q8k_build_q4k_zmm(
+                &tiles[a..a + n_sb * Q4K8::SIZE],
+                n_sb,
+                &mut forms[t * stride..(t + 1) * stride],
+            )
+        };
+        let mut rows: [[f32; 256]; P32_ROWS] = [[0.0; 256]; P32_ROWS];
+        for (r, row) in rows.iter_mut().enumerate() {
+            *row = peregrine_kernels::kq8::q4k_weights(&tiles[a..a + n_sb * Q4K8::SIZE], r);
+        }
+        let mut refs: [&[f32]; P32_ROWS] = [&[]; P32_ROWS];
+        for (r, x) in refs.iter_mut().enumerate() {
+            *x = rows[r].as_slice();
+        }
+        build_tile(&refs, &mut forms32[t * p32stride..(t + 1) * p32stride]);
+    }
+    // The per-32 form is the twin's multiply, on every activation width the table
+    // below reports: a mismatch would make the table compare a different arithmetic.
+    for &nb in &[8usize, 512] {
+        let mut want = vec![0.0f32; nb * 8];
+        let mut got = vec![0.0f32; nb * 8];
+        peregrine_kernels::p32::gemm_p32(&forms32[..p32stride], n_blk, &p32acts, nb, &mut want);
+        unsafe { gemm_p32_zmm(&forms32[..p32stride], n_blk, &p32acts, nb, &mut got) };
+        for i in 0..nb * 8 {
+            assert_eq!(
+                want[i].to_bits(),
+                got[i].to_bits(),
+                "the per-32 body is not the twin's at {nb} rows"
+            );
+        }
+        let _ = &kq;
+    }
+    println!(
+        "--- the per-32 form against the per-256 one (S5.4i, part B): {n} weights x {} output rows, \
+         one layer streamed, GMAC/s per core over 1 and {threads} cores; bytes per weight \
+         {:.5} (per 256) and {:.5} (per 32); the file's Q4_K is {:.4} ---",
+        8 * n_tiles,
+        Q8K_SIZE as f64 / 2048.0,
+        peregrine_kernels::p32::bytes_per_weight(),
+        Q4K_BLOCK as f64 / 256.0
+    );
+    for &nb in &[8usize, 64, 128, 256, 512] {
+        let reps = (120 / nb).max(1);
+        let macs = (n_tiles * 8 * n * nb * reps) as f64;
+        let mut rows = Vec::new();
+        for arm in 0..3 {
+            let mut best = f64::MAX;
+            let mut agg = f64::MAX;
+            // One core first, then `threads` independent copies: the engine splits
+            // output rows across workers, and a shared tile would measure cache
+            // sharing rather than the kernel.
+            for &cores in &[1usize, threads] {
+                let mut handles = Vec::new();
+                for _k in 0..cores {
+                    let tiles = tiles.clone();
+                    let forms = forms.clone();
+                    let forms32 = forms32.clone();
+                    let kq = kq.clone();
+                    let p32acts = p32acts.clone();
+                    handles.push(std::thread::spawn(move || {
+                        let mut o8 = vec![0.0f32; nb * 8];
+                        let t0 = Instant::now();
+                        for _ in 0..reps {
+                            for t in 0..n_tiles {
+                                let a = t * n_sb * Q4K8::SIZE;
+                                unsafe {
+                                    match arm {
+                                        0 => q4k8_gemm_zmm(
+                                            &tiles[a..a + n_sb * Q4K8::SIZE],
+                                            n_sb,
+                                            &kq,
+                                            nb,
+                                            &mut o8,
+                                        ),
+                                        1 => q8k_gemm_zmm(
+                                            &forms[t * stride..(t + 1) * stride],
+                                            n_sb,
+                                            &kq,
+                                            nb,
+                                            &mut o8,
+                                        ),
+                                        _ => gemm_p32_zmm(
+                                            &forms32[t * p32stride..(t + 1) * p32stride],
+                                            n_blk,
+                                            &p32acts,
+                                            nb,
+                                            &mut o8,
+                                        ),
+                                    }
+                                };
+                            }
+                        }
+                        t0.elapsed().as_secs_f64()
+                    }));
+                }
+                let secs: f64 = handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .fold(f64::MAX, f64::min);
+                if cores == 1 {
+                    best = secs;
+                } else {
+                    agg = secs;
+                }
+            }
+            rows.push((macs / best / 1e9, macs * threads as f64 / agg / 1e9));
+        }
+        println!(
+            "{nb:>3} acts: exact {:5.1} / {:6.1}   per-256 {:5.1} / {:6.1}   per-32 {:5.1} / {:6.1}  \
+             GMAC/s (1 core / {threads} cores)   per-32 ÷ per-256 {:.3} / {:.3}   per-32 ÷ exact \
+             {:.3} / {:.3}",
+            rows[0].0, rows[0].1, rows[1].0, rows[1].1, rows[2].0, rows[2].1,
+            rows[2].0 / rows[1].0, rows[2].1 / rows[1].1,
+            rows[2].0 / rows[0].0, rows[2].1 / rows[0].1,
+        );
+    }
+    // The build: the per-256 form's scalar twin (the definition, and the builder a
+    // scalar tier runs) against the per-32 form's builder, at weights per second.
+    let reps = 8usize;
+    let mut a256 = f64::MAX;
+    let mut a32 = f64::MAX;
+    for _ in 0..5 {
+        let t0 = Instant::now();
+        for t in 0..n_tiles {
+            let a = t * n_sb * Q4K8::SIZE;
+            peregrine_kernels::kq8::build_q4k(
+                &tiles[a..a + n_sb * Q4K8::SIZE],
+                n_sb,
+                &mut forms[t * stride..(t + 1) * stride],
+            );
+        }
+        a256 = a256.min(t0.elapsed().as_secs_f64());
+        let t0 = Instant::now();
+        for t in 0..n_tiles {
+            let a = t * n_sb * Q4K8::SIZE;
+            let mut rows: [[f32; 256]; P32_ROWS] = [[0.0; 256]; P32_ROWS];
+            for (r, row) in rows.iter_mut().enumerate() {
+                *row = peregrine_kernels::kq8::q4k_weights(&tiles[a..a + n_sb * Q4K8::SIZE], r);
+            }
+            let mut refs: [&[f32]; P32_ROWS] = [&[]; P32_ROWS];
+            for (r, x) in refs.iter_mut().enumerate() {
+                *x = rows[r].as_slice();
+            }
+            build_tile(&refs, &mut forms32[t * p32stride..(t + 1) * p32stride]);
+        }
+        a32 = a32.min(t0.elapsed().as_secs_f64());
+    }
+    let w = (n_tiles * 8 * n) as f64;
+    println!(
+        "build (scalar builders, dequantise + requantise, {reps} layers): per-256 {:.2} G weights/s, \
+         per-32 {:.2} G weights/s ({:.3}×)",
+        w / a256 / 1e9,
+        w / a32 / 1e9,
+        a256 / a32
+    );
 }

@@ -421,10 +421,140 @@ fn dump(path: &str, want: &str, groups: usize, prefix: &str) {
     );
 }
 
+/// Per-weight RMS and max error of the two 8-bit forms against the file's own
+/// dequantised weights (S5.4i): one scale per 256 weights (`crate::kq8`, the
+/// fast prompt mode's form) and one per 32 (`crate::p32`).
+///
+/// Every error is relative to the **super-block's** largest weight, the denominator
+/// S5.4a's requant tables use, so the two forms are directly comparable; the max is
+/// also given as a multiple of half the step the form can take (`max/254` per 256
+/// weights, `max/254` per 32 with that block's own max).
+fn p32_errors(path: &str) {
+    use peregrine_kernels::kq8::{build_q4k, build_q6k, code_at, scale_at, Q8K_SIZE};
+    use peregrine_kernels::p32::{build_tile, code_at as p32_at, P32_D, P32_ROWS, P32_SIZE};
+    let gguf = Gguf::open(std::path::Path::new(path)).expect("the model opens");
+    let mut names: Vec<&String> = gguf.tensors.keys().collect();
+    names.sort();
+    // [0] = per 256 weights, [1] = per 32 weights.
+    // [form][format]: 0 = per 256, 1 = per 32; format 0 = Q4_K, 1 = Q6_K.
+    let mut n = [[0u64; 2]; 2];
+    let mut sq = [[0.0f64; 2]; 2];
+    let mut hi = [[0.0f64; 2]; 2];
+    let mut hi_abs = [[0.0f64; 2]; 2];
+    let mut mean = [[0.0f64; 2]; 2];
+    let mut tensors = 0usize;
+    for name in names {
+        let t = &gguf.tensors[name];
+        let cols = t.dims[0] as usize;
+        if !matches!(t.kind, Format::Q4_K | Format::Q6_K) || !cols.is_multiple_of(Q8K_WEIGHTS) {
+            continue;
+        }
+        let rows: usize = t.dims[1..].iter().map(|&d| d as usize).product();
+        if rows < P32_ROWS {
+            continue;
+        }
+        tensors += 1;
+        let n_sb = cols / Q8K_WEIGHTS;
+        let block = t.kind.block_bytes();
+        type Repack = fn(&[&[u8]], &mut [u8]);
+        let (size, repack, fmt): (usize, Repack, usize) = match t.kind {
+            Format::Q4_K => (Q4K8::SIZE, repack_q4k8, 0usize),
+            _ => (Q6K8::SIZE, repack_q6k8, 1usize),
+        };
+        // Every 16th super-block of every tensor, and all eight rows of its tile.
+        let mut sb = 0usize;
+        while sb < n_sb {
+            let row0 = 0usize; // row 0 of the tensor; the tile is rows row0..row0+8
+            let tile = tile8(gguf.bytes(t), row_bytes_of(t), sb, block, repack, size);
+            let mut w: [[f32; Q8K_WEIGHTS]; P32_ROWS] = [[0.0; Q8K_WEIGHTS]; P32_ROWS];
+            for (r, wr) in w.iter_mut().enumerate() {
+                let one = if fmt == 0 {
+                    q4k_weights(&tile, r)
+                } else {
+                    peregrine_kernels::kq8::q6k_weights(&tile, r)
+                };
+                *wr = one;
+            }
+            let mut form = vec![0u8; Q8K_SIZE];
+            if fmt == 0 {
+                build_q4k(&tile, 1, &mut form)
+            } else {
+                build_q6k(&tile, 1, &mut form)
+            }
+            let mut refs: [&[f32]; P32_ROWS] = [&[]; P32_ROWS];
+            for (r, x) in refs.iter_mut().enumerate() {
+                *x = w[r].as_slice();
+            }
+            let mut form32 = vec![0u8; P32_SIZE * 8];
+            build_tile(&refs, &mut form32);
+            for (r, wr) in w.iter().enumerate() {
+                let top = wr.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
+                if top == 0.0 {
+                    continue;
+                }
+                let d256 = f32::from_le_bytes(
+                    form[scale_at(0, r)..scale_at(0, r) + 4].try_into().unwrap(),
+                );
+                for (i, &x) in wr.iter().enumerate() {
+                    let g = i / 8;
+                    let k = i % 8;
+                    let c = form[code_at(0, g, r, k)] as i32 - 128;
+                    let e = (x - c as f32 * d256).abs() as f64;
+                    n[0][fmt] += 1;
+                    sq[0][fmt] += e * e;
+                    mean[0][fmt] += e / top as f64;
+                    hi[0][fmt] = hi[0][fmt].max(e / top as f64);
+                    hi_abs[0][fmt] = hi_abs[0][fmt].max(e);
+                }
+                for blk in 0..8 {
+                    let unit = &form32[blk * P32_SIZE..(blk + 1) * P32_SIZE];
+                    let d = f32::from_le_bytes(
+                        unit[P32_D + r * 4..P32_D + r * 4 + 4].try_into().unwrap(),
+                    );
+                    for j in 0..4 {
+                        for k in 0..8 {
+                            let c = unit[p32_at(j, r, k)] as i32 - 128;
+                            let x = wr[blk * 32 + j * 8 + k];
+                            let e = (x - c as f32 * d).abs() as f64;
+                            n[1][fmt] += 1;
+                            sq[1][fmt] += e * e;
+                            mean[1][fmt] += e / top as f64;
+                            hi[1][fmt] = hi[1][fmt].max(e / top as f64);
+                            hi_abs[1][fmt] = hi_abs[1][fmt].max(e);
+                        }
+                    }
+                }
+            }
+            let _ = row0;
+            sb += 16;
+        }
+    }
+    println!("{path}: {tensors} Q4_K/Q6_K tensors, every 16th super-block, all eight rows");
+    for (i, label) in ["per 256 weights", "per 32 weights"].iter().enumerate() {
+        for (f, fmt) in ["Q4_K", "Q6_K"].iter().enumerate() {
+            println!(
+                "  {label:>16} {fmt:>4}: weights {:>7}  RMS {:.6e}  max {:.6e}  \
+                 (mean / super-block max {:.5}, max / super-block max {:.5})",
+                n[i][f],
+                (sq[i][f] / n[i][f] as f64).sqrt(),
+                hi_abs[i][f],
+                mean[i][f] / n[i][f] as f64,
+                hi[i][f]
+            );
+        }
+    }
+}
+
+fn row_bytes_of(t: &peregrine_core::gguf::TensorInfo) -> usize {
+    let cols = t.dims[0] as usize;
+    peregrine_kernels::quant::row_bytes(t.kind, cols)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("errors") => errors(&args[1]),
+        Some("p32") => p32_errors(&args[1]),
         Some("dump") => dump(
             &args[1],
             &args[2],
@@ -432,7 +562,8 @@ fn main() {
             &args[4],
         ),
         _ => eprintln!(
-            "usage: kq8model errors <model.gguf>\n       kq8model dump <model.gguf> <tensor> <groups> <prefix>"
+            "usage: kq8model errors <model.gguf>\n       kq8model p32 <model.gguf>\n       \
+             kq8model dump <model.gguf> <tensor> <groups> <prefix>"
         ),
     }
 }

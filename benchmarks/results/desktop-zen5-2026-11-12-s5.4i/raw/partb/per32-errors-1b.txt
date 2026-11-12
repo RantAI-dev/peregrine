@@ -1,0 +1,5 @@
+/home/uaa/models-ab/Llama-3.2-1B-Instruct-Q4_K_M.gguf: 113 Q4_K/Q6_K tensors, every 16th super-block, all eight rows
+   per 256 weights Q4_K: weights  212992  RMS 1.458002e-4  max 8.952990e-4  (mean / super-block max 0.00198, max / super-block max 0.00394)
+   per 256 weights Q6_K: weights   51200  RMS 1.211612e-4  max 5.508708e-4  (mean / super-block max 0.00194, max / super-block max 0.00394)
+    per 32 weights Q4_K: weights  212992  RMS 1.047538e-4  max 8.689351e-4  (mean / super-block max 0.00142, max / super-block max 0.00394)
+    per 32 weights Q6_K: weights   51200  RMS 8.620040e-5  max 5.352590e-4  (mean / super-block max 0.00138, max / super-block max 0.00394)
