@@ -18,8 +18,8 @@ fn main() {
 fn main() {
     use peregrine_kernels::format::Format;
     use peregrine_kernels::kq::{
-        dot_q4k8_ref, dot_q5_08_ref, dot_q6k8_ref, repack_q4k8, repack_q5_08, repack_q6k8, KqActs,
-        Q4K8, Q5_08, Q6K8,
+        dot_q4k8_ref, dot_q5_08_ref, dot_q6k8_ref, repack_q4k8, repack_q5_08, repack_q6k8,
+        repack_q8_08, KqActs, Q4K8, Q5_08, Q6K8, Q8_08,
     };
     use peregrine_kernels::quant::{dot_scalar, QuantAct};
     use std::hint::black_box;
@@ -154,7 +154,8 @@ fn main() {
         println!("{name:<34} {:>10.1} ns  {:>8.1} GMAC/s", ns, macs / ns);
     };
 
-    let mut out = vec![0.0f32; 1024];
+    // Room for a 512-row batch of the eight-row tile (512 · 8 floats).
+    let mut out = vec![0.0f32; 8192];
     println!(
         "n={n} rows={rows} reps={reps} tier={}",
         peregrine_kernels::cpu::tier_name()
@@ -188,6 +189,49 @@ fn main() {
         }
         black_box(out[0]);
     });
+
+    // The repacked Q8_0 tile (eight rows per block): its `sdot` body against the
+    // `smmla` body S4.9q adds, at the batch sizes the tile GEMM sees. One activation
+    // row is the GEMV path; 512 is a full encoder batch.
+    let mut q8_tile = vec![0u8; n_blk * Q8_08::SIZE];
+    for t in 0..n_blk {
+        let src: Vec<&[u8]> = (0..8).map(|_| &q8_row[t * 34..][..34]).collect();
+        repack_q8_08(&src, &mut q8_tile[t * Q8_08::SIZE..]);
+    }
+    let wide: Vec<QuantAct> = (0..512)
+        .map(|i| {
+            let y: Vec<f32> = (0..n)
+                .map(|j| (((i * 331 + j) as f32) * 0.0013).sin())
+                .collect();
+            let mut a = QuantAct::with_capacity(n);
+            a.fill(&y);
+            a
+        })
+        .collect();
+    for nb in [1usize, 8, 64, 512] {
+        bench(&format!("Q8_0 tile sdot, GEMM {nb}"), 8 * nb, &mut || {
+            unsafe {
+                peregrine_kernels::neon::q8_08_gemm(&q8_tile, n_blk, &wide[..nb], nb, &mut out)
+            };
+            black_box(out[0]);
+        });
+    }
+    if peregrine_kernels::cpu::have_i8mm() {
+        for nb in [1usize, 8, 64, 512] {
+            bench(&format!("Q8_0 tile i8mm, GEMM {nb}"), 8 * nb, &mut || {
+                unsafe {
+                    peregrine_kernels::neon::q8_08_gemm_i8mm(
+                        &q8_tile,
+                        n_blk,
+                        &wide[..nb],
+                        nb,
+                        &mut out,
+                    )
+                };
+                black_box(out[0]);
+            });
+        }
+    }
 
     bench("Q4_K scalar, 1 row", rows, &mut || {
         let mut acc = 0.0f32;
