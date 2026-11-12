@@ -73,7 +73,7 @@ jobs:
           for i in $(seq 1 100); do grep -q 'loaded in' "$log" 2>/dev/null && break; sleep 0.1; done
           echo "load1_start_ms $ready"
           grep -o 'loaded in [0-9.]* s' "$log" | head -1
-          "$exe" stop --port $port
+          "$exe" stop
 
           echo "=== load, second run"
           port=18202
@@ -84,7 +84,7 @@ jobs:
           for i in $(seq 1 100); do grep -q 'loaded in' "$log" 2>/dev/null && break; sleep 0.1; done
           echo "load2_start_ms $ready"
           grep -o 'loaded in [0-9.]* s' "$log" | head -1
-          "$exe" stop --port $port
+          "$exe" stop
 
           echo "=== bench, five runs, 512-token prompt, 4 threads"
           for i in 1 2 3 4 5; do
@@ -113,7 +113,7 @@ jobs:
               -d '{"model":"peregrine","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":8,"temperature":0}')
             echo "chat_s $chat"
             t0=$(date +%s%N)
-            "$exe" stop --port $port
+            "$exe" stop
             echo "stop_ms $(( ($(date +%s%N) - t0) / 1000000 ))"
             "$exe" status || echo "status: no managed server"
           fi
