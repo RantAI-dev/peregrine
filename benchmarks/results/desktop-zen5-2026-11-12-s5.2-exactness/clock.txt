@@ -1,0 +1,5 @@
+clockprobe.c (3 s burn, pinned to CPU 4), three times, at the start of the session:
+
+MONOTONIC 3.000  RAW 2.728  CPU 2.726  TSC/Gticks 5.445  tsc_ghz_if_cpu_accurate 1.997  cpu_over_wall 0.909
+MONOTONIC 3.000  RAW 2.727  CPU 2.726  TSC/Gticks 5.444  tsc_ghz_if_cpu_accurate 1.997  cpu_over_wall 0.909
+MONOTONIC 3.000  RAW 2.728  CPU 2.726  TSC/Gticks 5.445  tsc_ghz_if_cpu_accurate 1.997  cpu_over_wall 0.909

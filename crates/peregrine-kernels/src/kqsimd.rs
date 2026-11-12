@@ -1941,6 +1941,102 @@ unsafe fn q4k8_minpairs(t: *const u8) -> [__m256i; 4] {
     out
 }
 
+/// Where the Q4_K kernel reads a window's two eight-weight groups of codes.
+///
+/// The tile stores the codes as nibbles, so the narrow kernel unpacks them with
+/// an `and` and a `shift` per window. A wide pass can widen them to bytes once
+/// for a whole tile ([`q4k8_widen`]) and then load the two groups directly; the
+/// codes are the same bytes either way, so the two sources are bit-identical
+/// and only the instruction count differs.
+trait Q4Codes {
+    /// The low-nibble and high-nibble eight-weight groups of window `w`.
+    ///
+    /// # Safety
+    ///
+    /// The source must hold `n_sb` super-blocks.
+    unsafe fn window(&self, sb: usize, w: usize) -> (__m512i, __m512i);
+}
+
+/// The tile's own nibbles.
+struct Nibbles<'a> {
+    tile: &'a [u8],
+}
+
+impl Q4Codes for Nibbles<'_> {
+    #[inline(always)]
+    unsafe fn window(&self, sb: usize, w: usize) -> (__m512i, __m512i) {
+        let lownib = _mm512_set1_epi8(0x0F);
+        let p = self
+            .tile
+            .as_ptr()
+            .add(sb * Q4K8::SIZE + crate::kq::q4_qs() + w * 64);
+        let v = _mm512_loadu_si512(p as *const __m512i);
+        (
+            _mm512_and_si512(v, lownib),
+            _mm512_and_si512(_mm512_srli_epi16(v, 4), lownib),
+        )
+    }
+}
+
+/// A tile widened to one byte per weight by [`q4k8_widen`].
+struct Widened<'a> {
+    codes: &'a [u8],
+}
+
+impl Q4Codes for Widened<'_> {
+    #[inline(always)]
+    unsafe fn window(&self, sb: usize, w: usize) -> (__m512i, __m512i) {
+        let p = self.codes.as_ptr().add(sb * Q4K8_WIDE + w * 128);
+        (
+            _mm512_loadu_si512(p as *const __m512i),
+            _mm512_loadu_si512(p.add(64) as *const __m512i),
+        )
+    }
+}
+
+/// The bytes a widened Q4_K tile takes per super-block: eight rows of 256 codes.
+///
+/// Twice the tile's 1024 nibble bytes, and the window order is the tile's, with
+/// a window's low-nibble group first and its high-nibble group second.
+pub const Q4K8_WIDE: usize = 2048;
+
+/// Widen a repacked Q4_K tile's nibbles to one byte per weight.
+///
+/// This is the one thing a wide pass can hoist out of the kernel without
+/// touching a single bit: `q4_qs` holds the codes as nibbles and the kernel has
+/// to split them on every window of every activation group, so a pass that runs
+/// many groups over the same tile can do it once instead. Nothing is rescaled
+/// and nothing is rounded — the code is copied, `0..15`, into its own byte.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`]; `tile` must hold `n_sb` tiles
+/// and `dst` `n_sb * Q4K8_WIDE` bytes.
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+pub unsafe fn q4k8_widen(tile: &[u8], n_sb: usize, dst: &mut [u8]) {
+    assert!(
+        tile.len() >= n_sb * Q4K8::SIZE,
+        "the tile holds fewer than n_sb tiles"
+    );
+    assert!(
+        dst.len() >= n_sb * Q4K8_WIDE,
+        "the widened buffer holds fewer than n_sb super-blocks"
+    );
+    let lownib = _mm512_set1_epi8(0x0F);
+    for sb in 0..n_sb {
+        let t = tile.as_ptr().add(sb * Q4K8::SIZE);
+        let d = dst.as_mut_ptr().add(sb * Q4K8_WIDE);
+        for w in 0..WINDOWS {
+            let v = _mm512_loadu_si512(t.add(crate::kq::q4_qs() + w * 64) as *const __m512i);
+            _mm512_storeu_si512(d.add(w * 128) as *mut __m512i, _mm512_and_si512(v, lownib));
+            _mm512_storeu_si512(
+                d.add(w * 128 + 64) as *mut __m512i,
+                _mm512_and_si512(_mm512_srli_epi16(v, 4), lownib),
+            );
+        }
+    }
+}
+
 /// Eight output rows of a repacked Q4_K tile against `N` activation rows, on the
 /// AVX-512 tier.
 ///
@@ -1956,8 +2052,9 @@ unsafe fn q4k8_minpairs(t: *const u8) -> [__m256i; 4] {
 /// The caller must have checked [`have_zmm512`]. The tile must hold `n_sb`
 /// tiles, and the activation must carry the per-256 layout.
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
-unsafe fn q4k8_group_zmm<S: ActSrc, const N: usize>(
+unsafe fn q4k8_group_codes_zmm<S: ActSrc, C: Q4Codes, const N: usize>(
     tile: &[u8],
+    codes: &C,
     n_sb: usize,
     src: &S,
     row0: usize,
@@ -1968,14 +2065,13 @@ unsafe fn q4k8_group_zmm<S: ActSrc, const N: usize>(
         out.len() >= (row0 + N) * ROWS,
         "the output holds eight rows per row"
     );
-    let lownib = _mm512_set1_epi8(0x0F);
     let mut facc = [_mm256_setzero_ps(); N];
     // The activation's addressing is the same for every super-block and every
     // window but for two fixed strides, so it is worked out once per row here
     // rather than per (row, window) inside the kernel.
-    let mut codes = [std::ptr::null::<u8>(); N];
+    let mut acodes = [std::ptr::null::<u8>(); N];
     for u in 0..N {
-        codes[u] = src.codes_at(row0 + u);
+        acodes[u] = src.codes_at(row0 + u);
     }
     let cstride = src.codes_stride();
     for sb in 0..n_sb {
@@ -1995,11 +2091,9 @@ unsafe fn q4k8_group_zmm<S: ActSrc, const N: usize>(
             for k in 0..4 {
                 let w = g * 4 + k;
                 let (lo, hi) = src.window_step(w);
-                let v = _mm512_loadu_si512(t.add(crate::kq::q4_qs() + w * 64) as *const __m512i);
-                let vlo = _mm512_and_si512(v, lownib);
-                let vhi = _mm512_and_si512(_mm512_srli_epi16(v, 4), lownib);
+                let (vlo, vhi) = codes.window(sb, w);
                 for u in 0..N {
-                    let b = codes[u].add(soff);
+                    let b = acodes[u].add(soff);
                     // The low nibbles pair with the activation's first eight
                     // codes of the window, the high nibbles with the second
                     // eight (32 weights further along the row). VNNI's byte dot
@@ -2067,21 +2161,73 @@ pub unsafe fn q4k8_gemm_zmm(tile: &[u8], n_sb: usize, acts: &KqActs, nb: usize, 
         "the output holds fewer than eight rows per activation"
     );
     let src = Interleaved { acts };
+    let nib = Nibbles { tile };
     // Whole eight-row groups first: they are the prefill case, and the wider
     // group shares each super-block's decode between twice as many rows.
     let mut b0 = 0;
     while nb - b0 >= 8 {
-        q4k8_group_zmm::<_, 8>(tile, n_sb, &src, b0, out);
+        q4k8_group_codes_zmm::<_, _, 8>(tile, &nib, n_sb, &src, b0, out);
         b0 += 8;
     }
     while nb - b0 >= 4 {
-        q4k8_group_zmm::<_, 4>(tile, n_sb, &src, b0, out);
+        q4k8_group_codes_zmm::<_, _, 4>(tile, &nib, n_sb, &src, b0, out);
         b0 += 4;
     }
     match nb - b0 {
-        3 => q4k8_group_zmm::<_, 3>(tile, n_sb, &src, b0, out),
-        2 => q4k8_group_zmm::<_, 2>(tile, n_sb, &src, b0, out),
-        1 => q4k8_group_zmm::<_, 1>(tile, n_sb, &src, b0, out),
+        3 => q4k8_group_codes_zmm::<_, _, 3>(tile, &nib, n_sb, &src, b0, out),
+        2 => q4k8_group_codes_zmm::<_, _, 2>(tile, &nib, n_sb, &src, b0, out),
+        1 => q4k8_group_codes_zmm::<_, _, 1>(tile, &nib, n_sb, &src, b0, out),
+        _ => {}
+    }
+}
+
+/// Eight output rows of a repacked Q4_K tile against a whole pass of
+/// activations, on the AVX-512 tier, with the tile's nibbles widened to bytes
+/// once ([`q4k8_widen`]).
+///
+/// The codes are the tile's own codes — nothing is rescaled, nothing is
+/// rounded — so every output row is bit-identical to [`q4k8_gemm_zmm`]'s; only
+/// the `and` and `shift` that split each window's nibbles are hoisted out of
+/// the pass. `scratch` holds `n_sb * Q4K8_WIDE` bytes and is reused across
+/// calls; the caller owns it so the kernel allocates nothing.
+///
+/// # Safety
+///
+/// The caller must have checked [`have_zmm512`]. The tile must hold `n_sb`
+/// tiles, the activation the rows the caller says, and `scratch`
+/// `n_sb * Q4K8_WIDE` bytes.
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni,fma,f16c")]
+pub unsafe fn q4k8_gemm_zmm_wide(
+    tile: &[u8],
+    n_sb: usize,
+    acts: &KqActs,
+    nb: usize,
+    out: &mut [f32],
+    scratch: &mut [u8],
+) {
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    q4k8_widen(tile, n_sb, scratch);
+    let src = Interleaved { acts };
+    let w = Widened {
+        codes: &scratch[..n_sb * Q4K8_WIDE],
+    };
+    let mut b0 = 0;
+    while nb - b0 >= 8 {
+        q4k8_group_codes_zmm::<_, _, 8>(tile, &w, n_sb, &src, b0, out);
+        b0 += 8;
+    }
+    while nb - b0 >= 4 {
+        q4k8_group_codes_zmm::<_, _, 4>(tile, &w, n_sb, &src, b0, out);
+        b0 += 4;
+    }
+    match nb - b0 {
+        3 => q4k8_group_codes_zmm::<_, _, 3>(tile, &w, n_sb, &src, b0, out),
+        2 => q4k8_group_codes_zmm::<_, _, 2>(tile, &w, n_sb, &src, b0, out),
+        1 => q4k8_group_codes_zmm::<_, _, 1>(tile, &w, n_sb, &src, b0, out),
         _ => {}
     }
 }
@@ -2106,10 +2252,11 @@ pub unsafe fn q4k8_gemv_zmm(
         "the output holds fewer than eight rows per activation"
     );
     let src = Plain { acts };
+    let nib = Nibbles { tile };
     match nb {
-        1 => q4k8_group_zmm::<_, 1>(tile, n_sb, &src, 0, out),
-        2 => q4k8_group_zmm::<_, 2>(tile, n_sb, &src, 0, out),
-        _ => q4k8_group_zmm::<_, 3>(tile, n_sb, &src, 0, out),
+        1 => q4k8_group_codes_zmm::<_, _, 1>(tile, &nib, n_sb, &src, 0, out),
+        2 => q4k8_group_codes_zmm::<_, _, 2>(tile, &nib, n_sb, &src, 0, out),
+        _ => q4k8_group_codes_zmm::<_, _, 3>(tile, &nib, n_sb, &src, 0, out),
     }
 }
 
@@ -3105,6 +3252,61 @@ mod tests {
                         zmm[i],
                         avx2[i]
                     );
+                }
+            }
+        }
+    }
+
+    /// The widened-codes wide pass against the tile's own nibbles: the same
+    /// bits, at every batch width, and the widened buffer holds the nibbles'
+    /// codes. This is the S5.2 experiment's claim — the widening is exact — and
+    /// the reason it is not wired in is the register file, not the arithmetic.
+    #[test]
+    fn the_widened_wide_pass_is_bit_identical_to_the_narrow_one() {
+        if !crate::simd::have_batched() || !have_zmm512() {
+            return;
+        }
+        for n_sb in [1usize, 3, 8] {
+            let n = n_sb * 256;
+            let mut rng = Rng(0x5EED_1D1D_2468_0007 ^ n_sb as u64);
+            let tile = q4k8_tile(&mut rng, n_sb);
+            let batch = acts(&mut rng, 40, n);
+            let mut kq = KqActs::default();
+            kq.fill(&batch);
+            let mut scratch = vec![0u8; n_sb * Q4K8_WIDE];
+            for nb in 4..=40usize {
+                let mut narrow = vec![0.0f32; nb * 8];
+                let mut wide = vec![0.0f32; nb * 8];
+                unsafe {
+                    q4k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut narrow);
+                    q4k8_gemm_zmm_wide(&tile, n_sb, &kq, nb, &mut wide, &mut scratch);
+                }
+                for i in 0..nb * 8 {
+                    assert_eq!(
+                        narrow[i].to_bits(),
+                        wide[i].to_bits(),
+                        "n_sb {n_sb} nb {nb} element {i}: {} against {}",
+                        wide[i],
+                        narrow[i]
+                    );
+                }
+            }
+            // The widened buffer is the tile's own bytes, one nibble per byte:
+            // window `w`'s 64 bytes with the low nibbles first, then the same 64
+            // bytes with the high nibbles.
+            unsafe { q4k8_widen(&tile, n_sb, &mut scratch) };
+            for sb in 0..n_sb {
+                for w in 0..16 {
+                    for i in 0..64 {
+                        let byte = tile[sb * Q4K8::SIZE + crate::kq::q4_qs() + w * 64 + i];
+                        let at = sb * Q4K8_WIDE + w * 128;
+                        assert_eq!(scratch[at + i], byte & 0x0F, "sb {sb} window {w} low {i}");
+                        assert_eq!(
+                            scratch[at + 64 + i],
+                            byte >> 4,
+                            "sb {sb} window {w} high {i}"
+                        );
+                    }
                 }
             }
         }

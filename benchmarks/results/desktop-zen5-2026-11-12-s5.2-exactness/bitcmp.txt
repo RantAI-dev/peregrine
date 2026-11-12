@@ -1,0 +1,16 @@
+The two log-probability files of one engine, byte for byte. A file is a header
+("_logits_", n_ctx, n_vocab, n_chunk: 20 bytes), the chunk's tokens (n_ctx * n_chunk * 4 bytes),
+then 255 tokens of quantised log-probabilities per chunk; equal bytes would mean equal logits at
+every predicted position.
+
+$ cmp u512.logits u16.logits
+u512.logits u16.logits differ: byte 81945, line 271
+
+$ cmp l512.logits l16.logits
+l512.logits l16.logits differ: byte 81945, line 271
+
+The token stream ends at offset 20 + 512*40*4 = 81,940, so the first differing byte is the
+fourth byte of the first log-probability record: the two widths differ at the first predicted
+position, in both engines. Neither file is a prefix of the other.
+
+Sizes: 2,616,585,940 bytes each.
