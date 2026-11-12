@@ -51,6 +51,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **An AVX2 body for the fast prompt mode's 8-bit kernel (S5.4d)**: `--fast-prompt` had one
+  SIMD body (AVX-512); on an AVX2 machine the mode ran through the scalar twin, correct and
+  about as fast as the exact kernels. `crates/peregrine-kernels/src/kqsimd.rs` now has
+  `q8k_gemm_avx2` and the AVX2 builders (`q8k_build_q4k_avx2`, `q8k_build_q6k_avx2`), and
+  `MatKernels::q8k_gemm`/`q8k_build`/`q8k_body` dispatch them (`q8k_body` is what the server's
+  startup line and `fast_prompt_simd()` report). The body uses the `vpsignb` sign trick
+  (`|code|` × `sign(code)·a`, `2·128·127 = 32 512 < 32 767`) because `vpmaddubsw` saturates,
+  which is the trap the AVX-512 body's non-saturating `vpdpbusd` does not have; it is
+  **bit-identical to the scalar twin** — `to_bits` equal at every width class from 1 to 512
+  activation rows, at one, two, three and five super-blocks, on random forms and with every
+  code at `−128` and at `127` and the activation extremes — and the tier's fast goldens pass
+  unchanged (no golden file moves). On bluefin it runs at **59.7 GMAC/s against the scalar
+  twin's 1.6** (37×) and the AVX-512 body is still what the AVX-512 tier takes. **It is not
+  faster than this tier's exact Q4_K kernel** (59.7 against 77.4: an 8-bit dot needs four
+  instructions per 32 products on AVX2, while the 4-bit kernel chains eight `vpmaddubsw` deep),
+  it is 1.30× the exact Q6_K kernel, and end to end the fast mode is 0.88-0.92 of the exact
+  mode on Llama 3.2 1B Q4_K_M and level on Qwen 2.5 0.5B Q4_K_M (mostly Q5_0, which has no
+  form). The option's help text and `docs/design/s5.4-fast-prompt.md` §5d say so; the mode
+  stays off by default. Form build +0.83 s and +987 MiB on the 1B. Numbers:
+  `benchmarks/results/bluefin-2026-11-12-s5.4d/`.
 - **Windows lifetime commands, `upgrade`, installer and release archive (roadmap S7.3)**:
   `serve --background`, `status`, `stop` and `upgrade` work on Windows. Windows has no `SIGTERM`,
   so `peregrine stop` writes `serve-<port>.stop` in the state directory; the server notices it

@@ -377,11 +377,11 @@ impl MatKernels {
     /// `r` for activation row `b`. The form is format-agnostic (Q4_K and Q6_K
     /// produce the same object), so one entry point multiplies both.
     ///
-    /// The AVX-512 body is `crate::kqsimd::q8k_gemm_zmm`; every other tier
-    /// runs the scalar twin, [`crate::kq8::gemm_q8k`] (AVX2 and NEON bodies are
-    /// S5.4d). The two are bit-identical on the same tier
-    /// (`crates/peregrine-kernels/src/kqsimd.rs`'s tests), so this choice moves
-    /// time, never a number.
+    /// The AVX-512 body is `crate::kqsimd::q8k_gemm_zmm`, the AVX2 body is
+    /// `crate::kqsimd::q8k_gemm_avx2`, and a tier with neither (and ARM, until S5.4d's
+    /// NEON bodies are wired in) runs the scalar twin, [`crate::kq8::gemm_q8k`]. They
+    /// are bit-identical on the same tier (`crates/peregrine-kernels/src/kqsimd.rs`'s
+    /// tests), so this choice moves time, never a number.
     pub fn q8k_gemm(&self, form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
         assert!(
             form.len() >= n_sb * crate::kq8::Q8K_SIZE,
@@ -393,20 +393,29 @@ impl MatKernels {
             "the output holds fewer than eight rows per activation"
         );
         #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
-        if crate::kqsimd::have_zmm512() {
-            // SAFETY: `have_zmm512()` checked; `q8k_gemm_zmm` checks the same
-            // bounds this wrapper does.
-            unsafe { crate::kqsimd::q8k_gemm_zmm(form, n_sb, acts, nb, out) };
-            return;
+        {
+            if crate::kqsimd::have_zmm512() {
+                // SAFETY: `have_zmm512()` checked; `q8k_gemm_zmm` checks the same
+                // bounds this wrapper does.
+                unsafe { crate::kqsimd::q8k_gemm_zmm(form, n_sb, acts, nb, out) };
+                return;
+            }
+            if crate::kqsimd::have_avx2() {
+                // SAFETY: `have_avx2()` checked; `q8k_gemm_avx2` checks the same
+                // bounds this wrapper does.
+                unsafe { crate::kqsimd::q8k_gemm_avx2(form, n_sb, acts, nb, out) };
+                return;
+            }
         }
         crate::kq8::gemm_q8k(form, n_sb, acts, nb, out)
     }
 
     /// Build the 8-bit form of `n_sb` super-blocks from a repacked eight-row tile:
-    /// the AVX-512 builder when the tier has it, the scalar twin otherwise (S5.4b).
+    /// the AVX-512 builder when the tier has it, the AVX2 one next, the scalar twin
+    /// otherwise (S5.4b, S5.4d).
     ///
-    /// Both write the same bytes: the conformance test in `crate::kq8` and the
-    /// per-weight bound hold either way.
+    /// All three write the same bytes: the conformance tests in `crate::kqsimd` and
+    /// the per-weight bound hold either way.
     pub fn q8k_build(&self, kind: Format, tile: &[u8], n_sb: usize, form: &mut [u8]) {
         assert!(
             matches!(kind, Format::Q4_K | Format::Q6_K),
@@ -417,16 +426,29 @@ impl MatKernels {
             "the form holds fewer than n_sb super-blocks"
         );
         #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
-        if crate::kqsimd::have_zmm512() {
-            // SAFETY: `have_zmm512()` checked; both builders check the tile's and
-            // the form's lengths.
-            unsafe {
-                match kind {
-                    Format::Q4_K => crate::kqsimd::q8k_build_q4k_zmm(tile, n_sb, form),
-                    _ => crate::kqsimd::q8k_build_q6k_zmm(tile, n_sb, form),
+        {
+            if crate::kqsimd::have_zmm512() {
+                // SAFETY: `have_zmm512()` checked; both builders check the tile's and
+                // the form's lengths.
+                unsafe {
+                    match kind {
+                        Format::Q4_K => crate::kqsimd::q8k_build_q4k_zmm(tile, n_sb, form),
+                        _ => crate::kqsimd::q8k_build_q6k_zmm(tile, n_sb, form),
+                    }
                 }
+                return;
             }
-            return;
+            if crate::kqsimd::have_avx2() {
+                // SAFETY: `have_avx2()` checked; both builders check the tile's and
+                // the form's lengths.
+                unsafe {
+                    match kind {
+                        Format::Q4_K => crate::kqsimd::q8k_build_q4k_avx2(tile, n_sb, form),
+                        _ => crate::kqsimd::q8k_build_q6k_avx2(tile, n_sb, form),
+                    }
+                }
+                return;
+            }
         }
         match kind {
             Format::Q4_K => crate::kq8::build_q4k(tile, n_sb, form),
@@ -434,19 +456,32 @@ impl MatKernels {
         }
     }
 
-    /// Whether the 8-bit prompt form has a SIMD body on this tier (AVX-512 today).
+    /// The name of the 8-bit prompt form's SIMD body on this tier: `Some("AVX-512")`
+    /// or `Some("AVX2")` on x86, `None` where the mode runs through the scalar twin
+    /// (the option's startup line says so).
+    pub fn q8k_body(&self) -> Option<&'static str> {
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        {
+            if crate::kqsimd::have_zmm512() {
+                Some("AVX-512")
+            } else if crate::kqsimd::have_avx2() {
+                Some("AVX2")
+            } else {
+                None
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
+        {
+            None
+        }
+    }
+
+    /// Whether the 8-bit prompt form has a SIMD body on this tier (AVX-512 or AVX2).
     ///
     /// A tier without one runs the mode correctly through the scalar twin, just
     /// no faster than the exact kernel; the option's startup line says so.
     pub fn q8k_simd(&self) -> bool {
-        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
-        {
-            crate::kqsimd::have_zmm512()
-        }
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
-        {
-            false
-        }
+        self.q8k_body().is_some()
     }
 
     /// Eight rows of a repacked Q6_K tile against a batch of four or more
