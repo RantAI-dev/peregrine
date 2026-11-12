@@ -30,7 +30,7 @@ Download the archive for your architecture from the
 [releases page](https://github.com/RantAI-dev/peregrine/releases) and put the binary on your `PATH`:
 
 ```sh
-VERSION=v0.1.2   # the newest release tag on the releases page
+VERSION=v0.2.0   # the newest release tag on the releases page
 ARCH=$(uname -m) # x86_64 or aarch64
 curl -fLO "https://github.com/RantAI-dev/peregrine/releases/download/$VERSION/peregrine-$VERSION-linux-$ARCH.tar.gz"
 tar -xzf "peregrine-$VERSION-linux-$ARCH.tar.gz"
