@@ -377,7 +377,7 @@ impl MatKernels {
     /// `r` for activation row `b`. The form is format-agnostic (Q4_K and Q6_K
     /// produce the same object), so one entry point multiplies both.
     ///
-    /// The AVX-512 body is [`crate::kqsimd::q8k_gemm_zmm`]; every other tier
+    /// The AVX-512 body is `crate::kqsimd::q8k_gemm_zmm`; every other tier
     /// runs the scalar twin, [`crate::kq8::gemm_q8k`] (AVX2 and NEON bodies are
     /// S5.4d). The two are bit-identical on the same tier
     /// (`crates/peregrine-kernels/src/kqsimd.rs`'s tests), so this choice moves

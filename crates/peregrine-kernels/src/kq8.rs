@@ -77,7 +77,7 @@
 //! # The scalar twin is the definition
 //!
 //! [`build_q4k`], [`build_q6k`], [`build_q5_0`] and [`dot_q8k`] are plain loops;
-//! the AVX-512 bodies in [`crate::kqsimd`] are asserted bit for bit equal to them
+//! the AVX-512 bodies in `crate::kqsimd` are asserted bit for bit equal to them
 //! for every width and every edge tile (ADR 0005).
 
 use crate::format::f16;
@@ -555,7 +555,7 @@ pub fn gemm_q8k(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f
 /// Tile builders for the tests: random and hand-built edge tiles.
 ///
 /// They are shared by this module's tests and by the AVX-512 bodies' tests in
-/// [`crate::kqsimd`], so an edge case is defined once and the two paths are held
+/// `crate::kqsimd`, so an edge case is defined once and the two paths are held
 /// to the same input.
 #[cfg(test)]
 pub(crate) mod tiles {

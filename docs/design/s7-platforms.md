@@ -1,6 +1,7 @@
 # S7: macOS and Windows
 
-- Status: design, decided 2026-11-12. Not built.
+- Status: design, decided 2026-11-12. S7.2 built (Windows x86-64 builds and passes the suite in
+  CI); the rest is not built.
 - Owner request: "add support to windows, mac".
 
 ## 0. Where things stand
@@ -104,6 +105,51 @@ confirmed by the first run rather than assumed:
   nothing prints or parses a path with a `/` assumption;
 - the pool's default width: physical cores through the system's processor information call, not
   the logical count.
+
+**S7.2 as built (2026-11-12).** What the first Windows run showed, and what it took:
+
+- **Fixtures.** `* text=auto eol=lf` was already in `.gitattributes`, so the first run's
+  fixture-comparing tests passed as they were. `*.jsonl`, `*.golden`, `*.jinja`, `*.txt` and
+  `*.tsv` now carry an explicit `text eol=lf` as well, and `*.f32`, `*.gguf`, `*.bin` and
+  `*.slb` stay binary: a checkout with `core.autocrlf=true` cannot re-encode them.
+- **Mapped files.** Two write paths assumed a file can be rewritten or renamed over while it is
+  mapped, which Windows refuses (`ERROR_USER_MAPPED_FILE`, `ERROR_ACCESS_DENIED`):
+  the synthetic-model writers in `crates/peregrine-models/tests/support/models.rs` now give
+  every write a fresh name (`unique_path`), because a test that writes two models of one family
+  and format in one directory kept the first mapped; the pack cache's publish
+  (`crates/peregrine-core/src/packcache.rs`) keeps a file already published for the same key
+  instead of replacing it — the bytes a key names are the same bytes — and drops its temporary
+  copy; the `hf:` download drops the header mapping before the final `.part` rename; and the
+  pack-cache test that touches a model's mtime opens it for writing and drops the model first.
+  `Gguf::read_data` on Windows now uses `seek_read` (positioned `ReadFile`) rather than copying
+  out of the mapping, so the mapping's pages for the repacked matrices are not faulted in.
+- **Numbers off the C runtime** (decision in §3). The `det_*` forward-path helpers in
+  `crates/peregrine-kernels/src/vmath.rs` use the engine's own functions on aarch64 **and on
+  every non-Linux system**; only Linux x86-64 keeps libm, so only its goldens stay put. macOS is
+  aarch64, so this changes nothing there. The first run confirmed the need: several synthetic
+  models and the session fixture differed from the Linux goldens in `logits_fnv` alone (the
+  argmax and greedy tokens were identical), which is exactly the UCRT's rounding.
+- **Goldens.** Every place that keyed a golden directory `-macos` now also keys `-windows`
+  (11 sites in six test files), so Windows compares against its own directories and skips until
+  S7.4 records them. The Windows job never sets `PEREGRINE_GOLDEN=require`.
+- **Paths.** The model cache, the pack cache and the server state directory default to
+  `%LOCALAPPDATA%\peregrine` (and `…\peregrine\packs`) on Windows, after the explicit
+  `PEREGRINE_*`/XDG overrides.
+- **The pool's width.** `physical_cores()` on Windows counts `RelationProcessorCore` records from
+  `GetLogicalProcessorInformationEx` through a hand-written `extern "system"` in the new
+  `crates/peregrine-core/src/win32.rs` (no dependency; SAFETY comments on every `unsafe`), with
+  the logical count as the fallback when the call fails.
+- **Unix-only tests.** `serve_lifetime.rs` now runs its lifetime half (the server outlives the
+  drain timeout and keeps serving) everywhere; the `SIGTERM` half is `#[cfg(unix)]` with the
+  reason. `server_multi_model.rs` lost its file-level `#![cfg(unix)]`: every test except the
+  `SIGTERM` drain runs on Windows.
+- **Lifetime commands are S7.3.** `serve --background`, `status` and `stop` return an explicit
+  "not available on Windows yet (S7.3)" on Windows instead of failing through `kill`; `upgrade`
+  already refuses non-Linux. A foreground `serve` stops on Ctrl-C, through `tokio`.
+- **The job.** `test (windows-x86_64)` on `windows-2025` runs the same release-mode suite as the
+  other x86-64 entries, and a smoke step builds `peregrine.exe`, checks `--version`, `tier`
+  (`x86_64-avx2…` on the runner) and `run` on a model that `write_synthetic` writes. A green run
+  takes about seven minutes.
 
 **S7.3: lifetime, installer, release.**
 

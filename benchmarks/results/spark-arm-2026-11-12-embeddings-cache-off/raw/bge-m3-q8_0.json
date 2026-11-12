@@ -1,0 +1,133 @@
+{
+ "bge-m3-q8_0": {
+  "path": "~/models/embed/bge-m3-Q8_0.gguf",
+  "pooling": "cls",
+  "ctx": 2048,
+  "cells": {
+   "16": {
+    "texts": 1,
+    "tokens_per_text": 48,
+    "peregrine": [
+     30.891,
+     29.434,
+     23.115
+    ],
+    "llama.cpp": [
+     13.417,
+     14.197,
+     9.67
+    ],
+    "peregrine_median": 29.434,
+    "llama_median": 13.417,
+    "ratio": 2.194,
+    "peregrine_spread_pct": 26.42,
+    "llama_spread_pct": 33.74
+   },
+   "128": {
+    "texts": 1,
+    "tokens_per_text": 337,
+    "peregrine": [
+     4.718,
+     4.904,
+     5.045
+    ],
+    "llama.cpp": [
+     2.221,
+     2.329,
+     2.491
+    ],
+    "peregrine_median": 4.904,
+    "llama_median": 2.329,
+    "ratio": 2.106,
+    "peregrine_spread_pct": 6.67,
+    "llama_spread_pct": 11.59
+   },
+   "512": {
+    "texts": 1,
+    "tokens_per_text": 1025,
+    "peregrine": [
+     1.362,
+     1.378,
+     1.406
+    ],
+    "llama.cpp": [
+     0.664,
+     0.675,
+     0.683
+    ],
+    "peregrine_median": 1.378,
+    "llama_median": 0.675,
+    "ratio": 2.041,
+    "peregrine_spread_pct": 3.19,
+    "llama_spread_pct": 2.81
+   },
+   "2000": {
+    "texts": 1,
+    "tokens_per_text": 2000,
+    "peregrine": [
+     0.593,
+     0.595,
+     0.596
+    ],
+    "llama.cpp": [
+     0.299,
+     0.301,
+     0.299
+    ],
+    "peregrine_median": 0.595,
+    "llama_median": 0.299,
+    "ratio": 1.99,
+    "peregrine_spread_pct": 0.5,
+    "llama_spread_pct": 0.67
+   },
+   "batch": {
+    "texts": 32,
+    "tokens_per_text": 326.62,
+    "peregrine": [
+     4.929,
+     4.933,
+     4.937
+    ],
+    "llama.cpp": [
+     2.371,
+     2.39,
+     2.369
+    ],
+    "peregrine_median": 4.933,
+    "llama_median": 2.371,
+    "ratio": 2.081,
+    "peregrine_spread_pct": 0.16,
+    "llama_spread_pct": 0.89
+   },
+   "mixed": {
+    "texts": 32,
+    "tokens_per_text": 558.5,
+    "peregrine": [
+     2.652,
+     2.657,
+     2.655
+    ],
+    "llama.cpp": [
+     1.281,
+     1.284,
+     1.282
+    ],
+    "peregrine_median": 2.655,
+    "llama_median": 1.282,
+    "ratio": 2.071,
+    "peregrine_spread_pct": 0.19,
+    "llama_spread_pct": 0.23
+   }
+  },
+  "peregrine": {
+   "cmd": "~/wt-arm-emb/target/release/peregrine serve -m ~/models/embed/bge-m3-Q8_0.gguf --host 127.0.0.1 --port 18401 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/bge-m3-Q8_0.gguf --embedding --pooling cls -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18402",
+   "version": []
+  }
+ }
+}

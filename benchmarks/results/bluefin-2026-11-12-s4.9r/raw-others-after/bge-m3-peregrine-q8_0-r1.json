@@ -1,0 +1,170 @@
+{
+ "benchmark": "peregrine-s4.2-embed",
+ "timestamp": "2026-11-12T06:34:17.446698+00:00",
+ "round": 1,
+ "model": {
+  "name": "bge-m3",
+  "hf": "BAAI/bge-m3",
+  "pooling": "cls",
+  "max_tokens": 2048,
+  "dim": 1024,
+  "tokenizer_dir": "bge-m3/ref"
+ },
+ "row": {
+  "engine": "peregrine",
+  "precision": "q8_0",
+  "path": "~/models/embed/bge-m3-Q8_0.gguf",
+  "sha256": "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167",
+  "size_bytes": 634553760,
+  "fingerprint": {
+   "kind": "file",
+   "sha256": "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167",
+   "size_bytes": 634553760
+  },
+  "notes": "GGUF Q8_0, gpustack/bge-m3-GGUF; peregrine serve /v1/embeddings"
+ },
+ "machine": {
+  "hostname": "bluefin",
+  "os": "Linux",
+  "kernel": "7.2.7-200.fc44.x86_64",
+  "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+  "cpu_features": [
+   "fma",
+   "avx",
+   "avx2"
+  ],
+  "cores_logical": 8,
+  "threads_tested": 4,
+  "governor": "powersave",
+  "python": "3.14.8"
+ },
+ "engine": {
+  "name": "peregrine",
+  "binary": "~/wt-s49r/target/release/peregrine",
+  "worktree": "~/wt-s49r",
+  "commit": "d77636706373fa1e6030ba934e00bd71177e96a9",
+  "branch": "s4.9r-encoder-elementwise",
+  "server_version": "peregrine 0.2.0"
+ },
+ "start": {
+  "cmd": [
+   "~/wt-s49r/target/release/peregrine",
+   "serve",
+   "-m",
+   "~/models/embed/bge-m3-Q8_0.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8417",
+   "-t",
+   "4",
+   "-c",
+   "2048",
+   "--slots",
+   "40",
+   "--no-profile"
+  ],
+  "threads": 4,
+  "slots": 40,
+  "pooling": "cls"
+ },
+ "host_before": {
+  "loadavg": [
+   5.1396484375,
+   5.5166015625,
+   5.8095703125
+  ],
+  "mem_available_gb": 4.67,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.0
+ },
+ "host_after": {
+  "loadavg": [
+   5.1396484375,
+   5.5166015625,
+   5.8095703125
+  ],
+  "mem_available_gb": 4.67,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.0
+ },
+ "preflight": {
+  "loadavg": [
+   5.064453125,
+   5.50830078125,
+   5.80810546875
+  ],
+  "mem_available_gb": 4.8,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.0
+ },
+ "settings": {
+  "lengths": [
+   128,
+   512
+  ],
+  "batches": [
+   1
+  ],
+  "clients": [
+   1
+  ],
+  "threads": 4,
+  "budget_s": 0.5,
+  "max_requests": 20,
+  "max_big_requests": 2,
+  "max_cell_seconds": 120.0,
+  "texts_file": "/var/tmp/embed-texts-s49l/bge-m3.json",
+  "texts_per_length": 128
+ },
+ "cells": {
+  "L128_b1_c1": {
+   "texts_per_s": 7.355,
+   "tokens_per_s": 941.4,
+   "wall_s": 0.5438,
+   "requests": 4,
+   "texts": 4,
+   "tokens_calibrated": 512,
+   "tokens_reported": 512,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.134295,
+    "p99": 0.272266,
+    "min": 0.001097,
+    "max": 0.272431,
+    "n": 4
+   },
+   "length": 128,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 0.54,
+   "tokens_per_text_median": 128
+  },
+  "L512_b1_c1": {
+   "texts_per_s": 2.59,
+   "tokens_per_s": 1326.1,
+   "wall_s": 1.1583,
+   "requests": 3,
+   "texts": 3,
+   "tokens_calibrated": 1536,
+   "tokens_reported": 1536,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.001511,
+    "p99": 1.131818,
+    "min": 0.001439,
+    "max": 1.154885,
+    "n": 3
+   },
+   "length": 512,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 1.16,
+   "tokens_per_text_median": 512
+  }
+ }
+}

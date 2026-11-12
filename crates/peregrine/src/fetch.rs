@@ -134,6 +134,9 @@ fn hub_base() -> String {
 }
 
 /// Where downloaded models are kept.
+///
+/// `$PEREGRINE_CACHE_DIR`, else `$XDG_CACHE_HOME/peregrine`, else `%LOCALAPPDATA%\peregrine` on
+/// Windows, else `~/.cache/peregrine` (S7.2).
 pub fn cache_dir() -> PathBuf {
     if let Ok(d) = std::env::var("PEREGRINE_CACHE_DIR") {
         if !d.is_empty() {
@@ -143,6 +146,16 @@ pub fn cache_dir() -> PathBuf {
     if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
         if !d.is_empty() {
             return PathBuf::from(d).join("peregrine");
+        }
+    }
+    #[cfg(windows)]
+    {
+        // There is no `$XDG_CACHE_HOME` on Windows and `HOME` is usually unset: the per-user
+        // local application data directory is the platform's answer (`%LOCALAPPDATA%`).
+        if let Ok(d) = std::env::var("LOCALAPPDATA") {
+            if !d.is_empty() {
+                return PathBuf::from(d).join("peregrine");
+            }
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -224,6 +237,9 @@ pub fn fetch(spec: &Spec) -> Result<PathBuf, String> {
             .map_err(|e| format!("{name}: downloaded file is not a usable GGUF: {e}"))?;
         peregrine_models::check_compatible_metadata(&g)
             .map_err(|e| format!("{name} is not runnable by this build: {e}"))?;
+        // The mapping must go before the rename: Windows refuses to rename a file that is
+        // mapped, in this process or another (S7.2).
+        drop(g);
         std::fs::rename(&part, &final_path)
             .map_err(|e| format!("cannot finish {}: {e}", final_path.display()))?;
         return Ok(final_path);
@@ -281,6 +297,8 @@ pub fn fetch(spec: &Spec) -> Result<PathBuf, String> {
         .map_err(|e| format!("{name}: downloaded file is not a usable GGUF: {e}"))?;
     peregrine_models::check_compatible_metadata(&g)
         .map_err(|e| format!("{name} is not runnable by this build: {e}"))?;
+    // The mapping must go before the rename; Windows cannot rename a mapped file (S7.2).
+    drop(g);
     std::fs::rename(&part, &final_path)
         .map_err(|e| format!("cannot finish {}: {e}", final_path.display()))?;
     Ok(final_path)

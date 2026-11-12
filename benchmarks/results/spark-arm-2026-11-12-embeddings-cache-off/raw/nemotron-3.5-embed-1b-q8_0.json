@@ -1,0 +1,133 @@
+{
+ "nemotron-3.5-embed-1b-q8_0": {
+  "path": "~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
+  "pooling": "mean",
+  "ctx": 2048,
+  "cells": {
+   "16": {
+    "texts": 1,
+    "tokens_per_text": 16,
+    "peregrine": [
+     40.282,
+     41.34,
+     17.717
+    ],
+    "llama.cpp": [
+     15.851,
+     16.944,
+     7.082
+    ],
+    "peregrine_median": 40.282,
+    "llama_median": 15.851,
+    "ratio": 2.541,
+    "peregrine_spread_pct": 58.64,
+    "llama_spread_pct": 62.22
+   },
+   "128": {
+    "texts": 1,
+    "tokens_per_text": 250,
+    "peregrine": [
+     3.248,
+     3.438,
+     3.856
+    ],
+    "llama.cpp": [
+     1.21,
+     1.264,
+     1.409
+    ],
+    "peregrine_median": 3.438,
+    "llama_median": 1.264,
+    "ratio": 2.72,
+    "peregrine_spread_pct": 17.68,
+    "llama_spread_pct": 15.74
+   },
+   "512": {
+    "texts": 1,
+    "tokens_per_text": 882,
+    "peregrine": [
+     0.818,
+     0.816,
+     0.791
+    ],
+    "llama.cpp": [
+     0.319,
+     0.318,
+     0.307
+    ],
+    "peregrine_median": 0.816,
+    "llama_median": 0.318,
+    "ratio": 2.566,
+    "peregrine_spread_pct": 3.31,
+    "llama_spread_pct": 3.77
+   },
+   "2000": {
+    "texts": 1,
+    "tokens_per_text": 2000,
+    "peregrine": [
+     0.303,
+     0.303,
+     0.303
+    ],
+    "llama.cpp": [
+     0.126,
+     0.126,
+     0.126
+    ],
+    "peregrine_median": 0.303,
+    "llama_median": 0.126,
+    "ratio": 2.405,
+    "peregrine_spread_pct": 0.0,
+    "llama_spread_pct": 0.0
+   },
+   "batch": {
+    "texts": 32,
+    "tokens_per_text": 229.72,
+    "peregrine": [
+     3.54,
+     3.565,
+     3.563
+    ],
+    "llama.cpp": [
+     1.314,
+     1.318,
+     1.318
+    ],
+    "peregrine_median": 3.563,
+    "llama_median": 1.318,
+    "ratio": 2.703,
+    "peregrine_spread_pct": 0.7,
+    "llama_spread_pct": 0.3
+   },
+   "mixed": {
+    "texts": 32,
+    "tokens_per_text": 407.31,
+    "peregrine": [
+     1.884,
+     1.889,
+     1.887
+    ],
+    "llama.cpp": [
+     0.718,
+     0.719,
+     0.719
+    ],
+    "peregrine_median": 1.887,
+    "llama_median": 0.719,
+    "ratio": 2.624,
+    "peregrine_spread_pct": 0.26,
+    "llama_spread_pct": 0.14
+   }
+  },
+  "peregrine": {
+   "cmd": "~/wt-arm-emb/target/release/peregrine serve -m ~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf --host 127.0.0.1 --port 18401 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf --embedding --pooling mean -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18402",
+   "version": []
+  }
+ }
+}

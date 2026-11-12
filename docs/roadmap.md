@@ -139,7 +139,7 @@ archive, an installer, `upgrade`, the server's lifetime commands, goldens. The d
 | ID | Item | pw |
 |---|---|---|
 | S7.1 | macOS on Apple Silicon: release job with a dry run, installer, `upgrade`, performance-core default, synthetic goldens, quickstart | 1.0 |
-| S7.2 | Windows x86-64 builds and passes the suite in CI | 1.5 |
+| S7.2 | Windows x86-64 builds and passes the suite in CI — done: `test (windows-x86_64)` on `windows-2025` runs the release-mode suite (every test but the few that need `SIGTERM` or a freshly recorded Windows golden) and a smoke check of the binary, and `ci-ok` requires it | 1.5 |
 | S7.3 | Windows lifetime commands, `upgrade`, `install.ps1`, release job | 1.5 |
 | S7.4 | Windows goldens, docs for both systems, a native Windows measurement on the desktop | 1.0 |
 | S7.5 | A release that ships all four archives | 0.3 |
