@@ -109,9 +109,9 @@ All notable changes to this project are documented here. The format follows
   0.9963540/0.9996125 on gte (llama.cpp's own Q8_0: 0.9981270/0.9996284) and
   0.9998753/0.9999246 on Granite (llama.cpp: 0.9998838/0.9999252): 1.6e-5 and 6.5e-7 below
   llama.cpp's mean distance, inside the design's 1e-4 band. A file with a classifier head
-  (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`) loads, shape-checks and ignores
-  the head with one line of output, and still serves embeddings when it declares a pooling type;
-  `classify`/`rerank` wait for the BERT family's head (S4.6b). A synthetic four-layer file (a
+  (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`) loads and shape-checks the head
+  and still serves embeddings when it declares a pooling type; the head itself is served from
+  S4.7b (below). A synthetic four-layer file (a
   window of 8, two different RoPE bases, F32 and Q8_0, the three activations and a classifier
   variant) is checked bit for bit against an independent scalar reference, is batch- and
   thread-invariant, allocates nothing in a pass, and has a golden on each pinned x86 tier (the
@@ -121,6 +121,35 @@ All notable changes to this project are documented here. The format follows
   16 and 5.20 vs 3.76 at 128. The matrices take 69 % of a 512-token pass and 56 % of a 2000-token
   one; attention grows from 11 % to 27 %. The fixtures are under
   `crates/peregrine-models/tests/fixtures/modern-bert/`.
+
+- **Rerank and classify for the `modern-bert` family (roadmap S4.7b).** A `modern-bert` file
+  with a classifier head now answers `POST /v1/rerank` (and `/rerank`, `/v1/reranking`,
+  `/reranking`), `POST /v1/classify`, `/v1/models`' modalities and `peregrine rerank` — the same
+  `Want::Head` interface the `bert` family got in S4.6b, with no endpoint change. The head is
+  transcribed step by step from llama.cpp v0.9.0's `build_pooling` rank branch: the mean of the
+  text's `output_norm` rows (or row 0 when the file names another `classifier.pooling_type`; the
+  absent key means mean for this family), `cls.weight` **without** a bias (llama.cpp creates no
+  `cls.bias` for a sequence-classification file), `classifier.activation` (the erf GELU when the
+  key is absent, unlike `bert`'s tanh), `cls.norm` with a weight and no bias, and
+  `cls.output.weight` + `.bias`. A head that disagrees with itself is refused by name (`labels`
+  against `cls.output`, an activation llama.cpp does not read, labels with no projection, a bare
+  `cls.norm`), and a decision checkpoint (`modern-bert.decision.block_count`) is refused by name
+  until S4.12. `Tokenizer::encode_pair` gained the byte-level BPE case, tokenized with
+  `parse_special = false` as llama.cpp's `format_prompt_rerank` does, and assembles
+  `[bos] q [eos] [sep] d [eos]` from the file's flags. On `gte-reranker-modernbert-base` (F16 and
+  Q8_0, 100 pairs of 36–445 tokens, 51 past the 128-token window) the pair ids are identical to
+  llama.cpp's on all 100; at F16 the scores differ by 0.00067 mean / 0.00273 max and all ten query
+  rankings are identical, and the Q8_0 file is 0.01141 / 0.07430 from llama.cpp's Q8_0 and
+  0.02173 / 0.07970 from its F16 reference while llama.cpp's own Q8_0 is 0.02310 / 0.09370 from
+  that reference (its Q8_0 and F16 runs disagree on 5 of the 10 query orders; Peregrine's Q8_0
+  and llama.cpp's agree on 6, the swaps all being documents 2.2e-2 apart). Rerank throughput on a
+  shared 8-vCPU VM, 4 threads, eight pairs per request: 1.14x llama.cpp at 128-token pairs and
+  1.24x at 512-token ones. A head row is bit-identical alone, in any batch and at any pass size
+  or thread count, and a head pass allocates nothing. A synthetic head (a rank one and a labelled
+  one) is checked bit for bit against an independent scalar reference and has a golden on each
+  pinned x86 tier. No published `modern-bert` GGUF with real labels turned up, so `/v1/classify`
+  is covered by the synthetic labelled file and the server tests. The head's fixtures are under
+  `crates/peregrine-models/tests/fixtures/modern-bert/rerank/`.
 
 ### Changed
 

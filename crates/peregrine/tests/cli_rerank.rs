@@ -12,7 +12,7 @@ use peregrine_core::gguf::Format;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use support::models::{write_bert, BertConfig, BertHeadConfig};
+use support::models::{write_bert, write_modern_bert, BertConfig, BertHeadConfig};
 
 fn tmpdir(test: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!(
@@ -183,4 +183,36 @@ fn rerank_reads_stdin_and_refuses_what_it_cannot_do() {
         err.contains("classifier head") && err.contains("peregrine embed"),
         "{err}"
     );
+}
+
+/// The `modern-bert` family (roadmap S4.7b) reaches the same command without a change:
+/// its head is mean-pooled and erf-GELU activated by default.
+#[test]
+fn rerank_works_on_a_modern_bert_reranker() {
+    let dir = tmpdir("modern-bert");
+    let path = write_modern_bert(
+        &dir,
+        Format::F32,
+        82,
+        support::models::ModernBertConfig {
+            head: Some(support::models::ModernBertHeadConfig {
+                n_out: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+    let to = dir.join("mb-reranker.gguf");
+    std::fs::rename(&path, &to).unwrap();
+    let out = rerank(&to, &["--query", "hello world", "the cat", "hello world"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let rows = lines(&text);
+    assert_eq!(rows.len(), 2, "{text}");
+    assert!(rows[0].0 >= rows[1].0);
+    assert_eq!(rows[0].2, "the cat");
 }

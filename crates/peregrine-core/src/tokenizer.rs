@@ -1505,11 +1505,12 @@ impl Tokenizer {
     /// XLM-R one, where EOS and SEP are both `</s>` and `add_sep` is set,
     /// `<s> q </s> </s> d </s>`.
     ///
-    /// For WordPiece and unigram both texts are tokenized with `parse_special = false`,
-    /// as that path does: only user-defined tokens are still matched, control tokens
-    /// are not. The generator tokenizers fall back to [`Self::encode`], which does
-    /// match their special tokens — no generative reranker reaches this path (they are
-    /// scored through the file's own `rerank` chat template instead).
+    /// Both texts are tokenized with `parse_special = false`, as that path does: only
+    /// user-defined tokens are still matched, control tokens are not. That is WordPiece,
+    /// unigram and the byte-level BPE an encoder reranker carries (`modern-bert`, S4.7b).
+    /// The generator tokenizers fall back to [`Self::encode`], which does match their
+    /// special tokens — no generative reranker reaches this path (they are scored through
+    /// the file's own `rerank` chat template instead).
     pub fn encode_pair(&self, query: &str, document: &str) -> Vec<u32> {
         let eos = if self.eos != u32::MAX {
             Some(self.eos)
@@ -1526,6 +1527,12 @@ impl Tokenizer {
             TokenizerAlgo::Ugm(ugm) => {
                 self.encode_ugm(query, ugm, false, &mut query_tokens);
                 self.encode_ugm(document, ugm, false, &mut doc_tokens);
+            }
+            TokenizerAlgo::Bpe(bpe) => {
+                // `modern-bert`'s GPT-2 vocabulary (S4.7b): `[SEP]` in a document is
+                // four ordinary words here, as it is for llama.cpp's pair path.
+                self.encode_bpe_into(query, bpe, false, &mut query_tokens);
+                self.encode_bpe_into(document, bpe, false, &mut doc_tokens);
             }
             _ => {
                 self.encode_into(query, &mut query_tokens);
@@ -3914,6 +3921,74 @@ abc", 3
         spm.add_eos = true;
         assert_eq!(spm.encode_special("a"), vec![1, 3, 2]);
         assert_eq!(spm.encode_prompt("a"), vec![1, 3]);
+    }
+
+    #[test]
+    fn bpe_pair_path_does_not_parse_control_tokens() {
+        // The rerank pair of a `modern-bert` file (S4.7b): llama.cpp's
+        // `format_prompt_rerank` tokenizes the query and the document with
+        // `parse_special = false`, so a control-token spelling is ordinary text while a
+        // user-defined one is still matched, and it assembles
+        // `[bos] q [eos] [sep] d [eos]` from the file's own flags.
+        let (byte_enc, byte_dec) = byte_alphabet();
+        let mut pieces: Vec<String> = vec!["<unk>".into(), "<s>".into(), "</s>".into()];
+        let mut types = vec![TYPE_UNKNOWN, TYPE_CONTROL, TYPE_CONTROL];
+        for b in 0..=255u8 {
+            pieces.push(byte_enc[b as usize].to_string());
+            types.push(TYPE_NORMAL);
+        }
+        pieces.push("[SEP]".into());
+        types.push(TYPE_CONTROL);
+        pieces.push("[unused0]".into());
+        types.push(TYPE_USER_DEFINED);
+        let mut ids = HashMap::new();
+        for (i, p) in pieces.iter().enumerate() {
+            ids.entry(p.clone()).or_insert(i as u32);
+        }
+        let specials = collect_specials(&pieces, &types);
+        let user_specials = collect_user_specials(&pieces, &types);
+        let n_vocab = pieces.len();
+        let tk = Tokenizer {
+            pieces,
+            ids,
+            special_index: SpecialIndex::build(&specials),
+            specials,
+            user_index: SpecialIndex::build(&user_specials),
+            user_specials,
+            bos: 1,
+            eos: 2,
+            add_bos: true,
+            add_eos: true,
+            add_sep: true,
+            sep: Some(2),
+            cls: None,
+            mask: None,
+            pre: PreType::Gpt2,
+            n_vocab,
+            algo: TokenizerAlgo::Bpe(BpeData {
+                ranks: HashMap::new(),
+                byte_enc,
+                byte_dec,
+            }),
+        };
+        let byte = |c: char| tk.ids[&c.to_string()];
+        // `encode` parses control tokens; the pair path does not.
+        assert_eq!(tk.encode("[SEP]"), vec![259]);
+        assert_eq!(
+            tk.encode_pair("[SEP]", "[unused0]"),
+            vec![
+                1,
+                byte('['),
+                byte('S'),
+                byte('E'),
+                byte('P'),
+                byte(']'),
+                2,
+                2,
+                260,
+                2
+            ]
+        );
     }
 
     #[test]
