@@ -1643,8 +1643,10 @@ fn calibrated_settings_match_defaults_and_goldens() {
         cal.decode_threads
     );
 
-    // Verify against the committed golden
-    let name = "llama-q8_0";
+    // Verify against the committed golden, when one is recorded for this tier. The name is
+    // deliberately not `llama-Q8_0`: on macOS's case-insensitive filesystem it would read the
+    // dense test's golden for a *different* seed (1002, not this file's 1000) and fail.
+    let name = "llama-calibration-q8_0";
     let tier = peregrine_core::cpu::tier_name();
     // Goldens are recorded on Linux; macOS libm (sin, cos, exp) rounds differently, so macOS
     // keys its own directory and skips until one is recorded there.
