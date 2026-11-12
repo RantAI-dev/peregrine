@@ -41,7 +41,7 @@
  },
  "engine": {
   "name": "peregrine",
-  "binary": "/home/shiro/wt-s49r-before/target/release/peregrine",
+  "binary": "~/wt-s49r-before/target/release/peregrine",
   "worktree": "~/wt-s49r",
   "commit": "d77636706373fa1e6030ba934e00bd71177e96a9",
   "branch": "s4.9r-encoder-elementwise",
@@ -49,7 +49,7 @@
  },
  "start": {
   "cmd": [
-   "/home/shiro/wt-s49r-before/target/release/peregrine",
+   "~/wt-s49r-before/target/release/peregrine",
    "serve",
    "-m",
    "~/models/nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
