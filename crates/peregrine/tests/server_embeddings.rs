@@ -18,8 +18,9 @@ use std::process::Child;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::models::{
-    write_dense_pooled, write_gemma_embedding, write_modern_bert, write_nomic_bert, Dense,
-    GemmaEmbeddingConfig, ModernBertConfig, NomicBertConfig,
+    write_dense_pooled, write_gemma_embedding, write_jina_bert, write_modern_bert,
+    write_nomic_bert, Dense, GemmaEmbeddingConfig, JinaBertConfig, ModernBertConfig,
+    NomicBertConfig,
 };
 
 const WIDTH: usize = 256;
@@ -726,6 +727,78 @@ fn a_bert_encoder_serves_embeddings_and_refuses_chat() {
         .contains("embedding model"));
 
     // The position table is 64 rows: a longer text is refused, and `truncate` opts in.
+    let long: Vec<u32> = (5..90).collect();
+    let (status, body) = post(port, "/v1/embeddings", json!({"input": long}));
+    assert_eq!(status, 400, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("64 positions"), "message: {message}");
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": long, "truncate": true}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["usage"]["prompt_tokens"].as_u64().unwrap(), 64);
+}
+
+/// The `jina-bert-v2` family served (roadmap S4.8c): a synthetic file with mean
+/// pooling answers `/v1/embeddings` for strings, refuses chat by name, and names its
+/// `context_length` as the text limit.
+#[test]
+fn a_jina_bert_encoder_serves_embeddings_and_refuses_chat() {
+    let dir = tmpdir("jina-bert");
+    let model = write_jina_bert(&dir, Format::F16, 73, JinaBertConfig::default());
+    let (child, port) = common::start(
+        &dir,
+        &[],
+        &[
+            "serve",
+            "-m",
+            model.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            common::PORT,
+            "--ctx",
+            "64",
+            "--threads",
+            "2",
+            "--slots",
+            "4",
+            "--no-profile",
+        ],
+    );
+    let _guard = Guard(child);
+    wait_for_health(port);
+
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        json!({"input": ["hello world", "the test of a paris city", "hello world"]}),
+    );
+    assert_eq!(status, 200, "{body}");
+    for i in 0..3 {
+        let v = embedding(&body, i);
+        assert_eq!(v.len(), 128, "width");
+        assert!((norm(&v) - 1.0).abs() < 1e-4, "normalised");
+    }
+    assert_eq!(
+        bits(&embedding(&body, 0)),
+        bits(&embedding(&body, 2)),
+        "the same text has one vector"
+    );
+
+    let (status, body) = post(
+        port,
+        "/v1/chat/completions",
+        json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("embedding model"));
+
     let long: Vec<u32> = (5..90).collect();
     let (status, body) = post(port, "/v1/embeddings", json!({"input": long}));
     assert_eq!(status, 400, "{body}");

@@ -2288,3 +2288,140 @@ fn gpt_oss_synthetic_file_runs_in_llama_cpp() {
         failures.join("\n")
     );
 }
+
+/// The fast prompt mode's own goldens (S5.4b): one Q4_K and one Q6_K synthetic model,
+/// its prompt read as prompt rows (the 8-bit form) and its decode rows exact, on each
+/// pinned x86 tier. The integer sums are exact, so the three tiers' goldens are made
+/// from the same numbers; recording them separately is what pins that.
+///
+/// `PEREGRINE_GOLDEN=record` writes them, as the other synthetic goldens:
+///
+///   PEREGRINE_GOLDEN=record cargo test --release --test synthetic -- fast_prompt_mode
+#[test]
+fn fast_prompt_mode_matches_its_golden_for_the_tier() {
+    let dir = tmpdir("fast-golden");
+    let tier = peregrine_core::cpu::tier_name();
+    let golden_tier = format!(
+        "{}{}",
+        if tier == "x86_64-avx2-vnni256" {
+            "x86_64-avx2"
+        } else {
+            tier.as_str()
+        },
+        if cfg!(target_os = "macos") {
+            "-macos"
+        } else {
+            ""
+        }
+    );
+    let dir_golden = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/synthetic")
+        .join(golden_tier);
+    let record = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "record");
+    let require = std::env::var("PEREGRINE_GOLDEN").is_ok_and(|v| v == "require");
+    let mut failures = Vec::new();
+    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+        let path = write_dense(&dir, "llama", fmt, 1004 + i as u64, Dense::default());
+        let model = match Gguf::open(&path).and_then(peregrine_models::load_with_fast) {
+            Ok(m) => m,
+            Err(e) => {
+                failures.push(format!("llama-{}-fast: does not load: {e}", fmt.label()));
+                continue;
+            }
+        };
+        if model.q8_form().is_empty() {
+            failures.push(format!("llama-{}-fast: no form was built", fmt.label()));
+            continue;
+        }
+        let a = run_fast(&model, 4);
+        if run_fast(&model, 1) != a {
+            failures.push(format!(
+                "llama-{}-fast: 1 thread differs from 4",
+                fmt.label()
+            ));
+        }
+        let name = format!("llama-{}-fast", fmt.label());
+        let gpath = dir_golden.join(format!("{name}.golden"));
+        if record && tier != "x86_64-avx2-vnni256" {
+            std::fs::create_dir_all(&dir_golden).unwrap();
+            std::fs::write(&gpath, &a).unwrap();
+            eprintln!("synthetic: recorded {name} ({tier})");
+        } else if let Ok(want) = std::fs::read_to_string(&gpath) {
+            if want != a {
+                failures.push(format!(
+                    "{name}: differs from {}\n  want:\n{want}  got:\n{a}",
+                    gpath.display()
+                ));
+            }
+        } else if require {
+            failures.push(format!(
+                "{name}: no golden for tier {tier} ({}); record it with PEREGRINE_GOLDEN=record",
+                gpath.display()
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "the fast prompt mode's goldens failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// [`run`] with every prompt row marked for the fast prompt mode and every decode row
+/// exact: the mode's own read of the synthetic model.
+fn run_fast(model: &Model, threads: usize) -> String {
+    let c = model.cfg;
+    let pool = Pool::new(threads);
+    let n = PROMPT.len();
+    let mut st = model.new_state(128, n, 256, threads);
+    let mut kv = model.new_cache(KvPrec::F16, 256);
+    let mut ss = StepStats::default();
+    let want: Vec<usize> = (0..n).collect();
+    model
+        .forward_marked(
+            &mut st,
+            &mut kv,
+            &pool,
+            &PROMPT,
+            0,
+            &want,
+            &vec![true; n],
+            &mut ss,
+        )
+        .unwrap();
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut am = Vec::new();
+    for i in 0..n {
+        let row = st.logits_row(i, c.n_vocab);
+        assert!(
+            row.iter().all(|v| v.is_finite()),
+            "non-finite logit at position {i}"
+        );
+        fnv(&mut h, row);
+        am.push(argmax(row));
+    }
+    let mut next = *am.last().unwrap();
+    let mut greedy = vec![next];
+    for step in 1..GREEDY {
+        model
+            .forward(
+                &mut st,
+                &mut kv,
+                &pool,
+                &[next],
+                n + step - 1,
+                &[0],
+                &mut ss,
+            )
+            .unwrap();
+        next = argmax(st.logits_row(0, c.n_vocab));
+        greedy.push(next);
+    }
+    let join = |v: &[u32]| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let mut out = String::new();
+    writeln!(out, "logits_fnv {h:016x}").unwrap();
+    writeln!(out, "argmax {}", join(&am)).unwrap();
+    writeln!(out, "greedy {}", join(&greedy)).unwrap();
+    out
+}
