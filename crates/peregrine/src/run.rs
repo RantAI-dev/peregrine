@@ -60,12 +60,14 @@ pub struct RunArgs {
     /// Run projections a LittleBit sidecar covers from it (off by default, as in `serve`).
     #[arg(long, default_value_t = false)]
     pub littlebit: bool,
-    /// Experimental and lossy: prompt tokens read their Q4_K and Q6_K weights from an
-    /// 8-bit copy built at load, so a reply can differ from the default engine's; the
-    /// accuracy report is not published yet (roadmap S5.4c). Generated tokens keep the
-    /// exact kernels. A prompt pass is faster on AVX-512 and about a tenth slower on
-    /// AVX2, where the exact Q4_K kernel is the stronger one; the numbers are in
-    /// `docs/design/s5.4-fast-prompt.md` section 5d. Off by default.
+    /// Experimental and lossy: prompt tokens read the weights of the formats whose
+    /// 8-bit form beats this CPU tier's exact kernel from an 8-bit copy built at
+    /// load (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so
+    /// the option changes nothing), so a reply can differ from the default engine's;
+    /// the accuracy report is not published yet (roadmap S5.4c). Generated tokens
+    /// keep the exact kernels. `peregrine tier` names the formats this CPU takes;
+    /// the numbers are in `docs/design/s5.4-fast-prompt.md` section 5g. Off by
+    /// default.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
     /// Print one JSON object (text, token counts and timings) instead of streaming text.

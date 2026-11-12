@@ -1,14 +1,18 @@
-//! The opt-in fast prompt mode (S5.4b): what `--fast-prompt` guarantees.
+//! The opt-in fast prompt mode (S5.4b; the per-format table is S5.4f): what
+//! `--fast-prompt` guarantees.
 //!
-//! With the option on, a *prompt* row's Q4_K and Q6_K weights are read from an 8-bit
-//! form built at load (one scale per 256-weight super-block), while a *generated*
-//! row, an embedding, a rerank and a decision keep the exact kernels
+//! With the option on, a *prompt* row's weights are read from an 8-bit form built
+//! at load (one scale per 256-weight super-block) for the formats whose form's
+//! kernel beats this tier's exact kernel (`MatKernels::q8k_uses_form`: Q4_K and
+//! Q6_K on AVX-512, Q6_K on AVX2, none on a scalar tier), while a *generated* row,
+//! an embedding, a rerank and a decision keep the exact kernels
 //! (`docs/design/s5.4-fast-prompt.md` §3). This file pins each part of that:
 //!
 //! * the same prompt gives the same cache and logits at prefill chunks 16, 32, 64
 //!   and 128 and at 1, 2 and 4 threads, alone and beside a decoding user;
 //! * decode from a cache a fast-mode prefill produced is the exact engine;
-//! * the option is not a no-op: the prompt's logits differ from the exact mode's;
+//! * the option is not a no-op: the prompt's logits differ from the exact mode's
+//!   for every format the tier's table selects;
 //! * the per-weight error bound holds through the engine's own load path;
 //! * embeddings, decisions and the prefix store behave as documented.
 //!
@@ -28,6 +32,16 @@ use peregrine_core::serve::{Engine, Finish, SlotCfg, SlotId};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{write_dense, Dense};
+
+/// The formats the tier's table gives an 8-bit form (S5.4f). On AVX2 that is Q6_K
+/// alone; on AVX-512 Q4_K and Q6_K; on a tier with no SIMD body, none, so these
+/// tests have nothing to check there (the synthetic goldens assert the no-op).
+fn form_formats() -> Vec<Format> {
+    [Format::Q4_K, Format::Q6_K, Format::Q5_0]
+        .into_iter()
+        .filter(|&f| peregrine_kernels::table::MatKernels::get().q8k_uses_form(f))
+        .collect()
+}
 
 /// The chunk sizes `crates/peregrine-models/tests/prefill_chunk.rs` measures: the
 /// mode's bits must not depend on any of them.
@@ -224,7 +238,7 @@ fn bits(xs: &[f32]) -> Vec<u32> {
 fn fast_mode_is_prompt_invariant() {
     let dir = tmpdir("invariant");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    for (i, fmt) in form_formats().into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9150 + i as u64, Dense::default());
         let model = load_fast(&path);
         if model.q8_form().is_empty() {
@@ -291,7 +305,7 @@ fn fast_mode_is_prompt_invariant() {
 fn fast_mode_decode_is_the_exact_engine() {
     let dir = tmpdir("decode");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    for (i, fmt) in form_formats().into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9200 + i as u64, Dense::default());
         let fast = load_fast(&path);
         let exact = load_exact(&path);
@@ -348,7 +362,7 @@ fn fast_mode_decode_is_the_exact_engine() {
 fn fast_mode_differs_from_exact_mode_on_prompt_rows() {
     let dir = tmpdir("differs");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    for (i, fmt) in form_formats().into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9250 + i as u64, Dense::default());
         let fast = load_fast(&path);
         let exact = load_exact(&path);
@@ -378,7 +392,14 @@ fn every_rerounded_weight_is_within_half_a_step_after_loading() {
     let dir = tmpdir("bound");
     let mut failures = Vec::new();
     let mut checked = 0usize;
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    let bound_formats: Vec<Format> = form_formats()
+        .into_iter()
+        .filter(|f| matches!(f, Format::Q4_K | Format::Q6_K))
+        .collect();
+    if bound_formats.is_empty() {
+        return;
+    }
+    for (i, fmt) in bound_formats.into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9300 + i as u64, Dense::default());
         let model = load_fast(&path);
         let t = model
@@ -472,7 +493,7 @@ fn embeddings_and_decisions_are_untouched() {
     use peregrine_core::embed::Pooling;
     let dir = tmpdir("pooled");
     let mut failures = Vec::new();
-    for (i, fmt) in [Format::Q4_K, Format::Q6_K].into_iter().enumerate() {
+    for (i, fmt) in form_formats().into_iter().enumerate() {
         let path = write_dense(&dir, "llama", fmt, 9400 + i as u64, Dense::default());
         let model = Arc::new(load_fast(&path));
         let text: Vec<u32> = (0..24u32).map(|i| (i * 13 + 5) % 300).collect();
@@ -532,7 +553,10 @@ fn embeddings_and_decisions_are_untouched() {
 #[test]
 fn a_multi_user_pass_serves_each_slot_alone() {
     let dir = tmpdir("multi");
-    let path = write_dense(&dir, "llama", Format::Q4_K, 9450, Dense::default());
+    let Some(fmt) = form_formats().first().copied() else {
+        return;
+    };
+    let path = write_dense(&dir, "llama", fmt, 9450, Dense::default());
     let model = Arc::new(load_fast(&path));
     let long: Vec<u32> = (0..200u32).map(|i| (i * 37 + 11) % 300).collect();
     let short: Vec<u32> = (0..8u32).map(|i| (i * 7 + 3) % 300).collect();
@@ -609,7 +633,10 @@ fn a_multi_user_pass_serves_each_slot_alone() {
 #[test]
 fn a_restored_prefix_gives_the_prompt_read_again() {
     let dir = tmpdir("prefix");
-    let path = write_dense(&dir, "llama", Format::Q4_K, 9500, Dense::default());
+    let Some(fmt) = form_formats().first().copied() else {
+        return;
+    };
+    let path = write_dense(&dir, "llama", fmt, 9500, Dense::default());
     let model = Arc::new(load_fast(&path));
     let opening: Vec<u32> = (0..40u32).map(|i| (i * 13) % 900 % 300).collect();
     let run = |engine: &mut Engine, tail: u32| -> Vec<u32> {
@@ -660,7 +687,10 @@ fn a_restored_prefix_gives_the_prompt_read_again() {
 #[test]
 fn a_generated_tokens_cache_entry_differs_from_the_same_token_read_as_prompt() {
     let dir = tmpdir("exception");
-    let path = write_dense(&dir, "llama", Format::Q4_K, 9550, Dense::default());
+    let Some(fmt) = form_formats().first().copied() else {
+        return;
+    };
+    let path = write_dense(&dir, "llama", fmt, 9550, Dense::default());
     let model = load_fast(&path);
     let c = model.cfg;
     let pool = Pool::new(2);

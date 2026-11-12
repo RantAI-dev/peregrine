@@ -30,6 +30,12 @@ pub struct KernelOptions {
     /// multiply them with the pre-S4.9f float tile. On by default on x86-64, where the packed
     /// kernels run; it is the A/B switch of the float pack.
     pub fpack: bool,
+    /// `PEREGRINE_FAST_PROMPT=1`: the opt-in fast prompt mode (S5.4). The kernel
+    /// layer reads it only to decide whether an activation row whose width is not
+    /// a whole number of 256-weight super-blocks needs its padded per-256 layout
+    /// built (S5.4f, Q5_0 at 896); with the option off the layout is exactly what
+    /// it was.
+    pub fast_prompt: bool,
 }
 
 /// Default prefetch distance (bytes), the value the k-quant kernels were tuned with.
@@ -67,6 +73,7 @@ impl Default for KernelOptions {
             // default they are read into.
             kq_repack: kq_repack_default(crate::cpu::resolved_under(None)),
             fpack: true,
+            fast_prompt: false,
         }
     }
 }
@@ -91,6 +98,7 @@ pub fn get() -> &'static KernelOptions {
             exact: s("EXACT").is_some_and(|v| v == "1"),
             kq_repack: kq_repack_from(s("KREPACK").as_deref(), crate::cpu::resolved_under(isa)),
             fpack: s("FPACK").is_none_or(|v| v != "0"),
+            fast_prompt: s("FAST_PROMPT").is_some_and(|v| v == "1"),
         }
     })
 }

@@ -1,0 +1,207 @@
+== round 1 ==
+gemm(64) x4: best thread 73.8 GMAC/s/core, aggregate 295.4 GMAC/s, wall 0.00s
+--- kernel table: 2048 weights x 8 output rows, at {8, 64, 128, 512} activation rows; GMAC/s aggregate over {1, 4} cores (S5.4f's table a) ---
+ q4k   8 acts exact x1:   74.8 GMAC/s
+ q4k   8 acts  form x1:   59.8 GMAC/s
+ q4k   8 acts exact x4:  297.8 GMAC/s
+ q4k   8 acts  form x4:  238.4 GMAC/s
+ q4k  64 acts exact x1:   75.8 GMAC/s
+ q4k  64 acts  form x1:   59.9 GMAC/s
+ q4k  64 acts exact x4:  286.0 GMAC/s
+ q4k  64 acts  form x4:  238.7 GMAC/s
+ q4k 128 acts exact x1:   75.5 GMAC/s
+ q4k 128 acts  form x1:   59.7 GMAC/s
+ q4k 128 acts exact x4:  292.2 GMAC/s
+ q4k 128 acts  form x4:  237.4 GMAC/s
+ q4k 512 acts exact x1:   71.2 GMAC/s
+ q4k 512 acts  form x1:   59.1 GMAC/s
+ q4k 512 acts exact x4:  267.9 GMAC/s
+ q4k 512 acts  form x4:  235.8 GMAC/s
+ q6k   8 acts exact x1:   30.6 GMAC/s
+ q6k   8 acts  form x1:   39.8 GMAC/s
+ q6k   8 acts exact x4:  122.6 GMAC/s
+ q6k   8 acts  form x4:  238.9 GMAC/s
+ q6k  64 acts exact x1:   45.8 GMAC/s
+ q6k  64 acts  form x1:   59.6 GMAC/s
+ q6k  64 acts exact x4:  182.7 GMAC/s
+ q6k  64 acts  form x4:  232.8 GMAC/s
+ q6k 128 acts exact x1:   45.9 GMAC/s
+ q6k 128 acts  form x1:   59.5 GMAC/s
+ q6k 128 acts exact x4:  182.3 GMAC/s
+ q6k 128 acts  form x4:  238.0 GMAC/s
+ q6k 512 acts exact x1:   45.2 GMAC/s
+ q6k 512 acts  form x1:   59.2 GMAC/s
+ q6k 512 acts exact x4:  174.6 GMAC/s
+ q6k 512 acts  form x4:  234.5 GMAC/s
+q5_0   8 acts exact x1:   40.3 GMAC/s
+q5_0   8 acts  form x1:   39.8 GMAC/s
+q5_0   8 acts exact x4:  160.9 GMAC/s
+q5_0   8 acts  form x4:  159.4 GMAC/s
+q5_0  64 acts exact x1:   60.1 GMAC/s
+q5_0  64 acts  form x1:   59.8 GMAC/s
+q5_0  64 acts exact x4:  239.8 GMAC/s
+q5_0  64 acts  form x4:  238.0 GMAC/s
+q5_0 128 acts exact x1:   59.5 GMAC/s
+q5_0 128 acts  form x1:   59.7 GMAC/s
+q5_0 128 acts exact x4:  235.7 GMAC/s
+q5_0 128 acts  form x4:  237.3 GMAC/s
+q5_0 512 acts exact x1:   57.7 GMAC/s
+q5_0 512 acts  form x1:   59.2 GMAC/s
+q5_0 512 acts exact x4:  143.5 GMAC/s
+q5_0 512 acts  form x4:  232.7 GMAC/s
+--- Q5_0 at Qwen 2.5's 896-wide row (28 blocks, padded to 4 super-blocks); GMAC/s of useful weights, aggregate over {1, 4} cores ---
+q5_0   8 acts exact x1:   56.7 GMAC/s (useful)
+q5_0   8 acts  form x1:   34.0 GMAC/s (useful)
+q5_0   8 acts exact x4:  230.2 GMAC/s (useful)
+q5_0   8 acts  form x4:  202.8 GMAC/s (useful)
+q5_0  64 acts exact x1:   57.1 GMAC/s (useful)
+q5_0  64 acts  form x1:   51.8 GMAC/s (useful)
+q5_0  64 acts exact x4:  228.0 GMAC/s (useful)
+q5_0  64 acts  form x4:  207.0 GMAC/s (useful)
+q5_0 128 acts exact x1:   57.5 GMAC/s (useful)
+q5_0 128 acts  form x1:   51.3 GMAC/s (useful)
+q5_0 128 acts exact x4:  230.7 GMAC/s (useful)
+q5_0 128 acts  form x4:  208.0 GMAC/s (useful)
+q5_0 512 acts exact x1:   52.3 GMAC/s (useful)
+q5_0 512 acts  form x1:   47.7 GMAC/s (useful)
+q5_0 512 acts exact x4:  218.7 GMAC/s (useful)
+q5_0 512 acts  form x4:  205.2 GMAC/s (useful)
+3.42 3.79 3.41 1/1535 3239486
+== round 2 ==
+gemm(64) x4: best thread 73.4 GMAC/s/core, aggregate 293.4 GMAC/s, wall 0.00s
+--- kernel table: 2048 weights x 8 output rows, at {8, 64, 128, 512} activation rows; GMAC/s aggregate over {1, 4} cores (S5.4f's table a) ---
+ q4k   8 acts exact x1:   74.7 GMAC/s
+ q4k   8 acts  form x1:   59.8 GMAC/s
+ q4k   8 acts exact x4:  297.9 GMAC/s
+ q4k   8 acts  form x4:  238.3 GMAC/s
+ q4k  64 acts exact x1:   75.7 GMAC/s
+ q4k  64 acts  form x1:   59.3 GMAC/s
+ q4k  64 acts exact x4:  299.9 GMAC/s
+ q4k  64 acts  form x4:  237.0 GMAC/s
+ q4k 128 acts exact x1:   73.1 GMAC/s
+ q4k 128 acts  form x1:   59.6 GMAC/s
+ q4k 128 acts exact x4:  289.9 GMAC/s
+ q4k 128 acts  form x4:  237.2 GMAC/s
+ q4k 512 acts exact x1:   71.9 GMAC/s
+ q4k 512 acts  form x1:   59.1 GMAC/s
+ q4k 512 acts exact x4:  277.2 GMAC/s
+ q4k 512 acts  form x4:  235.3 GMAC/s
+ q6k   8 acts exact x1:   46.0 GMAC/s
+ q6k   8 acts  form x1:   39.8 GMAC/s
+ q6k   8 acts exact x4:  122.5 GMAC/s
+ q6k   8 acts  form x4:  159.4 GMAC/s
+ q6k  64 acts exact x1:   45.9 GMAC/s
+ q6k  64 acts  form x1:   59.6 GMAC/s
+ q6k  64 acts exact x4:  182.4 GMAC/s
+ q6k  64 acts  form x4:  238.0 GMAC/s
+ q6k 128 acts exact x1:   45.8 GMAC/s
+ q6k 128 acts  form x1:   59.6 GMAC/s
+ q6k 128 acts exact x4:  182.1 GMAC/s
+ q6k 128 acts  form x4:  237.3 GMAC/s
+ q6k 512 acts exact x1:   45.2 GMAC/s
+ q6k 512 acts  form x1:   59.3 GMAC/s
+ q6k 512 acts exact x4:  175.7 GMAC/s
+ q6k 512 acts  form x4:  235.7 GMAC/s
+q5_0   8 acts exact x1:   40.3 GMAC/s
+q5_0   8 acts  form x1:   54.3 GMAC/s
+q5_0   8 acts exact x4:  161.0 GMAC/s
+q5_0   8 acts  form x4:  159.3 GMAC/s
+q5_0  64 acts exact x1:   60.1 GMAC/s
+q5_0  64 acts  form x1:   59.4 GMAC/s
+q5_0  64 acts exact x4:  237.4 GMAC/s
+q5_0  64 acts  form x4:  238.0 GMAC/s
+q5_0 128 acts exact x1:   58.8 GMAC/s
+q5_0 128 acts  form x1:   59.6 GMAC/s
+q5_0 128 acts exact x4:  235.5 GMAC/s
+q5_0 128 acts  form x4:  238.2 GMAC/s
+q5_0 512 acts exact x1:   57.7 GMAC/s
+q5_0 512 acts  form x1:   59.2 GMAC/s
+q5_0 512 acts exact x4:  147.5 GMAC/s
+q5_0 512 acts  form x4:  234.9 GMAC/s
+--- Q5_0 at Qwen 2.5's 896-wide row (28 blocks, padded to 4 super-blocks); GMAC/s of useful weights, aggregate over {1, 4} cores ---
+q5_0   8 acts exact x1:   56.9 GMAC/s (useful)
+q5_0   8 acts  form x1:   43.2 GMAC/s (useful)
+q5_0   8 acts exact x4:  227.1 GMAC/s (useful)
+q5_0   8 acts  form x4:  201.8 GMAC/s (useful)
+q5_0  64 acts exact x1:   56.8 GMAC/s (useful)
+q5_0  64 acts  form x1:   41.4 GMAC/s (useful)
+q5_0  64 acts exact x4:  231.8 GMAC/s (useful)
+q5_0  64 acts  form x4:  205.0 GMAC/s (useful)
+q5_0 128 acts exact x1:   57.3 GMAC/s (useful)
+q5_0 128 acts  form x1:   51.5 GMAC/s (useful)
+q5_0 128 acts exact x4:  229.6 GMAC/s (useful)
+q5_0 128 acts  form x4:  207.0 GMAC/s (useful)
+q5_0 512 acts exact x1:   49.6 GMAC/s (useful)
+q5_0 512 acts  form x1:   50.7 GMAC/s (useful)
+q5_0 512 acts exact x4:  217.7 GMAC/s (useful)
+q5_0 512 acts  form x4:  206.5 GMAC/s (useful)
+3.42 3.79 3.41 1/1535 3239772
+== round 3 ==
+gemm(64) x4: best thread 74.6 GMAC/s/core, aggregate 298.3 GMAC/s, wall 0.00s
+--- kernel table: 2048 weights x 8 output rows, at {8, 64, 128, 512} activation rows; GMAC/s aggregate over {1, 4} cores (S5.4f's table a) ---
+ q4k   8 acts exact x1:   74.7 GMAC/s
+ q4k   8 acts  form x1:   59.8 GMAC/s
+ q4k   8 acts exact x4:  198.9 GMAC/s
+ q4k   8 acts  form x4:  238.3 GMAC/s
+ q4k  64 acts exact x1:   75.7 GMAC/s
+ q4k  64 acts  form x1:   59.9 GMAC/s
+ q4k  64 acts exact x4:  301.6 GMAC/s
+ q4k  64 acts  form x4:  238.8 GMAC/s
+ q4k 128 acts exact x1:   75.2 GMAC/s
+ q4k 128 acts  form x1:   59.7 GMAC/s
+ q4k 128 acts exact x4:  294.5 GMAC/s
+ q4k 128 acts  form x4:  237.7 GMAC/s
+ q4k 512 acts exact x1:   71.5 GMAC/s
+ q4k 512 acts  form x1:   59.4 GMAC/s
+ q4k 512 acts exact x4:  276.2 GMAC/s
+ q4k 512 acts  form x4:  235.6 GMAC/s
+ q6k   8 acts exact x1:   30.6 GMAC/s
+ q6k   8 acts  form x1:   59.7 GMAC/s
+ q6k   8 acts exact x4:  122.4 GMAC/s
+ q6k   8 acts  form x4:  159.3 GMAC/s
+ q6k  64 acts exact x1:   46.0 GMAC/s
+ q6k  64 acts  form x1:   59.5 GMAC/s
+ q6k  64 acts exact x4:  182.8 GMAC/s
+ q6k  64 acts  form x4:  234.3 GMAC/s
+ q6k 128 acts exact x1:   45.4 GMAC/s
+ q6k 128 acts  form x1:   59.4 GMAC/s
+ q6k 128 acts exact x4:  180.1 GMAC/s
+ q6k 128 acts  form x4:  237.7 GMAC/s
+ q6k 512 acts exact x1:   45.3 GMAC/s
+ q6k 512 acts  form x1:   59.3 GMAC/s
+ q6k 512 acts exact x4:  175.3 GMAC/s
+ q6k 512 acts  form x4:  235.7 GMAC/s
+q5_0   8 acts exact x1:   59.5 GMAC/s
+q5_0   8 acts  form x1:   39.8 GMAC/s
+q5_0   8 acts exact x4:  161.7 GMAC/s
+q5_0   8 acts  form x4:  159.4 GMAC/s
+q5_0  64 acts exact x1:   58.8 GMAC/s
+q5_0  64 acts  form x1:   59.5 GMAC/s
+q5_0  64 acts exact x4:  236.3 GMAC/s
+q5_0  64 acts  form x4:  238.1 GMAC/s
+q5_0 128 acts exact x1:   58.8 GMAC/s
+q5_0 128 acts  form x1:   59.4 GMAC/s
+q5_0 128 acts exact x4:  235.3 GMAC/s
+q5_0 128 acts  form x4:  237.0 GMAC/s
+q5_0 512 acts exact x1:   57.4 GMAC/s
+q5_0 512 acts  form x1:   59.2 GMAC/s
+q5_0 512 acts exact x4:  145.7 GMAC/s
+q5_0 512 acts  form x4:  234.8 GMAC/s
+--- Q5_0 at Qwen 2.5's 896-wide row (28 blocks, padded to 4 super-blocks); GMAC/s of useful weights, aggregate over {1, 4} cores ---
+q5_0   8 acts exact x1:   38.8 GMAC/s (useful)
+q5_0   8 acts  form x1:   49.9 GMAC/s (useful)
+q5_0   8 acts exact x4:  228.5 GMAC/s (useful)
+q5_0   8 acts  form x4:  202.6 GMAC/s (useful)
+q5_0  64 acts exact x1:   56.5 GMAC/s (useful)
+q5_0  64 acts  form x1:   49.7 GMAC/s (useful)
+q5_0  64 acts exact x4:  231.9 GMAC/s (useful)
+q5_0  64 acts  form x4:  207.8 GMAC/s (useful)
+q5_0 128 acts exact x1:   57.4 GMAC/s (useful)
+q5_0 128 acts  form x1:   51.2 GMAC/s (useful)
+q5_0 128 acts exact x4:  227.3 GMAC/s (useful)
+q5_0 128 acts  form x4:  204.0 GMAC/s (useful)
+q5_0 512 acts exact x1:   53.4 GMAC/s (useful)
+q5_0 512 acts  form x1:   51.2 GMAC/s (useful)
+q5_0 512 acts exact x4:  218.8 GMAC/s (useful)
+q5_0 512 acts  form x4:  205.4 GMAC/s (useful)
+3.42 3.79 3.41 1/1535 3240058

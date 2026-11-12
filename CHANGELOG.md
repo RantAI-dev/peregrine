@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The fast prompt mode takes the 8-bit form only where it wins on the tier (S5.4f)**: on
+  AVX2 the form's body runs at 59.7 GMAC/s for every format, while this tier's exact Q4_K kernel
+  is 77.4 and a Q4_K_M file is mostly Q4_K — so `--fast-prompt`, which took the form for Q4_K
+  and Q6_K on every tier, was **0.88-0.93× the exact engine** on Llama 3.2 1B. Which formats
+  take the form is now one table (`MatKernels::q8k_uses_form`): AVX-512 keeps Q4_K and Q6_K
+  (unchanged), AVX2 takes **Q6_K only** (1.28-1.34× its exact kernel; Q4_K is 0.79-0.85 and
+  Q5_0 0.99-1.03), aarch64 keeps S5.4e's Q4_K/Q6_K, and on x86 a tier with no SIMD body takes
+  none, so the option then changes nothing and says so. Q5_0 joins the form's supported set — `q8form.rs`, the dispatch and
+  a new bit-identical AVX2 builder (`q8k_build_q5_0_avx2`) handle its short last super-block —
+  but no x86 tier selects it: at Qwen 2.5's 896-wide rows the padding costs 12 % (0.88×). The
+  form is built only for the tier's formats: Llama 3.2 1B Q4_K_M carries **140.2 MiB** instead
+  of 957.0, its fast load **+0.16 s / +151 MiB** instead of +1.7 s / +987 MiB. End to end the
+  mode is now **1.05-1.08× exact on the 1B** (was 0.91-0.93) and 1.00-1.04× on the Qwen (one
+  cell level, none below); decode after a fast prompt is level, and the other engines' cells
+  are unchanged except that the 1B is now ahead of ik_llama.cpp on all four. Only the
+  `*-fast.golden` files of the AVX2 and scalar tiers move: on AVX2 `llama-Q4_K-fast` equals the
+  tier's exact `llama-Q4_K` golden (asserted in the test), on scalar both fast goldens do; the
+  AVX-512 fast goldens pass unchanged under Intel SDE. `peregrine tier`, the server's startup
+  line and the `--fast-prompt` help now name the formats the CPU takes.
+
 - **Qwen3-Embedding F16 at long text: the value mix shares V across two rows (S4.9s, ARM)**:
   the one cell still behind 1.0 in the cache-off ARM table (Qwen3-Embedding 0.6B F16, one
   2 000-token text, 0.96× llama.cpp) spends 24 % of its pass in the attention value mix, at
