@@ -876,6 +876,20 @@ c63d13b (docs: the mistral3 reading note, the supported-model list and the tests
   strings built from the specials' texts, their prefixes and their overlaps on the BPE and
   SentencePiece paths.
 
+### Fixed
+
+- **Rerank and classify scores no longer depend on the host's C library.** The classifier heads of
+  the `bert` and `modern-bert` families (and Gemma's logit soft-cap on x86) called the C library's
+  `tanhf`, which glibc 2.40 replaced with a correctly rounded version: the same file then gave a
+  score that differed in its last bit between, say, Ubuntu 24.04 and Fedora 42. Found by the
+  release gate on the AVX2 host, where two head goldens recorded on the older glibc did not match.
+  The heads now use the engine's own `tanh` (`vmath::tanh`, built from IEEE basic operations), so
+  every machine gives the same bits; the two synthetic head goldens are re-recorded, and with the
+  fix the older-glibc hosts produce exactly what the newer-glibc host produced before it. A
+  `clippy.toml` now forbids the single-precision C-library functions whose rounding changed
+  (`tanh`, `sinh`, `cosh`, the inverse hyperbolics, `exp_m1`, `ln_1p`, `cbrt`) anywhere in the
+  workspace.
+
 ## [0.1.2] - 2026-11-10
 
 ### Fixed

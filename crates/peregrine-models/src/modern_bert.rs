@@ -1208,9 +1208,11 @@ fn head_row(
         );
         // The head's activation (`hparams.act_cls`), in place.
         match h.act {
+            // The engine's own `tanh`, not the C library's: `tanhf` changed its rounding in
+            // glibc 2.40, and a score may not depend on the host's libc (issue #64).
             HeadAct::Tanh => {
                 for v in st.xb2[..dm].iter_mut() {
-                    *v = v.tanh();
+                    *v = vmath::tanh(*v);
                 }
             }
             HeadAct::Gelu => vmath::gelu_erf_rows(&mut st.xb2[..dm]),
