@@ -1348,6 +1348,9 @@ fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan,
 fn renders_every_chat(format: ToolFormat) -> bool {
     match format {
         ToolFormat::Hermes => false,
+        // Qwen 3's template writes messages untrimmed, later system messages as turns of
+        // their own, and earlier turns without their thinking; the renderer does the same.
+        ToolFormat::Qwen3(_) => true,
         ToolFormat::QwenXml => true,
     }
 }
@@ -2008,7 +2011,10 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
     // Such a reply is returned as llama.cpp returns it: the reasoning stripped, the answer
     // starting at its first character. With `reasoning_format: none` the span is content
     // as the model wrote it.
-    run.trim = reasoning_open && p.reasoning_format.extracts();
+    // The same goes for a reply rendered by the format of a family that thinks, whose
+    // model opens the block itself (Qwen 3).
+    let thinks = p.tool.as_ref().is_some_and(|t| t.format.thinks());
+    run.trim = (reasoning_open || thinks) && p.reasoning_format.extracts();
     run.skip_ws = run.trim;
     // gpt-oss's reply is split by control tokens; every other template's reasoning is Qwen3's
     // `<think>` span, below.
@@ -4654,6 +4660,45 @@ mod tests {
     }
 
     #[test]
+    fn a_qwen3_tool_request_leaves_the_thinking_block_to_the_model() {
+        let qwen3 = ToolFormat::for_template(tools::QWEN3_TEMPLATE).expect("the qwen3 format");
+        assert_eq!(qwen3.name(), "qwen3");
+        assert!(qwen3.thinks());
+        let plan = |extra: Value| {
+            let mut b = tool_body(json!({"tools": weather_tools()}));
+            for (k, v) in extra.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            tool_request(qwen3, &b, &b.to_string()).expect("the tool request")
+        };
+        // Thinking on: the prompt ends with the assistant's header and the model opens
+        // the block itself, so the reply does not start inside one.
+        let on = plan(json!({}));
+        assert!(on.prompt.ends_with("<|im_start|>assistant\n"));
+        assert!(!on.reasoning_open);
+        assert!(on.prompt.contains("# Tools"));
+        assert!(
+            !on.prompt.contains("You are Qwen"),
+            "no default system message"
+        );
+        // Off: the empty block, as for Qwen 3.5.
+        let off = plan(json!({"chat_template_kwargs": {"enable_thinking": false}}));
+        assert!(off
+            .prompt
+            .ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        assert!(!off.reasoning_open);
+        // A call is the JSON form, read without the schema's help.
+        let mut tool = ToolReply::new(qwen3, &two_tools(), true, 9);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = tool.feed(WEATHER_CALL);
+        assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        let events = tool.finish();
+        assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        assert_eq!(tool.calls.len(), 1);
+        assert_eq!(tool.calls[0].name, "weather");
+    }
+
+    #[test]
     fn the_reply_parser_is_given_the_tools_schemas() {
         // The XML format writes values bare, so only the schema says whether `5` is the
         // text or the number: `query` is declared a string, `limit` an integer.
@@ -4721,6 +4766,8 @@ mod tests {
     fn a_file_with_qwen35s_template_renders_every_chat_with_the_format() {
         assert!(renders_every_chat(ToolFormat::QwenXml));
         assert!(!renders_every_chat(ToolFormat::Hermes));
+        let qwen3 = ToolFormat::for_template(tools::QWEN3_TEMPLATE).expect("the qwen3 format");
+        assert!(renders_every_chat(qwen3));
         // A request without tools: the template's prompt, and nothing to parse.
         let xml = ToolFormat::for_template(tools::QWEN35_TEMPLATE).expect("the qwen-xml format");
         let b = json!({"messages": [

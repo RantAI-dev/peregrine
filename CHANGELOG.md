@@ -8,6 +8,23 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Tool calling for Qwen 3 (S6.2c)**: a file that carries Qwen 3's chat template is served with
+  tools through the new `qwen3` format: Qwen 2.5's tool list and JSON calls, no default system
+  message, messages written untrimmed, the assistant's turns after the last question with their
+  thinking block, and the model opening its own thinking (an empty block ends the prompt when
+  thinking is off). Four published wordings of the template are recognised (the repository's,
+  which bartowski and lmstudio-community carry; Qwen's own GGUF files; unsloth's up to 1.7B;
+  unsloth's larger files). llama.cpp v0.9.0 renders the 51 shared conversations to the same bytes
+  with all four, and the renderer matches them; the wordings differ on two corner rules (whether
+  a user message with a `<tool_response>` block in the middle is a tool's result, and whether
+  thinking that is only whitespace counts), so a file is served by the rules of the text it
+  carries, pinned by 44 more records rendered by llama.cpp. Chat requests without tools on these
+  files are rendered by the same renderer. On `Qwen_Qwen3-1.7B-Q4_K_M.gguf` at temperature 0
+  (16 requests, three tools) the right tool is called on 11 of 12 requests with thinking off in
+  both engines, every call identical, and 13 of 16 whole replies identical; with thinking on,
+  12 of 12 on Peregrine and 11 of 12 on llama.cpp, the same tool on 11 and the same arguments on
+  10 of the 12 (this model's long reasoning parts at near-ties in every request, in llama.cpp's
+  own repeated runs too, so no whole reply is identical).
 - **Tool calling for Qwen 3.5 and Bonsai 2 on the chat endpoint (S6.3b)**: a file that carries
   Qwen 3.5's chat template is served with tools through the `qwen-xml` format. Four published
   texts of that template are recognised: the one in Bonsai 2 files and Qwen's 4B and 9B files,

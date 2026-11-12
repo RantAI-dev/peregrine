@@ -386,6 +386,61 @@ fn a_request_without_tools_gets_the_same_template() {
     assert!(error_message(&body).contains("user"), "{body}");
 }
 
+/// Qwen 3: the tools are served, the thinking switch changes the prompt, and the four
+/// published wordings of the template give the same prompt and reply for an ordinary
+/// request (they part only on corner cases pinned in `peregrine-core`).
+#[test]
+fn a_qwen3_template_serves_tools_under_every_wording() {
+    let texts = std::iter::once(peregrine_core::tools::QWEN3_TEMPLATE).chain(
+        peregrine_core::tools::QWEN3_VARIANTS
+            .iter()
+            .map(|(text, _)| *text),
+    );
+    let mut replies = Vec::new();
+    for (i, template) in texts.enumerate() {
+        let (_server, port) = serve_qwen35_model(&format!("qwen3-text-{i}"), 46, template);
+        let (status, on) = post(port, tool_request(json!({})));
+        assert_eq!(status, 200, "wording {i}: {on}");
+        let (status, off) = post(
+            port,
+            tool_request(json!({"chat_template_kwargs": {"enable_thinking": false}})),
+        );
+        assert_eq!(status, 200, "wording {i}: {off}");
+        // Thinking off writes the empty block into the prompt.
+        assert!(
+            off["usage"]["prompt_tokens"].as_u64().unwrap()
+                > on["usage"]["prompt_tokens"].as_u64().unwrap(),
+            "wording {i}"
+        );
+        // A request without tools is rendered by the same template.
+        let (status, plain) = post(
+            port,
+            json!({
+                "messages": [
+                    {"role": "system", "content": "Be brief."},
+                    {"role": "user", "content": "Hello"}
+                ],
+                "temperature": 0,
+                "max_tokens": 4
+            }),
+        );
+        assert_eq!(status, 200, "wording {i}: {plain}");
+        replies.push((
+            on["usage"]["prompt_tokens"].clone(),
+            on["choices"].clone(),
+            plain["usage"]["prompt_tokens"].clone(),
+            plain["choices"].clone(),
+        ));
+    }
+    assert_eq!(replies.len(), 4);
+    for (i, reply) in replies.iter().enumerate() {
+        assert_eq!(
+            reply, &replies[0],
+            "wording {i} is not served like the first"
+        );
+    }
+}
+
 /// The texts of Qwen 3.5's template that other publishers ship are the same format: the
 /// same weights and the same request give the same prompt and the same reply.
 #[test]
