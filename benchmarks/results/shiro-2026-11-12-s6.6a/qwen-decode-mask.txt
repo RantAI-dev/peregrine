@@ -1,0 +1,11 @@
+model ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf vocab 151936 prep_ms 206.4 prep_median_ms 220.7 prep_min_ms 204.9 prep_max_ms 276.3
+unconstrained: tok_s median 40.69 runs [40.52570945617982, 40.96492338760408, 40.77822424418073, 40.69020217101207, 40.31752135303599]
+json_object: tok_s median 41.86 runs [43.86020215708535, 41.02986730035913, 42.45249103218114, 39.71842401773736, 41.860394479297135]
+json_object: cold mask calls 35 median_ns 79564 p99_ns 539064 max_ns 7426708 mean_ns 399135
+json_object: warm mask calls 175 median_ns 149288 p99_ns 551781 max_ns 565077 mean_ns 194984
+medium: tok_s median 41.13 runs [41.12799689871093, 38.66229132332535, 37.102791274549354, 44.990589858502375, 44.568975740300765]
+medium: cold mask calls 152 median_ns 75714 p99_ns 482681 max_ns 3019100 mean_ns 191223
+medium: warm mask calls 760 median_ns 169444 p99_ns 3030016 max_ns 3446863 mean_ns 271903
+large: tok_s median 40.30 runs [39.58201493949668, 40.295215384486305, 37.14901675604931, 41.9266002901201, 42.67849272904977]
+large: cold mask calls 400 median_ns 89527 p99_ns 2883469 max_ns 3008371 mean_ns 241763
+large: warm mask calls 2000 median_ns 153964 p99_ns 2901230 max_ns 3771575 mean_ns 317824

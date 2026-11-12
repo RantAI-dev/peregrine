@@ -126,6 +126,9 @@ curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' \
 ```
 
 The server speaks `/v1/chat/completions` (streamed or not), plus `/v1/models`, `/health` and `/metrics`.
+Its `response_format` constrains the reply to valid JSON: `{"type": "json_object"}` or a
+`{"type": "json_schema", "json_schema": {...}}` document (S6.6a; the supported keyword table is in
+[docs/compat.md](docs/compat.md#structured-output-response_format)).
 
 `-m` may be repeated: every file is a model in the same process, and a request's `model` field
 selects one. The first `-m` is the default for a request that names no model. With one `-m` the id is

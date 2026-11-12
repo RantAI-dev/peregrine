@@ -61,5 +61,9 @@ required-features = ["fmt-ternary"]
 name = "promptbench"
 required-features = ["arch-llama", "arch-qwen"]
 
+[[example]]
+name = "constrain_bench"
+required-features = ["arch-llama", "arch-qwen"]
+
 [lints]
 workspace = true

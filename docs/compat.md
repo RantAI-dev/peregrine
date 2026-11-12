@@ -34,6 +34,7 @@ uploads and the llama-server comparison command.
 | sampling | `temperature: 0` reproducible; same `temperature`/`top_p`/`seed` reproducible from the first request |
 | `stop` | a string or up to four strings: the reply must end at the sequence, the sequence must not be returned, `finish_reason` is `"stop"`, and streaming must hold back partial matches (the string, array and SSE forms must agree) |
 | `max_tokens` | exactly that many tokens with `ignore_eos`, `finish_reason: "length"` |
+| `response_format` | `{"type":"json_object"}` and `{"type":"json_schema","json_schema":{...}}`: the reply is valid JSON of that schema, streamed or not; a schema keyword that cannot be honoured is a 400 naming the keyword and its JSON pointer |
 | `n > 1` | three choices indexed 0..2; `n` with `stream` is either supported or refused cleanly |
 | `logprobs` | one entry per content token, numeric log-probability ≤ 0 |
 | errors | malformed JSON, missing/empty/non-array `messages`, a last assistant turn, an unknown model, an unsupported sampler, `n > 16`, unknown path, wrong method — all with the right status and, where applicable, an OpenAI error object |
@@ -43,6 +44,78 @@ uploads and the llama-server comparison command.
 
 A DEVIATION is a known difference from the OpenAI specification (or from llama-server), not a
 failure: the suite exits non-zero only on FAIL. The current deviations are below.
+
+## Structured output (`response_format`)
+
+The chat endpoint accepts OpenAI's three forms:
+
+| `response_format` | Meaning |
+|---|---|
+| `{"type": "text"}` | today's unconstrained reply (also the default when the field is absent) |
+| `{"type": "json_object"}` | any JSON object |
+| `{"type": "json_schema", "json_schema": {"name": "…", "schema": {…}, "strict": true}}` | one JSON value of the schema below |
+
+`strict` defaults to false. When it is true, OpenAI's definition applies: the object's
+`additionalProperties` is treated as `false` and every declared property is required.
+
+The constraint is applied between the logits and the sampler: the forward pass is untouched, and a
+request without `response_format` takes exactly the path it took before. Property order is the order
+of the schema's `properties` object (required properties must appear; optional ones may be skipped;
+additional properties come after the declared ones). Whitespace is bounded to JSON's single space,
+or one or two newlines followed by at most twenty spaces or tabs. Strings are valid UTF-8, control
+characters are escaped, and a surrogate pair is one character; `minLength`/`maxLength` count
+characters. When the top-level value closes, only the model's end-of-turn tokens are allowed, so the
+reply ends there.
+
+### Supported keywords
+
+| Keyword | Notes |
+|---|---|
+| `type` | `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`, or a list of them |
+| `properties`, `required`, `additionalProperties` | `additionalProperties` may be `false`, `true` or a schema; default `true` (JSON Schema), forced to `false` by `strict` |
+| `items`, `prefixItems`, `minItems`, `maxItems` | arrays |
+| `enum`, `const` | emitted as exact JSON text; may be combined with `type`, not with another restricting keyword |
+| `anyOf`, `oneOf` | `oneOf` is served as `anyOf` (the reply is valid for at least one branch) |
+| `allOf` | one element, or an unambiguous merge of object schemas |
+| `$ref` | a local pointer: `#`, `#/$defs/...`, `#/definitions/...`; recursion is allowed |
+| `minLength`, `maxLength` | characters, not bytes |
+| `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` | integers only, and only a finite set of at most 1 000 values or a single sign bound (`minimum: 0`, `maximum: 0` and their exclusive spellings) |
+| `description`, `title`, `default`, `examples`, `$schema`, `$id`, `$comment`, `$defs`, `definitions`, `deprecated`, `readOnly`, `writeOnly` | ignored (they do not restrict the value) |
+
+### Refused, never silently ignored
+
+Every other keyword that could restrict the value is a `400 invalid_request_error` with
+`param: "response_format"`, naming the keyword and the JSON pointer, for example:
+
+```
+unsupported JSON Schema keyword "pattern" at #/properties/name:
+  it would restrict the reply and this backend cannot honour it
+```
+
+That includes `pattern`, `format`, `patternProperties`, `dependentRequired`, `if`/`then`/`else`,
+`not`, `uniqueItems`, `multipleOf`, `minProperties`, `maxProperties`, `contains`, `propertyNames`,
+`unevaluatedProperties`, and any unknown key. A schema with no `type` while `properties`, `items`,
+`minLength`, bounds, … are present is refused naming `type`.
+
+### Interactions
+
+* **`tools` and `response_format` together**: `400 response_format with tools is not supported yet`.
+  The project lead joins the two in S6.6b; the public combinators
+  (`Constraint::sequence`, `any_of`, `repeat`) are the base.
+* **Reasoning models**: a reply that opens in a thinking span is refused while thinking is on:
+  `400 response_format is not supported while the model is thinking; send the request with thinking
+  off`. The engine's sampler cannot be told when the server's reasoning parser closes the span.
+* **`max_tokens`**: still cuts a reply short (`finish_reason: "length"`); the text is then an
+  incomplete prefix of a valid document, as OpenAI documents for JSON mode. A `stop` sequence does
+  the same.
+* **Streaming** is unchanged: chunks are text deltas, and their concatenation is the non-streamed
+  reply's text.
+
+### CLI
+
+`peregrine run --json-schema FILE` and `peregrine run --json-object` use the same path (the
+non-standard `--json` flag already means "print one JSON object of timings"). A constrained run on a
+reasoning model needs `--no-thinking`.
 
 ## Current deviations from the OpenAI specification
 

@@ -38,6 +38,59 @@ All notable changes to this project are documented here. The format follows
   `benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`; design:
   `docs/design/s5.4-fast-prompt.md` §5k/§5l.
 
+- **The pass width of large float encoders is right for ARM (S4.9, measured)**: #251 gave a
+  bidirectional encoder whose weights are all float and larger than 256 MiB 128 rows per pass
+  instead of 32, measured on x86 only. Re-measured on the ARM host with both settings of one
+  build (`--opt PASS_ROWS=32` against `128`, alternating inside every round, cache off, fresh
+  texts per request) on five such encoders — bge-m3 F16, EmbeddingGemma 300M F32,
+  gte-modernbert-base F16, nomic-embed-text v1.5 F16 (260.9 MiB) and jina-embeddings-v2-base-en
+  F16 (261.0 MiB) — the rule holds: at one thread the single-text cells are level (0.996-1.008,
+  a text is never split) and every batch gains, **16 × 32 tokens 1.084-1.289**, 32 × 128
+  1.038-1.081, 8 × 512 1.064-1.142, the mixed batch 1.004-1.010. The ten-thread cells are
+  host-contaminated (load 5.7-32.5); the two below 1.0 there (bge-m3 512 0.817, jina 8 × 512
+  0.896) are 0.999 and 1.085 at one thread. **No code changed and no golden moved**: the pass
+  budget is scheduling, and the size rule is the smallest that fits. Numbers and harness:
+  `benchmarks/results/spark-arm-2026-11-12-pass-rows/`; design §24.
+- **The fast prompt pass at long prompts on ARM: the account, and it is attention (S5.4k)**:
+  S5.4h left `--fast-prompt` behind ik_llama.cpp at 4 096-token prompts (Qwen 2.5 0.5B 0.86× at
+  one thread, 0.91× at ten; Llama 3.2 1B 0.74× at ten) and named the form's 385.9 MiB of
+  resident bytes as the suspect. The engine's own stage timers at 512 and 4 096 tokens, one
+  thread and ten, say otherwise: the form's weight matmul runs at the same rate at both lengths
+  (Q5_0 204-225 GMAC/s at 4 096 against 199-221 at 512; Q4_K/Q6_K 268-279), which is 80-91 % of
+  its hot-tile kernel-table rate — the rest is streaming the form once per chunk, not the
+  activation's preparation (1.8-1.9 % of the pass) and not the chunk (64-512 within 1 % at one
+  thread). What grows is **attention**: 19.5 % → 65.1 % of a one-thread Qwen pass and 13.5 % →
+  54.5 % on the 1B, because its MACs are O(n²); the score half runs at 35 GMAC/s and the value
+  mix at 18-23, the S4.9s/S4.9t rates, and the four-row bodies do fire. At ten threads the pass
+  is half caller wait on a host with a co-tenant (load 4-14). End to end the fast mode is
+  **1.31-1.75× ik on the 512-token cells** and 1.28× on the 1B at 4 096/1; below 1.0, all at
+  4 096 tokens: Qwen 0.94× at one thread (attention is 65 % of that pass; 20 % faster score and
+  mix kernels would make it 1.04×), Qwen 0.78× at ten and Llama 0.94× at ten (both on a loaded
+  host whose ik rounds spread 1.7×). Against llama.cpp the mode is 1.60-6.87× on all eight
+  cells. **No engine file changed**: the account names the next step (a new loop shape on the
+  attention kernels) rather than taking a 2.4 % one. ik's aarch64 wide path is read from its
+  source: it expands the file's k-quant codes to eight-bit in registers per 32 weights and
+  streams 0.5625/0.8125 bytes per weight, so its 4 096-token win is its CPU flash attention, not
+  its matmul. Numbers, scripts and the eight cells:
+  `benchmarks/results/spark-arm-2026-11-12-s5.4k/`; design §5m.
+- **Windows has its own goldens, and both systems compare theirs on every pull request (S7.4).** The
+  synthetic set for Windows' three x86-64 tiers (scalar, AVX2 and AVX-512) and its session fixture
+  were recorded on `windows-2025` by the **Record goldens** workflow, which now takes an `isa` input
+  (`PEREGRINE_ISA`; empty is the runner's own tier) and names its artefact after it. The Windows
+  runner pool draws both AVX2 and AVX-512 machines, so the job compares the committed
+  `x86_64-avx2-windows` set with `PEREGRINE_ISA=avx2` on every pull request whatever CPU it drew, and
+  fails on a "no golden for tier" / "no recording for tier" line instead of skipping silently; the
+  macOS job has the same guard at `aarch64-neon-dotprod`. The first measurements on GitHub's runners
+  (a shared EPYC/Xeon pool, not a benchmark host) put Windows within 0.80–0.95 of Linux on the same
+  CPU model and tier, and put the first load of a freshly downloaded 271 MB model at 2.3–3.6 s
+  against 0.1–0.3 s for the second one, which is Defender's first-open scan; the numbers and the
+  caveats are in `docs/design/s7-platforms.md` §10. A change that adds a golden now records it for
+  macOS and for both Windows tiers (`docs/dev/testing.md`). The sweep after the S4.8b and S5.4f
+  merges recorded `nomic-bert-moe-Q8_0` for macOS and all three Windows tiers, and removed the three
+  Windows `*-fast` goldens the scalar and AVX2 tiers no longer read: S5.4f takes the form only where
+  it wins, so the fast test compares against the exact engine and the exact golden on those tiers.
+  A second sweep after S5.4h merged recorded nothing on either system: macOS's `llama-Q5_0-fast`
+  golden came with #257, and no x86 tier takes Q5_0 in the form.
 - **The fast prompt pass measured against ik_llama.cpp's `-rtr` path, and a per-32 form as a
   prototype (S5.4i)**: the opt-in 8-bit prompt pass was 0.74-0.94× the fork's `-rtr` path on all
   eight cells (S5.4c), and this step accounts for it. **The 8-bit kernel is not where the pass
@@ -194,6 +247,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The Windows installer no longer flattens the user `Path`.** `scripts/install.ps1` read the value
+  with `[Environment]::GetEnvironmentVariable("Path","User")`, which expands every `%VARIABLE%`, and
+  wrote it back with `[Environment]::SetEnvironmentVariable`, which stores a plain `REG_SZ`: an entry
+  such as `%USERPROFILE%\bin` came back as `C:\Users\name\bin` and the value's kind changed from
+  `REG_EXPAND_SZ` to `REG_SZ`. It now reads the raw value from `HKCU:\Environment`
+  (`DoNotExpandEnvironmentNames`), appends the install directory, writes it back with
+  `RegistryValueKind::ExpandString` and broadcasts the change with a no-op
+  `[Environment]::SetEnvironmentVariable` on a scratch name (PowerShell 5.1 has no
+  `SendMessageTimeout` without `Add-Type`). The undo text is unchanged. The CI installer step starts
+  from a user `Path` carrying `%USERPROFILE%` and checks that the value comes back with the variable
+  intact, with the install directory appended, and still typed `ExpandString`.
 - **Prompt processing: a pass's "6-10 % of the caller's serial work" is not serial work
   (S5.2c)**: SwiGLU had no timer, and the pass's step account now names every step over 0.5 %
   (quantise 2.6-6.3 %, SwiGLU 2.4-5.9 %, residual 0.7-4.4 %, RoPE 0.4-1.7 %, RMSNorm
@@ -205,6 +269,28 @@ All notable changes to this project are documented here. The format follows
   `docs/design/s5-prefill-avx512.md` §13.
 
 ### Added
+
+- **Constrained decoding and `response_format` (S6.6a)**: `POST /v1/chat/completions` accepts
+  OpenAI's `response_format`: `{"type": "json_object"}` or a JSON Schema document
+  (`{"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`), and the sampler may
+  only pick tokens that keep the reply a valid prefix of that document. The forward pass is
+  untouched: logits are bit-for-bit what they were and the mask is applied between them and the
+  sampler, so an unconstrained request takes exactly today's path. A new dependency-free module,
+  `peregrine_core::constrain`, holds the schema compiler, an incremental byte-level matcher that
+  tracks UTF-8 and surrogate pairs across token boundaries, and a token mask over a vocabulary
+  byte trie with precomputed plain-string bitsets. Supported keywords, and everything refused by
+  name with its JSON pointer, are in `docs/compat.md`; the design is
+  `docs/design/s6.6-constrained-decoding.md`. `peregrine run` gains `--json-schema FILE` and
+  `--json-object`. A constrained slot does not speculate; a reasoning model with thinking on is
+  refused rather than constrained in the wrong span. Measured: 100 % of self-ended replies on
+  200 requests per model over 10 schemas validate (Qwen 2.5 0.5B and Llama 3.2 1B, against
+  llama.cpp v0.9.0's 198/198 and 187/187); the warm mask is 0.14-0.17 ms per token (0.3-0.7 % of a
+  decode step) and decode throughput is 0.99-1.03× the unconstrained engine across
+  json_object/medium/large schemas; the one-time vocabulary preparation is 187-221 ms median on
+  this host (148 ms when it is not saturated). Against llama.cpp v0.9.0 on the same requests,
+  Peregrine is 1.285× (Qwen) and 1.134× (Llama) its tokens/s and closes every object where
+  llama.cpp cut 2/200 (Qwen) and 13/200 (Llama) on `max_tokens`. Results:
+  `benchmarks/results/shiro-2026-11-12-s6.6a/`.
 
 - **The `nomic-bert-moe` family: nomic-embed-text-v2-moe (S4.8b)**: a GGUF with
   `general.architecture = "nomic-bert-moe"` now loads and serves `/v1/embeddings` and

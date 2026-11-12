@@ -126,6 +126,7 @@ fn the_pinned_draft_count_holds_the_head_to_its_depth() {
             dir: drafter.clone(),
             max_k: DrafterChoice::DSPARK_MAX_K,
         },
+        constraint: None,
     };
     let mut e = Engine::new(model.clone(), 4, 512, 1, KvPrec::F16, 0);
     let id = e.admit(prompt.clone(), cfg.clone()).expect("admit");

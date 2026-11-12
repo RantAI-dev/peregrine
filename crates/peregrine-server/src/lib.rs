@@ -41,6 +41,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
+use peregrine_core::constrain::{Constraint, Schema};
 use peregrine_core::decision::Decider;
 use peregrine_core::embed::Pooling;
 use peregrine_core::json::Value as OrderedValue;
@@ -1002,6 +1003,16 @@ fn bad_json(message: String) -> (StatusCode, Json<Value>) {
     )
 }
 
+/// The OpenAI error body with the request field it is about (`param`), before it
+/// becomes a response (so a unit test can read it).
+fn bad_param(message: String, param: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": {"message": message, "type": "invalid_request_error", "param": param, "code": 400}})),
+    )
+        .into_response()
+}
+
 /// `Json<Value>`, but a body that is not JSON is answered with the same error object as every
 /// other bad request. Axum's own rejection is `text/plain`, which an OpenAI client cannot read as
 /// an error. The raw text is kept for the chat route's tool path, which reads the tools and
@@ -1095,6 +1106,8 @@ struct Plan {
     stop: Vec<String>,
     /// The tool path, when the request carries tools or a tool conversation (S6.3).
     tool: Option<ToolPlan>,
+    /// Constrained decoding (S6.6a): `response_format`'s JSON constraint, if any.
+    constraint: Option<Arc<Constraint>>,
     /// The first call id's base: derived from the request's own id, so a response's
     /// calls are unique without a random source.
     call_base: u64,
@@ -1463,6 +1476,9 @@ fn plan_with(b: &Value, tool_path: bool) -> Result<Plan, String> {
     refuse_legacy_tools(b)?;
     // Validate the tool choice even without tools: `"required"` cannot be honoured.
     tool_choice(b)?;
+    if tool_path && b.get("response_format").is_some_and(|v| !v.is_null()) {
+        return Err("response_format with tools is not supported yet".into());
+    }
     reject_unsupported_sampling(b)?;
     let n = b["n"].as_u64().unwrap_or(1).max(1);
     if n > MAX_CHOICES {
@@ -1553,8 +1569,72 @@ fn plan_with(b: &Value, tool_path: bool) -> Result<Plan, String> {
         ignore_eos: b["ignore_eos"].as_bool().unwrap_or(false),
         stop: stop_sequences(b)?,
         tool: None,
+        constraint: None,
         call_base: 0,
     })
+}
+
+/// Read `response_format` from the request's own text, so a schema's `properties` keep
+/// the order the client wrote (serde_json without `preserve_order` sorts them).
+///
+/// The accepted forms are OpenAI's: `{"type":"text"}`, `{"type":"json_object"}`, and
+/// `{"type":"json_schema","json_schema":{"name":…,"schema":…,"strict":…}}`. A keyword the
+/// schema compiler refuses is an `invalid_request_error` naming the keyword and its JSON
+/// pointer, never a silently different reply.
+fn apply_response_format(p: &mut Plan, raw: &str) -> Result<(), String> {
+    let ordered =
+        OrderedValue::parse(raw).map_err(|e| format!("the request body is not valid JSON: {e}"))?;
+    let Some(rf) = ordered.get("response_format").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let Some(fields) = rf.as_object() else {
+        return Err("response_format must be an object".into());
+    };
+    let kind = fields
+        .iter()
+        .find(|(k, _)| k == "type")
+        .and_then(|(_, v)| v.as_str())
+        .ok_or_else(|| {
+            "response_format.type must be \"text\", \"json_object\" or \"json_schema\"".to_string()
+        })?;
+    match kind {
+        "text" => Ok(()),
+        "json_object" => {
+            p.constraint = Some(Arc::new(Constraint::json_object()));
+            Ok(())
+        }
+        "json_schema" => {
+            let js = fields
+                .iter()
+                .find(|(k, _)| k == "json_schema")
+                .map(|(_, v)| v)
+                .and_then(OrderedValue::as_object)
+                .ok_or_else(|| "response_format.json_schema must be an object".to_string())?;
+            let strict = js
+                .iter()
+                .find(|(k, _)| k == "strict")
+                .is_some_and(|(_, v)| matches!(v, OrderedValue::Bool(true)));
+            let schema = js
+                .iter()
+                .find(|(k, _)| k == "schema")
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| "response_format.json_schema.schema is required".to_string())?;
+            let constraint = Constraint::from_schema(Schema::with_strict(schema, strict));
+            constraint
+                .compile()
+                .map_err(|e| format!("response_format: {}", e.message()))?;
+            // A schema can compile and still be too large to start matching (a huge enum
+            // or anyOf). That is the client's schema, so it is refused here with a 400,
+            // not discovered at generation time as a server error.
+            peregrine_core::constrain::Matcher::new(&constraint)
+                .map_err(|e| format!("response_format: {}", e.message()))?;
+            p.constraint = Some(Arc::new(constraint));
+            Ok(())
+        }
+        other => Err(format!(
+            "response_format.type must be \"text\", \"json_object\" or \"json_schema\", not {other:?}"
+        )),
+    }
 }
 
 enum Msg {
@@ -2142,7 +2222,9 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
             penalties: p.penalties,
             seed: p.seed,
             max_tokens: budget_left.max(1),
-            stop: if p.ignore_eos {
+            // A constrained reply must end when the top-level value closes: its end tokens
+            // are always enabled, even under `ignore_eos`.
+            stop: if p.ignore_eos && p.constraint.is_none() {
                 vec![]
             } else {
                 app.stop.clone()
@@ -2156,6 +2238,7 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
             // The server asks for no drafter: the slot decodes plainly, and the
             // engine's own MTP speculation is the engine's business.
             drafter: Default::default(),
+            constraint: p.constraint.clone(),
         };
         if app
             .jobs
@@ -3532,6 +3615,7 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) 
     // for the same reasons on every model.
     let mut p = match plan_with(&body, tool_path) {
         Ok(p) => p,
+        Err(e) if e.starts_with("response_format") => return bad_param(e, "response_format"),
         Err(e) => return bad(e),
     };
     p.tool = if tool_path {
@@ -3555,6 +3639,23 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) 
     } else {
         None
     };
+    // `response_format` is read from the request's own text: a schema's property order is
+    // the order the client wrote, which serde_json without `preserve_order` would sort.
+    if let Err(e) = apply_response_format(&mut p, &raw) {
+        return bad_param(e, "response_format");
+    }
+    // A constrained reply is the assistant's content. A reasoning model's reply starts in
+    // its thinking span, and the engine's sampler cannot be told when the server's parser
+    // closes it; refuse instead of constraining the wrong span.
+    let opens_in_reasoning = app.template.opens_reasoning(p.thinking)
+        || p.tool.as_ref().is_some_and(|t| t.reasoning_open);
+    if p.constraint.is_some() && opens_in_reasoning {
+        return bad_param(
+            "response_format is not supported while the model is thinking; send the request with thinking off"
+                .into(),
+            "response_format",
+        );
+    }
     if body.get("reasoning_format").is_none() {
         p.reasoning_format = state.reasoning_format;
     }
@@ -3731,10 +3832,11 @@ pub fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_f32, chat_choice, chunk_json, continuation_prefix, fit_tokens, head_probabilities,
-        parse_classify_request, parse_embedding_request, parse_rerank_request, plan,
-        renders_every_chat, route_tool_events, tool_fields_present, tool_request, tools,
-        EmbedInput, Msg, OrderedValue, Penalties, ReasoningFormat, Run, ToolFormat, ToolReply,
+        apply_response_format, base64_f32, chat_choice, chunk_json, continuation_prefix,
+        fit_tokens, head_probabilities, parse_classify_request, parse_embedding_request,
+        parse_rerank_request, plan, plan_with, renders_every_chat, route_tool_events,
+        tool_fields_present, tool_request, tools, EmbedInput, Msg, OrderedValue, Penalties,
+        ReasoningFormat, Run, ToolFormat, ToolReply,
     };
     use axum::Json;
     use serde_json::{json, Value};
@@ -4888,5 +4990,124 @@ mod tests {
             chat_choice(0, String::new(), String::new(), &calls, "tool_calls")["finish_reason"],
             "tool_calls"
         );
+    }
+
+    /// Parse a request body and apply its `response_format`, as `chat` does.
+    fn constrained(raw: &str) -> Result<super::Plan, String> {
+        let body: Value = serde_json::from_str(raw).expect("the test body is JSON");
+        let mut p = plan(&body)?;
+        apply_response_format(&mut p, raw)?;
+        Ok(p)
+    }
+
+    #[test]
+    fn response_format_text_is_the_unconstrained_path() {
+        let p = constrained(
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"text"}}"#,
+        )
+        .unwrap();
+        assert!(p.constraint.is_none());
+        assert!(
+            constrained(r#"{"messages":[{"role":"user","content":"hi"}]}"#)
+                .unwrap()
+                .constraint
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn response_format_json_object_builds_an_any_object_constraint() {
+        let p = constrained(
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}"#,
+        )
+        .unwrap();
+        let c = p.constraint.expect("a constraint");
+        let mut m = peregrine_core::constrain::Matcher::new(&c).unwrap();
+        assert!(m.advance_bytes(br#"{"a":1}"#).is_ok());
+        assert!(m.can_end());
+        assert!(m.advance_bytes(br#"[]"#).is_err());
+    }
+
+    #[test]
+    fn response_format_json_schema_keeps_the_schema_and_its_strictness() {
+        let p = constrained(
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"answer","strict":true,"schema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"string"}}}}}}"#,
+        )
+        .unwrap();
+        let c = p.constraint.expect("a constraint");
+        let mut m = peregrine_core::constrain::Matcher::new(&c).unwrap();
+        // strict: b is required and additional properties are refused.
+        assert!(m.advance_bytes(br#"{"a":1,"b":"x"}"#).is_ok());
+        let mut missing = peregrine_core::constrain::Matcher::new(&c).unwrap();
+        assert!(
+            !missing.advance_bytes(br#"{"a":1}"#).is_ok(),
+            "strict requires b"
+        );
+        let mut extra = peregrine_core::constrain::Matcher::new(&c).unwrap();
+        assert!(!extra.advance_bytes(br#"{"z":1}"#).is_ok());
+    }
+
+    #[test]
+    fn response_format_a_schema_too_large_to_match_is_a_request_error() {
+        // Every keyword is supported; the schema is refused for its size, at parse time.
+        let members: Vec<String> = (0..50_000).map(|i| format!("\"value-{i:06}\"")).collect();
+        let body = format!(
+            r#"{{"messages":[{{"role":"user","content":"hi"}}],"response_format":{{"type":"json_schema","json_schema":{{"name":"x","schema":{{"enum":[{}]}}}}}}}}"#,
+            members.join(",")
+        );
+        let err = match constrained(&body) {
+            Err(e) => e,
+            Ok(_) => panic!("a 50 000-member enum must be refused"),
+        };
+        assert!(
+            err.contains("cannot be served") && err.contains("at #"),
+            "{err}"
+        );
+        assert!(!err.contains("unsupported JSON Schema keyword"), "{err}");
+        // A small enum is still served.
+        constrained(
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"x","schema":{"enum":["a","b",3,null]}}}}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn response_format_unsupported_keywords_name_the_keyword_and_pointer() {
+        let err = constrained(
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"x","schema":{"type":"object","properties":{"name":{"type":"string","pattern":".*"}}}}}}"#,
+        )
+        .err()
+        .expect("a refused schema");
+        assert!(err.contains("pattern"), "{err}");
+        assert!(err.contains("#/properties/name"), "{err}");
+    }
+
+    #[test]
+    fn response_format_shapes_are_refused_by_name() {
+        for raw in [
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":"json"}"#,
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"xml"}}"#,
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema"}}"#,
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"schema":1}}}"#,
+        ] {
+            let err = constrained(raw).err().expect("refused");
+            assert!(
+                err.contains("response_format")
+                    || err.contains("json_schema")
+                    || err.contains("json_object"),
+                "{raw}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_and_response_format_are_refused_together() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+            "response_format": {"type": "json_object"},
+        });
+        let err = plan_with(&body, true).err().expect("refused");
+        assert_eq!(err, "response_format with tools is not supported yet");
     }
 }
