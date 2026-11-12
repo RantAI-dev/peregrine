@@ -25,6 +25,8 @@ All notable changes to this project are documented here. The format follows
   merges recorded `nomic-bert-moe-Q8_0` for macOS and all three Windows tiers, and removed the three
   Windows `*-fast` goldens the scalar and AVX2 tiers no longer read: S5.4f takes the form only where
   it wins, so the fast test compares against the exact engine and the exact golden on those tiers.
+  A second sweep after S5.4h merged recorded nothing on either system: macOS's `llama-Q5_0-fast`
+  golden came with #257, and no x86 tier takes Q5_0 in the form.
 - **Q5_0 takes the 8-bit form in the fast prompt mode on ARM (S5.4h)**: S5.4f's per-tier table
   left aarch64 at S5.4e's Q4_K/Q6_K because it was written on an AVX2 machine, and Qwen 2.5 0.5B
   — 165 MiB of Q5_0 and the file the mode was aimed at — gained only 1.07-1.91×. Measured on the

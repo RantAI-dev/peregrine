@@ -367,7 +367,9 @@ real-model goldens (CI has no model files) and a published performance compariso
   where it wins on the tier — no format on the scalar tier, Q6_K only on AVX2 — so the fast test
   compares the fast run with the exact engine and the tier's exact golden there and has no fast
   golden of its own. The AVX-512 set's two fast goldens are still read and reproduced byte for byte
-  in that recording.
+  in that recording. A second sweep after S5.4h merged recorded nothing on any of the three
+  (EPYC 7763 for scalar and AVX2): Q5_0 takes the form only on the aarch64 NEON caps, so no x86
+  tier reads a `llama-Q5_0-fast` golden — the fast test compares against the exact one there.
 - **The pool and the pin.** The Windows pool draws AVX2-only and AVX-512 machines, and
   `PEREGRINE_ISA` takes capability names, not tier names. `ci.yml` therefore runs the
   golden-bearing targets (`synthetic`, `embeddings`, `bert_heads`, `modern_bert_heads`,
@@ -387,7 +389,8 @@ real-model goldens (CI has no model files) and a published performance compariso
   next recording added nothing). The macOS directory is a superset of the `aarch64-neon-dotprod`
   one: `jina-bert-Q8_0`, `nomic-bert-Q8_0` and now `nomic-bert-moe-Q8_0` exist only here, recorded
   in earlier macOS sweeps, and their tests skip on the aarch64 Linux tiers, which record no golden
-  for them.
+  for them. The sweep after S5.4h merged recorded nothing either, and rewrote `llama-Q5_0-fast`
+  byte-identically to the one #257 committed here.
 - **The installer.** `scripts/install.ps1` read the user `Path` with
   `[Environment]::GetEnvironmentVariable("Path","User")` — which expands `%VARIABLES%` — and wrote it
   back with `[Environment]::SetEnvironmentVariable`, which stores a plain `REG_SZ`, so
