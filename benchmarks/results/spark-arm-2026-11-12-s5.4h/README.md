@@ -294,5 +294,7 @@ to ik_llama.cpp is the form's 1.64× bytes and not an untouched format.
   at 4.8×, and it would not lift AVX2's 0.88× over the 1.10× bar.
 - Q8_0's form.
 - The accuracy report (S5.4c).
-- macOS's Q5_0 fast golden: recorded on GitHub's runner by `record-goldens.yml` (the
-  `aarch64-neon-dotprod-macos` directory); this host records the two Linux aarch64 tiers.
+- Nothing on Q5_0's goldens: `record-goldens.yml` on `macos-15` recorded
+  `aarch64-neon-dotprod-macos/llama-Q5_0-fast.golden`, and it is byte-identical to the Linux
+  `aarch64-neon-dotprod` one (the run's own record-then-verify pair passed; its recorded-files
+  list held only that file, so no existing macOS golden changed).
