@@ -1196,32 +1196,46 @@ impl Drop for TurnGuard<'_> {
 /// that names neither falls back to the CPUs this process may actually run on. On the ARM
 /// machines this was written for there is no SMT, so that number is the physical core count too;
 /// the fallback also honours a `taskset` mask, which is what the benchmark's affinity runs need.
+///
+/// Windows has no `/proc`: `GetLogicalProcessorInformationEx(RelationProcessorCore, …)` counts
+/// the cores (S7.2; the call is in `crate::win32`, which exists only on Windows), and the
+/// logical count is the fallback when that call fails.
 pub fn physical_cores() -> Option<usize> {
-    let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-    let mut seen = std::collections::HashSet::new();
-    let (mut pkg, mut core) = (None::<String>, None::<String>);
-    for line in info.lines().chain(std::iter::once("")) {
-        if line.trim().is_empty() {
-            if let (Some(p), Some(c)) = (pkg.take(), core.take()) {
-                seen.insert((p, c));
+    #[cfg(windows)]
+    {
+        // Windows has no `/proc`: the count comes from the processor topology, and the
+        // logical count is the fallback when the call fails (a restricted process).
+        crate::win32::physical_core_count()
+            .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+    }
+    #[cfg(not(windows))]
+    {
+        let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        let mut seen = std::collections::HashSet::new();
+        let (mut pkg, mut core) = (None::<String>, None::<String>);
+        for line in info.lines().chain(std::iter::once("")) {
+            if line.trim().is_empty() {
+                if let (Some(p), Some(c)) = (pkg.take(), core.take()) {
+                    seen.insert((p, c));
+                }
+                continue;
             }
-            continue;
+            let mut kv = line.splitn(2, ':');
+            let (k, v) = (
+                kv.next().unwrap_or("").trim(),
+                kv.next().unwrap_or("").trim().to_string(),
+            );
+            match k {
+                "physical id" => pkg = Some(v),
+                "core id" => core = Some(v),
+                _ => {}
+            }
         }
-        let mut kv = line.splitn(2, ':');
-        let (k, v) = (
-            kv.next().unwrap_or("").trim(),
-            kv.next().unwrap_or("").trim().to_string(),
-        );
-        match k {
-            "physical id" => pkg = Some(v),
-            "core id" => core = Some(v),
-            _ => {}
+        if seen.is_empty() {
+            return std::thread::available_parallelism().ok().map(|n| n.get());
         }
+        Some(seen.len())
     }
-    if seen.is_empty() {
-        return std::thread::available_parallelism().ok().map(|n| n.get());
-    }
-    Some(seen.len())
 }
 
 /// the pool for one-row steps (single-user decode), when it should be narrower than the main one.

@@ -2670,7 +2670,7 @@ fn fwht(x: &mut [f32]) {
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic f64 transcendentals, for the aarch64 tiers
+// Deterministic f64 transcendentals, for aarch64 and every non-Linux system
 // ---------------------------------------------------------------------------
 //
 // libm's `sin`, `cos`, `pow` and `log` are not one function across C libraries:
@@ -2679,8 +2679,11 @@ fn fwht(x: &mut [f32]) {
 // visible in the logits — which is why #140 had to give macOS its own golden
 // directory. The aarch64 tiers use the implementations below instead: they are
 // built from IEEE basic operations only, so one golden set holds on Linux and
-// macOS alike. The x86 tiers recorded their goldens against glibc, so the
-// [`det_*`] dispatchers below call libm off aarch64 and leave those bits alone.
+// macOS alike. Windows is the same (S7.2): it has no golden history to protect and
+// its Universal C Runtime is another `libm`, so every non-Linux build uses the
+// engine's own functions. Only Linux x86-64 keeps the C library: its goldens were
+// recorded against glibc, and the [`det_*`] dispatchers below leave those bits
+// alone there.
 
 /// `ln 2`, high part: 32 significant bits, so `k·ln2_hi` is exact for every `k`
 /// the `exp` reduction produces.
@@ -2690,17 +2693,17 @@ const DET_LN2_LO: f64 = f64::from_bits(0x3dea_39ef_3579_3c76);
 /// `log2(e)`: the `exp` reduction counts whole multiples of `ln 2`.
 const DET_LOG2E: f64 = f64::from_bits(0x3ff7_1547_652b_82fe);
 /// `2/π`: the sine's quadrant count.
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", not(target_os = "linux"), test))]
 const DET_FRAC_2_PI: f64 = f64::from_bits(0x3fe4_5f30_6dc9_c883);
 /// `π/2`, first part: the low mantissa bits are zero, so `n·PIO2_1` is exact for
 /// `|n| < 2²⁰` and the subtraction that reduces the angle is exact as well.
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", not(target_os = "linux"), test))]
 const DET_PIO2_1: f64 = f64::from_bits(0x3ff9_21fb_5440_0000);
 /// `π/2 − DET_PIO2_1`, to `f64`.
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", not(target_os = "linux"), test))]
 const DET_PIO2_2: f64 = f64::from_bits(0x3dd0_b461_1a62_6331);
 /// The rest of `π/2` after `DET_PIO2_2`.
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", not(target_os = "linux"), test))]
 const DET_PIO2_3: f64 = f64::from_bits(0x3a71_701b_839a_2520);
 
 /// `2^k` for an integer `k`, subnormals included.
@@ -2721,8 +2724,8 @@ fn pow2(k: i32) -> f64 {
 ///
 /// Pure IEEE arithmetic, so it is one function on every tier and every C library.
 /// The BERT family's `erf` reads it (the tail of `erfc` is `exp(−x²)`); the
-/// [`det_exp`] dispatcher below deliberately keeps libm on x86, because the
-/// logits goldens recorded there were made against it.
+/// [`det_exp`] dispatcher below deliberately keeps libm on Linux x86-64, because
+/// the logits goldens recorded there were made against it.
 fn exp_f64(x: f64) -> f64 {
     if x.is_nan() {
         return x;
@@ -2760,7 +2763,7 @@ fn exp_f64(x: f64) -> f64 {
 
 /// `ln(x)`: split `x = m·2^e` with `m ∈ [√2/2, √2]`, then the `atanh` series in
 /// `s = (m−1)/(m+1)`, whose `s²` is at most 0.03, so eleven terms reach `f64`.
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", not(target_os = "linux"), test))]
 fn ln_f64(x: f64) -> f64 {
     if x.is_nan() {
         return x;
@@ -2802,7 +2805,7 @@ fn ln_f64(x: f64) -> f64 {
 /// The three parts of `π/2` keep `x = n·π/2 + r` accurate out to the largest RoPE
 /// angle the engine can build (a few million radians at most); beyond `10⁶`
 /// radians, which no table reaches, libm keeps the job.
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", not(target_os = "linux"), test))]
 fn sin_cos_f64(x: f64) -> (f64, f64) {
     if !x.is_finite() {
         return (f64::NAN, f64::NAN);
@@ -2841,7 +2844,7 @@ fn sin_cos_f64(x: f64) -> (f64, f64) {
 }
 
 /// `base^exp = exp(exp·ln base)` for `base > 0`; the libm handles the rest.
-#[cfg(any(target_arch = "aarch64", test))]
+#[cfg(any(target_arch = "aarch64", not(target_os = "linux"), test))]
 fn pow_f64(base: f64, exp: f64) -> f64 {
     if exp == 0.0 {
         return 1.0;
@@ -2858,11 +2861,12 @@ fn pow_f64(base: f64, exp: f64) -> f64 {
 
 /// `exp` on the forward path.
 ///
-/// On aarch64: [`exp_scalar`], the engine's own exponential. Off aarch64: the C
-/// library's `expf`, so the x86 golden tiers do not move.
+/// On aarch64 and off Linux (Windows x86-64): [`exp_scalar`], the engine's own
+/// exponential. On Linux x86-64: the C library's `expf`, so those golden tiers do
+/// not move (macOS is aarch64; Windows compares against its own goldens, S7.4).
 #[inline]
 pub fn det_exp(x: f32) -> f32 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", not(target_os = "linux")))]
     {
         if x.is_nan() {
             return x;
@@ -2875,7 +2879,7 @@ pub fn det_exp(x: f32) -> f32 {
         }
         exp_scalar(x)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), target_os = "linux"))]
     {
         x.exp()
     }
@@ -2884,11 +2888,11 @@ pub fn det_exp(x: f32) -> f32 {
 /// `ln` on the forward path; see [`det_exp`] for the platform split.
 #[inline]
 pub fn det_ln(x: f32) -> f32 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", not(target_os = "linux")))]
     {
         ln_f64(x as f64) as f32
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), target_os = "linux"))]
     {
         x.ln()
     }
@@ -2897,11 +2901,11 @@ pub fn det_ln(x: f32) -> f32 {
 /// `ln` of an `f64` on the forward path; see [`det_exp`] for the platform split.
 #[inline]
 pub fn det_ln_f64(x: f64) -> f64 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", not(target_os = "linux")))]
     {
         ln_f64(x)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), target_os = "linux"))]
     {
         x.ln()
     }
@@ -2911,8 +2915,8 @@ pub fn det_ln_f64(x: f64) -> f64 {
 ///
 /// Unlike its neighbours this one has no platform split. The C library's `tanhf` is the
 /// function glibc 2.40 changed, so on x86 the same file gave different bits on two Linux
-/// distributions; the functions that still call the C library off aarch64 are ones whose
-/// results have not moved between glibc versions.
+/// distributions; the functions that still call the C library on Linux x86-64 are ones
+/// whose results have not moved between glibc versions.
 #[inline]
 pub fn det_tanh(x: f32) -> f32 {
     tanh(x)
@@ -2921,11 +2925,11 @@ pub fn det_tanh(x: f32) -> f32 {
 /// `(sin x, cos x)`; see [`det_exp`] for the platform split.
 #[inline]
 pub fn det_sin_cos(x: f64) -> (f64, f64) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", not(target_os = "linux")))]
     {
         sin_cos_f64(x)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), target_os = "linux"))]
     {
         (x.sin(), x.cos())
     }
@@ -2934,11 +2938,11 @@ pub fn det_sin_cos(x: f64) -> (f64, f64) {
 /// `base^exp` for `f64`; see [`det_exp`] for the platform split.
 #[inline]
 pub fn det_pow_f64(base: f64, exp: f64) -> f64 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", not(target_os = "linux")))]
     {
         pow_f64(base, exp)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), target_os = "linux"))]
     {
         base.powf(exp)
     }
@@ -2947,11 +2951,11 @@ pub fn det_pow_f64(base: f64, exp: f64) -> f64 {
 /// `base^exp` for `f32`; see [`det_exp`] for the platform split.
 #[inline]
 pub fn det_pow_f32(base: f32, exp: f32) -> f32 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", not(target_os = "linux")))]
     {
         pow_f64(base as f64, exp as f64) as f32
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), target_os = "linux"))]
     {
         base.powf(exp)
     }
@@ -2962,7 +2966,7 @@ pub fn det_pow_f32(base: f32, exp: f32) -> f32 {
 /// feeds a golden, so it is on the numeric path too.
 #[inline]
 pub fn det_hypot(a: f64, b: f64) -> f64 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", not(target_os = "linux")))]
     {
         let (big, small) = if a.abs() >= b.abs() {
             (a.abs(), b.abs())
@@ -2975,7 +2979,7 @@ pub fn det_hypot(a: f64, b: f64) -> f64 {
         let r = small / big;
         big * (1.0 + r * r).sqrt()
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(not(target_arch = "aarch64"), target_os = "linux"))]
     {
         a.hypot(b)
     }

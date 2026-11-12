@@ -37,7 +37,10 @@
 //! Writes go to a temporary file in the same directory and are renamed into
 //! place, so a reader sees a complete old file or a complete new one, and a crash
 //! mid-write leaves only a `.tmp-` file. Two processes may pack the same model at
-//! once: both write, one rename wins, and both load.
+//! once: both write, one rename wins, and both load. Windows cannot rename over a
+//! file that is mapped (S7.2), so when the destination already holds a valid pack
+//! for the same key it is kept and the loser's temporary file is dropped: the
+//! bytes a key names are the same bytes whoever wrote them.
 //!
 //! A cache directory that cannot be created or written (read-only, full) is not
 //! an error: the load packs in memory and says so once.
@@ -84,8 +87,8 @@ const MIB: u64 = 1 << 20;
 /// Where the pack cache lives when `PEREGRINE_PACK_CACHE` gives no directory.
 ///
 /// `$PEREGRINE_CACHE_DIR/packs`, else `$XDG_CACHE_HOME/peregrine/packs`, else
-/// `~/.cache/peregrine/packs` — the model cache's directory and conventions
-/// (`peregrine/src/fetch.rs`).
+/// `%LOCALAPPDATA%\peregrine\packs` on Windows, else `~/.cache/peregrine/packs` — the model
+/// cache's directory and conventions (`peregrine/src/fetch.rs`).
 pub fn default_dir() -> PathBuf {
     if let Ok(d) = std::env::var("PEREGRINE_CACHE_DIR") {
         if !d.is_empty() {
@@ -95,6 +98,15 @@ pub fn default_dir() -> PathBuf {
     if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
         if !d.is_empty() {
             return PathBuf::from(d).join("peregrine").join("packs");
+        }
+    }
+    #[cfg(windows)]
+    {
+        // The model cache's Windows default, plus the pack subdirectory (`fetch::cache_dir`).
+        if let Ok(d) = std::env::var("LOCALAPPDATA") {
+            if !d.is_empty() {
+                return PathBuf::from(d).join("peregrine").join("packs");
+            }
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -320,16 +332,33 @@ impl PackCache {
             let _ = std::fs::remove_file(&tmp);
             return None;
         }
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            eprintln!(
-                "peregrine: pack cache rename failed ({}): {e}",
-                path.display()
-            );
-            let _ = std::fs::remove_file(&tmp);
-            return None;
-        }
+        self.publish(&tmp, &path, key)?;
         self.evict(&path);
         Some(path)
+    }
+
+    /// Move the finished temporary file to `path`; `None` when it could not be published.
+    ///
+    /// A rename replaces the destination atomically on Unix. Windows refuses to rename over a
+    /// file that is mapped — by another process that won the race, or by this one — so a failed
+    /// rename asks whether the destination is now a valid pack for `key`. It is the same bytes
+    /// by construction, so keeping it is correct; only when it is not a valid pack does the
+    /// publish count as failed. The temporary file is removed either way.
+    fn publish(&self, tmp: &Path, path: &Path, key: &PackKey) -> Option<()> {
+        match std::fs::rename(tmp, path) {
+            Ok(()) => Some(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(tmp);
+                if self.open(key).is_some() {
+                    return Some(());
+                }
+                eprintln!(
+                    "peregrine: pack cache rename failed ({}): {e}",
+                    path.display()
+                );
+                None
+            }
+        }
     }
 
     fn tmp_path(&self, key: &PackKey) -> PathBuf {
@@ -764,4 +793,68 @@ fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<()
     let mut f = file.try_clone()?;
     f.seek(SeekFrom::Start(offset))?;
     f.read_exact(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "peregrine-packcache-unit-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn key() -> PackKey {
+        PackKey {
+            text: "unit-test-key\n".into(),
+            hash: 0x1234_5678,
+            stem: "model".into(),
+            version: FORMAT_VERSION,
+            model_size: 0,
+            model_mtime: (0, 0),
+            header_fnv: 0,
+        }
+    }
+
+    /// Publishing over a pack that is already mapped (S7.2): Unix replaces the file atomically;
+    /// Windows cannot rename over a mapped file, so the file already published for the key is
+    /// kept. Either way the second publish succeeds, a mapping made before it still reads its
+    /// bytes, one pack file exists, and no `.tmp-` file is left behind.
+    #[test]
+    fn publishing_over_a_mapped_pack_keeps_one_valid_file() {
+        let dir = tmp("publish");
+        let cache = PackCache::new(&dir, u64::MAX);
+        let key = key();
+        let path = cache
+            .write(&key, b"kq-bytes", b"fp-bytes")
+            .expect("the first publish");
+        let hit = cache.open(&key).expect("the file just published verifies");
+        assert_eq!(&hit.kq.as_ref().unwrap()[..], b"kq-bytes".as_slice());
+        // The same key published again while the first file is mapped.
+        assert_eq!(
+            cache.write(&key, b"kq-bytes", b"fp-bytes"),
+            Some(path.clone())
+        );
+        assert_eq!(&hit.fp.as_ref().unwrap()[..], b"fp-bytes".as_slice());
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names.iter().filter(|n| n.starts_with("pack-")).count(),
+            1,
+            "{names:?}"
+        );
+        assert!(names.iter().all(|n| !n.starts_with(".tmp-")), "{names:?}");
+        drop(hit);
+        let again = cache.open(&key).expect("the kept file still verifies");
+        assert_eq!(&again.kq.as_ref().unwrap()[..], b"kq-bytes".as_slice());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

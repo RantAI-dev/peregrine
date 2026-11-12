@@ -8,8 +8,9 @@
 //!
 //! The models are the synthetic files under `crates/peregrine-models/tests/support/`, so CI
 //! needs no model files.
-
-#![cfg(unix)]
+//!
+//! One test is Unix-only: it asks the server to drain with `SIGTERM`. Windows has no `SIGTERM`
+//! (the stop file is S7.3); the multi-model serving it drains is tested there by the others.
 
 #[path = "../../peregrine-models/tests/support/mod.rs"]
 mod support;
@@ -459,6 +460,10 @@ fn no_two_engines_run_a_pass_at_once() {
 }
 
 /// SIGTERM drains requests in flight on every model, then the process exits cleanly.
+///
+/// Unix only: Windows has no `SIGTERM`; its stop file (and the drain it triggers) is S7.3,
+/// and Ctrl-C is the clean shutdown there today.
+#[cfg(unix)]
 #[test]
 fn drain_covers_every_engine() {
     let dir = tmpdir("drain");
