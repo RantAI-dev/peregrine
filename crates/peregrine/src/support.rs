@@ -76,7 +76,7 @@ pub fn support_text() -> String {
     let _ = writeln!(out, "rerank and classify:");
     let _ = writeln!(
         out,
-        "  a bert file's classifier head (cls, cls.output, classifier.output_labels), POST /v1/rerank and POST /v1/classify, peregrine rerank"
+        "  a bert or modern-bert file's classifier head (cls, cls.norm, cls.output, classifier.output_labels), POST /v1/rerank and POST /v1/classify, peregrine rerank"
     );
 
     let _ = writeln!(out, "decisions:");
@@ -107,6 +107,7 @@ pub fn support_markdown() -> String {
                 "modern-bert" => {
                     "ModernBERT encoder (ModernBERT, gte-modernbert, Granite Embedding R2)"
                 }
+                "nomic-bert" => "NomicBERT encoder (nomic-embed-text v1.5)",
                 "mistral3" => "Mistral 3 embedding (Nemotron 3.5 Embed)",
                 "phi3" => "Phi-3 / Phi-4",
                 "qwen3moe" => "Qwen 3 MoE",
@@ -138,21 +139,22 @@ ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7)
     // 6. Embeddings
     let embd_str = "causal decoders as embedders (`<arch>.pooling_type`: last or mean), and \
 bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, \
-gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Gemma 3 \
-(EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); \
-`POST /v1/embeddings`, `peregrine embed`";
+gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), NomicBERT \
+(nomic-embed-text v1.5: mean, RoPE, SwiGLU), Gemma 3 (EmbeddingGemma: mean/cls with \
+`dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, \
+`peregrine embed`";
 
     // 7. Tool calling
     let tool_str = "OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on \
-`POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format) and for \
-Qwen 3.5 and Bonsai 2 (the `qwen-xml` format, thinking on or off); the prompt is the one llama.cpp \
-builds from the model's template";
+`POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 \
+(the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the \
+prompt is the one llama.cpp builds from the model's template";
 
     // 8. Rerank and classify
-    let rr_str = "a `bert` file's classifier head (`cls`, `cls.output`, \
-`classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), \
-`POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3 and bge-reranker-base checked \
-against llama.cpp v0.9.0";
+    let rr_str = "a `bert` or `modern-bert` file's classifier head (`cls`, `cls.norm`, \
+`cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, \
+`/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3, bge-reranker-base \
+and gte-reranker-modernbert-base checked against llama.cpp v0.9.0";
 
     // 8. Decision models
     let dec_str = "native decision models with a `systemone` template: the `openjev` type, \

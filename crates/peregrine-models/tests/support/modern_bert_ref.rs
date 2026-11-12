@@ -335,3 +335,84 @@ pub fn reference_embedding(model: &Model, tokens: &[u32], pooling: Pooling) -> V
     peregrine_core::embed::pool_rows_into(&hidden, dm, pooling, &mut sum, &mut v);
     v
 }
+
+/// The width of the head's row: `cls.output`'s rows, or `d_model` without one.
+fn head_width(g: &Gguf) -> usize {
+    match g.tensor("cls.output.weight") {
+        Ok(t) => t.dims.get(1).copied().unwrap_or(1) as usize,
+        Err(_) => g.tensor("cls.weight").map_or(0, |t| t.dims[0] as usize),
+    }
+}
+
+/// One text's classifier-head row, exactly as llama.cpp's `build_pooling` computes it
+/// for this family (`src/llama-graph.cpp:4185-4220`, roadmap S4.7b):
+///
+/// ```text
+/// h = pooled(output_norm rows)     // mean unless classifier.pooling_type names another
+///                                  // type; the key's absence means mean
+/// if cls:  h = cls.weight · h      // no bias: llama.cpp creates no cls.bias here
+///          h = act(h)              // classifier.activation, GELU_ERF when absent
+///          h = norm(h, cls.norm.w) // only when the tensor is there
+/// if cls.output: y = cls.output.weight · h + cls.output.bias
+/// ```
+///
+/// The reference reads `cls.bias` and `cls.norm.bias` not at all, because llama.cpp
+/// does not create them for a `modern-bert` classification file: a file that carries
+/// them computes the same row as one that does not.
+pub fn reference_head(model: &Model, tokens: &[u32]) -> Vec<f32> {
+    let g = model.gguf();
+    let cfg = &model.cfg;
+    let dm = cfg.d_model;
+    let hidden = hidden_rows(model, tokens);
+    let mean = g
+        .u32("modern-bert.classifier.pooling_type")
+        .map_or(true, |v| v == 1);
+    let mut h = if mean {
+        let mut sum = vec![0.0f64; dm];
+        let mut v = vec![0.0f32; dm];
+        peregrine_core::embed::pool_rows_into(&hidden, dm, Pooling::Mean, &mut sum, &mut v);
+        v
+    } else {
+        hidden[..dm].to_vec()
+    };
+    if g.tensor("cls.weight").is_ok() {
+        let w = mat(g, "cls.weight");
+        let mut out = vec![0.0f32; dm];
+        w.apply(&h, &mut out);
+        match g.str("modern-bert.classifier.activation") {
+            Ok("silu") => {
+                for v in out.iter_mut() {
+                    *v *= 1.0 / (1.0 + (-*v).exp());
+                }
+            }
+            // The engine's `tanh` is the one defined in `vmath`, not the C library's.
+            Ok("tanh") => {
+                for v in out.iter_mut() {
+                    *v = peregrine_core::vmath::tanh(*v);
+                }
+            }
+            // The family's default is the exact (erf) GELU, not `bert`'s tanh.
+            _ => peregrine_core::vmath::gelu_erf_rows(&mut out),
+        }
+        h = match g.tensor("cls.norm.weight") {
+            Ok(_) => norm_row(&out, &vec_f32(g, "cls.norm.weight"), cfg.eps),
+            Err(_) => out,
+        };
+    }
+    let hw = head_width(g);
+    match g.tensor("cls.output.weight") {
+        Ok(_) => {
+            let w = mat(g, "cls.output.weight");
+            let mut out = vec![0.0f32; hw];
+            w.apply(&h, &mut out);
+            if g.tensor("cls.output.bias").is_ok() {
+                for (o, b) in out.iter_mut().zip(vec_f32(g, "cls.output.bias")) {
+                    *o += b;
+                }
+            }
+            out
+        }
+        // A head without `cls.output` is its dense layer's activated, normed row.
+        Err(_) => h[..hw].to_vec(),
+    }
+}

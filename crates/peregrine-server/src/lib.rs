@@ -785,7 +785,9 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
     // `server-common.cpp:207-241`): a native decision model answers decisions, not text, and an
     // `openjev` file has no text generation even though it carries an LM head. A file with a
     // classifier head answers rerank or classify (S4.6b): one output with no labels is a
-    // reranker's score, several outputs or named labels are a classifier's.
+    // reranker's score, several outputs or named labels are a classifier's. One output
+    // with a label is both: converters write a dummy `LABEL_0` into a reranker's file
+    // (gte-reranker-modernbert-base), and both endpoints serve it.
     let data: Vec<Value> = s
         .models
         .iter()
@@ -794,10 +796,10 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
                 json!(["decisions"])
             } else if m.model.has_head() {
                 let n_out = m.model.head_width();
-                if n_out == 1 && m.model.head_labels().is_empty() {
-                    json!(["rerank"])
-                } else {
-                    json!(["classify"])
+                match (n_out, m.model.head_labels().is_empty()) {
+                    (1, true) => json!(["rerank"]),
+                    (1, false) => json!(["rerank", "classify"]),
+                    _ => json!(["classify"]),
                 }
             } else {
                 json!(["text"])
@@ -1348,6 +1350,9 @@ fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan,
 fn renders_every_chat(format: ToolFormat) -> bool {
     match format {
         ToolFormat::Hermes => false,
+        // Qwen 3's template writes messages untrimmed, later system messages as turns of
+        // their own, and earlier turns without their thinking; the renderer does the same.
+        ToolFormat::Qwen3(_) => true,
         ToolFormat::QwenXml => true,
     }
 }
@@ -2008,7 +2013,10 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
     // Such a reply is returned as llama.cpp returns it: the reasoning stripped, the answer
     // starting at its first character. With `reasoning_format: none` the span is content
     // as the model wrote it.
-    run.trim = reasoning_open && p.reasoning_format.extracts();
+    // The same goes for a reply rendered by the format of a family that thinks, whose
+    // model opens the block itself (Qwen 3).
+    let thinks = p.tool.as_ref().is_some_and(|t| t.format.thinks());
+    run.trim = (reasoning_open || thinks) && p.reasoning_format.extracts();
     run.skip_ws = run.trim;
     // gpt-oss's reply is split by control tokens; every other template's reasoning is Qwen3's
     // `<think>` span, below.
@@ -2891,7 +2899,7 @@ fn rerank_text(v: &Value, what: &str) -> Result<String, String> {
                 .find(|k| o.contains_key(**k))
             {
                 return Err(format!(
-                    "{k} is not supported by /v1/rerank: image and video input need a multimodal projector, and a bert reranker has none"
+                    "{k} is not supported by /v1/rerank: image and video input need a multimodal projector, and an encoder reranker has none"
                 ));
             }
             match o.get("text") {
@@ -2987,7 +2995,8 @@ fn parse_rerank_request(b: &Value) -> Result<RerankSpec, String> {
 ///
 /// Every (query, document) pair is one text of the batch, built by the tokenizer's pair
 /// encoding — `format_prompt_rerank`'s own rule: `[CLS] q [SEP] d` for WordPiece,
-/// `<s> q </s> d </s>` for the XLM-R vocabulary. Each pair is a head slot, so all of them
+/// `<s> q </s> d </s>` for the XLM-R vocabulary, `[CLS] q [SEP] d [SEP]` for the
+/// `modern-bert` GPT-2 one. Each pair is a head slot, so all of them
 /// share weight passes, and the answer is `cls` → activation → `cls.output` at row 0.
 /// The score is that raw logit, as llama.cpp returns it (`send_rerank`: `embd[0]`).
 async fn rerank(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
@@ -3010,7 +3019,7 @@ async fn rerank(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) 
     {
         return bad(
             "this file carries a \"rerank\" chat template (a generative reranker), which is not \
-             supported yet; a bert reranker is scored with its classifier head",
+             supported yet; an encoder reranker is scored with its classifier head",
         );
     }
     let spec = match parse_rerank_request(&body) {
@@ -4654,6 +4663,45 @@ mod tests {
     }
 
     #[test]
+    fn a_qwen3_tool_request_leaves_the_thinking_block_to_the_model() {
+        let qwen3 = ToolFormat::for_template(tools::QWEN3_TEMPLATE).expect("the qwen3 format");
+        assert_eq!(qwen3.name(), "qwen3");
+        assert!(qwen3.thinks());
+        let plan = |extra: Value| {
+            let mut b = tool_body(json!({"tools": weather_tools()}));
+            for (k, v) in extra.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            tool_request(qwen3, &b, &b.to_string()).expect("the tool request")
+        };
+        // Thinking on: the prompt ends with the assistant's header and the model opens
+        // the block itself, so the reply does not start inside one.
+        let on = plan(json!({}));
+        assert!(on.prompt.ends_with("<|im_start|>assistant\n"));
+        assert!(!on.reasoning_open);
+        assert!(on.prompt.contains("# Tools"));
+        assert!(
+            !on.prompt.contains("You are Qwen"),
+            "no default system message"
+        );
+        // Off: the empty block, as for Qwen 3.5.
+        let off = plan(json!({"chat_template_kwargs": {"enable_thinking": false}}));
+        assert!(off
+            .prompt
+            .ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        assert!(!off.reasoning_open);
+        // A call is the JSON form, read without the schema's help.
+        let mut tool = ToolReply::new(qwen3, &two_tools(), true, 9);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = tool.feed(WEATHER_CALL);
+        assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        let events = tool.finish();
+        assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        assert_eq!(tool.calls.len(), 1);
+        assert_eq!(tool.calls[0].name, "weather");
+    }
+
+    #[test]
     fn the_reply_parser_is_given_the_tools_schemas() {
         // The XML format writes values bare, so only the schema says whether `5` is the
         // text or the number: `query` is declared a string, `limit` an integer.
@@ -4721,6 +4769,8 @@ mod tests {
     fn a_file_with_qwen35s_template_renders_every_chat_with_the_format() {
         assert!(renders_every_chat(ToolFormat::QwenXml));
         assert!(!renders_every_chat(ToolFormat::Hermes));
+        let qwen3 = ToolFormat::for_template(tools::QWEN3_TEMPLATE).expect("the qwen3 format");
+        assert!(renders_every_chat(qwen3));
         // A request without tools: the template's prompt, and nothing to parse.
         let xml = ToolFormat::for_template(tools::QWEN35_TEMPLATE).expect("the qwen-xml format");
         let b = json!({"messages": [

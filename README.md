@@ -27,13 +27,13 @@ peregrine tier      # the SIMD tier picked for this CPU: AVX-512, AVX2, NEON, i8
 Pin a release or choose the install directory by passing arguments to `sh`:
 
 ```sh
-curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --version v0.1.2
+curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --version v0.2.0
 curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --prefix /usr/local
 peregrine upgrade            # self-update in place to the newest release
 ```
 
-The release archives (`peregrine-v0.1.2-linux-x86_64.tar.gz` and
-`peregrine-v0.1.2-linux-aarch64.tar.gz` on the
+The release archives (`peregrine-v0.2.0-linux-x86_64.tar.gz` and
+`peregrine-v0.2.0-linux-aarch64.tar.gz` on the
 [releases page](https://github.com/RantAI-dev/peregrine/releases)) contain portable binaries built for
 the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and i8mm are selected at run time,
 so one binary runs on every CPU of that architecture; `peregrine tier` prints what it picked.
@@ -144,8 +144,8 @@ curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' -
 The reply's `message.tool_calls` holds the call (`get_weather` with `{"city": "Paris"}`) and
 `finish_reason` is `"tool_calls"`. Run the tool, then send the conversation back with the assistant's
 message and a `tool` message carrying the result, and the model answers in text. Supported today:
-Qwen 2.5, Qwen 3.5 and Bonsai 2 chat models; `tool_choice` `"auto"` and `"none"`;
-`parallel_tool_calls`; streaming. A Qwen 3.5 or Bonsai 2 model thinks before it answers, and its
+Qwen 2.5, Qwen 3, Qwen 3.5 and Bonsai 2 chat models; `tool_choice` `"auto"` and `"none"`;
+`parallel_tool_calls`; streaming. A Qwen 3, Qwen 3.5 or Bonsai 2 model thinks before it answers, and its
 thinking comes back in `reasoning_content`, never read for calls; send
 `"chat_template_kwargs": {"enable_thinking": false}` (or `"reasoning_effort": "none"`) to switch
 it off. Other model families, and `tool_choice: "required"` or a named function, are refused with
@@ -213,6 +213,18 @@ longer than its 8192-token context is refused:
 ```sh
 peregrine embed -m hf:keisuke-miyako/gte-modernbert-base-gguf/gte-modernbert-base-Q8_0.gguf \
   "What is the capital of France?"
+```
+
+Nomic's nomic-embed-text v1.5 (`nomic-bert`) is a BERT-shaped post-norm encoder with a fused
+q/k/v, NeoX RoPE instead of a position table, a SwiGLU feed-forward and mean pooling, over a
+2048-token context. It was trained with task prefixes, and the client writes them: `search_document: `
+before a passage, `search_query: ` before a question. `dimensions` (512, 256, 64) truncates the
+Matryoshka vector before normalising:
+
+```sh
+peregrine embed -m hf:nomic-ai/nomic-embed-text-v1.5-GGUF/nomic-embed-text-v1.5.Q8_0.gguf \
+  "search_document: Paris is the capital of France." \
+  "search_query: What is the capital of France?"
 ```
 
 NVIDIA's Nemotron 3.5 Embed 1B (`mistral3`, OpenMDW 1.1) is another encoder: the Mistral 3 blocks
@@ -354,8 +366,7 @@ fastembed and text-embeddings-inference):
 - **Where Peregrine is behind:** the ik_llama.cpp fork processes prompts about twice as fast on the
   AVX-512 desktop (Peregrine at 0.39–0.58×). Decode is level with it (0.89–1.06×) and Peregrine is ahead
   with 10 users (1.05–3.09×). For embeddings, OpenVINO and ONNX Runtime are faster on the two small BERT
-  encoders at 128 and 512 tokens (Peregrine at 0.85–0.99×), and on ARM llama.cpp is faster on Q8_0
-  ModernBERT from 128 tokens up (0.77–0.94×).
+  encoders at 128 and 512 tokens (Peregrine at 0.85–0.99×).
 
 Full tables, charts, accuracy verification, and machine records are in [docs/benchmark.md](docs/benchmark.md).
 
@@ -375,14 +386,14 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 <!-- support:begin -->
 | | Supported now |
 |---|---|
-| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Gemma 3 embedding (EmbeddingGemma), BERT encoder (MiniLM, BGE, E5, GTE, bge-m3), ModernBERT encoder (ModernBERT, gte-modernbert, Granite Embedding R2), Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4, Mistral 3 embedding (Nemotron 3.5 Embed) |
+| Architectures | Llama, Qwen 2, Qwen 3, Qwen 3.5 / Bonsai 2 (Gated DeltaNet hybrid, MTP), Gemma 3, Gemma 3 embedding (EmbeddingGemma), BERT encoder (MiniLM, BGE, E5, GTE, bge-m3), ModernBERT encoder (ModernBERT, gte-modernbert, Granite Embedding R2), NomicBERT encoder (nomic-embed-text v1.5), Qwen 3 MoE, gpt-oss, Phi-3 / Phi-4, Mistral 3 embedding (Nemotron 3.5 Embed) |
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE (smollm, gpt2 / modern-bert, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
-| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
-| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format) and for Qwen 3.5 and Bonsai 2 (the `qwen-xml` format, thinking on or off); the prompt is the one llama.cpp builds from the model's template |
-| Rerank and classify | a `bert` file's classifier head (`cls`, `cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3 and bge-reranker-base checked against llama.cpp v0.9.0 |
+| Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), NomicBERT (nomic-embed-text v1.5: mean, RoPE, SwiGLU), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
+| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 (the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the prompt is the one llama.cpp builds from the model's template |
+| Rerank and classify | a `bert` or `modern-bert` file's classifier head (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3, bge-reranker-base and gte-reranker-modernbert-base checked against llama.cpp v0.9.0 |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->
 
@@ -404,7 +415,7 @@ cargo build --release -p peregrine --no-default-features --features cli,arch-qwe
 
 | Category | Features |
 |---|---|
-| Architectures | `arch-llama` (Llama), `arch-qwen` (Qwen 2/3), `arch-qwen35` (Qwen 3.5 / Bonsai 2), `arch-gemma3` (Gemma 3), `arch-gemma-embedding` (EmbeddingGemma), `arch-bert` (BERT encoders), `arch-modern-bert` (ModernBERT encoders), `arch-phi3` (Phi-3/4), `arch-qwen3moe` (Qwen 3 MoE), `arch-gptoss` (gpt-oss), `arch-mistral3` (Mistral 3 embedders) |
+| Architectures | `arch-llama` (Llama), `arch-qwen` (Qwen 2/3), `arch-qwen35` (Qwen 3.5 / Bonsai 2), `arch-gemma3` (Gemma 3), `arch-gemma-embedding` (EmbeddingGemma), `arch-bert` (BERT encoders), `arch-modern-bert` (ModernBERT encoders), `arch-nomic-bert` (NomicBERT encoders), `arch-phi3` (Phi-3/4), `arch-qwen3moe` (Qwen 3 MoE), `arch-gptoss` (gpt-oss), `arch-mistral3` (Mistral 3 embedders) |
 | Formats | `fmt-kquant` (Q2_K..Q6_K), `fmt-ternary` (PQ2_0, PTQ1_0), `fmt-iq` (IQ4_NL, IQ4_XS), `fmt-mxfp4` (MXFP4), `fmt-legacy` (Q4_0, Q5_0, Q8_0); F32/F16/BF16 always enabled |
 | Extras | `littlebit` (LittleBit sidecars), `dspark` (speculative drafter), `mtp` (multi-token prediction head), `server` (OpenAI HTTP server), `cli` (CLI binary) |
 

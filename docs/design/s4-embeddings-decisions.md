@@ -63,7 +63,7 @@ Why Peregrine should win here, and where the work is:
 | S4.5 | tokenizers | WordPiece (`bert`), SentencePiece unigram (`t5`, the XLM-R vocabulary) | two tokenizers |
 | S4.6 | `bert` | all-MiniLM-L6/L12, bge-small/base/large-en-v1.5, e5, gte, bge-m3, multilingual-e5; bge-reranker-v2-m3 with its `cls` head | post-norm encoder, absolute positions, the classifier head |
 | S4.7 | `modern-bert` | ModernBERT, gte-modernbert, mmBERT, Granite Embedding R2, and their fine-tuned classifiers (`classifier.output_labels`) | alternating local and global attention, the labelled head |
-| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand |
+| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand; **S4.8a done** (`nomic-bert` = nomic-embed-text v1.5), see §9 |
 | S4.14 | `mistral3`, non-causal | Nemotron 3.5 Embed 1B and Nemotron 3 Embed 1B (the same text model; mean pooling, 2048 dimensions); the 8B sizes load by the same code | the Tekken pre-tokenizer, the Mistral 3 block in the dense family, a bidirectional pass for dense models |
 
 Out of scope for this stage: `neo-bert`, `eurobert`, DeBERTa (Prompt Guard 2; llama.cpp does not
@@ -357,8 +357,8 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.5 | WordPiece and unigram tokenizers against `llama-tokenize` | |
 | S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
 | S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
-| S4.7 | `modern-bert` and labelled classifier heads. **Part a done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; a classifier head is read and ignored until S4.6b serves heads | S4.6 |
-| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3` | S4.6 |
+| S4.7 | `modern-bert` and labelled classifier heads. **Done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; S4.7b adds its classifier head on `/v1/rerank`, `/v1/classify` and `peregrine rerank` from the same `Want::Head` interface, measured on gte-reranker-modernbert-base F16 and Q8_0 (§9) | S4.6 |
+| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3`. **Part a done**: the `nomic-bert` family — token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused `attn_qkv`, NeoX RoPE at base 1000, SwiGLU (`ffn_gate` through SiLU times `ffn_up`), mean pooling and no final norm — against llama.cpp v0.9.0 on nomic-embed-text v1.5 F16 and Q8_0 (§9); `nomic-bert-moe` and the jina variants remain S4.8b | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
 | S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |
 | S4.12 | System One, part 3: **laya** and Julia-1 on `modern-bert` with the decision head | S4.7 |
@@ -427,7 +427,58 @@ rerank throughput level with llama.cpp at 123-token pairs and 5-6 % ahead at 449
 `cls` tensors), so `/v1/classify` is covered end to end by the synthetic labelled file and the
 server tests, not by a real-file gate.
 
-## 9. S4.10 as built
+## 9. S4.7b as built: the modern-bert head, rerank and classify
+
+The head of a `modern-bert` file is `ModernBertHead` in
+`crates/peregrine-models/src/modern_bert.rs`, transcribed from `build_pooling`'s rank
+branch (`src/llama-graph.cpp:4185-4220`) in
+[`docs/reference/modern-bert.md`](../reference/modern-bert.md):
+
+```text
+h = mean(output_norm rows)       // the file's classifier.pooling_type: mean by default
+h = cls.weight · h               // no bias: llama.cpp creates no cls.bias here
+h = act(h)                       // classifier.activation, GELU_ERF by default (not tanh)
+h = layer_norm(h, cls.norm.w)    // weight only
+y = cls.output.weight · h + cls.output.bias
+```
+
+`Want::Head`, `TextWant::Head`, `head_width()` and `head_labels()` were already the
+family-agnostic interface S4.6b added, so `/v1/rerank`, `/v1/classify`, `/v1/models`
+(modalities) and `peregrine rerank` serve this family with **no endpoint change**. Three
+points the note left to the implementer, now settled:
+
+1. **The head is a property of the tensors, not of `<arch>.pooling_type`.** The judge of
+   rerank-vs-classify is the same as `bert`'s: one output and no labels is a reranker; more
+   outputs, or a named label, is a classifier. gte-reranker-modernbert-base carries the
+   dummy `classifier.output_labels = ["LABEL_0"]` its converter wrote, and both endpoints
+   serve such a file (`/v1/rerank` returns the one score, `/v1/classify` the one label), so
+   `/v1/models` lists it with both: `["rerank", "classify"]` — the same rule `bert` files
+   with a dummy label get.
+2. **The dense layer and the head norm are bias-less.** llama.cpp's modern-bert loader
+   creates `cls.bias`/`cls.norm.bias` only for a decision model, so a sequence-classifier
+   file that carries them (only possible with `classifier_bias` / `norm_bias` on, which
+   Transformers defaults off) is read without them. The loader accepts them silently and
+   a test pins that the row is the same as a file without them.
+3. **The rerank pair** is `format_prompt_rerank`'s `[bos] q [eos] [sep] d [eos]` with both
+   halves tokenized with `parse_special = false`; `Tokenizer::encode_pair` gained that
+   branch for byte-level BPE (`[CLS]` in a query is text, `[unused3]` is still a token).
+   gte's file sets `add_sep_token = false`, so its pairs are `[CLS] q [SEP] d [SEP]`.
+
+What was measured: ids identical to llama.cpp on all 100 pairs (36–445 tokens, 51 past the
+128-token window). At F16 the 100 scores differ by 0.00067 mean / 0.00273 max and all ten
+query rankings are identical; the Q8_0 file is 0.01141 / 0.07430 from llama.cpp's Q8_0 and
+0.02173 / 0.07970 from its **F16** run, while llama.cpp's own Q8_0 is 0.02310 / 0.09370
+from that F16 run — the quantisation moves the scores further than the engines differ.
+Order swaps at Q8_0 happen between documents 2.2e-2 apart or less (4 of 10 queries), and
+llama.cpp's own Q8_0 and F16 runs disagree on 5. Rerank throughput on a shared 8-vCPU VM,
+4 threads, eight pairs per request: 1.14× llama.cpp at 128-token pairs and 1.24× at
+512-token ones. No published `modern-bert` GGUF with real `classifier.output_labels`
+turned up (searches for prompt-guard, router, sentiment and generic classifier
+conversions found PyTorch checkpoints only), so `/v1/classify` is covered end to end by
+the synthetic labelled file and the server tests, as `bert`'s is. The decision-model head
+blocks (Laya, Julia-1) are refused by name until S4.12.
+
+## 10. S4.10 as built
 
 `serve -m a.gguf -m b.gguf` loads every file at start, each as its own `Engine` on its own
 engine thread. The engine options are process-wide (thread count, pass rows, kernel switches,
@@ -472,3 +523,45 @@ and compare each one's vector with its one-model server.
 
 **Shutdown.** The drain timeout is the process's: SIGTERM stops accepting, lets the requests
 in flight on every engine finish, then exits. `peregrine stop` and `--background` are unchanged.
+
+## 9. S4.8a as built: the `nomic-bert` family
+
+`crates/peregrine-models/src/nomic_bert.rs` (`NomicBert::load`, `forward_texts`)
+registers `nomic-bert` behind `arch-nomic-bert`; the reading, the tensor table and
+the measurements are in [`docs/reference/nomic-bert.md`](../reference/nomic-bert.md).
+What this step settled, and why:
+
+1. **The graph is `bert`'s with three branch points, not a pre-norm RMSNorm
+   encoder.** llama.cpp v0.9.0's `LLM_ARCH_NOMIC_BERT` runs the shared post-norm
+   `bert` graph: `token_embd + token_types[0]`, a LayerNorm with weight and bias,
+   then per layer the fused `attn_qkv`, NeoX RoPE, attention, `attn_output` and a
+   residual, `attn_output_norm`, the FFN and a residual, `layer_output_norm`. The
+   feed-forward is `silu(ffn_gate) ⊙ ffn_up` then `ffn_down` (the `else` branch of
+   `src/models/bert.cpp`), and the file has no biases at all in v1.5's conversion.
+   There is **no final `output_norm`**: the last `layer_output_norm` is the output.
+   The earlier one-line summary in `docs/reference/bert.md` that called this family
+   "pre-norm with RMSNorm" was wrong; it is corrected by the new note.
+2. **The tokenizer is WordPiece with no normalizer keys.** The file says
+   `tokenizer.ggml.model = "bert"` and no `tokenizer.ggml.pre`; llama.cpp's DEFAULT
+   pre-tokenizer splits on whitespace, peels punctuation into its own word and
+   prefixes the phantom `▁`, and it lowercases only when
+   `tokenizer.ggml.normalizer.lowercase` says so (this file does not). `[CLS]` and
+   `[SEP]` are added whenever specials are on, independent of `add_bos`/`add_eos`.
+   Peregrine's ids are identical to llama.cpp's on all 200 gate texts.
+3. **The prefixes and dimensions stay the client's and the server's.** The client
+   writes `search_document: ` / `search_query: ` (llama.cpp does not add them
+   either); `dimensions` truncates the pooled vector and then re-normalises —
+   the existing `embed::finish`, unchanged.
+4. **The Q8_0 bound is set from measurement, and it is lower than the BERT
+   files'.** On the gate's 200 texts the Q8_0 file is 0.9983 mean from its F16
+   conversion for *both* engines (llama.cpp's own Q8_0: 0.99780 min / 0.998298
+   mean), so the test's bound is min 0.9975 / mean 0.9982; Peregrine is 1.3e-6
+   closer than llama.cpp on the mean. F16 is 0.9999995 min against llama.cpp.
+5. **One family, not a new block set.** The blocks reuse the `bert` family's
+   LayerNorm-with-bias kernel, the shared bidirectional attention and the SwiGLU
+   kernel Granite's `modern-bert` file already exercises; the new code is the
+   loader and the graph order.
+
+`nomic-bert-moe` (nomic-embed-text-v2-moe) is refused by name: it needs the
+mixture-of-experts feed-forward on every second layer and its XLM-R unigram
+vocabulary, and is left to S4.8b.

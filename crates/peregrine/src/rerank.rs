@@ -1,9 +1,10 @@
-//! `peregrine rerank`: rank documents by their relevance to a query (S4.6b).
+//! `peregrine rerank`: rank documents by their relevance to a query (S4.6b, S4.7b).
 //!
-//! A `bert` reranker carries a classifier head (`cls`, `cls.output`). Each (query, document)
-//! pair is one text, built by the tokenizer's pair encoding exactly as llama.cpp's
-//! `format_prompt_rerank` builds it — `[CLS] query [SEP] document` with a WordPiece
-//! vocabulary, `<s> query </s> document </s>` with the XLM-R one — and scored by that head.
+//! A `bert` or `modern-bert` reranker carries a classifier head (`cls`, `cls.output`). Each
+//! (query, document) pair is one text, built by the tokenizer's pair encoding exactly as
+//! llama.cpp's `format_prompt_rerank` builds it — `[CLS] query [SEP] document` with a
+//! WordPiece vocabulary, `<s> query </s> document </s>` with the XLM-R one, `[CLS] query
+//! [SEP] document [SEP]` with the `modern-bert` GPT-2 one — and scored by that head.
 //! The score is the head's raw logit, as llama.cpp's `/v1/rerank` returns it; the documents
 //! come back sorted by it, highest first.
 
@@ -83,7 +84,7 @@ pub fn run(args: &RerankArgs) -> Result<(), String> {
     if model.gguf().str("tokenizer.chat_template.rerank").is_ok() {
         return Err(
             "this file carries a \"rerank\" chat template (a generative reranker), which is not \
-             supported yet; a bert reranker is scored with its classifier head"
+             supported yet; an encoder reranker is scored with its classifier head"
                 .into(),
         );
     }

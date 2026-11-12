@@ -425,12 +425,18 @@ impl Model {
             .iter()
             .find(|f| f.names().contains(&arch_name.as_str()))
             .ok_or_else(|| {
+                if arch_name == "nomic-bert-moe" {
+                    return "architecture \"nomic-bert-moe\" (nomic-embed-text-v2-moe) is not \
+                            supported yet (roadmap S4.8b)"
+                        .to_string();
+                }
                 let feat = match arch_name.as_str() {
                     "llama" => Some("arch-llama"),
                     "qwen2" | "qwen3" => Some("arch-qwen"),
                     "qwen25" | "qwen35" => Some("arch-qwen35"),
                     "gemma3" => Some("arch-gemma3"),
                     "gemma-embedding" => Some("arch-gemma-embedding"),
+                    "nomic-bert" => Some("arch-nomic-bert"),
                     "phi3" => Some("arch-phi3"),
                     "mistral3" => Some("arch-mistral3"),
                     _ => None,
@@ -456,10 +462,26 @@ impl Model {
         // float path, with no activation quantisation, at four times the weight bytes;
         // the size rule keeps that a small-model choice. `PEREGRINE_Q8_FLOAT=0` turns
         // it off, and it needs the float pack.
-        let q8_as_f32 = fp
-            && crate::options::get().q8_float
-            && arch_name == "bert"
-            && g.total_weight_bytes() <= crate::options::Q8_FLOAT_MAX_BYTES;
+        //
+        // S4.9o: a `modern-bert` file takes the same route on the aarch64 tiers
+        // that carry the Q8_0 int8 tiles, up to `Q8_FLOAT_MAX_BYTES_ARM`. Those
+        // tiles have no `i8mm` body (they run on `sdot`, eight output rows at a
+        // time), and the NEON float panel kernel is the faster one even at four
+        // times the weight bytes; the float route is also the more exact one. The
+        // lower aarch64 tiers keep the per-row kernel they already run, and x86
+        // keeps the measured 64 MiB rule for `bert`.
+        let (q8_conv, q8_limit) = if arch_name == "bert" {
+            (true, crate::options::Q8_FLOAT_MAX_BYTES)
+        } else if arch_name == "modern-bert"
+            && cfg!(target_arch = "aarch64")
+            && crate::cpu::have_dotprod()
+        {
+            (true, crate::options::Q8_FLOAT_MAX_BYTES_ARM)
+        } else {
+            (false, 0)
+        };
+        let q8_as_f32 =
+            fp && crate::options::get().q8_float && q8_conv && g.total_weight_bytes() <= q8_limit;
         // The k-quant repack (S3.4): the Q4_K and Q6_K matrices, and Q5_0, are
         // rewritten into eight-row tiles before the family reads the file, so every matrix the
         // family holds knows where its repacked bytes are. A converted Q8_0 matrix is not

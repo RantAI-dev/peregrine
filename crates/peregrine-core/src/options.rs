@@ -235,8 +235,24 @@ pub const SMALL_FLOAT_ENCODER_BYTES: u64 = 256 << 20;
 /// its weights become four times the file's size, so the packed form stays under
 /// [`SMALL_FLOAT_ENCODER_BYTES`]. Measured on MiniLM Q8_0 (23 MiB) and bge-small-en-v1.5
 /// Q8_0 (34 MiB), which win; bge-m3 Q8_0 (604 MiB) and EmbeddingGemma 300M Q8_0 are
-/// past it and keep the int8 tiles.
+/// past it and keep the int8 tiles. aarch64's `modern-bert` files use
+/// [`Q8_FLOAT_MAX_BYTES_ARM`] instead (S4.9o).
 pub const Q8_FLOAT_MAX_BYTES: u64 = 64 << 20;
+
+/// The largest Q8_0 `modern-bert` file whose matrices are dequantised into f32 panels on the
+/// aarch64 tiers that carry the Q8_0 int8 tiles (`dotprod` and up; S4.9o). It equals
+/// [`SMALL_FLOAT_ENCODER_BYTES`], so a converted file is still a "small float encoder" for
+/// [`pass_rows_default_for`] and its panels stay under 1 GiB.
+///
+/// Measured on this ARM host (10 threads, medians, cache off) against the int8 tiles the
+/// int8 tiers would otherwise run: gte-modernbert-base Q8_0 (151 MiB) 12.25 → 20.63 texts/s
+/// at 128 tokens, 76.3 → 97.7 at 16, 3.13 → 3.93 at 512 and 47.5 → 92.4 on a batch of 16 ×
+/// 32, on aarch64-neon-i8mm. The 64 MiB [`Q8_FLOAT_MAX_BYTES`] was measured on x86, where
+/// the int8 tile is the faster kernel past that size; on ARM the Q8_0 tile has no `i8mm`
+/// body and loses to the float panel kernel at every measured cell. Only the 151 MiB gte
+/// file was measured; the Granite Embedding R2 Q8_0 files are smaller than this constant and
+/// take the same route.
+pub const Q8_FLOAT_MAX_BYTES_ARM: u64 = 256 << 20;
 
 /// [`pass_rows_default_for`] with the model's weight bytes, for the small-float-encoder rule.
 pub fn pass_rows_default_for(
@@ -305,7 +321,8 @@ pub struct EngineOptions {
     pub fpack_switch: bool,
     /// `PEREGRINE_Q8_FLOAT=0`: a small Q8_0 encoder keeps its int8 tiles instead of being
     /// dequantised once into the float kernel's f32 panels (S4.9m). On by default for a
-    /// `bert` file of at most [`Q8_FLOAT_MAX_BYTES`].
+    /// `bert` file of at most [`Q8_FLOAT_MAX_BYTES`], and on aarch64 for a `modern-bert`
+    /// file of at most [`Q8_FLOAT_MAX_BYTES_ARM`] (S4.9o).
     pub q8_float: bool,
     /// `PEREGRINE_DYNAMIC=0` uses the static row partition instead of dynamic work splitting.
     pub dynamic_rows: bool,
@@ -1226,25 +1243,48 @@ mod tests {
         assert_eq!(o.tuning_source, crate::calib::TuningSource::Default);
     }
 
+    /// The two documented outcomes of a startup calibration that ran.
+    ///
+    /// It measured, and the tuning source is `Startup`; or its fork-join probe did not come
+    /// back inside the product's 2 s budget on a host too busy to run it, and it fell back to
+    /// the safe settings with source `Default` (`calib::calibrate`'s give-up path). Both are
+    /// correct behaviour on a loaded machine. With `calibrate` on and nothing pinned, `Default`
+    /// has no other cause, so accepting it here does not weaken the `Startup` check: the
+    /// fallback's exact settings are asserted instead.
+    fn assert_a_calibration_that_ran(o: &EngineOptions) {
+        assert!(o.calibrate);
+        match o.tuning_source {
+            crate::calib::TuningSource::Startup => {
+                assert!(o.decode_threads.is_some());
+                assert!(o.spin_us >= 50 && o.spin_us <= 2000);
+            }
+            crate::calib::TuningSource::Default => {
+                // The give-up path: the physical cores stand, and so does the default window.
+                assert_eq!(
+                    o.decode_threads,
+                    Some(crate::pool::physical_cores().unwrap_or(1))
+                );
+                assert_eq!(o.spin_us, SPIN_DEFAULT_US);
+            }
+            other => {
+                panic!("a calibration that ran must end Startup or on the fallback, not {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn calibration_runs_when_asked_for_and_nothing_is_pinned() {
         let o = EngineOptions::from_chained(
             |k| (k == "PEREGRINE_CALIBRATE").then(|| "1".to_string()),
             None,
         );
-        assert!(o.calibrate);
-        assert!(o.decode_threads.is_some());
-        assert!(o.spin_us >= 50 && o.spin_us <= 2000);
-        assert_eq!(o.tuning_source, crate::calib::TuningSource::Startup);
+        assert_a_calibration_that_ran(&o);
     }
 
     #[test]
     fn the_server_calibrates_when_nothing_pins_the_knobs() {
         let o = EngineOptions::from_chained_calibrating(|_| None, None);
-        assert!(o.calibrate);
-        assert!(o.decode_threads.is_some());
-        assert!(o.spin_us >= 50 && o.spin_us <= 2000);
-        assert_eq!(o.tuning_source, crate::calib::TuningSource::Startup);
+        assert_a_calibration_that_ran(&o);
     }
 
     #[test]

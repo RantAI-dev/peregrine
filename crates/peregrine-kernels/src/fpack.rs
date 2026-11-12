@@ -415,27 +415,41 @@ mod x86 {
     #[inline(always)]
     unsafe fn w16(fmt: Format, p: *const u8) -> (__m256, __m256) {
         match fmt {
-            Format::F32 => (
-                _mm256_loadu_ps(p as *const f32),
-                _mm256_loadu_ps((p as *const f32).add(8)),
-            ),
-            Format::F16 => {
-                let h = _mm256_loadu_si256(p as *const __m256i);
-                (
-                    _mm256_cvtph_ps(_mm256_castsi256_si128(h)),
-                    _mm256_cvtph_ps(_mm256_extracti128_si256(h, 1)),
-                )
-            }
-            _ => {
-                let h = _mm256_loadu_si256(p as *const __m256i);
-                let lo = _mm256_cvtepu16_epi32(_mm256_castsi256_si128(h));
-                let hi = _mm256_cvtepu16_epi32(_mm256_extracti128_si256(h, 1));
-                (
-                    _mm256_castsi256_ps(_mm256_slli_epi32::<16>(lo)),
-                    _mm256_castsi256_ps(_mm256_slli_epi32::<16>(hi)),
-                )
-            }
+            Format::F32 => w16_f32(p),
+            Format::F16 => w16_f16(p),
+            _ => w16_bf16(p),
         }
+    }
+
+    /// Sixteen f32 weights of one panel step: two loads.
+    #[inline(always)]
+    unsafe fn w16_f32(p: *const u8) -> (__m256, __m256) {
+        (
+            _mm256_loadu_ps(p as *const f32),
+            _mm256_loadu_ps((p as *const f32).add(8)),
+        )
+    }
+
+    /// Sixteen f16 weights of one panel step, widened exactly by `vcvtph2ps`.
+    #[inline(always)]
+    unsafe fn w16_f16(p: *const u8) -> (__m256, __m256) {
+        let h = _mm256_loadu_si256(p as *const __m256i);
+        (
+            _mm256_cvtph_ps(_mm256_castsi256_si128(h)),
+            _mm256_cvtph_ps(_mm256_extracti128_si256(h, 1)),
+        )
+    }
+
+    /// Sixteen bf16 weights of one panel step, widened exactly by the high-half shift.
+    #[inline(always)]
+    unsafe fn w16_bf16(p: *const u8) -> (__m256, __m256) {
+        let h = _mm256_loadu_si256(p as *const __m256i);
+        let lo = _mm256_cvtepu16_epi32(_mm256_castsi256_si128(h));
+        let hi = _mm256_cvtepu16_epi32(_mm256_extracti128_si256(h, 1));
+        (
+            _mm256_castsi256_ps(_mm256_slli_epi32::<16>(lo)),
+            _mm256_castsi256_ps(_mm256_slli_epi32::<16>(hi)),
+        )
     }
 
     /// Six accumulator pairs: one `k` step over the six rows of an AVX2 tile.
@@ -459,7 +473,208 @@ mod x86 {
     ///
     /// The tail of a block duplicates the last row's pointer; its lanes are computed
     /// and thrown away, which costs a few multiplies and keeps the stores in bounds.
+    macro_rules! avx2_panel {
+        ($name:ident, $eb:literal, $load:path) => {
+            /// # Safety
+            ///
+            /// As [`super::gemm`]: the caller has checked the lengths and this CPU has
+            /// AVX2, FMA and F16C.
+            #[target_feature(enable = "avx2,fma,f16c")]
+            #[allow(clippy::too_many_arguments)]
+            pub unsafe fn $name(
+                packed: &[u8],
+                n_in: usize,
+                panels: usize,
+                acts: &[QuantAct],
+                bias: Option<&[f32]>,
+                out: &mut [f32],
+                out_stride: usize,
+            ) {
+                /// The bytes one element of this format takes.
+                const EB: usize = $eb;
+                /// The bytes one `k` step of a panel takes.
+                const STEP: usize = PANEL * EB;
+                let pb = n_in * STEP;
+                let nb = acts.len();
+                let bs = row_block(n_in);
+                let stride = out_stride;
+                let pf = crate::simd::prefetch_distance();
+                let mut b0 = 0;
+                while b0 < nb {
+                    let bn = bs.min(nb - b0);
+                    for p in 0..panels {
+                        let w = packed.as_ptr().add(p * pb);
+                        let op = out.as_mut_ptr().add(b0 * stride + p * PANEL);
+                        let (ib0, ib1) = match bias {
+                            Some(v) => {
+                                let q = v.as_ptr().add(p * PANEL);
+                                (_mm256_loadu_ps(q), _mm256_loadu_ps(q.add(8)))
+                            }
+                            None => (_mm256_setzero_ps(), _mm256_setzero_ps()),
+                        };
+                        let mut t = 0;
+                        while t < bn {
+                            let tn = (bn - t).min(6);
+                            let mut xp = [std::ptr::null(); 6];
+                            for (r, x) in xp.iter_mut().enumerate() {
+                                *x = acts[b0 + t + r.min(tn - 1)].xf.as_ptr();
+                            }
+                            let mut acc = [[ib0, ib1]; 6];
+                            let mut k = 0;
+                            while k < n_in {
+                                crate::simd::prefetch_ahead(w.add(k * STEP), pf, 1);
+                                let (w0, w1) = $load(w.add(k * STEP));
+                                step6!(acc, xp, k, w0, w1);
+                                k += 1;
+                            }
+                            for r in 0..tn {
+                                let o = op.add((t + r) * stride);
+                                _mm256_storeu_ps(o, acc[r][0]);
+                                _mm256_storeu_ps(o.add(8), acc[r][1]);
+                            }
+                            t += tn;
+                        }
+                    }
+                    b0 += bn;
+                }
+            }
+        };
+    }
+
+    avx2_panel!(gemm_avx2_f32, 4, w16_f32);
+    avx2_panel!(gemm_avx2_f16_direct, 2, w16_f16);
+    avx2_panel!(gemm_avx2_bf16_direct, 2, w16_bf16);
+
+    /// The activation rows above which a halved-precision matrix is widened once per
+    /// panel instead of once per weight step.
+    ///
+    /// Three row tiles of six: with fewer, the widening's own pass (one load, two
+    /// conversions and two stores per `k`) costs more than the conversions it saves.
+    const WIDEN_ROWS: usize = 18;
+
+    // The f32 panel one worker reuses between calls: `n_in · 16` floats, per thread,
+    // grown once and reused. A halved-precision matrix is widened into it one panel at
+    // a time (`gemm_avx2_widened`), so it is allocated the first time a worker runs
+    // such a matrix and never again.
+    thread_local! {
+        static WIDE: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The halved-precision GEMM through an f32 panel: widen once, multiply many.
+    ///
+    /// [`w16_f16`] and [`w16_bf16`] widen sixteen weights per weight step, and on this
+    /// core the two conversions (F16: `vcvtph2ps`, BF16: the widening shift) issue on
+    /// the same two ports as the twelve fused multiply-adds of the step: fourteen
+    /// vector operations where twelve would do, which measured 50.2 GMAC/s against
+    /// F32's 57.4 on 384×384 and 128 rows, one thread. Widening a whole panel into
+    /// [`WIDE`] once and then running [`gemm_avx2_f32`]'s loop on it moves the
+    /// conversion out of the step: it is paid `n_in · 16` times per (panel, row
+    /// block) instead of once per (panel, row block, row tile) — a factor of the row
+    /// block's tiles (21 at 128 rows).
+    ///
+    /// The widened panel is the panel, exactly: both conversions are exact, and every
+    /// output's chain over `k` is unchanged. Nothing about a result depends on this
+    /// path; it is chosen by whether its scratch fits in half of L2 (so a very wide
+    /// matrix keeps the direct loop and its half-size weight stream).
+    ///
+    /// A pass of [`WIDEN_ROWS`] activation rows or fewer keeps the direct loop: with
+    /// one or two row tiles to share it, the widening is paid for more often than the
+    /// conversions it saves (measured on 384×384: 16 rows 47.2 GMAC/s direct against
+    /// 44.2 widened; 64 rows 51.5 against 55.9). Decode is one row and never reaches
+    /// here (it takes the GEMV).
+    ///
+    /// Returns `false` when the caller should run its direct loop instead.
+    ///
+    /// # Safety
+    ///
+    /// As [`super::gemm`], plus `fmt` is F16 or BF16.
     #[target_feature(enable = "avx2,fma,f16c")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn gemm_avx2_widened(
+        fmt: Format,
+        packed: &[u8],
+        n_in: usize,
+        panels: usize,
+        acts: &[QuantAct],
+        bias: Option<&[f32]>,
+        out: &mut [f32],
+        out_stride: usize,
+    ) -> bool {
+        let need = n_in * PANEL;
+        if acts.len() <= WIDEN_ROWS || need * 4 > l2_bytes() / 2 || panels == 0 {
+            return false;
+        }
+        let src_step = PANEL * elem_bytes(fmt);
+        let pb = n_in * src_step;
+        let nb = acts.len();
+        let win_len = (nb - 1) * out_stride + PANEL;
+        WIDE.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            if scratch.len() < need {
+                scratch.resize(need, 0.0);
+            }
+            let dst = scratch.as_mut_ptr();
+            for p in 0..panels {
+                let src = packed.as_ptr().add(p * pb);
+                for k in 0..n_in {
+                    let (a, b) = w16(fmt, src.add(k * src_step));
+                    _mm256_storeu_ps(dst.add(k * PANEL), a);
+                    _mm256_storeu_ps(dst.add(k * PANEL + 8), b);
+                }
+                // SAFETY: `dst` holds `need` floats, written above; the f32 kernel only
+                // reads them. `o` addresses this panel's own column of every activation
+                // row, and the caller's output holds that window.
+                let wide = std::slice::from_raw_parts(dst as *const u8, need * 4);
+                let o = out.as_mut_ptr().add(p * PANEL);
+                let win = std::slice::from_raw_parts_mut(o, win_len);
+                let b = bias.map(|v| &v[p * PANEL..]);
+                gemm_avx2_f32(wide, n_in, 1, acts, b, win, out_stride);
+            }
+        });
+        true
+    }
+
+    /// One panel, six activation rows at a time, halved precision (AVX2).
+    ///
+    /// The widened panel when its scratch fits half of L2, else [`w16_f16`]'s
+    /// conversion inside the weight loop. Both compute the same chain.
+    ///
+    /// # Safety
+    ///
+    /// As [`super::gemm`], plus `fmt` is F16 or BF16.
+    #[target_feature(enable = "avx2,fma,f16c")]
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn gemm_avx2_half(
+        fmt: Format,
+        packed: &[u8],
+        n_in: usize,
+        panels: usize,
+        acts: &[QuantAct],
+        bias: Option<&[f32]>,
+        out: &mut [f32],
+        out_stride: usize,
+    ) {
+        if gemm_avx2_widened(fmt, packed, n_in, panels, acts, bias, out, out_stride) {
+            return;
+        }
+        if fmt == Format::F16 {
+            gemm_avx2_f16_direct(packed, n_in, panels, acts, bias, out, out_stride);
+        } else {
+            gemm_avx2_bf16_direct(packed, n_in, panels, acts, bias, out, out_stride);
+        }
+    }
+
+    /// One panel, six activation rows at a time (AVX2), dispatched on the format.
+    ///
+    /// The format picks a whole kernel rather than a branch inside the weight loop:
+    /// what the loop must not pay per weight step is the `match`, and hoisting it here
+    /// costs one branch per call. Every arm computes the same chain
+    /// ([`super::gemm_scalar`]'s), so which one runs never reaches a bit.
+    ///
+    /// # Safety
+    ///
+    /// As [`super::gemm`]: the caller has checked the lengths and this CPU has AVX2,
+    /// FMA and F16C.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn gemm_avx2(
         fmt: Format,
@@ -471,47 +686,12 @@ mod x86 {
         out: &mut [f32],
         out_stride: usize,
     ) {
-        let eb = elem_bytes(fmt);
-        let pb = panel_bytes(fmt, n_in);
-        let nb = acts.len();
-        let bs = row_block(n_in);
-        let stride = out_stride;
-        let pf = crate::simd::prefetch_distance();
-        let mut b0 = 0;
-        while b0 < nb {
-            let bn = bs.min(nb - b0);
-            for p in 0..panels {
-                let w = packed.as_ptr().add(p * pb);
-                let op = out.as_mut_ptr().add(b0 * stride + p * PANEL);
-                let (ib0, ib1) = match bias {
-                    Some(v) => {
-                        let q = v.as_ptr().add(p * PANEL);
-                        (_mm256_loadu_ps(q), _mm256_loadu_ps(q.add(8)))
-                    }
-                    None => (_mm256_setzero_ps(), _mm256_setzero_ps()),
-                };
-                let mut t = 0;
-                while t < bn {
-                    let tn = (bn - t).min(6);
-                    let mut xp = [std::ptr::null(); 6];
-                    for (r, x) in xp.iter_mut().enumerate() {
-                        *x = acts[b0 + t + r.min(tn - 1)].xf.as_ptr();
-                    }
-                    let mut acc = [[ib0, ib1]; 6];
-                    for k in 0..n_in {
-                        crate::simd::prefetch_ahead(w.add(k * PANEL * eb), pf, 1);
-                        let (w0, w1) = w16(fmt, w.add(k * PANEL * eb));
-                        step6!(acc, xp, k, w0, w1);
-                    }
-                    for r in 0..tn {
-                        let o = op.add((t + r) * stride);
-                        _mm256_storeu_ps(o, acc[r][0]);
-                        _mm256_storeu_ps(o.add(8), acc[r][1]);
-                    }
-                    t += tn;
-                }
+        match fmt {
+            Format::F32 => gemm_avx2_f32(packed, n_in, panels, acts, bias, out, out_stride),
+            Format::F16 | Format::BF16 => {
+                gemm_avx2_half(fmt, packed, n_in, panels, acts, bias, out, out_stride)
             }
-            b0 += bn;
+            other => panic!("{} is not a packed float format", other.label()),
         }
     }
 
@@ -1280,6 +1460,195 @@ mod tests {
                         same(got[r], batch[b * panels * PANEL + r]),
                         "{fmt:?} row {b}/{r}: pair position 0"
                     );
+                }
+            }
+        }
+    }
+
+    /// The edge values of IEEE-754, as an activation row and as a weight row.
+    ///
+    /// Zeros and negative zeros (a sign the chain must keep), the smallest and
+    /// largest subnormals in both formats, large magnitudes near the format's
+    /// ceiling, infinities and a NaN. A fused multiply-add's NaN *payload* differs
+    /// between an instruction and libm's `fmaf`, so NaNs are compared by class
+    /// ([`same`]); everything else is compared by bits.
+    const EDGE: [f32; 16] = [
+        0.0,
+        -0.0,
+        f32::from_bits(1), // the smallest subnormal
+        -f32::from_bits(1),
+        6.0e-8,  // a subnormal after an f16/bf16 rounding
+        -6.1e-5, // the smallest f16 subnormal
+        1.0e-38,
+        6.103_515_6e-5, // 2^-14, f16's smallest normal
+        0.0 + 1.0,
+        -1.0,
+        3.0e4,
+        -3.0e4,
+        6.5e4, // near f16's ceiling
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
+
+    /// A matrix whose rows cycle through [`EDGE`], so every panel step carries one.
+    fn matrix_edge(fmt: Format, n_out: usize, n_in: usize) -> Vec<u8> {
+        let eb = elem_bytes(fmt);
+        let mut w = vec![0u8; n_out * n_in * eb];
+        for r in 0..n_out {
+            for k in 0..n_in {
+                let v = EDGE[(r * 7 + k * 3) % EDGE.len()];
+                let b = enc(fmt, v);
+                let at = (r * n_in + k) * eb;
+                w[at..at + eb].copy_from_slice(&b[..eb]);
+            }
+        }
+        w
+    }
+
+    /// An activation row cycling through [`EDGE`].
+    fn act_edge(n: usize, off: usize) -> QuantAct {
+        let x: Vec<f32> = (0..n).map(|k| EDGE[(off + k * 5) % EDGE.len()]).collect();
+        act(&x)
+    }
+
+    /// Every kernel against the scalar chain on the edge values, at row counts on
+    /// both sides of [`x86::WIDEN_ROWS`].
+    #[test]
+    fn the_edge_values_keep_every_bit() {
+        for fmt in FORMATS {
+            for &(n_out, n_in) in &[(16, 384), (33, 37), (48, 1024), (16, 1536)] {
+                let w = matrix_edge(fmt, n_out, n_in);
+                let vals = decode(fmt, &w, n_out, n_in);
+                let packed = pack(fmt, &w, n_out, n_in);
+                let panels = n_out.div_ceil(PANEL);
+                let xs: Vec<QuantAct> = (0..24).map(|b| act_edge(n_in, b * 3)).collect();
+                for nb in [1usize, 5, 17, 18, 19, 24] {
+                    let xs = &xs[..nb];
+                    let want = reference(&vals, n_out, n_in, xs, None);
+                    let mut got = vec![0.0f32; panels * PANEL * nb];
+                    gemm(fmt, &packed, n_in, panels, xs, None, &mut got);
+                    let mut got_s = vec![0.0f32; panels * PANEL * nb];
+                    gemm_scalar(fmt, &packed, n_in, panels, xs, None, &mut got_s);
+                    for b in 0..nb {
+                        for r in 0..n_out {
+                            let v = got[b * panels * PANEL + r];
+                            assert!(
+                                same(v, want[b * n_out + r]),
+                                "{fmt:?} {n_out}x{n_in} nb={nb} b={b} r={r}: {v:e} vs {:e}",
+                                want[b * n_out + r]
+                            );
+                            assert!(
+                                same(v, got_s[b * panels * PANEL + r]),
+                                "{fmt:?} {n_out}x{n_in} nb={nb} b={b} r={r}: scalar"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every row count the engine can hand the kernel, and widths that are and are
+    /// not multiples of the panel, the twelve-lane tile or the L2 row block.
+    #[test]
+    fn every_row_count_and_width_is_the_scalar_chain() {
+        let rows: Vec<usize> = (1..=40).chain([127, 128, 129, 511, 512, 513]).collect();
+        let widths = [37usize, 384, 768, 1024, 1536, 383, 385, 513, 1023, 1537];
+        for fmt in FORMATS {
+            for &n_in in &widths {
+                let n_out = 32;
+                let w = matrix(fmt, n_out, n_in, (n_in * 5) as u64);
+                let vals = decode(fmt, &w, n_out, n_in);
+                let packed = pack(fmt, &w, n_out, n_in);
+                let panels = n_out.div_ceil(PANEL);
+                let all = acts(513, n_in, (n_in * 11) as u64);
+                for &nb in &rows {
+                    let xs = &all[..nb];
+                    let want = reference(&vals, n_out, n_in, xs, None);
+                    let mut got = vec![0.0f32; panels * PANEL * nb];
+                    gemm(fmt, &packed, n_in, panels, xs, None, &mut got);
+                    for b in 0..nb {
+                        for r in 0..n_out {
+                            assert!(
+                                same(got[b * panels * PANEL + r], want[b * n_out + r]),
+                                "{fmt:?} {n_out}x{n_in} nb={nb} b={b} r={r}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The widened panel is the direct loop: F16 and BF16 with the conversion inside
+    /// the weight loop and with the panel widened once compute the same bits, at
+    /// every row count and at the widths an encoder multiplies, including the widths
+    /// that are not a multiple of the panel step.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_widened_panel_is_the_direct_loop() {
+        if !x86::have_avx2() {
+            return;
+        }
+        for fmt in [Format::F16, Format::BF16] {
+            for &(n_out, n_in) in &[
+                (16usize, 384usize),
+                (16, 1536),
+                (48, 768),
+                (33, 37),
+                (16, 1024),
+                (24, 385),
+            ] {
+                let w = matrix(fmt, n_out, n_in, (n_out * 17 + n_in) as u64);
+                let packed = pack(fmt, &w, n_out, n_in);
+                let panels = n_out.div_ceil(PANEL);
+                let all = acts(64, n_in, (n_in * 3 + n_out) as u64);
+                for nb in [1usize, 6, 17, 18, 19, 24, 40, 64] {
+                    let xs = &all[..nb];
+                    let mut direct = vec![0.0f32; panels * PANEL * nb];
+                    let mut widened = vec![0.0f32; panels * PANEL * nb];
+                    unsafe {
+                        if fmt == Format::F16 {
+                            x86::gemm_avx2_f16_direct(
+                                &packed,
+                                n_in,
+                                panels,
+                                xs,
+                                None,
+                                &mut direct,
+                                panels * PANEL,
+                            );
+                        } else {
+                            x86::gemm_avx2_bf16_direct(
+                                &packed,
+                                n_in,
+                                panels,
+                                xs,
+                                None,
+                                &mut direct,
+                                panels * PANEL,
+                            );
+                        }
+                        x86::gemm_avx2_half(
+                            fmt,
+                            &packed,
+                            n_in,
+                            panels,
+                            xs,
+                            None,
+                            &mut widened,
+                            panels * PANEL,
+                        );
+                    }
+                    for i in 0..direct.len() {
+                        assert!(
+                            same(direct[i], widened[i]),
+                            "{fmt:?} {n_out}x{n_in} nb={nb} at {i}: {} vs {}",
+                            direct[i],
+                            widened[i]
+                        );
+                    }
                 }
             }
         }

@@ -82,8 +82,8 @@ with no decode.
 | S4.4 | Bidirectional forward; `gemma-embedding` (EmbeddingGemma) — `Architecture::forward_texts` over whole texts with no KV cache, symmetric sliding-window attention, mean/cls pooling and the `dense_2`/`dense_3` head (#162); EmbeddingGemma 300M checked against llama.cpp v0.9.0 — done | 1.0 |
 | S4.5 | WordPiece and SentencePiece-unigram tokenizers — done (#157) | 0.5 |
 | S4.6 | `bert` family and the classifier head: MiniLM, bge, e5, bge-m3, bge-reranker; `/v1/classify` — part a, the family (post-norm blocks, absolute positions, token types, biases everywhere, LayerNorm, the exact GELU, cls/mean pooling; WordPiece and the XLM-R unigram vocabulary) with the defined `erf`/`gelu_erf`/`layer_norm` kernels: MiniLM-L6-v2, bge-small-en-v1.5 and bge-m3 checked against llama.cpp v0.9.0 and the fp32 PyTorch reference — done; part b, the head: `cls`/`cls.output` with the file's activation and labels, `Want::Head`, `/v1/rerank` (four routes) and `/v1/classify`, `peregrine rerank`, bge-reranker-v2-m3 and bge-reranker-base checked against llama.cpp v0.9.0 (pair ids identical, document order identical, scores within the measured Q8_0 bound) — done | 1.5 |
-| S4.7 | `modern-bert` and labelled classifier heads (guards, routers) — part a, the family: pre-norm blocks with weight-only LayerNorms, fused q/k/v, RoPE with separate local/global bases, alternating 128-token local and global attention, the gated feed-forward (erf GeGLU, tanh GeGLU or SwiGLU), the `modern-bert` GPT-2 pre-tokenizer and cls/mean pooling; gte-modernbert-base and Granite Embedding R2 F16 and Q8_0 checked against llama.cpp v0.9.0, on 200 texts of 16–6976 tokens; the classifier head is read and ignored until S4.6b — done | 1.0 |
-| S4.8 | `nomic-bert`, `jina-bert-v2/v3` | 1.0 |
+| S4.7 | `modern-bert` and labelled classifier heads (guards, routers) — part a, the family: pre-norm blocks with weight-only LayerNorms, fused q/k/v, RoPE with separate local/global bases, alternating 128-token local and global attention, the gated feed-forward (erf GeGLU, tanh GeGLU or SwiGLU), the `modern-bert` GPT-2 pre-tokenizer and cls/mean pooling; gte-modernbert-base and Granite Embedding R2 F16 and Q8_0 checked against llama.cpp v0.9.0, on 200 texts of 16–6976 tokens. Part b, the head: `cls`→erf GELU→`cls.norm`→`cls.output` over the mean (or row 0), served on `/v1/rerank` and `/v1/classify`, with the `[bos] q [eos] [sep] d [eos]` pair; gte-reranker-modernbert-base F16 and Q8_0 on 100 pairs up to 445 tokens, ids identical and F16 order identical — done | 1.0 |
+| S4.8 | `nomic-bert`, `jina-bert-v2/v3` — part a, the `nomic-bert` family: token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused q/k/v, NeoX RoPE at base 1000, the SwiGLU feed-forward, mean pooling and no final norm; nomic-embed-text v1.5 F16 and Q8_0 checked against llama.cpp v0.9.0 on 200 texts of 20–2040 tokens (ids identical; F16 0.9999995 min, Q8_0 0.99830 mean vs the F16 reference, llama.cpp's own Q8_0 0.99830) — done; part b, `nomic-bert-moe` (nomic-embed-text-v2-moe) and `jina-bert-v2/v3` | 1.0 |
 | S4.9 | State of the art for embeddings and decision models against every engine (OpenVINO, ONNX Runtime, llama.cpp): the plan and its steps S4.9a-l are in [`docs/design/s4.9-sota.md`](design/s4.9-sota.md): token-budget passes with no padding, the batch-invariant float GEMM, the encoder attention strip, state forking for decision models, threading for small work, and the proof run on three machines | 6.0 |
 | S4.10 | Several models in one server: `-m` repeated, routed by the request's `model`, one engine per model and one weight pass at a time for the process | 1.0 |
 | S4.11 | System One, part 2: Kev (pointer head) and vLLM D3 (non-causal Qwen 3.5) | 1.0 |
@@ -110,6 +110,7 @@ The ik_llama.cpp fork processes prompts about twice as fast as Peregrine on the 
 | S5.2a | Is ik_llama.cpp's fast wide pass exact? No: it requantises each 256-weight row-block onto one 8-bit grid (worst case 0.394 % of the block's largest weight), its `-ub 512` logits differ from `-ub 16` by 0.0011 mean KLD and 97.9 % top-1, and the same conversion done exactly — widen, keep the per-32 scale and the min — measures +0.2 % at 128 rows and +1 % at 512, so nothing was ported. Q5_0's gap to Q4_K is its 32-weight fold; two exact variants measured slower and were withdrawn | 1.5 |
 | S5.2b | Where a prompt pass spends its time: attention is 8–10 % of a 512-token pass and 35–45 % of a 4096 one (the value mix twice the score stage), the matmul is the stage that stops scaling (7.1× of 12 against attention's 8–9×), and 6–10 % of a pass is on the calling thread. The prefill value mix now mixes two rows per V pass (+5.7 % at 4096, twelve threads, both models; the bits do not move) and runs at 16 % of the f32 roof instead of 13 %. A 512-bit score row stays unbuilt (a 16-lane reduction measured 30–70 % slower) and the 24-thread collapse is the pool, not a kernel | 1.5 |
 | S5.3 | The same questions on AVX2 and NEON; ik_llama.cpp measured on bluefin and ARM | 1.0 |
+| S5.4 | An opt-in fast prompt mode (`--fast-prompt`, off by default): prompt passes read Q4_K and Q6_K weights re-rounded to 8 bits per 256-weight block, the trade ik_llama.cpp makes by default; decode stays exact; ships with an accuracy report. Design: [`s5.4-fast-prompt.md`](design/s5.4-fast-prompt.md) | 3.0 |
 
 ## Stage 6: tool calling
 
@@ -120,12 +121,26 @@ prompt is the one llama.cpp builds from the model's template, byte for byte. Des
 | ID | Item | pw |
 |---|---|---|
 | S6.1 | Design | 0.2 |
-| S6.2 | The tool module: the `hermes` format (Qwen 2.5) and the `qwen-xml` format (Qwen 3.5 / Bonsai 2), renderers and parsers, fixtures from llama.cpp — done for both in the module; Qwen 3 is next | 1.0 |
-| S6.3 | The endpoint: `tools`, `tool_choice`, `tool_calls` in requests and responses, streaming — done for the `hermes` format (Qwen 2.5): 15 of 16 replies identical to llama.cpp's on the same file; and for the `qwen-xml` format (Qwen 3.5, Bonsai 2), thinking on or off: every call identical to llama.cpp's on a Qwen 3.5 file (S6.3b). Chat without tools on these files is rendered by the same renderer in `serve`, and `peregrine run` takes the same prompt from the `qwen35` chat template (S6.3c) | 1.0 |
+| S6.2 | The tool module: the `hermes` format (Qwen 2.5) and the `qwen-xml` format (Qwen 3.5 / Bonsai 2), renderers and parsers, fixtures from llama.cpp — done for both in the module; and the `qwen3` format (Qwen 3: the same calls, thinking opened by the model, four published wordings of the template with their two differing rules) (S6.2c) | 1.0 |
+| S6.3 | The endpoint: `tools`, `tool_choice`, `tool_calls` in requests and responses, streaming — done for the `hermes` format (Qwen 2.5): 15 of 16 replies identical to llama.cpp's on the same file; and for the `qwen-xml` format (Qwen 3.5, Bonsai 2), thinking on or off: every call identical to llama.cpp's on a Qwen 3.5 file (S6.3b). Chat without tools on these files is rendered by the same renderer in `serve`, and `peregrine run` takes the same prompt from the `qwen35` chat template (S6.3c). Qwen 3 is served too: on a 1.7B file the right tool is called on 11 of 12 requests with thinking off (llama.cpp 11) and 12 of 12 with it on (llama.cpp 11) | 1.0 |
 | S6.4 | The `llama3` format (Llama 3.1 / 3.2) | 0.5 |
 | S6.5 | The `harmony` format (gpt-oss) | 0.5 |
 | S6.6 | Constrained sampling for calls: a JSON-schema matcher and a token mask; `tool_choice: "required"` and named choices | 2.0 |
 | S6.7 | The `generic` format for templates without a tool section | 0.5 |
+
+## Stage 7: macOS and Windows
+
+Peregrine on the two other desktop systems, to the bar Linux is held to: CI on every PR, a release
+archive, an installer, `upgrade`, the server's lifetime commands, goldens. The design is
+[`docs/design/s7-platforms.md`](design/s7-platforms.md).
+
+| ID | Item | pw |
+|---|---|---|
+| S7.1 | macOS on Apple Silicon: release job with a dry run, installer, `upgrade`, performance-core default, synthetic goldens, quickstart | 1.0 |
+| S7.2 | Windows x86-64 builds and passes the suite in CI | 1.5 |
+| S7.3 | Windows lifetime commands, `upgrade`, `install.ps1`, release job | 1.5 |
+| S7.4 | Windows goldens, docs for both systems, a native Windows measurement on the desktop | 1.0 |
+| S7.5 | A release that ships all four archives | 0.3 |
 
 ## Open decisions
 
