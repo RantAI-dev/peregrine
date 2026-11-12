@@ -15,8 +15,26 @@ const START_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long a stopped server gets to drain its in-flight requests.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(40);
 
+/// Run `serve --background` on Windows: S7.3's work, and it says so.
+#[cfg(windows)]
+pub fn start_background(
+    _port: u16,
+    _log: Option<PathBuf>,
+    _timeout: Duration,
+) -> Result<State, String> {
+    Err(
+        "serve --background is not available on Windows yet (S7.3): the detached start, the \
+         state file and the stop file arrive then; run `peregrine serve` in the foreground"
+            .into(),
+    )
+}
+
 /// Run `serve --background`: start the detached child, wait until it is listening, and return its
 /// state. The parent exits; the child keeps running in its own process group.
+///
+/// Unix only: Windows needs `CREATE_NO_WINDOW`, a liveness check and the stop file, which is
+/// S7.3. A foreground `peregrine serve` works there today and stops on Ctrl-C.
+#[cfg(not(windows))]
 pub fn start_background(
     port: u16,
     log: Option<PathBuf>,
@@ -45,6 +63,17 @@ pub fn start_background(
 }
 
 /// `peregrine status`: the managed server, or why there is none.
+#[cfg(windows)]
+pub fn status() -> Result<String, String> {
+    Err(
+        "the managed server is not available on Windows yet (S7.3): run `peregrine serve` in \
+         the foreground"
+            .into(),
+    )
+}
+
+/// `peregrine status`: the managed server, or why there is none.
+#[cfg(not(windows))]
 pub fn status() -> Result<String, String> {
     let path = lifecycle::state_path();
     let Some(state) = lifecycle::read(&path) else {
@@ -73,6 +102,17 @@ pub fn status() -> Result<String, String> {
 }
 
 /// `peregrine stop`: ask the managed server to drain and exit.
+#[cfg(windows)]
+pub fn stop() -> Result<String, String> {
+    Err(
+        "the managed server is not available on Windows yet (S7.3): stop a foreground \
+         `peregrine serve` with Ctrl-C, which drains in-flight requests"
+            .into(),
+    )
+}
+
+/// `peregrine stop`: ask the managed server to drain and exit.
+#[cfg(not(windows))]
 pub fn stop() -> Result<String, String> {
     let path = lifecycle::state_path();
     let Some(state) = lifecycle::read(&path) else {

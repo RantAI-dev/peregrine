@@ -314,6 +314,8 @@ fn the_synthetic_bert_heads_match_their_golden_for_the_tier() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }

@@ -179,7 +179,13 @@ fn every_key_component_invalidates() {
     let first = load(&path, &cache, true, false);
     assert!(!first.packed_from_cache());
     assert!(load(&path, &cache, true, false).packed_from_cache());
-    std::fs::File::open(&path)
+    // The first model has the file mapped, and `set_modified` needs write access: drop the
+    // model (Windows refuses to change a mapped file's attributes through a read handle) and
+    // open the file for writing, as the other tests here do (S7.2).
+    drop(first);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
         .unwrap();

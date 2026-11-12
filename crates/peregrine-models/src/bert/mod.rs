@@ -621,21 +621,115 @@ fn add_bias(out: &mut [f32], dim: usize, nb: usize, bias: &[f32]) {
     }
 }
 
-/// `out[row][i] = (out[row][i] + bias[i]) + residual[row][i]` in one pass (the
-/// residual walk and the bias walk are the same memory, S4.9h). A projection whose
-/// bias is all zero skips the bias add, as [`add_bias`] does, so a `-0.0` stays.
-#[inline]
-fn add_bias_residual(out: &mut [f32], residual: &[f32], bias: &[f32], dim: usize) {
-    if bias.iter().all(|&b| b == 0.0) {
-        for (o, &r) in out.iter_mut().zip(residual) {
-            *o += r;
-        }
-        return;
+/// `out[row][i] = (out[row][i] + bias[i]) + residual[row][i]` over the pool
+/// (`S4.9r`): rows are independent, so which thread computes a row cannot change its
+/// bits. The bias walk and the residual walk are the same memory (S4.9h); a projection
+/// whose bias is all zero skips the bias add, as [`add_bias`] does, so a `-0.0` stays.
+fn add_bias_residual_par(
+    pool: &Pool,
+    stats: &mut StepStats,
+    out: &mut [f32],
+    residual: &mut [f32],
+    bias: &[f32],
+    dim: usize,
+    nb: usize,
+) {
+    let parallel = nb >= peregrine_core::blocks::ROW_PARALLEL && pool.width() > 1;
+    let has_bias = !bias.iter().all(|&b| b == 0.0);
+    peregrine_core::blocks::par::for_row_chunks_2(
+        pool,
+        parallel,
+        out,
+        dim,
+        residual,
+        dim,
+        nb,
+        peregrine_core::blocks::par::Sched::Static,
+        |_wk, _rows, oc, rc| {
+            if has_bias {
+                for (row, res) in oc.chunks_mut(dim).zip(rc.chunks_exact(dim)) {
+                    for ((o, &b), &r) in row.iter_mut().zip(bias).zip(res) {
+                        *o = (*o + b) + r;
+                    }
+                }
+            } else {
+                for (o, &r) in oc.iter_mut().zip(rc.iter()) {
+                    *o += r;
+                }
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
     }
-    for (row, res) in out.chunks_mut(dim).zip(residual.chunks_exact(dim)) {
-        for ((o, &b), &r) in row.iter_mut().zip(bias).zip(res) {
-            *o = (*o + b) + r;
-        }
+}
+
+/// The q/k/v prologue of one layer in one pool task (`S4.9r`): each row takes its
+/// projection's bias, and the query row its `1/√head_dim` scale — the same two
+/// operations on the same values, row by row, as the serial walk it replaces.
+///
+/// A projection whose bias is all zero skips the add, exactly as [`add_bias`] does,
+/// so a `-0.0` activation stays a `-0.0`.
+#[allow(clippy::too_many_arguments)]
+fn qkv_prologue(
+    pool: &Pool,
+    stats: &mut StepStats,
+    q: &mut [f32],
+    k: &mut [f32],
+    v: &mut [f32],
+    qd: usize,
+    kvd: usize,
+    nb: usize,
+    bq: &[f32],
+    bk: &[f32],
+    bv: &[f32],
+    scale: f32,
+) {
+    let parallel = nb >= peregrine_core::blocks::ROW_PARALLEL && pool.width() > 1;
+    let has_bq = !bq.iter().all(|&b| b == 0.0);
+    let has_bk = !bk.iter().all(|&b| b == 0.0);
+    let has_bv = !bv.iter().all(|&b| b == 0.0);
+    peregrine_core::blocks::par::for_row_chunks_3(
+        pool,
+        parallel,
+        q,
+        qd,
+        k,
+        kvd,
+        v,
+        kvd,
+        nb,
+        peregrine_core::blocks::par::Sched::Static,
+        |_wk, _rows, qc, kc, vc| {
+            for row in qc.chunks_mut(qd) {
+                if has_bq {
+                    for (o, &b) in row.iter_mut().zip(bq) {
+                        *o = (*o + b) * scale;
+                    }
+                } else {
+                    for o in row.iter_mut() {
+                        *o *= scale;
+                    }
+                }
+            }
+            if has_bk {
+                for row in kc.chunks_mut(kvd) {
+                    for (o, &b) in row.iter_mut().zip(bk) {
+                        *o += b;
+                    }
+                }
+            }
+            if has_bv {
+                for row in vc.chunks_mut(kvd) {
+                    for (o, &b) in row.iter_mut().zip(bv) {
+                        *o += b;
+                    }
+                }
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
     }
 }
 
@@ -996,15 +1090,15 @@ impl Architecture for Bert {
                     &mut st.kq,
                 );
             }
-            add_bias(&mut st.q, qd, nb, &l.bq);
-            add_bias(&mut st.k, kvd, nb, &l.bk);
-            add_bias(&mut st.v, kvd, nb, &l.bv);
             // llama.cpp passes `kq_scale = 1/√head_dim`; scaling Q here and 1.0 there
             // is the same product, and keeps the bidirectional block's interface.
+            // The three bias adds and the query scale are one fork-join (S4.9r): the
+            // rows are the layer's own and a row's bits do not depend on its worker.
             let scale = 1.0 / (cfg.head_dim as f32).sqrt();
-            for q in &mut st.q[..nb * qd] {
-                *q *= scale;
-            }
+            qkv_prologue(
+                pool, stats, &mut st.q, &mut st.k, &mut st.v, qd, kvd, nb, &l.bq, &l.bk, &l.bv,
+                scale,
+            );
 
             // ---- attention: one n × n block per text, no cache ----
             peregrine_core::blocks::bidir::attend_texts(
@@ -1039,9 +1133,16 @@ impl Architecture for Bert {
                 &mut st.xb2,
                 dm,
                 &mut st.kq,
-                |chunk, r0| {
-                    add_bias_residual(chunk, &st.x[r0 * dm..r0 * dm + chunk.len()], &l.bo, dm);
-                },
+                |_, _| {},
+            );
+            add_bias_residual_par(
+                pool,
+                stats,
+                &mut st.xb2[..nb * dm],
+                &mut st.x[..nb * dm],
+                &l.bo,
+                dm,
+                nb,
             );
             layer_norm_rows_fill(
                 pool,
@@ -1098,7 +1199,15 @@ impl Architecture for Bert {
                     &mut st.kq,
                 );
             }
-            add_bias_residual(&mut st.xb2[..nb * dm], &st.xb[..nb * dm], &l.down_b, dm);
+            add_bias_residual_par(
+                pool,
+                stats,
+                &mut st.xb2[..nb * dm],
+                &mut st.xb[..nb * dm],
+                &l.down_b,
+                dm,
+                nb,
+            );
             // The layer's output is its normalised value: the next layer applies no
             // pre-norm, so `st.x` and the activation rows are its input directly.
             layer_norm_rows_fill(

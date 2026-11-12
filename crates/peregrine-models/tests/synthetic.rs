@@ -145,8 +145,9 @@ fn check_model(model: Model, name: &str) -> Option<String> {
     }
     let tier = peregrine_core::cpu::tier_name();
     // AVX-VNNI-256 is mathematically bit-identical to AVX2 and aliases to its goldens (S2.6 Decision 1).
-    // Goldens are recorded on Linux; macOS libm (sin, cos, exp) rounds differently, so macOS
-    // keys its own directory and skips until one is recorded there.
+    // Goldens are recorded on Linux; macOS and Windows round the forward path their own way
+    // (their own libm / the engine's own functions off Linux), so each keys its own directory
+    // and skips until one is recorded there (S7.2; Windows' are recorded in S7.4).
     let golden_tier = format!(
         "{}{}",
         if tier == "x86_64-avx2-vnni256" {
@@ -156,6 +157,8 @@ fn check_model(model: Model, name: &str) -> Option<String> {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }
@@ -1648,8 +1651,9 @@ fn calibrated_settings_match_defaults_and_goldens() {
     // dense test's golden for a *different* seed (1002, not this file's 1000) and fail.
     let name = "llama-calibration-q8_0";
     let tier = peregrine_core::cpu::tier_name();
-    // Goldens are recorded on Linux; macOS libm (sin, cos, exp) rounds differently, so macOS
-    // keys its own directory and skips until one is recorded there.
+    // Goldens are recorded on Linux; macOS and Windows round the forward path their own way
+    // (their own libm / the engine's own functions off Linux), so each keys its own directory
+    // and skips until one is recorded there (S7.2; Windows' are recorded in S7.4).
     let golden_tier = format!(
         "{}{}",
         if tier == "x86_64-avx2-vnni256" {
@@ -1659,6 +1663,8 @@ fn calibrated_settings_match_defaults_and_goldens() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }
@@ -2310,6 +2316,8 @@ fn fast_prompt_mode_matches_its_golden_for_the_tier() {
         },
         if cfg!(target_os = "macos") {
             "-macos"
+        } else if cfg!(windows) {
+            "-windows"
         } else {
             ""
         }

@@ -68,6 +68,11 @@ jobs:
           - { os: ubuntu-24.04, name: linux-x86_64 }
           - { os: ubuntu-24.04-arm, name: linux-aarch64 }
           - { os: macos-15, name: macos-aarch64 }
+          # Windows x86-64 (roadmap S7.2): the MSVC toolchain, the same release-mode suite as
+          # Linux, and a smoke check of the binary afterwards. Its goldens are Windows' own
+          # (`<tier>-windows`) and are recorded in S7.4, so the golden tests skip there; the job
+          # never sets `PEREGRINE_GOLDEN=require`.
+          - { os: windows-2025, name: windows-x86_64 }
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     steps:
@@ -96,6 +101,25 @@ jobs:
           model=$(cargo run -q --release --locked -p peregrine-bench --example write_synthetic \
             -- "$RUNNER_TEMP/synthetic")
           ./target/release/peregrine run -m "$model" --threads 3 --max-tokens 8 "Say hello."
+      # The binary itself, on the system the release will ship (S7.2): it starts, the tier it
+      # picked is the AVX2 one this runner has, and `run` answers on a synthetic model.
+      - name: smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --release --locked -p peregrine
+          $exe = "target\release\peregrine.exe"
+          & $exe --version
+          $tier = (& $exe tier | Select-Object -First 1)
+          Write-Host $tier
+          if ($tier -notmatch '^kernel tier\s+x86_64-avx2') {
+            throw "the run-time tier is not the AVX2 one this runner has: $tier"
+          }
+          $out = Join-Path $env:RUNNER_TEMP "synthetic"
+          $model = (& cargo run -q --release --locked -p peregrine-bench --example write_synthetic -- $out | Select-Object -Last 1).Trim()
+          Write-Host "synthetic model: $model"
+          & $exe run -m $model --max-tokens 4 --no-profile "hello"
       # The synthetic goldens are per tier and the native tier above already compares its own.
       # Compare the lower aarch64 tiers too, so a stale golden fails here instead of on the next
       # re-record (the aarch64-neon-dotprod goldens were stale for months). A golden that is

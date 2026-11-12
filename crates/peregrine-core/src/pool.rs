@@ -1198,6 +1198,10 @@ impl Drop for TurnGuard<'_> {
 /// of each fork–join and finish it later. The default width is `hw.perflevel0.physicalcpu`, the
 /// performance-core count, falling back to `hw.physicalcpu` and then to the CPUs this process may
 /// run on (a VM can cap them below the host's count).
+///
+/// Windows has no `/proc`: `GetLogicalProcessorInformationEx(RelationProcessorCore, …)` counts
+/// the cores (S7.2; the call is in `crate::win32`, which exists only on Windows), and the
+/// logical count is the fallback when that call fails.
 pub fn physical_cores() -> Option<usize> {
     #[cfg(target_os = "macos")]
     {
@@ -1209,6 +1213,13 @@ pub fn physical_cores() -> Option<usize> {
         cores.map_or(available, |n| {
             Some(available.map_or(n, |max| n.min(max).max(1)))
         })
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no `/proc`: the count comes from the processor topology, and the
+        // logical count is the fallback when the call fails (a restricted process).
+        crate::win32::physical_core_count()
+            .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
     }
     #[cfg(target_os = "linux")]
     {
@@ -1238,7 +1249,7 @@ pub fn physical_cores() -> Option<usize> {
         }
         Some(seen.len())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         std::thread::available_parallelism().ok().map(|n| n.get())
     }
