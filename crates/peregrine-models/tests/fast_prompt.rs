@@ -4,7 +4,8 @@
 //! With the option on, a *prompt* row's weights are read from an 8-bit form built
 //! at load (one scale per 256-weight super-block) for the formats whose form's
 //! kernel beats this tier's exact kernel (`MatKernels::q8k_uses_form`: Q4_K and
-//! Q6_K on AVX-512, Q6_K on AVX2, none on a scalar tier), while a *generated* row,
+//! Q6_K on AVX-512, Q6_K on AVX2, Q4_K/Q6_K and — since S5.4h — Q5_0 on aarch64's
+//! `dotprod`/`i8mm` caps, none on a scalar tier), while a *generated* row,
 //! an embedding, a rerank and a decision keep the exact kernels
 //! (`docs/design/s5.4-fast-prompt.md` §3). This file pins each part of that:
 //!
@@ -33,9 +34,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use support::models::{write_dense, Dense};
 
-/// The formats the tier's table gives an 8-bit form (S5.4f). On AVX2 that is Q6_K
-/// alone; on AVX-512 Q4_K and Q6_K; on a tier with no SIMD body, none, so these
-/// tests have nothing to check there (the synthetic goldens assert the no-op).
+/// The formats the tier's table gives an 8-bit form (S5.4f, S5.4h). On AVX2 that is
+/// Q6_K alone; on AVX-512 Q4_K and Q6_K; on aarch64 Q4_K and Q6_K on every cap and
+/// Q5_0 where the multiply is a NEON body; on a tier with no SIMD body, none, so
+/// these tests have nothing to check there (the synthetic goldens assert the
+/// no-op).
 fn form_formats() -> Vec<Format> {
     [Format::Q4_K, Format::Q6_K, Format::Q5_0]
         .into_iter()
@@ -295,6 +298,95 @@ fn fast_mode_is_prompt_invariant() {
     assert!(
         failures.is_empty(),
         "the fast prompt mode is not prompt-invariant:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// A Q5_0 model whose rows are *not* a whole number of 256-weight super-blocks
+/// (S5.4h): Qwen 2.5 0.5B's 896-wide shape, where the form pads a fourth
+/// super-block. The prompt must still be the same bits at every chunk and thread
+/// count and beside a decoder, and the prompt logits must differ from the exact
+/// engine's (the form is in use, not silently skipped).
+#[test]
+fn a_q5_0_row_that_is_not_a_whole_super_block_is_prompt_invariant() {
+    if !peregrine_kernels::table::MatKernels::get().q8k_uses_form(Format::Q5_0) {
+        return;
+    }
+    let dir = tmpdir("invariant-padded");
+    // 896 = 28 Q5_0 blocks = three and a half super-blocks; the head is 64 wide.
+    let shape = Dense {
+        d_model: 896,
+        n_layer: 2,
+        n_head: 14,
+        n_head_kv: 2,
+        n_ff: 1024,
+        ctx: 512,
+        tied: false,
+    };
+    let path = write_dense(&dir, "llama", Format::Q5_0, 9400, shape);
+    let model = load_fast(&path);
+    assert!(!model.q8_form().is_empty(), "no form was built");
+    // Every 896-wide matrix's form is four super-blocks, one of them half padding.
+    let t = model
+        .tensor("blk.0.attn_q.weight")
+        .expect("the synthetic model has the matrix");
+    let off = t.q8_off.expect("the 896-wide matrix has a form");
+    let cols = t.dims[0] as usize;
+    assert_eq!(cols, 896);
+    assert_eq!(
+        model.tensor("blk.0.ffn_gate.weight").unwrap().dims[0] as usize,
+        896
+    );
+    let ranges = peregrine_core::q8form::layout(&Gguf::open(&path).unwrap());
+    let entry = ranges
+        .iter()
+        .find(|e| e.name == t.name)
+        .expect("the layout holds the matrix");
+    assert_eq!(
+        entry.super_blocks(),
+        4,
+        "896 weights pad to four super-blocks"
+    );
+    assert_eq!(off, entry.offset);
+
+    let toks = prompt();
+    let mut failures = Vec::new();
+    let (cache0, logits0) = read_in_pieces(&model, CHUNKS[0], 4, &toks);
+    for &chunk in &CHUNKS[1..] {
+        let (cache, logits) = read_in_pieces(&model, chunk, 4, &toks);
+        if cache != cache0 {
+            failures.push(format!("the cache differs at chunk {chunk}"));
+        }
+        if logits != logits0 {
+            failures.push(format!("the logits differ at chunk {chunk}"));
+        }
+    }
+    for threads in [1usize, 2] {
+        let (cache, logits) = read_in_pieces(&model, CHUNKS[1], threads, &toks);
+        if cache != cache0 {
+            failures.push(format!("the cache differs at {threads} threads"));
+        }
+        if logits != logits0 {
+            failures.push(format!("the logits differ at {threads} threads"));
+        }
+    }
+    for &chunk in &CHUNKS {
+        let cache = read_beside_a_decoder(&model, chunk, 4, &toks);
+        if cache != cache0 {
+            failures.push(format!(
+                "the cache differs beside a decoder at chunk {chunk}"
+            ));
+        }
+    }
+    let exact = load_exact(&path);
+    let (_, logits_exact) = read_in_pieces(&exact, CHUNKS[2], 4, &toks);
+    if logits0 == logits_exact {
+        failures.push("the fast mode gave the exact mode's logits".to_string());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "a padded Q5_0 row is not prompt-invariant:\n{}",
         failures.join("\n")
     );
 }

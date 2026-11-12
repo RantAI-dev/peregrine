@@ -1,0 +1,12 @@
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf exact round1 load 5.21 decode_tok_s 43.79
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf fast round1 load 5.21 decode_tok_s 44.57
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf exact round2 load 5.19 decode_tok_s 44.75
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf fast round2 load 5.19 decode_tok_s 44.3
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf exact round3 load 5.42 decode_tok_s 45.01
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf fast round3 load 5.15 decode_tok_s 44.56
+Llama-3.2-1B-Instruct-Q4_K_M.gguf exact round1 load 5.13 decode_tok_s 26.16
+Llama-3.2-1B-Instruct-Q4_K_M.gguf fast round1 load 5.12 decode_tok_s 25.8
+Llama-3.2-1B-Instruct-Q4_K_M.gguf exact round2 load 5.12 decode_tok_s 26.11
+Llama-3.2-1B-Instruct-Q4_K_M.gguf fast round2 load 5.12 decode_tok_s 26.02
+Llama-3.2-1B-Instruct-Q4_K_M.gguf exact round3 load 5.18 decode_tok_s 25.96
+Llama-3.2-1B-Instruct-Q4_K_M.gguf fast round3 load 5.08 decode_tok_s 25.96

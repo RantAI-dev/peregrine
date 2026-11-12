@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+<<<<<<< HEAD
 - **Windows has its own goldens, and both systems compare theirs on every pull request (S7.4).** The
   synthetic set for Windows' three x86-64 tiers (scalar, AVX2 and AVX-512) and its session fixture
   were recorded on `windows-2025` by the **Record goldens** workflow, which now takes an `isa` input
@@ -24,6 +25,28 @@ All notable changes to this project are documented here. The format follows
   merges recorded `nomic-bert-moe-Q8_0` for macOS and all three Windows tiers, and removed the three
   Windows `*-fast` goldens the scalar and AVX2 tiers no longer read: S5.4f takes the form only where
   it wins, so the fast test compares against the exact engine and the exact golden on those tiers.
+- **Q5_0 takes the 8-bit form in the fast prompt mode on ARM (S5.4h)**: S5.4f's per-tier table
+  left aarch64 at S5.4e's Q4_K/Q6_K because it was written on an AVX2 machine, and Qwen 2.5 0.5B
+  — 165 MiB of Q5_0 and the file the mode was aimed at — gained only 1.07-1.91×. Measured on the
+  DGX Spark, the form's NEON multiply (4.86-4.91× the exact Q5_0 kernel at Qwen's real 896-wide
+  row, 5.50-5.67× on whole 2048-weight rows, 8 rows up, one and ten workers), so aarch64's
+  `neon-i8mm` and `neon-dotprod` caps now take **Q4_K, Q6_K and Q5_0**; `neon` and `scalar` keep
+  the two formats they had, because their multiply is the scalar twin and a third format would
+  only cost memory. The padded fourth super-block a 896-wide row carries costs 13.7 % of the
+  kernel's rate and is proven not to move a bit (a test rewrites the padded groups' codes and the
+  result is unchanged), so the shared layout is untouched — on AVX2 removing it would still not
+  reach the 1.10× bar that keeps Q5_0 off x86. On Qwen 2.5 0.5B the mode is now **1.72-2.73× the
+  exact engine** (was 1.09-1.63×) on every cell and no cell is slower, **99.4 % of the bytes a
+  prompt pass multiplies take the form**, and Llama 3.2 1B (no Q5_0) is level. The Qwen is still
+  0.86-0.91× ik_llama.cpp at 4 096 tokens: the form is 385.9 MiB where the file's multiplied
+  weights are 235.5 MiB, and ik streams the file's own bytes. `llama-Q5_0-fast` goldens are
+  recorded for the two aarch64 NEON caps (no existing golden moved); the invariance test grew a
+  896-wide Q5_0 model so the padded layout is checked at every chunk, thread count and beside a
+  decoder; and the padded activation is now built for a form loaded through the library's
+  `load_with_fast` as well as for `--fast-prompt`. `peregrine tier` reads `Q4_K, Q6_K and Q5_0
+  (NEON smmla)` on this host. Numbers, scripts and the kernel table:
+  `benchmarks/results/spark-arm-2026-11-12-s5.4h/`; design §5h.
+
 - **Long-context attention on ARM reads a query-tile row group once, same bits (S4.9t)**:
   S4.9s's account left the score kernel at 29.0 GMAC/s and the value mix at 21.3 (bucket, soft-max
   included) against this core's 66 GMAC/s f32 roof, both limited by how many accumulation chains
