@@ -186,8 +186,20 @@ pub fn describe_runtime() -> String {
         },
         |n| n.to_string(),
     );
+    // S5.4f: the formats the fast prompt mode takes on this tier, and through
+    // which body. An empty set is not a failure: the option then computes the
+    // exact engine's numbers, and saying so here keeps that visible.
+    let form = if peregrine_core::options::fast_prompt_formats().is_empty() {
+        "none: this tier has no faster 8-bit kernel, the option changes nothing".to_string()
+    } else {
+        format!(
+            "{} ({})",
+            peregrine_core::options::fast_prompt_format_list(),
+            peregrine_core::options::fast_prompt_body().unwrap_or("scalar twin")
+        )
+    };
     format!(
-        "kernel tier   {}\nsimd features {}\nkq_repack     {}\nfpack         {}\npack cache    {}\nprefill chunk {chunk} (for {threads} workers), {wide} with no decoder\npass rows     {pass}\noptions:\n{}",
+        "kernel tier   {}\nsimd features {}\nfast prompt   {form}\nkq_repack     {}\nfpack         {}\npack cache    {}\nprefill chunk {chunk} (for {threads} workers), {wide} with no decoder\npass rows     {pass}\noptions:\n{}",
         peregrine_kernels::cpu::tier_name(),
         peregrine_core::simd_name(),
         o.kq_repack_note(),

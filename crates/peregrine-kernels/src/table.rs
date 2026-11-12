@@ -368,6 +368,47 @@ impl MatKernels {
         }
     }
 
+    /// The weight formats whose prompt rows take the 8-bit form on this tier
+    /// (S5.4f).
+    ///
+    /// This is the one table the load path, the dispatch and the startup line
+    /// read. A format belongs here only when the form's kernel is at least 1.10×
+    /// this tier's exact kernel for that format at prompt widths (64 activation
+    /// rows and up); the measurements behind each entry are in
+    /// `docs/design/s5.4-fast-prompt.md` §5g and
+    /// `benchmarks/results/bluefin-2026-11-12-s5.4f/`.
+    ///
+    /// * **AVX-512** (unchanged by S5.4f: it cannot be measured on the AVX2 host):
+    ///   Q4_K and Q6_K.
+    /// * **AVX2**: Q6_K only. Q4_K's exact wide kernel is 1.26× the form's, and
+    ///   Q5_0 is level at 2048 weights (1.00×) and 0.88× at Qwen 2.5's 896-wide
+    ///   rows, where the form pays a padded fourth super-block — below the 1.10×
+    ///   bar both ways.
+    /// * **Scalar, and any tier without a SIMD body**: nothing. The mode then
+    ///   computes exactly what the exact engine computes.
+    ///
+    /// The aarch64 arms are left as `origin/main` had them (there is no NEON form
+    /// wiring in this step); S5.4e adds them.
+    #[inline]
+    pub fn q8k_uses_form(&self, kind: Format) -> bool {
+        self.q8k_formats().contains(&kind)
+    }
+
+    /// [`MatKernels::q8k_uses_form`] as a list, for the startup line, `peregrine
+    /// tier` and the option's help text.
+    pub fn q8k_formats(&self) -> &'static [Format] {
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        {
+            if crate::kqsimd::have_zmm512() {
+                return &[Format::Q4_K, Format::Q6_K];
+            }
+            if crate::kqsimd::have_avx2() {
+                return &[Format::Q6_K];
+            }
+        }
+        &[]
+    }
+
     /// The resident 8-bit prompt form of one run of eight output rows against a
     /// batch of activation rows (`crate::kq8`, S5.4a; dispatched here since
     /// S5.4b).
@@ -410,19 +451,30 @@ impl MatKernels {
         crate::kq8::gemm_q8k(form, n_sb, acts, nb, out)
     }
 
-    /// Build the 8-bit form of `n_sb` super-blocks from a repacked eight-row tile:
+    /// Build the 8-bit form of one run of eight output rows from a repacked tile:
     /// the AVX-512 builder when the tier has it, the AVX2 one next, the scalar twin
-    /// otherwise (S5.4b, S5.4d).
+    /// otherwise (S5.4b, S5.4d, Q5_0 since S5.4f).
+    ///
+    /// `n_sb` is the number of 256-weight super-blocks for Q4_K and Q6_K, and the
+    /// number of 32-weight blocks for Q5_0 (the form is written one 256-weight
+    /// super-block at a time, so the last one may be short); the Q5_0 builders
+    /// take the block count, as `crate::kq8::build_q5_0` does.
     ///
     /// All three write the same bytes: the conformance tests in `crate::kqsimd` and
     /// the per-weight bound hold either way.
     pub fn q8k_build(&self, kind: Format, tile: &[u8], n_sb: usize, form: &mut [u8]) {
         assert!(
-            matches!(kind, Format::Q4_K | Format::Q6_K),
-            "only Q4_K and Q6_K have an 8-bit form in this step"
+            matches!(kind, Format::Q4_K | Format::Q6_K)
+                || (cfg!(feature = "fmt-legacy") && kind == Format::Q5_0),
+            "only Q4_K, Q6_K and Q5_0 have an 8-bit form"
         );
+        let form_sb = if kind == Format::Q5_0 {
+            n_sb.div_ceil(crate::kq8::Q8K_WEIGHTS / crate::kq::Q5_0_WEIGHTS)
+        } else {
+            n_sb
+        };
         assert!(
-            form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+            form.len() >= form_sb * crate::kq8::Q8K_SIZE,
             "the form holds fewer than n_sb super-blocks"
         );
         #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
@@ -433,7 +485,10 @@ impl MatKernels {
                 unsafe {
                     match kind {
                         Format::Q4_K => crate::kqsimd::q8k_build_q4k_zmm(tile, n_sb, form),
-                        _ => crate::kqsimd::q8k_build_q6k_zmm(tile, n_sb, form),
+                        Format::Q6_K => crate::kqsimd::q8k_build_q6k_zmm(tile, n_sb, form),
+                        #[cfg(feature = "fmt-legacy")]
+                        Format::Q5_0 => crate::kqsimd::q8k_build_q5_0_zmm(tile, n_sb, form),
+                        _ => unreachable!("the format has no 8-bit form"),
                     }
                 }
                 return;
@@ -444,7 +499,10 @@ impl MatKernels {
                 unsafe {
                     match kind {
                         Format::Q4_K => crate::kqsimd::q8k_build_q4k_avx2(tile, n_sb, form),
-                        _ => crate::kqsimd::q8k_build_q6k_avx2(tile, n_sb, form),
+                        Format::Q6_K => crate::kqsimd::q8k_build_q6k_avx2(tile, n_sb, form),
+                        #[cfg(feature = "fmt-legacy")]
+                        Format::Q5_0 => crate::kqsimd::q8k_build_q5_0_avx2(tile, n_sb, form),
+                        _ => unreachable!("the format has no 8-bit form"),
                     }
                 }
                 return;
@@ -452,7 +510,10 @@ impl MatKernels {
         }
         match kind {
             Format::Q4_K => crate::kq8::build_q4k(tile, n_sb, form),
-            _ => crate::kq8::build_q6k(tile, n_sb, form),
+            Format::Q6_K => crate::kq8::build_q6k(tile, n_sb, form),
+            #[cfg(feature = "fmt-legacy")]
+            Format::Q5_0 => crate::kq8::build_q5_0(tile, n_sb, form),
+            _ => unreachable!("the format has no 8-bit form"),
         }
     }
 

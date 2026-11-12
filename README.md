@@ -95,7 +95,7 @@ Common flags (all are listed by `peregrine run --help`):
 | `--system TEXT` | A system message for the chat template |
 | `--chat-template NAME` | Render a named template when the file declares none |
 | `--kv f16\|f32\|i8` | KV-cache precision (default f16) |
-| `--fast-prompt` | Experimental and lossy: read prompt tokens' Q4_K/Q6_K weights from an 8-bit copy built at load. Faster prompts; a reply can differ from the default engine's, and the accuracy report is not published yet (generated tokens keep the exact kernels; off by default) |
+| `--fast-prompt` | Experimental and lossy: prompt tokens read the weights of the formats whose 8-bit form beats this CPU tier's exact kernel (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; a tier with no SIMD body: none, so the option changes nothing) from an 8-bit copy built at load. Faster prompts; a reply can differ from the default engine's, and the accuracy report is not published yet (generated tokens keep the exact kernels; off by default) |
 | `--no-thinking` | Answer without the reasoning block (reasoning models only) |
 | `--speculate` | Lossless prompt-lookup speculation (off by default) |
 | `--json` | Print one JSON object (text, token counts, prefill/decode tok/s, TTFT, wall time) |

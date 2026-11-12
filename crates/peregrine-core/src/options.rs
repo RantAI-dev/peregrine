@@ -321,6 +321,32 @@ pub fn fast_prompt_body() -> Option<&'static str> {
     peregrine_kernels::table::MatKernels::get().q8k_body()
 }
 
+/// The weight formats whose prompt rows take the 8-bit form on this tier (S5.4f).
+///
+/// Empty where the tier has no faster 8-bit kernel: the option then computes
+/// exactly what the exact engine computes, and the startup line says so.
+pub fn fast_prompt_formats() -> &'static [peregrine_kernels::format::Format] {
+    peregrine_kernels::table::MatKernels::get().q8k_formats()
+}
+
+/// [`fast_prompt_formats`] as the human-readable list the startup line, `peregrine
+/// tier` and the option's help quote (`"Q6_K and Q5_0"`, or `"none"`).
+pub fn fast_prompt_format_list() -> String {
+    let formats = fast_prompt_formats();
+    match formats {
+        [] => "none".to_string(),
+        [one] => one.label().to_string(),
+        [.., last] => {
+            let head = formats[..formats.len() - 1]
+                .iter()
+                .map(|f| f.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{head} and {}", last.label())
+        }
+    }
+}
+
 /// Every engine switch. Defaults are the tuned values; see each field's environment variable.
 /// The k-quant repack is on by default on every tier, the AVX-512 tier included
 /// ([`EngineOptions::kq_repack_note`] says whether the switch overrode it).
@@ -378,12 +404,17 @@ pub struct EngineOptions {
     pub tb_span: usize,
     /// `PEREGRINE_EXACT=1`: ternary matmuls in f32 against decoded weights (slow reference path).
     pub exact: bool,
-    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): the Q4_K and Q6_K weights of a
-    /// *prompt* row are read from an 8-bit form built at load, one scale per 256
-    /// weights, instead of the file's own codes. Prompt passes get faster and
-    /// their logits move (the accuracy report that says by how much is roadmap
-    /// S5.4c, not published yet); generated rows, embeddings, rerank and
-    /// decisions keep the exact kernels. Off by default (ADR 0003);
+    /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): a *prompt* row's weights are
+    /// read from an 8-bit form built at load, one scale per 256 weights, instead of
+    /// the file's own codes — for the weight formats whose form's kernel is faster
+    /// than the tier's exact kernel for that format
+    /// ([`peregrine_kernels::table::MatKernels::q8k_uses_form`], S5.4f). On AVX-512
+    /// that is Q4_K and Q6_K; on AVX2 Q6_K (Q4_K's exact kernel is the stronger one
+    /// there, and Q5_0 is level); on a tier with no SIMD body, none, so the option
+    /// changes nothing. Prompt passes get faster where a format takes it and their
+    /// logits move (the accuracy report that says by how much is roadmap S5.4c, not
+    /// published yet); generated rows, embeddings, rerank and decisions keep the
+    /// exact kernels. Off by default (ADR 0003);
     /// `docs/design/s5.4-fast-prompt.md`.
     pub fast_prompt: bool,
 
@@ -932,6 +963,7 @@ impl EngineOptions {
             exact: self.exact,
             kq_repack: self.kq_repack,
             fpack: self.fpack,
+            fast_prompt: self.fast_prompt,
         }
     }
 }
