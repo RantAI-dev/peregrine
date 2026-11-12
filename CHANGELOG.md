@@ -43,7 +43,20 @@ All notable changes to this project are documented here. The format follows
   redistributable needed), and a `workflow_dispatch` dry run that builds artefacts without
   publishing. CI's Windows job runs the installer against the archive it just built. Windows
   counterparts of the `SIGTERM` drain tests go through the stop file with the same assertions.
-
+- **NEON bodies for the 8-bit prompt kernel (S5.4d, ARM)**: `crates/peregrine-kernels/src/neon.rs`
+  gains the vectorised build of the Q4_K/Q6_K/Q5_0 forms (`q8k_build_*_neon`) and the multiply on
+  `sdot` (`q8k_gemm_sdot`) and `smmla` (`q8k_gemm_i8mm`), with `q8k_gemm` picking the tier's body.
+  The form stores `code + 128` for x86's unsigned `vpdpbusd`; `sdot`/`smmla` are signed, so the
+  kernel flips bit 7 and sums `code·a` directly, and the epilogue is the twin's `d·dk` and one
+  fused multiply-add per (row, super-block) in the twin's order. Builds are byte-identical to the
+  twin on every edge tile S5.4a defines and both bodies are bit-identical to `kq8::dot_q8k` at
+  every width 1..=40 plus 63/64/65, 127/128/129 and 511/512/513. One Cortex-X925: the resident
+  form is 176–182 GMAC/s on `sdot` and 292–303 on `smmla` at 512 rows, against the exact Q4_K
+  kernel's 76/123, Q6_K's 52/77 and Q5_0's 35/55; it wins at every width of eight rows and above
+  (2.3× Q4_K, 3.5× Q6_K, 5.1× Q5_0 at 512 rows on the resident shape), loses at one row on the
+  8 192-weight streamed shape (0.63–0.70× for Q4_K), and costs 1.187 GiB on Llama 3.2 1B.
+  **Nothing is wired in**: no default-path file changes and no golden moves. Numbers:
+  `benchmarks/results/spark-arm-2026-11-12-s5.4d-neon/`.
 - **Windows x86-64 builds and passes the suite (roadmap S7.2)**: a `test (windows-x86_64)` job on
   `windows-2025` runs the whole workspace in release mode on every pull request, beside the Linux
   and macOS entries, and a smoke step checks `peregrine.exe --version`, `peregrine.exe tier`
@@ -144,6 +157,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The ARM embedding table re-measured with the result cache off.** The DGX Spark embedding
+  table had timed its batch cells with Peregrine's exact embedding-vector cache on, so a repeated
+  text list inside a cell was answered by a lookup after the first wave. Every row is now measured
+  with `--opt EMBED_CACHE_MB=0`: the four Q8_0 files, Qwen3-Embedding 0.6B F16, both
+  `gte-modernbert-base` files (now with 2 000-token, 32 × 128 and mixed cells), `all-MiniLM-L6-v2`
+  in F16 and Q8_0, and `bge-reranker-v2-m3` Q8_0 on `/v1/rerank` (8 and 32 documents of 124–128
+  tokens, 1.38× and 1.35× llama.cpp). Qwen3-Embedding 0.6B F16's batch of 32 falls from the
+  cache-on 2.72–3.21× to **1.17×** and its mixed batch is 1.10×; one cell is now below 1.0×,
+  that file at a single 2 000-token text (0.96×). The other eight rows are 1.33–3.20× ahead on
+  every cell. Three interleaved rounds, medians, both engines pinned to the Cortex-X925 cluster,
+  a co-tenant on the host. See `benchmarks/results/spark-arm-2026-11-12-embeddings-cache-off/`.
 - **The encoder's element-wise block: threaded and batched, same bits (S4.9r).** The S4.9p
   account put 9.26 ms of a 512-token MiniLM pass (18.05 bge-small) in everything around the
   matrix products against OpenVINO's 0.55 / 1.14 ms. Three changes close what the arithmetic
