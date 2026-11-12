@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
+  `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
+  embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused
+  `attn_qkv`, NeoX RoPE at base 1000 (no position table), full bidirectional attention, the
+  SwiGLU pair (`silu(ffn_gate) ⊙ ffn_up`) and `ffn_down`, and no final norm — the last
+  `layer_output_norm` is the vector, mean-pooled as the file says. `/v1/embeddings` and
+  `peregrine embed` serve it with no endpoint change (the Matryoshka `dimensions` field
+  truncates before normalising), and chat or label requests are refused by name. The
+  line-cited reading of llama.cpp v0.9.0's graph, the tensor table and the client's task
+  prefixes (`search_document: `, `search_query: `) are in `docs/reference/nomic-bert.md`.
+  On 200 `search_document: ` texts of 20–2040 tokens against llama.cpp v0.9.0 on
+  `nomic-embed-text-v1.5.f16.gguf` (SHA-256 `f7af6f66802f4df86eda10fe9bbcfc75c39562bed48ef6ace719a251cf1c2fdb`)
+  and `.Q8_0.gguf` (`3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7`),
+  the token ids are identical on every text; the F16 vectors are 0.9999995 min /
+  0.9999998 mean cosine to llama.cpp's; the Q8_0 vectors are 0.9978348 / 0.9982994 against
+  the F16 conversion (llama.cpp's own Q8_0: 0.9978020 / 0.9982981), and 0.9997719 /
+  0.9998660 against llama.cpp's Q8_0. The synthetic file, its independent scalar reference
+  forward, the batch/thread invariance matrix, the no-allocation pass, the missing-tensor
+  and unknown-pooling refusals and a `nomic-bert-Q8_0` golden on the scalar, AVX2 and
+  AVX-512-under-SDE tiers are in the test suite; the real-file test is `#[ignore]`d and
+  skips a missing file. Speed, 4 threads on the shared 8-vCPU Xeon E5-2680 v4 (AVX2), 5
+  runs, median (min..max) texts/s, Peregrine / llama.cpp: 16 tokens one text 34.5
+  (33.7..36.1) / 20.9 (20.0..21.6) = 1.65×; 128 tokens 5.70 (5.60..5.82) / 4.02
+  (3.90..4.04) = 1.42×; 512 tokens 1.31 (1.22..1.31) / 0.96 (0.94..0.97) = 1.36×; 16 texts
+  of 32 tokens in one request 20.8 (20.4..21.2) / 15.9 (15.6..15.9) = 1.31× (the worst
+  cell — Peregrine's embedding pass budget is 32 rows, so that request is several weight
+  passes). `nomic-bert-moe` (nomic-embed-text-v2-moe) and the jina BERT variants are not
+  in this step; a `nomic-bert-moe` file is refused by name as roadmap S4.8b.
+
 ### Changed
 
 - **The Qwen3-Embedding 0.6B Q8_0 long-text "slowdown" of S4.9q does not reproduce
@@ -29,6 +60,36 @@ All notable changes to this project are documented here. The format follows
   overstated; single-text cells were not affected. `docs/benchmark.md` now carries only cache-off
   numbers in that column (1.9–2.6× for the Q8_0 files) and marks the one row that has not been
   re-measured.
+- **The halved-precision float panel is widened once, and the small-BERT gap is measured
+  against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
+  and the prefetch guard inside its `k` loop and widened sixteen weights per weight step, on the
+  same two ports as its twelve fused multiply-adds: fourteen vector operations a step where twelve
+  would do, 77 % of this core's FMA roof against f32's 91 %. `gemm_avx2` is now three
+  monomorphised kernels (`f32`, `f16`, `bf16`) dispatched once per call, and a halved-precision
+  matrix is widened **once per panel** into a per-thread f32 scratch and then multiplied by the
+  f32 tile loop — 21× fewer conversions at a 128-row block, and the scratch is used only when
+  there are more than 18 activation rows and it fits in half of L2. The widening is exact and
+  every output is still one sequential `fma` chain over `k`, so no bit and no golden moved (new
+  tests: widened against direct on F16/BF16 for six shapes × rows 1-64, every row count 1-40 and
+  127/128/129/511/512/513 at ten widths, and ±0, subnormals, 1e-38, 2^-14, ±3e4, ±6.5e4, ±inf and
+  NaN). One thread: f16 50.2 → 57.3 GMAC/s and bf16 51.5 → 57.2 on 384 × 384 at 128 rows (+14 %,
+  +11 %), f16 44.6 → 52.6 on 2048 × 8192 (+18 %). End to end, medians of three interleaved rounds:
+  MiniLM's F16 row goes 0.87× → **0.90×** at L512 b1, 0.88× → **0.91×** at b8, 0.89× →
+  **0.94×** at b32, 0.96× → **1.02×** at L128 b1, 0.92× → **0.98×** at L128 b8, 0.97× →
+  **1.03×** at L128 b32, 1.30× → **1.39×** at L16 b1, 1.18× → 1.14× at L16 b8, 0.99× →
+  **1.10×** at L16 b32 and 1.45× → **1.52×** on the mixed batch; bge-small's F32 row is the
+  control and did not move (0.86–1.26× in both runs). **Still below 1.0× on this 4-core host**,
+  by cell: MiniLM f16 at 128 b8 (0.98×) and 512 b1/b8/b32 (0.90×/0.91×/0.94×); MiniLM q8_0 at
+  128 b8 (0.99×) and 512 b1/b8/b32 (0.91×/0.92×/0.95×); bge-small f32 at 16 b32 (0.97×), 128
+  b1/b8/b32 (0.95×/0.92×/0.97×) and 512 b1/b8/b32 (0.86×/0.89×/0.89×); bge-small q8_0 at 16 b32
+  (0.97×), 128 b1/b8/b32 (0.95×/0.92×/0.96×) and 512 b1/b8/b32 (0.84×/0.88×/0.88×). The
+  measurement says why: the matmul is already level with oneDNN's packed kernel on this CPU
+  (165.0–178.3 against 173.2–173.7 GMAC/s, 64–69 % of the 259.6 GMAC/s four-core roof), while the
+  element-wise work is 9.26 ms of a 54.8 ms MiniLM pass against OpenVINO's 0.55 ms and 18.05 of
+  104.4 ms against 1.14 ms on bge-small — so the remainder is the per-element passes (and, on
+  bge-small, the attention strip), not the matrix kernel. Rerank is 1.11–1.42× llama.cpp on both
+  bge-reranker files. See `benchmarks/results/bluefin-2026-11-12-s4.9p/README.md` and
+  `docs/design/s4.9-sota.md` §19.
 
 - **An `i8mm` body for the Q8_0 tile (S4.9q).** The Q8_0 repacked eight-row tile was the one tile
   with no `smmla` body, so on `aarch64-neon-i8mm` every Q8_0 file that stays on int8 tiles ran the

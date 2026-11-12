@@ -15,5 +15,44 @@ peregrine-core = { workspace = true }
 peregrine-kernels = { workspace = true, features = ["fmt-kquant", "fmt-legacy"] }
 peregrine-models = { workspace = true }
 
+# The dependency crates are workspace members with `default-features = false`, so an example that
+# needs a format or an architecture declares it here. A workspace build (or `cargo bench -p
+# peregrine-bench` alone) does not unify them into this crate: the examples name what they use.
+[features]
+default = []
+# `peregrine_core::lbq`: `lb_convert`, `lbbench`.
+littlebit = ["peregrine-core/littlebit"]
+# `peregrine_models::hybrid` and the qwen 3.5 family: `bonsai_check`, `bonsai_load`.
+arch-qwen35 = ["peregrine-models/arch-qwen35"]
+# `peregrine_core::tern`: `tbench1`, `tpar`.
+fmt-ternary = ["peregrine-core/fmt-ternary", "peregrine-models/fmt-ternary"]
+
+# Examples that call a format- or architecture-gated item. Without these, `cargo test -p
+# peregrine-bench` builds the examples against the crate's own (empty) default feature set and
+# fails; only a workspace build, which unifies the members' defaults, hid it.
+[[example]]
+name = "bonsai_check"
+required-features = ["arch-qwen35"]
+
+[[example]]
+name = "bonsai_load"
+required-features = ["arch-qwen35"]
+
+[[example]]
+name = "lb_convert"
+required-features = ["littlebit"]
+
+[[example]]
+name = "lbbench"
+required-features = ["littlebit"]
+
+[[example]]
+name = "tbench1"
+required-features = ["fmt-ternary"]
+
+[[example]]
+name = "tpar"
+required-features = ["fmt-ternary"]
+
 [lints]
 workspace = true
