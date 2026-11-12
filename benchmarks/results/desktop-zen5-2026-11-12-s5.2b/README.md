@@ -452,13 +452,13 @@ All on this branch, `CARGO_TARGET_DIR=~/.cache/peregrine-bench/target-s52b`, fro
 |---|---|
 | `cargo fmt --all --check` | clean |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
-| `cargo test --release -p peregrine-kernels -p peregrine-core` | 456 passed, 0 failed |
-| the same with `PEREGRINE_ISA=avx2` | 456 passed, 0 failed |
-| the same with `PEREGRINE_ISA=scalar` | 256 passed, 0 failed (the SIMD-only tests are `cfg`-excluded); `options::tests::the_server_calibrates_when_nothing_pins_the_knobs` failed once under load ("the workers did not come back in 2000 ms") and passed on three re-runs alone |
-| `cargo test --release -p peregrine-models` (native) | 184 passed, 0 failed with `PEREGRINE_GOLDEN_MODELS=Llama-3.2-1B`; see the note below |
-| the same with `PEREGRINE_ISA=avx2` | 184 passed, 0 failed |
-| the same with `PEREGRINE_ISA=scalar` | run in pieces (it exceeds ten minutes whole): `attn_invariance` 4, `golden` 1, `prefill_chunk` 5, `batch` 5, `engine` 15, `kq` 1, `synthetic` 32, `runtime_parity` 10, and 61 + 42 across the remaining binaries — 0 failed |
-| `cargo test --release -p peregrine-server -p peregrine` | 147 passed, 0 failed |
+| `cargo test --release -p peregrine-kernels -p peregrine-core` | 464 passed, 0 failed (after merging `origin/main` at `24ff574`) |
+| the same with `PEREGRINE_ISA=avx2` | 464 passed, 0 failed |
+| the same with `PEREGRINE_ISA=scalar` | 464 passed, 0 failed (before the merge the same command read 256 passed, the SIMD-only tests being `cfg`-excluded, and `options::tests::the_server_calibrates_when_nothing_pins_the_knobs` failed once under load — "the workers did not come back in 2000 ms" — passing on three re-runs alone; `origin/main`'s #236 then made that test accept the documented give-up path) |
+| `cargo test --release -p peregrine-models` (native) | 202 passed, 0 failed with `PEREGRINE_GOLDEN_MODELS=Llama-3.2-1B`; see the note below |
+| the same with `PEREGRINE_ISA=avx2` | 202 passed, 0 failed |
+| the same with `PEREGRINE_ISA=scalar` | run in pieces (it exceeds ten minutes whole): before the merge, `attn_invariance` 4, `golden` 1, `prefill_chunk` 5, `batch` 5, `engine` 15, `kq` 1, `synthetic` 32, `runtime_parity` 10 and 61 + 42 across the remaining binaries; after it, the attention and golden binaries again (`attn_invariance`, `golden`, `prefill_chunk`, `synthetic`: 43) — 0 failed |
+| `cargo test --release -p peregrine-server -p peregrine` | 155 passed, 0 failed |
 | `cargo hack check --each-feature --no-dev-deps -p peregrine-kernels -p peregrine-core` | all 20 + 10 feature sets clean (cargo-hack is installed) |
 | `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace` | clean |
 | `git status` under any `tests/golden/` | **nothing changed** |
