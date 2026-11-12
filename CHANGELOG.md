@@ -18,6 +18,10 @@ All notable changes to this project are documented here. The format follows
   ik_llama.cpp's arithmetic on 1.44 M weights of a real file, and the form costs 1.19 GiB on
   Llama 3.2 1B. **Nothing is wired in**: the engine's default path is untouched and no golden
   moved. Numbers: `benchmarks/results/desktop-zen5-2026-11-12-s5.4a/`.
+- **Design: macOS and Windows (S7)**: `docs/design/s7-platforms.md` sets what "supported" means on a
+  platform (CI on every PR, a release archive, an installer, `upgrade`, the lifetime commands,
+  goldens), the targets (macOS on Apple Silicon and Windows x86-64 first; Intel Macs not planned,
+  Windows on ARM later) and the steps S7.1 to S7.5. Nothing is built yet.
 - **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
   `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
   embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused
