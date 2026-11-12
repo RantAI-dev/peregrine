@@ -323,6 +323,16 @@ pub fn add_bert_tokenizer_metadata(w: &mut GgufWriter) {
     w.u32("tokenizer.ggml.token_type_count", 2);
 }
 
+/// Writes a `jina-bert-v2` WordPiece tokenizer: the `bert` vocabulary with the
+/// reference file's special-token flags (`add_bos_token` and `add_eos_token` true,
+/// `token_type_count = 2`), which is what `conversion/bert.py`'s `JinaBertV2Model`
+/// writes through `BertModel.set_vocab`.
+pub fn add_jina_bert_tokenizer_metadata(w: &mut GgufWriter) {
+    add_bert_tokenizer_metadata(w);
+    w.bool("tokenizer.ggml.add_eos_token", true);
+    w.u32("tokenizer.ggml.token_type_count", 2);
+}
+
 /// Writes a SentencePiece-unigram (`tokenizer.ggml.model = "t5"`) vocabulary, the
 /// XLM-R shape: `<unk>`, `<s>`, `</s>`, `<pad>`, the `▁`-prefixed pieces above,
 /// single characters so any string tokenises, and scores. `<s>`/`</s>` are the

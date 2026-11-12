@@ -431,6 +431,7 @@ impl Model {
                     "qwen25" | "qwen35" => Some("arch-qwen35"),
                     "gemma3" => Some("arch-gemma3"),
                     "gemma-embedding" => Some("arch-gemma-embedding"),
+                    "jina-bert-v2" => Some("arch-jina-bert"),
                     "phi3" => Some("arch-phi3"),
                     "mistral3" => Some("arch-mistral3"),
                     _ => None,

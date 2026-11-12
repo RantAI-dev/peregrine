@@ -6,6 +6,32 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The `jina-bert-v2` family (S4.8c)**: jina-embeddings-v2-base-en (and -small-en) are
+  served on `/v1/embeddings` and `peregrine embed`, transcribed from llama.cpp v0.9.0's
+  `LLM_ARCH_JINA_BERT_V2` graph: ALiBi's additive `slope·(−|i−j|)` attention bias instead
+  of position embeddings, the token-type row, optional per-token query/key LayerNorms, the
+  GEGLU feed-forward (separate `ffn_gate`/`ffn_up` or the fused `2·n_ff` layout), one
+  LayerNorm between the attention residual and the feed-forward plus the optional
+  `attn_norm_2`, and the layer's own output norm with no final norm. The bias is a new
+  input to the shared attention block (`peregrine_kernels::bidir::alibi_slopes`/`alibi_row`,
+  scalar, with its own tests and the whole path held bit for bit to a row-by-row
+  reference); the other families pass `None`, so their goldens did not move. On
+  jina-embeddings-v2-base-en against llama.cpp, 200 texts of 16–8180 tokens: token ids
+  identical. F16 cosine vs llama.cpp's F16 min **0.9999999**, mean **1.0000000**. Q8_0 vs
+  llama.cpp's F16 reference min **0.9993389**, mean **0.9996382** (llama.cpp's own Q8_0:
+  min 0.9992368, mean 0.9996404, so Peregrine is 2.2e-6 below on the mean, inside the S4
+  gate's 1e-4); Q8_0 vs llama.cpp's own Q8_0 min 0.9998662, mean 0.9999650. Speed on the
+  shared 8-vCPU VM (rough), 4 threads, Q8_0, cache off, five runs, texts/s: 16 tokens
+  **33.75 vs 22.55 (1.50×)**; 128 tokens **4.654 vs 4.201 (1.11×)**; 512 tokens **0.888 vs
+  0.857 (1.04×, the worst cell)**; one request of sixteen 32-token texts **260.7 vs 16.01
+  (16.3×)**, the ragged batch against llama.cpp's sequence-at-a-time server. Synthetic
+  goldens on scalar, AVX2 and AVX-512 under SDE, a no-allocation pass, server and CLI
+  cases, and an `#[ignore]`d real-file gate. `docs/reference/jina-bert.md` holds the
+  transcription and says what `jina-bert-v3` (RoPE, plain GELU, LoRA adapters) would take;
+  it is not built.
+
 ## [0.2.0] - 2026-11-12
 
 This release adds tool calling, embedding models, rerank and classify, decision models and

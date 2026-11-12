@@ -1024,6 +1024,7 @@ impl Architecture for ModernBert {
                 &mut st.xb,
                 &spans,
                 half_window,
+                None,
                 1.0,
                 &mut st.attn.bidir,
                 pool,

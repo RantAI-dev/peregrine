@@ -12,8 +12,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use support::models::{
-    write_dense_pooled, write_gemma_embedding, write_modern_bert, Dense, GemmaEmbeddingConfig,
-    ModernBertConfig,
+    write_dense_pooled, write_gemma_embedding, write_jina_bert, write_modern_bert, Dense,
+    GemmaEmbeddingConfig, JinaBertConfig, ModernBertConfig,
 };
 
 fn tmpdir(test: &str) -> PathBuf {
@@ -322,6 +322,47 @@ fn a_bert_encoder_embeds_and_refuses_to_generate() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains("pooling       cls (2) (embedding model)"),
+        "{text}"
+    );
+    let out = Command::new(bin())
+        .args(["run", "-m"])
+        .arg(&model)
+        .args(["--no-profile", "-t", "2", "hello"])
+        .output()
+        .expect("run peregrine run");
+    assert!(!out.status.success(), "a chat run on an encoder must fail");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("embedding model"));
+}
+
+/// A synthetic `jina-bert-v2` encoder (roadmap S4.8c): `embed` works over the
+/// WordPiece vocabulary (`[CLS] … [SEP]`), `inspect` prints the file's mean pooling,
+/// and `run` refuses to generate.
+#[test]
+fn a_jina_bert_encoder_embeds_and_refuses_to_generate() {
+    let dir = tmpdir("jina-bert");
+    let model = write_jina_bert(&dir, Format::F16, 30, JinaBertConfig::default());
+    let out = embed(&model, &["hello world", "the test of a paris city"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        let v = floats(line);
+        assert_eq!(v.len(), 128);
+        assert!((norm(&v) - 1.0).abs() < 1e-5);
+    }
+    let out = Command::new(bin())
+        .arg("inspect")
+        .arg(&model)
+        .output()
+        .expect("run inspect");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("pooling       mean (1) (embedding model)"),
         "{text}"
     );
     let out = Command::new(bin())
