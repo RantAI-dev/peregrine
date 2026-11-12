@@ -1053,13 +1053,60 @@ pub fn geglu(gate: &mut [f32], up: &[f32]) {
 /// `0.5·x·(1 + erff(x/√2))·g` left to right; [`gelu_erf`] is `(0.5·x)·(1 + erf(x/√2))`
 /// and the final multiply is the same one, so the bits match for the same `erf`.
 ///
-/// Scalar, and deliberately so (S4.7): it has no vector path, so there is no second
-/// arithmetic to keep in step. A vector body may only be added if it evaluates these
-/// same expressions lane-wise.
+/// On x86-64 with AVX2 and FMA, sixteen elements are evaluated at once by the
+/// same GELU body [`gelu_erf_rows`] uses; the product with `up` is
+/// the one `f32` multiply the scalar loop does, so the result is bit for bit the
+/// scalar one. The tail takes the scalar [`gelu_erf`], which is itself bit for bit
+/// the vector `erf` (the test pins that too). On aarch64 the loop stays scalar.
 pub fn geglu_erf(gate: &mut [f32], up: &[f32]) {
-    debug_assert_eq!(gate.len(), up.len());
+    assert_eq!(
+        gate.len(),
+        up.len(),
+        "geglu_erf: gate and up must be the same length, got {} and {}",
+        gate.len(),
+        up.len()
+    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        if vector_ok() {
+            // SAFETY: AVX2 and FMA checked; the lengths are equal.
+            unsafe { geglu_erf_avx2(gate, up) };
+            return;
+        }
+    }
     for (g, &u) in gate.iter_mut().zip(up) {
         *g = gelu_erf(*g) * u;
+    }
+}
+
+/// The AVX2 [`geglu_erf`]: sixteen elements per step.
+///
+/// # Safety
+///
+/// AVX2 and FMA must be available, and `gate` and `up` must be the same length.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn geglu_erf_avx2(gate: &mut [f32], up: &[f32]) {
+    let n = gate.len();
+    let p = gate.as_mut_ptr();
+    let u = up.as_ptr();
+    let mut i = 0;
+    while i + 16 <= n {
+        // The GELU writes the gate block, then the one multiply the definition's
+        // last step is.
+        gelu_erf_16(p.add(i));
+        let g0 = _mm256_loadu_ps(p.add(i));
+        let g1 = _mm256_loadu_ps(p.add(i + 8));
+        _mm256_storeu_ps(p.add(i), _mm256_mul_ps(g0, _mm256_loadu_ps(u.add(i))));
+        _mm256_storeu_ps(
+            p.add(i + 8),
+            _mm256_mul_ps(g1, _mm256_loadu_ps(u.add(i + 8))),
+        );
+        i += 16;
+    }
+    while i < n {
+        *p.add(i) = gelu_erf(*p.add(i)) * *u.add(i);
+        i += 1;
     }
 }
 
@@ -1627,6 +1674,44 @@ unsafe fn layer_norm_8_rows(
     r0: usize,
     out: &mut [f32],
 ) {
+    let (mean, inv) = layer_norm_8_rows_stats(x, eps, dim, r0);
+    for j in 0..8 {
+        let mb = _mm256_set1_ps(mean[j]);
+        let ib = _mm256_set1_ps(inv[j]);
+        let src = x.as_ptr().add((r0 + j) * dim);
+        let dst = out.as_mut_ptr().add((r0 + j) * dim);
+        let mut k = 0;
+        while k + 8 <= dim {
+            let xv = _mm256_loadu_ps(src.add(k));
+            let t = _mm256_mul_ps(_mm256_sub_ps(xv, mb), ib);
+            let wv = _mm256_loadu_ps(weight.as_ptr().add(k));
+            let bv = _mm256_loadu_ps(bias.as_ptr().add(k));
+            _mm256_storeu_ps(dst.add(k), _mm256_add_ps(_mm256_mul_ps(t, wv), bv));
+            k += 8;
+        }
+        while k < dim {
+            let t = (*src.add(k) - mean[j]) * inv[j];
+            *dst.add(k) = t * *weight.get_unchecked(k) + *bias.get_unchecked(k);
+            k += 1;
+        }
+    }
+}
+
+/// The mean and inverse scale of eight rows: the reduction of
+/// [`layer_norm_row`], walked in index order in eight independent `f64` lanes.
+///
+/// # Safety
+///
+/// AVX2 must be available, `r0 + 8 <= nb`, and `x` must cover `(r0 + 8) * dim`.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn layer_norm_8_rows_stats(
+    x: &[f32],
+    eps: f32,
+    dim: usize,
+    r0: usize,
+) -> ([f32; 8], [f32; 8]) {
     let base = x.as_ptr().add(r0 * dim);
     let load = |i: usize, lane: usize| *base.add(lane * dim + i) as f64;
     let mut s0 = _mm256_setzero_pd();
@@ -1680,26 +1765,7 @@ unsafe fn layer_norm_8_rows(
     _mm_storeu_ps(mean.as_mut_ptr().add(4), _mm256_cvtpd_ps(m1));
     _mm_storeu_ps(inv.as_mut_ptr(), _mm256_cvtpd_ps(inv0));
     _mm_storeu_ps(inv.as_mut_ptr().add(4), _mm256_cvtpd_ps(inv1));
-    for j in 0..8 {
-        let mb = _mm256_set1_ps(mean[j]);
-        let ib = _mm256_set1_ps(inv[j]);
-        let src = x.as_ptr().add((r0 + j) * dim);
-        let dst = out.as_mut_ptr().add((r0 + j) * dim);
-        let mut k = 0;
-        while k + 8 <= dim {
-            let xv = _mm256_loadu_ps(src.add(k));
-            let t = _mm256_mul_ps(_mm256_sub_ps(xv, mb), ib);
-            let wv = _mm256_loadu_ps(weight.as_ptr().add(k));
-            let bv = _mm256_loadu_ps(bias.as_ptr().add(k));
-            _mm256_storeu_ps(dst.add(k), _mm256_add_ps(_mm256_mul_ps(t, wv), bv));
-            k += 8;
-        }
-        while k < dim {
-            let t = (*src.add(k) - mean[j]) * inv[j];
-            *dst.add(k) = t * *weight.get_unchecked(k) + *bias.get_unchecked(k);
-            k += 1;
-        }
-    }
+    (mean, inv)
 }
 
 /// The NEON [`gelu_erf_rows`]: eight elements per step, two `f64` lanes per `erf`
@@ -2081,10 +2147,12 @@ pub fn layer_norm_row_nobias(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32
 
 /// [`layer_norm_row_nobias`] over `nb` rows of `dim` floats.
 ///
-/// Scalar (S4.7): the AVX2 body of [`layer_norm_rows`] adds a bias in its final
-/// lane-wise step, and this form's defined arithmetic is one multiply. A vector
-/// body goes here when a profile asks for one; it must be `to_bits` equal to the
-/// scalar twin, as the bias form's is.
+/// On x86-64 with AVX2, eight rows are normalised at a time exactly as
+/// [`layer_norm_rows`] does it — each row is one `f64` lane of the reduction, the
+/// mean and inverse scale round once, and the scale-and-shift is the row's `f32`
+/// lanes — but the last step is one multiply by the weight and no add, so a `-0.0`
+/// stays a `-0.0`. A row's bits are [`layer_norm_row_nobias`]'s, whatever the batch.
+/// On aarch64 the loop stays scalar.
 pub fn layer_norm_rows_nobias(
     x: &[f32],
     weight: &[f32],
@@ -2107,6 +2175,14 @@ pub fn layer_norm_rows_nobias(
         "layer_norm_rows_nobias: a {dim}-wide row needs {dim} weights, got {}",
         weight.len()
     );
+    #[cfg(target_arch = "x86_64")]
+    {
+        if vector_ok() {
+            // SAFETY: AVX2 and FMA checked, and the lengths were asserted above.
+            unsafe { layer_norm_rows_nobias_avx2(x, weight, eps, dim, nb, out) };
+            return;
+        }
+    }
     for r in 0..nb {
         layer_norm_row_nobias(
             &x[r * dim..(r + 1) * dim],
@@ -2114,6 +2190,77 @@ pub fn layer_norm_rows_nobias(
             eps,
             &mut out[r * dim..(r + 1) * dim],
         );
+    }
+}
+
+/// The AVX2 [`layer_norm_rows_nobias`]: eight rows per step, one `f64` lane per row.
+///
+/// # Safety
+///
+/// AVX2 and FMA must be available.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn layer_norm_rows_nobias_avx2(
+    x: &[f32],
+    weight: &[f32],
+    eps: f32,
+    dim: usize,
+    nb: usize,
+    out: &mut [f32],
+) {
+    let mut r = 0;
+    while r + 8 <= nb {
+        layer_norm_8_rows_nobias(x, weight, eps, dim, r, out);
+        r += 8;
+    }
+    while r < nb {
+        layer_norm_row_nobias(
+            &x[r * dim..(r + 1) * dim],
+            weight,
+            eps,
+            &mut out[r * dim..(r + 1) * dim],
+        );
+        r += 1;
+    }
+}
+
+/// Eight rows of [`layer_norm_row_nobias`]: [`layer_norm_8_rows_stats`]'s eight
+/// lanes, then the one weight multiply the definition ends with — no add.
+///
+/// # Safety
+///
+/// AVX2 must be available, `r0 + 8 <= nb`, and the slices must cover `nb * dim`.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn layer_norm_8_rows_nobias(
+    x: &[f32],
+    weight: &[f32],
+    eps: f32,
+    dim: usize,
+    r0: usize,
+    out: &mut [f32],
+) {
+    let (mean, inv) = layer_norm_8_rows_stats(x, eps, dim, r0);
+    for j in 0..8 {
+        let mb = _mm256_set1_ps(mean[j]);
+        let ib = _mm256_set1_ps(inv[j]);
+        let src = x.as_ptr().add((r0 + j) * dim);
+        let dst = out.as_mut_ptr().add((r0 + j) * dim);
+        let mut k = 0;
+        while k + 8 <= dim {
+            let xv = _mm256_loadu_ps(src.add(k));
+            let t = _mm256_mul_ps(_mm256_sub_ps(xv, mb), ib);
+            let wv = _mm256_loadu_ps(weight.as_ptr().add(k));
+            // One multiply: a `+ 0.0` here would turn a `-0.0` product into `+0.0`.
+            _mm256_storeu_ps(dst.add(k), _mm256_mul_ps(t, wv));
+            k += 8;
+        }
+        while k < dim {
+            let t = (*src.add(k) - mean[j]) * inv[j];
+            *dst.add(k) = t * *weight.get_unchecked(k);
+            k += 1;
+        }
     }
 }
 
@@ -3845,6 +3992,180 @@ mod tests {
         for i in 0..n {
             let want = gelu_erf(values[i]) * ups[i];
             assert_eq!(got[i].to_bits(), want.to_bits(), "index {i}");
+        }
+    }
+
+    /// Every `geglu_erf` element is the scalar `gelu_erf` times `up`, bit for bit:
+    /// the AVX2 body's sixteen lanes, its scalar tail, and every class of input.
+    #[test]
+    fn geglu_erf_matches_the_scalar_twin() {
+        let same = |a: f32, b: f32| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        // `erf_boundary_inputs` has ±0, subnormals, the branch boundaries, ±inf and
+        // NaNs with payloads; add the large magnitudes and the GELU's own range.
+        let mut edges = erf_boundary_inputs();
+        edges.extend([
+            1e30f32,
+            -1e30,
+            1e-30,
+            -1e-30,
+            12.0,
+            -12.0,
+            f32::from_bits(0x007f_ffff),
+            f32::from_bits(0x807f_ffff),
+        ]);
+        let sweep = prng(11, 2304, -12.0, 12.0);
+        let lens = [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 33, 768, 1152, 2304];
+        for &n in &lens {
+            // The edges first, so every block covers the branch boundaries, then the
+            // dense sweep.
+            let gate: Vec<f32> = (0..n)
+                .map(|i| if i < edges.len() { edges[i] } else { sweep[i] })
+                .collect();
+            let up: Vec<f32> = (0..n)
+                .map(|i| {
+                    if i < edges.len() {
+                        -edges[edges.len() - 1 - i]
+                    } else {
+                        sweep[(i * 7 + 3) % sweep.len()]
+                    }
+                })
+                .collect();
+            let want: Vec<f32> = gate
+                .iter()
+                .zip(&up)
+                .map(|(&g, &u)| gelu_erf(g) * u)
+                .collect();
+            let mut got = gate.clone();
+            geglu_erf(&mut got, &up);
+            assert_eq!(got.len(), want.len());
+            for i in 0..n {
+                assert!(
+                    same(got[i], want[i]),
+                    "len {n}, index {i}: {:#010x} vs {:#010x}",
+                    got[i].to_bits(),
+                    want[i].to_bits()
+                );
+            }
+        }
+        // 200 000 values of [-12, 12]: the sweep the acceptance names, carried by the
+        // sixteen-wide body and one tail rather than by the edges.
+        let n = 200_000usize;
+        let gate = prng(12, n, -12.0, 12.0);
+        let up = prng(13, n, -12.0, 12.0);
+        let want: Vec<f32> = gate
+            .iter()
+            .zip(&up)
+            .map(|(&g, &u)| gelu_erf(g) * u)
+            .collect();
+        let mut got = gate.clone();
+        geglu_erf(&mut got, &up);
+        for i in 0..n {
+            assert!(
+                same(got[i], want[i]),
+                "sweep {i}: {:#010x} vs {:#010x}",
+                got[i].to_bits(),
+                want[i].to_bits()
+            );
+        }
+    }
+
+    /// Every `layer_norm_rows_nobias` row is the scalar twin's row, bit for bit:
+    /// the eight-row AVX2 body, its scalar row tail, and widths on both sides of
+    /// eight.
+    #[test]
+    fn layer_norm_rows_nobias_matches_the_scalar_twin() {
+        let same = |a: f32, b: f32| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        let weights = prng(21, 2304, -2.0, 2.0);
+        let dims = [1usize, 7, 8, 9, 15, 16, 17, 31, 33, 37, 40, 768, 1152, 2304];
+        for (c, &dim) in dims.iter().enumerate() {
+            let w = &weights[..dim];
+            for &nb in &[0usize, 1, 2, 7, 8, 9, 16, 17] {
+                let x = prng(22 + c as u64, nb * dim, -12.0, 12.0);
+                let mut got = vec![0.0f32; nb * dim];
+                let mut want = vec![0.0f32; nb * dim];
+                layer_norm_rows_nobias(&x, w, 1e-12, dim, nb, &mut got);
+                for r in 0..nb {
+                    layer_norm_row_nobias(
+                        &x[r * dim..(r + 1) * dim],
+                        w,
+                        1e-12,
+                        &mut want[r * dim..(r + 1) * dim],
+                    );
+                }
+                for i in 0..nb * dim {
+                    assert!(
+                        same(got[i], want[i]),
+                        "dim {dim}, nb {nb}, row {}: {:#010x} vs {:#010x}",
+                        i / dim,
+                        got[i].to_bits(),
+                        want[i].to_bits()
+                    );
+                }
+            }
+        }
+        // A row of negative zeros keeps the product's sign: the vector body's one
+        // multiply, and no `+ 0.0`. The weights are positive, as in the bias form's
+        // test, so the product is `-0.0`.
+        let dim = 37usize;
+        let nb = 9usize;
+        let w = &weights[..dim];
+        let w_pos: Vec<f32> = w.iter().map(|v| v.abs() + 0.5).collect();
+        let x = vec![-0.0f32; nb * dim];
+        let mut got = vec![0.0f32; nb * dim];
+        layer_norm_rows_nobias(&x, &w_pos, 1e-5, dim, nb, &mut got);
+        assert!(
+            got.iter().all(|v| v.to_bits() == (-0.0f32).to_bits()),
+            "a row of -0.0 must stay -0.0"
+        );
+        // A constant row is all zeros.
+        let x = vec![7.0f32; nb * dim];
+        let mut got = vec![1.0f32; nb * dim];
+        layer_norm_rows_nobias(&x, &w_pos, 1e-5, dim, nb, &mut got);
+        assert!(got.iter().all(|&v| v == 0.0));
+        // Huge magnitudes, infinities, NaNs and their payloads: the same comparison
+        // the bias form's test makes (a NaN is a NaN on both paths; its payload is
+        // not part of the definition).
+        let cases: Vec<Vec<f32>> = vec![
+            vec![1e30; 13],
+            vec![
+                -1e30, 1e30, 0.0, -0.0, 1.0, -1.0, 1e-30, 0.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+            ],
+            vec![f32::INFINITY; 13],
+            vec![f32::from_bits(1); 13],
+            vec![-f32::from_bits(2); 13],
+            vec![
+                1.0,
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                2.0,
+                1e30,
+                -1e30,
+                3.0,
+                4.0,
+            ],
+            vec![f32::from_bits(0x7fc0_1234); 13],
+        ];
+        for (c, row) in cases.iter().enumerate() {
+            let dim = row.len();
+            let w = &weights[..dim];
+            let x = row.clone();
+            let mut got = vec![0.0f32; dim];
+            let mut want = vec![0.0f32; dim];
+            layer_norm_rows_nobias(&x, w, 1e-12, dim, 1, &mut got);
+            layer_norm_row_nobias(&x, w, 1e-12, &mut want);
+            for i in 0..dim {
+                assert!(
+                    same(got[i], want[i]),
+                    "case {c}, index {i}: {:#010x} vs {:#010x}",
+                    got[i].to_bits(),
+                    want[i].to_bits()
+                );
+            }
         }
     }
 }
