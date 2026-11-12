@@ -43,6 +43,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The Qwen3-Embedding 0.6B Q8_0 long-text "slowdown" of S4.9q does not reproduce
+  (2026-11-12).** Both ends of the reported fall were rebuilt side by side and measured
+  interleaved (five rounds each, 10 threads pinned to the Cortex-X925 cluster, embedding cache
+  off): on a quiet host `3030172` gives 0.360 texts/s and main 0.380 on the single 2 000-token
+  cell, and under a co-tenant (load average 8.2–9.1) the same two binaries give 0.179 and 0.191.
+  Main is 2.5–8.1 % ahead in all eight cells (16/512/2000 tokens single and 128-token batch 32,
+  in both host states), so there is no commit to bisect and no code change. The reported
+  0.213 → 0.177 step happened with no source change at all: one commit spans 0.360 quiet to
+  0.179 loaded, and the earlier standings record shows the load. The only causal-prefill change
+  between the commits is S5.1's wide pass (64 rows instead of 16 with no decoding row), and
+  flipping it back on main leaves the cell at 0.19 either way. See
+  `benchmarks/results/spark-arm-2026-11-12-qwen3-embed-regression/` and
+  `docs/design/s4.9-sota.md` §20.
+- **Correction to the ARM embedding table.** The same study found that the first ARM standings
+  run (`spark-2026-11-12-embeddings`) measured its batch cells with the exact result cache on:
+  the batch cell followed the single-text cell in one process, and the cache served 20 of the 32
+  texts (Qwen3-Embedding Q8_0, 32 texts of 128 tokens: 10.74 texts/s with the cache, 3.98–4.27
+  without). The batch-of-32 ratios published from that run (2.2–3.2× llama.cpp) were therefore
+  overstated; single-text cells were not affected. `docs/benchmark.md` now carries only cache-off
+  numbers in that column (1.9–2.6× for the Q8_0 files) and marks the one row that has not been
+  re-measured.
 - **The halved-precision float panel is widened once, and the small-BERT gap is measured
   against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
   and the prefetch guard inside its `k` loop and widened sixteen weights per weight step, on the
