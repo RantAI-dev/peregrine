@@ -1,4 +1,4 @@
-model /home/uaa/.cache/peregrine-bench/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+model ~/.cache/peregrine-bench/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 tensors 157  weights 492584960  file bytes 339060736 (0.6883 B/weight)  resident form 565137408 (1.1473 B/weight, 0.526 GiB)
 sampling: every 16th eight-row group and every 16th super-block
 
