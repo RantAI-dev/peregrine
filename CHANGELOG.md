@@ -8,6 +8,35 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
+  `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
+  embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused
+  `attn_qkv`, NeoX RoPE at base 1000 (no position table), full bidirectional attention, the
+  SwiGLU pair (`silu(ffn_gate) ⊙ ffn_up`) and `ffn_down`, and no final norm — the last
+  `layer_output_norm` is the vector, mean-pooled as the file says. `/v1/embeddings` and
+  `peregrine embed` serve it with no endpoint change (the Matryoshka `dimensions` field
+  truncates before normalising), and chat or label requests are refused by name. The
+  line-cited reading of llama.cpp v0.9.0's graph, the tensor table and the client's task
+  prefixes (`search_document: `, `search_query: `) are in `docs/reference/nomic-bert.md`.
+  On 200 `search_document: ` texts of 20–2040 tokens against llama.cpp v0.9.0 on
+  `nomic-embed-text-v1.5.f16.gguf` (SHA-256 `f7af6f66802f4df86eda10fe9bbcfc75c39562bed48ef6ace719a251cf1c2fdb`)
+  and `.Q8_0.gguf` (`3e24342164b3d94991ba9692fdc0dd08e3fd7362e0aacc396a9a5c54a544c3b7`),
+  the token ids are identical on every text; the F16 vectors are 0.9999995 min /
+  0.9999998 mean cosine to llama.cpp's; the Q8_0 vectors are 0.9978348 / 0.9982994 against
+  the F16 conversion (llama.cpp's own Q8_0: 0.9978020 / 0.9982981), and 0.9997719 /
+  0.9998660 against llama.cpp's Q8_0. The synthetic file, its independent scalar reference
+  forward, the batch/thread invariance matrix, the no-allocation pass, the missing-tensor
+  and unknown-pooling refusals and a `nomic-bert-Q8_0` golden on the scalar, AVX2 and
+  AVX-512-under-SDE tiers are in the test suite; the real-file test is `#[ignore]`d and
+  skips a missing file. Speed, 4 threads on the shared 8-vCPU Xeon E5-2680 v4 (AVX2), 5
+  runs, median (min..max) texts/s, Peregrine / llama.cpp: 16 tokens one text 34.5
+  (33.7..36.1) / 20.9 (20.0..21.6) = 1.65×; 128 tokens 5.70 (5.60..5.82) / 4.02
+  (3.90..4.04) = 1.42×; 512 tokens 1.31 (1.22..1.31) / 0.96 (0.94..0.97) = 1.36×; 16 texts
+  of 32 tokens in one request 20.8 (20.4..21.2) / 15.9 (15.6..15.9) = 1.31× (the worst
+  cell — Peregrine's embedding pass budget is 32 rows, so that request is several weight
+  passes). `nomic-bert-moe` (nomic-embed-text-v2-moe) and the jina BERT variants are not
+  in this step; a `nomic-bert-moe` file is refused by name as roadmap S4.8b.
+
 - **Tool calling for Qwen 3 (S6.2c)**: a file that carries Qwen 3's chat template is served with
   tools through the new `qwen3` format: Qwen 2.5's tool list and JSON calls, no default system
   message, messages written untrimmed, the assistant's turns after the last question with their

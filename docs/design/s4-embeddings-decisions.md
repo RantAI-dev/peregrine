@@ -63,7 +63,7 @@ Why Peregrine should win here, and where the work is:
 | S4.5 | tokenizers | WordPiece (`bert`), SentencePiece unigram (`t5`, the XLM-R vocabulary) | two tokenizers |
 | S4.6 | `bert` | all-MiniLM-L6/L12, bge-small/base/large-en-v1.5, e5, gte, bge-m3, multilingual-e5; bge-reranker-v2-m3 with its `cls` head | post-norm encoder, absolute positions, the classifier head |
 | S4.7 | `modern-bert` | ModernBERT, gte-modernbert, mmBERT, Granite Embedding R2, and their fine-tuned classifiers (`classifier.output_labels`) | alternating local and global attention, the labelled head |
-| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand |
+| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand; **S4.8a done** (`nomic-bert` = nomic-embed-text v1.5), see §9 |
 | S4.14 | `mistral3`, non-causal | Nemotron 3.5 Embed 1B and Nemotron 3 Embed 1B (the same text model; mean pooling, 2048 dimensions); the 8B sizes load by the same code | the Tekken pre-tokenizer, the Mistral 3 block in the dense family, a bidirectional pass for dense models |
 
 Out of scope for this stage: `neo-bert`, `eurobert`, DeBERTa (Prompt Guard 2; llama.cpp does not
@@ -358,7 +358,7 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
 | S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
 | S4.7 | `modern-bert` and labelled classifier heads. **Part a done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; a classifier head is read and ignored until S4.6b serves heads | S4.6 |
-| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3` | S4.6 |
+| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3`. **Part a done**: the `nomic-bert` family — token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused `attn_qkv`, NeoX RoPE at base 1000, SwiGLU (`ffn_gate` through SiLU times `ffn_up`), mean pooling and no final norm — against llama.cpp v0.9.0 on nomic-embed-text v1.5 F16 and Q8_0 (§9); `nomic-bert-moe` and the jina variants remain S4.8b | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
 | S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |
 | S4.12 | System One, part 3: **laya** and Julia-1 on `modern-bert` with the decision head | S4.7 |
@@ -472,3 +472,45 @@ and compare each one's vector with its one-model server.
 
 **Shutdown.** The drain timeout is the process's: SIGTERM stops accepting, lets the requests
 in flight on every engine finish, then exits. `peregrine stop` and `--background` are unchanged.
+
+## 9. S4.8a as built: the `nomic-bert` family
+
+`crates/peregrine-models/src/nomic_bert.rs` (`NomicBert::load`, `forward_texts`)
+registers `nomic-bert` behind `arch-nomic-bert`; the reading, the tensor table and
+the measurements are in [`docs/reference/nomic-bert.md`](../reference/nomic-bert.md).
+What this step settled, and why:
+
+1. **The graph is `bert`'s with three branch points, not a pre-norm RMSNorm
+   encoder.** llama.cpp v0.9.0's `LLM_ARCH_NOMIC_BERT` runs the shared post-norm
+   `bert` graph: `token_embd + token_types[0]`, a LayerNorm with weight and bias,
+   then per layer the fused `attn_qkv`, NeoX RoPE, attention, `attn_output` and a
+   residual, `attn_output_norm`, the FFN and a residual, `layer_output_norm`. The
+   feed-forward is `silu(ffn_gate) ⊙ ffn_up` then `ffn_down` (the `else` branch of
+   `src/models/bert.cpp`), and the file has no biases at all in v1.5's conversion.
+   There is **no final `output_norm`**: the last `layer_output_norm` is the output.
+   The earlier one-line summary in `docs/reference/bert.md` that called this family
+   "pre-norm with RMSNorm" was wrong; it is corrected by the new note.
+2. **The tokenizer is WordPiece with no normalizer keys.** The file says
+   `tokenizer.ggml.model = "bert"` and no `tokenizer.ggml.pre`; llama.cpp's DEFAULT
+   pre-tokenizer splits on whitespace, peels punctuation into its own word and
+   prefixes the phantom `▁`, and it lowercases only when
+   `tokenizer.ggml.normalizer.lowercase` says so (this file does not). `[CLS]` and
+   `[SEP]` are added whenever specials are on, independent of `add_bos`/`add_eos`.
+   Peregrine's ids are identical to llama.cpp's on all 200 gate texts.
+3. **The prefixes and dimensions stay the client's and the server's.** The client
+   writes `search_document: ` / `search_query: ` (llama.cpp does not add them
+   either); `dimensions` truncates the pooled vector and then re-normalises —
+   the existing `embed::finish`, unchanged.
+4. **The Q8_0 bound is set from measurement, and it is lower than the BERT
+   files'.** On the gate's 200 texts the Q8_0 file is 0.9983 mean from its F16
+   conversion for *both* engines (llama.cpp's own Q8_0: 0.99780 min / 0.998298
+   mean), so the test's bound is min 0.9975 / mean 0.9982; Peregrine is 1.3e-6
+   closer than llama.cpp on the mean. F16 is 0.9999995 min against llama.cpp.
+5. **One family, not a new block set.** The blocks reuse the `bert` family's
+   LayerNorm-with-bias kernel, the shared bidirectional attention and the SwiGLU
+   kernel Granite's `modern-bert` file already exercises; the new code is the
+   loader and the graph order.
+
+`nomic-bert-moe` (nomic-embed-text-v2-moe) is refused by name: it needs the
+mixture-of-experts feed-forward on every second layer and its XLM-R unigram
+vocabulary, and is left to S4.8b.
