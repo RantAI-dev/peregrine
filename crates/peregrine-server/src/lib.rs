@@ -1621,6 +1621,11 @@ fn apply_response_format(p: &mut Plan, raw: &str) -> Result<(), String> {
             constraint
                 .compile()
                 .map_err(|e| format!("response_format: {}", e.message()))?;
+            // A schema can compile and still be too large to start matching (a huge enum
+            // or anyOf). That is the client's schema, so it is refused here with a 400,
+            // not discovered at generation time as a server error.
+            peregrine_core::constrain::Matcher::new(&constraint)
+                .map_err(|e| format!("response_format: {}", e.message()))?;
             p.constraint = Some(Arc::new(constraint));
             Ok(())
         }
@@ -5038,6 +5043,30 @@ mod tests {
         );
         let mut extra = peregrine_core::constrain::Matcher::new(&c).unwrap();
         assert!(!extra.advance_bytes(br#"{"z":1}"#).is_ok());
+    }
+
+    #[test]
+    fn response_format_a_schema_too_large_to_match_is_a_request_error() {
+        // Every keyword is supported; the schema is refused for its size, at parse time.
+        let members: Vec<String> = (0..50_000).map(|i| format!("\"value-{i:06}\"")).collect();
+        let body = format!(
+            r#"{{"messages":[{{"role":"user","content":"hi"}}],"response_format":{{"type":"json_schema","json_schema":{{"name":"x","schema":{{"enum":[{}]}}}}}}}}"#,
+            members.join(",")
+        );
+        let err = match constrained(&body) {
+            Err(e) => e,
+            Ok(_) => panic!("a 50 000-member enum must be refused"),
+        };
+        assert!(
+            err.contains("cannot be served") && err.contains("at #"),
+            "{err}"
+        );
+        assert!(!err.contains("unsupported JSON Schema keyword"), "{err}");
+        // A small enum is still served.
+        constrained(
+            r#"{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"x","schema":{"enum":["a","b",3,null]}}}}"#,
+        )
+        .unwrap();
     }
 
     #[test]

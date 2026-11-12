@@ -238,10 +238,11 @@ impl Matcher {
         let mut out = BTreeSet::new();
         let mut budget = MAX_EXPANSIONS;
         if !m.close_into(vec![Item::Node(m.prog.root)], &mut out, &mut budget) || out.is_empty() {
-            return Err(super::SchemaError::new(
-                "type",
+            return Err(super::SchemaError::too_complex(
                 "#",
-                "the schema is too complex to match (its alternatives expand without bound)",
+                "it offers more alternatives at one point than the matcher follows at once \
+                 (for example an enum or anyOf with tens of thousands of members); shorten or \
+                 split it",
             ));
         }
         m.stacks = out.into_iter().collect();

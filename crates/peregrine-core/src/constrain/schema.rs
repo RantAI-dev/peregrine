@@ -51,8 +51,27 @@ impl SchemaError {
         }
     }
 
+    /// A schema whose keywords are all supported but which is too large to serve: no single
+    /// keyword is at fault, so the message names the place and the reason only.
+    pub(crate) fn too_complex(
+        pointer: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> SchemaError {
+        SchemaError {
+            keyword: String::new(),
+            pointer: pointer.into(),
+            detail: detail.into(),
+        }
+    }
+
     /// The message an OpenAI-shaped 400 carries.
     pub fn message(&self) -> String {
+        if self.keyword.is_empty() {
+            return format!(
+                "the JSON Schema at {} cannot be served: {}",
+                self.pointer, self.detail
+            );
+        }
         format!(
             "unsupported JSON Schema keyword {:?} at {}: {}",
             self.keyword, self.pointer, self.detail
