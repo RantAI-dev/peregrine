@@ -1,0 +1,6 @@
+# scripts/rerank-bench.py --docs 8 --tokens 123 --reps 5, one query, 952 prompt tokens,
+# 4 threads, Peregrine alone through HTTP, two interleaved runs per binary.
+before bge-reranker-v2-m3-Q8_0  3.89  3.89  pairs/s
+before bge-reranker-base-q8_0   12.82 13.32 pairs/s
+after  bge-reranker-v2-m3-Q8_0  3.94  3.94  pairs/s
+after  bge-reranker-base-q8_0   13.40 13.43 pairs/s

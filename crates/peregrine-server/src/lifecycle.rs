@@ -41,7 +41,7 @@ impl State {
 }
 
 /// Where the state file lives: `$PEREGRINE_STATE_DIR`, else `$XDG_STATE_HOME/peregrine`, else
-/// `~/.local/state/peregrine`.
+/// `%LOCALAPPDATA%\peregrine` on Windows, else `~/.local/state/peregrine` (S7.2).
 pub fn state_dir() -> PathBuf {
     if let Ok(d) = std::env::var("PEREGRINE_STATE_DIR") {
         if !d.is_empty() {
@@ -51,6 +51,16 @@ pub fn state_dir() -> PathBuf {
     if let Ok(d) = std::env::var("XDG_STATE_HOME") {
         if !d.is_empty() {
             return PathBuf::from(d).join("peregrine");
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no XDG state directory; the per-user local application data is where a
+        // program keeps state of its own (`%LOCALAPPDATA%\peregrine\serve.json`).
+        if let Ok(d) = std::env::var("LOCALAPPDATA") {
+            if !d.is_empty() {
+                return PathBuf::from(d).join("peregrine");
+            }
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -97,7 +107,18 @@ pub fn remove_if_ours(path: &Path, pid: u32) {
     }
 }
 
+/// Whether a process is running. Linux reads `/proc`; the other Unix systems ask `kill -0`.
+///
+/// Windows is S7.3: liveness there is `OpenProcess` plus `GetExitCodeProcess`, which arrives
+/// with the stop file and `status`/`stop`. Until then a state file found on Windows is
+/// treated as stale, and the commands that would act on it say what is missing.
+#[cfg(windows)]
+pub fn alive(_pid: u32) -> bool {
+    false
+}
+
 /// Whether a process is running. Linux reads `/proc`; elsewhere `kill -0` is asked.
+#[cfg(not(windows))]
 pub fn alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -116,6 +137,16 @@ pub fn alive(pid: u32) -> bool {
 }
 
 /// Ask a process to shut down (`SIGTERM`), and say whether the signal was sent.
+///
+/// Unix only: Windows has no `SIGTERM`. `peregrine stop` there asks the server to drain
+/// through the per-user stop file, and that is S7.3.
+#[cfg(windows)]
+pub fn terminate(_pid: u32) -> Result<(), String> {
+    Err("peregrine stop: Windows has no SIGTERM; the stop file arrives in S7.3".into())
+}
+
+/// Ask a process to shut down (`SIGTERM`), and say whether the signal was sent.
+#[cfg(not(windows))]
 pub fn terminate(pid: u32) -> Result<(), String> {
     let status = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
