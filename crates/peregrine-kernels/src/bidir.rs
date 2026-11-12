@@ -198,7 +198,10 @@ pub fn band(i: usize, n: usize, half: Option<usize>) -> (usize, usize) {
 /// `f_max_alibi_bias > 0` path): with `n_head_log2 = 1 << floor(log2(n_head))`,
 /// `m0 = 2^(-max_bias/n_head_log2)` and `m1 = 2^(-(max_bias/2)/n_head_log2)`, head `h`
 /// gets `m0^(h+1)` when `h < n_head_log2` and `m1^(2·(h - n_head_log2) + 1)` otherwise.
-/// The `f32::powf` calls are llama.cpp's own; they run once at load, not in a pass.
+/// llama.cpp calls the C library's `powf` here. The powers go through
+/// [`crate::vmath::det_pow_f32`] instead, so the slopes (and every score they touch) do
+/// not depend on the platform's C library: the same split as the other `det_*` helpers.
+/// They are built once at load, not in a pass.
 ///
 /// `jina-bert-v2` is the family that asks for this (`f_max_alibi_bias = 8`,
 /// `src/models/jina-bert-v2.cpp`), but the bias is generic and the kernel does not
@@ -211,14 +214,15 @@ pub fn alibi_slopes(n_head: usize, max_bias: f32) -> Vec<f32> {
     );
     let n_head_log2 = 1usize << (usize::BITS - 1 - n_head.leading_zeros());
     let l = n_head_log2 as f32;
-    let m0 = 2.0f32.powf(-max_bias / l);
-    let m1 = 2.0f32.powf(-(max_bias / 2.0) / l);
+    let pow = crate::vmath::det_pow_f32;
+    let m0 = pow(2.0, -max_bias / l);
+    let m1 = pow(2.0, -(max_bias / 2.0) / l);
     (0..n_head)
         .map(|h| {
             if h < n_head_log2 {
-                m0.powf(h as f32 + 1.0)
+                pow(m0, h as f32 + 1.0)
             } else {
-                m1.powf(2.0 * (h - n_head_log2) as f32 + 1.0)
+                pow(m1, 2.0 * (h - n_head_log2) as f32 + 1.0)
             }
         })
         .collect()
@@ -3711,10 +3715,10 @@ mod tests {
             assert_eq!(s[h].to_bits(), want.to_bits(), "head {h}: {}", s[h]);
         }
         // The second group is sqrt(1/2) at odd powers; compare to the same f32 the
-        // formula's own `powf` produces, not to a decimal literal.
-        let m1 = 2.0f32.powf(-4.0 / 8.0);
+        // formula's own power function produces, not to a decimal literal.
+        let m1 = crate::vmath::det_pow_f32(2.0, -4.0 / 8.0);
         for (h, e) in [(8usize, 1i32), (9, 3), (10, 5), (11, 7)] {
-            let want = m1.powf(e as f32);
+            let want = crate::vmath::det_pow_f32(m1, e as f32);
             assert_eq!(s[h].to_bits(), want.to_bits(), "head {h}: {}", s[h]);
         }
         // A single head is its own log2 group: `m0 = 2^-8` and the first slope is `m0^1`.

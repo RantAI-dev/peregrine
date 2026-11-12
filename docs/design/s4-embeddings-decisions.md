@@ -63,7 +63,7 @@ Why Peregrine should win here, and where the work is:
 | S4.5 | tokenizers | WordPiece (`bert`), SentencePiece unigram (`t5`, the XLM-R vocabulary) | two tokenizers |
 | S4.6 | `bert` | all-MiniLM-L6/L12, bge-small/base/large-en-v1.5, e5, gte, bge-m3, multilingual-e5; bge-reranker-v2-m3 with its `cls` head | post-norm encoder, absolute positions, the classifier head |
 | S4.7 | `modern-bert` | ModernBERT, gte-modernbert, mmBERT, Granite Embedding R2, and their fine-tuned classifiers (`classifier.output_labels`) | alternating local and global attention, the labelled head |
-| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand; **S4.8a done** (`nomic-bert` = nomic-embed-text v1.5), see §9; **S4.8c done** (`jina-bert-v2` = jina-embeddings-v2), see §11 |
+| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand; **S4.8a done** (`nomic-bert` = nomic-embed-text v1.5), see §12; **S4.8c done** (`jina-bert-v2` = jina-embeddings-v2), see §11 |
 | S4.14 | `mistral3`, non-causal | Nemotron 3.5 Embed 1B and Nemotron 3 Embed 1B (the same text model; mean pooling, 2048 dimensions); the 8B sizes load by the same code | the Tekken pre-tokenizer, the Mistral 3 block in the dense family, a bidirectional pass for dense models |
 
 Out of scope for this stage: `neo-bert`, `eurobert`, DeBERTa (Prompt Guard 2; llama.cpp does not
@@ -358,7 +358,7 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
 | S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
 | S4.7 | `modern-bert` and labelled classifier heads. **Done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; S4.7b adds its classifier head on `/v1/rerank`, `/v1/classify` and `peregrine rerank` from the same `Want::Head` interface, measured on gte-reranker-modernbert-base F16 and Q8_0 (§9) | S4.6 |
-| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3`. **Part a done**: the `nomic-bert` family — token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused `attn_qkv`, NeoX RoPE at base 1000, SwiGLU (`ffn_gate` through SiLU times `ffn_up`), mean pooling and no final norm — against llama.cpp v0.9.0 on nomic-embed-text v1.5 F16 and Q8_0 (§9). **Part b done (S4.8c)**: the `jina-bert-v2` family (ALiBi instead of positions, the GEGLU pair separate or fused, one LayerNorm between the attention residual and the feed-forward plus the optional `attn_norm_2`, optional q/k LayerNorms, the token-type row, no final output norm, mean/cls pooling) against llama.cpp v0.9.0 on jina-embeddings-v2-base-en F16 and Q8_0 (§11); the id/pair/headless rules as the other encoders. S4.8c also writes down what `jina-bert-v3` would take (a nomic-bert-shaped block with RoPE and a plain GELU, plus the LoRA-adapter files) and does not build it; `nomic-bert-moe` remains S4.8b | S4.6 |
+| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3`. **Part a done**: the `nomic-bert` family — token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused `attn_qkv`, NeoX RoPE at base 1000, SwiGLU (`ffn_gate` through SiLU times `ffn_up`), mean pooling and no final norm — against llama.cpp v0.9.0 on nomic-embed-text v1.5 F16 and Q8_0 (§12). **Part b done (S4.8c)**: the `jina-bert-v2` family (ALiBi instead of positions, the GEGLU pair separate or fused, one LayerNorm between the attention residual and the feed-forward plus the optional `attn_norm_2`, optional q/k LayerNorms, the token-type row, no final output norm, mean/cls pooling) against llama.cpp v0.9.0 on jina-embeddings-v2-base-en F16 and Q8_0 (§11); the id/pair/headless rules as the other encoders. S4.8c also writes down what `jina-bert-v3` would take (a nomic-bert-shaped block with RoPE and a plain GELU, plus the LoRA-adapter files) and does not build it; `nomic-bert-moe` remains S4.8b | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
 | S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |
 | S4.12 | System One, part 3: **laya** and Julia-1 on `modern-bert` with the decision head | S4.7 |
@@ -572,7 +572,7 @@ lead is in the same range as the single-short-text lead. A request whose texts r
 answered faster because identical texts are computed once in it (sixteen copies of one
 text: 309 texts/s), and that is in-request deduplication, not a batch ratio.
 
-## 9. S4.8a as built: the `nomic-bert` family
+## 12. S4.8a as built: the `nomic-bert` family
 
 `crates/peregrine-models/src/nomic_bert.rs` (`NomicBert::load`, `forward_texts`)
 registers `nomic-bert` behind `arch-nomic-bert`; the reading, the tensor table and

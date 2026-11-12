@@ -141,14 +141,17 @@ fn table_row(g: &Gguf, name: &str, r: usize, n: usize) -> Vec<f32> {
 fn slopes(n_head: usize) -> Vec<f32> {
     let n_head_log2 = 1usize << (usize::BITS - 1 - n_head.leading_zeros());
     let l = n_head_log2 as f32;
-    let m0 = 2.0f32.powf(-8.0 / l);
-    let m1 = 2.0f32.powf(-4.0 / l);
+    // The engine's platform-independent power, as the kernel uses: the reference is
+    // independent in its formula and its loop, not in its C library.
+    let pow = peregrine_core::vmath::det_pow_f32;
+    let m0 = pow(2.0, -8.0 / l);
+    let m1 = pow(2.0, -4.0 / l);
     (0..n_head)
         .map(|h| {
             if h < n_head_log2 {
-                m0.powf(h as f32 + 1.0)
+                pow(m0, h as f32 + 1.0)
             } else {
-                m1.powf(2.0 * (h - n_head_log2) as f32 + 1.0)
+                pow(m1, 2.0 * (h - n_head_log2) as f32 + 1.0)
             }
         })
         .collect()
