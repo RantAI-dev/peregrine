@@ -145,6 +145,9 @@ fn main() {
             2048.0 * 64.0 * n_sb as f64 * reps as f64 / best / 1e9,
             2048.0 * 64.0 * n_sb as f64 * reps as f64 * threads as f64 / best / 1e9
         );
+        if std::env::var("KQBENCH_PROMPT").is_ok() {
+            prompt_kernel_table(n_sb, threads);
+        }
         return;
     }
     let n = n_sb * 256;
@@ -315,7 +318,7 @@ fn main() {
     }
 
     if std::env::var("KQBENCH_PROMPT").is_ok() {
-        prompt_mode(n_sb);
+        prompt_mode(n_sb, threads);
     }
 
     if std::env::var("KQBENCH_LAYER").is_ok() {
@@ -740,10 +743,11 @@ fn wide_layer(n_sb: usize, n_tiles: usize, kq: &KqActs, tiles: &[u8]) {
 /// compared with the one built outside: the two paths must agree, or the table
 /// would be comparing a different arithmetic.
 #[cfg(target_arch = "x86_64")]
-fn prompt_mode(n_sb: usize) {
+fn prompt_mode(n_sb: usize, threads: usize) {
     use peregrine_kernels::kq8::{build_q4k, build_q5_0, build_q6k, form_size, Q8K_SIZE};
     use peregrine_kernels::kqsimd::{
-        q8k_build_q4k_zmm, q8k_build_q5_0_zmm, q8k_build_q6k_zmm, q8k_gemm_zmm,
+        q4k8_gemm_zmm, q5_08_gemm_zmm, q6k8_gemm_zmm, q8k_build_q4k_avx2, q8k_build_q4k_zmm,
+        q8k_build_q5_0_zmm, q8k_build_q6k_avx2, q8k_build_q6k_zmm, q8k_gemm_avx2, q8k_gemm_zmm,
     };
     let n_tiles = 1024; // 8192 output rows
     let n = n_sb * 256;
@@ -751,9 +755,44 @@ fn prompt_mode(n_sb: usize) {
     let mut kq = KqActs::default();
     kq.fill(&batch);
     let zmm = peregrine_kernels::kqsimd::have_zmm512();
-    if !zmm {
-        eprintln!("the 8-bit form has no AVX2 body; nothing to measure here");
+    let avx2 = peregrine_kernels::kqsimd::have_avx2();
+    if !avx2 {
+        eprintln!("the 8-bit form has no SIMD body on this machine; nothing to measure here");
         return;
+    }
+    // One name for the 8-bit body under test, so every row below measures the same
+    // tier's kernel (S5.4d added the AVX2 one).
+    macro_rules! q8k_build {
+        ($kind:ident, $tile:expr, $n_sb:expr, $form:expr) => {
+            unsafe {
+                if zmm {
+                    match stringify!($kind) {
+                        "q4k" => q8k_build_q4k_zmm($tile, $n_sb, $form),
+                        "q6k" => q8k_build_q6k_zmm($tile, $n_sb, $form),
+                        _ => q8k_build_q5_0_zmm($tile, $n_sb, $form),
+                    }
+                } else {
+                    match stringify!($kind) {
+                        "q4k" => q8k_build_q4k_avx2($tile, $n_sb, $form),
+                        "q6k" => q8k_build_q6k_avx2($tile, $n_sb, $form),
+                        // Q5_0 has no AVX2 builder in S5.4d (it is not in the
+                        // engine's load path); its row is the scalar build.
+                        _ => build_q5_0($tile, $n_sb * 8, $form),
+                    }
+                }
+            }
+        };
+    }
+    macro_rules! q8k_gemm {
+        ($form:expr, $n_sb:expr, $kq:expr, $nb:expr, $out:expr) => {
+            unsafe {
+                if zmm {
+                    q8k_gemm_zmm($form, $n_sb, $kq, $nb, $out)
+                } else {
+                    q8k_gemm_avx2($form, $n_sb, $kq, $nb, $out)
+                }
+            }
+        };
     }
     let n_blk5 = n / 32;
 
@@ -805,29 +844,26 @@ fn prompt_mode(n_sb: usize) {
     let mut scratch = vec![0u8; form_size(n_sb)];
     for t in 0..n_tiles {
         let a = t * n_sb * Q4K8::SIZE;
-        unsafe {
-            q8k_build_q4k_zmm(
-                &tiles4[a..a + n_sb * Q4K8::SIZE],
-                n_sb,
-                &mut forms4[t * stride4..(t + 1) * stride4],
-            )
-        };
+        q8k_build!(
+            q4k,
+            &tiles4[a..a + n_sb * Q4K8::SIZE],
+            n_sb,
+            &mut forms4[t * stride4..(t + 1) * stride4]
+        );
         let a = t * n_sb * Q6K8::SIZE;
-        unsafe {
-            q8k_build_q6k_zmm(
-                &tiles6[a..a + n_sb * Q6K8::SIZE],
-                n_sb,
-                &mut forms6[t * stride6..(t + 1) * stride6],
-            )
-        };
+        q8k_build!(
+            q6k,
+            &tiles6[a..a + n_sb * Q6K8::SIZE],
+            n_sb,
+            &mut forms6[t * stride6..(t + 1) * stride6]
+        );
         let a = t * n_blk5 * Q5_08::SIZE;
-        unsafe {
-            q8k_build_q5_0_zmm(
-                &tiles5[a..a + n_blk5 * Q5_08::SIZE],
-                n_blk5,
-                &mut forms5[t * stride5..(t + 1) * stride5],
-            )
-        };
+        q8k_build!(
+            q5_0,
+            &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+            n_sb,
+            &mut forms5[t * stride5..(t + 1) * stride5]
+        );
     }
     // The forms are the twin's, built from the same tiles (this also checks that the
     // resident store is what the per-pass path will produce).
@@ -883,7 +919,11 @@ fn prompt_mode(n_sb: usize) {
                 for t in 0..n_tiles {
                     let a = t * n_sb * Q4K8::SIZE;
                     unsafe {
-                        q4k8_gemm_zmm(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &kq, nb, &mut o)
+                        if zmm {
+                            q4k8_gemm_zmm(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &kq, nb, &mut o)
+                        } else {
+                            q4k8_gemm(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &kq, nb, &mut o)
+                        }
                     };
                 }
             }
@@ -892,7 +932,7 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * stride4;
-                    unsafe { q8k_gemm_zmm(&forms4[a..a + stride4], n_sb, &kq, nb, &mut o) };
+                    q8k_gemm!(&forms4[a..a + stride4], n_sb, &kq, nb, &mut o);
                 }
             }
             resident.push(t0.elapsed().as_secs_f64());
@@ -900,10 +940,8 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * n_sb * Q4K8::SIZE;
-                    unsafe {
-                        q8k_build_q4k_zmm(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &mut scratch);
-                        q8k_gemm_zmm(&scratch, n_sb, &kq, nb, &mut o);
-                    }
+                    q8k_build!(q4k, &tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &mut scratch);
+                    q8k_gemm!(&scratch, n_sb, &kq, nb, &mut o);
                 }
             }
             per_pass.push(t0.elapsed().as_secs_f64());
@@ -911,9 +949,7 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * n_sb * Q4K8::SIZE;
-                    unsafe {
-                        q8k_build_q4k_zmm(&tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &mut scratch)
-                    };
+                    q8k_build!(q4k, &tiles4[a..a + n_sb * Q4K8::SIZE], n_sb, &mut scratch);
                 }
             }
             build_only.push(t0.elapsed().as_secs_f64());
@@ -938,7 +974,11 @@ fn prompt_mode(n_sb: usize) {
                 for t in 0..n_tiles {
                     let a = t * n_sb * Q6K8::SIZE;
                     unsafe {
-                        q6k8_gemm_zmm(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &kq, nb, &mut o)
+                        if zmm {
+                            q6k8_gemm_zmm(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &kq, nb, &mut o)
+                        } else {
+                            q6k8_gemm(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &kq, nb, &mut o)
+                        }
                     };
                 }
             }
@@ -947,7 +987,7 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * stride6;
-                    unsafe { q8k_gemm_zmm(&forms6[a..a + stride6], n_sb, &kq, nb, &mut o) };
+                    q8k_gemm!(&forms6[a..a + stride6], n_sb, &kq, nb, &mut o);
                 }
             }
             resident.push(t0.elapsed().as_secs_f64());
@@ -955,10 +995,8 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * n_sb * Q6K8::SIZE;
-                    unsafe {
-                        q8k_build_q6k_zmm(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &mut scratch);
-                        q8k_gemm_zmm(&scratch, n_sb, &kq, nb, &mut o);
-                    }
+                    q8k_build!(q6k, &tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &mut scratch);
+                    q8k_gemm!(&scratch, n_sb, &kq, nb, &mut o);
                 }
             }
             per_pass.push(t0.elapsed().as_secs_f64());
@@ -966,9 +1004,7 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * n_sb * Q6K8::SIZE;
-                    unsafe {
-                        q8k_build_q6k_zmm(&tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &mut scratch)
-                    };
+                    q8k_build!(q6k, &tiles6[a..a + n_sb * Q6K8::SIZE], n_sb, &mut scratch);
                 }
             }
             build_only.push(t0.elapsed().as_secs_f64());
@@ -991,13 +1027,23 @@ fn prompt_mode(n_sb: usize) {
                 for t in 0..n_tiles {
                     let a = t * n_blk5 * Q5_08::SIZE;
                     unsafe {
-                        q5_08_gemm_zmm(
-                            &tiles5[a..a + n_blk5 * Q5_08::SIZE],
-                            n_blk5,
-                            &batch[..nb],
-                            nb,
-                            &mut o,
-                        )
+                        if zmm {
+                            q5_08_gemm_zmm(
+                                &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+                                n_blk5,
+                                &batch[..nb],
+                                nb,
+                                &mut o,
+                            )
+                        } else {
+                            q5_08_gemm(
+                                &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+                                n_blk5,
+                                &batch[..nb],
+                                nb,
+                                &mut o,
+                            )
+                        }
                     };
                 }
             }
@@ -1006,7 +1052,7 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * stride5;
-                    unsafe { q8k_gemm_zmm(&forms5[a..a + stride5], n_sb, &kq, nb, &mut o) };
+                    q8k_gemm!(&forms5[a..a + stride5], n_sb, &kq, nb, &mut o);
                 }
             }
             resident.push(t0.elapsed().as_secs_f64());
@@ -1014,14 +1060,13 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * n_blk5 * Q5_08::SIZE;
-                    unsafe {
-                        q8k_build_q5_0_zmm(
-                            &tiles5[a..a + n_blk5 * Q5_08::SIZE],
-                            n_blk5,
-                            &mut scratch,
-                        );
-                        q8k_gemm_zmm(&scratch, n_sb, &kq, nb, &mut o);
-                    }
+                    q8k_build!(
+                        q5_0,
+                        &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+                        n_sb,
+                        &mut scratch
+                    );
+                    q8k_gemm!(&scratch, n_sb, &kq, nb, &mut o);
                 }
             }
             per_pass.push(t0.elapsed().as_secs_f64());
@@ -1029,13 +1074,12 @@ fn prompt_mode(n_sb: usize) {
             for _ in 0..reps {
                 for t in 0..n_tiles {
                     let a = t * n_blk5 * Q5_08::SIZE;
-                    unsafe {
-                        q8k_build_q5_0_zmm(
-                            &tiles5[a..a + n_blk5 * Q5_08::SIZE],
-                            n_blk5,
-                            &mut scratch,
-                        )
-                    };
+                    q8k_build!(
+                        q5_0,
+                        &tiles5[a..a + n_blk5 * Q5_08::SIZE],
+                        n_sb,
+                        &mut scratch
+                    );
                 }
             }
             build_only.push(t0.elapsed().as_secs_f64());
@@ -1053,6 +1097,145 @@ fn prompt_mode(n_sb: usize) {
                  per-pass {per_pass:6.1} ({:+.0}%)  build {build:5.1} G weights/s  GMAC/s/core",
                 (resident / exact - 1.0) * 100.0,
                 (per_pass / exact - 1.0) * 100.0,
+            );
+        }
+    }
+    prompt_kernel_table(n_sb, threads.max(1));
+}
+
+/// The kernel table S5.4d asks for: the exact wide kernel, the 8-bit form's scalar
+/// twin and the tier's 8-bit SIMD body, in GMAC/s, per format, at one and at
+/// `threads` cores. One "row" of work is 8 output rows of a tile over `n_sb`
+/// super-blocks against 128 activation rows — a prompt chunk.
+///
+/// Each thread holds its own copy of the tile (the engine splits *output* rows
+/// across workers, and a shared L1 tile would measure cache sharing rather than the
+/// kernel), so the multi-thread column is the aggregate rate of `threads`
+/// independent copies.
+#[cfg(target_arch = "x86_64")]
+fn prompt_kernel_table(n_sb: usize, threads: usize) {
+    use peregrine_kernels::kq8::{gemm_q8k, Q8K_SIZE};
+    let n = n_sb * 256;
+    let nb = 128usize;
+    let reps = 40usize;
+    let zmm = peregrine_kernels::kqsimd::have_zmm512();
+    let macs = 2048.0 * n_sb as f64 * nb as f64;
+    println!("--- kernel table: {n} weights x 8 output rows x {nb} activation rows; GMAC/s aggregate over {{1, {threads}}} cores ---");
+    for fmt in ["q4k", "q6k"] {
+        // The exact tile.
+        let mut tile = vec![0u8; n_sb * if fmt == "q4k" { Q4K8::SIZE } else { Q6K8::SIZE }];
+        for sb in 0..n_sb {
+            let block = if fmt == "q4k" { Q4K_BLOCK } else { Q6K_BLOCK };
+            let mut blocks: [Vec<u8>; 8] = Default::default();
+            for (r, b) in blocks.iter_mut().enumerate() {
+                let mut v = prng(0x5EED_0000 + (r * 31 + sb) as u64, block);
+                if fmt == "q4k" {
+                    v[0..2]
+                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                    v[2..4].copy_from_slice(
+                        &peregrine_kernels::quant::f32_to_f16(0.005).to_le_bytes(),
+                    );
+                } else {
+                    v[208..210]
+                        .copy_from_slice(&peregrine_kernels::quant::f32_to_f16(0.01).to_le_bytes());
+                }
+                *b = v;
+            }
+            let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+            let out = &mut tile[sb * if fmt == "q4k" { Q4K8::SIZE } else { Q6K8::SIZE }..];
+            if fmt == "q4k" {
+                repack_q4k8(&refs, &mut out[..Q4K8::SIZE])
+            } else {
+                repack_q6k8(&refs, &mut out[..Q6K8::SIZE])
+            }
+        }
+        // The 8-bit form of the same tile.
+        let mut form = vec![0u8; n_sb * Q8K_SIZE];
+        unsafe {
+            if fmt == "q4k" {
+                if zmm {
+                    peregrine_kernels::kqsimd::q8k_build_q4k_zmm(&tile, n_sb, &mut form)
+                } else {
+                    peregrine_kernels::kqsimd::q8k_build_q4k_avx2(&tile, n_sb, &mut form)
+                }
+            } else if zmm {
+                peregrine_kernels::kqsimd::q8k_build_q6k_zmm(&tile, n_sb, &mut form)
+            } else {
+                peregrine_kernels::kqsimd::q8k_build_q6k_avx2(&tile, n_sb, &mut form)
+            }
+        }
+        let batch = acts(nb, n, 0xC0DE_5678);
+        let mut kq = KqActs::default();
+        kq.fill(&batch);
+        for (body, ncores) in [
+            ("exact", 1usize),
+            ("twin", 1),
+            ("simd", 1),
+            ("exact", threads),
+            ("twin", threads),
+            ("simd", threads),
+        ] {
+            let hs: Vec<_> = (0..ncores)
+                .map(|_| {
+                    let tile = tile.clone();
+                    let form = form.clone();
+                    let mut kq = kq.clone();
+                    std::thread::spawn(move || {
+                        let mut o = vec![0.0f32; nb * 8];
+                        // The warm-up run faults the pages and lifts the clock; the
+                        // best of three is what the table reports.
+                        let mut best = f64::MAX;
+                        for _round in 0..4 {
+                            let t0 = Instant::now();
+                            for _ in 0..reps {
+                                unsafe {
+                                    match (body, fmt) {
+                                        ("exact", "q4k") => {
+                                            if zmm {
+                                                q4k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o)
+                                            } else {
+                                                q4k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                                            }
+                                        }
+                                        ("exact", _) => {
+                                            if zmm {
+                                                q6k8_gemm_zmm(&tile, n_sb, &kq, nb, &mut o)
+                                            } else {
+                                                q6k8_gemm(&tile, n_sb, &kq, nb, &mut o)
+                                            }
+                                        }
+                                        ("twin", _) => gemm_q8k(&form, n_sb, &kq, nb, &mut o),
+                                        (_, "q4k") if zmm => {
+                                            peregrine_kernels::kqsimd::q8k_gemm_zmm(
+                                                &form, n_sb, &kq, nb, &mut o,
+                                            )
+                                        }
+                                        (_, "q4k") => peregrine_kernels::kqsimd::q8k_gemm_avx2(
+                                            &form, n_sb, &kq, nb, &mut o,
+                                        ),
+                                        (_, _) if zmm => peregrine_kernels::kqsimd::q8k_gemm_zmm(
+                                            &form, n_sb, &kq, nb, &mut o,
+                                        ),
+                                        (_, _) => peregrine_kernels::kqsimd::q8k_gemm_avx2(
+                                            &form, n_sb, &kq, nb, &mut o,
+                                        ),
+                                    }
+                                }
+                            }
+                            let _ = &mut kq;
+                            best = best.min(t0.elapsed().as_secs_f64());
+                        }
+                        best
+                    })
+                })
+                .collect();
+            let wall = hs
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .fold(0.0f64, f64::max);
+            println!(
+                "{fmt} {body:>5} x{ncores}: {:6.1} GMAC/s",
+                macs * reps as f64 * ncores as f64 / wall / 1e9
             );
         }
     }

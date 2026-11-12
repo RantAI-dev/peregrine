@@ -1,0 +1,6 @@
+{"round": 0, "model": "llama1b", "len": 512, "threads": 12, "load": "18.86 19.31 16.48", "peregrine": 217.14, "ik512": 466.15, "llama": 241.48}
+{"round": 0, "model": "qwen05", "len": 512, "threads": 12, "load": "19.65 19.46 16.56", "peregrine": 332.91, "ik512": 765.23, "llama": 388.83}
+{"round": 1, "model": "llama1b", "len": 512, "threads": 12, "load": "19.27 19.38 16.56", "peregrine": 247.29, "ik512": 397.01, "llama": 0.0}
+{"round": 1, "model": "qwen05", "len": 512, "threads": 12, "load": "18.35 19.18 16.54", "peregrine": 291.97, "ik512": 954.55, "llama": 371.99}
+{"round": 2, "model": "llama1b", "len": 512, "threads": 12, "load": "19.22 19.34 16.62", "peregrine": 238.08, "ik512": 392.77, "llama": 236.32}
+{"round": 2, "model": "qwen05", "len": 512, "threads": 12, "load": "20.28 19.57 16.74", "peregrine": 479.66, "ik512": 896.65, "llama": 329.53}
