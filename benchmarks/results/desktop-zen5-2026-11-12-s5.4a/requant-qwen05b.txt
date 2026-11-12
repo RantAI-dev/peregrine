@@ -1,0 +1,21 @@
+model ~/.cache/peregrine-bench/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+tensors 157  weights 492584960  file bytes 339060736 (0.6883 B/weight)  resident form 565137408 (1.1473 B/weight, 0.526 GiB)
+sampling: every 16th eight-row group and every 16th super-block
+
+Q4_K: blocks 1344  weights 344064  all-zero blocks 0
+  mean of the per-block mean |error| / block max: 0.00197   (blocks 0.00130 .. 0.00252)
+  worst single weight / block max: 0.00394   (bound 0.5/127 = 0.00394)
+  weights exactly on the grid: 0.44 %
+Q6_K: blocks 1344  weights 344064  all-zero blocks 0
+  mean of the per-block mean |error| / block max: 0.00191   (blocks 0.00136 .. 0.00216)
+  worst single weight / block max: 0.00394   (bound 0.5/127 = 0.00394)
+  weights exactly on the grid: 3.47 %
+Q6_K blocks in the exact case: 0 of 1344 sampled (0.0 %)
+Q5_0: blocks 27064  weights 6928384  all-zero blocks 0
+  mean of the per-block mean |error| / block max: 0.00183   (blocks 0.00087 .. 0.00222)
+  worst single weight / block max: 0.00394   (bound 0.5/127 = 0.00394)
+  weights exactly on the grid: 6.73 %
+
+The grid step is max/127, so the bound is half a step, max/254 = 0.3937 %;
+'block max' is the largest |w| in that row's 256-weight super-block, the number
+the form divides by 127. Every ratio above is relative to that maximum.

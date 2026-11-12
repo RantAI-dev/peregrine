@@ -1,0 +1,18 @@
+model ~/.cache/peregrine-bench/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+tensors 113  weights 1235746816  file bytes 799592448 (0.6471 B/weight)  resident form 1274363904 (1.0312 B/weight, 1.187 GiB)
+sampling: every 16th eight-row group and every 16th super-block
+
+Q4_K: blocks 23296  weights 5963776  all-zero blocks 0
+  mean of the per-block mean |error| / block max: 0.00197   (blocks 0.00128 .. 0.00273)
+  worst single weight / block max: 0.00394   (bound 0.5/127 = 0.00394)
+  weights exactly on the grid: 0.42 %
+Q6_K: blocks 10320  weights 2641920  all-zero blocks 0
+  mean of the per-block mean |error| / block max: 0.00193   (blocks 0.00123 .. 0.00220)
+  worst single weight / block max: 0.00394   (bound 0.5/127 = 0.00394)
+  weights exactly on the grid: 3.33 %
+Q6_K blocks in the exact case: 0 of 10320 sampled (0.0 %)
+Q5_0: blocks 0  weights 0  all-zero blocks 0
+
+The grid step is max/127, so the bound is half a step, max/254 = 0.3937 %;
+'block max' is the largest |w| in that row's 256-weight super-block, the number
+the form divides by 127. Every ratio above is relative to that maximum.

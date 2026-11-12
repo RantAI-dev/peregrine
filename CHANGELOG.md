@@ -20,7 +20,20 @@ All notable changes to this project are documented here. The format follows
   any platform, the macOS CI job smoke-tests the release binary and a synthetic generation, and the
   quickstart and release checklist have the macOS commands, the quarantine note and the dry run.
   `docs/design/s7-platforms.md` has the step's "as built" section.
-
+- **The 8-bit prompt kernel (S5.4a)**, the first build step of the opt-in fast prompt mode:
+  `crates/peregrine-kernels/src/kq8.rs` holds the form's layout, its scalar twin and the
+  requantisation, `kqsimd.rs` the AVX-512 bodies of both (asserted bit for bit equal to the twin
+  at every width from 1 to 40 and at 63, 64, 65, 127, 128, 129, 511, 512 and 513 activation
+  rows), and `KQBENCH_PROMPT=1` measures them. On one real layer the resident form runs at
+  91.9 GMAC/s against the exact Q4_K kernel's 66.2 at 512 activation rows, the per-pass
+  conversion only pays above about 128 rows, the codes and scales are identical to
+  ik_llama.cpp's arithmetic on 1.44 M weights of a real file, and the form costs 1.19 GiB on
+  Llama 3.2 1B. **Nothing is wired in**: the engine's default path is untouched and no golden
+  moved. Numbers: `benchmarks/results/desktop-zen5-2026-11-12-s5.4a/`.
+- **Design: macOS and Windows (S7)**: `docs/design/s7-platforms.md` sets what "supported" means on a
+  platform (CI on every PR, a release archive, an installer, `upgrade`, the lifetime commands,
+  goldens), the targets (macOS on Apple Silicon and Windows x86-64 first; Intel Macs not planned,
+  Windows on ARM later) and the steps S7.1 to S7.5. Nothing is built yet.
 - **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
   `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
   embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused
@@ -51,6 +64,58 @@ All notable changes to this project are documented here. The format follows
   in this step; a `nomic-bert-moe` file is refused by name as roadmap S4.8b.
 
 ### Changed
+
+- **The Qwen3-Embedding 0.6B Q8_0 long-text "slowdown" of S4.9q does not reproduce
+  (2026-11-12).** Both ends of the reported fall were rebuilt side by side and measured
+  interleaved (five rounds each, 10 threads pinned to the Cortex-X925 cluster, embedding cache
+  off): on a quiet host `3030172` gives 0.360 texts/s and main 0.380 on the single 2 000-token
+  cell, and under a co-tenant (load average 8.2–9.1) the same two binaries give 0.179 and 0.191.
+  Main is 2.5–8.1 % ahead in all eight cells (16/512/2000 tokens single and 128-token batch 32,
+  in both host states), so there is no commit to bisect and no code change. The reported
+  0.213 → 0.177 step happened with no source change at all: one commit spans 0.360 quiet to
+  0.179 loaded, and the earlier standings record shows the load. The only causal-prefill change
+  between the commits is S5.1's wide pass (64 rows instead of 16 with no decoding row), and
+  flipping it back on main leaves the cell at 0.19 either way. See
+  `benchmarks/results/spark-arm-2026-11-12-qwen3-embed-regression/` and
+  `docs/design/s4.9-sota.md` §20.
+- **Correction to the ARM embedding table.** The same study found that the first ARM standings
+  run (`spark-2026-11-12-embeddings`) measured its batch cells with the exact result cache on:
+  the batch cell followed the single-text cell in one process, and the cache served 20 of the 32
+  texts (Qwen3-Embedding Q8_0, 32 texts of 128 tokens: 10.74 texts/s with the cache, 3.98–4.27
+  without). The batch-of-32 ratios published from that run (2.2–3.2× llama.cpp) were therefore
+  overstated; single-text cells were not affected. `docs/benchmark.md` now carries only cache-off
+  numbers in that column (1.9–2.6× for the Q8_0 files) and marks the one row that has not been
+  re-measured.
+- **The halved-precision float panel is widened once, and the small-BERT gap is measured
+  against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
+  and the prefetch guard inside its `k` loop and widened sixteen weights per weight step, on the
+  same two ports as its twelve fused multiply-adds: fourteen vector operations a step where twelve
+  would do, 77 % of this core's FMA roof against f32's 91 %. `gemm_avx2` is now three
+  monomorphised kernels (`f32`, `f16`, `bf16`) dispatched once per call, and a halved-precision
+  matrix is widened **once per panel** into a per-thread f32 scratch and then multiplied by the
+  f32 tile loop — 21× fewer conversions at a 128-row block, and the scratch is used only when
+  there are more than 18 activation rows and it fits in half of L2. The widening is exact and
+  every output is still one sequential `fma` chain over `k`, so no bit and no golden moved (new
+  tests: widened against direct on F16/BF16 for six shapes × rows 1-64, every row count 1-40 and
+  127/128/129/511/512/513 at ten widths, and ±0, subnormals, 1e-38, 2^-14, ±3e4, ±6.5e4, ±inf and
+  NaN). One thread: f16 50.2 → 57.3 GMAC/s and bf16 51.5 → 57.2 on 384 × 384 at 128 rows (+14 %,
+  +11 %), f16 44.6 → 52.6 on 2048 × 8192 (+18 %). End to end, medians of three interleaved rounds:
+  MiniLM's F16 row goes 0.87× → **0.90×** at L512 b1, 0.88× → **0.91×** at b8, 0.89× →
+  **0.94×** at b32, 0.96× → **1.02×** at L128 b1, 0.92× → **0.98×** at L128 b8, 0.97× →
+  **1.03×** at L128 b32, 1.30× → **1.39×** at L16 b1, 1.18× → 1.14× at L16 b8, 0.99× →
+  **1.10×** at L16 b32 and 1.45× → **1.52×** on the mixed batch; bge-small's F32 row is the
+  control and did not move (0.86–1.26× in both runs). **Still below 1.0× on this 4-core host**,
+  by cell: MiniLM f16 at 128 b8 (0.98×) and 512 b1/b8/b32 (0.90×/0.91×/0.94×); MiniLM q8_0 at
+  128 b8 (0.99×) and 512 b1/b8/b32 (0.91×/0.92×/0.95×); bge-small f32 at 16 b32 (0.97×), 128
+  b1/b8/b32 (0.95×/0.92×/0.97×) and 512 b1/b8/b32 (0.86×/0.89×/0.89×); bge-small q8_0 at 16 b32
+  (0.97×), 128 b1/b8/b32 (0.95×/0.92×/0.96×) and 512 b1/b8/b32 (0.84×/0.88×/0.88×). The
+  measurement says why: the matmul is already level with oneDNN's packed kernel on this CPU
+  (165.0–178.3 against 173.2–173.7 GMAC/s, 64–69 % of the 259.6 GMAC/s four-core roof), while the
+  element-wise work is 9.26 ms of a 54.8 ms MiniLM pass against OpenVINO's 0.55 ms and 18.05 of
+  104.4 ms against 1.14 ms on bge-small — so the remainder is the per-element passes (and, on
+  bge-small, the attention strip), not the matrix kernel. Rerank is 1.11–1.42× llama.cpp on both
+  bge-reranker files. See `benchmarks/results/bluefin-2026-11-12-s4.9p/README.md` and
+  `docs/design/s4.9-sota.md` §19.
 
 - **An `i8mm` body for the Q8_0 tile (S4.9q).** The Q8_0 repacked eight-row tile was the one tile
   with no `smmla` body, so on `aarch64-neon-i8mm` every Q8_0 file that stays on int8 tiles ran the

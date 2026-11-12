@@ -235,26 +235,35 @@ for every timed row, so every engine computes every text.
 
 ### Bluefin (4 cores, AVX2): every engine
 
-`origin/main` at `2a5e9f6`, 4 threads, three interleaved rounds, medians. Cells are 16, 128 and 512
+4 threads, three interleaved rounds, medians. Cells are 16, 128 and 512
 tokens at batch 1, 8 and 32, a mixed-length batch of 32 texts (8–512 tokens), and 2 000 tokens for the
 models that accept them. Engines: llama.cpp v0.9.0, OpenVINO 2026.4, ONNX Runtime 1.31, fastembed 0.9
-and text-embeddings-inference 1.9.
+and text-embeddings-inference 1.9. The four larger families are the S4.9l proof run at `2a5e9f6`; the
+two small BERT rows are re-measured at `4500a6f` plus S4.9p
+([`bluefin-2026-11-12-s4.9p`](../benchmarks/results/bluefin-2026-11-12-s4.9p/README.md)).
 
 | Model | File | Fastest other engine | 16 tokens | 128 tokens | 512 tokens | 2 000 tokens | mixed batch |
 |---|---|---|---|---|---|---|---|
-| all-MiniLM-L6-v2 | F16, Q8_0 | OpenVINO, ONNX Runtime | **1.06–1.44×** | 0.94–0.99× | 0.85–0.90× | n/a | **1.47×** |
-| bge-small-en-v1.5 | F32, Q8_0 | OpenVINO, ONNX Runtime, fastembed | 0.96–1.21× | 0.91–0.97× | 0.85–0.88× | n/a | **1.23×** |
+| all-MiniLM-L6-v2 | F16, Q8_0 | OpenVINO, ONNX Runtime | **1.10–1.39×** | 0.98–1.03× | 0.90–0.95× | n/a | **1.52×** |
+| bge-small-en-v1.5 | F32, Q8_0 | OpenVINO, ONNX Runtime, fastembed | 0.97–1.26× | 0.92–0.97× | 0.84–0.89× | n/a | **1.25×** |
 | bge-m3 | Q8_0 | llama.cpp | **1.18–1.53× across every cell** | | | **1.35×** | |
 | EmbeddingGemma 300M | Q8_0 | llama.cpp | **1.30–1.51× across every cell** | | | | |
 | Qwen3-Embedding 0.6B | Q8_0, F16 | llama.cpp | **1.25–1.51×** (Q8_0), **1.24–1.44×** (F16) | | | | |
 | Nemotron 3.5 Embed 1B | Q8_0 | llama.cpp | **1.34–1.62× across every cell** | | | | |
 
-Peregrine is the fastest engine in 55 of the 68 measured cells. The 13 it loses are MiniLM and
-bge-small at 128 and 512 tokens (and one 16-token batch-32 cell of bge-small, 0.96×). There the pass
-is 58–72% matrix products and, at 512 tokens, another 23–25% attention; OpenVINO's packed fp32 matrix
-kernel runs that chain faster. The F16/F32 and Q8_0 rows of each model run at the same speed, so the
-gap is the float matrix kernel and the attention strip, not quantisation. The mixed-length batch is a
-win on both models because Peregrine never pads: the padding engines are 1.6–4.5× slower there.
+The four larger families are ahead in every cell (1.05× and up). The cells behind are all on the two
+small BERT encoders at 128 and 512 tokens: MiniLM F16/Q8_0 lose at 128 b8 (0.98–0.99×) and 512
+b1/b8/b32 (0.90–0.95×), bge-small F32/Q8_0 at 16 b32 (0.97×), 128 b1/b8/b32 (0.92–0.97×) and 512
+b1/b8/b32 (0.84–0.89×). The stage profile says where: at 512 tokens the pass is 58–60% matmul, 23–25%
+attention and 17% element-wise, and OpenVINO's own per-node profile on the same cell puts its
+`FullyConnected` at 173 GMAC/s against Peregrine's 165–178 — the matrix kernels are level, while the
+element-wise work is 9.3 ms against OpenVINO's 0.5 ms (18.1 against 1.1 on bge-small) and bge-small's
+attention is 25.7 against 20.7 ms. So the remainder is the per-element passes and bge-small's 32-wide
+attention strip, not the matrix kernel and not quantisation (the F16/F32 and Q8_0 rows still run at
+the same speed). S4.9p closed the halved-precision kernel's conversion overhead and moved MiniLM's
+F16 row 0.87→0.90× at 512 b1 and 0.96→1.02× at 128 b1; the element-wise block is the next lever. The
+mixed-length batch is a win on both models because Peregrine never pads: the padding engines are
+1.6–4.5× slower there.
 
 Accuracy on the same texts: Q8_0 agrees with llama.cpp's Q8_0 within 3e-4 cosine and is closer to the
 fp32 reference on all three BERT models; the F16 and F32 rows are exact against the fp32 engines;
@@ -286,14 +295,18 @@ Full details, per-cell tables, stage profiles and the excluded rows:
 |---|---|---|---|---|
 | EmbeddingGemma 300M | Q8_0 | **1.98–2.47×** | **1.91×** | **1.94×** |
 | Qwen3-Embedding 0.6B | Q8_0 | **1.33–2.20×** | **2.02×** | **1.93×** |
-| Qwen3-Embedding 0.6B | F16 | **1.05–1.52×** | **2.72–3.21×** | **1.11×** |
+| Qwen3-Embedding 0.6B | F16 | **1.05–1.52×** | not re-measured¹ | not re-measured¹ |
 | Nemotron 3.5 Embed 1B | Q8_0 | **2.37–2.65×** | **2.63×** | **2.63×** |
 | bge-m3 | Q8_0 | **1.83–2.10×** | **2.03×** | **2.02×** |
 | gte-modernbert-base | F16 | **1.42–1.56×** | **1.15×** (16 texts) | n/a |
 | gte-modernbert-base | Q8_0 | **1.43–1.77×** (16 to 512 tokens) | **1.55×** (16 texts) | n/a |
 
-The batch cells are the largest wins because llama.cpp runs one embedding task at a time inside a
-request while Peregrine shares weight passes across the texts. No cell in this table is behind
+¹ The first ARM standings run measured its batch cells with the exact result cache on, which served
+20 of the 32 texts, so its batch ratios (2.2–3.2×) were overstated; the single-text cells were not
+affected. Every batch number in this table is now from a cache-off run, and this row's batch cells
+have not been measured again.
+
+No cell in this table is behind
 after S4.9q, which added the missing `i8mm` body for the Q8_0 int8 tile (`smmla` instead of
 `sdot`, 3.05× the kernel, 1.5–2.6× the whole pass) — before it, nine cells of these four Q8_0
 files were at or below 1.0×. The narrowest now is Qwen3-Embedding Q8_0 at one 2 000-token text
@@ -313,9 +326,27 @@ Full details: [`spark-arm-2026-11-12-q8-i8mm`](../benchmarks/results/spark-arm-2
 ### Rerank
 
 `POST /v1/rerank` on bge-reranker-v2-m3 and bge-reranker-base gives the same token ids and the same
-ranking order as llama.cpp on the reference pairs. Speed has only been measured on the shared
-development VM so far: level with llama.cpp at 123-token pairs and 5–6% ahead at 449-token pairs
-([reference/bert.md](reference/bert.md)). A table from a quiet host is still owed.
+ranking order as llama.cpp on the reference pairs (320 pairs, eight languages:
+[reference/bert.md](reference/bert.md)).
+
+Bluefin, 4 threads, one query against 1, 8 and 32 documents of 123 and 449 tokens, both engines on the
+same GGUF, one engine at a time through HTTP, median of five requests (`scripts/rerank-bench.py`).
+llama.cpp got one slot per document of the largest request (`-np 32 -c 16640 -b 1024 -ub 1024
+--reranking`); Peregrine ran `serve --threads 4 --ctx 16640`, which clamps to the file's 8 192 and runs
+32 rows per pass. Pairs per second:
+
+| File | tokens/pair | documents | Peregrine | llama.cpp | Ratio |
+|---|---|---:|---:|---:|---:|
+| bge-reranker-v2-m3 Q8_0 | 123 | 1 / 8 / 32 | 3.87 / 3.91 / 3.92 | 3.31 / 2.77 / 2.76 | **1.17× / 1.41× / 1.42×** |
+| bge-reranker-v2-m3 Q8_0 | 449 | 1 / 8 / 32 | 0.96 / 0.96 / 0.96 | 0.78 / 0.73 / 0.73 | **1.23× / 1.32× / 1.32×** |
+| bge-reranker-base Q8_0 | 123 | 1 / 8 / 32 | 12.37 / 13.11 / 13.14 | 11.10 / 9.66 / 9.68 | **1.11× / 1.36× / 1.36×** |
+| bge-reranker-base Q8_0 | 449 | 1 / 8 / 32 | 3.25 / 3.26 / 3.25 | 2.76 / 2.52 / 2.52 | **1.18× / 1.29× / 1.29×** |
+
+The top-1 document agrees in every cell. bge-reranker-base's whole ranking is identical (Kendall
+τ = 1.000, largest score difference 0.10); v2-m3 swaps one adjacent pair at each length, and those
+two documents are 0.013–0.018 apart in llama.cpp's own scores — smaller than the engines' score
+difference on the same document (0.04–0.11), so the swap is the near-tie. Method, flags and the full
+data: [`bluefin-2026-11-12-s4.9p`](../benchmarks/results/bluefin-2026-11-12-s4.9p/README.md).
 
 ## Task accuracy and decoding invariance
 

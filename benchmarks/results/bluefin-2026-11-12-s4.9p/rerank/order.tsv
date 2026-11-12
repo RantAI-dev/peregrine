@@ -1,0 +1,5 @@
+# file	tokens	kendall_tau	top1_same	max_abs_score_diff	note
+bge-reranker-base	123	1.000	yes	0.097	identical order
+bge-reranker-base	449	1.000	yes	0.038	identical order
+bge-reranker-v2-m3	123	0.929	yes	0.107	one adjacent swap: docs 5/6, 0.013 apart in llama.cpp
+bge-reranker-v2-m3	449	0.929	yes	0.071	one adjacent swap: docs 6/4, 0.018 apart in llama.cpp
