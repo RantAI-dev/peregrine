@@ -311,3 +311,109 @@ fn a_stop_file_drains_and_exits_cleanly() {
         "the server must remove the stop file it acted on"
     );
 }
+
+/// `serve --background`, `status` and `stop` on Windows (S7.3): the detached start records the
+/// same state a Unix background server does, `status` reads it and gets `/health`, and `stop`
+/// drains through the stop file; `status` then reports no managed server.
+#[cfg(windows)]
+#[test]
+fn background_serve_status_and_stop_round_trip() {
+    struct Managed {
+        exe: PathBuf,
+        state: PathBuf,
+    }
+    impl Drop for Managed {
+        fn drop(&mut self) {
+            let _ = Command::new(&self.exe)
+                .arg("stop")
+                .env("PEREGRINE_STATE_DIR", &self.state)
+                .output();
+        }
+    }
+
+    let dir = tmpdir("background");
+    let model = write_dense(&dir, "llama", Format::F16, 11, Dense::default());
+    let state = dir.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let listen = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listen.local_addr().unwrap().port();
+    drop(listen);
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_peregrine"));
+    let run = |args: &[&str]| {
+        Command::new(&exe)
+            .args(args)
+            .env("PEREGRINE_STATE_DIR", &state)
+            .output()
+            .expect("run peregrine")
+    };
+    let port_text = port.to_string();
+
+    let start = run(&[
+        "serve",
+        "-m",
+        model.to_str().unwrap(),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port_text,
+        "--threads",
+        "1",
+        "-c",
+        "128",
+        "--no-profile",
+        "--background",
+    ]);
+    assert!(
+        start.status.success(),
+        "serve --background failed: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let started = String::from_utf8_lossy(&start.stdout);
+    assert!(
+        started.contains("background server ready"),
+        "the parent did not report readiness: {started}"
+    );
+    let _managed = Managed {
+        exe: exe.clone(),
+        state: state.clone(),
+    };
+
+    let status = run(&["status"]);
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        text.contains(&format!("127.0.0.1:{port}")),
+        "status does not name the address: {text}"
+    );
+    assert!(
+        text.contains("health     ok"),
+        "status did not get /health: {text}"
+    );
+
+    let stop = run(&["stop"]);
+    assert!(
+        stop.status.success(),
+        "stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let stopped = String::from_utf8_lossy(&stop.stdout);
+    assert!(
+        stopped.contains("stopped pid"),
+        "stop did not stop the server: {stopped}"
+    );
+
+    let after = run(&["status"]);
+    assert!(
+        !after.status.success(),
+        "status still reports a server after stop"
+    );
+    assert!(
+        String::from_utf8_lossy(&after.stderr).contains("no managed server"),
+        "the stopped state was not removed: {}",
+        String::from_utf8_lossy(&after.stderr)
+    );
+}
