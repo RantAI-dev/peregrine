@@ -186,6 +186,8 @@ impl GptOss {
                     window,
                     None,
                     l.sinks.as_deref(),
+                    // The hybrid families keep the exact attention order (S5.4j).
+                    None,
                     stats,
                 );
             }

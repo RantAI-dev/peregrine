@@ -653,6 +653,11 @@ impl Model {
         );
         let (lx, lt) = self.lb_scratch(max_batch);
         st.set_lb_scratch(lx, lt);
+        // The fast prompt mode's attention order (S5.4j) needs the tier to have it and
+        // the model to carry the 8-bit form: a model whose formats are all outside the
+        // tier's table is the exact engine, attention included.
+        st.fast_attn =
+            peregrine_kernels::table::MatKernels::get().fast_attn() && !self.q8_form().is_empty();
         if self.causality() == crate::arch::Causality::Bidirectional {
             // An encoder's strip scratch (S4.9g): the pass allocates nothing.
             st.attn.bidir.resize(max_batch, self.cfg.head_dim, threads);

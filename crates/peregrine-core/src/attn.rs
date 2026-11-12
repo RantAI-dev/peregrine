@@ -127,6 +127,20 @@ pub struct Shape<'a> {
     /// The attention sinks: one learned logit per query head, added to the
     /// softmax's denominator (`src/models/openai-moe.cpp:42`, gpt-oss).
     pub sinks: Option<&'a [f32]>,
+    /// Which batch rows are **fast prompt rows** (S5.4j): one flag per row of this
+    /// call, `None` when no row of it is a prompt row of the opt-in fast prompt mode
+    /// or when this tier keeps the exact order. A flagged row computes its attention
+    /// in the fast order of [`fast::DEFINITION`] — its own scores' tree, its own
+    /// denominator fold — which is lossy rounding-wise and is why only the mode's
+    /// prompt rows take it. Every other row, every read-out and every tier without
+    /// the flag keeps the exact engine's attention bit for bit.
+    pub fast: Option<&'a [bool]>,
+}
+
+/// Whether batch row `b` of this call is a fast prompt row (S5.4j).
+#[inline]
+pub(crate) fn fast_row(sh: &Shape<'_>, b: usize) -> bool {
+    sh.fast.is_some_and(|f| f.get(b).copied().unwrap_or(false))
 }
 
 impl<'a> Shape<'a> {
@@ -188,7 +202,9 @@ pub fn plan(sh: &Shape<'_>, workers: usize) -> Plan {
     }
     // Only a call that is one row can split positions across tasks. A multi-row call
     // splits rows and lets each row walk its own canonical chunks inside the task.
-    let chunks = if sh.nb > 1 || sh.nb * sh.gqa() > MAX_PARTIAL_ROWS {
+    // A fast prompt row always walks whole `BLOCK`-key tiles (S5.4j), so its partition
+    // is never cut by the pool.
+    let chunks = if sh.nb > 1 || sh.nb * sh.gqa() > MAX_PARTIAL_ROWS || fast_row(sh, 0) {
         1
     } else {
         row_chunks(sh, ctx)
@@ -656,8 +672,237 @@ pub fn run_rows<O: RowSink>(
     let mut r0 = 0;
     while r0 < rows {
         let r1 = (r0 + MAX_PARTIAL_ROWS).min(rows);
-        run_range(kv, layer, sh, q, t, r0, r1, sc, out);
+        // A sub-block of one row kind is walked by that kind's path: a fast prompt row
+        // (S5.4j) has its own pieces — the absolute `BLOCK`-key tiles — and shares
+        // them with the fast rows beside it; every other row keeps the exact engine's
+        // path, bit for bit. Splitting a mixed block into runs of one kind keeps a
+        // row's bits the row's own: neither path reads a neighbour's partition.
+        let mut r = r0;
+        while r < r1 {
+            let fast = fast_row_of(sh, t, r);
+            let mut e = r + 1;
+            while e < r1 && fast_row_of(sh, t, e) == fast {
+                e += 1;
+            }
+            if fast {
+                run_range_fast(kv, layer, sh, q, t, r, e, sc, out);
+            } else {
+                run_range(kv, layer, sh, q, t, r, e, sc, out);
+            }
+            r = e;
+        }
         r0 = r1;
+    }
+}
+
+/// Whether task row `r` (a query head of one batch row) is a fast prompt row.
+#[inline]
+fn fast_row_of(sh: &Shape<'_>, t: &Task, r: usize) -> bool {
+    fast_row(sh, t.b0 + r / sh.gqa())
+}
+
+/// [`run_rows`]'s fast branch: one sub-block of **fast prompt rows** (S5.4j).
+///
+/// The rows walk their own pieces — the absolute `BLOCK`-key tiles (and a sliding
+/// window's own start) — so there is no position chunking and each row leaves exactly
+/// one `(o, m, l)` part. Up to [`fast::FAST_ROWS`] rows that see the same keys of a
+/// tile share the pass over K and V; each row's score, denominator and mix stay its
+/// own arithmetic, in the order `fast`'s definition writes down.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_range_fast<O: RowSink>(
+    kv: &KvCache,
+    layer: usize,
+    sh: &Shape<'_>,
+    q: &[f32],
+    t: &Task,
+    r0: usize,
+    r1: usize,
+    sc: &mut Scratch,
+    out: &mut O,
+) {
+    fast_walk(kv, layer, sh, q, t, r0, r1, sc);
+    let hd = sh.head_dim;
+    let gqa = sh.gqa();
+    let sub = r1 - r0;
+    let rotated = kv.rotated();
+    for lr in 0..sub {
+        let r = r0 + lr;
+        let (bi, g) = (r / gqa, r % gqa);
+        let h = t.kh * gqa + g;
+        let part: [(&[f32], f32, f64); 1] = [(&sc.o[lr * hd..(lr + 1) * hd], sc.m[lr], sc.l[lr])];
+        let sink = sh.sinks.map(|s| s[h]);
+        combine_row(&part, sink, rotated, out.head(bi, h));
+    }
+}
+
+/// One fast row's attention as one task: the fast walk, leaving `(o, m, l)` in `sc`
+/// for the caller's [`finish_row`].
+pub fn run_fast(kv: &KvCache, layer: usize, sh: &Shape<'_>, q: &[f32], t: &Task, sc: &mut Scratch) {
+    let rows = (t.b1 - t.b0) * sh.gqa();
+    fast_walk(kv, layer, sh, q, t, 0, rows, sc);
+}
+
+/// The walk both fast entry points share: fills `sc.q`, `sc.o`, `sc.m` and `sc.l` for
+/// the task's rows `r0..r1`.
+#[allow(clippy::too_many_arguments)]
+fn fast_walk(
+    kv: &KvCache,
+    layer: usize,
+    sh: &Shape<'_>,
+    q: &[f32],
+    t: &Task,
+    r0: usize,
+    r1: usize,
+    sc: &mut Scratch,
+) {
+    let hd = sh.head_dim;
+    let gqa = sh.gqa();
+    let qd = sh.q_dim();
+    let kh = t.kh;
+    let sub = r1 - r0;
+    debug_assert!(sub <= MAX_PARTIAL_ROWS, "a fast walk takes one sub-block");
+    for lr in 0..sub {
+        let r = r0 + lr;
+        let (bi, g) = (r / gqa, r % gqa);
+        let h = kh * gqa + g;
+        let src = &q[(t.b0 + bi) * qd + h * hd..][..hd];
+        sc.q[lr * hd..][..hd].copy_from_slice(src);
+        if kv.rotated() {
+            crate::vmath::hadamard(&mut sc.q[lr * hd..][..hd]);
+        }
+    }
+    sc.o[..sub * hd].fill(0.0);
+    sc.m[..sub].fill(f32::NEG_INFINITY);
+    sc.l[..sub].fill(0.0);
+    let mut ctx_of = [0usize; MAX_PARTIAL_ROWS];
+    let mut max_ctx = 0;
+    for lr in 0..sub {
+        let b = t.b0 + (r0 + lr) / gqa;
+        ctx_of[lr] = sh.start_pos + b + 1;
+        max_ctx = max_ctx.max(ctx_of[lr]);
+    }
+    let p_min_task = match sh.window {
+        Some(w) => (sh.start_pos + t.b0 + 1).saturating_sub(w),
+        None => 0,
+    };
+    let p_end = t.p1.min(max_ctx);
+    let mut blk = t.p0.max(p_min_task / BLOCK * BLOCK);
+    let mut alpha = [1.0f32; MAX_PARTIAL_ROWS];
+    while blk < p_end {
+        let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
+        // 1. The keys: score every group of rows that sees this tile, and fold each
+        //    row's own soft-max over its own piece.
+        kv.decode_block(true, layer, kh, blk, bn, &mut sc.kf);
+        let mut lr = 0;
+        while lr < sub {
+            let (start, len0) = vis_range(sh, ctx_of[lr], blk, bn);
+            if len0 == 0 {
+                lr += 1;
+                continue;
+            }
+            let mut rows = [0usize; fast::FAST_ROWS];
+            let mut ends = [0usize; fast::FAST_ROWS];
+            rows[0] = lr;
+            ends[0] = start + len0;
+            let mut n = 1;
+            let mut nxt = lr + 1;
+            while n < fast::FAST_ROWS && nxt < sub {
+                let (s2, l2) = vis_range(sh, ctx_of[nxt], blk, bn);
+                if s2 != start || l2 == 0 {
+                    break;
+                }
+                rows[n] = nxt;
+                ends[n] = s2 + l2;
+                n += 1;
+                nxt += 1;
+            }
+            let j0 = start - blk;
+            // The scores, level by level: a level ends where the shortest row of the
+            // group ends, so a row that sees the tile from the same key onward is
+            // scored by the same pass.
+            let mut lev = 0usize;
+            loop {
+                let mut act = [0usize; fast::FAST_ROWS];
+                let mut na = 0;
+                let mut e = usize::MAX;
+                for r in 0..n {
+                    if ends[r] > start + lev {
+                        act[na] = rows[r];
+                        na += 1;
+                        e = e.min(ends[r] - start);
+                    }
+                }
+                if na == 0 {
+                    break;
+                }
+                let pad = act[0];
+                for a in act.iter_mut().skip(na) {
+                    *a = pad;
+                }
+                fast::scores_rows(sc, &act, na, j0 + lev, e - lev, hd, sh.scale);
+                lev = e;
+            }
+            for r in 0..n {
+                let lr = rows[r];
+                let len = ends[r] - start;
+                let (m_new, psum, a) = fast::denom_row(sc, lr, j0, len, hd);
+                sc.l[lr] = sc.l[lr] * a as f64 + psum;
+                sc.m[lr] = m_new;
+                alpha[lr] = a;
+            }
+            lr = nxt;
+        }
+        // 2. The values: the same tiles, the same groups, mixed ascending.
+        kv.decode_block(false, layer, kh, blk, bn, &mut sc.kf);
+        let mut lr = 0;
+        while lr < sub {
+            let (start, len0) = vis_range(sh, ctx_of[lr], blk, bn);
+            if len0 == 0 {
+                lr += 1;
+                continue;
+            }
+            let mut rows = [0usize; fast::FAST_ROWS];
+            let mut ends = [0usize; fast::FAST_ROWS];
+            rows[0] = lr;
+            ends[0] = start + len0;
+            let mut n = 1;
+            let mut nxt = lr + 1;
+            while n < fast::FAST_ROWS && nxt < sub {
+                let (s2, l2) = vis_range(sh, ctx_of[nxt], blk, bn);
+                if s2 != start || l2 == 0 {
+                    break;
+                }
+                rows[n] = nxt;
+                ends[n] = s2 + l2;
+                n += 1;
+                nxt += 1;
+            }
+            let j0 = start - blk;
+            let mut lev = 0usize;
+            loop {
+                let mut act = [0usize; fast::FAST_ROWS];
+                let mut na = 0;
+                let mut e = usize::MAX;
+                for r in 0..n {
+                    if ends[r] > start + lev {
+                        act[na] = rows[r];
+                        na += 1;
+                        e = e.min(ends[r] - start);
+                    }
+                }
+                if na == 0 {
+                    break;
+                }
+                let pad = act[0];
+                for a in act.iter_mut().skip(na) {
+                    *a = pad;
+                }
+                fast::mix_rows(sc, &act, na, &alpha, j0 + lev, e - lev, hd, lev == 0);
+                lev = e;
+            }
+            lr = nxt;
+        }
+        blk += bn;
     }
 }
 
@@ -1122,6 +1367,7 @@ pub(crate) fn run_row<O: RowSink>(
     layer: usize,
     sh: &Shape<'_>,
     q_row: &[f32],
+    row: usize,
     kh: usize,
     pos: usize,
     sc: &mut Scratch,
@@ -1135,6 +1381,8 @@ pub(crate) fn run_row<O: RowSink>(
     let one = Shape {
         nb: 1,
         start_pos: pos,
+        // This row's own flag: `sh.fast` is indexed by batch row.
+        fast: sh.fast.map(|f| &f[row..row + 1]),
         ..*sh
     };
     // The same visible-position cut [`task`] makes for a solo row.
@@ -1148,7 +1396,11 @@ pub(crate) fn run_row<O: RowSink>(
             p0: v0 + ci * visible / count,
             p1: v0 + (ci + 1) * visible / count,
         };
-        run(kv, layer, &one, q_row, &t, sc);
+        if fast_row(&one, 0) {
+            run_fast(kv, layer, &one, q_row, &t, sc);
+        } else {
+            run(kv, layer, &one, q_row, &t, sc);
+        }
         for g in 0..gqa {
             save_part(sc, g, ci, hd);
         }
@@ -1517,6 +1769,508 @@ fn avx512_attn(head_dim: usize) -> bool {
         && crate::cpu_has!("fma")
         && crate::cpu_has!("f16c")
 }
+
+/// The fast prompt mode's attention order (S5.4j).
+///
+/// The mode is lossy by definition, and its prompt rows already have their own bits
+/// (the 8-bit weight form). A *different summation order of the same sums* moves a
+/// result by rounding only — orders of magnitude below the form's error — so a prompt
+/// row of the mode may score its keys, fold its soft-max denominator and mix its
+/// values in a tiled order that shares each loaded K and V vector between up to
+/// [`FAST_ROWS`] query rows. Generated rows, embeddings, rerank, decisions and every
+/// pass with the option off keep the exact engine's attention, bit for bit.
+///
+/// # The definition
+///
+/// A fast prompt row's attention is defined by these three pieces, and by nothing
+/// else. Each is implemented twice: [`scores_twin`], [`mix_twin`] and
+/// [`denom_twin`] are the definition (plain loops, ADR 0005), and the `*_zmm`
+/// bodies must equal them bit for bit at every length (the tests sweep the grid
+/// S5.2b used). The **order is a function of the row's own visible key range alone**:
+/// pieces are the `BLOCK`-key tiles on the absolute position grid (and a sliding
+/// window's own start), never a prefill chunk's or a task's boundaries, so a row's
+/// bits cannot depend on the batch, the chunk, the pass budget or the pool.
+///
+/// 1. **Scores.** `head_dim` is walked in ascending 16-lane blocks; lane `l` keeps
+///    one `f32` accumulator and takes one fused multiply-add per block,
+///    `acc[l] = fma(q[l], k[l], acc[l])` (dimensions past `head_dim` count as a zero
+///    product). The 16 lanes are then reduced by
+///    `T16(v) = T8(v[l] + v[l+8])`, where
+///    `T8(w) = ((w0+w1)+(w2+w3)) + ((w4+w5)+(w6+w7))`, and the result is multiplied
+///    by the soft-max scale (a separate `f32` multiply, as the exact kernels do).
+/// 2. **Soft-max.** The maximum is over the piece and is order-free. Each exponential
+///    is the engine's own ([`crate::vmath::det_exp`], which is `exp8`'s scalar twin
+///    lane for lane). The denominator folds the piece in **16-key groups from the
+///    piece's first key, ascending**: a group's exponentials are reduced with `T16`
+///    in `f32`, and the group sums are added into the row's `f64` denominator in
+///    ascending order. The online rescale is the engine's (`l = l·α + Σ`,
+///    `α = exp(m_old − m_new)`), and the row's pieces are the tiles above, so the
+///    number of rescales is a function of the row's range too.
+/// 3. **Value mix.** Per element, one `f32` chain in ascending key order,
+///    `o = fma(p_j, v_j, α·o)`. This is the exact tier's own mix formula; what the
+///    fast order changes here is only that up to [`FAST_ROWS`] rows share one pass
+///    over V (each row keeps its own chain, so the sharing moves no bit).
+///
+/// Nothing else changes: the causal and sliding-window ranges, the sinks, the
+/// rotation, the head and KV-head geometry and the merge of the pieces' `(o, m, l)`
+/// are the exact engine's. A fast row is never cut into position chunks by the pool
+/// ([`plan`] gives it one), because its pieces are the tiles.
+pub mod fast {
+    use super::*;
+
+    /// Query rows one fast body shares a pass over K or V between.
+    ///
+    /// Four rows × four keys is the widest score tile that keeps its sixteen 16-lane
+    /// accumulators, the four query vectors and the four key vectors in the ZMM file at
+    /// once; the same four rows fill sixteen accumulators over a 64-dimension value
+    /// block, so one pass over V serves all four rows' mixes.
+    pub const FAST_ROWS: usize = 4;
+
+    /// Lanes of the fast order's score and denominator tree.
+    const LANES: usize = 16;
+
+    /// Whether this tier computes a fast prompt row's attention in the fast order.
+    ///
+    /// A per-tier property, like the form's formats: the AVX-512 tier yes; AVX2,
+    /// aarch64 and scalar no (their fast-mode goldens must not move), so the mode
+    /// behaves there exactly as it did before S5.4j.
+    #[inline]
+    pub fn tier() -> bool {
+        peregrine_kernels::table::MatKernels::get().fast_attn()
+    }
+
+    /// Whether the 16-lane bodies can run: the tier, and a head width they cover.
+    #[inline]
+    pub(super) fn body_ok(hd: usize) -> bool {
+        hd.is_multiple_of(LANES) && tier()
+    }
+
+    /// `T8`: the eight-lane tree `((0+1)+(2+3)) + ((4+5)+(6+7))`.
+    #[inline]
+    fn t8(w: &[f32; 8]) -> f32 {
+        ((w[0] + w[1]) + (w[2] + w[3])) + ((w[4] + w[5]) + (w[6] + w[7]))
+    }
+
+    /// `T16(v) = T8(v[l] + v[l+8])`.
+    #[inline]
+    fn t16(v: &[f32; LANES]) -> f32 {
+        let mut h = [0.0f32; 8];
+        for (l, x) in h.iter_mut().enumerate() {
+            *x = v[l] + v[l + 8];
+        }
+        t8(&h)
+    }
+
+    /// The definition's score of `vis` keys of one row: `s[j] = 16-lane tree · scale`.
+    pub fn scores_twin(q: &[f32], kf: &[f32], vis: usize, hd: usize, scale: f32, s: &mut [f32]) {
+        for (j, sj) in s.iter_mut().enumerate().take(vis) {
+            let k = &kf[j * hd..(j + 1) * hd];
+            let mut acc = [0.0f32; LANES];
+            let mut d = 0;
+            while d < hd {
+                let n = (hd - d).min(LANES);
+                for (l, a) in acc.iter_mut().enumerate() {
+                    // Dimensions past `head_dim` are a zero product, and neither
+                    // operand is read there.
+                    if l < n {
+                        *a = q[d + l].mul_add(k[d + l], *a);
+                    }
+                }
+                d += LANES;
+            }
+            *sj = t16(&acc) * scale;
+        }
+    }
+
+    /// The definition's value mix of one row, `o = α·o + Σ_j p_j·v_j` ascending.
+    pub fn mix_twin(o: &mut [f32], alpha: f32, p: &[f32], vf: &[f32], hd: usize) {
+        for (d, od) in o.iter_mut().enumerate().take(hd) {
+            let mut acc = alpha * *od;
+            for (j, &w) in p.iter().enumerate() {
+                acc = w.mul_add(vf[j * hd + d], acc);
+            }
+            *od = acc;
+        }
+    }
+
+    /// The definition's denominator of one piece: `(m_new, Σ, α)`.
+    pub fn denom_twin(s: &mut [f32], m_old: f32) -> (f32, f64, f32) {
+        let mut m_new = m_old;
+        for &x in s.iter() {
+            m_new = m_new.max(x);
+        }
+        let mut sum = 0.0f64;
+        let mut g = 0;
+        while g < s.len() {
+            let n = (s.len() - g).min(LANES);
+            let mut v = [0.0f32; LANES];
+            for (l, vl) in v.iter_mut().enumerate() {
+                let x = if l < n {
+                    // The engine's own exponential (`exp8`'s scalar twin), which is
+                    // what the 16-lane body's `exp16` computes lane for lane.
+                    let e = peregrine_kernels::vmath::exp_scalar(s[g + l] - m_new);
+                    s[g + l] = e;
+                    e
+                } else {
+                    0.0
+                };
+                *vl = x;
+            }
+            sum += t16(&v) as f64;
+            g += LANES;
+        }
+        (m_new, sum, crate::vmath::det_exp(m_old - m_new))
+    }
+
+    /// [`scores_twin`] on sixteen lanes, [`FAST_ROWS`] rows × four keys at a time.
+    ///
+    /// # Safety
+    /// AVX-512F/DQ and FMA must be available; `hd` must be a multiple of 16; `q` must
+    /// hold `hd` floats at every `rows[r] · hd`, `kf` the level's keys at `hd`, and
+    /// `s` `len` floats at every `rows[r] · sstride`.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512dq,fma")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn scores_zmm(
+        q: *const f32,
+        hd: usize,
+        kf: *const f32,
+        rows: &[usize; FAST_ROWS],
+        nrows: usize,
+        len: usize,
+        scale: f32,
+        s: *mut f32,
+        sstride: usize,
+        sofs: usize,
+    ) {
+        use std::arch::x86_64::*;
+        assert!(
+            hd.is_multiple_of(LANES),
+            "the fast body takes whole 16-lane blocks"
+        );
+        let nblk = hd / LANES;
+        let sc = _mm512_set1_ps(scale);
+        let mut j = 0;
+        // Four keys per pass: sixteen accumulators (four rows × four keys) stay in the
+        // ZMM file beside the four query vectors of the block in flight, and four keys'
+        // trees share one reduction.
+        while j + 4 <= len {
+            let mut a = [[_mm512_setzero_ps(); 4]; FAST_ROWS];
+            for b in 0..nblk {
+                let d = b * LANES;
+                let mut qv = [_mm512_setzero_ps(); FAST_ROWS];
+                for (r, qr) in qv.iter_mut().enumerate() {
+                    if r < nrows {
+                        *qr = _mm512_loadu_ps(q.add(rows[r] * hd + d));
+                    }
+                }
+                let mut kv = [_mm512_setzero_ps(); 4];
+                for (u, k) in kv.iter_mut().enumerate() {
+                    *k = _mm512_loadu_ps(kf.add((j + u) * hd + d));
+                }
+                for r in 0..FAST_ROWS {
+                    for u in 0..4 {
+                        a[r][u] = _mm512_fmadd_ps(qv[r], kv[u], a[r][u]);
+                    }
+                }
+            }
+            for r in 0..nrows {
+                let sums = hsum16x4(a[r]);
+                let dst = s.add(rows[r] * sstride + sofs + j);
+                for (u, t) in sums.iter().enumerate() {
+                    *dst.add(u) = *t * scale;
+                }
+            }
+            j += 4;
+        }
+        while j < len {
+            let mut a = [_mm512_setzero_ps(); FAST_ROWS];
+            for b in 0..nblk {
+                let d = b * LANES;
+                let k = _mm512_loadu_ps(kf.add(j * hd + d));
+                for (r, ar) in a.iter_mut().enumerate() {
+                    if r < nrows {
+                        *ar = _mm512_fmadd_ps(_mm512_loadu_ps(q.add(rows[r] * hd + d)), k, *ar);
+                    }
+                }
+            }
+            for r in 0..nrows {
+                *s.add(rows[r] * sstride + sofs + j) = hsum16(a[r]) * scale;
+            }
+            j += 1;
+        }
+        let _ = sc;
+    }
+
+    /// Four [`hsum16`]s at once: each accumulator is folded to eight lanes, then the
+    /// four folds are reduced by the transposed `hadd` tree, whose lanes are
+    /// `T8(v[l] + v[l+8])` of each — the definition's `T16`, four times, bit for bit.
+    ///
+    /// # Safety
+    /// AVX-512F/DQ and AVX2 must be available.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn hsum16x4(v: [std::arch::x86_64::__m512; 4]) -> [f32; 4] {
+        use std::arch::x86_64::*;
+        let fold = |x: __m512| -> __m256 {
+            _mm256_add_ps(_mm512_castps512_ps256(x), _mm512_extractf32x8_ps(x, 1))
+        };
+        let s0 = fold(v[0]);
+        let s1 = fold(v[1]);
+        let s2 = fold(v[2]);
+        let s3 = fold(v[3]);
+        let t0 = _mm256_hadd_ps(s0, s1);
+        let t1 = _mm256_hadd_ps(s2, s3);
+        let u = _mm256_hadd_ps(t0, t1);
+        let out = _mm_add_ps(_mm256_castps256_ps128(u), _mm256_extractf128_ps(u, 1));
+        let mut r = [0.0f32; 4];
+        _mm_storeu_ps(r.as_mut_ptr(), out);
+        r
+    }
+
+    /// `T16` of sixteen lanes in registers: the low half plus the high half, then
+    /// [`crate::attn`]'s eight-lane tree.
+    ///
+    /// # Safety
+    /// AVX-512F must be available.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn hsum16(v: std::arch::x86_64::__m512) -> f32 {
+        use std::arch::x86_64::*;
+        let lo = _mm512_castps512_ps256(v);
+        let hi = _mm512_extractf32x8_ps(v, 1);
+        hsum_grouped_ps(_mm256_add_ps(lo, hi))
+    }
+
+    /// [`mix_twin`] sixteen lanes at a time, [`FAST_ROWS`] rows over one pass of V.
+    ///
+    /// # Safety
+    /// AVX-512F/DQ and FMA must be available; `hd` a multiple of 16; `v` `len · hd`
+    /// floats; `p` `len` floats at every `rows[r] · pstride`; `o` `hd` floats at every
+    /// `rows[r] · hd`. The caller pads `rows` with a valid row, so every read is in
+    /// bounds; only the first `nrows` are written back.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512dq,fma")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn mix_zmm(
+        o: *mut f32,
+        hd: usize,
+        alpha: *const f32,
+        rows: &[usize; FAST_ROWS],
+        nrows: usize,
+        p: *const f32,
+        pstride: usize,
+        v: *const f32,
+        len: usize,
+    ) {
+        use std::arch::x86_64::*;
+        assert!(
+            hd.is_multiple_of(LANES),
+            "the fast body takes whole 16-lane blocks"
+        );
+        // Sixty-four dimensions at a time: sixteen accumulators (four rows × four lane
+        // blocks), so each position's four value vectors are loaded once and each row's
+        // weight is broadcast once, for sixteen fused multiply-adds. Every loop below
+        // has a constant trip count, which is what keeps the accumulators in the
+        // register file.
+        let mut d0 = 0;
+        while d0 + 64 <= hd {
+            let mut acc = [[_mm512_setzero_ps(); 4]; FAST_ROWS];
+            for (r, ar) in acc.iter_mut().enumerate() {
+                let al = _mm512_set1_ps(*alpha.add(rows[r]));
+                for (l, a) in ar.iter_mut().enumerate() {
+                    *a = _mm512_mul_ps(_mm512_loadu_ps(o.add(rows[r] * hd + d0 + l * LANES)), al);
+                }
+            }
+            for j in 0..len {
+                let row = v.add(j * hd + d0);
+                let mut vv = [_mm512_setzero_ps(); 4];
+                for (l, x) in vv.iter_mut().enumerate() {
+                    *x = _mm512_loadu_ps(row.add(l * LANES));
+                }
+                for (r, ar) in acc.iter_mut().enumerate() {
+                    let w = _mm512_set1_ps(*p.add(rows[r] * pstride + j));
+                    for (l, a) in ar.iter_mut().enumerate() {
+                        *a = _mm512_fmadd_ps(w, vv[l], *a);
+                    }
+                }
+            }
+            for (r, ar) in acc.iter().enumerate().take(nrows) {
+                for (l, a) in ar.iter().enumerate() {
+                    _mm512_storeu_ps(o.add(rows[r] * hd + d0 + l * LANES), *a);
+                }
+            }
+            d0 += 64;
+        }
+        // The head's last lane blocks (80 and 16 wide heads are not a multiple of 64).
+        while d0 < hd {
+            let mut acc = [_mm512_setzero_ps(); FAST_ROWS];
+            for (r, a) in acc.iter_mut().enumerate() {
+                let al = _mm512_set1_ps(*alpha.add(rows[r]));
+                *a = _mm512_mul_ps(_mm512_loadu_ps(o.add(rows[r] * hd + d0)), al);
+            }
+            for j in 0..len {
+                let vv = _mm512_loadu_ps(v.add(j * hd + d0));
+                for (r, a) in acc.iter_mut().enumerate() {
+                    *a = _mm512_fmadd_ps(_mm512_set1_ps(*p.add(rows[r] * pstride + j)), vv, *a);
+                }
+            }
+            for (r, a) in acc.iter().enumerate().take(nrows) {
+                _mm512_storeu_ps(o.add(rows[r] * hd + d0), *a);
+            }
+            d0 += LANES;
+        }
+    }
+
+    /// [`denom_twin`] sixteen keys at a time.
+    ///
+    /// # Safety
+    /// AVX-512F/DQ and FMA must be available and `s` readable for `s.len()` floats.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512dq,fma")]
+    pub(super) unsafe fn denom_zmm(s: &mut [f32], m_old: f32) -> (f32, f64, f32) {
+        use std::arch::x86_64::*;
+        let m_new = crate::vmath::max(s).max(m_old);
+        let sh = _mm512_set1_ps(m_new);
+        let mut sum = 0.0f64;
+        let mut g = 0;
+        while g < s.len() {
+            let n = s.len() - g;
+            let (v, valid) = if n >= LANES {
+                let x = _mm512_sub_ps(_mm512_loadu_ps(s.as_ptr().add(g)), sh);
+                (peregrine_kernels::vmath::exp16(x), u16::MAX)
+            } else {
+                let mask = (1u16 << n) - 1;
+                let x = _mm512_maskz_loadu_ps(mask, s.as_ptr().add(g));
+                (
+                    _mm512_maskz_mov_ps(
+                        mask,
+                        peregrine_kernels::vmath::exp16(_mm512_sub_ps(x, sh)),
+                    ),
+                    mask,
+                )
+            };
+            _mm512_mask_storeu_ps(s.as_mut_ptr().add(g), valid, v);
+            sum += hsum16(v) as f64;
+            g += LANES;
+        }
+        (m_new, sum, crate::vmath::det_exp(m_old - m_new))
+    }
+
+    /// The scores of up to [`FAST_ROWS`] rows that see the same keys of one tile.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn scores_rows(
+        sc: &mut Scratch,
+        rows: &[usize; FAST_ROWS],
+        nrows: usize,
+        j: usize,
+        len: usize,
+        hd: usize,
+        scale: f32,
+    ) {
+        if body_ok(hd) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                // SAFETY: as `scores_row`; `rows` are distinct scratch rows inside
+                // `MAX_PARTIAL_ROWS` and `s_tile` holds one `BLOCK` row each; `k16`
+                // holds the tile's halves and the widened tile its floats.
+                unsafe {
+                    scores_zmm(
+                        sc.q.as_ptr(),
+                        hd,
+                        sc.kf.as_ptr().add(j * hd),
+                        rows,
+                        nrows,
+                        len,
+                        scale,
+                        sc.s_tile.as_mut_ptr(),
+                        BLOCK,
+                        j,
+                    )
+                };
+                return;
+            }
+        }
+        for &lr in &rows[..nrows] {
+            scores_twin(
+                &sc.q[lr * hd..][..hd],
+                &sc.kf[j * hd..],
+                len,
+                hd,
+                scale,
+                &mut sc.s_tile[lr * BLOCK + j..lr * BLOCK + j + len],
+            );
+        }
+    }
+
+    /// The mix of up to [`FAST_ROWS`] rows over the same keys of one tile.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn mix_rows(
+        sc: &mut Scratch,
+        rows: &[usize; FAST_ROWS],
+        nrows: usize,
+        alpha: &[f32; MAX_PARTIAL_ROWS],
+        j: usize,
+        len: usize,
+        hd: usize,
+        first: bool,
+    ) {
+        if body_ok(hd) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let one = [1.0f32; MAX_PARTIAL_ROWS];
+                let al = if first { alpha.as_ptr() } else { one.as_ptr() };
+                // SAFETY: as `scores_rows`; `al` is indexed by the same scratch rows,
+                // `p` is the row's own scores of this piece, and `v` the tile's values.
+                unsafe {
+                    mix_zmm(
+                        sc.o.as_mut_ptr(),
+                        hd,
+                        al,
+                        rows,
+                        nrows,
+                        sc.s_tile.as_ptr().add(j),
+                        BLOCK,
+                        sc.kf.as_ptr().add(j * hd),
+                        len,
+                    )
+                };
+                return;
+            }
+        }
+        for &lr in &rows[..nrows] {
+            let a = if first { alpha[lr] } else { 1.0 };
+            mix_twin(
+                &mut sc.o[lr * hd..][..hd],
+                a,
+                &sc.s_tile[lr * BLOCK + j..lr * BLOCK + j + len],
+                &sc.kf[j * hd..],
+                hd,
+            );
+        }
+    }
+
+    /// One row's soft-max over a piece: the tier's body, or the definition.
+    pub(super) fn denom_row(
+        sc: &mut Scratch,
+        lr: usize,
+        j: usize,
+        len: usize,
+        hd: usize,
+    ) -> (f32, f64, f32) {
+        let m_old = sc.m[lr];
+        if body_ok(hd) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let s = &mut sc.s_tile[lr * BLOCK + j..lr * BLOCK + j + len];
+                // SAFETY: the tier's features are checked (`body_ok`) and `s` is this
+                // row's own piece of `s_tile`.
+                return unsafe { denom_zmm(s, m_old) };
+            }
+        }
+        denom_twin(&mut sc.s_tile[lr * BLOCK + j..lr * BLOCK + j + len], m_old)
+    }
+} // pub mod fast
 
 /// The per-key reduction tree of the four-key score block: `((d0+d1)+(d2+d3)) +
 /// ((d4+d5)+(d6+d7))`. A tail key reduced with this tree gets the same bits as one
@@ -3296,6 +4050,7 @@ mod tests {
                 scale: 1.0 / (head_dim as f32).sqrt(),
                 window: None,
                 sinks: None,
+                fast: None,
             };
             let (kv, q, ks, vs) = setup(KvPrec::F16, &sh, 2);
             // The cache holds f16; feed the reference what it actually stores.
@@ -3341,6 +4096,7 @@ mod tests {
                 scale: 1.0 / (head_dim as f32).sqrt(),
                 window: None,
                 sinks: None,
+                fast: None,
             };
             let (kv, q, ks, vs) = setup(KvPrec::F32, &sh, 1);
             assert!(!kv.rotated());
@@ -3368,6 +4124,7 @@ mod tests {
             scale: 1.0 / 128f32.sqrt(),
             window: None,
             sinks: None,
+            fast: None,
         };
         let (_, q, ks, vs) = setup(KvPrec::F32, &sh, 1);
         let want = reference(&sh, &q, &ks, &vs);
@@ -3403,6 +4160,7 @@ mod tests {
             scale: 1.0 / 128f32.sqrt(),
             window: None,
             sinks: None,
+            fast: None,
         };
         let (kv, q, ks, vs) = setup(KvPrec::I8, &sh, 1);
         assert!(kv.rotated());
@@ -3431,6 +4189,7 @@ mod tests {
             scale: 1.0 / 8.0,
             window: Some(6),
             sinks: None,
+            fast: None,
         };
         let (kv, q, ks, vs) = setup(KvPrec::F16, &sh, 1);
         let want = reference(&sh, &q, &ks, &vs);
@@ -3455,6 +4214,7 @@ mod tests {
             scale: 0.25,
             window: None,
             sinks: None,
+            fast: None,
         };
         let (kv, q, ks, vs) = setup(KvPrec::F32, &sh, 1);
         let hd = sh.head_dim;
@@ -3507,6 +4267,7 @@ mod tests {
         let sinks = [-2.0f32, 0.5, 1.5, 3.0];
         let sh = Shape {
             sinks: Some(&sinks),
+            fast: None,
             ..sh
         };
         let got = grouped(&kv, 0, &sh, &q, plan(&sh, 4));
@@ -3520,6 +4281,7 @@ mod tests {
         let big = [50.0f32, 50.0, 50.0, 50.0];
         let sh = Shape {
             sinks: Some(&big),
+            fast: None,
             ..sh
         };
         let got = grouped(&kv, 0, &sh, &q, plan(&sh, 4));
@@ -3548,6 +4310,7 @@ mod tests {
                 scale: 0.1,
                 window: None,
                 sinks: None,
+                fast: None,
             };
             let p = plan(&sh, workers);
             let ctx = start_pos + nb;
@@ -3580,6 +4343,7 @@ mod tests {
             scale: 0.1,
             window: Some(320),
             sinks: None,
+            fast: None,
         };
         let p = plan(&sh, 4);
         assert!(p.pos_chunks > 1, "{p:?}");
@@ -3628,6 +4392,7 @@ mod tests {
                 scale: 1.0 / (hd as f32).sqrt(),
                 window: None,
                 sinks: None,
+                fast: None,
             };
             let (kv, q, _, _) = setup(KvPrec::F32, &base, 1);
             let batch = grouped(&kv, 0, &base, &q, plan(&base, 4));
@@ -3663,6 +4428,7 @@ mod tests {
             scale: 0.125,
             window: None,
             sinks: None,
+            fast: None,
         };
         // At 512 positions the old plan gave a 12-worker pool four tasks; the split
         // now uses the whole pool without needing a thread count to decide it.
@@ -3704,6 +4470,7 @@ mod tests {
             scale: 0.125,
             window: None,
             sinks: None,
+            fast: None,
         };
         assert_eq!(plan(&one_b, 12).pos_chunks, 3);
         assert_eq!(plan(&one_b, 12).tasks(&one_b), 24);
@@ -3911,6 +4678,7 @@ mod tests {
                 scale: 1.0 / 8.0,
                 window: None,
                 sinks: None,
+                fast: None,
             };
             assert!(
                 !prefill_direct(&kv, &sh, DIRECT_MIN_VIS - 1),
@@ -3941,6 +4709,7 @@ mod tests {
             scale: 1.0 / 8.0,
             window: None,
             sinks: None,
+            fast: None,
         };
         let hd = base.head_dim;
         let qd = base.q_dim();
@@ -4602,6 +5371,7 @@ mod tests {
             scale: 1.0 / 8.0,
             window: Some(320),
             sinks: None,
+            fast: None,
         };
         // The window leaves the longest rows 320 visible positions: five chunks of
         // 64, and a start that is not on the `BLOCK` grid.
@@ -4672,6 +5442,7 @@ mod tests {
             scale: 1.0 / 8.0,
             window: Some(1200),
             sinks: None,
+            fast: None,
         };
         let hd = base.head_dim;
         let qd = base.q_dim();
@@ -4766,6 +5537,388 @@ mod tests {
                 )
             };
             assert!(same_bits(&a, &b), "mix at vis {vis}");
+        }
+    }
+    // ---- S5.4j: the fast prompt mode's attention order ----
+
+    /// The lengths S5.2b's pair-mix test swept, plus the ones the mode's pieces take.
+    ///
+    /// Both grids are only read by the two bit-identity tests, which exist only on the
+    /// architecture whose 512-bit bodies they pin (the twin is portable; the body is
+    /// not), so they are gated with them.
+    #[cfg(target_arch = "x86_64")]
+    const FAST_LENS: [usize; 24] = [
+        1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 63, 64, 65, 70, 127, 128, 129, 511, 512, 513, 4095,
+        4096, 4097,
+    ];
+
+    /// The head widths the gate models use and the ones a non-multiple of the lane
+    /// width produces.
+    #[cfg(target_arch = "x86_64")]
+    const FAST_DIMS: [usize; 5] = [64, 128, 80, 72, 16];
+
+    /// The fast score body against the fast order's own definition, bit for bit.
+    ///
+    /// The identity is defined on this architecture only: the twin is portable, but the
+    /// 512-bit body exists only where AVX-512 does (and `fast::tier()` is the tier
+    /// table's verdict). Every other tier runs the twin.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_fast_score_body_is_the_twin() {
+        if !fast::tier() {
+            eprintln!("skip: this tier keeps the exact attention for prompt rows");
+            return;
+        }
+        let mut failures = 0usize;
+        for hd in FAST_DIMS {
+            // The body takes whole 16-lane blocks; a width like 72 runs the twin (the
+            // dispatch's `body_ok` is the same test).
+            if !hd.is_multiple_of(16) {
+                continue;
+            }
+            for &len in &FAST_LENS {
+                for (seed, edge) in [(7u64, false), (11, true)] {
+                    let q: Vec<f32> = prng(seed + hd as u64, fast::FAST_ROWS * hd);
+                    let mut kf = prng(seed + 3 + hd as u64, len * hd);
+                    if edge {
+                        // The values a soft-max's edge cases produce: wide score spread.
+                        for (i, x) in kf.iter_mut().enumerate() {
+                            *x = if i % 97 == 0 { 30.0 } else { *x * 0.01 };
+                        }
+                    }
+                    let mut want = vec![0.0f32; fast::FAST_ROWS * len];
+                    for r in 0..fast::FAST_ROWS {
+                        fast::scores_twin(
+                            &q[r * hd..][..hd],
+                            &kf,
+                            len,
+                            hd,
+                            0.125,
+                            &mut want[r * len..(r + 1) * len],
+                        );
+                    }
+                    let rows: [usize; fast::FAST_ROWS] = std::array::from_fn(|r| r);
+                    for nrows in [1usize, 3, fast::FAST_ROWS] {
+                        let mut got = vec![0.0f32; fast::FAST_ROWS * len];
+                        // SAFETY: AVX-512 checked by `fast::tier()`; `hd % 16 == 0` for
+                        // every width but 72's tail, which the twin takes.
+                        unsafe {
+                            fast::scores_zmm(
+                                q.as_ptr(),
+                                hd,
+                                kf.as_ptr(),
+                                &rows,
+                                nrows,
+                                len,
+                                0.125,
+                                got.as_mut_ptr(),
+                                len,
+                                0,
+                            )
+                        };
+                        for r in 0..nrows {
+                            for j in 0..len {
+                                let at = r * len + j;
+                                if got[at].to_bits() != want[at].to_bits() {
+                                    failures += 1;
+                                    if failures < 4 {
+                                        eprintln!(
+                                            "score hd {hd} len {len} row {r} key {j}: {:e} vs {:e}",
+                                            got[at], want[at]
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            failures, 0,
+            "{failures} fast scores differ from the definition"
+        );
+    }
+
+    /// The fast value-mix body against the fast order's definition, bit for bit.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_fast_mix_body_is_the_twin() {
+        if !fast::tier() {
+            eprintln!("skip: this tier keeps the exact attention for prompt rows");
+            return;
+        }
+        let mut failures = 0usize;
+        for hd in FAST_DIMS {
+            if !hd.is_multiple_of(16) {
+                continue;
+            }
+            for &len in &FAST_LENS {
+                for (seed, alpha) in [(13u64, 1.0f32), (17, 0.37), (19, 0.0)] {
+                    let vf = prng(seed + hd as u64, len * hd);
+                    let p: Vec<f32> = prng(seed + 5, fast::FAST_ROWS * len)
+                        .iter()
+                        .map(|x| x.abs())
+                        .collect();
+                    let o0 = prng(seed + 9, fast::FAST_ROWS * hd);
+                    let alphas = [alpha; MAX_PARTIAL_ROWS];
+                    let rows: [usize; fast::FAST_ROWS] = std::array::from_fn(|r| r);
+                    for nrows in [1usize, 3, fast::FAST_ROWS] {
+                        let mut got = o0.clone();
+                        let mut want = o0.clone();
+                        for r in 0..nrows {
+                            fast::mix_twin(
+                                &mut want[r * hd..(r + 1) * hd],
+                                alphas[r],
+                                &p[r * len..(r + 1) * len],
+                                &vf,
+                                hd,
+                            );
+                        }
+                        // SAFETY: AVX-512 checked; `hd % 16 == 0` for every width the
+                        // body takes (72 is the twin's, and the loop's guard agrees).
+                        unsafe {
+                            fast::mix_zmm(
+                                got.as_mut_ptr(),
+                                hd,
+                                alphas.as_ptr(),
+                                &rows,
+                                nrows,
+                                p.as_ptr(),
+                                len,
+                                vf.as_ptr(),
+                                len,
+                            )
+                        };
+                        for r in 0..nrows {
+                            for d in 0..hd {
+                                let at = r * hd + d;
+                                if got[at].to_bits() != want[at].to_bits() {
+                                    failures += 1;
+                                    if failures < 4 {
+                                        eprintln!(
+                                            "mix hd {hd} len {len} alpha {alpha} row {r} d {d}: {:e} vs {:e}",
+                                            got[at], want[at]
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            failures, 0,
+            "{failures} fast mixes differ from the definition"
+        );
+    }
+
+    /// The fast soft-max body against the fast order's definition, bit for bit.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_fast_denominator_body_is_the_twin() {
+        if !fast::tier() {
+            eprintln!("skip: this tier keeps the exact attention for prompt rows");
+            return;
+        }
+        let mut failures = 0usize;
+        for _hd in [16usize, 64] {
+            for &len in &FAST_LENS {
+                for (seed, m_old, edge) in [
+                    (23u64, f32::NEG_INFINITY, false),
+                    (29, f32::NEG_INFINITY, true),
+                    (31, 0.75, false),
+                    (37, -4.0, true),
+                ] {
+                    let mut s = prng(seed + len as u64, len);
+                    if edge {
+                        // All equal (a flat distribution), and one huge logit, so the
+                        // exponentials underflow and saturate as they can in a soft-max.
+                        for (i, x) in s.iter_mut().enumerate() {
+                            *x = match i % 61 {
+                                0 => 100.0,
+                                1 => -100.0,
+                                _ => 0.0,
+                            };
+                        }
+                    }
+                    let mut want = s.clone();
+                    let (wm, ws, wa) = fast::denom_twin(&mut want, m_old);
+                    let mut got = s.clone();
+                    // SAFETY: AVX-512 checked; `s` is the row's own piece.
+                    let (gm, gs, ga) = unsafe { fast::denom_zmm(&mut got, m_old) };
+                    if wm.to_bits() != gm.to_bits()
+                        || ws.to_bits() != gs.to_bits()
+                        || wa.to_bits() != ga.to_bits()
+                    {
+                        failures += 1;
+                        if failures < 4 {
+                            eprintln!("denom len {len} seed {seed} m_old {m_old}: {wm} {ws:e} {wa} vs {gm} {gs:e} {ga}");
+                        }
+                    }
+                    for (a, b) in want.iter().zip(&got) {
+                        if a.to_bits() != b.to_bits() {
+                            failures += 1;
+                            if failures < 4 {
+                                eprintln!("denom len {len}: exp {a:e} vs {b:e}");
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            failures, 0,
+            "{failures} fast denominators differ from the definition"
+        );
+    }
+
+    /// A test cache and query for the end-to-end fast-attention tests.
+    fn fast_attend_case(cfg: &crate::model::Config, n: usize) -> (KvCache, Vec<f32>) {
+        let hd = cfg.head_dim;
+        let mut kv = KvCache::new(KvPrec::F16, 1, cfg.n_kv_head, hd, n + cfg.n_head);
+        for p in 0..n {
+            for h in 0..cfg.n_kv_head {
+                let k = prng((p * 31 + h * 7 + 1) as u64, hd);
+                let v = prng((p * 17 + h * 5 + 2) as u64, hd);
+                kv.put(0, h, p, &k, &v);
+            }
+        }
+        kv.advance(n);
+        let q = prng(0x5a5a, cfg.n_head * cfg.n_head * hd);
+        (kv, q)
+    }
+
+    /// One prompt of `nb` rows over `n` cached positions, every row's flag `fast`.
+    fn fast_attend(
+        cfg: &crate::model::Config,
+        kv: &KvCache,
+        q: &[f32],
+        n: usize,
+        nb: usize,
+        fast: bool,
+        threads: usize,
+    ) -> Vec<f32> {
+        use crate::blocks::attn::{attend_marked, AttnScratch};
+        use crate::pool::Pool;
+        let pool = Pool::new(threads);
+        let mut scratch = AttnScratch::new(cfg, nb.max(1), threads);
+        let mut stats = crate::state::StepStats::default();
+        let mut xb = vec![0.0f32; nb * cfg.q_dim()];
+        let flags = vec![fast; nb];
+        attend_marked(
+            cfg,
+            &mut scratch,
+            q,
+            &mut xb,
+            kv,
+            &pool,
+            0,
+            nb,
+            n,
+            0,
+            Some(&flags),
+            &mut stats,
+        );
+        xb
+    }
+
+    /// The fast order is what a marked prompt row gets, and it is not the exact order.
+    #[test]
+    fn a_marked_prompt_row_takes_the_fast_attention_order() {
+        use crate::model::Config;
+        let cfg = Config {
+            arch_name: "test",
+            rope_neox: false,
+            n_layer: 1,
+            n_kv_layer: 1,
+            n_head: 8,
+            n_kv_head: 2,
+            head_dim: 64,
+            d_model: 8 * 64,
+            n_ff: 4 * 8 * 64,
+            n_vocab: 32,
+            rope_dim: 64,
+            eps: 1e-5,
+            rope_base: 10_000.0,
+            ctx_train: 1024,
+            rope_yarn: None,
+        };
+        let n = 96usize;
+        let (kv, q) = fast_attend_case(&cfg, n + 8);
+        let exact = fast_attend(&cfg, &kv, &q, n, 8, false, 2);
+        let fast = fast_attend(&cfg, &kv, &q, n, 8, true, 2);
+        if fast::tier() {
+            assert_ne!(
+                exact.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                fast.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "a marked row got the exact order: the fast path is not being taken"
+            );
+            // A different order of the same sums: rounding only.
+            for (a, b) in exact.iter().zip(&fast) {
+                assert!((a - b).abs() <= 1e-4 * a.abs().max(1.0), "{a} vs {b}");
+            }
+        } else {
+            assert_eq!(
+                exact.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                fast.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "a tier without the fast order moved a row's bits"
+            );
+        }
+        // The generated rows of the same call (flag false) are the exact engine's.
+        let mixed = [
+            fast_attend(&cfg, &kv, &q, n, 8, false, 2),
+            fast_attend(&cfg, &kv, &q, n, 8, true, 2),
+        ];
+        assert_ne!(
+            mixed[0].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            mixed[1].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "the two modes agree, so the flags did nothing"
+        );
+    }
+
+    /// A fast row's bits do not depend on how many rows share its pass: the same row at
+    /// the same position is its own result at the head of a 1-, 2-, 4- and 8-row call,
+    /// at 1 and 4 threads. This is the group-count half of §5k's invariance rule (the
+    /// chunk and thread half is `fast_mode_is_prompt_invariant` in
+    /// `crates/peregrine-models/tests/fast_prompt.rs`).
+    #[test]
+    fn a_fast_rows_attention_is_its_own_at_every_group_size() {
+        use crate::model::Config;
+        let cfg = Config {
+            arch_name: "test",
+            rope_neox: false,
+            n_layer: 1,
+            n_kv_layer: 1,
+            n_head: 8,
+            n_kv_head: 2,
+            head_dim: 64,
+            d_model: 8 * 64,
+            n_ff: 4 * 8 * 64,
+            n_vocab: 32,
+            rope_dim: 64,
+            eps: 1e-5,
+            rope_base: 10_000.0,
+            ctx_train: 1024,
+            rope_yarn: None,
+        };
+        let n = 200usize;
+        let (kv, q) = fast_attend_case(&cfg, n + 8);
+        let qd = cfg.q_dim();
+        let first = fast_attend(&cfg, &kv, &q, n, 1, true, 1);
+        for nb in [2usize, 4, 8] {
+            for threads in [1usize, 4] {
+                let got = fast_attend(&cfg, &kv, &q, n, nb, true, threads);
+                assert!(
+                    first[..qd]
+                        .iter()
+                        .zip(&got[..qd])
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "the first row moved at {nb} rows, {threads} threads"
+                );
+            }
         }
     }
 }

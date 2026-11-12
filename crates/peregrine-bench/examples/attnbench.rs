@@ -53,6 +53,7 @@ fn main() {
         .collect();
     let mut xb = vec![0.0f32; batch * qd];
     let mut stats = StepStats::default();
+    let flags = vec![true; batch];
     let mut best = f64::INFINITY;
     let mut out_chk = 0.0f32;
     for _ in 0..reps {
@@ -78,8 +79,12 @@ fn main() {
             let mut start = 0;
             while start < ctx {
                 let nb = chunk.min(ctx - start);
+                // `PEREGRINE_FAST_ATTN=1` marks every row a prompt row of the fast
+                // prompt mode (S5.4j), so the fast attention order is what is timed.
+                let on = std::env::var("PEREGRINE_FAST_ATTN").as_deref() == Ok("1");
+                let fast: Option<&[bool]> = on.then_some(&flags[..nb]);
                 for l in 0..cfg.n_layer {
-                    attend(
+                    peregrine_core::blocks::attn::attend_marked(
                         &cfg,
                         &mut st.attn,
                         &q,
@@ -90,6 +95,7 @@ fn main() {
                         nb,
                         start,
                         0,
+                        fast,
                         &mut stats,
                     );
                     out_chk += xb[0];

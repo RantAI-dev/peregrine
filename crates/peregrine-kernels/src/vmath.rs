@@ -131,7 +131,7 @@ pub unsafe fn exp8(x: __m256) -> __m256 {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f,fma")]
-unsafe fn exp16(x: __m512) -> __m512 {
+pub unsafe fn exp16(x: __m512) -> __m512 {
     let r = _mm512_set1_ps(f32::from_bits(0x4b40_0000)); // 0x1.8p23
     let z = _mm512_fmadd_ps(x, _mm512_set1_ps(f32::from_bits(0x3fb8_aa3b)), r); // log2(e)
     let n = _mm512_sub_ps(z, r);

@@ -40,15 +40,17 @@ pub struct BenchArgs {
     /// 8-bit form beats this CPU tier's exact kernel from an 8-bit copy built at
     /// load (AVX-512: Q4_K and Q6_K; AVX2: Q6_K; aarch64 with `dotprod`/`i8mm`:
     /// Q4_K, Q6_K and Q5_0; aarch64 without them: Q4_K and Q6_K; a tier with no SIMD
-    /// body: none, so the option changes nothing). A prompt pass is 1.18-1.46x the
-    /// exact engine's speed on AVX-512, 1.05-1.08x on an AVX2 host (S5.4f), and
-    /// 1.72-2.73x on Qwen 2.5 0.5B on ARM (S5.4h). On Llama 3.2 1B Q4_K_M
-    /// (AVX-512) the prompt's logits move 0.0035 nats of mean KL divergence from the
-    /// default engine's and 96.7 % of positions keep the same top token (the report:
-    /// benchmarks/results/desktop-zen5-2026-11-12-s5.4c/). Generated tokens keep the
-    /// exact kernels, on a cache the 8-bit prompt wrote, so a reply can differ.
-    /// `peregrine tier` names the formats this CPU takes; the numbers are in
-    /// `docs/design/s5.4-fast-prompt.md` sections 5c, 5g and 5h.
+    /// body: none, so the option changes nothing), and on AVX-512 a prompt row's
+    /// attention is computed in the mode's own summation order too (a tiled order of
+    /// the same sums; generated rows keep the exact attention on every tier). A prompt
+    /// pass is 1.28-1.46x the exact engine's speed on AVX-512, 1.05-1.08x on an AVX2
+    /// host (S5.4f), and 1.72-2.73x on Qwen 2.5 0.5B on ARM (S5.4h). On Llama 3.2 1B
+    /// Q4_K_M (AVX-512) the prompt's logits move 0.0035 nats of mean KL divergence
+    /// from the default engine's and 96.7 % of positions keep the same top token (the
+    /// report: benchmarks/results/desktop-zen5-2026-11-13-s5.4j/). Generated tokens
+    /// keep the exact kernels, on a cache the 8-bit prompt wrote, so a reply can
+    /// differ. `peregrine tier` names the formats this CPU takes; the numbers are in
+    /// `docs/design/s5.4-fast-prompt.md` sections 5c, 5g, 5h, 5k and 5l.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
 }

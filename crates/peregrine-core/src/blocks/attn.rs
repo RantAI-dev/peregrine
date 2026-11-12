@@ -206,7 +206,33 @@ pub fn attend(
     stats: &mut StepStats,
 ) {
     attend_window(
-        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, None, stats,
+        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, None, None, stats,
+    )
+}
+
+/// [`attend`] with the fast prompt mode's row flags (S5.4j): `fast[b]` says batch row
+/// `b` of this call is a prompt row whose attention takes the mode's own order
+/// (`peregrine_core::attn::fast`).
+///
+/// `None` — the default engine, every read-out, every tier without the order, and
+/// every family that does not pass the flags — is the exact engine, bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub fn attend_marked(
+    cfg: &Config,
+    scratch: &mut AttnScratch,
+    q: &[f32],
+    xb: &mut [f32],
+    kv: &KvCache,
+    pool: &Pool,
+    li: usize,
+    nb: usize,
+    start_pos: usize,
+    row0: usize,
+    fast: Option<&[bool]>,
+    stats: &mut StepStats,
+) {
+    attend_scaled_window(
+        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, None, None, None, fast, stats,
     )
 }
 
@@ -225,10 +251,11 @@ pub fn attend_window(
     // the first row of `q` / `xb` this call reads and writes (0 for a shared cache).
     row0: usize,
     window: Option<usize>,
+    fast: Option<&[bool]>,
     stats: &mut StepStats,
 ) {
     attend_scaled_window(
-        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, window, None, None, stats,
+        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, window, None, None, fast, stats,
     )
 }
 
@@ -276,12 +303,17 @@ pub fn attend_scaled_window(
     scale: Option<f32>,
     // the attention sinks, one per query head (gpt-oss): `None` for every other model.
     sinks: Option<&[f32]>,
+    // which of this call's rows are fast prompt rows (S5.4j); `None` for none.
+    fast: Option<&[bool]>,
     stats: &mut StepStats,
 ) {
     let c = cfg;
     let hd = c.head_dim;
     let gqa = c.gqa();
     let qd = c.q_dim();
+    // The rows' flags are the *call's* (`row0..row0 + nb`); a row outside it is never
+    // a fast row of this call.
+    let fast = fast.map(|f| &f[row0..row0 + nb]);
     let sh = attn::Shape {
         n_head: c.n_head,
         n_kv_head: c.n_kv_head,
@@ -291,6 +323,7 @@ pub fn attend_scaled_window(
         scale: scale.unwrap_or_else(|| 1.0 / (hd as f32).sqrt()),
         window,
         sinks,
+        fast,
     };
     let plan = attn::plan(&sh, pool.width());
     let tasks = plan.tasks(&sh);
@@ -321,7 +354,14 @@ pub fn attend_scaled_window(
                 attn::run_rows(kv, li, &sh, q, &t, sc, &mut dst);
                 continue;
             }
-            attn::run(kv, li, &sh, q, &t, sc);
+            if attn::fast_row(&sh, t.b0) {
+                // A fast prompt row's pieces are the absolute key tiles, so the pool
+                // never splits its positions (`plan` gives it one chunk) and the walk
+                // leaves one `(o, m, l)` per row for `finish_row` below.
+                attn::run_fast(kv, li, &sh, q, &t, sc);
+            } else {
+                attn::run(kv, li, &sh, q, &t, sc);
+            }
             let pi = i % plan.pos_chunks;
             for bi in 0..t.b1 - t.b0 {
                 let b = t.b0 + bi;
@@ -416,6 +456,8 @@ pub fn attend_mapped(
     li: usize,
     nb: usize,
     positions: &[usize],
+    // which rows are fast prompt rows (S5.4j); `None` for none.
+    fast: Option<&[bool]>,
     stats: &mut StepStats,
 ) {
     let c = cfg;
@@ -447,6 +489,7 @@ pub fn attend_mapped(
             scale: 1.0 / (hd as f32).sqrt(),
             window: None,
             sinks: None,
+            fast,
         };
         let tasks = rows.len() * c.n_kv_head;
         let out = Disjoint::new(&mut xb[..nb * qd]);
@@ -472,6 +515,7 @@ pub fn attend_mapped(
                     li,
                     &sh,
                     &q[b * qd..],
+                    b,
                     kh,
                     positions[b],
                     sc,
@@ -513,6 +557,7 @@ pub fn attend_mapped(
             None,
             None,
             None,
+            fast,
             stats,
         );
     }
@@ -575,6 +620,7 @@ mod tests {
             scale: 1.0 / (head_dim as f32).sqrt(),
             window: None,
             sinks: None,
+            fast: None,
         };
         // The plan splits the rows across workers and keeps a task per KV head, so
         // tasks with different KV heads cover the same rows.

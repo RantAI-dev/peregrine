@@ -149,6 +149,17 @@ pub(crate) fn attention_rows(
     });
 
     let t_attn = std::time::Instant::now();
+    // The fast prompt mode's attention order (S5.4j): a prompt row of the mode takes
+    // the fast order on the tiers that have it, on this pass's row flags — the same
+    // `QuantAct::prompt` the weight dispatch reads. Generated rows, pooled rows and
+    // every pass with the option off are not marked, and the fast rows of an
+    // embedding or decision pass are never marked either (§5b), so they keep the
+    // exact engine's attention.
+    let fast_on = st.fast_attn;
+    for b in 0..nb {
+        st.fast_rows[b] = fast_on && st.acts[b].prompt;
+    }
+    let fast: Option<&[bool]> = fast_on.then(|| &st.fast_rows[..nb]);
     peregrine_core::prof::time(peregrine_core::prof::Slot::Attn, || {
         peregrine_core::blocks::attn::attend_mapped(
             cfg,
@@ -160,6 +171,7 @@ pub(crate) fn attention_rows(
             li,
             nb,
             positions,
+            fast,
             stats,
         );
     });
