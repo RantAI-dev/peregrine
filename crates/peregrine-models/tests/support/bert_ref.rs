@@ -343,9 +343,11 @@ pub fn reference_head(model: &Model, tokens: &[u32]) -> Vec<f32> {
                 }
             }
             _ => {
-                // `ggml_vec_tanh_f32` is `tanhf`.
+                // `ggml_vec_tanh_f32` is `tanhf`. The engine's `tanh` is the one defined in
+                // `vmath` (the C library's rounds differently from glibc 2.40 on), and the
+                // reference uses that definition too.
                 for v in out.iter_mut() {
-                    *v = v.tanh();
+                    *v = peregrine_core::vmath::tanh(*v);
                 }
             }
         }
