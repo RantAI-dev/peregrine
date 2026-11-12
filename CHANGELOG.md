@@ -24,6 +24,18 @@ All notable changes to this project are documented here. The format follows
   `GetLogicalProcessorInformationEx`, hand-written in `crates/peregrine-core/src/win32.rs` (no
   dependency); and the tests that only needed a Unix signal got a Windows counterpart where the
   behaviour exists. `serve --background`, `status` and `stop` are S7.3 and say so on Windows.
+
+- **`--fast-prompt`, the opt-in 8-bit prompt pass (S5.4b)**: with the option on, a prompt
+  row's Q4_K and Q6_K weights are read from an 8-bit form built once per matrix at load
+  (one f32 scale and one int8 code per weight, per 256-weight super-block), while generated
+  tokens, embeddings, rerank and decisions keep the exact kernels. `PEREGRINE_FAST_PROMPT=1`
+  or `--opt FAST_PROMPT=1` is the engine switch; `peregrine serve`, `run` and `bench` take
+  `--fast-prompt`. Off by default: with it off nothing moves by a bit or a millisecond (the
+  activation's whole-block sums are built only when it is on). The form costs 957 MiB on
+  Llama 3.2 1B Q4_K_M and is built in about half a second on AVX-512; a tier without a SIMD
+  body (AVX2, NEON) runs the mode correctly through the scalar twin, no faster. The accuracy
+  report is S5.4c. Design: `docs/design/s5.4-fast-prompt.md` §5b; first-look numbers:
+  `benchmarks/results/desktop-zen5-2026-11-12-s5.4b/`.
 - **The 8-bit prompt kernel (S5.4a)**, the first build step of the opt-in fast prompt mode:
   `crates/peregrine-kernels/src/kq8.rs` holds the form's layout, its scalar twin and the
   requantisation, `kqsimd.rs` the AVX-512 bodies of both (asserted bit for bit equal to the twin

@@ -52,6 +52,10 @@ pub struct TensorInfo {
     /// where this matrix sits in the model's packed float store (F32, F16 and BF16 in 16-row
     /// panels), if it was packed at load; the bytes are the same, reordered (`fpack.rs`).
     pub fp_off: Option<usize>,
+    /// where this matrix sits in the resident 8-bit prompt form (S5.4b, `q8form.rs`),
+    /// if `--fast-prompt` was on at load; one run of eight rows over the matrix's
+    /// 256-weight super-blocks, built by `peregrine_kernels::kq8`.
+    pub q8_off: Option<usize>,
     /// The format of the packed float panels when it differs from `kind`: set for a small
     /// Q8_0 `bert` matrix dequantised into f32 panels at load (S4.9m). `kind` stays the
     /// file's format, so a reader of the file's own bytes (the reference forward, the
@@ -129,6 +133,17 @@ impl TensorInfo {
                 )
             }),
             fp_kind: self.fp_kind,
+            q8_off: self.q8_off.and_then(|off| {
+                // A slice of a matrix with a resident form is a slice of the same
+                // runs of eight rows, when it starts and ends on one; every other
+                // slice keeps the exact path.
+                if !matches!(self.kind, Format::Q4_K | Format::Q6_K) || start % 8 != 0 || n % 8 != 0
+                {
+                    return None;
+                }
+                let n_sb = cols / self.kind.block();
+                Some(off + (start / 8) * n_sb * peregrine_kernels::kq8::Q8K_SIZE)
+            }),
             kq_off: self.kq_off.and_then(|off| {
                 // A slice of a repacked matrix is repacked too, when it starts and
                 // ends on a row the tiles hold whole; the rows in between are the
@@ -330,6 +345,7 @@ impl Gguf {
                 kind,
                 offset,
                 tile_off: None,
+                q8_off: None,
                 kq_off: None,
                 fp_off: None,
                 fp_kind: None,
@@ -842,6 +858,7 @@ mod tests {
             kind: Format::F16,
             offset: 1000,
             tile_off: Some(42),
+            q8_off: None,
             kq_off: None,
             fp_off: None,
             fp_kind: None,
@@ -874,6 +891,7 @@ mod tests {
             kind: Format::Q8_0,
             offset: 2048,
             tile_off: None,
+            q8_off: None,
             kq_off: None,
             fp_off: None,
             fp_kind: None,
@@ -895,6 +913,7 @@ mod tests {
             kind: Format::F16,
             offset: 0,
             tile_off: None,
+            q8_off: None,
             kq_off: None,
             fp_off: None,
             fp_kind: None,
@@ -907,6 +926,7 @@ mod tests {
             kind: Format::F16,
             offset: 0,
             tile_off: None,
+            q8_off: None,
             kq_off: None,
             fp_off: None,
             fp_kind: None,
@@ -925,6 +945,7 @@ mod tests {
             kind: Format::Q8_0,
             offset: 0,
             tile_off: None,
+            q8_off: None,
             kq_off: None,
             fp_off: None,
             fp_kind: None,

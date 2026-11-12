@@ -81,7 +81,9 @@
 //! for every width and every edge tile (ADR 0005).
 
 use crate::format::f16;
-use crate::kq::{tile_q4k_min, tile_q4k_scale, KqActs, ACT_GROUP, Q4K8, Q5_08, Q5_0_WEIGHTS, Q6K8};
+use crate::kq::{tile_q4k_min, tile_q4k_scale, KqActs, ACT_GROUP, Q4K8, Q6K8};
+#[cfg(feature = "fmt-legacy")]
+use crate::kq::{Q5_08, Q5_0_WEIGHTS};
 use crate::quant::QuantAct;
 
 #[cfg(feature = "fmt-legacy")]
@@ -514,6 +516,40 @@ pub fn dot_q8k_plain(form: &[u8], n_sb: usize, row: usize, act: &QuantAct) -> f3
         acc = (s as f32).mul_add(x, acc);
     }
     acc
+}
+
+/// A batch of activation rows against a run of eight output rows of one form:
+/// the scalar twin of the AVX-512 `q8k_gemm_zmm` (`crate::kqsimd`).
+///
+/// `out[b · 8 + r]` receives row `r` of the form for activation row `b`, the
+/// layout every repacked tile kernel writes. The body is [`dot_q8k`]: the
+/// definition of the multiply. It is what the mode runs on a tier with no
+/// SIMD body yet (AVX2 and NEON are S5.4d), so on those tiers the fast prompt
+/// mode is correct and no faster than the exact one.
+///
+/// # Panics
+///
+/// If `nb` exceeds the activation's rows, the form is shorter than `n_sb`
+/// super-blocks, or `out` is shorter than `nb · 8`.
+pub fn gemm_q8k(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    assert!(
+        form.len() >= n_sb * Q8K_SIZE,
+        "the form holds fewer than n_sb super-blocks"
+    );
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        acts.super_blocks() >= n_sb,
+        "the activation is shorter than the weights"
+    );
+    assert!(
+        out.len() >= nb * Q8K_ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    for b in 0..nb {
+        for row in 0..Q8K_ROWS {
+            out[b * Q8K_ROWS + row] = dot_q8k(form, n_sb, row, acts, b);
+        }
+    }
 }
 
 /// Tile builders for the tests: random and hand-built edge tiles.

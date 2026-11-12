@@ -138,6 +138,9 @@ pub struct Weights {
     // The float matrices packed into 16-row panels at load (`TensorInfo::fp_off` points here);
     // empty when the pack is off (`PEREGRINE_FPACK=0`) or the target has no packed kernel.
     pub(crate) fp: FpStore,
+    // The resident 8-bit prompt form of the Q4_K and Q6_K matrices (S5.4b,
+    // `TensorInfo::q8_off` points here); empty unless `--fast-prompt` was on at load.
+    pub(crate) q8: KqStore,
     #[cfg(feature = "littlebit")]
     pub(crate) lb: Option<Slb>,
 }
@@ -163,6 +166,11 @@ impl Weights {
     #[inline]
     pub fn fp(&self) -> &[u8] {
         self.fp.bytes()
+    }
+    /// The resident 8-bit prompt form (see `TensorInfo::q8_off`).
+    #[inline]
+    pub fn q8(&self) -> &[u8] {
+        self.q8.bytes()
     }
     #[cfg(feature = "littlebit")]
     pub fn lb(&self) -> Option<&Slb> {
@@ -374,7 +382,24 @@ impl Model {
         // Same rule for the float pack (S4.9f): on where the packed kernel runs.
         let fp = crate::options::get().fpack && mk.fp_panels();
         let cache = crate::packcache::PackCache::from_options(crate::options::get());
-        Self::load_with_kq_fp_cache(g, families, kq, fp, cache.as_ref())
+        // The resident 8-bit prompt form (S5.4b) is built from the file's own bytes,
+        // so it needs no kernel the exact path does not already have; the option is
+        // the process's, and every model of a multi-model server sees it.
+        let q8 = crate::options::get().fast_prompt;
+        Self::load_with_packs_cache(g, families, kq, fp, q8, cache.as_ref())
+    }
+
+    /// Load a model with the resident 8-bit prompt form forced on, whatever
+    /// `PEREGRINE_FAST_PROMPT` says (S5.4b).
+    ///
+    /// This is the switch the mode's tests and A/B need: the same file, loaded with
+    /// and without the form, compared in one process. It keeps the process's other
+    /// load-time choices (the k-quant repack, the float pack).
+    pub fn load_with_fast(g: Gguf, families: &[&dyn crate::arch::Family]) -> Result<Model, String> {
+        let mk = peregrine_kernels::table::MatKernels::get();
+        let kq = crate::options::get().kq_repack && mk.kq_tiles();
+        let fp = crate::options::get().fpack && mk.fp_panels();
+        Self::load_with_packs(g, families, kq, fp, true)
     }
 
     /// Load a model from a parsed GGUF file, with the k-quant repack forced on or
@@ -418,6 +443,30 @@ impl Model {
         families: &[&dyn crate::arch::Family],
         kq: bool,
         fp: bool,
+        cache: Option<&crate::packcache::PackCache>,
+    ) -> Result<Model, String> {
+        Self::load_with_packs_cache(g, families, kq, fp, false, cache)
+    }
+
+    /// Load a model with the k-quant repack, the float pack and the resident 8-bit
+    /// prompt form chosen explicitly (S3.4, S4.9f, S5.4b).
+    pub fn load_with_packs(
+        g: Gguf,
+        families: &[&dyn crate::arch::Family],
+        kq: bool,
+        fp: bool,
+        q8: bool,
+    ) -> Result<Model, String> {
+        Self::load_with_packs_cache(g, families, kq, fp, q8, None)
+    }
+
+    /// [`Model::load_with_packs`], with an explicit pack cache (S4.9e).
+    pub fn load_with_packs_cache(
+        g: Gguf,
+        families: &[&dyn crate::arch::Family],
+        kq: bool,
+        fp: bool,
+        q8: bool,
         cache: Option<&crate::packcache::PackCache>,
     ) -> Result<Model, String> {
         let arch_name = g.str("general.architecture")?.to_string();
@@ -543,6 +592,15 @@ impl Model {
                 c.write(k, kq.bytes(), fp.bytes());
             }
         }
+        // The resident 8-bit prompt form (S5.4b). It is not in the pack cache in
+        // this step (`q8form.rs` says why); it is built from the file's bytes,
+        // before the family reads the directory, so each matrix knows its offset.
+        let q8 = if q8 {
+            let layout = crate::q8form::layout(&g);
+            crate::q8form::build(&mut g, &layout)
+        } else {
+            KqStore::default()
+        };
         let tk = Tokenizer::from_gguf(&g)?;
         let loaded = family.load(&g, &tk)?;
         Ok(Model {
@@ -551,6 +609,7 @@ impl Model {
                 tiles: loaded.tiles,
                 kq,
                 fp,
+                q8,
                 #[cfg(feature = "littlebit")]
                 lb: None,
             },
@@ -666,6 +725,12 @@ impl Model {
                     return Err(format!("token {id} in text {i} is outside the vocabulary"));
                 }
             }
+        }
+        // A text's rows are never prompt rows of the fast mode: their answer is read
+        // off the prompt itself (embedding, rerank, decision), so the option leaves
+        // them on the exact kernels (S5.4b, design §6).
+        for slot in st8.acts.iter_mut().take(total) {
+            slot.prompt = false;
         }
         self.arch
             .forward_texts(&self.w, &self.cfg, st8, pool, texts, wants, stats)
@@ -846,6 +911,23 @@ impl Model {
         self.w.kq.bytes()
     }
 
+    /// The resident 8-bit prompt form: the Q4_K and Q6_K matrices re-rounded onto one
+    /// 8-bit grid per 256-weight super-block, built at load when `--fast-prompt` is on
+    /// (S5.4b). Empty otherwise.
+    pub fn q8_form(&self) -> &[u8] {
+        self.w.q8.bytes()
+    }
+
+    /// One tensor of the file's directory, by name.
+    pub fn tensor(&self, name: &str) -> Option<&TensorInfo> {
+        self.w.g.tensors.get(name)
+    }
+
+    /// A tensor's bytes in the mapped file.
+    pub fn tensor_bytes(&self, t: &TensorInfo) -> &[u8] {
+        self.w.bytes(t)
+    }
+
     /// The packed float store: the F32, F16 and BF16 matrices, in 16-row panels
     /// (S4.9f). Empty when the pack is off, and empty where the kernel table has no
     /// packed kernel to read it.
@@ -939,6 +1021,49 @@ impl Model {
         r
     }
 
+    /// [`Model::forward`], marking which rows carry prompt tokens (S5.4b).
+    ///
+    /// `prompt_rows` is one flag per token: true for a row of a prompt chunk whose
+    /// result the opt-in fast prompt mode may compute from the resident 8-bit form,
+    /// false for a generated (decode) row. An empty slice is every row exact, which
+    /// is what [`Model::forward`] passes; the engine passes one flag per row. The
+    /// flags only matter when the process's `PEREGRINE_FAST_PROMPT` is on and the
+    /// matrix has a form: with the option off the exact kernels run regardless.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_marked(
+        &self,
+        st8: &mut State,
+        kv: &mut KvCache,
+        pool: &Pool,
+        tokens: &[u32],
+        start_pos: usize,
+        want_logits: &[usize],
+        prompt_rows: &[bool],
+        stats: &mut StepStats,
+    ) -> Result<(), String> {
+        let n = tokens.len();
+        let mut positions = std::mem::take(&mut st8.positions);
+        let fits = n <= positions.len();
+        if fits {
+            for (i, p) in positions[..n].iter_mut().enumerate() {
+                *p = start_pos + i;
+            }
+        }
+        let pos: &[usize] = if fits { &positions[..n] } else { &[] };
+        let r = self.forward_rows_marked(
+            st8,
+            &mut Caches::Shared(kv),
+            pool,
+            tokens,
+            pos,
+            want_logits,
+            prompt_rows,
+            stats,
+        );
+        st8.positions = positions;
+        r
+    }
+
     // the general pass. Row `b` carries `tokens[b]` at `positions[b]` of the sequence whose cache
     // `caches` gives for `b`; every row shares one read of the weights.
     #[allow(clippy::too_many_arguments)]
@@ -952,6 +1077,43 @@ impl Model {
         want_logits: &[usize],
         stats: &mut StepStats,
     ) -> Result<(), String> {
+        self.forward_rows_marked(
+            st8,
+            caches,
+            pool,
+            tokens,
+            positions,
+            want_logits,
+            &[],
+            stats,
+        )
+    }
+
+    /// [`Model::forward_rows`], marking which rows carry prompt tokens (S5.4b).
+    ///
+    /// The flag travels on the activation row ([`peregrine_kernels::quant::QuantAct::prompt`]): it survives each
+    /// layer's re-quantisation and is read by the matrix dispatch, which computes a
+    /// flag's rows from the resident 8-bit form and the rest from the exact kernels.
+    /// An empty slice marks every row exact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_rows_marked(
+        &self,
+        st8: &mut State,
+        caches: &mut Caches,
+        pool: &Pool,
+        tokens: &[u32],
+        positions: &[usize],
+        want_logits: &[usize],
+        prompt_rows: &[bool],
+        stats: &mut StepStats,
+    ) -> Result<(), String> {
+        if !prompt_rows.is_empty() && prompt_rows.len() != tokens.len() {
+            return Err(format!(
+                "{} prompt-row flags for {} tokens",
+                prompt_rows.len(),
+                tokens.len()
+            ));
+        }
         let c = self.cfg;
         let nb = tokens.len();
         if nb == 0 {
@@ -988,6 +1150,11 @@ impl Model {
                     "token {t} at batch index {i} is outside the vocabulary"
                 ));
             }
+        }
+        // The row's kind, on the row's own activation (S5.4b). `fill` preserves the
+        // flag, so the same mark reaches every layer's matmul of this pass.
+        for (b, slot) in st8.acts.iter_mut().take(nb).enumerate() {
+            slot.prompt = prompt_rows.get(b).copied().unwrap_or(false);
         }
         self.arch.forward_rows(
             &self.w,

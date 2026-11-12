@@ -142,6 +142,21 @@ pub fn inspect(path: &std::path::Path) -> Result<String, String> {
     let opts = EngineOptions::from_env();
     let cache = peregrine_core::packcache::model_status(path, &opts);
     let _ = writeln!(out, "pack cache    {}", cache.describe());
+    // S5.4b: what the opt-in fast prompt mode's resident 8-bit form costs on this
+    // file. A header reading: the layout is the same one the load would build.
+    if opts.fast_prompt {
+        let form: usize = peregrine_core::q8form::layout(&g)
+            .iter()
+            .map(|e| e.len)
+            .sum();
+        let _ = writeln!(
+            out,
+            "8-bit form    {:.1} MiB (--fast-prompt)",
+            form as f64 / (1u64 << 20) as f64
+        );
+    } else {
+        let _ = writeln!(out, "8-bit form    off (--fast-prompt)");
+    }
     Ok(out)
 }
 
@@ -155,7 +170,10 @@ pub fn describe_runtime() -> String {
         .prefill_chunk
         .unwrap_or_else(|| peregrine_core::options::prefill_chunk_default_for(threads));
     let wide = o.prefill_chunk.unwrap_or_else(|| {
-        peregrine_core::options::wide_chunk_default_for(peregrine_core::cpu::resolved())
+        peregrine_core::options::wide_chunk_default_for_mode(
+            peregrine_core::cpu::resolved(),
+            o.fast_prompt,
+        )
     });
     // The pass budget is per model (it depends on the model's width), so the default is printed
     // for a representative 1024-wide model beside the option.

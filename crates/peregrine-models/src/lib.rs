@@ -180,6 +180,13 @@ pub fn load(g: Gguf) -> Result<Model, String> {
     Model::load_with(g, FAMILIES)
 }
 
+/// Load a model with the resident 8-bit prompt form built whatever
+/// `PEREGRINE_FAST_PROMPT` says (S5.4b): the fast prompt mode's tests and A/B load
+/// the same file both ways in one process.
+pub fn load_with_fast(g: Gguf) -> Result<Model, String> {
+    Model::load_with_fast(g, FAMILIES)
+}
+
 /// Check whether the GGUF model file is compatible with Peregrine's architectures.
 pub fn check_compatible(g: &Gguf) -> Result<(), String> {
     peregrine_core::check_compatible(g, FAMILIES)

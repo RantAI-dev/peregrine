@@ -2,7 +2,7 @@
 //! rows of the whole batch (design §2.2, roadmap S4.4 and S4.14).
 //!
 //! An encoder forwards a whole text (up to the model's context) in one pass, but the
-//! shared GEMM accepts at most [`peregrine_core::blocks::linear::MAX_BATCH`] rows per
+//! shared GEMM accepts at most [`peregrine_core::blocks::linear::DEFAULT_BATCH`] rows per
 //! call. These helpers run a layer's projection in as many calls as it takes, one
 //! weight pass each. Rows of the batch are contiguous, so a chunk is a plain row range
 //! and a row's bits do not depend on where a chunk boundary fell.
@@ -33,7 +33,7 @@ pub(crate) fn linear_rows(
     out_dim: usize,
     kq: &mut peregrine_kernels::kq::KqActs,
 ) {
-    let step = peregrine_core::blocks::linear::MAX_BATCH;
+    let step = peregrine_core::blocks::linear::DEFAULT_BATCH;
     let mut r0 = 0;
     while r0 < nb {
         let r1 = (r0 + step).min(nb);
@@ -83,7 +83,7 @@ pub(crate) fn linear_rows_shared(
     kq: &mut peregrine_kernels::kq::KqActs,
 ) {
     debug_assert!(!jobs.is_empty() && jobs.len() <= 4);
-    let step = peregrine_core::blocks::linear::MAX_BATCH;
+    let step = peregrine_core::blocks::linear::DEFAULT_BATCH;
     let empty: &mut [f32] = &mut [];
     let mut lj = [LinJob {
         lin: jobs[0].lin,
