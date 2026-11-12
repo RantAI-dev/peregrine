@@ -114,8 +114,8 @@ All notable changes to this project are documented here. The format follows
   of the 1B's own distance from F16 (two models' share is negative, i.e. not measurable);
   no task score moves significantly (largest +7.5 points at n = 80, every paired McNemar
   p ≥ 0.15, and the suite's run-to-run spread on this host is 0.0 because greedy replies are
-  deterministic); prompts are **1.18-1.46× the default engine's** speed on AVX-512 (on
-  AVX2 the mode is slower than the exact kernel and stays off — S5.4d), 0.94-1.01×
+  deterministic); prompts are **1.18-1.46× the default engine's** speed on AVX-512 (1.05-1.08× on an
+  AVX2 host, where only Q6_K takes the form — S5.4f), 0.94-1.01×
   ik_llama.cpp at its defaults and 0.74-0.94× the fork's `-rtr` path; and the form costs
   +957 MiB and 0.5-1.7 s of load on the 1B. **The design's 0.0015 bound on the 1B is not
   met, and the report shows why it is the bound that is wrong**: 0.0015 was calibrated on
