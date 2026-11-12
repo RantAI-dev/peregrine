@@ -2454,8 +2454,9 @@ pub unsafe fn q8k_gemm_i8mm(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, 
 /// widest body the CPU tier allows: `smmla` on `neon-i8mm`, `sdot` on
 /// `neon-dotprod`, and the scalar twin on `neon` or `scalar`.
 ///
-/// This is the tier entry point the S5.4d tests call; nothing in the engine
-/// dispatches it yet (the option arrives with S5.4b).
+/// This is the tier entry point the engine's dispatch (`MatKernels::q8k_gemm`)
+/// calls on aarch64 when the CPU has `dotprod` (S5.4e); the S5.4d tests call it
+/// directly.
 ///
 /// # Safety
 /// The form must hold `n_sb` super-blocks, the activation at least as many and at
@@ -3812,5 +3813,69 @@ mod tests {
         // The i8mm body's 1–3-row tail stays on sdot, so the result is still the
         // twin's (checked above at every width); here only the full group is counted.
         let _ = &mut out;
+    }
+
+    /// S5.4e: the engine's dispatch (`MatKernels::q8k_gemm`/`q8k_build`, the
+    /// table's entry points) takes this file's body and builder exactly where
+    /// the table says this tier has them, and the bits stay the twin's.
+    #[test]
+    fn the_engine_dispatch_takes_this_files_bodies() {
+        let mk = crate::table::MatKernels::get();
+        assert_eq!(
+            mk.q8k_simd(),
+            crate::cpu::have_dotprod(),
+            "q8k_simd must say what the tier's multiply does"
+        );
+        let mut rng = Rng(0x8A8A_9999);
+        let n_sb = 2;
+        let n = n_sb * 256;
+        let tile = crate::kq8::tiles::q4k_tile(&mut crate::kq8::tiles::Rng(0x8A8A_AAAA), n_sb);
+        let mut form = vec![0u8; crate::kq8::form_size(n_sb)];
+        let mut twin = vec![0u8; crate::kq8::form_size(n_sb)];
+        crate::kq8::build_q4k(&tile, n_sb, &mut twin);
+        mk.q8k_build(Format::Q4_K, &tile, n_sb, &mut form);
+        assert_eq!(form, twin, "the dispatch's builder is not the twin's bytes");
+        let acts: Vec<QuantAct> = (0..4).map(|_| activations(&mut rng, n)).collect();
+        let mut kq = KqActs::default();
+        kq.fill(&acts);
+        let mut out = vec![0.0f32; 4 * 8];
+        Q8K_SDOT_CALLS.with(|c| c.set(0));
+        Q8K_I8MM_CALLS.with(|c| c.set(0));
+        mk.q8k_gemm(&form, n_sb, &kq, 4, &mut out);
+        let (sdot, i8mm) = (
+            Q8K_SDOT_CALLS.with(|c| c.get()),
+            Q8K_I8MM_CALLS.with(|c| c.get()),
+        );
+        if crate::cpu::have_dotprod() {
+            assert_eq!(
+                (sdot, i8mm),
+                if crate::cpu::have_i8mm() {
+                    (0, 1)
+                } else {
+                    (1, 0)
+                },
+                "the dispatch took another body than the tier's own"
+            );
+            assert!(
+                mk.q8k_body().is_some_and(|b| b.starts_with("NEON")),
+                "a tier with dotprod must report a NEON body"
+            );
+        } else {
+            assert_eq!(
+                (sdot, i8mm),
+                (0, 0),
+                "a tier without dotprod must stay on the scalar twin"
+            );
+        }
+        for b in 0..4 {
+            for r in 0..8 {
+                let want = crate::kq8::dot_q8k(&form, n_sb, r, &kq, b);
+                assert_eq!(
+                    out[b * 8 + r].to_bits(),
+                    want.to_bits(),
+                    "the dispatch, row {r}, activation {b}"
+                );
+            }
+        }
     }
 }
