@@ -140,6 +140,28 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    real-file test uses the 200 texts (16–6976 tokens) and llama.cpp's ids and vectors under
    `tests/fixtures/modern-bert/` for gte-modernbert-base and Granite Embedding R2, F16 and Q8_0,
    and skips a file that is absent.
+   S4.7b's classifier head is covered like S4.6b's, without model files, by
+   `crates/peregrine-models/tests/modern_bert_heads.rs`: a synthetic rank head (one output, no
+   `classifier.*` key, so mean pooling and the erf GELU) and a labelled one (three outputs,
+   `classifier.activation = tanh`, `classifier.pooling_type = 2`), whose rows must equal
+   `tests/support/modern_bert_ref.rs`'s `reference_head` bit for bit on an F32 file; that the
+   mean and row 0 differ; that `cls.bias`/`cls.norm.bias` (which llama.cpp does not create) change
+   nothing; the invariance matrix (alone, batches of 2/7/64, pass sizes 1 and 13, 1/2/4 threads);
+   the loader's refusals (labels that disagree with `cls.output`, an activation llama.cpp does not
+   read, labels with no projection, a bare `cls.norm`); the head slot's refusal by name on a file
+   without one; and one tier golden
+   (`tests/golden/synthetic/<tier>/modern-bert-heads-Q8_0.golden`, recorded on scalar, AVX2 and
+   AVX-512 under SDE; no aarch64 golden). `tests/no_alloc.rs` passes a head text through the
+   whole-text pass. `crates/peregrine/tests/server_rerank.rs` serves a synthetic modern-bert
+   reranker and a labelled classifier over `/v1/rerank`, `/v1/classify` and `/v1/models`, and
+   `cli_rerank.rs` runs `peregrine rerank` on the reranker. The 100 real-file pairs live in
+   `crates/peregrine-models/tests/fixtures/modern-bert/rerank/` (`texts.tsv`, `ids.txt` from
+   llama.cpp's `format_prompt_rerank`, `q8_0_llama.f32`, `f16_llama.f32`, and a README with the
+   file SHAs and commands); `tests/rerank_real.rs`'s `the_real_modern_bert_reranker_matches_llama_cpp`
+   compares ids, order and scores when `gte-reranker-modernbert-base-Q8_0.gguf` and its F16
+   conversion are in `~/models/embed/` (or `MODERN_BERT_DIR`), and
+   `a_real_modern_bert_scores_are_bit_identical_in_any_batch` checks the batch invariance on the
+   real file. Both are `#[ignore]`d and skip, with a notice, without the files.
    The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both

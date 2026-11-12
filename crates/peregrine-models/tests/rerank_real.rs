@@ -413,3 +413,222 @@ fn a_real_rerankers_score_is_bit_identical_in_any_batch() {
     assert_eq!(g.tensor("cls.weight").unwrap().kind, Format::Q8_0);
     assert_eq!(g.tensor("cls.output.weight").unwrap().numel(), 1024);
 }
+
+// ---------------------------------------------------------------------------
+// S4.7b: the `modern-bert` reranker (gte-reranker-modernbert-base)
+// ---------------------------------------------------------------------------
+
+fn modern_bert_fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/modern-bert/rerank")
+}
+
+/// The two reference uploads: `MODERN_BERT_DIR` first, then the usual model directories.
+fn modern_bert_models() -> Option<(PathBuf, PathBuf)> {
+    let names = [
+        "gte-reranker-modernbert-base-Q8_0.gguf",
+        "gte-reranker-modernbert-base-F16.gguf",
+    ];
+    if let Ok(dir) = std::env::var("MODERN_BERT_DIR") {
+        let dir = PathBuf::from(dir);
+        let q8 = dir.join(names[0]);
+        let f16 = dir.join(names[1]);
+        if q8.is_file() && f16.is_file() {
+            return Some((q8, f16));
+        }
+        return None;
+    }
+    Some((model_at(&[names[0]])?, model_at(&[names[1]])?))
+}
+
+fn modern_bert_pairs() -> Vec<(String, String, Vec<u32>)> {
+    let dir = modern_bert_fixtures();
+    let texts = std::fs::read_to_string(dir.join("texts.tsv")).unwrap();
+    let ids = std::fs::read_to_string(dir.join("ids.txt")).unwrap();
+    let texts: Vec<&str> = texts.lines().collect();
+    let ids: Vec<&str> = ids.lines().collect();
+    assert_eq!(texts.len(), ids.len(), "one id list per pair");
+    texts
+        .iter()
+        .zip(ids)
+        .map(|(line, ids)| {
+            let (q, d) = line.split_once('\t').expect("query<TAB>document");
+            let ids: Vec<u32> = ids
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().parse().unwrap())
+                .collect();
+            (unescape(q), unescape(d), ids)
+        })
+        .collect()
+}
+
+fn modern_bert_load(path: &Path) -> Arc<Model> {
+    let g = peregrine_core::Gguf::open(path).expect("open the model");
+    let model = peregrine_models::load(g).expect("load the model");
+    assert_eq!(model.cfg.arch_name, "modern-bert");
+    Arc::new(model)
+}
+
+fn mean_max(v: &[f32]) -> (f32, f32) {
+    (
+        v.iter().sum::<f32>() / v.len() as f32,
+        v.iter().copied().fold(0.0f32, f32::max),
+    )
+}
+
+/// `gte-reranker-modernbert-base` against llama.cpp v0.9.0 on 100 pairs (36–445 tokens,
+/// 51 of them past the 128-token local window): pair ids, document order, and the raw
+/// scores of the F16 and Q8_0 files. The F16 run is the full-precision reference, as the
+/// S4 gate states.
+///
+/// ```
+/// MODERN_BERT_DIR=/var/tmp/models-s47b \
+///   cargo test --release -p peregrine-models --test rerank_real -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "needs gte-reranker-modernbert-base-Q8_0.gguf and its F16 conversion"]
+fn the_real_modern_bert_reranker_matches_llama_cpp() {
+    let Some((q8_path, f16_path)) = modern_bert_models() else {
+        eprintln!(
+            "SKIPPED: gte-reranker-modernbert-base Q8_0/F16 are not in ~/models/embed/ \
+             (or MODERN_BERT_DIR)"
+        );
+        return;
+    };
+    let pairs = modern_bert_pairs();
+    let dir = modern_bert_fixtures();
+    let llama_q8 = f32s(&dir.join("q8_0_llama.f32"));
+    let llama_f16 = f32s(&dir.join("f16_llama.f32"));
+    assert_eq!(llama_q8.len(), pairs.len(), "one score per pair");
+    assert_eq!(llama_f16.len(), pairs.len(), "one score per pair");
+
+    let q8 = modern_bert_load(&q8_path);
+    let f16 = modern_bert_load(&f16_path);
+    for (label, model) in [("Q8_0", &q8), ("F16", &f16)] {
+        assert!(
+            model.has_head(),
+            "{label}: the reranker has a classifier head"
+        );
+        assert_eq!(model.head_width(), 1, "{label}");
+        assert_eq!(
+            model.head_labels(),
+            ["LABEL_0"].map(String::from),
+            "{label}: the file names its single output"
+        );
+        // The head's pooling and activation are this family's defaults: the file carries
+        // neither `classifier.pooling_type` nor `classifier.activation`.
+        let g = model.gguf();
+        assert!(g.u32("modern-bert.classifier.pooling_type").is_err());
+        assert!(g.str("modern-bert.classifier.activation").is_err());
+        let mut mismatches = 0;
+        for (i, (q, d, ids)) in pairs.iter().enumerate() {
+            let got = model.tk.encode_pair(q, d);
+            if &got != ids {
+                mismatches += 1;
+                if mismatches <= 3 {
+                    eprintln!("{label} pair {i}: ids {got:?} != llama {ids:?}");
+                }
+            }
+        }
+        assert_eq!(mismatches, 0, "{label}: pair ids differ from llama.cpp");
+    }
+
+    let texts: Vec<Vec<u32>> = pairs.iter().map(|(_, _, ids)| ids.clone()).collect();
+    let rows_q8 = head_rows(&q8, &texts, 4);
+    let rows_f16 = head_rows(&f16, &texts, 4);
+    let sq8: Vec<f32> = rows_q8.iter().map(|r| r[0]).collect();
+    let sf16: Vec<f32> = rows_f16.iter().map(|r| r[0]).collect();
+    let diffs = |a: &[f32], b: &[f32]| -> Vec<f32> {
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).collect()
+    };
+    let (q8_vs_q8_mean, q8_vs_q8_max) = mean_max(&diffs(&sq8, &llama_q8));
+    let (f16_vs_f16_mean, f16_vs_f16_max) = mean_max(&diffs(&sf16, &llama_f16));
+    let (q8_vs_f16_mean, q8_vs_f16_max) = mean_max(&diffs(&sq8, &llama_f16));
+    let (llama_q8_vs_f16_mean, llama_q8_vs_f16_max) = mean_max(&diffs(&llama_q8, &llama_f16));
+    eprintln!(
+        "modern-bert Q8_0: {} pairs, ids identical; vs llama.cpp Q8_0 mean {q8_vs_q8_mean:.5} \
+         max {q8_vs_q8_max:.5}; vs llama.cpp F16 (the reference) mean {q8_vs_f16_mean:.5} \
+         max {q8_vs_f16_max:.5}",
+        pairs.len()
+    );
+    eprintln!(
+        "modern-bert F16: vs llama.cpp F16 mean {f16_vs_f16_mean:.5} max {f16_vs_f16_max:.5}; \
+         llama.cpp's own Q8_0 vs its F16 mean {llama_q8_vs_f16_mean:.5} \
+         max {llama_q8_vs_f16_max:.5}"
+    );
+
+    // Order per query (ten documents each), outside a near-tie. The F16 run agrees to
+    // 7e-4 mean, so 1e-2 is a wide tie there; the Q8_0 scores sit 1.1e-2 (vs llama.cpp's
+    // Q8_0) and 2.2e-2 (vs its F16) apart, so its near-tie is 3e-2 — one measured
+    // cross-engine difference wide. Two documents whose true scores are 1.5e-2 apart
+    // swap under that noise, as they do between llama.cpp's own Q8_0 and F16 runs.
+    for (label, ours, theirs, tie) in [
+        ("Q8_0", &sq8, &llama_q8, 3e-2),
+        ("F16", &sf16, &llama_f16, 1e-2),
+    ] {
+        let mut disagreements = Vec::new();
+        for q in 0..pairs.len() / 10 {
+            let s = q * 10;
+            disagreements.extend(order_disagreements(
+                &ours[s..s + 10],
+                &theirs[s..s + 10],
+                tie,
+            ));
+        }
+        for d in &disagreements {
+            eprintln!("modern-bert {label} order: {d}");
+        }
+        assert!(
+            disagreements.is_empty(),
+            "modern-bert {label}: {} document pairs changed order outside a {tie} near-tie",
+            disagreements.len()
+        );
+    }
+
+    // The bound is the measured band (this file's README and the PR): the quantisation
+    // moves llama.cpp's own scores further than the two engines differ.
+    assert!(
+        f16_vs_f16_mean < 1e-2 && f16_vs_f16_max < 1e-1,
+        "modern-bert F16: mean {f16_vs_f16_mean:.5} max {f16_vs_f16_max:.5}"
+    );
+    // llama.cpp's own Q8_0 scores sit 2.3e-2 mean / 9.4e-2 max from its F16 run, so the
+    // bound is that band: a tighter number would be a claim about quantisation, not about
+    // the graph.
+    assert!(
+        q8_vs_f16_mean < 3e-2 && q8_vs_f16_max < 1.5e-1,
+        "modern-bert Q8_0 vs the F16 reference: mean {q8_vs_f16_mean:.5} max {q8_vs_f16_max:.5}"
+    );
+}
+
+/// A real modern-bert pair's score is bit-identical alone and in a batch, at one, two and
+/// four threads.
+#[test]
+#[ignore = "needs gte-reranker-modernbert-base-Q8_0.gguf"]
+fn a_real_modern_bert_scores_are_bit_identical_in_any_batch() {
+    let Some((q8_path, _)) = modern_bert_models() else {
+        eprintln!("SKIPPED: gte-reranker-modernbert-base Q8_0 is not in ~/models/embed/");
+        return;
+    };
+    let pairs = modern_bert_pairs();
+    let model = modern_bert_load(&q8_path);
+    let probe = &pairs[0].2;
+    let alone = head_rows(&model, std::slice::from_ref(probe), 1)[0][0];
+    for (n, threads) in [(2usize, 1usize), (7, 2), (8, 4)] {
+        let texts: Vec<Vec<u32>> = (0..n).map(|i| pairs[i * 3].2.clone()).collect();
+        let rows = head_rows(&model, &texts, threads);
+        assert_eq!(
+            rows[0][0].to_bits(),
+            alone.to_bits(),
+            "the probe's score changed in a batch of {n} at {threads} threads"
+        );
+    }
+    let g = model.gguf();
+    assert_eq!(g.tensor("cls.weight").unwrap().kind, Format::Q8_0);
+    assert_eq!(g.tensor("cls.output.weight").unwrap().numel(), 768);
+    // The file names its single output `LABEL_0`, so the head is a classifier's by the
+    // S4.6b rule while `/v1/rerank` serves it as the reranker it is.
+    assert_eq!(model.head_labels(), ["LABEL_0"].map(String::from));
+}
