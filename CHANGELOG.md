@@ -37,7 +37,15 @@ All notable changes to this project are documented here. The format follows
   thinking on and off, with and without a system message) and returns the reasoning in
   `reasoning_content`. A model that thinks spends tokens on it: send
   `"chat_template_kwargs": {"enable_thinking": false}` for the old behaviour of a direct answer.
-  Requests on other files, and `peregrine run`, are unchanged.
+  Requests on other files are unchanged.
+- **`peregrine run` uses Qwen 3.5's own prompt too (S6.3c)**: a file with that template is now
+  the `qwen35` chat template (also a name for `--chat-template`), detected by the template's
+  exact text; any other template with a thinking switch is still read as Qwen 3's. The prompt
+  ends inside the opened thinking block (or after the empty one with `--no-thinking`), messages
+  are trimmed, and an earlier turn is replayed without its thinking. The command prints the
+  opening `<think>` the prompt wrote before the model's reasoning, and `--json`'s `text` starts
+  with it. On Qwen 3.5 2B and Bonsai 2 2B the prompt is 16 tokens with thinking and 18 without,
+  as in llama.cpp, and both models now reason before they answer unless told not to.
 
 ### Added
 

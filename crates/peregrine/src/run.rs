@@ -128,6 +128,18 @@ pub fn run(args: &RunArgs) -> Result<(), String> {
 
     let started = Instant::now();
     let json = args.json;
+    // Qwen 3.5's template (Bonsai 2 carries it) opens the reasoning block in the prompt,
+    // so the model writes its reasoning and only the closing tag. The opening tag is
+    // shown first, so the output reads as the whole block, as it does for a model that
+    // writes the tag itself.
+    let opened = if session.template().opens_reasoning(!args.no_thinking) {
+        "<think>\n"
+    } else {
+        ""
+    };
+    if !json {
+        print!("{opened}");
+    }
     let (text, telem) = session
         .generate(&prompt, |e| {
             if !json {
@@ -136,6 +148,7 @@ pub fn run(args: &RunArgs) -> Result<(), String> {
             }
         })
         .map_err(|e| format!("generation failed: {e}"))?;
+    let text = format!("{opened}{text}");
     let wall = started.elapsed().as_secs_f64();
 
     if json {

@@ -83,8 +83,8 @@ pub struct Args {
     /// are given (two files with the same stem need an explicit `--alias`).
     #[arg(long = "alias", value_name = "ID")]
     pub alias: Vec<String>,
-    /// The chat template to use, by name (chatml, llama3, qwen3, gemma, mistral-v0,
-    /// mistral-v1, mistral-v7, llama2, llama2-sys-bos). It overrides the template the
+    /// The chat template to use, by name (chatml, phi4, llama3, qwen3, qwen35, gemma,
+    /// mistral-v0, mistral-v1, mistral-v7, llama2, llama2-sys-bos, harmony). It overrides the template the
     /// file declares; a file that declares none needs it, since a model prompted in
     /// a template it was not trained on answers fluently and wrongly.
     #[arg(long = "chat-template", value_name = "NAME")]
@@ -1997,7 +1997,13 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
         .map(|t| ToolReply::new(t.format, &t.tools, t.parallel, p.call_base));
     // A tool format whose template opens the thinking block itself (Qwen 3.5's): the reply
     // starts inside the reasoning span, and the model writes only the closing tag.
-    let reasoning_open = p.tool.as_ref().is_some_and(|t| t.reasoning_open);
+    // The same holds on the ordinary path when the template named for the file is one
+    // that opens the block (`--chat-template qwen35` on a file whose own text is not
+    // recognised).
+    let reasoning_open = match &p.tool {
+        Some(t) => t.reasoning_open,
+        None => app.template.opens_reasoning(p.thinking),
+    };
     run.in_think = reasoning_open;
     // Such a reply is returned as llama.cpp returns it: the reasoning stripped, the answer
     // starting at its first character. With `reasoning_format: none` the span is content

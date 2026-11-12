@@ -508,7 +508,7 @@ fn render_qwen25(tools: &[Value], messages: &[Msg]) -> Result<String, String> {
 }
 
 /// Jinja's `trim`: the whitespace C's `isspace` knows, from both ends.
-fn jinja_trim(text: &str) -> &str {
+pub(crate) fn jinja_trim(text: &str) -> &str {
     text.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'))
 }
 

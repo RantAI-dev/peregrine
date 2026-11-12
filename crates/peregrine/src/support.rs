@@ -132,7 +132,7 @@ pub fn support_markdown() -> String {
 
     // 5. Chat templates
     let tmpl_str = "read from the model file and rendered exactly as llama.cpp renders them: \
-ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) \
+ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) \
 — or named with `--chat-template` for a file that declares none";
 
     // 6. Embeddings
