@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Design: an opt-in fast prompt mode (S5.4)**: `docs/design/s5.4-fast-prompt.md` specifies
+  `--fast-prompt`, off by default: prompt passes read the Q4_K and Q6_K weights re-rounded to
+  8 bits per 256-weight block (the arithmetic of ik_llama.cpp's wide pass, which S5.2 found is
+  where its prompt speed comes from), decode stays on the exact weights, results stay
+  independent of batch and chunk size, and the option ships with an accuracy report as ADR 0003
+  requires. Nothing is built yet.
 - **Tool calling for Qwen 3 (S6.2c)**: a file that carries Qwen 3's chat template is served with
   tools through the new `qwen3` format: Qwen 2.5's tool list and JSON calls, no default system
   message, messages written untrimmed, the assistant's turns after the last question with their

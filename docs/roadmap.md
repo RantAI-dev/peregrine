@@ -110,6 +110,7 @@ The ik_llama.cpp fork processes prompts about twice as fast as Peregrine on the 
 | S5.2a | Is ik_llama.cpp's fast wide pass exact? No: it requantises each 256-weight row-block onto one 8-bit grid (worst case 0.394 % of the block's largest weight), its `-ub 512` logits differ from `-ub 16` by 0.0011 mean KLD and 97.9 % top-1, and the same conversion done exactly — widen, keep the per-32 scale and the min — measures +0.2 % at 128 rows and +1 % at 512, so nothing was ported. Q5_0's gap to Q4_K is its 32-weight fold; two exact variants measured slower and were withdrawn | 1.5 |
 | S5.2 | A 512-bit attention score kernel; thread scaling past 12 threads | 1.5 |
 | S5.3 | The same questions on AVX2 and NEON; ik_llama.cpp measured on bluefin and ARM | 1.0 |
+| S5.4 | An opt-in fast prompt mode (`--fast-prompt`, off by default): prompt passes read Q4_K and Q6_K weights re-rounded to 8 bits per 256-weight block, the trade ik_llama.cpp makes by default; decode stays exact; ships with an accuracy report. Design: [`s5.4-fast-prompt.md`](design/s5.4-fast-prompt.md) | 3.0 |
 
 ## Stage 6: tool calling
 
