@@ -273,7 +273,10 @@ mod tests {
             .collect()
     }
 
-    #[cfg_attr(not(all(target_arch = "x86_64", feature = "fmt-kquant")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(target_arch = "x86_64", feature = "fmt-kquant")),
+        allow(dead_code)
+    )]
     fn batch(rows: usize, n: usize, seed: u64) -> Vec<crate::quant::QuantAct> {
         let mut s = seed | 1;
         (0..rows)
