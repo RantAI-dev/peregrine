@@ -434,9 +434,11 @@ pub struct EngineOptions {
     /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): a *prompt* row reads the weights
     /// of the formats whose 8-bit form beats this CPU tier's exact kernel from a form
     /// built at load (AVX-512: Q4_K and Q6_K, one f32 scale per 256 weights; AVX2:
-    /// Q6_K; a tier with no SIMD body: none, so the option computes exactly what the
-    /// exact engine computes). Prompt passes get 1.18-1.46× faster on AVX-512
-    /// (1.05-1.08× on an AVX2 host, S5.4f) and their logits move: on Llama 3.2 1B
+    /// Q6_K; aarch64: Q4_K and Q6_K, and Q5_0 where the multiply is a NEON body
+    /// (`neon-dotprod`, `neon-i8mm`, S5.4h); a tier with no SIMD body: none, so the
+    /// option computes exactly what the exact engine computes). Prompt passes get
+    /// 1.18-1.46× faster on AVX-512 (1.05-1.08× on an AVX2 host, S5.4f; 1.72-2.73×
+    /// on Qwen 2.5 0.5B on ARM, S5.4h) and their logits move: on Llama 3.2 1B
     /// Q4_K_M, measured on AVX-512, the prompt's mean KL divergence from the default
     /// engine is 0.0035 and 96.7 % of positions keep the same top token (the report:
     /// `benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`). Generated rows keep the

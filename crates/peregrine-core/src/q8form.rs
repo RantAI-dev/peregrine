@@ -17,8 +17,9 @@
 //! embedding, which is gathered and never multiplied. On AVX2 that is Q6_K only;
 //! on AVX-512 Q4_K and Q6_K (unchanged by S5.4f); on a tier without a SIMD body,
 //! nothing, so the mode computes exactly what the exact engine computes. Q5_0 is
-//! in the form's set but no x86 tier selects it: it is level with AVX2's exact
-//! kernel at 2048 weights and 0.88× at Qwen 2.5's 896-wide rows (§5g).
+//! in the form's set: aarch64's `dotprod`/`i8mm` caps select it (S5.4h, §5h),
+//! no x86 tier does (level with AVX2's exact kernel at 2048 weights and 0.88×
+//! at Qwen 2.5's 896-wide rows, §5g).
 //!
 //! # Which rows
 //!
@@ -134,6 +135,15 @@ pub fn layout(g: &Gguf) -> Vec<Q8Entry> {
 /// k-quant store: the form does not depend on `PEREGRINE_KREPACK`, and a scalar
 /// tier (where the repack is off by default) still gets the mode.
 pub fn build(g: &mut Gguf, entries: &[Q8Entry]) -> KqStore {
+    // A Q5_0 matrix whose row stops inside its last 256-weight super-block (Qwen
+    // 2.5's 896-wide rows) is multiplied against a padded activation buffer, which
+    // `QuantAct::fill` builds only when it knows the form will read it (S5.4h).
+    if entries
+        .iter()
+        .any(|e| e.kind == Format::Q5_0 && !e.cols.is_multiple_of(256))
+    {
+        peregrine_kernels::kq8::note_padded_q5_form();
+    }
     let total: usize = entries.iter().map(|e| e.len).sum();
     let mut store = KqStore::new(total);
     {

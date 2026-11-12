@@ -1,0 +1,96 @@
+=== round 0, prompt 512, threads 1, load1 7.58
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |       1 |           pp512 |         61.88 ± 0.00 |
+
+build: cd959ba (1)
+=== round 1, prompt 512, threads 1, load1 8.04
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |       1 |           pp512 |         61.73 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 512, threads 1, load1 7.99
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |       1 |           pp512 |         61.66 ± 0.00 |
+
+build: cd959ba (1)
+=== round 0, prompt 512, threads 1, load1 8.10
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |       1 |           pp512 |         30.08 ± 0.00 |
+
+build: cd959ba (1)
+=== round 1, prompt 512, threads 1, load1 7.80
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |       1 |           pp512 |         30.04 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 512, threads 1, load1 8.45
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |       1 |           pp512 |         30.11 ± 0.00 |
+
+build: cd959ba (1)
+=== round 0, prompt 512, threads 10, load1 7.09
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |           pp512 |        281.59 ± 0.00 |
+
+build: cd959ba (1)
+=== round 1, prompt 512, threads 10, load1 7.64
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |           pp512 |        310.47 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 512, threads 10, load1 8.23
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |           pp512 |        362.17 ± 0.00 |
+
+build: cd959ba (1)
+=== round 0, prompt 512, threads 10, load1 9.09
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |      10 |           pp512 |        177.19 ± 0.00 |
+
+build: cd959ba (1)
+=== round 1, prompt 512, threads 10, load1 9.42
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |      10 |           pp512 |        186.87 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 512, threads 10, load1 10.27
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |      10 |           pp512 |        167.17 ± 0.00 |
+
+build: cd959ba (1)
+=== round 0, prompt 4096, threads 10, load1 9.96
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |          pp4096 |        299.42 ± 0.00 |
+
+build: cd959ba (1)
+=== round 1, prompt 4096, threads 10, load1 12.33
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |          pp4096 |        244.28 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 4096, threads 10, load1 15.28
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |          pp4096 |        259.92 ± 0.00 |
+
+build: cd959ba (1)
+=== round 0, prompt 4096, threads 10, load1 15.12
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |      10 |          pp4096 |        173.06 ± 0.00 |
+
+build: cd959ba (1)
+=== round 1, prompt 4096, threads 10, load1 15.26
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |      10 |          pp4096 |        183.77 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 4096, threads 10, load1 14.32
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |      10 |          pp4096 |        171.21 ± 0.00 |
+
+build: cd959ba (1)
+=== round 0, prompt 4096, threads 1, load1 13.70
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |       1 |          pp4096 |         50.51 ± 0.00 |
+
+build: cd959ba (1)
+=== round 1, prompt 4096, threads 1, load1 6.25
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |       1 |          pp4096 |         50.43 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 4096, threads 1, load1 32.13
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |       1 |          pp4096 |         50.51 ± 0.00 |
+
+build: cd959ba (1)
+=== round 0, prompt 4096, threads 1, load1 28.53
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |       1 |          pp4096 |         25.98 ± 0.00 |
+
+build: cd959ba (1)
+=== round 1, prompt 4096, threads 1, load1 2.80
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |       1 |          pp4096 |         25.95 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 4096, threads 1, load1 3.93
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | CPU        |       1 |          pp4096 |         25.94 ± 0.00 |
+
+build: cd959ba (1)

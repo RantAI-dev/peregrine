@@ -1,0 +1,12 @@
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf before run1 load 5.59 wall 0:00.85 rss_kb 789612
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf before run2 load 5.59 wall 0:00.77 rss_kb 789596
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf before run3 load 5.59 wall 0:00.68 rss_kb 789608
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf after run1 load 5.59 wall 0:01.03 rss_kb 1079392
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf after run2 load 5.59 wall 0:00.86 rss_kb 1079568
+Qwen2.5-0.5B-Instruct-Q4_K_M.gguf after run3 load 5.59 wall 0:00.83 rss_kb 1079576
+Llama-3.2-1B-Instruct-Q4_K_M.gguf before run1 load 5.62 wall 0:01.11 rss_kb 1897320
+Llama-3.2-1B-Instruct-Q4_K_M.gguf before run2 load 5.62 wall 0:00.81 rss_kb 1897568
+Llama-3.2-1B-Instruct-Q4_K_M.gguf before run3 load 5.62 wall 0:01.05 rss_kb 1897872
+Llama-3.2-1B-Instruct-Q4_K_M.gguf after run1 load 5.62 wall 0:01.00 rss_kb 1897412
+Llama-3.2-1B-Instruct-Q4_K_M.gguf after run2 load 5.62 wall 0:01.03 rss_kb 1897724
+Llama-3.2-1B-Instruct-Q4_K_M.gguf after run3 load 5.65 wall 0:01.07 rss_kb 1897648
