@@ -1136,15 +1136,17 @@ impl Architecture for Dense {
                     )
                 });
             }
-            peregrine_core::blocks::ffn::swiglu_rows(
-                cfg.n_ff,
-                &mut st.hb,
-                &st.hb2,
-                &mut st.acts,
-                nb,
-                pool,
-                stats,
-            );
+            peregrine_core::prof::time(peregrine_core::prof::Slot::Swiglu, || {
+                peregrine_core::blocks::ffn::swiglu_rows(
+                    cfg.n_ff,
+                    &mut st.hb,
+                    &st.hb2,
+                    &mut st.acts,
+                    nb,
+                    pool,
+                    stats,
+                )
+            });
             {
                 let lbx = Disjoint::new(&mut st.lb_x);
                 let lbt = Disjoint::new(&mut st.lb_t);
