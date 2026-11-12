@@ -849,9 +849,11 @@ pub(crate) fn run_range<O: RowSink>(
         // Two rows of one KV head that see the same positions are mixed in one pass
         // over V, with each row's own accumulators and its own ascending positions —
         // the sharing cannot move a bit, and the second row's FMAs ride loads the first
-        // row already paid for. Only the F16-direct tile has the pair body (x86 and
-        // aarch64); a widened tile and the other architectures mix a row at a time.
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        // row already paid for. On x86 both tiles have the pair body; on aarch64 the
+        // F16-direct tile has one (S4.9s); the other architectures mix a row at a time.
+        #[cfg(target_arch = "x86_64")]
+        let pair_mix = pairs;
+        #[cfg(target_arch = "aarch64")]
         let pair_mix = v16.is_some() && pairs;
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let pair_mix = false;
@@ -963,14 +965,48 @@ pub(crate) fn run_range<O: RowSink>(
                             }
                         }
                         _ => {
-                            let s = &sc.s_tile[lr * BLOCK + base..][..len];
-                            mix(
-                                &mut sc.o[lr * hd..][..hd],
-                                alpha[0],
-                                s,
-                                &sc.kf[j_start * hd..],
-                                hd,
-                            );
+                            // The widened tile has the same two-row body as the F16
+                            // one: the loaded f32 value feeds both rows' FMAs.
+                            #[cfg(target_arch = "x86_64")]
+                            if two {
+                                let s0 = &sc.s_tile[lr * BLOCK + base..][..len];
+                                let s1 = &sc.s_tile[(lr + 1) * BLOCK + base..][..len];
+                                let (lo, hi) = sc.o.split_at_mut((lr + 1) * hd);
+                                // SAFETY: the widened tile `kf` holds the values and
+                                // each `s` its row's scores for the positions mixed.
+                                unsafe {
+                                    mix_pair_same(
+                                        &mut lo[lr * hd..],
+                                        &mut hi[..hd],
+                                        alpha[0],
+                                        alpha[1],
+                                        s0,
+                                        s1,
+                                        &sc.kf[j_start * hd..],
+                                        hd,
+                                    )
+                                };
+                            } else {
+                                let s = &sc.s_tile[lr * BLOCK + base..][..len];
+                                mix(
+                                    &mut sc.o[lr * hd..][..hd],
+                                    alpha[0],
+                                    s,
+                                    &sc.kf[j_start * hd..],
+                                    hd,
+                                );
+                            }
+                            #[cfg(not(target_arch = "x86_64"))]
+                            {
+                                let s = &sc.s_tile[lr * BLOCK + base..][..len];
+                                mix(
+                                    &mut sc.o[lr * hd..][..hd],
+                                    alpha[0],
+                                    s,
+                                    &sc.kf[j_start * hd..],
+                                    hd,
+                                );
+                            }
                         }
                     }
                 }
@@ -1998,6 +2034,139 @@ unsafe fn mix_f16_pair_same_ymm(
             _mm256_storeu_ps(o1.as_mut_ptr().add(d0 + l * 8), a1[l]);
         }
         d0 += 32;
+    }
+}
+
+/// Two rows of one KV head mixed over the same positions in one pass over a
+/// **widened** (f32) V tile.
+///
+/// This is [`mix_f16_pair_same`] for the tile below [`DIRECT_MIN_VIS`], whose values
+/// are decoded into f32 once per tile: both rows read the same f32 vector, each row
+/// keeps its own accumulators and adds `p_j · v_j` ascending in `j`, so the sharing
+/// cannot change a bit.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_pair_same(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    vf: &[f32],
+    hd: usize,
+) {
+    if avx512_attn(hd) {
+        return mix_pair_same_zmm(o0, o1, alpha0, alpha1, p0, p1, vf, hd);
+    }
+    if hd.is_multiple_of(8) && crate::cpu_has!("avx2") && crate::cpu_has!("fma") {
+        return mix_pair_same_ymm(o0, o1, alpha0, alpha1, p0, p1, vf, hd);
+    }
+    mix(o0, alpha0, p0, vf, hd);
+    mix(o1, alpha1, p1, vf, hd);
+}
+
+/// [`mix_pair_same`] sixteen lanes at a time.
+///
+/// # Safety
+/// The CPU must have AVX-512F/DQ, AVX2 and FMA, `hd` must be a multiple of 16,
+/// `p0` and `p1` the same length, and `vf` at least `p0.len() · hd` floats.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512dq,avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_pair_same_zmm(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    vf: &[f32],
+    hd: usize,
+) {
+    use std::arch::x86_64::*;
+    let vis = p0.len();
+    if vis == 0 {
+        return;
+    }
+    let vp = vf.as_ptr();
+    let (al0, al1) = (_mm512_set1_ps(alpha0), _mm512_set1_ps(alpha1));
+    let mut d0 = 0;
+    while d0 < hd {
+        let lanes = (hd - d0).min(64) / 16;
+        let mut a0 = [_mm512_setzero_ps(); 4];
+        let mut a1 = [_mm512_setzero_ps(); 4];
+        for l in 0..lanes {
+            a0[l] = _mm512_mul_ps(_mm512_loadu_ps(o0.as_ptr().add(d0 + l * 16)), al0);
+            a1[l] = _mm512_mul_ps(_mm512_loadu_ps(o1.as_ptr().add(d0 + l * 16)), al1);
+        }
+        for (j, (&w0, &w1)) in p0.iter().zip(p1).enumerate() {
+            let (w0, w1) = (_mm512_set1_ps(w0), _mm512_set1_ps(w1));
+            let row = vp.add(j * hd + d0);
+            for l in 0..lanes {
+                let vv = _mm512_loadu_ps(row.add(l * 16));
+                a0[l] = _mm512_fmadd_ps(w0, vv, a0[l]);
+                a1[l] = _mm512_fmadd_ps(w1, vv, a1[l]);
+            }
+        }
+        for l in 0..lanes {
+            _mm512_storeu_ps(o0.as_mut_ptr().add(d0 + l * 16), a0[l]);
+            _mm512_storeu_ps(o1.as_mut_ptr().add(d0 + l * 16), a1[l]);
+        }
+        d0 += lanes * 16;
+    }
+}
+
+/// [`mix_pair_same`] eight lanes at a time, four lanes per row in flight: the two
+/// rows' eight accumulators fit in registers together with the loaded value.
+///
+/// # Safety
+/// The CPU must have AVX2 and FMA, `hd` must be a multiple of 8, `p0` and `p1` the
+/// same length, and `vf` at least `p0.len() · hd` floats.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn mix_pair_same_ymm(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    vf: &[f32],
+    hd: usize,
+) {
+    use std::arch::x86_64::*;
+    let vis = p0.len();
+    if vis == 0 {
+        return;
+    }
+    let vp = vf.as_ptr();
+    let (al0, al1) = (_mm256_set1_ps(alpha0), _mm256_set1_ps(alpha1));
+    let mut d0 = 0;
+    while d0 < hd {
+        let lanes = (hd - d0).min(32) / 8;
+        let mut a0 = [_mm256_setzero_ps(); 4];
+        let mut a1 = [_mm256_setzero_ps(); 4];
+        for l in 0..lanes {
+            a0[l] = _mm256_mul_ps(_mm256_loadu_ps(o0.as_ptr().add(d0 + l * 8)), al0);
+            a1[l] = _mm256_mul_ps(_mm256_loadu_ps(o1.as_ptr().add(d0 + l * 8)), al1);
+        }
+        for (j, (&w0, &w1)) in p0.iter().zip(p1).enumerate() {
+            let (w0, w1) = (_mm256_set1_ps(w0), _mm256_set1_ps(w1));
+            let row = vp.add(j * hd + d0);
+            for l in 0..lanes {
+                let vv = _mm256_loadu_ps(row.add(l * 8));
+                a0[l] = _mm256_fmadd_ps(w0, vv, a0[l]);
+                a1[l] = _mm256_fmadd_ps(w1, vv, a1[l]);
+            }
+        }
+        for l in 0..lanes {
+            _mm256_storeu_ps(o0.as_mut_ptr().add(d0 + l * 8), a0[l]);
+            _mm256_storeu_ps(o1.as_mut_ptr().add(d0 + l * 8), a1[l]);
+        }
+        d0 += lanes * 8;
     }
 }
 
@@ -3889,6 +4058,76 @@ mod tests {
                     assert!(same_bits(&x0, &y0), "row 0 at hd {hd} vis {n}");
                     assert!(same_bits(&x1, &y1), "row 1 at hd {hd} vis {n}");
                 }
+            }
+        }
+    }
+
+    /// The widened tile's two-row value mix is each row's own mix: same f32 values,
+    /// same ascending positions, per-row accumulators — only the loaded value is
+    /// shared. Checked against the single-row kernel on the same grid as the F16 pair
+    /// body: every visible length 1…70 and 127/128/129, 511/512/513, 4095/4096; head
+    /// dims 64 and 128 (sixteen-lane body), 80 and 72 (eight-lane body) and 16; on
+    /// random scores and the edge values a softmax can produce.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_prefill_f32_pair_mix_is_each_rows_own_mix() {
+        if !(crate::cpu_has!("avx2") && crate::cpu_has!("fma")) {
+            return;
+        }
+        let mut vis: Vec<usize> = (1..=70).collect();
+        vis.extend([127, 128, 129, 511, 512, 513]);
+        for hd in [64usize, 128, 80, 72, 16] {
+            for &n in &vis {
+                let vf: Vec<f32> = prng(0x77 + hd as u64, n * hd);
+                let p0: Vec<f32> = prng(91 + hd as u64, n)
+                    .iter()
+                    .map(|x| x.abs() + 0.01)
+                    .collect();
+                let p1: Vec<f32> = prng(92 + hd as u64, n)
+                    .iter()
+                    .map(|x| (x * 3.0).abs() + 0.001)
+                    .collect();
+                let cases: [(&[f32], &[f32], f32, f32); 5] = [
+                    (&p0, &p1, 0.75, 0.25),
+                    (&p0, &p1, 1.0, 1.0),
+                    (&p0, &p1, 0.0, 0.0),
+                    (&p0[..], &p0[..], 1.0, 0.5),
+                    (&p0, &p1, -0.0, 3.5),
+                ];
+                for (a, b, al0, al1) in cases {
+                    let o0 = prng(123 + hd as u64, hd);
+                    let o1 = prng(124 + hd as u64, hd);
+                    let (mut x0, mut x1) = (o0.clone(), o1.clone());
+                    let (mut y0, mut y1) = (o0.clone(), o1.clone());
+                    // SAFETY: AVX2+FMA checked; `vf` holds `n · hd` floats.
+                    unsafe {
+                        mix(&mut x0, al0, a, &vf, hd);
+                        mix(&mut x1, al1, b, &vf, hd);
+                        mix_pair_same(&mut y0, &mut y1, al0, al1, a, b, &vf, hd);
+                    }
+                    assert!(same_bits(&x0, &y0), "row 0 at hd {hd} vis {n}");
+                    assert!(same_bits(&x1, &y1), "row 1 at hd {hd} vis {n}");
+                }
+            }
+        }
+        // The long lengths the task names, at the two widths a real model uses.
+        for hd in [64usize, 128] {
+            for n in [4095usize, 4096] {
+                let vf: Vec<f32> = prng(0x55 + hd as u64, n * hd);
+                let p0: Vec<f32> = (0..n).map(|i| ((i * 37 % 251) as f32).recip()).collect();
+                let p1: Vec<f32> = (0..n).map(|i| ((i * 53 % 199) as f32).recip()).collect();
+                let o0 = prng(7, hd);
+                let o1 = prng(8, hd);
+                let (mut x0, mut x1) = (o0.clone(), o1.clone());
+                let (mut y0, mut y1) = (o0.clone(), o1.clone());
+                // SAFETY: AVX2+FMA checked.
+                unsafe {
+                    mix(&mut x0, 0.5, &p0, &vf, hd);
+                    mix(&mut x1, 0.5, &p1, &vf, hd);
+                    mix_pair_same(&mut y0, &mut y1, 0.5, 0.5, &p0, &p1, &vf, hd);
+                }
+                assert!(same_bits(&x0, &y0), "long row 0 at hd {hd} vis {n}");
+                assert!(same_bits(&x1, &y1), "long row 1 at hd {hd} vis {n}");
             }
         }
     }

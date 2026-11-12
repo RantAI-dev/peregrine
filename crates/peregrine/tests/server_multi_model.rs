@@ -9,8 +9,8 @@
 //! The models are the synthetic files under `crates/peregrine-models/tests/support/`, so CI
 //! needs no model files.
 //!
-//! One test is Unix-only: it asks the server to drain with `SIGTERM`. Windows has no `SIGTERM`
-//! (the stop file is S7.3); the multi-model serving it drains is tested there by the others.
+//! One test per mechanism asks the server to drain: `SIGTERM` on Unix, the stop file on Windows
+//! (S7.3). Both drain every model's in-flight request and then exit with status 0.
 
 #[path = "../../peregrine-models/tests/support/mod.rs"]
 mod support;
@@ -537,7 +537,101 @@ fn drain_covers_every_engine() {
     assert!(status.success(), "the drained server exited with {status}");
 }
 
-/// `-m` may be repeated, and one `--alias` per `-m` names the models. Without an alias a
+/// The same drain on Windows, asked for through the stop file (S7.3): every model's in-flight
+/// request finishes, a new connection is refused once the drain starts, and the process exits 0.
+#[cfg(windows)]
+#[test]
+fn drain_covers_every_engine_through_the_stop_file() {
+    let dir = tmpdir("drain-stopfile");
+    let f = files(&dir);
+    let state = dir.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let state_s = state.to_str().unwrap().to_string();
+    let (child, port) = common::start(
+        &dir,
+        &[
+            ("PEREGRINE_DRAIN_TIMEOUT_MS", "20000"),
+            ("PEREGRINE_STATE_DIR", &state_s),
+        ],
+        &[
+            "serve",
+            "-m",
+            f.chat.to_str().unwrap(),
+            "--alias",
+            "chat",
+            "-m",
+            f.causal.to_str().unwrap(),
+            "--alias",
+            "causal",
+            "-m",
+            f.decision.to_str().unwrap(),
+            "--alias",
+            "decide",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            common::PORT,
+            "--ctx",
+            "512",
+            "--threads",
+            "2",
+            "--no-profile",
+        ],
+    );
+    let mut guard = Guard(child);
+    wait_for_health(port);
+
+    let slow = json!({
+        "model": "chat",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 200,
+        "temperature": 0,
+    });
+    let stop = state.join(format!("serve-{port}.stop"));
+    let (a, b, c) = thread::scope(|s| {
+        let a = s.spawn(|| post(port, "/v1/chat/completions", &slow));
+        let b = s.spawn(|| post(port, "/v1/embeddings", &embedding_body("causal")));
+        let c = s.spawn(|| post(port, "/v1/systemone", &decision_body("decide")));
+        // Let the requests reach their engines, then ask the process to drain.
+        thread::sleep(Duration::from_millis(300));
+        std::fs::write(&stop, b"stop\n").expect("write the stop file");
+        // The server removes it as it starts the drain, then stops accepting.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while stop.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the server never noticed the stop file"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "a new connection was accepted while draining"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        (a.join().unwrap(), b.join().unwrap(), c.join().unwrap())
+    });
+    assert_eq!(a.0, 200, "{}", a.1);
+    assert_eq!(b.0, 200, "{}", b.1);
+    assert_eq!(c.0, 200, "{}", c.1);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = guard.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server did not exit after draining"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "the drained server exited with {status}");
+    assert!(!stop.exists(), "the server must remove the stop file");
+}
 /// multi-model server names each file by its stem; two equal stems are refused.
 #[test]
 fn the_cli_takes_repeated_models_and_aliases() {

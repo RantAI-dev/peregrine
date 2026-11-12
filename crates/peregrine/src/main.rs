@@ -100,6 +100,10 @@ struct UpgradeCmd {
 }
 
 fn main() {
+    // A Windows upgrade renames the running `.exe` aside (`peregrine.exe.old`); remove leftovers
+    // from a previous upgrade at the next start (S7.3).
+    #[cfg(all(windows, feature = "server"))]
+    peregrine::service::clean_old_binaries();
     match Cli::parse().cmd {
         #[cfg(feature = "server")]
         Cmd::Serve(cmd) => {
