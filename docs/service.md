@@ -54,9 +54,10 @@ peregrine upgrade             # install the newest release, replace the managed 
 1. reads the newest release tag from `peregrine.rantai.dev`, falling back to GitHub
    (`--version vX.Y.Z` pins one; `--base-url`/`PEREGRINE_RELEASE_BASE` and
    `PEREGRINE_RELEASE_LATEST` point at a mirror);
-2. downloads the platform's archive (`linux-x86_64`, `linux-aarch64`, `windows-x86_64`) and its
-   `SHA256SUMS` (vanity host first, GitHub as the fallback), verifies the checksum, extracts it,
-   and runs the new binary with `--version` **before** touching anything;
+2. downloads the platform's archive (`linux-x86_64`, `linux-aarch64`, `macos-aarch64`,
+   `windows-x86_64`) and its `SHA256SUMS` (vanity host first, GitHub as the fallback), verifies the
+   checksum, extracts it, and runs the new binary with `--version` **before** touching anything.
+   Intel Macs and Windows on ARM64 have no archive: there `upgrade` says to build from source;
 3. copies it beside the installed binary and renames it into place, so the replacement is atomic and
    a running server keeps serving from its already-mapped old image. On Windows a running `.exe`
    cannot be overwritten but can be renamed, so `peregrine.exe` becomes `peregrine.exe.old` and the
@@ -142,6 +143,7 @@ matters, or run two units behind a reverse proxy.
 - One managed server per user/state directory. Run one process per model, as with llama-server.
 - The log is appended, not rotated; point `--log-file` at a logrotate-managed path for long-lived services.
 - `SO_REUSEPORT` and the zero-downtime handoff are Unix features; Windows uses the stop file and a
-  short restart gap instead. `--background`, `status` and `stop` exist on Linux, macOS and Windows
-  on x86-64; `upgrade` and the release archives exist on Linux today and on Windows x86-64 from the
-  release after v0.2.0.
+  short restart gap instead. `--background`, `status`, `stop` and `upgrade` exist on Linux, macOS
+  and Windows on x86-64. The release archives exist on Linux x86-64 and aarch64 today; the
+  `macos-aarch64` and `windows-x86_64` archives (and their installers) ship from the release after
+  v0.2.0, so `upgrade` names the right asset but v0.2.0 has none to download until then.

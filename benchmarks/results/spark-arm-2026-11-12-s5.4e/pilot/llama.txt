@@ -1,0 +1,12 @@
+=== round 1, prompt 512, threads 10, load1 3.36
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |           pp512 |        576.06 ± 0.00 |
+
+build: cd959ba (1)
+=== round 2, prompt 512, threads 10, load1 4.48
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |           pp512 |        477.16 ± 0.00 |
+
+build: cd959ba (1)
+=== round 3, prompt 512, threads 10, load1 5.48
+| qwen2 1B Q4_K - Medium         | 373.71 MiB |   494.03 M | CPU        |      10 |           pp512 |        369.01 ± 0.00 |
+
+build: cd959ba (1)

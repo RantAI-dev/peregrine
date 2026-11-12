@@ -24,6 +24,23 @@ All notable changes to this project are documented here. The format follows
   In the paired ten-thread window the cell moves 0.67× → 0.75× against llama.cpp; the row's
   quiet-host re-read is owed (the host's co-tenant swung one arm 3.8×). Numbers and the stage
   account: `benchmarks/results/spark-arm-2026-11-12-s4.9s/`; design §22.
+- **The fast prompt mode takes the NEON 8-bit kernel on ARM (S5.4e)**: `--fast-prompt`'s
+  dispatch now calls `crates/peregrine-kernels/src/neon.rs` on aarch64 — `smmla` on
+  `neon-i8mm`, `sdot` on `neon-dotprod`, the scalar twin on `neon`/`scalar` — and its NEON
+  builder where the CPU has `neon`; x86 and the AVX2 path are untouched. `q8k_simd()` reports
+  the body, the server's startup line and `peregrine tier` name it, and the fast goldens now
+  exist for `aarch64`, `aarch64-neon`, `aarch64-neon-dotprod` and `aarch64-neon-i8mm` (Q4_K
+  identical on all four; Q6_K identical on the three NEON tiers and different from the
+  forced-scalar one). The mode's bits are the same under every cap: the invariance test passes
+  under `neon-dotprod`, `neon` and `scalar`, and no existing golden moved. On the DGX Spark
+  (shared host, medians of interleaved rounds, load beside every cell) Llama 3.2 1B Q4_K_M is
+  **1.45–2.54×** the exact default (254.4 → 645.5 prompt tok/s at 512 tokens/10 threads,
+  93.6 → 192.5 at 512/1, 55.8 → 81.0 at 4 096/1) and Qwen 2.5 0.5B, whose Q5_0/Q8_0 have no
+  form, 1.07–1.91×. At ten threads 512 is the best fast chunk on all four cells of both models
+  (7.7–26.6 % over 256) and level at one thread, so **aarch64's fast-mode wide chunk is 512**
+  (`WIDE_CHUNK_DEFAULT_FAST_ARM`); x86 keeps 256. The form costs +966 MiB and +0.48 s to load
+  on the 1B, and decode after a fast prompt is level (1.006×/1.012×). Numbers:
+  `benchmarks/results/spark-arm-2026-11-12-s5.4e/`; design §5f.
 
 - **Prompt processing: the 512-token path's value mix takes two rows per V pass (S5.2c)**: the
   widened f32 tile — the one a prompt below 1024 positions uses — had no pair body, so the
@@ -68,6 +85,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **macOS on Apple Silicon is a supported platform (roadmap S7.1)**: `release.yml` builds and tests
+  `peregrine-vX.Y.Z-macos-aarch64.tar.gz` on the `macos-15` runner (`MACOSX_DEPLOYMENT_TARGET=11.0`,
+  `strip -x`, then ad-hoc signed with `codesign --force --sign -`; not notarised), and a
+  `workflow_dispatch` dry run builds and uploads the archives without publishing. `scripts/install.sh`
+  accepts Darwin arm64 (and refuses Intel Macs with the build-from-source line; it uses `shasum -a 256`
+  where `sha256sum` is absent), `peregrine upgrade` maps macOS aarch64 to `macos-aarch64`, and the
+  default decode width on Apple Silicon is the performance-core count
+  (`hw.perflevel0.physicalcpu`, read with `sysctlbyname`), not every core. The synthetic goldens are
+  recorded on the runner for its macOS tier, `.github/workflows/record-goldens.yml` records them for
+  any platform, the macOS CI job smoke-tests the release binary and a synthetic generation, and the
+  quickstart and release checklist have the macOS commands, the quarantine note and the dry run.
+  `docs/design/s7-platforms.md` has the step's "as built" section.
 - **An AVX2 body for the fast prompt mode's 8-bit kernel (S5.4d)**: `--fast-prompt` had one
   SIMD body (AVX-512); on an AVX2 machine the mode ran through the scalar twin, correct and
   about as fast as the exact kernels. `crates/peregrine-kernels/src/kqsimd.rs` now has
@@ -137,7 +166,6 @@ All notable changes to this project are documented here. The format follows
   `GetLogicalProcessorInformationEx`, hand-written in `crates/peregrine-core/src/win32.rs` (no
   dependency); and the tests that only needed a Unix signal got a Windows counterpart where the
   behaviour exists. `serve --background`, `status` and `stop` are S7.3 and say so on Windows.
-
 - **`--fast-prompt`, the opt-in 8-bit prompt pass (S5.4b)**: with the option on, a prompt
   row's Q4_K and Q6_K weights are read from an 8-bit form built once per matrix at load
   (one f32 scale and one int8 code per weight, per 256-weight super-block), while generated
@@ -146,7 +174,8 @@ All notable changes to this project are documented here. The format follows
   `--fast-prompt`. Off by default: with it off nothing moves by a bit or a millisecond (the
   activation's whole-block sums are built only when it is on). The form costs 957 MiB on
   Llama 3.2 1B Q4_K_M and is built in about half a second on AVX-512; a tier without a SIMD
-  body (AVX2, NEON) runs the mode correctly through the scalar twin, no faster. The accuracy
+  body runs the mode correctly through the scalar twin, no faster (S5.4e later gave aarch64
+  its NEON bodies; AVX2 is still the twin). The accuracy
   report is S5.4c. Design: `docs/design/s5.4-fast-prompt.md` §5b; first-look numbers:
   `benchmarks/results/desktop-zen5-2026-11-12-s5.4b/`.
 - **The 8-bit prompt kernel (S5.4a)**, the first build step of the opt-in fast prompt mode:

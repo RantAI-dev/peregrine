@@ -1,0 +1,16 @@
+PROMPT: Write one sentence about the sea.
+exact tokens 35
+The vast expanse of the sea, with its endless blue horizon and diverse marine life, is a powerful and awe-inspiring force that has captivated human imagination for centuries.
+---
+PROMPT: Write one sentence about the sea.
+fast tokens 35
+The vast expanse of the sea, with its endless blue waters and diverse marine life, is a powerful and awe-inspiring force that has captivated human imagination for centuries.
+---
+PROMPT: List three colours, comma separated.
+exact tokens 5
+Blue, Red, Green
+---
+PROMPT: List three colours, comma separated.
+fast tokens 5
+Blue, Red, Green
+---
