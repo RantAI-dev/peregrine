@@ -1323,6 +1323,12 @@ fn score_tile(
 /// With four rows the four denominators advance interleaved (`exp_rows4_sums`, S4.9r's
 /// encoder body); each row still folds its own exponentials in ascending key order
 /// into its own `f64`, so no row's bits depend on the rows beside it.
+///
+/// The four-row body is aarch64's only. There `exp_rows4_sums` and
+/// [`crate::vmath::exp_shift_sum`] define the same denominator (one ascending `f64`
+/// fold per row). On x86-64 `exp_shift_sum` folds eight-value groups, a different
+/// defined order, so the two are not interchangeable and four rows there are four
+/// single rows.
 fn softmax_rows(
     sc: &mut Scratch,
     lr: usize,
@@ -1331,6 +1337,7 @@ fn softmax_rows(
     rows: usize,
     alpha: &mut [f32; 4],
 ) {
+    #[cfg(target_arch = "aarch64")]
     if rows == 4 {
         let mut m_new = [0.0f32; 4];
         let mut sums = [0.0f64; 4];
@@ -4383,51 +4390,60 @@ mod tests {
     /// a padded stride, and the tile walk itself at every piece length up to `BLOCK`.
     #[test]
     fn the_four_row_softmax_is_each_rows_own_softmax() {
-        let mut vis: Vec<usize> = (1..=70).collect();
-        vis.extend([127, 128, 129, 511, 512, 513]);
-        for &n in &vis {
-            for edge in [false, true] {
-                let stride = n + 5;
-                let raw: Vec<f32> = (0..4 * stride)
-                    .map(|i| {
-                        let x = prng(0x5e + (i * 7) as u64, 1)[0] * 3.0;
-                        if edge {
-                            const EDGE: [f32; 8] =
-                                [0.0, -0.0, 3.5, -3.5, -88.0, -1.0e30, 88.0, 0.5];
-                            if i % 11 == 0 {
-                                EDGE[i % EDGE.len()]
+        // The two kernels agree where they share a defined order: aarch64 (see
+        // `softmax_rows`). On x86-64 the decoder's soft-max folds eight-value groups.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let mut vis: Vec<usize> = (1..=70).collect();
+            vis.extend([127, 128, 129, 511, 512, 513]);
+            for &n in &vis {
+                for edge in [false, true] {
+                    let stride = n + 5;
+                    let raw: Vec<f32> = (0..4 * stride)
+                        .map(|i| {
+                            let x = prng(0x5e + (i * 7) as u64, 1)[0] * 3.0;
+                            if edge {
+                                const EDGE: [f32; 8] =
+                                    [0.0, -0.0, 3.5, -3.5, -88.0, -1.0e30, 88.0, 0.5];
+                                if i % 11 == 0 {
+                                    EDGE[i % EDGE.len()]
+                                } else {
+                                    x
+                                }
                             } else {
                                 x
                             }
-                        } else {
-                            x
-                        }
-                    })
-                    .collect();
-                let maxes = [
-                    crate::vmath::max(&raw[..n]) + 0.25,
-                    crate::vmath::max(&raw[stride..stride + n]) - 0.5,
-                    crate::vmath::max(&raw[2 * stride..2 * stride + n]),
-                    crate::vmath::max(&raw[3 * stride..3 * stride + n]) + 1.0,
-                ];
-                let mut four = raw.clone();
-                let mut sums4 = [0.0f64; 4];
-                peregrine_kernels::bidir::exp_rows4_sums(&mut four, stride, n, maxes, &mut sums4);
-                for r in 0..4 {
-                    let mut one = raw.clone();
-                    let sum =
-                        crate::vmath::exp_shift_sum(&mut one[r * stride..r * stride + n], maxes[r]);
-                    assert_eq!(
-                        sum.to_bits(),
-                        sums4[r].to_bits(),
-                        "row {r} denominator at n={n} edge={edge}"
+                        })
+                        .collect();
+                    let maxes = [
+                        crate::vmath::max(&raw[..n]) + 0.25,
+                        crate::vmath::max(&raw[stride..stride + n]) - 0.5,
+                        crate::vmath::max(&raw[2 * stride..2 * stride + n]),
+                        crate::vmath::max(&raw[3 * stride..3 * stride + n]) + 1.0,
+                    ];
+                    let mut four = raw.clone();
+                    let mut sums4 = [0.0f64; 4];
+                    peregrine_kernels::bidir::exp_rows4_sums(
+                        &mut four, stride, n, maxes, &mut sums4,
                     );
-                    for j in 0..n {
-                        assert_eq!(
-                            four[r * stride + j].to_bits(),
-                            one[r * stride + j].to_bits(),
-                            "row {r} key {j} at n={n} edge={edge}"
+                    for r in 0..4 {
+                        let mut one = raw.clone();
+                        let sum = crate::vmath::exp_shift_sum(
+                            &mut one[r * stride..r * stride + n],
+                            maxes[r],
                         );
+                        assert_eq!(
+                            sum.to_bits(),
+                            sums4[r].to_bits(),
+                            "row {r} denominator at n={n} edge={edge}"
+                        );
+                        for j in 0..n {
+                            assert_eq!(
+                                four[r * stride + j].to_bits(),
+                                one[r * stride + j].to_bits(),
+                                "row {r} key {j} at n={n} edge={edge}"
+                            );
+                        }
                     }
                 }
             }
