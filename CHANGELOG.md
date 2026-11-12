@@ -39,6 +39,37 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The halved-precision float panel is widened once, and the small-BERT gap is measured
+  against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
+  and the prefetch guard inside its `k` loop and widened sixteen weights per weight step, on the
+  same two ports as its twelve fused multiply-adds: fourteen vector operations a step where twelve
+  would do, 77 % of this core's FMA roof against f32's 91 %. `gemm_avx2` is now three
+  monomorphised kernels (`f32`, `f16`, `bf16`) dispatched once per call, and a halved-precision
+  matrix is widened **once per panel** into a per-thread f32 scratch and then multiplied by the
+  f32 tile loop — 21× fewer conversions at a 128-row block, and the scratch is used only when
+  there are more than 18 activation rows and it fits in half of L2. The widening is exact and
+  every output is still one sequential `fma` chain over `k`, so no bit and no golden moved (new
+  tests: widened against direct on F16/BF16 for six shapes × rows 1-64, every row count 1-40 and
+  127/128/129/511/512/513 at ten widths, and ±0, subnormals, 1e-38, 2^-14, ±3e4, ±6.5e4, ±inf and
+  NaN). One thread: f16 50.2 → 57.3 GMAC/s and bf16 51.5 → 57.2 on 384 × 384 at 128 rows (+14 %,
+  +11 %), f16 44.6 → 52.6 on 2048 × 8192 (+18 %). End to end, medians of three interleaved rounds:
+  MiniLM's F16 row goes 0.87× → **0.90×** at L512 b1, 0.88× → **0.91×** at b8, 0.89× →
+  **0.94×** at b32, 0.96× → **1.02×** at L128 b1, 0.92× → **0.98×** at L128 b8, 0.97× →
+  **1.03×** at L128 b32, 1.30× → **1.39×** at L16 b1, 1.18× → 1.14× at L16 b8, 0.99× →
+  **1.10×** at L16 b32 and 1.45× → **1.52×** on the mixed batch; bge-small's F32 row is the
+  control and did not move (0.86–1.26× in both runs). **Still below 1.0× on this 4-core host**,
+  by cell: MiniLM f16 at 128 b8 (0.98×) and 512 b1/b8/b32 (0.90×/0.91×/0.94×); MiniLM q8_0 at
+  128 b8 (0.99×) and 512 b1/b8/b32 (0.91×/0.92×/0.95×); bge-small f32 at 16 b32 (0.97×), 128
+  b1/b8/b32 (0.95×/0.92×/0.97×) and 512 b1/b8/b32 (0.86×/0.89×/0.89×); bge-small q8_0 at 16 b32
+  (0.97×), 128 b1/b8/b32 (0.95×/0.92×/0.96×) and 512 b1/b8/b32 (0.84×/0.88×/0.88×). The
+  measurement says why: the matmul is already level with oneDNN's packed kernel on this CPU
+  (165.0–178.3 against 173.2–173.7 GMAC/s, 64–69 % of the 259.6 GMAC/s four-core roof), while the
+  element-wise work is 9.26 ms of a 54.8 ms MiniLM pass against OpenVINO's 0.55 ms and 18.05 of
+  104.4 ms against 1.14 ms on bge-small — so the remainder is the per-element passes (and, on
+  bge-small, the attention strip), not the matrix kernel. Rerank is 1.11–1.42× llama.cpp on both
+  bge-reranker files. See `benchmarks/results/bluefin-2026-11-12-s4.9p/README.md` and
+  `docs/design/s4.9-sota.md` §19.
+
 - **An `i8mm` body for the Q8_0 tile (S4.9q).** The Q8_0 repacked eight-row tile was the one tile
   with no `smmla` body, so on `aarch64-neon-i8mm` every Q8_0 file that stays on int8 tiles ran the
   `sdot` kernel. `q8_08_gemm_i8mm` runs whole groups of four activation rows on `smmla` (a tile
