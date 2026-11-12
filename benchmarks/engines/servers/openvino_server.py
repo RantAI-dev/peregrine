@@ -29,6 +29,9 @@ def main() -> None:
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--batch-size", type=int, default=128)
+    ap.add_argument("--max-seq-length", type=int, default=512,
+                    help="sentence-transformers truncation length; the 8 192-token "
+                         "families need their own value")
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
 
@@ -50,7 +53,7 @@ def main() -> None:
         model_kwargs={"ov_config": ov_config},
         trust_remote_code=False,
     )
-    model.max_seq_length = 512
+    model.max_seq_length = args.max_seq_length
     # One inference at a time: a single-threaded server queues requests in the
     # socket backlog, which is how these engines are actually embedded.  A
     # threaded server with a lock makes ten clients contend on the GIL and
