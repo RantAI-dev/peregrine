@@ -54,11 +54,28 @@ Work down the list; do not cut the tag until every line holds.
    request after that, so a lifetime tied to the drain timeout cannot ship again; (c) exercise
    `serve --background`, `status`, `stop`, then `status` again (it must report no managed server).
    On the macOS archive also check `codesign -dv` reports an ad-hoc signature and that
-   `scripts/install.sh --version vX.Y.Z` installs and runs it (the installer refuses Intel Macs).
-   On Windows run `scripts/install.ps1 -Version vX.Y.Z -BaseUrl <dir with the zip> -InstallDir
-   <temp>` and start the installed `peregrine.exe`: it must report the same version and tier.
-7. **Record the goldens of any new platform tier** with the **Record goldens** workflow before the
-   release (`docs/dev/testing.md`), so the archive's suite compares them instead of skipping.
+   `scripts/install.sh --version vX.Y.Z` installs and runs it (the installer refuses Intel Macs):
+   `./peregrine tier` must print an `aarch64-neon*` tier and `peregrine run` on a synthetic model
+   must answer. On Windows unzip the archive and run `peregrine.exe --version` and
+   `peregrine.exe tier` from it, then run
+   `powershell -File scripts/install.ps1 -Version vX.Y.Z -BaseUrl <dir with the zip> -InstallDir
+   <temp>` and start the installed `peregrine.exe`: it must report the same version and tier. Also
+   check the installer left the user `Path` alone apart from the new directory — it keeps
+   `%VARIABLES%` and the value's `ExpandString` kind (CI tests this on every PR).
+7. **Golden sweep.** Before the tag, prove each supported system's golden set is current by
+   starting the **Record goldens** workflow on the candidate commit and expecting zero new files:
+   ```sh
+   gh workflow run record-goldens.yml --ref <candidate> -f runner=macos-15
+   gh workflow run record-goldens.yml --ref <candidate> -f runner=windows-2025 -f isa=scalar
+   gh workflow run record-goldens.yml --ref <candidate> -f runner=windows-2025 -f isa=avx2
+   gh run watch <id> --exit-status   # then read each run's recorded.txt artefact
+   ```
+   Each run's verify step compares the committed values and fails on a mismatch, and its
+   `goldens-<runner>-<isa>.tar.gz` must hold nothing: a file that appears is a golden the release
+   would otherwise skip, so commit it by name (`docs/dev/testing.md`) before the tag. The Windows
+   AVX-512 set is not part of the sweep — the pool draws it at random — and a missing one only
+   makes that tier skip.
+
 
 ## What ships
 
