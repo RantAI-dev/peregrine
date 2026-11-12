@@ -24,7 +24,8 @@ use peregrine_kernels::quant::{dequant_row, dot_f32_ref};
 use peregrine_kernels::table::MatKernels;
 
 /// One float matrix row times an activation row, in the arithmetic the engine
-/// defines for this build (the same helper `embed_ref` uses).
+/// defines for this build (the same helper `embed_ref` uses): the packed panel
+/// kernel's FMA chain, or `dot_f32_ref` for a matrix the store does not pack.
 fn row_dot(row: &[u8], x: &[f32]) -> f32 {
     if MatKernels::get().fp_panels() {
         let mut acc = 0.0f32;
@@ -50,6 +51,11 @@ struct Mat {
     bytes: Vec<u8>,
     d_in: usize,
     d_out: usize,
+    /// Whether the engine reads this matrix from the packed float panels (whose chain is
+    /// `row_dot`'s fused one) or row by row (`dot_f32_ref`, a plain multiply and add).
+    /// A tensor written 1-d — a classifier head's one-row `cls.output.weight` — is not a
+    /// panel matrix (`fpack::eligible` wants two dimensions), so its chain differs.
+    packed: bool,
 }
 
 impl Mat {
@@ -65,7 +71,11 @@ impl Mat {
         match self.kind {
             Format::F32 => {
                 for (r, o) in out[..self.d_out].iter_mut().enumerate() {
-                    *o = row_dot(self.row(r), x);
+                    *o = if self.packed {
+                        row_dot(self.row(r), x)
+                    } else {
+                        dot_f32_ref(Format::F32, self.row(r), x)
+                    };
                 }
             }
             Format::Q8_0 => {
@@ -103,6 +113,7 @@ fn mat(g: &Gguf, name: &str) -> Mat {
             bytes,
             d_in,
             d_out,
+            packed: true,
         };
     }
     Mat {
@@ -110,6 +121,9 @@ fn mat(g: &Gguf, name: &str) -> Mat {
         bytes: g.bytes(t).to_vec(),
         d_in,
         d_out,
+        // A Q8_0 matrix the store did not convert keeps the int8 twin; a float matrix is
+        // a panel matrix unless the file wrote it 1-d.
+        packed: t.kind != Format::F32 || t.fp_off.is_some(),
     }
 }
 
@@ -284,4 +298,79 @@ pub fn reference_embedding(model: &Model, tokens: &[u32], pooling: Pooling) -> V
     let mut v = vec![0.0f32; dm];
     peregrine_core::embed::pool_rows_into(&hidden, dm, pooling, &mut sum, &mut v);
     v
+}
+
+/// One text's classifier-head row (roadmap S4.6b), the reference's own transcription of
+/// llama.cpp's `build_pooling` rank branch (`src/llama-graph.cpp:4185-4226`):
+///
+/// ```text
+/// h = row 0 of the last layer (or the mean, `bert.classifier.pooling_type = 1`)
+/// if cls:      h = cls.weight · h + cls.bias; h = activation(h)   // tanh, gelu, silu
+/// if cls.out:  y = cls.out.weight · h + cls.out.bias
+/// ```
+///
+/// The matrices go through [`Mat`], the engine's defined float/int8 chain, so an F32 file's
+/// head row is bit for bit the engine's.
+pub fn reference_head(model: &Model, tokens: &[u32]) -> Vec<f32> {
+    let g = model.gguf();
+    let dm = model.cfg.d_model;
+    let hidden = hidden_rows(model, tokens);
+    // `classifier.pooling_type = 1` is the mean; anything else is row 0.
+    let mut h = if g.u32("bert.classifier.pooling_type") == Ok(1) {
+        let mut sum = vec![0.0f64; dm];
+        let mut v = vec![0.0f32; dm];
+        peregrine_core::embed::pool_rows_into(&hidden, dm, Pooling::Mean, &mut sum, &mut v);
+        v
+    } else {
+        hidden[..dm].to_vec()
+    };
+    let hw = head_width(g);
+    if g.tensor("cls.weight").is_ok() {
+        let w = mat(g, "cls.weight");
+        let mut out = vec![0.0f32; dm];
+        w.apply(&h, &mut out);
+        if g.tensor("cls.bias").is_ok() {
+            for (o, b) in out.iter_mut().zip(vec_f32(g, "cls.bias")) {
+                *o += b;
+            }
+        }
+        // `classifier.activation`: llama.cpp's default is TANH (`hparams.act_cls`).
+        match g.str("bert.classifier.activation") {
+            Ok("gelu") => peregrine_core::vmath::gelu_erf_rows(&mut out),
+            Ok("silu") => {
+                for v in out.iter_mut() {
+                    *v *= 1.0 / (1.0 + (-*v).exp());
+                }
+            }
+            _ => {
+                // `ggml_vec_tanh_f32` is `tanhf`.
+                for v in out.iter_mut() {
+                    *v = v.tanh();
+                }
+            }
+        }
+        h = out;
+    }
+    if g.tensor("cls.output.weight").is_ok() {
+        let w = mat(g, "cls.output.weight");
+        let mut out = vec![0.0f32; hw];
+        w.apply(&h, &mut out);
+        if g.tensor("cls.output.bias").is_ok() {
+            for (o, b) in out.iter_mut().zip(vec_f32(g, "cls.output.bias")) {
+                *o += b;
+            }
+        }
+        out
+    } else {
+        // A head without `cls.output` is its dense layer's activated output.
+        h[..hw].to_vec()
+    }
+}
+
+/// The width of a synthetic head's row: `cls.output`'s rows, or `d_model` without one.
+fn head_width(g: &Gguf) -> usize {
+    match g.tensor("cls.output.weight") {
+        Ok(t) => t.dims.get(1).copied().unwrap_or(1) as usize,
+        Err(_) => g.tensor("cls.weight").map_or(0, |t| t.dims[0] as usize),
+    }
 }

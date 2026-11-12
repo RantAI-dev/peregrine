@@ -962,7 +962,7 @@ impl Architecture for Gemma3 {
         st: &mut State,
         pool: &Pool,
         texts: &[&[u32]],
-        poolings: &[peregrine_core::embed::Pooling],
+        wants: &[peregrine_core::arch::TextWant],
         stats: &mut StepStats,
     ) -> Result<(), String> {
         let t_fwd = Instant::now();
@@ -1252,10 +1252,16 @@ impl Architecture for Gemma3 {
         for (t, text) in texts.iter().enumerate() {
             let row0 = spans[t].row0;
             let n = text.len();
+            let pooling = match wants[t] {
+                peregrine_core::arch::TextWant::Pooled(p) => p,
+                peregrine_core::arch::TextWant::Head => {
+                    return Err(format!("{} has no classifier head", cfg.arch_name))
+                }
+            };
             peregrine_core::embed::pool_rows_into(
                 &st.hidden[row0 * dm..(row0 + n) * dm],
                 dm,
-                poolings[t],
+                pooling,
                 &mut st.pool_sum,
                 &mut st.xb2[..dm],
             );

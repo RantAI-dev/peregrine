@@ -150,6 +150,10 @@ pub struct State {
     pub label_ids: Vec<u32>,
     /// The head's label entries, one per id in [`State::label_ids`].
     pub label_out: Vec<f32>,
+    /// The classifier head's output rows of one bidirectional pass (S4.6b):
+    /// `[row0][head_width]`, at each text's first row. Empty when the model has no head;
+    /// sized once with the rest of the scratch, so a head pass allocates nothing.
+    pub head_out: Vec<f32>,
 }
 
 impl State {
@@ -259,6 +263,7 @@ impl State {
             label_rows: Vec::new(),
             label_ids: Vec::new(),
             label_out: Vec::new(),
+            head_out: Vec::new(),
         }
     }
 

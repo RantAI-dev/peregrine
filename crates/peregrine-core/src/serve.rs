@@ -182,7 +182,7 @@ type AskedDrafter = Option<(Box<dyn crate::draft::Drafter>, usize)>;
 /// chunks and batched in the same weight passes.
 ///
 /// The enum is the design's `Want` (`docs/design/s4-embeddings-decisions.md` §2.1); the decision
-/// variants (`Choice`, `Head`) arrive with the classifier heads (S4.13).
+/// variants (`Choice`) arrive with the decision models' read-outs (S4.13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Want {
     /// Sample and stream tokens (today's request).
@@ -194,6 +194,9 @@ pub enum Want {
     /// Read the last prompt row's logits at a list of token ids and finish (S4.3): a decision
     /// model's raw score per option.
     Labels,
+    /// Read the classifier head's row for the text and finish (S4.6b): a rerank score or a
+    /// classifier's outputs, one row of `cls`/`cls.output` per text.
+    Head,
 }
 
 impl Want {
@@ -205,11 +208,24 @@ impl Want {
     pub fn is_labels(self) -> bool {
         matches!(self, Want::Labels)
     }
+    /// Whether this slot is the classifier head's read-out.
+    pub fn is_head(self) -> bool {
+        matches!(self, Want::Head)
+    }
     /// The pooling this slot asks for, if it is an embedding slot.
     pub fn pooling(self) -> Option<Pooling> {
         match self {
-            Want::Tokens | Want::Labels => None,
+            Want::Tokens | Want::Labels | Want::Head => None,
             Want::Pooled(p) => Some(p),
+        }
+    }
+    /// What a bidirectional pass reads this slot's text out as: a pooled vector or the head's
+    /// row. `None` for a token or labels slot, which a bidirectional model never admits.
+    pub fn text_want(self) -> Option<crate::arch::TextWant> {
+        match self {
+            Want::Pooled(p) => Some(crate::arch::TextWant::Pooled(p)),
+            Want::Head => Some(crate::arch::TextWant::Head),
+            Want::Tokens | Want::Labels => None,
         }
     }
     /// Whether the slot forwards its whole prompt (a pooled or labels slot) rather than leaving
@@ -342,6 +358,10 @@ pub struct Emission {
     /// A labels slot's answer: the last prompt row's logits at the slot's label token ids, in
     /// that order. `None` for every other slot. Set once, on the slot's only emission.
     pub label_logits: Option<Vec<f32>>,
+    /// A head slot's answer (S4.6b): the classifier head's row for the text, as wide as the
+    /// file's head (`cls.output`'s rows, or `d_model` for a one-layer head). `None` for every
+    /// other slot. Set once, on the slot's only emission.
+    pub head: Option<Vec<f32>>,
 }
 
 /// A request's handle while it is being served.
@@ -437,7 +457,7 @@ impl Slot {
         }
         let full = match self.want {
             Want::Tokens => self.prompt.len() - 1,
-            Want::Pooled(_) | Want::Labels => self.prompt.len(),
+            Want::Pooled(_) | Want::Labels | Want::Head => self.prompt.len(),
         };
         if self.fed < self.fork_at {
             self.fork_at
@@ -520,9 +540,12 @@ pub fn chat_prompt(
 /// Several users, one model, one weight pass per step.
 pub struct Engine {
     model: Arc<Model>,
-    pool: Pool,
+    /// The worker pool; `Arc` so several engines in one process can share it (S4.10).
+    /// A shared pool is still run by one caller at a time, which the server's
+    /// `PassTurn` guarantees.
+    pool: Arc<Pool>,
     // the narrower pool for one-row steps (`pool::narrow_pool`); None: use `pool`.
-    pool1: Option<Pool>,
+    pool1: Option<Arc<Pool>>,
     state: State,
     slots: Vec<Slot>,
     max_slots: usize,
@@ -644,6 +667,34 @@ impl Engine {
             prefill_chunk(threads),
             wide_prefill_chunk(threads),
             None,
+            None,
+        )
+    }
+
+    /// The engine with the process's pools (S4.10), and otherwise the defaults of [`Engine::new`].
+    ///
+    /// Only one engine may be inside `step` at a time when the pools are shared; the
+    /// server's `PassTurn` guarantees that.
+    pub fn new_with_pools(
+        model: Arc<Model>,
+        threads: usize,
+        max_ctx: usize,
+        max_slots: usize,
+        kv_prec: KvPrec,
+        prefix_cache_bytes: usize,
+        pools: (Arc<Pool>, Option<Arc<Pool>>),
+    ) -> Engine {
+        Self::build(
+            model,
+            threads,
+            max_ctx,
+            max_slots,
+            kv_prec,
+            prefix_cache_bytes,
+            prefill_chunk(threads),
+            wide_prefill_chunk(threads),
+            None,
+            Some(pools),
         )
     }
 
@@ -703,6 +754,7 @@ impl Engine {
             prefill_chunk,
             prefill_chunk,
             pass_rows,
+            None,
         )
     }
 
@@ -735,6 +787,7 @@ impl Engine {
             prefill_chunk,
             wide_chunk.max(prefill_chunk),
             pass_rows,
+            None,
         )
     }
 
@@ -749,6 +802,7 @@ impl Engine {
         prefill_chunk: usize,
         wide_chunk: usize,
         pass_rows: Option<usize>,
+        pools: Option<(Arc<Pool>, Option<Arc<Pool>>)>,
     ) -> Engine {
         let c = model.cfg;
         let max_slots = max_slots.max(1);
@@ -810,7 +864,17 @@ impl Engine {
         } else {
             max_slots
         };
-        let mut state = model.new_state(max_batch, max_logit_rows, max_ctx, threads);
+        // The pools: this engine's own, or the process's shared pair (S4.10). The sampler
+        // scratch is indexed by the pool's worker number, so its width, not `threads`,
+        // decides how many there are.
+        let (pool, pool1) = match pools {
+            Some((p, n)) => (p, n),
+            None => (
+                Arc::new(Pool::new(threads)),
+                crate::pool::narrow_pool(threads).map(Arc::new),
+            ),
+        };
+        let mut state = model.new_state(max_batch, max_logit_rows, max_ctx, pool.width());
         // A pooled slot asks for every row's final hidden state, and a decode step must not allocate:
         // the buffer is sized once, here. (The hybrid family resizes it per forward, which keeps
         // the capacity.)
@@ -832,8 +896,8 @@ impl Engine {
             last_step: StepReport::default(),
             kept: None,
             model,
-            pool: Pool::new(threads),
-            pool1: crate::pool::narrow_pool(threads),
+            pool: pool.clone(),
+            pool1: pool1.clone(),
             state,
             slots: Vec::with_capacity(max_slots),
             max_slots,
@@ -849,7 +913,7 @@ impl Engine {
             decode_steps: 0,
             decode_rows: 0,
             tap_layers: Vec::new(),
-            samps: (0..threads.max(1))
+            samps: (0..pool.width())
                 .map(|_| std::sync::Mutex::new(crate::sample::Scratch::default()))
                 .collect(),
             // The engine's own drafter needs the MTP feature; without it the
@@ -1045,6 +1109,20 @@ impl Engine {
         self.admit_inner(prompt, cfg, Want::Labels, None, labels, None)
     }
 
+    /// Admit a classifier-head read-out (S4.6b): a rerank pair or a classifier's text. The slot
+    /// is prefilled like a pooled slot and finishes when its last prompt row is computed; its
+    /// emission's `head` holds the head's row for the text (`cls` → activation → `cls.output`).
+    ///
+    /// A file without a head is refused by name, and so is a causal model: the head is the
+    /// bidirectional encoder's read-out.
+    pub fn admit_head(
+        &mut self,
+        prompt: Vec<u32>,
+        cfg: SlotCfg,
+    ) -> Result<SlotId, (Vec<u32>, String)> {
+        self.admit_inner(prompt, cfg, Want::Head, None, Vec::new(), None)
+    }
+
     /// Admit a decision request's questions as one group (S4.9j): the longest common beginning of
     /// their prompts is forwarded **once**, in the first question's slot, and its state is copied
     /// into every other question's slot at that position. Each then forwards only its own tail, and
@@ -1214,7 +1292,7 @@ impl Engine {
 
     /// The narrow pool for one-row steps, when there is one.
     pub fn narrow_pool(&self) -> Option<&Pool> {
-        self.pool1.as_ref()
+        self.pool1.as_deref()
     }
 
     /// Refuse a request: the caller's cache goes back to it, held until the
@@ -1264,6 +1342,22 @@ impl Engine {
         if let Want::Pooled(Pooling::Cls) = want {
             if !bidirectional {
                 return Err("cls pooling is not implemented for causal models".into());
+            }
+        }
+        // A head slot reads the classifier head's row: it needs a file that has a head, and a
+        // bidirectional pass to compute the row in (S4.6b).
+        if want.is_head() {
+            if !bidirectional {
+                return Err(format!(
+                    "{} is a causal model: its classifier head is not served yet",
+                    self.model.cfg.arch_name
+                ));
+            }
+            if !self.model.has_head() {
+                return Err(format!(
+                    "{} has no classifier head (cls / cls.output), so it cannot rerank or classify",
+                    self.model.cfg.arch_name
+                ));
             }
         }
         if want.is_labels() {
@@ -1383,9 +1477,10 @@ impl Engine {
             // S4.9j: a group's follower forwards nothing of its own: its leader forwards the shared
             // beginning and the state is copied in at `fork_at`.
             0
-        } else if asked.is_some() || matches!(want, Want::Pooled(_)) {
-            // A pooled slot starts at position 0: `Mean` needs every row of the text, and a
-            // restored prefix would leave its rows uncomputed.
+        } else if asked.is_some() || matches!(want, Want::Pooled(_) | Want::Head) {
+            // A pooled or head slot starts at position 0: `Mean` needs every row of the text,
+            // and a head reads row 0 of the text (or its mean), so a restored prefix would
+            // leave rows uncomputed.
             //
             // S4.3: a labels slot does consult the prefix store below. It reads only its final
             // row, and the store restores the cache's own bytes, so the rows a sibling question
@@ -1910,6 +2005,7 @@ impl Engine {
                         cost: None,
                         embedding: None,
                         label_logits: None,
+                        head: None,
                     }]
                 }
             };
@@ -1952,6 +2048,7 @@ impl Engine {
                         cost: None,
                         embedding: None,
                         label_logits: None,
+                        head: None,
                     }];
                 }
                 chosen.push((i, 0, n));
@@ -1970,23 +2067,19 @@ impl Engine {
             .iter()
             .map(|&(i, _, _)| self.slots[i].prompt.as_slice())
             .collect();
-        let poolings: Vec<Pooling> = chosen
+        let wants: Vec<crate::arch::TextWant> = chosen
             .iter()
             .map(|&(i, _, _)| {
                 self.slots[i]
                     .want
-                    .pooling()
-                    .expect("only pooled slots reach a bidirectional step")
+                    .text_want()
+                    .expect("only pooled and head slots reach a bidirectional step")
             })
             .collect();
         self.state.want_hidden = true;
-        let r = self.model.forward_texts(
-            &mut self.state,
-            &self.pool,
-            &texts,
-            &poolings,
-            &mut self.stats,
-        );
+        let r =
+            self.model
+                .forward_texts(&mut self.state, &self.pool, &texts, &wants, &mut self.stats);
         self.state.want_hidden = false;
         let secs = t0.elapsed().as_secs_f64();
         if let Err(e) = r {
@@ -2002,15 +2095,26 @@ impl Engine {
                     cost: None,
                     embedding: None,
                     label_logits: None,
+                    head: None,
                 })
                 .collect();
             self.slots.retain(|s| !ids.contains(&s.id));
             return out;
         }
         let dm = self.model.cfg.d_model;
+        let hw = self.model.head_width();
         let mut out = Vec::with_capacity(chosen.len());
         for &(i, row0, n) in &chosen {
-            let vector = self.state.hidden[row0 * dm..(row0 + 1) * dm].to_vec();
+            let head = if self.slots[i].want.is_head() {
+                Some(self.state.head_out[row0 * hw..(row0 + 1) * hw].to_vec())
+            } else {
+                None
+            };
+            let vector = if head.is_some() {
+                None
+            } else {
+                Some(self.state.hidden[row0 * dm..(row0 + 1) * dm].to_vec())
+            };
             let s = &mut self.slots[i];
             s.fed = n;
             s.prefilled = n;
@@ -2029,8 +2133,9 @@ impl Engine {
                     prefill_s: s.prefill_s,
                     decode_s: 0.0,
                 }),
-                embedding: Some(vector),
+                embedding: vector,
                 label_logits: None,
+                head,
             });
         }
         self.reap(&out);
@@ -2222,6 +2327,7 @@ impl Engine {
                     cost: None,
                     embedding: None,
                     label_logits: None,
+                    head: None,
                 })
                 .collect();
             self.slots.clear();
@@ -2309,6 +2415,7 @@ impl Engine {
                 }),
                 embedding: vector,
                 label_logits,
+                head: None,
             });
         }
         // S4.9j: a group's leader may have just reached the shared beginning's end; the other
@@ -2444,6 +2551,7 @@ impl Engine {
                     }),
                     embedding: vector,
                     label_logits,
+                    head: None,
                 });
             }
         }
@@ -2517,6 +2625,7 @@ impl Engine {
                     cost: None,
                     embedding: None,
                     label_logits: None,
+                    head: None,
                 })
                 .collect();
             self.slots.clear();
@@ -2677,6 +2786,7 @@ impl Engine {
             cost,
             embedding: None,
             label_logits: None,
+            head: None,
         }
     }
 
@@ -2924,6 +3034,7 @@ impl Engine {
                 cost: None,
                 embedding: None,
                 label_logits: None,
+                head: None,
             }];
         }
         // What the pass cost is what the model measures.

@@ -23,8 +23,9 @@ All notable changes to this project are documented here. The format follows
   hash), and no existing golden moved. On the ARM host (10 threads, nine interleaved
   rounds, medians) the family's throughput is unchanged within the run spread — 0.990–1.002
   of the before build — because the element-wise work is about 1 % of a pass beside the
-  matrices; against llama.cpp v0.9.0 `cd959ba` gte-modernbert-base is 1.09× at 16 tokens and
-  0.87–0.94× from 128 tokens up in Q8_0, and 1.15–1.56× in F16. The vectors agree to cosine
+  matrices; against llama.cpp v0.9.0 `cd959ba` gte-modernbert-base is 1.09× at 16 tokens,
+  0.87–0.94× from 128 tokens up and 0.77× on a batch of 16 short texts in Q8_0 (the int8
+  tiers' Q8_0 path is the slow one: the same file in F16 is 1.15–1.56× llama.cpp). The vectors agree to cosine
   0.99978 (Q8_0) and 0.9999999 (F16). See
   `benchmarks/results/spark-arm-2026-11-12-modern-bert/README.md`.
 
@@ -64,6 +65,24 @@ All notable changes to this project are documented here. The format follows
   `crates/peregrine-models/tests/fixtures/modern-bert/`.
 
 ### Changed
+
+- **AVX2 bodies for the modern-bert element-wise kernels (S4.9n).** `geglu_erf` and
+  `layer_norm_rows_nobias` were the ModernBERT family's two scalar-only kernels; both now have an
+  AVX2+FMA body that is `to_bits` equal to its scalar twin, so no golden moved on any tier.
+  `geglu_erf` runs sixteen elements per step through the same erf-GELU body `gelu_erf_rows` uses
+  and then the one multiply by the second half; its tail goes through the scalar `gelu_erf`, which
+  is itself bit-identical to the vector `erf`. `layer_norm_rows_nobias` normalises eight rows per
+  step through the bias form's `f64` reduction and ends in one multiply by the weight and no add,
+  so a `-0.0` product stays negative. New tests compare the scalar and dispatched outputs bit for
+  bit at lengths 0, 1, 7, 8, 9, 15, 16, 17, 31, 33, 768, 1152 and 2304, on ±0, subnormals,
+  ±1e30, ±inf and NaN, over a 200 000-value sweep of [-12, 12], and for the norm on several
+  batches, an all-`-0.0` row, a constant row, width 768 and widths that are not a multiple of
+  eight. At ModernBERT-base's 512-token shape the two kernels go 187.9 → 126.9 ms on one thread
+  (1.48×; `geglu_erf` 140.1 → 94.1, the norm 47.3 → 30.6), 5.2 → 3.5 % of a single-thread pass.
+  End to end with 4 threads on a shared, loaded 8-vCPU Xeon the medians move by 1.7 % at 16
+  tokens, 2.9 % at 512 and 0.8 % at 128, and the 16-text batch cell is inside the noise (the
+  per-run spread reaches 2×); single-thread at 512 tokens is 3630 → 3574 ms, 2.4 %, which is the
+  3 % the isolated kernel time predicts. See `docs/design/s4.9-sota.md` §16.
 
 - **The Q4_K kernel is at the machine's byte-dot roof, and the fork's is not faster (S5.1b).** This
   item was "rebuild the Q4_K kernel with ik_llama.cpp's instruction mix at 120 GMAC/s per core".
@@ -153,6 +172,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Rerank and classify: the bert family's classifier head (S4.6b)**: a `bert` file's head —
+  `cls` (dense), `cls.bias`, `cls.output` (one row per output, written 1-d for a reranker),
+  `classifier.output_labels`, `classifier.activation` (tanh, gelu or silu) and
+  `classifier.pooling_type` (row 0 or mean) — is read and computed after the last layer, from
+  llama.cpp v0.9.0's `build_pooling` rank branch; the file's own `<arch>.pooling_type` does not
+  have to be `4`, because llama.cpp's converter never writes that for a `bert` file (llama-server
+  is told `--reranking`). A new `Want::Head` slot is one `TextWant::Head` text of a bidirectional
+  pass; its row is bit-identical alone, batched, at any pass size and thread count, and the head's
+  two projections are part of the no-allocation pass. `POST /v1/rerank` (also `/rerank`,
+  `/v1/reranking`, `/reranking`, as llama.cpp serves it) takes `query`, `documents` (strings or
+  `{"text": …}` objects), `top_n`, `return_documents`, `truncate`; each pair is one text built with
+  llama.cpp's `format_prompt_rerank` rule (`[CLS] q [SEP] d`, `<s> q </s> d </s>`), and the score
+  is the head's raw logit, sorted descending, in llama.cpp's response shape. `POST /v1/classify`
+  answers one entry per input with every label's probability (softmax; a sigmoid for a one-output
+  head that names its label) and the top label. `peregrine rerank` ranks documents on the command
+  line, and `/v1/models` reports `["rerank"]` or `["classify"]`. Checked against llama.cpp v0.9.0
+  on bge-reranker-v2-m3 Q8_0 and bge-reranker-base Q8_0, 320 (query, document) pairs in eight
+  languages: pair token ids identical, document order identical, scores 0.0107 and 0.0103 mean
+  apart — less than each engine's own Q8_0 distance from its FP16 run (0.0158), because llama.cpp's
+  GELU is the tanh approximation through f16 and this family's is exact. Rerank throughput at 4
+  threads: level with llama.cpp at 123-token pairs, 5-6 % ahead at 449-token ones. The synthetic
+  `bert` head files have new goldens on the scalar, AVX2 and AVX-512-under-SDE tiers; there is no
+  aarch64 golden yet. See `docs/reference/bert.md` and `docs/design/s4-embeddings-decisions.md` §8.
 - **Tool calling on the chat endpoint (S6.3)**: `POST /v1/chat/completions` reads OpenAI's `tools`,
   `tool_choice` and `parallel_tool_calls`, conversations with assistant `tool_calls` and `tool`
   messages, and answers with `message.tool_calls` and `finish_reason: "tool_calls"`, streamed or
@@ -262,6 +304,27 @@ All notable changes to this project are documented here. The format follows
   over pass budgets, thread counts and admission orders; tier goldens on scalar, AVX2 and AVX-512
   (under SDE); no-allocation coverage; and the ignored real-file gate with llama.cpp's token ids
   and vectors in `crates/peregrine-models/tests/fixtures/nemotron/`. No existing golden moves.
+- **Several models in one server (S4.10)**: `peregrine serve -m a.gguf -m b.gguf -m c.gguf` loads
+  every file at start and serves each as its own model, with its own `Engine` (slots, scheduler,
+  admission, prefix store) and its own id on `/v1/models`. A request's `model` field selects one;
+  an absent or empty field goes to the first `-m`; with several models an unknown id is
+  OpenAI's 404 (`code: model_not_found`). With one `-m` the id is still `peregrine` and the
+  model is served whatever `model` a request names, so a single-model server is unchanged.
+  `/v1/rerank` and `/v1/classify` are routed like the other endpoints. With several, a file without `--alias` is named by its stem, and `--alias` may be
+  repeated one per `-m` in order; equal ids are refused at startup. Each endpoint keeps its
+  existing refusal for something a model cannot do (chat on an encoder, embeddings on a file
+  with no pooling type, `/v1/systemone` on a model that is not a decision model), for the model
+  the request named. `/metrics` keeps its unlabelled lines for the first model and adds
+  `peregrine_model_*{model="<id>"}` lines for every model, plus `peregrine_pass_turns_total` and
+  `peregrine_pass_holders_max`.
+  The engines share one process-wide pool, and a `PassTurn` lets one `Engine::step` run at a time.
+  The next turn goes to the busy engine that has had the least pass time (arrival order breaks
+  ties), so passes interleave and a model with sub-millisecond passes still gets its share instead
+  of one pass per long chat pass; a waiting model waits at most about one pass. A long chat
+  prefill cannot hold an embedding behind it, the machine never carries more than one pass's
+  threads, and a request's output is bit-identical to a single-model server's — greedy chat
+  tokens, embedding vectors and decision answers are tested against one-model servers while all
+  models are busy. The drain timeout and `peregrine stop` cover every engine.
 
 - **The packed float GEMM and the encoder attention strip on aarch64 (S4.9f, S4.9g)**: the float
   F32/F16/BF16 matrices now go through the packed 16-output panels on ARM too, with a NEON kernel

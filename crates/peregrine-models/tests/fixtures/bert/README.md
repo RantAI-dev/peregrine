@@ -22,3 +22,44 @@ checkpoints (`sentence-transformers/all-MiniLM-L6-v2`, `BAAI/bge-small-en-v1.5`,
 truncates the long texts and is not the comparison.
 
 `*.f32` is little-endian f32, one vector after another, `texts.txt`'s order.
+
+## The rerank pairs (S4.6b)
+
+`rerank/` holds one fixed set of (query, document) pairs and, per reranker file, llama.cpp's
+own pair encoding and its `/v1/rerank` scores. `crates/peregrine-models/tests/rerank_real.rs`
+runs them when the GGUF files are on the machine (the test is `#[ignore]`d: CI has none).
+
+| Fixture | Contents |
+|---|---|
+| `rerank/texts.tsv` | 320 pairs: 40 queries of eight documents, backslash-escaped, `query<TAB>document` |
+| `rerank/v2_m3.ids` | llama.cpp's `format_prompt_rerank` ids for each pair (a list per line) |
+| `rerank/v2_m3_q8_0_llama.f32` | llama.cpp's score per pair on the Q8_0 file, little-endian f32 |
+| `rerank/v2_m3_fp16_llama.f32` | the same pairs on the FP16 conversion |
+| `rerank/base.ids`, `rerank/base_q8_0_llama.f32` | the second reranker's ids and scores; one pair is past its 512-token table and is stored as NaN |
+
+The queries are five each in English, Chinese, French, German, Spanish, Russian, Arabic and
+Japanese. A query's eight documents are the right answer and a wrong one in the query's language,
+four medium English passages, and two English passages from `texts.txt` — so a set mixes scripts
+and lengths from 3 to 428 tokens.
+
+| File | Repo | SHA-256 |
+|---|---|---|
+| `bge-reranker-v2-m3-Q8_0.gguf` | `gpustack/bge-reranker-v2-m3-GGUF` | `a43c7c9b11a4c1517e5bf95151960e1621d1b72f7a493364b01e386cf1aaa1d3` |
+| `bge-reranker-v2-m3-FP16.gguf` (reference only) | same | `5df93be121c09c43432102ad2b9569d369ccb85c209ca7583e8ccd28f0e41b88` |
+| `bge-reranker-base-q8_0.gguf` | `xinming0111/bge-reranker-base-Q8_0-GGUF` | `4bf3f9269c55954a5ad4d9e0e7fb05b448cb1053818170f497242ff760fd46bb` |
+
+The scores come from `llama-server --reranking` at v0.9.0 (`cd959ba`), one request per query
+(one per pair for the 512-token file), and the ids from `scripts/tokenizer-pair-oracle.cpp`,
+which calls llama.cpp's `format_prompt_rerank` rather than re-implementing it. Regenerate with:
+
+```text
+python3 scripts/rerank-fixtures.py --pairs /tmp/pairoracle \
+    --base-url http://127.0.0.1:18111 --model bge-reranker-v2-m3-Q8_0.gguf \
+    --out crates/peregrine-models/tests/fixtures/bert/rerank \
+    --ids v2_m3.ids --scores v2_m3_q8_0_llama.f32
+```
+
+The head of a `bert` reranker has no published WordPiece file: `bge-reranker-v2-m3` and
+`bge-reranker-base` are both XLM-R (unigram). WordPiece pair encoding is pinned by the pair files
+of `crates/peregrine-core/tests/fixtures/tokenize-golden-wpm-*-pair.tsv` and by the synthetic
+WordPiece head model instead.

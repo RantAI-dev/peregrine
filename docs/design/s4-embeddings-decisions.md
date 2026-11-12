@@ -84,8 +84,8 @@ what it asks for at the end:
 pub enum Want {
     Tokens,                         // today: sample and stream
     Pooled(Pooling),                // an embedding: Last | Mean | Cls, then the model's own head
-    Labels { ids: Vec<u32> },       // a decision: the last row's logits at these label tokens
-    Head,                           // a classifier or decision head's outputs
+    Labels,                         // a decision: the last row's logits at these label tokens
+    Head,                           // a classifier head's row for the text (S4.6b)
 }
 ```
 
@@ -129,8 +129,13 @@ mean, one f32 rounding at the end).
   then optional truncation to `dimensions` (Matryoshka), then L2 normalisation. Truncate, then
   normalise.
 - Classifier head *(transcribe per family)*: `cls` (dense + activation) and `cls.output`, giving one
-  logit (a reranker; the score is the sigmoid) or one per label (`classifier.output_labels`; the
-  scores are the softmax, or sigmoids when the file says multi-label).
+  logit (a reranker) or one per label (`classifier.output_labels`).
+  **As built (S4.6b)**: the reranker's `relevance_score` is that raw logit, because that is what
+  llama.cpp returns (`send_rerank` reads `embd[0]`; the earlier note said sigmoid, which no
+  llama.cpp path applies for `bert`); a classifier's scores are the softmax of the head's outputs,
+  and the sigmoid only when the file has one output and names its label. The head's activation is
+  the file's `classifier.activation` (tanh unless it says gelu or silu), and its pool is row 0
+  unless `classifier.pooling_type = 1` (mean).
 
 ### 2.5 System One decisions
 
@@ -234,7 +239,11 @@ Shapes follow what clients already speak; unknown fields are rejected, as in cha
   truncation; `truncate: true` opts into truncation.
 - `POST /v1/rerank` (Jina / Cohere shape, also served at `/rerank`): `query`, `documents`, `top_n`,
   `return_documents`; `results: [{index, relevance_score}]` sorted by score.
-- `POST /v1/classify`: `input` (string or array); `results: [{label, score, scores: {label: p}}]`.
+- `POST /v1/classify`: `input` (string or array); `results: [{index, label, score, scores:
+  {label: p}}]`, in input order — `label` is the most likely label, `score` its probability and
+  `scores` every label's (the softmax of the head's outputs; a sigmoid when a one-output head names
+  its label). A head with several outputs and no labels is served as `LABEL_0`, `LABEL_1`, …; a
+  one-output head with no labels is a reranker and is refused here by name.
 - `POST /v1/systemone` (TypeSafe / llama.cpp shape): `state` (string, object or array; a
   non-string is given to the model as JSON text), `questions` (id → `{type, instructions,
   criteria}`); response `{model, answers: {id: {...}}, usage: {input_tokens, output_tokens: 0}}`
@@ -319,7 +328,17 @@ A model is listed when, on the same file:
    1e-2 of `llama-server`'s on the same file (measured on the tiny test file: 2.5e-3 at most,
    about the size of the difference between Peregrine's own kernel paths) (first on `ggml-org/tinyopenjev-for-testing-gguf`, the file
    llama.cpp's own tests use, then on each real model listed); the chosen option identical except
-   at near-ties; rerank scores within 1e-3; classifier label argmax identical except at near-ties.
+   at near-ties; classifier label argmax identical except at near-ties.
+   **Rerank, as built (S4.6b)**: 1e-3 was an F16-class number and no Q8_0 encoder can hold it, by
+   either engine. On 320 pairs the two engines' Q8_0 scores differ by 0.0107 mean / 0.186 max,
+   while each engine's *own* Q8_0 scores are 0.0158 (llama.cpp, max 0.222) and 0.0174 (Peregrine,
+   max 0.282) from its FP16 run: the quantisation moves the scores further than the engines differ.
+   At the same precision (FP16 vs FP16) the difference is 0.0047 mean / 0.0688 max, and it is one
+   thing — llama.cpp's GELU is the tanh approximation through an f16 table, ours is the exact erf
+   form (ADR 0003) — because substituting llama.cpp's own GELU into our pass brings it to 0.00056
+   mean / 0.0067 max. The gate for this family is therefore: pair token ids identical, document
+   order identical outside near-ties (scores within 1e-2), and scores within the measured 2e-2
+   mean, 0.3 max.
 5. **Invariance** (§2.3): bit-identical alone and batched, on every kernel tier, with goldens.
 
 Synthetic encoders (tiny random `bert`, `modern-bert`, `gemma-embedding` files with every head)
@@ -336,7 +355,8 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.3 | System One, part 1: decision metadata, `/v1/systemone`, the answer math, `Want::Labels`, the state fork, the **openjev** renderer; parity with `llama-server` on the tinyopenjev test file. Then the other label-logit types, one renderer each: **lev** (two-variant choice, 9-point noul), **nimble**, **pplx-decider**, **h2o-lightning** | S4.1 |
 | S4.4 | Bidirectional forward (§2.2) and `gemma-embedding`: EmbeddingGemma 300M | S4.1 |
 | S4.5 | WordPiece and unigram tokenizers against `llama-tokenize` | |
-| S4.6 | `bert` family and the `cls` head: MiniLM, bge, e5, bge-m3; bge-reranker-v2-m3 on `/v1/rerank`; `/v1/classify` | S4.4, S4.5 |
+| S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
+| S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
 | S4.7 | `modern-bert` and labelled classifier heads. **Part a done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; a classifier head is read and ignored until S4.6b serves heads | S4.6 |
 | S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3` | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
@@ -361,5 +381,94 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
    llama.cpp computes them, so a client gets the same numbers from either engine.
 6. **No Jinja engine.** A decision type is supported when its renderer is written and matches
    llama.cpp byte for byte on the fixtures; an unknown type or an unrecognised template is refused.
-5. **Multi-model serving is last** (S4.10): every earlier step is useful with one model per
-   process, and it needs a decision on how models share the thread pool.
+5. **Multi-model serving: one engine per model, one pass at a time for the process** (S4.10).
+   `serve -m a -m b` keeps one `Engine` per file — its own slots, scheduler, admission and
+   prefix store — because ADR 0007 makes the engine the only runtime and a model's state must
+   not be shared with another's. The thread pool *is* shared: `Pool` becomes an `Arc` that every
+   engine runs, because `Pool::run` publishes one job at a time and is not meant for two
+   callers anyway, and one pool keeps its workers hot when the turn moves between models
+   instead of parking a pool per switch. A process-wide `PassTurn` is still needed, both to
+   serialise the one pool and to decide who runs: it is held for exactly one `Engine::step`,
+   and the next turn goes to the busy engine that has had the least pass time, with arrival
+   order breaking ties. Passes are tens of milliseconds for the models this is for, so the
+   models interleave pass by pass; on a tiny model whose pass is under a millisecond, the
+   model takes a few passes in a row until it has had its share, rather than one pass per long
+   chat pass. A model waits at most about one pass of the others, so none starves. The cost
+   is one engine thread per model, mostly parked.
+
+## 8. S4.6b as built: the classifier head, rerank and classify
+
+The second half of S4.6 is on top of the family: `crates/peregrine-models/src/bert/mod.rs` reads
+the head (`cls`, `cls.bias`, `cls.output`, `classifier.output_labels`, `classifier.activation`,
+`classifier.pooling_type`) and computes its row after the last layer for the texts that ask for
+it; `Want::Head` is the slot, `Architecture::forward_texts` takes a `TextWant` per text
+(`Pooled` or `Head`), and the row lands in `State::head_out`, sized once with the rest of the
+scratch so a head pass allocates nothing. The head is a property of the tensors, not of
+`<arch>.pooling_type`: llama.cpp's converter never writes `pooling_type = 4` for a `bert` file,
+and llama-server is told `--reranking` instead.
+
+Four decisions the note left open, now settled:
+
+1. **`relevance_score` is the raw logit**, in llama.cpp's shape, at four paths (`/v1/rerank`,
+   `/rerank`, `/v1/reranking`, `/reranking`); `return_documents` adds the text, and `top_n`
+   defaults to every document. The TEI request shape (`texts`) is refused by name: it answers a
+   bare array, a second response shape this step does not need.
+2. **`/v1/classify`** answers one entry per input, in input order, as §3 now states.
+3. **A pair longer than the position table** is refused with the limit, or truncated under
+   `"truncate": true` — the embeddings rule, because a rerank pair is one text.
+4. **A generative reranker's `rerank` chat template** is refused by name; it is a prompt, not a
+   pair, and it is S4.13.
+
+What was measured on bluefin (4 threads): 320 pairs in eight languages, ids identical and order
+identical to llama.cpp for bge-reranker-v2-m3 Q8_0 and bge-reranker-base Q8_0 (the numbers in §5);
+rerank throughput level with llama.cpp at 123-token pairs and 5-6 % ahead at 449-token ones
+(`docs/reference/bert.md`). No published `bert` GGUF with `classifier.output_labels` turned up
+(searches for DistilBERT/XLM-R classifiers found embedding conversions only, whose files carry no
+`cls` tensors), so `/v1/classify` is covered end to end by the synthetic labelled file and the
+server tests, not by a real-file gate.
+
+## 9. S4.10 as built
+
+`serve -m a.gguf -m b.gguf` loads every file at start, each as its own `Engine` on its own
+engine thread. The engine options are process-wide (thread count, pass rows, kernel switches,
+KV precision), and so is the tuning profile lookup, which uses the first `-m`.
+
+**Routing.** A request's `model` field is looked up in the ids `/v1/models` lists. The id of a
+one-model server is still `peregrine`, so `serve -m one.gguf` behaves exactly as before. With
+several `-m`, a file without `--alias` is named by its stem, and `--alias` may be repeated (one
+per `-m`, in order); two equal ids are refused at startup. A request with no `model` (or an
+empty one) goes to the first `-m`, so single-model clients keep working. A server with one
+model serves it whatever `model` says, as before and as llama-server does (OpenAI clients send
+the name they were configured with); with several models an unknown id is a 404 in the OpenAI
+error shape (`type: invalid_request_error`, `code: model_not_found`). `/v1/rerank` and
+`/v1/classify` are routed the same way (S4.6b landed first; a reranker and an embedder can share
+one process). The route
+is chosen before the request is parsed, so each endpoint keeps its existing messages for a
+model that cannot do what is asked: chat on an encoder is a 400 naming it, embeddings on a file
+with no pooling type is a 400 naming the key, and `/v1/systemone` on a model without decision
+metadata is a 501.
+
+**Passes and fairness.** Every engine shares one process-wide pool, and its engine thread takes
+the process-wide `PassTurn` around one `Engine::step`. The next turn goes to the busy engine
+that has had the least pass time, ties in arrival order: an embedding that arrives beside a long
+chat prefill runs after at most the chat pass in flight, not after the whole prefill, and a model
+whose passes are cheap (the tiny decision file's are under a millisecond) still gets about half
+the machine instead of one pass per long chat pass. A model that has been idle may catch up by
+at most about one long pass. `/metrics` reports `peregrine_pass_turns_total` and `peregrine_pass_holders_max`; the
+latter is 1 when the turn is doing its job. The models' outputs do not change: which model runs
+when is timing only, and the tests compare greedy chat tokens, embedding vectors and decision
+answers bit for bit against one-model servers while all models are busy.
+
+**Capabilities and metrics.** `/v1/models` lists every model with the same entry a one-model
+server gives that file. `/metrics` keeps its unlabelled lines for the first model and adds
+`peregrine_model_*{model="<id>"}` lines for every model (slots, requests, passes, decode steps,
+rows, MTP drafts and accepts, and the embedding cache's entries and bytes).
+
+**Memory and the embedding cache.** Every model loads at start; unloading idle models is not
+in this step. The duplicate-text embedding cache (`embed_cache.rs`, keyed by token ids, pooling
+and dimensions) is one cache per model, so one model's vector can never be returned for
+another's; the tests serve two causal embedders with identical tokenizers and different weights
+and compare each one's vector with its one-model server.
+
+**Shutdown.** The drain timeout is the process's: SIGTERM stops accepting, lets the requests
+in flight on every engine finish, then exits. `peregrine stop` and `--background` are unchanged.

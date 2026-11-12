@@ -28,7 +28,11 @@
 //!   ends before the sequence, streaming holds back a suffix that could still become one, and the
 //!   match is per request, so it cannot affect another user in the same batched pass.
 //!
-//! One session per process (one stream at a time; requests queue): run one process per model, as with llama-server.
+//! `-m` may be repeated: every file is one model in the same process, with its own `Engine`
+//! (its own slots, scheduler and admission) and its own `/v1/models` id. A request's `model`
+//! field selects one (an absent field selects the first), and a process-wide turn lets one
+//! model's thread pool run one pass at a time, so the models interleave pass by pass instead
+//! of competing for the cores (S4.10).
 use axum::{
     extract::{FromRequest, Request, State},
     http::{header, StatusCode},
@@ -66,16 +70,19 @@ use stop::StopMatcher;
 #[command(about = "Serve a GGUF model with Peregrine behind the OpenAI chat API")]
 pub struct Args {
     /// The GGUF file (llama, qwen2 or qwen3; F32/F16/Q8_0/Q5_0/Q4_K/Q6_K tensors), or
-    /// `hf:<namespace>/<repo>/<file>[@<rev>]` to download it into the cache once.
-    #[arg(short = 'm', long)]
-    pub model: std::path::PathBuf,
+    /// `hf:<namespace>/<repo>/<file>[@<rev>]` to download it into the cache once. Repeatable:
+    /// each file is one model in the same process, served on every endpoint it supports.
+    #[arg(short = 'm', long, required = true)]
+    pub model: Vec<std::path::PathBuf>,
     /// An engine option, as `NAME=VALUE` with the name of its `PEREGRINE_<NAME>` variable (for example
     /// `--opt MTP=0`). Overrides the environment; repeatable. Every option is listed at startup.
     #[arg(long = "opt", value_name = "NAME=VALUE")]
     pub opts: Vec<String>,
-    /// The model id reported by /v1/models and expected in requests (any id is accepted).
-    #[arg(long, default_value = "peregrine")]
-    pub alias: String,
+    /// The model id reported by /v1/models and expected in requests, one per `-m` in the same order.
+    /// The default is `peregrine` for a one-model server and the file's stem when several `-m`
+    /// are given (two files with the same stem need an explicit `--alias`).
+    #[arg(long = "alias", value_name = "ID")]
+    pub alias: Vec<String>,
     /// The chat template to use, by name (chatml, llama3, qwen3, gemma, mistral-v0,
     /// mistral-v1, mistral-v7, llama2, llama2-sys-bos). It overrides the template the
     /// file declares; a file that declares none needs it, since a model prompted in
@@ -142,10 +149,10 @@ pub struct Args {
     pub log_file: Option<std::path::PathBuf>,
 }
 
-struct App {
-    /// `/metrics` lines naming every engine option (`peregrine_option{name,value} 1`).
-    option_metrics: String,
-    /// The engine thread's queue: every request is served there, several at a time.
+/// Everything one served model owns: its engine thread, its queue and what a request
+/// routes to. One of these per `-m`; the [`App`] around them holds what the process shares.
+struct Served {
+    /// The engine thread's queue: every request for this model is served there, several at a time.
     jobs: std::sync::mpsc::Sender<EngineMsg>,
     engine: Arc<EngineShared>,
     model: Arc<Model>,
@@ -171,25 +178,37 @@ struct App {
     decider: Option<Decider>,
     think_open: Option<u32>,
     think_close: Option<u32>,
-    /// The server's default reasoning format, overridden by a request's `reasoning_format`.
-    reasoning_format: ReasoningFormat,
-    /// Requests being served or waiting (llama-server's `requests_processing`).
+    /// Requests being served or waiting for this model (llama-server's `requests_processing`).
     busy: AtomicUsize,
     requests: AtomicU64,
     tokens: AtomicU64,
-    started: Instant,
-    simd: &'static str,
-    /// The kernel tier the run takes, reported beside `simd` so a manifest names
-    /// the kernels that ran rather than the build's instruction-set baseline.
-    simd_tier: String,
     /// "dense" or "littlebit", reported in every response's timings.
     weights: &'static str,
 }
 
+struct App {
+    /// The models, in command-line order. The first is the default for a request with no `model`.
+    models: Vec<Arc<Served>>,
+    /// Model id to index in `models`.
+    by_id: HashMap<String, usize>,
+    /// the index of the first `-m`.
+    default: usize,
+    /// `/metrics` lines naming every engine option (`peregrine_option{name,value} 1`).
+    option_metrics: String,
+    /// The server's default reasoning format, overridden by a request's `reasoning_format`.
+    reasoning_format: ReasoningFormat,
+    /// The process-wide turn one pass at a time takes; see [`peregrine_core::pool::PassTurn`].
+    turn: Arc<peregrine_core::pool::PassTurn>,
+    started: Instant,
+}
+
 /// Run the server until it is stopped. Logging must already be set up (see [`init_logging`]).
 pub async fn run(a: Args) {
+    // Engine options are process-wide (one thread count, one pass budget, one set of
+    // kernel switches), so a default tuning profile is looked up for the first model.
+    let first = &a.model[0];
     let (profile, prof_msg) =
-        peregrine_core::profile::resolve(&a.model, a.profile.as_deref(), a.no_profile);
+        peregrine_core::profile::resolve(first, a.profile.as_deref(), a.no_profile);
     println!("{prof_msg}");
     let opts = match engine_options(&a.opts, profile.as_ref()) {
         Ok(o) => {
@@ -198,7 +217,7 @@ pub async fn run(a: Args) {
                     .profile
                     .as_deref()
                     .map(|p| p.to_path_buf())
-                    .or_else(|| peregrine_core::profile::default_path(&a.model).ok());
+                    .or_else(|| peregrine_core::profile::default_path(first).ok());
                 if let Some(p) = p_path {
                     let dt = o
                         .decode_threads
@@ -248,8 +267,7 @@ pub async fn run(a: Args) {
     let threads = a
         .threads
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
-    let t0 = Instant::now();
-    // The chat template: the one the caller named, else the one the file declares.
+    // The chat template: the one the caller named, else the one each file declares.
     let chosen = match a.chat_template.as_deref() {
         Some(name) => match Template::from_name(name) {
             Some(t) => Some(t),
@@ -263,39 +281,6 @@ pub async fn run(a: Args) {
         },
         None => None,
     };
-    let gguf = match peregrine_core::gguf::Gguf::open(&a.model).and_then(|g| {
-        peregrine_models::check_compatible_with(&g, chosen)?;
-        Ok(g)
-    }) {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("cannot open {}: {e}", a.model.display());
-            std::process::exit(2);
-        }
-    };
-    let model = match peregrine_models::keep::open_with_template(&a.model, a.littlebit, chosen) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("cannot open {}: {e}", a.model.display());
-            std::process::exit(2);
-        }
-    };
-    // An embedding-only model has no chat template and needs none: it serves
-    // `/v1/embeddings` and refuses generation (design §3). The placeholder is never
-    // rendered because `chat` answers 400 before it.
-    let template = match chosen {
-        Some(t) => t,
-        None if model.causality() == peregrine_core::arch::Causality::Bidirectional => {
-            Template::ChatMl
-        }
-        None => match Template::detect(&gguf) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("cannot serve {}: {e}", a.model.display());
-                std::process::exit(2);
-            }
-        },
-    };
     let kv_prec = match a.kv.as_deref() {
         Some(s) => match peregrine_core::kv::KvPrec::parse(s) {
             Some(p) => p,
@@ -307,7 +292,6 @@ pub async fn run(a: Args) {
         // No `--kv`: the environment decides (`PEREGRINE_KV`), else f16.
         None => peregrine_core::options::get().kv_prec,
     };
-    let max_ctx = a.ctx.clamp(32, model.cfg.ctx_train);
     let reasoning_format = match ReasoningFormat::parse(&a.reasoning_format) {
         Some(f) => f,
         None => {
@@ -318,106 +302,175 @@ pub async fn run(a: Args) {
             std::process::exit(2);
         }
     };
-    let engine = Engine::new(
-        model.clone(),
-        threads,
-        max_ctx,
-        a.slots,
-        kv_prec,
-        a.prefix_cache_mb << 20,
-    );
-    let cache_mb = engine.cache_bytes_per_slot() >> 20;
-    // S4.9b: embedding and decision slots are admitted by their own memory budget and their
-    // caches are sized to their prompts, so they cost the prompt, not a context each.
-    tracing::info!(
-        "peregrine-core: embedding and decision slots: {} rows per pass, {} MB of prompt-sized caches, prompt cache {} KB per position",
-        engine.pass_rows(),
-        peregrine_core::options::get().work_cache_mb.unwrap_or(512),
-        engine.cache_bytes_per_position().div_ceil(1024),
-    );
-    let (jobs, rx) = std::sync::mpsc::channel::<EngineMsg>();
-    let shared = Arc::new(EngineShared::default());
-    {
-        let shared = shared.clone();
-        std::thread::Builder::new()
-            .name("peregrine-engine".into())
-            .spawn(move || engine_thread(engine, rx, shared))
-            .expect("spawn the engine thread");
-    }
-    let decider = match Decider::from_model(&model) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("cannot serve {}: {e}", a.model.display());
-            std::process::exit(2);
+    let aliases = model_aliases(&a.model, &a.alias);
+    // One turn for the whole process: whichever model has work takes it, one pass at a
+    // time, so the models never put two pools on the same cores (S4.10). The engines also
+    // share one pair of pools, so a switch between models does not park and wake a pool.
+    let turn = Arc::new(peregrine_core::pool::PassTurn::new(a.model.len()));
+    let pool = Arc::new(peregrine_core::pool::Pool::new(threads));
+    let narrow = peregrine_core::pool::narrow_pool(threads).map(Arc::new);
+    let mut served = Vec::with_capacity(a.model.len());
+    for (i, path) in a.model.iter().enumerate() {
+        let t_model = Instant::now();
+        let gguf = match peregrine_core::gguf::Gguf::open(path).and_then(|g| {
+            peregrine_models::check_compatible_with(&g, chosen)?;
+            Ok(g)
+        }) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("cannot open {}: {e}", path.display());
+                std::process::exit(2);
+            }
+        };
+        let model = match peregrine_models::keep::open_with_template(path, a.littlebit, chosen) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("cannot open {}: {e}", path.display());
+                std::process::exit(2);
+            }
+        };
+        // An embedding-only model has no chat template and needs none: it serves
+        // `/v1/embeddings` and refuses generation (design §3). The placeholder is never
+        // rendered because `chat` answers 400 before it.
+        let template = match chosen {
+            Some(t) => t,
+            None if model.causality() == peregrine_core::arch::Causality::Bidirectional => {
+                Template::ChatMl
+            }
+            None => match Template::detect(&gguf) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("cannot serve {}: {e}", path.display());
+                    std::process::exit(2);
+                }
+            },
+        };
+        let max_ctx = a.ctx.clamp(32, model.cfg.ctx_train);
+        let loaded = model.clone();
+        let engine = Engine::new_with_pools(
+            model.clone(),
+            threads,
+            max_ctx,
+            a.slots,
+            kv_prec,
+            a.prefix_cache_mb << 20,
+            (pool.clone(), narrow.clone()),
+        );
+        let cache_mb = engine.cache_bytes_per_slot() >> 20;
+        // S4.9b: embedding and decision slots are admitted by their own memory budget and their
+        // caches are sized to their prompts, so they cost the prompt, not a context each.
+        tracing::info!(
+            "{}: embedding and decision slots: {} rows per pass, {} MB of prompt-sized caches, prompt cache {} KB per position",
+            path.display(),
+            engine.pass_rows(),
+            peregrine_core::options::get().work_cache_mb.unwrap_or(512),
+            engine.cache_bytes_per_position().div_ceil(1024),
+        );
+        let (jobs, rx) = std::sync::mpsc::channel::<EngineMsg>();
+        let shared = Arc::new(EngineShared::default());
+        {
+            let shared = shared.clone();
+            let turn = turn.clone();
+            let name = format!("peregrine-engine-{}", i + 1);
+            std::thread::Builder::new()
+                .name(name)
+                .spawn(move || engine_thread(engine, rx, shared, turn, i))
+                .expect("spawn an engine thread");
         }
-    };
-    let pooling = match model.pooling() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("peregrine-server: {e}");
-            std::process::exit(2);
-        }
-    };
-    let embedding_width = model.embedding_width();
-    let tool_format = gguf
-        .str("tokenizer.chat_template")
-        .ok()
-        .and_then(ToolFormat::for_template);
-    let app = Arc::new(App {
-        option_metrics,
-        pooling,
-        embedding_width,
-        embed_cache: EmbedCache::new(peregrine_core::options::get().embed_cache_mb),
-        decider,
-        think_open: model.tk.id_of("<think>"),
-        think_close: model.tk.id_of("</think>"),
-        reasoning_format,
-        stop: template.stop_ids(&model.tk),
-        default_system: template.default_system(model.name()),
-        tool_format,
-        template,
-        max_ctx,
-        max_slots: a.slots,
-        alias: a.alias.clone(),
-        busy: AtomicUsize::new(0),
-        requests: AtomicU64::new(0),
-        tokens: AtomicU64::new(0),
-        started: Instant::now(),
-        simd: peregrine_core::simd_name(),
-        simd_tier: peregrine_core::simd_tier(),
-        weights: if model.lb_summary().is_some() {
+        let decider = match Decider::from_model(&loaded) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("cannot serve {}: {e}", path.display());
+                std::process::exit(2);
+            }
+        };
+        // The tool format of this file's own chat template, when Peregrine has one for it.
+        let tool_format = gguf
+            .str("tokenizer.chat_template")
+            .ok()
+            .and_then(ToolFormat::for_template);
+        let pooling = match loaded.pooling() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("peregrine-server: {e}");
+                std::process::exit(2);
+            }
+        };
+        let weights = if loaded.lb_summary().is_some() {
             "littlebit"
         } else {
             "dense"
-        },
-        jobs,
-        engine: shared,
-        model,
+        };
+        let weights_detail = match loaded.lb_summary() {
+            Some((n, bytes)) => {
+                format!("LittleBit ({n} projections, {} MB of factors)", bytes >> 20)
+            }
+            None => "dense".to_string(),
+        };
+        let think_open = loaded.tk.id_of("<think>");
+        let think_close = loaded.tk.id_of("</think>");
+        tracing::info!(
+            "peregrine-core: {} loaded in {:.1} s as {:?}, {} threads, {}, ctx {}, {} chat slots ({} MB of cache each), {} weights, {} chat template, think tokens {:?}/{:?}",
+            path.display(),
+            t_model.elapsed().as_secs_f64(),
+            aliases[i],
+            threads,
+            peregrine_core::simd_tier(),
+            max_ctx,
+            a.slots,
+            cache_mb,
+            weights_detail,
+            template.name(),
+            think_open,
+            think_close
+        );
+        served.push(Arc::new(Served {
+            jobs,
+            engine: shared,
+            model: loaded,
+            template,
+            tool_format,
+            default_system: template.default_system(model.name()),
+            stop: template.stop_ids(&model.tk),
+            max_ctx,
+            max_slots: a.slots,
+            alias: aliases[i].clone(),
+            pooling,
+            embedding_width: model.embedding_width(),
+            decider,
+            think_open,
+            think_close,
+            embed_cache: EmbedCache::new(peregrine_core::options::get().embed_cache_mb),
+            busy: AtomicUsize::new(0),
+            requests: AtomicU64::new(0),
+            tokens: AtomicU64::new(0),
+            weights,
+        }));
+    }
+    let mut by_id = HashMap::with_capacity(served.len());
+    for (i, m) in served.iter().enumerate() {
+        by_id.insert(m.alias.clone(), i);
+    }
+    let app = Arc::new(App {
+        models: served,
+        by_id,
+        default: 0,
+        option_metrics,
+        reasoning_format,
+        turn,
+        started: Instant::now(),
     });
-    let weights = match app.model.lb_summary() {
-        Some((n, bytes)) => format!("LittleBit ({n} projections, {} MB of factors)", bytes >> 20),
-        None => "dense".to_string(),
-    };
-    tracing::info!(
-        "peregrine-core: {} loaded in {:.1} s, {} threads, {}, ctx {}, {} chat slots ({} MB of cache each), {} weights, {} chat template, think tokens {:?}/{:?}",
-        a.model.display(),
-        t0.elapsed().as_secs_f64(),
-        threads,
-        app.simd_tier,
-        max_ctx,
-        a.slots,
-        cache_mb,
-        weights,
-        template.name(),
-        app.think_open,
-        app.think_close
-    );
     let router = Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(models))
         .route("/metrics", get(metrics))
         .route("/v1/chat/completions", post(chat))
         .route("/v1/embeddings", post(embeddings))
+        .route("/v1/rerank", post(rerank))
+        .route("/rerank", post(rerank))
+        .route("/v1/reranking", post(rerank))
+        .route("/reranking", post(rerank))
+        .route("/v1/classify", post(classify))
         .route("/v1/systemone", post(systemone))
         .with_state(app);
     let addr = format!("{}:{}", a.host, a.port);
@@ -434,7 +487,12 @@ pub async fn run(a: Args) {
             version: env!("CARGO_PKG_VERSION").to_string(),
             host: a.host.clone(),
             port: a.port,
-            model: a.model.display().to_string(),
+            model: a
+                .model
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
             log: a.log_file.clone(),
             args: lifecycle::forwarded_args(std::env::args().skip(1)),
             started: lifecycle::now(),
@@ -461,6 +519,52 @@ pub async fn run(a: Args) {
     if let Some(path) = &a.state_file {
         lifecycle::remove_if_ours(path, std::process::id());
     }
+}
+
+/// The id of every model, in `-m` order.
+///
+/// One model keeps the historical default `peregrine`, so a single-model server behaves
+/// exactly as before. With several, a file without an explicit `--alias` is named by its
+/// stem; two files with the same stem need an explicit alias. Ids must be unique, because
+/// a request's `model` selects one.
+fn model_aliases(models: &[std::path::PathBuf], given: &[String]) -> Vec<String> {
+    if given.len() > models.len() {
+        eprintln!(
+            "--alias: {} name(s) given for {} model(s); give one per -m, in order",
+            given.len(),
+            models.len()
+        );
+        std::process::exit(2);
+    }
+    let mut out = Vec::with_capacity(models.len());
+    for (i, path) in models.iter().enumerate() {
+        let id = match given.get(i) {
+            Some(a) => a.clone(),
+            None if models.len() == 1 => "peregrine".to_string(),
+            None => path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("model-{}", i + 1)),
+        };
+        if id.trim().is_empty() {
+            eprintln!("--alias: the id for {} is empty", path.display());
+            std::process::exit(2);
+        }
+        out.push(id);
+    }
+    for (i, id) in out.iter().enumerate() {
+        if let Some(j) = out[..i].iter().position(|x| x == id) {
+            eprintln!(
+                "two models have the id {id:?} ({} and {}); give each its own --alias",
+                models[j].display(),
+                models[i].display()
+            );
+            std::process::exit(2);
+        }
+    }
+    out
 }
 
 /// How long a drain may take before the process exits with requests still open.
@@ -677,40 +781,97 @@ async fn health() -> Json<Value> {
 }
 
 async fn models(State(s): State<Arc<App>>) -> Json<Value> {
-    // What llama.cpp advertises for the file (`server_model_output_modalities`,
+    // What llama.cpp advertises for each file (`server_model_output_modalities`,
     // `server-common.cpp:207-241`): a native decision model answers decisions, not text, and an
-    // `openjev` file has no text generation even though it carries an LM head.
-    let output_modalities = if s.decider.is_some() {
-        json!(["decisions"])
-    } else {
-        json!(["text"])
-    };
-    Json(json!({"object": "list", "data": [{
-        "id": s.alias,
-        "object": "model",
-        "owned_by": "peregrine-core",
-        "weights": s.weights,
-        "architecture": {"input_modalities": ["text"], "output_modalities": output_modalities},
-    }]}))
+    // `openjev` file has no text generation even though it carries an LM head. A file with a
+    // classifier head answers rerank or classify (S4.6b): one output with no labels is a
+    // reranker's score, several outputs or named labels are a classifier's.
+    let data: Vec<Value> = s
+        .models
+        .iter()
+        .map(|m| {
+            let output_modalities = if m.decider.is_some() {
+                json!(["decisions"])
+            } else if m.model.has_head() {
+                let n_out = m.model.head_width();
+                if n_out == 1 && m.model.head_labels().is_empty() {
+                    json!(["rerank"])
+                } else {
+                    json!(["classify"])
+                }
+            } else {
+                json!(["text"])
+            };
+            json!({
+                "id": m.alias,
+                "object": "model",
+                "owned_by": "peregrine-core",
+                "weights": m.weights,
+                "architecture": {"input_modalities": ["text"], "output_modalities": output_modalities},
+            })
+        })
+        .collect();
+    Json(json!({"object": "list", "data": data}))
+}
+
+/// A metric label value: quotes and backslashes escaped, as the exposition format says.
+fn label(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 async fn metrics(State(s): State<Arc<App>>) -> String {
-    format!(
-        "# Peregrine server\nllamacpp:requests_processing {}\nllamacpp:requests_deferred {}\nperegrine_slots_total {}\nperegrine_requests_total {}\nperegrine_tokens_predicted_total {}\nperegrine_decode_steps_total {}\nperegrine_decode_rows_total {}\nperegrine_mtp_drafts_total {}\nperegrine_mtp_accepted_total {}\nperegrine_uptime_seconds {}\nperegrine_embed_cache_entries {}\nperegrine_embed_cache_bytes {}\n{}",
-        s.engine.active.load(Ordering::SeqCst),
-        s.engine.waiting.load(Ordering::SeqCst),
-        s.max_slots,
-        s.requests.load(Ordering::SeqCst),
-        s.tokens.load(Ordering::SeqCst),
-        s.engine.steps.load(Ordering::SeqCst),
-        s.engine.rows.load(Ordering::SeqCst),
-        s.engine.drafts.load(Ordering::SeqCst),
-        s.engine.hits.load(Ordering::SeqCst),
+    // The unlabelled lines keep describing the first model, so a dashboard written for a
+    // one-model server reads a multi-model one unchanged. The labelled lines repeat every
+    // counter for each model.
+    let first = &s.models[s.default];
+    let mut out = format!(
+        "# Peregrine server\nllamacpp:requests_processing {}\nllamacpp:requests_deferred {}\nperegrine_slots_total {}\nperegrine_requests_total {}\nperegrine_tokens_predicted_total {}\nperegrine_decode_steps_total {}\nperegrine_decode_rows_total {}\nperegrine_mtp_drafts_total {}\nperegrine_mtp_accepted_total {}\nperegrine_uptime_seconds {}\n# HELP peregrine_pass_turns_total Weight passes run under the process-wide turn\n# TYPE peregrine_pass_turns_total counter\nperegrine_pass_turns_total {}\n# HELP peregrine_pass_holders_max Most engines that ever ran a pass at once (1 is no oversubscription)\n# TYPE peregrine_pass_holders_max gauge\nperegrine_pass_holders_max {}\nperegrine_embed_cache_entries {}\nperegrine_embed_cache_bytes {}\n",
+        first.engine.active.load(Ordering::SeqCst),
+        first.engine.waiting.load(Ordering::SeqCst),
+        first.max_slots,
+        first.requests.load(Ordering::SeqCst),
+        first.tokens.load(Ordering::SeqCst),
+        first.engine.steps.load(Ordering::SeqCst),
+        first.engine.rows.load(Ordering::SeqCst),
+        first.engine.drafts.load(Ordering::SeqCst),
+        first.engine.hits.load(Ordering::SeqCst),
         s.started.elapsed().as_secs(),
-        s.embed_cache.len(),
-        s.embed_cache.bytes(),
-        s.option_metrics
-    )
+        s.turn.passes(),
+        s.turn.max_holders(),
+        first.embed_cache.len(),
+        first.embed_cache.bytes(),
+    );
+    for m in &s.models {
+        let id = label(&m.alias);
+        out.push_str(&format!(
+            "peregrine_model_slots_total{{model=\"{id}\"}} {}\n\
+             peregrine_model_requests_processing{{model=\"{id}\"}} {}\n\
+             peregrine_model_requests_deferred{{model=\"{id}\"}} {}\n\
+             peregrine_model_requests_total{{model=\"{id}\"}} {}\n\
+             peregrine_model_tokens_predicted_total{{model=\"{id}\"}} {}\n\
+             peregrine_model_passes_total{{model=\"{id}\"}} {}\n\
+             peregrine_model_decode_steps_total{{model=\"{id}\"}} {}\n\
+             peregrine_model_decode_rows_total{{model=\"{id}\"}} {}\n\
+             peregrine_model_mtp_drafts_total{{model=\"{id}\"}} {}\n\
+             peregrine_model_mtp_accepted_total{{model=\"{id}\"}} {}\n\
+             peregrine_model_embed_cache_entries{{model=\"{id}\"}} {}\n\
+             peregrine_model_embed_cache_bytes{{model=\"{id}\"}} {}\n",
+            m.max_slots,
+            m.engine.active.load(Ordering::SeqCst),
+            m.engine.waiting.load(Ordering::SeqCst),
+            m.requests.load(Ordering::SeqCst),
+            m.tokens.load(Ordering::SeqCst),
+            m.engine.passes.load(Ordering::SeqCst),
+            m.engine.steps.load(Ordering::SeqCst),
+            m.engine.rows.load(Ordering::SeqCst),
+            m.engine.drafts.load(Ordering::SeqCst),
+            m.engine.hits.load(Ordering::SeqCst),
+            m.embed_cache.len(),
+            m.embed_cache.bytes(),
+        ));
+    }
+    out.push_str(&s.option_metrics);
+    out
 }
 
 /// The engine options: the environment's `PEREGRINE_*` variables, overridden by `--opt NAME=VALUE`,
@@ -1415,6 +1576,8 @@ fn engine_thread(
     mut engine: Engine,
     rx: std::sync::mpsc::Receiver<EngineMsg>,
     shared: Arc<EngineShared>,
+    turn: Arc<peregrine_core::pool::PassTurn>,
+    model: usize,
 ) {
     let mut routes: HashMap<SlotId, tokio::sync::mpsc::UnboundedSender<Emission>> = HashMap::new();
     let mut waiting: VecDeque<Queued> = VecDeque::new();
@@ -1473,6 +1636,7 @@ fn engine_thread(
                         Want::Tokens => engine.admit(j.prompt, j.cfg),
                         Want::Pooled(pooling) => engine.admit_pooled(j.prompt, j.cfg, pooling),
                         Want::Labels => engine.admit_labels(j.prompt, j.cfg, j.labels),
+                        Want::Head => engine.admit_head(j.prompt, j.cfg),
                     };
                     match admitted {
                         Ok(id) => {
@@ -1488,6 +1652,7 @@ fn engine_thread(
                                 cost: None,
                                 embedding: None,
                                 label_logits: None,
+                                head: None,
                             });
                         }
                     }
@@ -1549,6 +1714,7 @@ fn engine_thread(
                                     cost: None,
                                     embedding: None,
                                     label_logits: None,
+                                    head: None,
                                 });
                             }
                         }
@@ -1559,7 +1725,9 @@ fn engine_thread(
         shared.active.store(engine.active(), Ordering::SeqCst);
         shared.waiting.store(waiting.len(), Ordering::SeqCst);
         if engine.active() == 0 {
-            // Nothing to serve: block until something arrives rather than spin on four cores.
+            // Nothing to serve: leave the turn and block until something arrives rather
+            // than spin on four cores.
+            turn.leave(model);
             match rx.recv() {
                 Ok(m) => take(m, &mut waiting, &mut engine, &mut routes),
                 Err(_) => return,
@@ -1567,7 +1735,14 @@ fn engine_thread(
             continue;
         }
         let t_step = profiled.then(Instant::now);
-        let emitted = engine.step();
+        // One pass at a time for the whole process: another model's pool sleeps while this
+        // one runs, so the models cannot put two sets of workers on the same cores. The turn
+        // is taken for exactly one pass, and granted in arrival order.
+        turn.enter(model);
+        let emitted = {
+            let _turn = turn.acquire(model);
+            engine.step()
+        };
         if let Some(t) = t_step {
             prof_wall += t.elapsed();
             prof_steps += 1;
@@ -1598,21 +1773,9 @@ fn engine_thread(
             prof_wall = Duration::ZERO;
             prof_at = Instant::now();
         }
-        for em in emitted {
-            let done = em.finish.is_some();
-            let slot = em.slot;
-            if let Some(tx) = routes.get(&slot) {
-                if tx.send(em).is_err() && !done {
-                    // The caller has gone: stop generating for it.
-                    engine.cancel(slot);
-                    routes.remove(&slot);
-                    continue;
-                }
-            }
-            if done {
-                routes.remove(&slot);
-            }
-        }
+        // Publish the counters before the emissions: a client that has its answer and then
+        // asks `/metrics` must see the pass that produced it, not the previous one.
+        shared.passes.fetch_add(1, Ordering::SeqCst);
         shared.steps.store(engine.decode_steps, Ordering::SeqCst);
         shared.rows.store(engine.decode_rows, Ordering::SeqCst);
         shared.drafts.store(engine.spec_drafts, Ordering::SeqCst);
@@ -1628,6 +1791,21 @@ fn engine_thread(
         *shared.prefix_full.lock().unwrap_or_else(|e| e.into_inner()) =
             (entries, bytes, hits, saved);
         *shared.phases.lock().unwrap_or_else(|e| e.into_inner()) = engine.phases_ms();
+        for em in emitted {
+            let done = em.finish.is_some();
+            let slot = em.slot;
+            if let Some(tx) = routes.get(&slot) {
+                if tx.send(em).is_err() && !done {
+                    // The caller has gone: stop generating for it.
+                    engine.cancel(slot);
+                    routes.remove(&slot);
+                    continue;
+                }
+            }
+            if done {
+                routes.remove(&slot);
+            }
+        }
     }
 }
 
@@ -1636,6 +1814,8 @@ fn engine_thread(
 struct EngineShared {
     active: AtomicUsize,
     waiting: AtomicUsize,
+    /// Weight passes run, including prefill-only ones (which `steps` does not count).
+    passes: AtomicU64,
     steps: AtomicU64,
     rows: AtomicU64,
     /// MTP drafts verified and kept (single-user speculation).
@@ -1702,7 +1882,7 @@ fn route_tool_events(
 /// Serve one request: build its prompt, hand it to the engine, and turn the tokens it sends back into the
 /// deltas the caller is streamed. The reasoning budget is enforced here, by replanning the turn with what the
 /// model has written so far — the engine's prefix store then restores that reasoning instead of recomputing it.
-async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Msg>) {
+async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Msg>) {
     let t0 = Instant::now();
     let mut run = Run::default();
     let mut budget_left = p.max_tokens;
@@ -2035,7 +2215,7 @@ async fn generate(app: &App, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender<Ms
         usage: json!({"prompt_tokens": run.prompt_n + run.cache_n, "completion_tokens": predicted_n, "total_tokens": run.prompt_n + run.cache_n + predicted_n}),
         timings: json!({"prompt_n": run.prompt_n, "cache_n": run.cache_n, "prompt_ms": run.prompt_ms, "predicted_n": predicted_n, "predicted_ms": run.predicted_ms,
             "predicted_per_second": if run.predicted_ms > 0.0 { predicted_n as f64 / run.predicted_ms * 1e3 } else { 0.0 },
-            "peregrine": {"simd": app.simd, "simd_tier": app.simd_tier, "weights": app.weights, "budget_forced": run.budget_hit, "wall_ms": wall_ms,
+            "peregrine": {"simd": peregrine_core::simd_name(), "simd_tier": peregrine_core::simd_tier(), "weights": app.weights, "budget_forced": run.budget_hit, "wall_ms": wall_ms,
                 "phases_ms": {"names": ["matmul", "head", "attention", "other", "sampling", "drafting"], "decode": app.engine.phases(), "prefill": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
                 "concurrency": {"slots": app.max_slots, "active": app.engine.active.load(Ordering::SeqCst), "waiting": app.engine.waiting.load(Ordering::SeqCst),
                     "decode_steps": steps, "decode_rows": rows,
@@ -2062,7 +2242,7 @@ fn try_reserve_n(counter: &AtomicUsize, k: usize, cap: usize) -> bool {
     }
 }
 
-struct BusyGuard(Arc<App>);
+struct BusyGuard(Arc<Served>);
 impl Drop for BusyGuard {
     fn drop(&mut self) {
         self.0.busy.fetch_sub(1, Ordering::SeqCst);
@@ -2083,7 +2263,7 @@ struct SlotJob {
 /// `EngineMsg::Run` is queued, not refused), so a decision with ten questions answers on a
 /// four-slot server and an embedding of thirty texts answers on a four-slot one. The caller has
 /// already reserved the request's place in the wait queue.
-async fn run_jobs(app: &Arc<App>, jobs: Vec<SlotJob>) -> Result<Vec<Emission>, Box<Response>> {
+async fn run_jobs(app: &Arc<Served>, jobs: Vec<SlotJob>) -> Result<Vec<Emission>, Box<Response>> {
     let mut rxs = Vec::with_capacity(jobs.len());
     for job in jobs {
         let (etx, erx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
@@ -2114,7 +2294,7 @@ async fn run_jobs(app: &Arc<App>, jobs: Vec<SlotJob>) -> Result<Vec<Emission>, B
 /// and runs the tails together; a request with more questions than slots is split into groups by
 /// the engine thread, each group forked from one evaluation of the shared beginning.
 async fn run_group_jobs(
-    app: &Arc<App>,
+    app: &Arc<Served>,
     prompts: Vec<Vec<u32>>,
     labels: Vec<Vec<u32>>,
 ) -> Result<Vec<Emission>, Box<Response>> {
@@ -2172,6 +2352,39 @@ fn not_supported(message: impl Into<String>) -> Response {
         Json(json!({"error": {"message": message.into(), "type": "not_supported_error", "code": 501}})),
     )
         .into_response()
+}
+
+/// The model a request names: its `model` field, or the first `-m` when the field is absent.
+///
+/// A server with one model serves it whatever the field says, as it always has and as
+/// llama-server does: OpenAI clients send the name they were configured with, and with one
+/// model there is nothing to choose (`docs/compat.md`). With several models the name is a
+/// choice, and an unknown id is OpenAI's 404.
+fn route_model(app: &App, requested: Option<&str>) -> Result<Arc<Served>, Box<Response>> {
+    match requested.filter(|s| !s.is_empty()) {
+        None => Ok(app.models[app.default].clone()),
+        Some(id) => match app.by_id.get(id) {
+            Some(&i) => Ok(app.models[i].clone()),
+            None if app.models.len() == 1 => Ok(app.models[app.default].clone()),
+            None => {
+                let ids: Vec<&str> = app.models.iter().map(|m| m.alias.as_str()).collect();
+                Err(Box::new(
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": {
+                            "message": format!(
+                                "model {id:?} does not exist; this server serves {}",
+                                ids.join(", ")
+                            ),
+                            "type": "invalid_request_error",
+                            "code": "model_not_found",
+                        }})),
+                    )
+                        .into_response(),
+                ))
+            }
+        },
+    }
 }
 
 /// One input of an embedding request: text to tokenize, or token ids the caller already has.
@@ -2369,7 +2582,11 @@ fn base64_f32(v: &[f32]) -> String {
 ///
 /// Every input of one request becomes a slot, so the texts share weight passes; the results
 /// come back in input order.
-async fn embeddings(State(app): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
+async fn embeddings(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
+    let app = match route_model(&state, body.get("model").and_then(Value::as_str)) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
     let Some(pooling) = app.pooling else {
         return bad(format!(
             "this model file declares no {}.pooling_type (pooling \"none\"), so /v1/embeddings has no vector to return",
@@ -2487,13 +2704,450 @@ fn ordered_json(value: &OrderedValue) -> Response {
         .into_response()
 }
 
+/// What `/v1/rerank` asks for (roadmap S4.6b), in the Jina / Cohere shape llama.cpp serves.
+#[derive(Debug, Clone, PartialEq)]
+struct RerankSpec {
+    pub model: String,
+    pub query: String,
+    pub documents: Vec<String>,
+    pub top_n: usize,
+    pub return_documents: bool,
+    pub truncate: bool,
+}
+
+/// The fields `/v1/rerank` accepts. Anything else is refused by name, as on the chat route.
+const RERANK_FIELDS: &[&str] = &[
+    "model",
+    "query",
+    "documents",
+    "top_n",
+    "return_documents",
+    "truncate",
+    "user",
+];
+
+/// One rerank input: a string, or an object carrying its text (`{"text": "…"}`; llama.cpp
+/// accepts an array of strings there too and joins it).
+///
+/// Image and video input need a multimodal projector, which a `bert` reranker never has;
+/// llama.cpp answers the same way without `--mmproj`.
+fn rerank_text(v: &Value, what: &str) -> Result<String, String> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        Value::Object(o) => {
+            if let Some(k) = ["image", "video", "fps", "max_frames"]
+                .iter()
+                .find(|k| o.contains_key(**k))
+            {
+                return Err(format!(
+                    "{k} is not supported by /v1/rerank: image and video input need a multimodal projector, and a bert reranker has none"
+                ));
+            }
+            match o.get("text") {
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(Value::Array(items)) => {
+                    let mut out = String::new();
+                    for t in items {
+                        let s = t
+                            .as_str()
+                            .ok_or_else(|| "\"text\" array elements must be strings".to_string())?;
+                        out.push_str(s);
+                    }
+                    Ok(out)
+                }
+                Some(Value::Null) | None => Ok(String::new()),
+                Some(_) => Err("\"text\" must be a string or an array of strings".into()),
+            }
+        }
+        _ => Err(format!(
+            "each {what} must be a string or an object of the form {{\"text\": …}}"
+        )),
+    }
+}
+
+/// Read `/v1/rerank` (`docs/design/s4-embeddings-decisions.md` §3).
+fn parse_rerank_request(b: &Value) -> Result<RerankSpec, String> {
+    let Some(obj) = b.as_object() else {
+        return Err("the request body must be a JSON object".into());
+    };
+    for k in obj.keys() {
+        if !RERANK_FIELDS.contains(&k.as_str()) {
+            return Err(format!("{k} is not supported by /v1/rerank"));
+        }
+    }
+    let query = match b.get("query") {
+        Some(v) => rerank_text(v, "query")?,
+        None => return Err("\"query\" must be provided".into()),
+    };
+    let documents = match b.get("documents") {
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len());
+            for v in items {
+                out.push(rerank_text(v, "document")?);
+            }
+            out
+        }
+        Some(Value::Array(_)) => {
+            return Err("\"documents\" must be a non-empty array of strings or objects".into())
+        }
+        Some(_) => {
+            return Err("\"documents\" must be a non-empty array of strings or objects".into())
+        }
+        None => return Err("\"documents\" must be provided".into()),
+    };
+    let top_n = match b.get("top_n") {
+        None | Some(Value::Null) => documents.len(),
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .filter(|&n| n <= usize::MAX as u64)
+                .ok_or_else(|| "\"top_n\" must be a non-negative integer".to_string())?;
+            usize::try_from(n).unwrap_or(usize::MAX)
+        }
+    };
+    let return_documents = match b.get("return_documents") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "return_documents must be a boolean".to_string())?,
+    };
+    let truncate = match b.get("truncate") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "truncate must be a boolean".to_string())?,
+    };
+    Ok(RerankSpec {
+        model: b
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        query,
+        documents,
+        top_n,
+        return_documents,
+        truncate,
+    })
+}
+
+/// `POST /v1/rerank` (also `/rerank`, `/v1/reranking`, `/reranking`: llama.cpp serves all
+/// four; S4.6b).
+///
+/// Every (query, document) pair is one text of the batch, built by the tokenizer's pair
+/// encoding — `format_prompt_rerank`'s own rule: `[CLS] q [SEP] d` for WordPiece,
+/// `<s> q </s> d </s>` for the XLM-R vocabulary. Each pair is a head slot, so all of them
+/// share weight passes, and the answer is `cls` → activation → `cls.output` at row 0.
+/// The score is that raw logit, as llama.cpp returns it (`send_rerank`: `embd[0]`).
+async fn rerank(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
+    let app = match route_model(&state, body.get("model").and_then(Value::as_str)) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
+    if !app.model.has_head() {
+        return bad(format!(
+            "{} has no classifier head (cls / cls.output), so it cannot rerank; use /v1/embeddings",
+            app.model.cfg.arch_name
+        ));
+    }
+    // A generative reranker's `rerank` template is a prompt, not a pair: that is S4.13.
+    if app
+        .model
+        .gguf()
+        .str("tokenizer.chat_template.rerank")
+        .is_ok()
+    {
+        return bad(
+            "this file carries a \"rerank\" chat template (a generative reranker), which is not \
+             supported yet; a bert reranker is scored with its classifier head",
+        );
+    }
+    let spec = match parse_rerank_request(&body) {
+        Ok(s) => s,
+        Err(e) => return bad(e),
+    };
+    // Tokenize before reserving a place: an over-length pair is the caller's error.
+    let mut pairs: Vec<Vec<u32>> = Vec::with_capacity(spec.documents.len());
+    for (i, doc) in spec.documents.iter().enumerate() {
+        let mut tokens = app.model.tk.encode_pair(&spec.query, doc);
+        if let Err(e) = fit_tokens(i, &mut tokens, app.max_ctx, spec.truncate) {
+            return bad(e);
+        }
+        pairs.push(tokens);
+    }
+    if spec.top_n == 0 {
+        // Nothing to rank: no pair is worth a forward pass.
+        return Json(json!({
+            "model": if spec.model.is_empty() { app.alias.clone() } else { spec.model.clone() },
+            "object": "list",
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+            "results": [],
+        }))
+        .into_response();
+    }
+    if !try_reserve_n(&app.busy, 1, MIN_WAITING.max(2 * app.max_slots)) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "too many requests are waiting for this model", "type": "overloaded_error", "code": 503}})),
+        )
+            .into_response();
+    }
+    let _busy = BusyGuard(app.clone());
+    app.requests.fetch_add(1, Ordering::SeqCst);
+    let prompt_tokens: u64 = pairs.iter().map(|t| t.len() as u64).sum();
+    let jobs = pairs
+        .iter()
+        .map(|t| SlotJob {
+            prompt: t.clone(),
+            want: Want::Head,
+            labels: Vec::new(),
+        })
+        .collect();
+    let emissions = match run_jobs(&app, jobs).await {
+        Ok(e) => e,
+        Err(response) => return *response,
+    };
+    if emissions.len() != pairs.len() {
+        return internal("the engine returned the wrong number of rerank scores");
+    }
+    let mut ranked: Vec<(usize, f32)> = Vec::with_capacity(pairs.len());
+    for (i, em) in emissions.into_iter().enumerate() {
+        let Some(head) = em.head else {
+            return internal("the engine returned no classifier head row");
+        };
+        let Some(&score) = head.first() else {
+            return internal("the classifier head row is empty");
+        };
+        ranked.push((i, score));
+    }
+    // Descending by score, then by document index so equal scores keep request order
+    // (llama.cpp sorts by score alone and leaves ties in whatever order its sort ends in).
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let results: Vec<Value> = ranked
+        .iter()
+        .take(spec.top_n)
+        .map(|&(i, score)| {
+            let mut r = json!({"index": i, "relevance_score": score});
+            if spec.return_documents {
+                r["document"] = json!({"text": spec.documents[i]});
+            }
+            r
+        })
+        .collect();
+    let model = if spec.model.is_empty() {
+        app.alias.clone()
+    } else {
+        spec.model.clone()
+    };
+    Json(json!({
+        "model": model,
+        "object": "list",
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+        "results": results,
+    }))
+    .into_response()
+}
+
+/// What `/v1/classify` asks for (S4.6b).
+#[derive(Debug, Clone, PartialEq)]
+struct ClassifySpec {
+    pub model: String,
+    pub inputs: Vec<String>,
+    pub truncate: bool,
+}
+
+/// The fields `/v1/classify` accepts.
+const CLASSIFY_FIELDS: &[&str] = &["model", "input", "truncate", "user"];
+
+/// Read `/v1/classify`: `input` is a string or an array of strings.
+fn parse_classify_request(b: &Value) -> Result<ClassifySpec, String> {
+    let Some(obj) = b.as_object() else {
+        return Err("the request body must be a JSON object".into());
+    };
+    for k in obj.keys() {
+        if !CLASSIFY_FIELDS.contains(&k.as_str()) {
+            return Err(format!("{k} is not supported by /v1/classify"));
+        }
+    }
+    let inputs = match b.get("input") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, v) in items.iter().enumerate() {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| format!("input {i} must be a string"))?;
+                out.push(s.to_string());
+            }
+            out
+        }
+        Some(Value::Array(_)) => return Err("input must not be an empty array".into()),
+        Some(_) => return Err("input must be a string or an array of strings".into()),
+        None => return Err("input must be provided".into()),
+    };
+    let truncate = match b.get("truncate") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "truncate must be a boolean".to_string())?,
+    };
+    Ok(ClassifySpec {
+        model: b
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        inputs,
+        truncate,
+    })
+}
+
+/// The probability of each output of a classifier head: a softmax when the file has more
+/// than one output, a sigmoid when it has one (a single-label head, which is a reranker's
+/// shape and is refused here unless the file names its label).
+///
+/// The softmax subtracts the maximum and sums in f64, rounding once per probability, so a
+/// batch's probabilities do not depend on the order the texts were computed in.
+fn head_probabilities(out: &[f32]) -> Vec<f32> {
+    if out.len() == 1 {
+        let x = out[0];
+        return vec![(1.0 / (1.0 + (-x as f64).exp())) as f32];
+    }
+    let max = out.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let sum: f64 = out.iter().map(|&x| (x as f64 - max).exp()).sum();
+    out.iter()
+        .map(|&x| ((x as f64 - max).exp() / sum) as f32)
+        .collect()
+}
+
+/// `POST /v1/classify` (S4.6b): one entry per input, with every label's probability and
+/// the most likely one.
+///
+/// The shape is the design's (`docs/design/s4-embeddings-decisions.md` §3):
+/// `results: [{index, label, score, scores: {label: probability}}]`, in input order. A
+/// `bert` head with `classifier.output_labels` names its labels; a head with several
+/// outputs and no labels is served as `LABEL_0`, `LABEL_1`, … (Hugging Face's own default
+/// names, which the converter drops when it writes the file).
+async fn classify(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
+    let app = match route_model(&state, body.get("model").and_then(Value::as_str)) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
+    let n_out = app.model.head_width();
+    if n_out == 0 {
+        return bad(format!(
+            "{} has no classifier head (cls / cls.output), so it cannot classify",
+            app.model.cfg.arch_name
+        ));
+    }
+    let file_labels = app.model.head_labels();
+    if n_out == 1 && file_labels.is_empty() {
+        return bad(
+            "this file's head has one output and no classifier.output_labels: it is a reranker, \
+             so use /v1/rerank",
+        );
+    }
+    let labels: Vec<String> = if file_labels.is_empty() {
+        (0..n_out).map(|i| format!("LABEL_{i}")).collect()
+    } else if file_labels.len() == n_out {
+        file_labels.to_vec()
+    } else {
+        return bad(format!(
+            "the file names {} labels for a head of {n_out} outputs",
+            file_labels.len()
+        ));
+    };
+    let spec = match parse_classify_request(&body) {
+        Ok(s) => s,
+        Err(e) => return bad(e),
+    };
+    let mut texts: Vec<Vec<u32>> = Vec::with_capacity(spec.inputs.len());
+    for (i, input) in spec.inputs.iter().enumerate() {
+        let mut tokens = app.model.tk.encode_special(input);
+        if let Err(e) = fit_tokens(i, &mut tokens, app.max_ctx, spec.truncate) {
+            return bad(e);
+        }
+        texts.push(tokens);
+    }
+    if !try_reserve_n(&app.busy, 1, MIN_WAITING.max(2 * app.max_slots)) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "too many requests are waiting for this model", "type": "overloaded_error", "code": 503}})),
+        )
+            .into_response();
+    }
+    let _busy = BusyGuard(app.clone());
+    app.requests.fetch_add(1, Ordering::SeqCst);
+    let prompt_tokens: u64 = texts.iter().map(|t| t.len() as u64).sum();
+    let jobs = texts
+        .iter()
+        .map(|t| SlotJob {
+            prompt: t.clone(),
+            want: Want::Head,
+            labels: Vec::new(),
+        })
+        .collect();
+    let emissions = match run_jobs(&app, jobs).await {
+        Ok(e) => e,
+        Err(response) => return *response,
+    };
+    if emissions.len() != texts.len() {
+        return internal("the engine returned the wrong number of classifier rows");
+    }
+    let mut results = Vec::with_capacity(texts.len());
+    for (i, em) in emissions.into_iter().enumerate() {
+        let Some(head) = em.head else {
+            return internal("the engine returned no classifier head row");
+        };
+        if head.len() != n_out {
+            return internal(format!(
+                "the classifier head row is {} wide, the file's head is {n_out}",
+                head.len()
+            ));
+        }
+        let probs = head_probabilities(&head);
+        let (top, &score) = probs
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(&a.0)))
+            .expect("a head has at least one output");
+        let scores: serde_json::Map<String, Value> = labels
+            .iter()
+            .zip(&probs)
+            .map(|(l, &p)| (l.clone(), json!(p)))
+            .collect();
+        results.push(json!({
+            "index": i,
+            "label": labels[top],
+            "score": score,
+            "scores": Value::Object(scores),
+        }));
+    }
+    let model = if spec.model.is_empty() {
+        app.alias.clone()
+    } else {
+        spec.model.clone()
+    };
+    Json(json!({
+        "object": "list",
+        "model": model,
+        "results": results,
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+    }))
+    .into_response()
+}
+
 /// `POST /v1/systemone` (S4.3c): every question is one labels slot in the engine, so they share
 /// weight passes, and the answers come back in request order.
 ///
 /// The request and its validation are [`Decider`]'s; the answer math is
 /// [`peregrine_core::decision::format_answer`]. Image input is not supported in this stage, so
 /// media is a 501 as llama.cpp answers without `--mmproj`.
-async fn systemone(State(app): State<Arc<App>>, OrderedJson(body): OrderedJson) -> Response {
+async fn systemone(State(state): State<Arc<App>>, OrderedJson(body): OrderedJson) -> Response {
+    let app = match route_model(&state, body.get("model").and_then(|v| v.as_str())) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
     let Some(decider) = app.decider.as_ref() else {
         return not_supported("This model is not a decision model");
     };
@@ -2612,7 +3266,11 @@ fn chat_choice(
     json!({"index": index, "message": message, "finish_reason": finish})
 }
 
-async fn chat(State(app): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) -> Response {
+async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) -> Response {
+    let app = match route_model(&state, body.get("model").and_then(Value::as_str)) {
+        Ok(m) => m,
+        Err(response) => return *response,
+    };
     if app.decider.is_some() {
         return not_supported(
             "This model is a decision model without text generation, use /v1/systemone",
@@ -2647,7 +3305,7 @@ async fn chat(State(app): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) ->
     };
     p.tool = tool;
     if body.get("reasoning_format").is_none() {
-        p.reasoning_format = app.reasoning_format;
+        p.reasoning_format = state.reasoning_format;
     }
     // One session decodes one request at a time; the others wait. A bounded wait queue keeps a burst of (possibly
     // abandoned) long prompts from piling up blocking threads and CPU-hours of prefill.
@@ -2822,9 +3480,10 @@ pub fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_f32, chat_choice, chunk_json, continuation_prefix, fit_tokens,
-        parse_embedding_request, plan, route_tool_events, tool_fields_present, tool_request,
-        EmbedInput, Msg, Penalties, ReasoningFormat, ToolFormat, ToolReply,
+        base64_f32, chat_choice, chunk_json, continuation_prefix, fit_tokens, head_probabilities,
+        parse_classify_request, parse_embedding_request, parse_rerank_request, plan,
+        route_tool_events, tool_fields_present, tool_request, EmbedInput, Msg, Penalties,
+        ReasoningFormat, ToolFormat, ToolReply,
     };
     use axum::Json;
     use serde_json::{json, Value};
@@ -3426,6 +4085,89 @@ mod tests {
         assert!(t == (0..8).collect::<Vec<u32>>());
         // A text that tokenizes to nothing is refused too.
         assert!(fit_tokens(2, &mut vec![], 8, false).is_err());
+    }
+
+    #[test]
+    fn the_rerank_request_is_jina_shaped_and_strict() {
+        let spec = parse_rerank_request(&json!({
+            "query": "q", "documents": ["a", {"text": "b"}], "top_n": 1,
+        }))
+        .unwrap();
+        assert_eq!(spec.query, "q");
+        assert_eq!(spec.documents, ["a", "b"]);
+        assert_eq!(spec.top_n, 1);
+        assert!(!spec.return_documents);
+        // `top_n` defaults to every document; `model` is echoed, `user` accepted.
+        let spec = parse_rerank_request(&json!({
+            "query": {"text": ["a", "b"]}, "documents": ["d"], "model": "m", "user": "u",
+        }))
+        .unwrap();
+        assert_eq!(spec.query, "ab");
+        assert_eq!(spec.top_n, 1);
+        assert_eq!(spec.model, "m");
+        // Every refusal names its field.
+        for (body, needle) in [
+            (json!({"documents": ["d"]}), "query"),
+            (json!({"query": "q"}), "documents"),
+            (json!({"query": "q", "documents": []}), "non-empty"),
+            (
+                json!({"query": "q", "documents": ["d"], "top_n": -1}),
+                "top_n",
+            ),
+            (
+                json!({"query": "q", "documents": ["d"], "other": 1}),
+                "other",
+            ),
+            (
+                json!({"query": "q", "documents": [{"image": "u"}]}),
+                "image",
+            ),
+            (json!({"query": 3, "documents": ["d"]}), "query"),
+        ] {
+            let err = parse_rerank_request(&body).err().unwrap_or_default();
+            assert!(err.contains(needle), "{body} -> {err:?}");
+        }
+    }
+
+    #[test]
+    fn head_probabilities_are_a_softmax_or_a_sigmoid() {
+        // One output: the logistic function of the logit.
+        let p = head_probabilities(&[0.0]);
+        assert_eq!(p, vec![0.5]);
+        assert!((head_probabilities(&[2.0])[0] - 0.880_797) < 1e-5);
+        // More than one: a softmax that sums to one, in f64.
+        let p = head_probabilities(&[1.0, 2.0, 3.0]);
+        assert!((p.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!(p[0] < p[1] && p[1] < p[2]);
+        // Equal logits are equal probabilities, and a large logit does not overflow.
+        assert_eq!(head_probabilities(&[0.0, 0.0]), vec![0.5, 0.5]);
+        let p = head_probabilities(&[1e30, 0.0]);
+        assert_eq!(p, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn the_classify_request_takes_a_string_or_an_array_of_strings() {
+        assert_eq!(
+            parse_classify_request(&json!({"input": "a"}))
+                .unwrap()
+                .inputs,
+            ["a"]
+        );
+        assert_eq!(
+            parse_classify_request(&json!({"input": ["a", "b"]}))
+                .unwrap()
+                .inputs,
+            ["a", "b"]
+        );
+        for (body, needle) in [
+            (json!({}), "input"),
+            (json!({"input": []}), "empty"),
+            (json!({"input": [1]}), "string"),
+            (json!({"input": "a", "documents": []}), "documents"),
+        ] {
+            let err = parse_classify_request(&body).err().unwrap_or_default();
+            assert!(err.contains(needle), "{body} -> {err:?}");
+        }
     }
 
     #[test]
