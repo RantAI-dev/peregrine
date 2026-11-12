@@ -1,0 +1,148 @@
+=== round 1, prompt 512, threads 1, load1 4.55
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |       1 |         pp512 |    307.59 ± 0.00 |
+
+build: 479074c (77)
+=== round 2, prompt 512, threads 1, load1 4.85
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |       1 |         pp512 |    308.60 ± 0.00 |
+
+build: 479074c (77)
+=== round 3, prompt 512, threads 1, load1 4.61
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |       1 |         pp512 |    309.80 ± 0.00 |
+
+build: 479074c (77)
+=== round 4, prompt 512, threads 1, load1 4.30
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |       1 |         pp512 |    307.55 ± 0.00 |
+
+build: 479074c (77)
+=== round 5, prompt 512, threads 1, load1 4.36
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |       1 |         pp512 |    307.03 ± 0.00 |
+
+build: 479074c (77)
+=== round 1, prompt 512, threads 1, load1 6.52
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |       1 |         pp512 |    118.50 ± 0.00 |
+
+build: 479074c (77)
+=== round 2, prompt 512, threads 1, load1 5.36
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |       1 |         pp512 |    118.94 ± 0.00 |
+
+build: 479074c (77)
+=== round 3, prompt 512, threads 1, load1 4.73
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |       1 |         pp512 |    118.34 ± 0.00 |
+
+build: 479074c (77)
+=== round 4, prompt 512, threads 1, load1 5.24
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |       1 |         pp512 |    118.01 ± 0.00 |
+
+build: 479074c (77)
+=== round 5, prompt 512, threads 1, load1 6.13
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |       1 |         pp512 |    118.21 ± 0.00 |
+
+build: 479074c (77)
+=== round 1, prompt 512, threads 10, load1 6.87
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |    637.91 ± 0.00 |
+
+build: 479074c (77)
+=== round 2, prompt 512, threads 10, load1 8.61
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |   1351.23 ± 0.00 |
+
+build: 479074c (77)
+=== round 3, prompt 512, threads 10, load1 9.16
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |   1082.87 ± 0.00 |
+
+build: 479074c (77)
+=== round 4, prompt 512, threads 10, load1 10.08
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |    712.44 ± 0.00 |
+
+build: 479074c (77)
+=== round 5, prompt 512, threads 10, load1 10.02
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |    693.73 ± 0.00 |
+
+build: 479074c (77)
+=== round 1, prompt 512, threads 10, load1 9.30
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |      10 |         pp512 |    426.12 ± 0.00 |
+
+build: 479074c (77)
+=== round 2, prompt 512, threads 10, load1 9.40
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |      10 |         pp512 |    384.35 ± 0.00 |
+
+build: 479074c (77)
+=== round 3, prompt 512, threads 10, load1 10.27
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |      10 |         pp512 |    550.98 ± 0.00 |
+
+build: 479074c (77)
+=== round 4, prompt 512, threads 10, load1 11.43
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |      10 |         pp512 |    452.88 ± 0.00 |
+
+build: 479074c (77)
+=== round 5, prompt 512, threads 10, load1 11.86
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |      10 |         pp512 |    385.05 ± 0.00 |
+
+build: 479074c (77)
+=== round 1, prompt 4096, threads 10, load1 14.87
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |        pp4096 |    589.77 ± 0.00 |
+
+build: 479074c (77)
+=== round 2, prompt 4096, threads 10, load1 13.84
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |        pp4096 |    803.34 ± 0.00 |
+
+build: 479074c (77)
+=== round 3, prompt 4096, threads 10, load1 14.60
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |        pp4096 |    846.55 ± 0.00 |
+
+build: 479074c (77)
+=== round 1, prompt 4096, threads 10, load1 13.93
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |      10 |        pp4096 |    391.44 ± 0.00 |
+
+build: 479074c (77)
+=== round 2, prompt 4096, threads 10, load1 11.45
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |      10 |        pp4096 |    550.87 ± 0.00 |
+
+build: 479074c (77)
+=== round 3, prompt 4096, threads 10, load1 14.34
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |      10 |        pp4096 |    621.42 ± 0.00 |
+
+build: 479074c (77)
+=== round 1, prompt 4096, threads 1, load1 4.36
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |       1 |        pp4096 |    190.01 ± 0.00 |
+
+build: 479074c (77)
+=== round 1, prompt 4096, threads 1, load1 5.25
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |       1 |        pp4096 |     86.24 ± 0.00 |
+
+build: 479074c (77)
+=== round 2, prompt 4096, threads 1, load1 8.65
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |       1 |        pp4096 |     84.03 ± 0.00 |
+
+build: 479074c (77)
+=== round 3, prompt 4096, threads 1, load1 22.17
+| llama ?B Q4_K - Medium         | 968.30 MiB |     1.50 B | CPU        |       1 |        pp4096 |     75.38 ± 0.00 |
+
+build: 479074c (77)
+=== round 2, prompt 4096, threads 1, load1 4.53
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |       1 |        pp4096 |    189.70 ± 0.00 |
+
+build: 479074c (77)
+=== round 3, prompt 4096, threads 1, load1 7.19
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |       1 |        pp4096 |    188.94 ± 0.00 |
+
+build: 479074c (77)
+=== round 6, prompt 512, threads 10, load1 16.16
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |    338.01 ± 0.00 |
+
+build: 479074c (77)
+=== round 7, prompt 512, threads 10, load1 20.80
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |    755.66 ± 0.00 |
+
+build: 479074c (77)
+=== round 8, prompt 512, threads 10, load1 21.10
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |    677.00 ± 0.00 |
+
+build: 479074c (77)
+=== round 9, prompt 512, threads 10, load1 19.08
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |   1455.52 ± 0.00 |
+
+build: 479074c (77)
+=== round 10, prompt 512, threads 10, load1 18.90
+| qwen2 1B Q4_K - Medium         | 511.65 MiB |   630.17 M | CPU        |      10 |         pp512 |    517.20 ± 0.00 |
+
+build: 479074c (77)

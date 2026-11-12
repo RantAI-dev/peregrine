@@ -1,0 +1,15 @@
+{"round": 1, "mode": "exact", "chunk": null, "prompt_tokens": 512, "threads": 10, "load1": 3.39, "prefill_tok_s": 317.91462806886693, "prefill_s": 1.610495255, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 1, "mode": "fast", "chunk": 64, "prompt_tokens": 512, "threads": 10, "load1": 3.39, "prefill_tok_s": 1177.527573458281, "prefill_s": 0.434809351, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 1, "mode": "fast", "chunk": 128, "prompt_tokens": 512, "threads": 10, "load1": 3.39, "prefill_tok_s": 1173.4892433586829, "prefill_s": 0.436305661, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 1, "mode": "fast", "chunk": 256, "prompt_tokens": 512, "threads": 10, "load1": 3.36, "prefill_tok_s": 1022.9490221746179, "prefill_s": 0.5005137, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 1, "mode": "fast", "chunk": 512, "prompt_tokens": 512, "threads": 10, "load1": 3.36, "prefill_tok_s": 1078.1953967357265, "prefill_s": 0.474867544, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 2, "mode": "exact", "chunk": null, "prompt_tokens": 512, "threads": 10, "load1": 2.93, "prefill_tok_s": 212.72062940687215, "prefill_s": 2.406912773, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 2, "mode": "fast", "chunk": 64, "prompt_tokens": 512, "threads": 10, "load1": 3.74, "prefill_tok_s": 226.22300673061872, "prefill_s": 2.263253448, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 2, "mode": "fast", "chunk": 128, "prompt_tokens": 512, "threads": 10, "load1": 3.74, "prefill_tok_s": 353.4821785894545, "prefill_s": 1.448446431, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 2, "mode": "fast", "chunk": 256, "prompt_tokens": 512, "threads": 10, "load1": 3.74, "prefill_tok_s": 392.8164956934787, "prefill_s": 1.303407585, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 2, "mode": "fast", "chunk": 512, "prompt_tokens": 512, "threads": 10, "load1": 4.48, "prefill_tok_s": 637.1322256423738, "prefill_s": 0.803600853, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 3, "mode": "exact", "chunk": null, "prompt_tokens": 512, "threads": 10, "load1": 5.0, "prefill_tok_s": 619.9184710832576, "prefill_s": 0.825915058, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 3, "mode": "fast", "chunk": 64, "prompt_tokens": 512, "threads": 10, "load1": 5.0, "prefill_tok_s": 184.5221430260272, "prefill_s": 2.774734737, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 3, "mode": "fast", "chunk": 128, "prompt_tokens": 512, "threads": 10, "load1": 5.48, "prefill_tok_s": 314.2767639921405, "prefill_s": 1.629137304, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 3, "mode": "fast", "chunk": 256, "prompt_tokens": 512, "threads": 10, "load1": 5.48, "prefill_tok_s": 464.09880147173413, "prefill_s": 1.1032133640000001, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
+{"round": 3, "mode": "fast", "chunk": 512, "prompt_tokens": 512, "threads": 10, "load1": 5.48, "prefill_tok_s": 648.2380809828262, "prefill_s": 0.789833265, "model": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"}
