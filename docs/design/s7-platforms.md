@@ -1,8 +1,8 @@
 # S7: macOS and Windows
 
 - Status: design, decided 2026-11-12. S7.1 (macOS on Apple Silicon), S7.2 (Windows x86-64 builds and
-  passes the suite in CI) and S7.3 (Windows lifetime, installer and release archive) built; the rest
-  is not built. §8 and §9 are the two "as built" sections.
+  passes the suite in CI), S7.3 (Windows lifetime, installer and release archive) and S7.4 (platform
+  goldens, docs and the first measurements) built. §8, §9 and §10 are the "as built" sections.
 - Owner request: "add support to windows, mac".
 
 ## 0. Where things stand
@@ -169,10 +169,11 @@ confirmed by the first run rather than assumed:
   `peregrine-vX.Y.Z-windows-x86_64.zip`.
 
 **S7.4: goldens, docs, a first measurement.** The synthetic goldens for the Windows tiers
-(scalar, AVX2; AVX-512 under the emulator if it runs on the runner). Quickstart, README install
-section and the support table for both systems. Native Windows numbers on the AVX-512 desktop
-(it is a Windows machine; the Linux numbers published so far come from WSL2 on it) against
-llama.cpp's Windows build, for decode, prompt and ten users on the three gate models.
+(scalar, AVX2; AVX-512 when a recording happens to draw an AVX-512 runner), compared on every pull
+request on a pinned tier. Quickstart, README install section and the support table for both systems.
+The first measurements are on GitHub's Windows and Linux runners, which are different machines; a
+native Windows number from the AVX-512 desktop (it is a Windows machine; the Linux numbers published
+so far come from WSL2 on it) against llama.cpp's Windows build is still to be taken.
 
 ## 6. Steps
 
