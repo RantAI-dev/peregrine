@@ -474,11 +474,6 @@ impl Model {
             .iter()
             .find(|f| f.names().contains(&arch_name.as_str()))
             .ok_or_else(|| {
-                if arch_name == "nomic-bert-moe" {
-                    return "architecture \"nomic-bert-moe\" (nomic-embed-text-v2-moe) is not \
-                            supported yet (roadmap S4.8b)"
-                        .to_string();
-                }
                 let feat = match arch_name.as_str() {
                     "llama" => Some("arch-llama"),
                     "qwen2" | "qwen3" => Some("arch-qwen"),
@@ -486,6 +481,7 @@ impl Model {
                     "gemma3" => Some("arch-gemma3"),
                     "gemma-embedding" => Some("arch-gemma-embedding"),
                     "nomic-bert" => Some("arch-nomic-bert"),
+                    "nomic-bert-moe" => Some("arch-nomic-bert-moe"),
                     "jina-bert-v2" => Some("arch-jina-bert"),
                     "phi3" => Some("arch-phi3"),
                     "mistral3" => Some("arch-mistral3"),
@@ -520,18 +516,33 @@ impl Model {
         // times the weight bytes; the float route is also the more exact one. The
         // lower aarch64 tiers keep the per-row kernel they already run, and x86
         // keeps the measured 64 MiB rule for `bert`.
-        let (q8_conv, q8_limit) = if arch_name == "bert" {
-            (true, crate::options::Q8_FLOAT_MAX_BYTES)
+        let (q8_panels, q8_limit): (crate::fpack::Q8Panels, u64) = if arch_name == "bert" {
+            (
+                crate::fpack::Q8Panels::Float,
+                crate::options::Q8_FLOAT_MAX_BYTES,
+            )
         } else if arch_name == "modern-bert"
             && cfg!(target_arch = "aarch64")
             && crate::cpu::have_dotprod()
         {
-            (true, crate::options::Q8_FLOAT_MAX_BYTES_ARM)
+            (
+                crate::fpack::Q8Panels::Float,
+                crate::options::Q8_FLOAT_MAX_BYTES_ARM,
+            )
         } else {
-            (false, 0)
+            // A family's own rule (S4.8b: a large bidirectional mixture of experts).
+            (family.q8_panels(), crate::options::Q8_FLOAT_MAX_BYTES_MOE)
         };
-        let q8_as_f32 =
-            fp && crate::options::get().q8_float && q8_conv && g.total_weight_bytes() <= q8_limit;
+        let q8_panels = if fp
+            && crate::options::get().q8_float
+            && q8_panels != crate::fpack::Q8Panels::Keep
+            && g.total_weight_bytes() <= q8_limit
+        {
+            q8_panels
+        } else {
+            crate::fpack::Q8Panels::Keep
+        };
+        let q8_as_f32 = q8_panels != crate::fpack::Q8Panels::Keep;
         // The k-quant repack (S3.4): the Q4_K and Q6_K matrices, and Q5_0, are
         // rewritten into eight-row tiles before the family reads the file, so every matrix the
         // family holds knows where its repacked bytes are. A converted Q8_0 matrix is not
@@ -541,8 +552,9 @@ impl Model {
         } else {
             Vec::new()
         };
+        let packs_experts = fp && family.packs_experts();
         let fp_layout = if fp {
-            crate::fpack::layout_with(&g, q8_as_f32)
+            crate::fpack::layout_with(&g, q8_panels, packs_experts)
         } else {
             Vec::new()
         };
@@ -563,12 +575,7 @@ impl Model {
                         t.kq_off = Some(e.offset);
                     }
                 }
-                for e in &fp_layout {
-                    if let Some(t) = g.tensors.get_mut(&e.name) {
-                        t.fp_off = Some(e.offset);
-                        t.fp_kind = (e.kind != e.source).then_some(e.kind);
-                    }
-                }
+                crate::fpack::apply(&mut g.tensors, &fp_layout);
                 kq_store = h.kq.map(KqStore::from_map);
                 fp_store = h.fp.map(FpStore::from_map);
             }
@@ -582,7 +589,7 @@ impl Model {
         // before the family reads the file, so each matrix knows where its panels are.
         let fp = match fp_store {
             Some(s) => s,
-            None if fp => crate::fpack::repack_with(&mut g, q8_as_f32),
+            None if fp => crate::fpack::repack_with(&mut g, q8_panels, packs_experts),
             None => FpStore::default(),
         };
         // A miss packed the stores above: write them beside the model cache so the

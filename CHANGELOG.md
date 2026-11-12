@@ -147,6 +147,33 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The `nomic-bert-moe` family: nomic-embed-text-v2-moe (S4.8b)**: a GGUF with
+  `general.architecture = "nomic-bert-moe"` now loads and serves `/v1/embeddings` and
+  `peregrine embed`. It is llama.cpp v0.9.0's shared `bert` graph with its two
+  `LLM_ARCH_NOMIC_BERT_MOE` branches: the fused `attn_qkv`, NeoX RoPE at base 10000,
+  post-norm blocks, a plain GELU feed-forward on the even layers and a mixture of 8
+  experts (top 2, softmax gating, raw probabilities, no renormalisation, GELU experts,
+  summed in the router's order) on the odd ones, the token-type row and no final norm.
+  The family lives beside `nomic-bert` in `crates/peregrine-models/src/nomic_bert.rs`
+  (`NomicFfn` is the only branch); the shared MoE block gained a gate-less `Gelu` act.
+  The XLM-R SentencePiece-unigram tokenizer is the one `bge-m3` already used. Registered
+  behind `arch-nomic-bert-moe`; chat and label requests are refused by name. Measured
+  against llama.cpp v0.9.0 on 200 texts of 17-511 tokens in 24 languages
+  (`docs/reference/nomic-bert-moe.md`): ids identical; F16 mean 0.9999977 (one text at
+  0.9997738, a router tie, reported); Q8_0 against the F16 reference mean 0.9996520 /
+  min 0.9989152, which is 2.4e-4 better than llama.cpp's own Q8_0 mean (0.9994075) and
+  1.7e-4 worse than its minimum (0.9990825) - both inside the S4 clauses, which the
+  test asserts. The family's matmuls all take the packed float path: its 3D expert
+  banks are packed one matrix per expert (48 % of the parameters, previously the raw
+  per-row kernel) and the Q8_0 file is dequantised into f16 panels at load, which is
+  both closer to the F16 conversion and faster than its int8 tiles here; no other
+  family's bytes or bits move. Every measured cell is ahead of llama.cpp: 1.31-1.59x on
+  F16 and 1.11-1.34x on Q8_0 (16/128/512 tokens and sixteen 32-token texts). Tests: a
+  synthetic file with malformed variants, an independent scalar reference that writes
+  the routing out longhand, batch/thread/pass-budget invariance on F32 and Q8_0,
+  refusals by name, the no-allocation pass, server and CLI cases, and a Q8_0 golden on
+  scalar, AVX2 and AVX-512 under SDE.
+
 - **The accuracy report and speed table of `--fast-prompt` (S5.4c)**: the mode's measured
   trade on the five gate models, with wikitext-2 (40 chunks of 512 tokens, 10 200 scored
   positions, each chunk read as a prompt), the unquantised (F16) file of each model, the
