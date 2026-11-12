@@ -15,8 +15,11 @@
 //!   would be a second full copy of it — 311 MB on the 0.6B f16 encoder — for a
 //!   matmul whose bytes are the same either way and whose decode step is bound by
 //!   those bytes, not by the multiplies. It keeps the per-row path;
-//! * a matrix that is not two-dimensional (the mixture-of-experts' experts are
-//!   three-dimensional and are not packed yet).
+//! * a matrix that is not two-dimensional — unless the family asks for its expert
+//!   banks ([`layout_with`]'s `experts`, S4.8b): a three-dimensional
+//!   `[d_in, d_out, n_expert]` tensor is then packed **per expert**, each expert a
+//!   two-dimensional matrix of its own. Every other mixture-of-experts family keeps
+//!   the per-row path and its exact bytes.
 //!
 //! # The store
 //!
@@ -37,11 +40,40 @@ pub const PANEL: usize = peregrine_kernels::fpack::PANEL;
 /// The token embedding: gathered row by row, never multiplied, so it is not packed.
 const EMBEDDING: &str = "token_embd.weight";
 
+/// What a Q8_0 matrix is dequantised into, when a family asks for it.
+///
+/// `Float` is the exact form (`scale × code` in f32) the small `bert` encoders take
+/// (S4.9m); `Half` is the same value written in f16 panels, half the bytes, for a
+/// family whose weights are too large for the f32 form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Q8Panels {
+    /// Keep the file's Q8_0 bytes (the int8 kernels).
+    Keep,
+    /// Dequantise into f32 panels.
+    Float,
+    /// Dequantise into f16 panels.
+    Half,
+}
+
+impl Q8Panels {
+    /// The panel format a converted Q8_0 matrix is written in.
+    fn kind(self) -> Option<Format> {
+        match self {
+            Q8Panels::Keep => None,
+            Q8Panels::Float => Some(Format::F32),
+            Q8Panels::Half => Some(Format::F16),
+        }
+    }
+}
+
 /// One matrix's place in the float store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FpEntry {
-    /// The tensor's name in the file.
+    /// The tensor's name in the file. A three-dimensional expert bank writes one
+    /// entry per expert under this name; `expert` says which one.
     pub name: String,
+    /// The expert of a three-dimensional bank this entry is, `None` for a matrix.
+    pub expert: Option<usize>,
     /// The matrix's format in the panel store: one of the three float formats.
     pub kind: Format,
     /// The matrix's format in the file. Different from `kind` only for a Q8_0 matrix
@@ -73,6 +105,17 @@ pub fn eligible(t: &TensorInfo) -> bool {
         && t.dims[1] > 0
 }
 
+/// Whether one expert of a three-dimensional bank can be packed as a matrix of its
+/// own: a float format, three dimensions, a whole number of blocks per expert.
+pub fn expert_eligible(t: &TensorInfo) -> bool {
+    matches!(t.kind, Format::F32 | Format::F16 | Format::BF16)
+        && t.dims.len() == 3
+        && t.dims[0] > 0
+        && t.dims[1] > 0
+        && t.dims[2] > 0
+        && (t.dims[0] * t.dims[1]).is_multiple_of(t.kind.block() as u64)
+}
+
 /// Whether a Q8_0 matrix can be dequantised into f32 panels (S4.9m): two-dimensional,
 /// not the gathered embedding, and a whole number of 32-weight blocks.
 pub fn convertible(t: &TensorInfo) -> bool {
@@ -84,32 +127,55 @@ pub fn convertible(t: &TensorInfo) -> bool {
         && t.dims[0].is_multiple_of(32)
 }
 
+/// Whether one expert of a three-dimensional Q8_0 bank can be dequantised into f32
+/// panels: the same rules, one dimension up.
+pub fn expert_convertible(t: &TensorInfo) -> bool {
+    t.kind == Format::Q8_0
+        && t.dims.len() == 3
+        && t.dims[0] > 0
+        && t.dims[1] > 0
+        && t.dims[2] > 0
+        && t.dims[0].is_multiple_of(32)
+}
+
 /// The matrices the store holds, in store order, without conversion.
 pub fn layout(g: &Gguf) -> Vec<FpEntry> {
-    layout_with(g, false)
+    layout_with(g, Q8Panels::Keep, false)
 }
 
 /// The matrices the store holds, in store order; `q8_as_f32` adds every
-/// [`convertible`] Q8_0 matrix, its panels written in F32 (S4.9m).
+/// [`convertible`] Q8_0 matrix, its panels written in F32 (S4.9m), and `experts`
+/// adds every three-dimensional float bank as one matrix per expert (S4.8b).
 ///
 /// The order is the file's own: the matrices are laid out by their offset in the
 /// data section, so a file always produces the same store.
-pub fn layout_with(g: &Gguf, q8_as_f32: bool) -> Vec<FpEntry> {
-    let mut mats: Vec<(&String, &TensorInfo)> = g
-        .tensors
-        .iter()
-        .filter(|(_, t)| eligible(t) || (q8_as_f32 && convertible(t)))
-        .collect();
-    mats.sort_by_key(|(name, t)| (t.offset, name.as_str()));
+pub fn layout_with(g: &Gguf, q8: Q8Panels, experts: bool) -> Vec<FpEntry> {
+    let convert = q8.kind();
+    let mut mats: Vec<(&String, &TensorInfo, Option<usize>)> = Vec::new();
+    for (name, t) in &g.tensors {
+        if eligible(t) || (convert.is_some() && convertible(t)) {
+            mats.push((name, t, None));
+        } else if experts && (expert_eligible(t) || (convert.is_some() && expert_convertible(t))) {
+            for e in 0..t.dims[2] as usize {
+                mats.push((name, t, Some(e)));
+            }
+        }
+    }
+    mats.sort_by_key(|(name, t, e)| (t.offset, name.as_str(), *e));
     let mut entries = Vec::with_capacity(mats.len());
     let mut at = 0usize;
-    for (name, t) in mats {
-        let rows = t.dims[1] as usize;
-        let cols = t.dims[0] as usize;
-        let kind = if convertible(t) { Format::F32 } else { t.kind };
+    for (name, t, expert) in mats {
+        // A bank's expert is `[dims[0], dims[1]]`; the bank itself is a matrix too, but
+        // the families that use one read it through its experts.
+        let (rows, cols) = (t.dims[1] as usize, t.dims[0] as usize);
+        let kind = match (convertible(t), expert_convertible(t), convert) {
+            (true, _, Some(f)) | (_, true, Some(f)) => f,
+            _ => t.kind,
+        };
         let len = peregrine_kernels::fpack::packed_len(kind, rows, cols);
         entries.push(FpEntry {
             name: name.clone(),
+            expert,
             kind,
             source: t.kind,
             offset: at,
@@ -128,15 +194,20 @@ pub fn layout_with(g: &Gguf, q8_as_f32: bool) -> Vec<FpEntry> {
 /// The families read the file after this, so every matrix they hold carries the
 /// offset of its packed panels.
 pub fn repack(g: &mut Gguf) -> FpStore {
-    repack_with(g, false)
+    repack_with(g, Q8Panels::Keep, false)
 }
 
 /// [`repack`], converting every [`convertible`] Q8_0 matrix into f32 panels when
-/// `q8_as_f32` is set (S4.9m). The tensor keeps its file format and gains
+/// `q8_as_f32` is set (S4.9m), and packing every three-dimensional float bank per
+/// expert when `experts` is set (S4.8b). The tensor keeps its file format and gains
 /// [`TensorInfo::fp_kind`], so a reader of the file's bytes is unaffected while the
 /// float path sees an f32 panel.
-pub fn repack_with(g: &mut Gguf, q8_as_f32: bool) -> FpStore {
-    let entries = layout_with(g, q8_as_f32);
+///
+/// An expert bank's tensor carries the **first expert's** offset: a family that
+/// holds 2D views of the bank ([`crate::blocks::moe::expert_view`]) computes each
+/// view's offset from it, one packed expert apart.
+pub fn repack_with(g: &mut Gguf, q8: Q8Panels, experts: bool) -> FpStore {
+    let entries = layout_with(g, q8, experts);
     let total: usize = entries.iter().map(|e| e.len).sum();
     let mut store = FpStore::new(total);
     {
@@ -148,13 +219,26 @@ pub fn repack_with(g: &mut Gguf, q8_as_f32: bool) -> FpStore {
             pack_matrix(g, e, t, &mut dst[e.offset..e.offset + e.len]);
         }
     }
-    for e in &entries {
-        if let Some(t) = g.tensors.get_mut(&e.name) {
+    apply(&mut g.tensors, &entries);
+    store
+}
+
+/// Record in the tensor directory where each packed matrix sits, for a store that is
+/// already in memory or was mapped from the pack cache.
+///
+/// An expert bank carries the **first** expert's offset: a family that holds 2D views
+/// of the bank computes each view's own offset from it, one packed expert apart
+/// ([`crate::blocks::moe::expert_view`]).
+pub fn apply(tensors: &mut std::collections::HashMap<String, TensorInfo>, entries: &[FpEntry]) {
+    for e in entries {
+        let Some(t) = tensors.get_mut(&e.name) else {
+            continue;
+        };
+        if e.expert.is_none_or(|x| x == 0) {
             t.fp_off = Some(e.offset);
             t.fp_kind = (e.kind != e.source).then_some(e.kind);
         }
     }
-    store
 }
 
 /// Write one matrix's panels, reading the file in large sequential chunks.
@@ -174,10 +258,13 @@ fn pack_matrix(file: &Gguf, e: &FpEntry, t: &TensorInfo, dst: &mut [u8]) {
     // when the matrix is converted, where one panel's rows are decoded at a time.
     let mut decoded = vec![0.0f32; PANEL * e.cols];
     let mut bytes = vec![0u8; PANEL * out_row];
+    // One expert of a bank is a contiguous run of its rows; the bank's own offset is
+    // the first expert's.
+    let base = t.offset as usize + e.expert.unwrap_or(0) * e.rows * rb;
     let mut first = 0usize;
     while first < e.rows {
         let n = (e.rows - first).min(per_chunk);
-        let at = t.offset as usize + first * rb;
+        let at = base + first * rb;
         file.read_data(at, &mut buf[..n * rb])
             .expect("the matrix's bytes are in the file");
         for local in (0..n).step_by(PANEL) {
@@ -195,7 +282,8 @@ fn pack_matrix(file: &Gguf, e: &FpEntry, t: &TensorInfo, dst: &mut [u8]) {
                 );
             } else {
                 // Dequantise this panel's rows (`scale × code` is exact in f32) and
-                // write them in the panel writer's F32 row form.
+                // write them in the panel writer's row form: f32, or f16 for a family
+                // that keeps half the bytes.
                 for r in 0..k {
                     let row = &buf[(local + r) * rb..(local + r + 1) * rb];
                     peregrine_kernels::quant::dequant_row(
@@ -204,8 +292,15 @@ fn pack_matrix(file: &Gguf, e: &FpEntry, t: &TensorInfo, dst: &mut [u8]) {
                         &mut decoded[r * e.cols..(r + 1) * e.cols],
                     );
                 }
-                for (i, &v) in decoded[..k * e.cols].iter().enumerate() {
-                    bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                if e.kind == Format::F16 {
+                    for (i, &v) in decoded[..k * e.cols].iter().enumerate() {
+                        let h = crate::quant::f32_to_f16(v);
+                        bytes[i * 2..i * 2 + 2].copy_from_slice(&h.to_le_bytes());
+                    }
+                } else {
+                    for (i, &v) in decoded[..k * e.cols].iter().enumerate() {
+                        bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+                    }
                 }
                 let refs: Vec<&[u8]> = (0..k)
                     .map(|r| &bytes[r * out_row..(r + 1) * out_row])
@@ -280,6 +375,7 @@ mod tests {
     fn the_packed_length_rounds_up_to_whole_panels() {
         let e = FpEntry {
             name: "w".into(),
+            expert: None,
             kind: Format::F16,
             source: Format::F16,
             offset: 0,
