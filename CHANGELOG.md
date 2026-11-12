@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Prompt processing: the attention value mix takes two rows per V pass (S5.2b)**: on a
+  4096-token prompt attention is 35-45 % of a pass and the value mix alone is twice the score
+  stage, running at 8.6-9.3 GMAC/s per core, a sixth of this machine's f32 FMA roof. Two query
+  rows of one KV head see the same positions, so the prefill tile now loads and widens each V
+  half-vector once and feeds both rows' fused multiply-adds from it; each row keeps its own
+  accumulators and its own ascending position order, so no result bit moves (no golden file
+  changed; the Llama 1B real-model golden passes on all three tiers). Measured on Llama 3.2 1B and Qwen 2.5 0.5B Q4_K_M, 4096 tokens:
+  **+5.7 % at twelve threads on both models**, +2-4 % at one and six, the mix's own time
+  29.3 -> 23.6 s at one thread. Decode (0.99-1.01) and ten users on one pool are unchanged.
+  **Still below ik_llama.cpp**: 0.66 (Llama) and 0.58 (Qwen) at 4096, twelve threads, and 0.57
+  and 0.47 at 512, where the prompt takes the widened f32 tile and this body does not apply;
+  the remaining gap is the weight matmul (the fork runs a requantising kernel at 91 GMAC/s
+  against Peregrine's exact 72-75, §11.3-11.4 of `docs/design/s5-prefill-avx512.md`).
+
 ### Added
 
 - **NEON bodies for the 8-bit prompt kernel (S5.4d, ARM)**: `crates/peregrine-kernels/src/neon.rs`
@@ -311,6 +327,142 @@ several models in one server. Read these before upgrading:
   one; attention grows from 11 % to 27 %. The fixtures are under
   `crates/peregrine-models/tests/fixtures/modern-bert/`.
 
+### Changed
+
+- **AVX2 bodies for the modern-bert element-wise kernels (S4.9n).** `geglu_erf` and
+  `layer_norm_rows_nobias` were the ModernBERT family's two scalar-only kernels; both now have an
+  AVX2+FMA body that is `to_bits` equal to its scalar twin, so no golden moved on any tier.
+  `geglu_erf` runs sixteen elements per step through the same erf-GELU body `gelu_erf_rows` uses
+  and then the one multiply by the second half; its tail goes through the scalar `gelu_erf`, which
+  is itself bit-identical to the vector `erf`. `layer_norm_rows_nobias` normalises eight rows per
+  step through the bias form's `f64` reduction and ends in one multiply by the weight and no add,
+  so a `-0.0` product stays negative. New tests compare the scalar and dispatched outputs bit for
+  bit at lengths 0, 1, 7, 8, 9, 15, 16, 17, 31, 33, 768, 1152 and 2304, on ±0, subnormals,
+  ±1e30, ±inf and NaN, over a 200 000-value sweep of [-12, 12], and for the norm on several
+  batches, an all-`-0.0` row, a constant row, width 768 and widths that are not a multiple of
+  eight. At ModernBERT-base's 512-token shape the two kernels go 187.9 → 126.9 ms on one thread
+  (1.48×; `geglu_erf` 140.1 → 94.1, the norm 47.3 → 30.6), 5.2 → 3.5 % of a single-thread pass.
+  End to end with 4 threads on a shared, loaded 8-vCPU Xeon the medians move by 1.7 % at 16
+  tokens, 2.9 % at 512 and 0.8 % at 128, and the 16-text batch cell is inside the noise (the
+  per-run spread reaches 2×); single-thread at 512 tokens is 3630 → 3574 ms, 2.4 %, which is the
+  3 % the isolated kernel time predicts. See `docs/design/s4.9-sota.md` §16.
+
+- **The fork's fast wide pass is a requantisation, and an exact one buys nothing (S5.2).** §10.6
+  item 1 proposed copying ik_llama.cpp's trick — convert each block of weight rows to 8 bits once
+  per wide pass — and said it could be bit-identical "if the kernel widens, not requantises".
+  Half right: the fork *does* requantise. `iqk_convert_q4_k_r4_q8_k_r16`
+  (`ggml/src/iqk/iqk_gemm_kquants.cpp:2400`) dequantises each 256-weight row-block to f32, takes
+  its largest magnitude, and rounds every weight onto a new grid of `max/127` with one f32 scale
+  per (row, 256 weights) — a 4-bit code with a 6-bit scale reaches 945 and cannot fold into int8,
+  so nothing of the original grid survives. Worst case half a step, `max/254` = 0.394 % of the
+  block's largest weight. Measured on 40 chunks of 512 tokens with `llama-perplexity`'s
+  log-probability files: `-ub 512` is not bit-identical to `-ub 16` (the files differ at the first
+  predicted position), Mean KLD 0.001087, RMS Δp 0.634 %, same top-1 97.873 % — 44 % of the
+  0.00248 that separates Q4_K_M from the unquantised model. Peregrine's chunk 16 and chunk 64 are
+  identical on a real model, as the invariant requires.
+
+  Built exactly as §10.6 item 1 asked — the tile's nibbles widened to one byte per weight once per
+  tile, the per-32 scale multiply and the min term kept, bit-identical to the narrowed kernel at
+  every width — the wide pass measures **73.5 against 73.4 GMAC/s at 128 activation rows, 72.6
+  against 71.7 at 512** (two runs, ±2 % both signs): the nibble split is free and removing it buys
+  nothing, because the busy ports are the byte dot and the int32 multiplier. An exact wide kernel's
+  ceiling is today's 74-76, not the fork's 91; what separates them is the per-32 scale multiply and
+  the min term (28 % of the kernel), which only the requantisation can remove. Nothing was wired
+  in. The Q5_0 kernel was attacked too, and two exact variants — a cheaper fifth-bit decode with a
+  prefetch (+2.4 % at 64 rows, −1.9 % at 512, inside the noise) and sixteen output rows per fold
+  (42.4 against 53.6 GMAC/s at 128 rows, slower at every width) — were measured and withdrawn:
+  Q5_0's 32-weight block makes its fold eight times more frequent per weight than Q4_K's, and that
+  is the gap, not the kernel. Peregrine is at 0.64 of ik_llama.cpp on Llama 3.2 1B and 0.57 on Qwen
+  2.5 0.5B on prompt processing at the default settings (0.62 and 0.52 at twelve threads), unchanged
+  because nothing shipped. See `docs/design/s5-prefill-avx512.md` §11.
+
+- **The Q4_K kernel is at the machine's byte-dot roof, and the fork's is not faster (S5.1b).** This
+  item was "rebuild the Q4_K kernel with ik_llama.cpp's instruction mix at 120 GMAC/s per core".
+  Both kernels were disassembled instruction for instruction and both were measured, and the target
+  is above what this core does with a byte dot product: a 512-bit `vpdpbusd` costs twice a 256-bit
+  one here, so both widths roof at 106–117 GMAC/s per core (16 accumulators, one barrier per
+  iteration), and Peregrine's kernel is at 77–81 of that (73 %) against the fork's 58–67 (55 %),
+  measured through the fork's own `ggml_mul_mat`. The "134–148 GMAC/s" that set the target does not
+  reproduce. A 256-bit kernel with the fork's shape was built and measured 12 % slower, and
+  removing half the 512-bit broadcasts bought 3 %, so nothing was shipped: the only code change is
+  `kqbench`'s output buffer, sized for the 128 activation rows its width sweep already asked for.
+  Peregrine is at 0.52 of ik_llama.cpp on Qwen 2.5 0.5B (594.0 against 1 132.6 tok/s) and 0.64 on
+  Llama 3.2 1B (338.4 against 530.6) at 512 prompt tokens and twelve threads, so the remaining
+  prompt-time gap is outside the Q4_K kernel. See `docs/design/s5-prefill-avx512.md` §9.
+
+- **A wide prefill pass when no user is decoding (S5.1a).** The chunk was 16 tokens because the
+  chunk is also how long a *decoding* user waits while another user's prompt is read. When
+  nobody is decoding nobody is waiting, and §6 item 3 (PR #209) made a wide pass pay, so the
+  engine now picks the chunk per pass: 64 tokens when no slot is ready to decode, today's rule
+  otherwise (including the 64-token pieces of a prompt over 1024 tokens). `PEREGRINE_PREFILL_CHUNK`
+  still forces one chunk. The rule is the same on the AVX-512 and AVX2 tiers: 64 beat 128 on both
+  1B models on both tiers and lost 5 % (avx512) and 1 % (avx2) to it on Qwen, and 64 is free in
+  memory — the scratch already holds 64 prompt rows for speculation, where 128 would have cost
+  17.6 MiB on the 1B. Single user at 512 prompt tokens, twelve threads: Llama 3.2 1B 305.5 →
+  338.4 tok/s (time to first token 1.68 → 1.51 s), Qwen 2.5 0.5B 488.0 → 594.0 (1.05 → 0.86 s),
+  Gemma 3 1B 277.2 → 326.8 (1.85 → 1.57 s); 4096-token prompts are flat because they were
+  already read in 64-token pieces. At four and ten users the per-user decode rate while another
+  user's prompt is read is unchanged (53.1 → 53.4 and 52.8 → 54.4 tok/s for the 1B; 78.7 → 77.1
+  and 79.9 → 82.9 for Qwen) and total throughput does not drop. Nothing allocates in the pass
+  and no result moves; `prefill_chunk.rs` gains a mid-prompt width switch and an engine test
+  that the pass widens with no decoder, narrows beside one, and widens again. See
+  `docs/design/s5-prefill-avx512.md` §8.
+- **NEON twins for long-text attention and the bert family's element-wise work (S4.9g/S4.9h).**
+  The key-major 16-key panel, its tiled score kernel and the 128-key-blocked value mix now run on
+  aarch64 too, as a four-row × sixteen-key `vfmaq_f32` tile and a six-row × two-vector mix. The
+  bert family's `gelu_erf_rows` and `layer_norm_rows` get NEON bodies: eight elements per step
+  with two `f64` lanes per `erf`, and eight rows per step with one `f64` lane pair per two rows.
+  Both are bit-identical to the scalar twins, on every input and at every width the tests pin,
+  so no golden changed on any tier. One thread at head_dim 64/128 and 512-8 192 keys the score
+  kernel goes from 50-67 % to 77-78 % of the core's FMA peak; Nemotron 3.5 Embed 1B Q8_0 at
+  8 192 tokens goes 75.4 → 47.3 s at 10 threads (attention 98.3 → 42.4 s). The strided float
+  GEMM was already on its NEON store path. See `docs/design/s4.9-sota.md` §9 and §12.
+
+- **A wider prefill pass is never slower: the matmul's write-out is contiguous (S5.1).** The
+  kernels hand back a tile as row-major (`blk[i · nb + b]`) and the output is transposed
+  (`out[(b0 + b) · rows + row]`), so the write-out used to be `8 · nb` single-float stores per
+  tile with a stride of `rows` floats (32 KiB on the 1B at chunk 128): every store its own cache
+  line, and a wider pass paid for it. Turned around, one activation's tile is eight consecutive
+  floats in both places, so `untile` copies each activation's rows as one slice — `nb` copies
+  instead of `8 · nb` scattered stores, and the tile block stays in L1. The packed-float and
+  per-row paths keep their scatter: their blocks are row-major, so their output would need a real
+  transpose. Nothing allocates and no result moves (`prefill_chunk.rs` passes unchanged). At twelve threads the 1B's
+  prefill at chunk 128 goes 266.2 → 347.7 tok/s against 294.5 → 324.6 at 16, so a wide pass is now
+  the fastest pass where before it was the slowest for the 1B; at one thread chunk 64 goes 35.7 →
+  56.1 (+57 %). The default chunk stays 16: chunk 64 is
+  the best for throughput at twelve threads for both models, but the default also sets how long a
+  decoding user waits behind another user's prompt pass, and that trade was not measured here. See
+  `docs/design/s5.1-wide-pass.md`.
+
+- **A 512-bit Q6_K tile kernel (S5.1).** Q6_K's codes split out of a 64-byte window exactly as
+  Q4_K's nibbles do, so the tile kernel now loads eight rows' eight bytes at a time, builds the
+  six-bit codes from `ql`'s nibble and `qh`'s two bits, and accumulates them with `vpdpbusd`
+  straight into int32 — no int16 stage, so none of the AVX2 kernel's widening every two
+  `vpmaddubsw`. The run stays the unit because the scale does: two `vpdpbusd` per activation row,
+  then one exact int32 scale multiply. The format's `-32` offset is eight `vpdpwssd` of paired
+  scales against paired per-16 sums, shifted by five once per super-block, as the AVX2 kernel has
+  it. Eight activation rows per group, window-major, as the Q4_K kernel. One core, L1 tile: 39.2 →
+  62.0 GMAC/s at sixteen activation rows, 33.9 → 57.2 at one hundred and twenty-eight; on a
+  DRAM-sized tile 31.9 → 46–50. End to end the 1B's prefill gains 1.7 % at twelve threads (Q6_K
+  is 15.4 % of it, but a sixteen-token pass streams the weights). The one-row GEMV is unchanged.
+  No golden moves. See `docs/design/s5.1-q6k-zmm.md`.
+
+- **The AVX-512 Q4_K and Q5_0 kernels work eight activation rows per pass (S5.1).** The prefill
+  group was four rows, and each super-block's weight windows, scale decode and min term were
+  re-done for each of them; a super-block is now decoded once for eight, with the window loop
+  outside the row loop so sixteen `vpdpbusd` chains overlap. The Q4_K min term sums two sub-blocks
+  per `vpdpwssd` against paired sums kept in the interleaved activation (`KqActs::bsp`) instead of
+  eight scalar broadcasts and eight int32 multiplies per row, and both kernels work out a row's
+  activation addressing once per call. All of it is bit-identical: the integer sums are
+  order-free and the fold is unchanged, so no golden moves. One core, L1-resident: Q4_K 76.8 →
+  80.8 GMAC/s at sixteen activation rows and 74.6 → 79.3 at sixty-four, Q5_0 48.4 → 54.2 and
+  47.8 → 54.3; the one-row decode kernel 43.5 → 44.0. End to end at 512 tokens: +6.0 % (Qwen 2.5
+  0.5B) and +2.1 % (Llama 3.2 1B) prefill at twelve threads, +5.8 % / +4.7 % at one, decode
+  unchanged. The kernel was not the engine's limit at a sixteen-token pass — the weights stream
+  from DRAM per pass — which is what the wider-pass work is for. See
+  `docs/design/s5.1-kq-epilogue.md`.
+
+### Added
 - **Rerank and classify for the `modern-bert` family (roadmap S4.7b).** A `modern-bert` file
   with a classifier head now answers `POST /v1/rerank` (and `/rerank`, `/v1/reranking`,
   `/reranking`), `POST /v1/classify`, `/v1/models`' modalities and `peregrine rerank` — the same

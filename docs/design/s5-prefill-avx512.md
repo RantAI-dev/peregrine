@@ -1566,3 +1566,171 @@ and none was run for Part A; the two structural Q5_0 variants were reverted afte
   engines read 0.34 (1B, one thread) and 0.21 (1B, twelve), which is far below anything the
   prompt-path account predicts and outside this round's question; it is recorded in `e2e.txt`
   as a flag, not as a result.
+
+## 12. Round 5: attention, thread scaling, and the value mix (S5.2b)
+
+- Status: **built and measured**; the value mix takes two rows per V pass, every result bit
+  unchanged
+- Date: 2026-11-12 (09:30–14:00 local, UTC+7)
+- Host: AMD Ryzen AI 9 HX 370 (Zen 5, 12 cores / 24 threads, AVX-512 F/BW/VL/VNNI/VBMI/BF16),
+  WSL2, 11.7 GiB, **shared for half the window** (another worker's `llama-bench` and tests)
+- Peregrine: `s5.2b-prefill-attention` = `origin/main` `dc6beba` + `origin/s5.2-exactness`
+  `f3f7dd4`; ik_llama.cpp `479074c` (the build of §10, not rebuilt)
+- Raw data, the drivers, the corpus recipe and the clock probe:
+  `benchmarks/results/desktop-zen5-2026-11-12-s5.2b/`
+- Every ratio is **Peregrine ÷ the fork**. Every prompt is plain prose (the S5.2 corpus, no
+  chat template), read by a new `promptbench` example that drives `Engine` with real token ids.
+
+§10.6 item 4 ("a 512-bit attention score kernel; +2–3 % at 512 and +8–10 % at 4096") and item 5
+("24 threads") were the last two items nobody had measured at 4096. This round measures where a
+prompt pass spends its time at both lengths, at one, six, twelve and twenty-four threads, and
+builds the one candidate that reaches the bar with the bits fixed.
+
+### 12.1 Where the time goes
+
+Shares of the engine's own prefill wall, `PEREGRINE_PROF2=full`, medians of three runs; the
+attention sub-buckets are worker-side sums over the pool width.
+
+| model | prompt | threads | tok/s | matmul | attention | scores | mix | rest | barrier wait |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Llama 3.2 1B | 512 | 1 | 49.0 | 86.5 % | 7.6 % | 2.1 % | 4.8 % | 2.7 % | 0 % |
+| | 512 | 12 | 304.5 | 79.2 % | 8.0 % | 1.6 % | 3.2 % | 7.3 % | 13.7 % |
+| | 4096 | 1 | 33.8 | 59.4 % | 36.4 % | 11.3 % | 24.4 % | 1.9 % | 0 % |
+| | 4096 | 12 | 227.4 | 56.0 % | 34.5 % | 9.5 % | 18.2 % | 6.3 % | 13.2 % |
+| Qwen 2.5 0.5B | 512 | 1 | 88.0 | 82.3 % | 10.3 % | 2.7 % | 6.5 % | 2.7 % | 0 % |
+| | 512 | 12 | 563.5 | 72.3 % | 10.4 % | 1.9 % | 4.1 % | 9.3 % | 19.5 % |
+| | 4096 | 1 | 59.1 | 51.1 % | 44.8 % | 13.5 % | 30.4 % | 1.7 % | 0 % |
+| | 4096 | 12 | 377.6 | 50.3 % | 40.9 % | 10.5 % | 20.9 % | 9.5 % | 23.9 % |
+
+So attention is **8–10 % of a 512-token prompt pass and 35–45 % of a 4096-token one**, and the
+value mix alone is twice the score stage. §3's "7.5 % at 512, ~29 % at 4096" was the right
+shape and half the 4096 size.
+
+**Thread scaling.** Twelve threads buy 6.2–6.8× on both engines and both models at both
+lengths (Llama 1B 4096: 6.73× against the fork's 7.73×; Qwen 512: 6.36× against 6.23×), so
+§10.5's "thread scaling is not the gap" holds at 4096 too. Per stage (Llama 1B, 4096): the
+weight matmul is 72.0 s at one thread and 10.1 s at twelve (**7.1×**, and its per-core rate
+falls 41 %), the score stage 13.7 → 1.71 s (**8.0×**), the mix 29.6 → 3.28 s (**9.0×**), and the
+calling thread's own work (norms, activation quantise, RoPE, KV write, residual, SwiGLU)
+2.3 → 1.13 s (**2.0×**). **The stage that stops scaling is the weight matmul**, not attention:
+twelve cores stream the same weights through one memory system. At twelve threads 6–10 % of a
+pass is on the calling thread and another 13–24 % is the caller waiting for its workers
+(imbalance inside the fork–join, which the caller's `barrier wait` slot reports).
+
+The documented switches do not move the 12-thread pass: at 512 tokens the defaults are already
+the best of `PEREGRINE_PREFILL_CHUNK` 16/64/128 (16 costs 14–16 %, 128 costs 3–5 %),
+`PEREGRINE_SPIN_US` 0/200/1000/4000 (parking costs 56–79 %, 200 µs costs 36–55 %, 4000 µs costs
+2–13 %), `PEREGRINE_AFFINITY=1` (−13 % on Qwen, +3 % on Llama) and `PEREGRINE_DYNAMIC=0`
+(−11–17 %). **At 24 threads the pool falls over and the pass width is most of it** — Llama 1B
+512 tokens: chunk 64 gives 125–286 tok/s across rounds, chunk 128 gives 282–312 — but the host
+was shared and the spread is over 100 % on both engines; ik keeps scaling where Peregrine does
+not (Qwen 512: 1302 tok/s at 24 threads against 1101 at twelve). That item stays open, and
+nothing here ships for it: a default chosen on a loaded host is not a measurement.
+
+### 12.2 The attention kernels, and what they achieve
+
+Multiply-accumulates for one prompt of `N` tokens: `layers × query heads × N(N+1)/2 × head_dim`
+for the scores and the same for the mix — Llama 1B 4.30 GMAC each at 512 and 274.9 at 4096,
+Qwen 0.5B 2.82 and 180.3. Against those counts and the measured times, with the f32 FMA roof
+**59.0 GMAC/s per core** (`peak.c`: 3.69 G `vfmadd512`/s × 16, 2.00 per cycle, CPU-time timed):
+
+| model | N | stage | one thread | rate | 12 threads (aggregate) | rate | % of roof, 1 t / 12 t |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Llama 1B | 4096 | scores | 13.7 s | 20.1 GMAC/s | 1.71 s | 161 GMAC/s | 34 % / 27 % |
+| | 4096 | mix | 29.6 s | 9.3 | 3.28 s | 84 | 16 % / 14 % |
+| | 512 | scores | 0.219 s | 19.6 | 0.027 s | 159 | 33 % / 27 % |
+| | 512 | mix | 0.494 s | 8.7 | 0.056 s | 77 | 15 % / 13 % |
+| Qwen 0.5B | 4096 | scores | 9.36 s | 19.3 | 1.14 s | 158 | 33 % / 27 % |
+| | 4096 | mix | 21.1 s | 8.6 | 2.27 s | 79 | 15 % / 13 % |
+
+**The score kernel runs at about a third of the machine's f32 roof and the value mix at about
+a sixth**, and the mix's rate is the same at 512 and 4096 — it is not traffic, it is the body.
+
+As they were (§1.5 of this round's README has the line numbers and the exact order):
+
+- Below 1024 positions the tile is widened to f32 once and the scores take `scores_avx2`: 8
+  keys per pass, **256-bit**, eight accumulators, one transposed reduction per eight keys; a
+  score's products are added ascending in 8-dimension blocks and reduced as
+  `((d0+d1)+(d2+d3)) + ((d4+d5)+(d6+d7))`. The mix takes `mix_avx512`: 16 lanes, four
+  accumulators (64 dimensions), one row at a time.
+- From 1024 positions the kernels read the cache's f16 halves: the scores take
+  `scores_f16_pair` (four keys per pass, eight accumulators, **two rows share each converted K
+  vector**); the mix took `mix_f16_avx512` **one row at a time**, four accumulators, one
+  `vcvtph2ps` per accumulator per position.
+- The thread split is `n_kv_head × row_blocks × pos_chunks` tasks; a prefill chunk is `nb > 1`,
+  so `pos_chunks = 1` and `row_blocks = ceil(2·workers / n_kv_head)` — 24 tasks at twelve
+  threads on both models — and a row's arithmetic never depends on the task, the chunk or the
+  pool.
+
+Ranked by what each could save at 4096/12 t: the value mix 18–30 % of the pass (pairing, worth
+5–7 %), the score kernel 9.5–13.5 % (four rows per key block, worth ~1 % more than the pair it
+already does), the barrier wait 13–24 % (not a kernel job; the switches are at their optimum),
+24 threads (no 12-thread effect), and a pair body for the widened f32 tile (the 512-token
+path's 4–6.5 %, worth ~3 % of that pass).
+
+### 12.3 As built: the value mix, two rows per V pass
+
+`mix_f16_pair_same` (`attn.rs`): when the next row of a task sees the same positions — the
+`gqa` query heads of one batch row always do — the prefill tile's mix loads and widens each V
+half-vector once and feeds **both** rows' fused multiply-adds. Each row keeps its own four
+accumulators, its own `p_j` and its own ascending position order; the chunk boundaries and the
+banking of partial results are the caller's, unchanged, and a piece is cut at the same
+boundary as before. The sixteen-lane body takes `head_dim % 16 == 0`, an eight-lane body
+`% 8`, and anything else falls back to two single-row mixes. The generic `mix_f16_pair` (which
+handles rows of different lengths and banks inside the pass) is not used here: its
+per-position branches and per-row reloads measured **slower** than the two solo mixes in situ
+(43.6 s of mix core-time against 29.3 s), which is why the prefill path never had it.
+
+**Why the bits cannot move.** f16 → f32 widening is exact; the pair changes only where the
+multiplied operand came from and keeps the same `fma(p_j, v_j, acc)` per row in the same order.
+`the_prefill_pair_mix_is_each_rows_own_mix` checks the new body against `mix_f16` row by row,
+bit for bit, for every visible length 1…70 and 127, 128, 129, 511, 512, 513, 4095, 4096, at head
+dims 64, 128, 80, 72 and 16, on random scores and on the edge values a softmax produces.
+
+Measured (two builds that differ only in that dispatch, alternating within each round):
+
+| model | prompt | threads | before | after | ratio | rounds |
+|---|---|---:|---:|---:|---:|---|
+| Llama 1B | 4096 | 12 | 224.7 | **237.5** | **1.057** | 4 (3 forward, 1 reversed) |
+| Qwen 0.5B | 4096 | 12 | 365.5 | **386.3** | **1.057** | 4 |
+| Llama 1B | 4096 | 6 / 1 | 127.7 / 30.6 | 132.7 / 31.3 | 1.039 / 1.023 | 2 |
+| Qwen 0.5B | 4096 | 6 / 1 | 223.1 / 56.4 | 228.3 / 58.5 | 1.023 / 1.036 | 2–4 |
+
+The mix's core-time at one thread falls 29.3 → 23.6 s (1.24×), and the pass gains 5–8 %. At 512
+tokens the cell does not take the new body (that prompt uses the widened f32 tile, where the
+same trick is a separate body this round did not build) and the A/B is 0.96–1.07 depending on
+the order the arms are run in, i.e. the host. Decode is unchanged (0.99–1.01 at 512 and 4096
+contexts) and ten users on one pool are unchanged (1.01 Llama, 0.92–1.05 Qwen across arm
+orders).
+
+### 12.4 What is still behind the fork
+
+At 4096 tokens Peregrine is at **0.66 (Llama 1B) and 0.58 (Qwen 0.5B)** of ik_llama.cpp at
+twelve threads, from 0.63 and 0.56; at 512, 0.57 and 0.47. Attention is no longer the largest
+single addressable term: the weight matmul is 50–56 % of a 4096 pass and 72–79 % of a 512 one,
+and §11.4 measured that an exact wide kernel buys nothing there — the fork's lead is a
+requantising kernel at 91 GMAC/s against Peregrine's exact 72–75, which is a different
+arithmetic (§11.3). What this round adds is the proof that the attention path was leaving a
+sixth of its own roof on the table for a reason that had nothing to do with the bits, and that
+two rows per V pass recovers a quarter of the mix's time. The other two attention candidates
+stay open: a 512-bit score row (measured 30–70 % *slower* when tried, §3.5), and a pair body
+for the widened f32 tile, worth about 3 % of a 512-token pass.
+
+### 12.5 What is not reconciled
+
+- **The 24-thread rows.** Another worker's benchmarks ran on the same 24 logical CPUs for half
+  the window; every 24-thread cell swings by more than 100 % and none is reported as a result.
+  The chunk-128 recovery is real enough to name (three rounds in one window, 282–312 against
+  125–286) but not enough to change a default from.
+- **The absolute tok/s carry ~10 % of clock error.** CLOCK_MONOTONIC ran 3.000 s per 2.728 s of
+  raw time in this session, so every rate here is ~10 % low in real seconds; both engines use
+  the same clock, so the ratios stand. The roof probes use CPU time and need no correction.
+- **Why the value mix is at a sixth of the roof** even after pairing is not fully settled: a
+  micro-benchmark of the exact loop shape on an L1-resident tile reads 16.4 GMAC/s solo and
+  27.8 GMAC/s with two rows, and the in-situ rate is half of that, so part of the gap is the
+  tile stream and part is the four-accumulator dependency chain (`head_dim 64` gives only four
+  independent 16-lane chains). Four rows per V pass measured the same total as two (27.6), so
+  the chain, not the loads, is the remaining limit; breaking it would need a second accumulator
+  per dimension, which is a different order of additions.
+- **The 512-token prompt's mix is still single-row** (the widened f32 tile has no pair body),
+  so this change is worth nothing there. That is the next candidate, not a result.
