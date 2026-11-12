@@ -8,10 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Windows x86-64 builds and passes the suite (roadmap S7.2)**: a `test (windows-x86_64)` job on
+  `windows-2025` runs the whole workspace in release mode on every pull request, beside the Linux
+  and macOS entries, and a smoke step checks `peregrine.exe --version`, `peregrine.exe tier`
+  (AVX2 on the runner's CPU) and `run` on a synthetic model. Getting there: `*.jsonl`,
+  `*.golden`, `*.jinja`, `*.txt` and `*.tsv` are pinned to LF in `.gitattributes`; a synthetic
+  model is never written over a file a loaded model still maps, the pack cache keeps a pack
+  already published for a key when Windows refuses to rename over it (and `Gguf::read_data` uses
+  positioned reads there, not the mapping), and the `hf:` download drops its header mapping
+  before the final rename; the forward path uses the engine's own `exp`/`ln`/`sin`/`cos`/`pow`
+  off Linux as aarch64 already did, so Windows results are the arithmetic's and not the UCRT's,
+  and every golden directory that keyed `-macos` now keys `-windows` too (recorded in S7.4, so
+  those tests skip there until then); the cache and state directories default to
+  `%LOCALAPPDATA%\peregrine`; the pool's default width counts physical cores with
+  `GetLogicalProcessorInformationEx`, hand-written in `crates/peregrine-core/src/win32.rs` (no
+  dependency); and the tests that only needed a Unix signal got a Windows counterpart where the
+  behaviour exists. `serve --background`, `status` and `stop` are S7.3 and say so on Windows.
+
 - **Design: macOS and Windows (S7)**: `docs/design/s7-platforms.md` sets what "supported" means on a
   platform (CI on every PR, a release archive, an installer, `upgrade`, the lifetime commands,
   goldens), the targets (macOS on Apple Silicon and Windows x86-64 first; Intel Macs not planned,
-  Windows on ARM later) and the steps S7.1 to S7.5. Nothing is built yet.
+  Windows on ARM later) and the steps S7.1 to S7.5. S7.2 (Windows x86-64 in CI) is built; the
+  rest is not.
 - **The `nomic-bert` family: nomic-embed-text v1.5 (roadmap S4.8a)**: the family behind
   `arch-nomic-bert`, registered so `general.architecture = "nomic-bert"` loads: the token
   embedding plus token type 0 and a LayerNorm with a bias, post-norm blocks with a fused

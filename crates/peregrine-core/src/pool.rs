@@ -1198,7 +1198,8 @@ impl Drop for TurnGuard<'_> {
 /// the fallback also honours a `taskset` mask, which is what the benchmark's affinity runs need.
 ///
 /// Windows has no `/proc`: `GetLogicalProcessorInformationEx(RelationProcessorCore, …)` counts
-/// the cores (S7.2, [`crate::win32`]), and the logical count is the fallback when that call fails.
+/// the cores (S7.2; the call is in `crate::win32`, which exists only on Windows), and the
+/// logical count is the fallback when that call fails.
 pub fn physical_cores() -> Option<usize> {
     #[cfg(windows)]
     {
