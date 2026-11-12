@@ -1,0 +1,14 @@
+# decode tok/s after a 512-token prompt (chunk 512 fast / default exact), one thread on core 5; alternate order each round
+model round order load prefill_tok_s decode_tok_s
+Llama-3.2-1B-Instruct-Q4_K_M 1 exact 20.00 86.2 24.78
+Llama-3.2-1B-Instruct-Q4_K_M 1 fast 19.58 189.1 24.92
+Qwen2.5-0.5B-Instruct-Q4_K_M 1 exact 18.98 141.5 42.33
+Qwen2.5-0.5B-Instruct-Q4_K_M 1 fast 17.86 160.5 42.83
+Llama-3.2-1B-Instruct-Q4_K_M 2 fast 16.99 190.4 24.99
+Llama-3.2-1B-Instruct-Q4_K_M 2 exact 16.99 93.4 25.02
+Qwen2.5-0.5B-Instruct-Q4_K_M 2 fast 15.91 155.8 40.19
+Qwen2.5-0.5B-Instruct-Q4_K_M 2 exact 17.12 109.7 38.29
+Llama-3.2-1B-Instruct-Q4_K_M 3 exact 17.83 84.6 24.22
+Llama-3.2-1B-Instruct-Q4_K_M 3 fast 17.85 188.4 24.55
+Qwen2.5-0.5B-Instruct-Q4_K_M 3 exact 17.22 140.7 42.83
+Qwen2.5-0.5B-Instruct-Q4_K_M 3 fast 16.88 160.5 43.03
