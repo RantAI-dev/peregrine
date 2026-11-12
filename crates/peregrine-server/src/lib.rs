@@ -119,9 +119,11 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub speculate: bool,
     /// Experimental and lossy: prompt tokens read their Q4_K and Q6_K weights from an
-    /// 8-bit copy built at load. Prompts get faster and a reply can differ from the
-    /// default engine's; the accuracy report is not published yet (roadmap S5.4c).
-    /// Generated tokens keep the exact kernels. Off by default.
+    /// 8-bit copy built at load, so a reply can differ from the default engine's; the
+    /// accuracy report is not published yet (roadmap S5.4c). Generated tokens keep the
+    /// exact kernels. A prompt pass is faster on AVX-512 and about a tenth slower on
+    /// AVX2, where the exact Q4_K kernel is the stronger one; the numbers are in
+    /// `docs/design/s5.4-fast-prompt.md` section 5d. Off by default.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
     /// Memory (MB) for snapshots of finished conversations' caches, so a prompt that shares a long beginning with an
@@ -277,16 +279,18 @@ pub async fn run(a: Args) {
     peregrine_core::options::init(opts)
         .expect("engine options are set once, before the model loads");
     if peregrine_core::options::get().fast_prompt {
-        // One line, at start: what the mode trades, and whether this tier has the
-        // SIMD body (S5.4b; AVX2 and NEON are S5.4d).
+        // One line, at start: what the mode trades, and which SIMD body this tier
+        // runs it through (S5.4b; AVX2 since S5.4d, NEON still pending).
         tracing::info!(
             "fast prompt mode: prompt tokens read Q4_K/Q6_K weights from the resident 8-bit \
              form ({}); results differ from the exact mode, generated tokens, embeddings, \
              rerank and decisions stay exact",
-            if peregrine_core::options::fast_prompt_simd() {
-                "AVX-512 body"
-            } else {
-                "scalar twin: correct, but not faster than the exact kernels on this tier"
+            match peregrine_core::options::fast_prompt_body() {
+                Some(body) => format!("{body} body"),
+                None => {
+                    "scalar twin: correct, but not faster than the exact kernels on this tier"
+                        .to_string()
+                }
             }
         );
     }
