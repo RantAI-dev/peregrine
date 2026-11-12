@@ -192,6 +192,58 @@ pub fn band(i: usize, n: usize, half: Option<usize>) -> (usize, usize) {
     }
 }
 
+/// llama.cpp's ALiBi slopes: the per-head scale of the `-|i - j|` bias.
+///
+/// Transcribed from the CPU soft-max (`ggml/src/ggml-cpu/ops.cpp`, the
+/// `f_max_alibi_bias > 0` path): with `n_head_log2 = 1 << floor(log2(n_head))`,
+/// `m0 = 2^(-max_bias/n_head_log2)` and `m1 = 2^(-(max_bias/2)/n_head_log2)`, head `h`
+/// gets `m0^(h+1)` when `h < n_head_log2` and `m1^(2·(h - n_head_log2) + 1)` otherwise.
+/// llama.cpp calls the C library's `powf` here. The powers go through
+/// [`crate::vmath::det_pow_f32`] instead, so the slopes (and every score they touch) do
+/// not depend on the platform's C library: the same split as the other `det_*` helpers.
+/// They are built once at load, not in a pass.
+///
+/// `jina-bert-v2` is the family that asks for this (`f_max_alibi_bias = 8`,
+/// `src/models/jina-bert-v2.cpp`), but the bias is generic and the kernel does not
+/// know which model it serves.
+pub fn alibi_slopes(n_head: usize, max_bias: f32) -> Vec<f32> {
+    assert!(n_head > 0, "ALiBi needs at least one attention head");
+    assert!(
+        max_bias.is_finite() && max_bias > 0.0,
+        "ALiBi's max_bias must be positive, got {max_bias}"
+    );
+    let n_head_log2 = 1usize << (usize::BITS - 1 - n_head.leading_zeros());
+    let l = n_head_log2 as f32;
+    let pow = crate::vmath::det_pow_f32;
+    let m0 = pow(2.0, -max_bias / l);
+    let m1 = pow(2.0, -(max_bias / 2.0) / l);
+    (0..n_head)
+        .map(|h| {
+            if h < n_head_log2 {
+                pow(m0, h as f32 + 1.0)
+            } else {
+                pow(m1, 2.0 * (h - n_head_log2) as f32 + 1.0)
+            }
+        })
+        .collect()
+}
+
+/// Add ALiBi's bias to one query row's scores: `x[j] += slope · (-|j - qpos|)`,
+/// `j` in `lo..hi`.
+///
+/// The order is llama.cpp's: the soft-max scales the score first (`scores_tile` has
+/// already done that), then adds `slope · mask`, where the mask entry is
+/// `-|p0 - p1|` as an `f32` (`src/llama-graph.cpp`, `llm_graph_input_attn_no_cache`)
+/// and the slope is [`alibi_slopes`]'s. Only a row's own band is touched: the keys
+/// outside it hold whatever the score tile left there and are never read.
+pub fn alibi_row(x: &mut [f32], lo: usize, hi: usize, qpos: usize, slope: f32) {
+    assert!(lo <= hi && hi <= x.len(), "ALiBi band outside the row");
+    assert!(slope.is_finite(), "ALiBi slope must be finite, got {slope}");
+    for (j, s) in x.iter_mut().enumerate().take(hi).skip(lo) {
+        *s += slope * -(j.abs_diff(qpos) as f32);
+    }
+}
+
 /// One head's keys of one text, key-major on x86_64 and aarch64 (S4.9g part 3).
 ///
 /// `keys` is the text's key rows (`n` rows of `stride` floats), `base` the KV head's
@@ -3828,6 +3880,50 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The twelve slopes of `jina-bert-v2`'s 12 heads and `f_max_alibi_bias = 8`, as
+    /// llama.cpp's soft-max computes them: two geometric groups of eight and four.
+    #[test]
+    fn alibi_slopes_follow_llama_cpps_two_groups() {
+        let s = alibi_slopes(12, 8.0);
+        let exact = [
+            0.5f32, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125, 0.00390625,
+        ];
+        for (h, &want) in exact.iter().enumerate() {
+            assert_eq!(s[h].to_bits(), want.to_bits(), "head {h}: {}", s[h]);
+        }
+        // The second group is sqrt(1/2) at odd powers; compare to the same f32 the
+        // formula's own power function produces, not to a decimal literal.
+        let m1 = crate::vmath::det_pow_f32(2.0, -4.0 / 8.0);
+        for (h, e) in [(8usize, 1i32), (9, 3), (10, 5), (11, 7)] {
+            let want = crate::vmath::det_pow_f32(m1, e as f32);
+            assert_eq!(s[h].to_bits(), want.to_bits(), "head {h}: {}", s[h]);
+        }
+        // A single head is its own log2 group: `m0 = 2^-8` and the first slope is `m0^1`.
+        assert_eq!(alibi_slopes(1, 8.0), vec![0.00390625]);
+    }
+
+    /// The bias is `slope · (−|j − qpos|)` on exactly the band it is given, and
+    /// nothing outside it.
+    #[test]
+    fn alibi_row_touches_only_the_band() {
+        let mut x = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        alibi_row(&mut x, 1, 4, 2, 0.5);
+        assert_eq!(x[0].to_bits(), 1.0f32.to_bits());
+        for (j, want) in [(1usize, 2.0 - 0.5), (2, 3.0), (3, 4.0 - 0.5)] {
+            assert_eq!(x[j], want, "key {j}");
+        }
+        assert_eq!(x[4].to_bits(), 5.0f32.to_bits());
+
+        // A whole row against the formula, for a position away from the middle.
+        let mut row: Vec<f32> = (0..97).map(|i| i as f32 * 0.125).collect();
+        let orig = row.clone();
+        alibi_row(&mut row, 3, 91, 40, 0.03125);
+        for j in 3..91 {
+            let want = orig[j] + 0.03125 * -((j as i64 - 40).unsigned_abs() as f32);
+            assert_eq!(row[j].to_bits(), want.to_bits(), "key {j}");
         }
     }
 }

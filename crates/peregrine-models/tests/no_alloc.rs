@@ -25,9 +25,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use support::models::{
-    write_bert, write_dense, write_gemma_embedding, write_hybrid, write_mistral3,
+    write_bert, write_dense, write_gemma_embedding, write_hybrid, write_jina_bert, write_mistral3,
     write_modern_bert, write_moe, write_nomic_bert, BertConfig, BertHeadConfig, Dense,
-    GemmaEmbeddingConfig, Mistral3Config, ModernBertConfig, MoeShape, NomicBertConfig,
+    GemmaEmbeddingConfig, JinaBertConfig, Mistral3Config, ModernBertConfig, MoeShape,
+    NomicBertConfig,
 };
 
 /// Allocations counted while `COUNTING` was set.
@@ -442,6 +443,43 @@ fn a_decode_step_allocates_nothing() {
         if n != 0 {
             failures.push(format!(
                 "modern-bert classifier head, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
+    // The jina-bert-v2 family (S4.8c): ALiBi's bias, the GEGLU pair and the layer's
+    // output norm in the same whole-text pass.
+    let jina = load(&write_jina_bert(
+        &dir,
+        Format::Q8_0,
+        7011,
+        JinaBertConfig::default(),
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&jina, threads);
+        if n != 0 {
+            failures.push(format!(
+                "jina-bert-v2 whole-text pass, {threads} threads: {n} allocations per pass"
+            ));
+        }
+    }
+
+    // The fused GEGLU layout allocates its `2·n_ff` scratch once, at `new_state`, and
+    // nothing in the pass.
+    let jina_fused = load(&write_jina_bert(
+        &dir,
+        Format::Q8_0,
+        7012,
+        JinaBertConfig {
+            fused_gate: true,
+            ..Default::default()
+        },
+    ));
+    for threads in [1, 4] {
+        let n = check_forward_texts(&jina_fused, threads);
+        if n != 0 {
+            failures.push(format!(
+                "jina-bert-v2 fused GEGLU pass, {threads} threads: {n} allocations per pass"
             ));
         }
     }

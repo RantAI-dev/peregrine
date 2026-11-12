@@ -273,6 +273,7 @@ pub fn hidden_rows(model: &Model, tokens: &[u32]) -> Vec<f32> {
             &mut attn,
             &span,
             half,
+            None,
             1.0,
             &mut scratch,
             &pool,
