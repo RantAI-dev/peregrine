@@ -26,6 +26,9 @@ littlebit = ["peregrine-core/littlebit"]
 arch-qwen35 = ["peregrine-models/arch-qwen35"]
 # `peregrine_core::tern`: `tbench1`, `tpar`.
 fmt-ternary = ["peregrine-core/fmt-ternary", "peregrine-models/fmt-ternary"]
+# The Llama and Qwen families: `promptbench` (a real text read by the engine).
+arch-llama = ["peregrine-models/arch-llama"]
+arch-qwen = ["peregrine-models/arch-qwen"]
 
 # Examples that call a format- or architecture-gated item. Without these, `cargo test -p
 # peregrine-bench` builds the examples against the crate's own (empty) default feature set and
@@ -53,6 +56,10 @@ required-features = ["fmt-ternary"]
 [[example]]
 name = "tpar"
 required-features = ["fmt-ternary"]
+
+[[example]]
+name = "promptbench"
+required-features = ["arch-llama", "arch-qwen"]
 
 [lints]
 workspace = true

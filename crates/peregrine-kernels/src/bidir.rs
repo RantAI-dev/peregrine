@@ -192,6 +192,58 @@ pub fn band(i: usize, n: usize, half: Option<usize>) -> (usize, usize) {
     }
 }
 
+/// llama.cpp's ALiBi slopes: the per-head scale of the `-|i - j|` bias.
+///
+/// Transcribed from the CPU soft-max (`ggml/src/ggml-cpu/ops.cpp`, the
+/// `f_max_alibi_bias > 0` path): with `n_head_log2 = 1 << floor(log2(n_head))`,
+/// `m0 = 2^(-max_bias/n_head_log2)` and `m1 = 2^(-(max_bias/2)/n_head_log2)`, head `h`
+/// gets `m0^(h+1)` when `h < n_head_log2` and `m1^(2·(h - n_head_log2) + 1)` otherwise.
+/// llama.cpp calls the C library's `powf` here. The powers go through
+/// [`crate::vmath::det_pow_f32`] instead, so the slopes (and every score they touch) do
+/// not depend on the platform's C library: the same split as the other `det_*` helpers.
+/// They are built once at load, not in a pass.
+///
+/// `jina-bert-v2` is the family that asks for this (`f_max_alibi_bias = 8`,
+/// `src/models/jina-bert-v2.cpp`), but the bias is generic and the kernel does not
+/// know which model it serves.
+pub fn alibi_slopes(n_head: usize, max_bias: f32) -> Vec<f32> {
+    assert!(n_head > 0, "ALiBi needs at least one attention head");
+    assert!(
+        max_bias.is_finite() && max_bias > 0.0,
+        "ALiBi's max_bias must be positive, got {max_bias}"
+    );
+    let n_head_log2 = 1usize << (usize::BITS - 1 - n_head.leading_zeros());
+    let l = n_head_log2 as f32;
+    let pow = crate::vmath::det_pow_f32;
+    let m0 = pow(2.0, -max_bias / l);
+    let m1 = pow(2.0, -(max_bias / 2.0) / l);
+    (0..n_head)
+        .map(|h| {
+            if h < n_head_log2 {
+                pow(m0, h as f32 + 1.0)
+            } else {
+                pow(m1, 2.0 * (h - n_head_log2) as f32 + 1.0)
+            }
+        })
+        .collect()
+}
+
+/// Add ALiBi's bias to one query row's scores: `x[j] += slope · (-|j - qpos|)`,
+/// `j` in `lo..hi`.
+///
+/// The order is llama.cpp's: the soft-max scales the score first (`scores_tile` has
+/// already done that), then adds `slope · mask`, where the mask entry is
+/// `-|p0 - p1|` as an `f32` (`src/llama-graph.cpp`, `llm_graph_input_attn_no_cache`)
+/// and the slope is [`alibi_slopes`]'s. Only a row's own band is touched: the keys
+/// outside it hold whatever the score tile left there and are never read.
+pub fn alibi_row(x: &mut [f32], lo: usize, hi: usize, qpos: usize, slope: f32) {
+    assert!(lo <= hi && hi <= x.len(), "ALiBi band outside the row");
+    assert!(slope.is_finite(), "ALiBi slope must be finite, got {slope}");
+    for (j, s) in x.iter_mut().enumerate().take(hi).skip(lo) {
+        *s += slope * -(j.abs_diff(qpos) as f32);
+    }
+}
+
 /// One head's keys of one text, key-major on x86_64 and aarch64 (S4.9g part 3).
 ///
 /// `keys` is the text's key rows (`n` rows of `stride` floats), `base` the KV head's
@@ -1708,6 +1760,186 @@ unsafe fn exp_row_neon(x: &mut [f32], lo: usize, hi: usize, max: f32) {
         *x.get_unchecked_mut(j) = exp_scalar(*x.get_unchecked(j) - max);
         j += 1;
     }
+}
+
+/// Four rows of [`exp_row`] with the same band `0..n`, in one call: `x[r][j] =
+/// exp(x[r][j] - max[r])`, and `sums[r]` is the row's ascending `f64` sum.
+///
+/// The arithmetic is [`exp_row`]'s, row for row: the same `exp`, the same ascending
+/// `f64` fold. The point is the *schedule*: the four denominators are four independent
+/// add chains, and the scalar `f64` add a chain is built from has a four-cycle
+/// latency, so one row at a time spends three of every four cycles waiting. Walking the
+/// four rows' scalars interleaved keeps four adds in flight and is four times the
+/// throughput on the same, single, bit-defined fold. A row's bits never depend on the
+/// rows beside it: each lane still adds its elements in ascending key order, and the
+/// rows only share the instruction stream.
+///
+/// The rows are `x[r * stride .. r * stride + n]`. `max` and `sums` hold one entry per
+/// row.
+pub fn exp_rows4_sums(x: &mut [f32], stride: usize, n: usize, max: [f32; 4], sums: &mut [f64; 4]) {
+    assert!(
+        stride >= n,
+        "exp_rows4_sums: a {n}-wide row cannot stride {stride}"
+    );
+    let need = 3 * stride + n;
+    assert!(
+        x.len() >= need,
+        "exp_rows4_sums: four {n}-wide rows at stride {stride} need {need} floats, got {}",
+        x.len()
+    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        if vector_ok() {
+            // SAFETY: AVX2 and FMA checked, and the lengths were asserted above.
+            unsafe { exp_rows4_sums_avx2(x, stride, n, max, sums) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if vector_ok() {
+            // SAFETY: NEON checked, and the lengths were asserted above.
+            unsafe { exp_rows4_sums_neon(x, stride, n, max, sums) };
+            return;
+        }
+    }
+    exp_rows4_sums_scalar(x, stride, n, max, sums);
+}
+
+/// [`exp_rows4_sums`]'s scalar twin: four [`exp_row`]s in a row, bit for bit.
+pub fn exp_rows4_sums_scalar(
+    x: &mut [f32],
+    stride: usize,
+    n: usize,
+    max: [f32; 4],
+    sums: &mut [f64; 4],
+) {
+    for r in 0..4 {
+        let m = max[r];
+        for v in &mut x[r * stride..r * stride + n] {
+            *v = exp_scalar(*v - m);
+        }
+    }
+    for r in 0..4 {
+        let mut s = 0.0f64;
+        for &v in &x[r * stride..r * stride + n] {
+            s += v as f64;
+        }
+        sums[r] = s;
+    }
+}
+
+/// The AVX2 [`exp_rows4_sums`]: four rows per key step, the four denominators
+/// interleaved in ascending order.
+///
+/// # Safety
+/// AVX2 and FMA must be available, and the slices must cover four `n`-wide rows.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn exp_rows4_sums_avx2(
+    x: &mut [f32],
+    stride: usize,
+    n: usize,
+    max: [f32; 4],
+    sums: &mut [f64; 4],
+) {
+    let m = [
+        _mm256_set1_ps(max[0]),
+        _mm256_set1_ps(max[1]),
+        _mm256_set1_ps(max[2]),
+        _mm256_set1_ps(max[3]),
+    ];
+    let p = x.as_mut_ptr();
+    let mut s = [0.0f64; 4];
+    let mut j = 0usize;
+    while j + 8 <= n {
+        let mut e = [[0.0f32; 8]; 4];
+        for r in 0..4 {
+            let src = p.add(r * stride + j);
+            let v = _mm256_loadu_ps(src);
+            let w = exp8(_mm256_sub_ps(v, m[r]));
+            _mm256_storeu_ps(src, w);
+            _mm256_storeu_ps(e[r].as_mut_ptr(), w);
+        }
+        // The four sums advance together, each in its row's ascending order.
+        for k in 0..8 {
+            s[0] += e[0][k] as f64;
+            s[1] += e[1][k] as f64;
+            s[2] += e[2][k] as f64;
+            s[3] += e[3][k] as f64;
+        }
+        j += 8;
+    }
+    if j < n {
+        for r in 0..4 {
+            let row = p.add(r * stride);
+            for jj in j..n {
+                *row.add(jj) = exp_scalar(*row.add(jj) - max[r]);
+            }
+        }
+        for r in 0..4 {
+            let row = p.add(r * stride);
+            for jj in j..n {
+                s[r] += *row.add(jj) as f64;
+            }
+        }
+    }
+    sums.copy_from_slice(&s);
+}
+
+/// The NEON [`exp_rows4_sums`], four rows of four lanes per key step.
+///
+/// # Safety
+/// NEON must be available, and the slices must cover four `n`-wide rows.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn exp_rows4_sums_neon(
+    x: &mut [f32],
+    stride: usize,
+    n: usize,
+    max: [f32; 4],
+    sums: &mut [f64; 4],
+) {
+    let m = [
+        vdupq_n_f32(max[0]),
+        vdupq_n_f32(max[1]),
+        vdupq_n_f32(max[2]),
+        vdupq_n_f32(max[3]),
+    ];
+    let p = x.as_mut_ptr();
+    let mut s = [0.0f64; 4];
+    let mut j = 0usize;
+    while j + 4 <= n {
+        let mut e = [[0.0f32; 4]; 4];
+        for r in 0..4 {
+            let src = p.add(r * stride + j);
+            let v = exp4(vsubq_f32(vld1q_f32(src), m[r]));
+            vst1q_f32(src, v);
+            vst1q_f32(e[r].as_mut_ptr(), v);
+        }
+        for k in 0..4 {
+            s[0] += e[0][k] as f64;
+            s[1] += e[1][k] as f64;
+            s[2] += e[2][k] as f64;
+            s[3] += e[3][k] as f64;
+        }
+        j += 4;
+    }
+    if j < n {
+        for r in 0..4 {
+            let row = p.add(r * stride);
+            for jj in j..n {
+                *row.add(jj) = exp_scalar(*row.add(jj) - max[r]);
+            }
+        }
+        for r in 0..4 {
+            let row = p.add(r * stride);
+            for jj in j..n {
+                s[r] += *row.add(jj) as f64;
+            }
+        }
+    }
+    sums.copy_from_slice(&s);
 }
 
 /// The number of keys the rows of a strip share at most: the union of their bands.
@@ -3649,5 +3881,225 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The twelve slopes of `jina-bert-v2`'s 12 heads and `f_max_alibi_bias = 8`, as
+    /// llama.cpp's soft-max computes them: two geometric groups of eight and four.
+    #[test]
+    fn alibi_slopes_follow_llama_cpps_two_groups() {
+        let s = alibi_slopes(12, 8.0);
+        let exact = [
+            0.5f32, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125, 0.00390625,
+        ];
+        for (h, &want) in exact.iter().enumerate() {
+            assert_eq!(s[h].to_bits(), want.to_bits(), "head {h}: {}", s[h]);
+        }
+        // The second group is sqrt(1/2) at odd powers; compare to the same f32 the
+        // formula's own power function produces, not to a decimal literal.
+        let m1 = crate::vmath::det_pow_f32(2.0, -4.0 / 8.0);
+        for (h, e) in [(8usize, 1i32), (9, 3), (10, 5), (11, 7)] {
+            let want = crate::vmath::det_pow_f32(m1, e as f32);
+            assert_eq!(s[h].to_bits(), want.to_bits(), "head {h}: {}", s[h]);
+        }
+        // A single head is its own log2 group: `m0 = 2^-8` and the first slope is `m0^1`.
+        assert_eq!(alibi_slopes(1, 8.0), vec![0.00390625]);
+    }
+
+    /// The bias is `slope · (−|j − qpos|)` on exactly the band it is given, and
+    /// nothing outside it.
+    #[test]
+    fn alibi_row_touches_only_the_band() {
+        let mut x = [1.0f32, 2.0, 3.0, 4.0, 5.0];
+        alibi_row(&mut x, 1, 4, 2, 0.5);
+        assert_eq!(x[0].to_bits(), 1.0f32.to_bits());
+        for (j, want) in [(1usize, 2.0 - 0.5), (2, 3.0), (3, 4.0 - 0.5)] {
+            assert_eq!(x[j], want, "key {j}");
+        }
+        assert_eq!(x[4].to_bits(), 5.0f32.to_bits());
+
+        // A whole row against the formula, for a position away from the middle.
+        let mut row: Vec<f32> = (0..97).map(|i| i as f32 * 0.125).collect();
+        let orig = row.clone();
+        alibi_row(&mut row, 3, 91, 40, 0.03125);
+        for j in 3..91 {
+            let want = orig[j] + 0.03125 * -((j as i64 - 40).unsigned_abs() as f32);
+            assert_eq!(row[j].to_bits(), want.to_bits(), "key {j}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod exp_rows4_tests {
+    use super::*;
+
+    fn prng(seed: u64, n: usize, lo: f32, hi: f32) -> Vec<f32> {
+        let mut s = seed | 1;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            ((s >> 40) as f32 / 16_777_216.0).mul_add(hi - lo, lo)
+        };
+        (0..n).map(|_| next()).collect()
+    }
+
+    /// The batched four-row exponential and sums against the per-row definition:
+    /// `exp_rows4_sums` must be `exp_row` + `sum_row`, row for row, bit for bit.
+    fn check(n: usize, stride: usize, x0: &[f32], max: [f32; 4]) {
+        assert!(stride >= n && x0.len() >= 3 * stride + n);
+        let mut a = x0.to_vec();
+        let mut b = x0.to_vec();
+        let mut sums = [0.0f64; 4];
+        exp_rows4_sums(&mut a, stride, n, max, &mut sums);
+        for r in 0..4 {
+            let row = &mut b[r * stride..r * stride + n];
+            let m = max[r];
+            for v in row.iter_mut() {
+                *v = exp_scalar(*v - m);
+            }
+        }
+        for r in 0..4 {
+            let want: f64 = b[r * stride..r * stride + n]
+                .iter()
+                .fold(0.0f64, |s, &v| s + v as f64);
+            let got = sums[r];
+            assert_eq!(
+                want.to_bits(),
+                got.to_bits(),
+                "n {n} stride {stride} row {r}: sum {got:?} != {want:?}"
+            );
+            let mut scalar = x0[r * stride..r * stride + n].to_vec();
+            let l = exp_row(&mut scalar, 0, n, max[r]);
+            assert_eq!(
+                l.to_bits(),
+                got.to_bits(),
+                "n {n} row {r}: exp_row disagrees"
+            );
+            assert_eq!(
+                scalar.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                a[r * stride..r * stride + n]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                "n {n} stride {stride} row {r}: weights differ"
+            );
+        }
+        // Padding between the rows is untouched (rows 0..=2 have padding after them;
+        // the fourth row is followed only by the `n` values it owns).
+        if stride > n {
+            for r in 0..3 {
+                for j in n..stride {
+                    assert_eq!(
+                        a[r * stride + j].to_bits(),
+                        x0[r * stride + j].to_bits(),
+                        "n {n} stride {stride}: padding rewritten"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_length_matches_the_per_row_definition() {
+        let mut lens: Vec<usize> = (0..=40).collect();
+        lens.extend([127, 128, 129, 383, 384, 385, 511, 512, 513]);
+        for n in lens {
+            let stride = n + 5;
+            let x = prng(0x517a ^ n as u64, 3 * stride + n, -8.0, 8.0);
+            // Also exercise the shape the engine passes: stride == n.
+            let x2 = prng(0x517b ^ n as u64, 4 * n, -8.0, 8.0);
+            let max = [
+                x[..n].iter().copied().fold(f32::NEG_INFINITY, f32::max),
+                x[stride..stride + n]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max),
+                -0.5,
+                3.25,
+            ];
+            check(n, stride, &x, max);
+            let max = [
+                x2[..n].iter().copied().fold(f32::NEG_INFINITY, f32::max),
+                0.0,
+                -3.0,
+                1.5,
+            ];
+            check(n, n, &x2, max);
+        }
+    }
+
+    #[test]
+    fn every_row_count_is_four_rows_of_the_definition() {
+        // The batch is always four rows; vary the width and the shifts as the caller
+        // would across 1..=20 rows' worth of strips (the caller groups them by four).
+        for n in [1usize, 7, 16, 17, 32, 40] {
+            for seed in 0..20u64 {
+                let x = prng(0x9e11 ^ seed, 4 * n, -6.0, 6.0);
+                let max = [seed as f32 * 0.25 - 2.0, 0.0, -1.0, 1.0];
+                check(n, n, &x, max);
+            }
+        }
+    }
+
+    #[test]
+    fn the_edge_values_match_the_definition() {
+        let edges = [
+            0.0f32,
+            -0.0,
+            f32::from_bits(1),           // smallest subnormal
+            f32::from_bits(0x8000_0001), // its negative
+            1e-38,
+            -1e-38,
+            1.0,
+            -1.0,
+            -88.0, // exp underflows towards zero
+            88.0,  // exp overflows towards infinity
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        for n in [1usize, 5, 16, 17, 129, 512] {
+            let mut x = vec![0.0f32; 4 * n];
+            for (i, v) in x.iter_mut().enumerate() {
+                *v = edges[(i * 7 + i / 3) % edges.len()];
+            }
+            let max = [0.0, -0.0, f32::INFINITY, f32::NEG_INFINITY];
+            let mut a = x.clone();
+            let mut sums = [0.0f64; 4];
+            exp_rows4_sums(&mut a, n, n, max, &mut sums);
+            for r in 0..4 {
+                let mut row = x[r * n..r * n + n].to_vec();
+                for v in row.iter_mut() {
+                    *v = exp_scalar(*v - max[r]);
+                }
+                let want: f64 = row.iter().fold(0.0f64, |s, &v| s + v as f64);
+                assert!(
+                    (want.is_nan() && sums[r].is_nan()) || want.to_bits() == sums[r].to_bits(),
+                    "n {n} row {r}: {sums:?} vs {want:?}"
+                );
+                for j in 0..n {
+                    let g = a[r * n + j];
+                    let w = row[j];
+                    assert!(
+                        (g.is_nan() && w.is_nan()) || g.to_bits() == w.to_bits(),
+                        "n {n} row {r} col {j}: {g:?} vs {w:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bounds_are_checked() {
+        let mut x = vec![0.0f32; 16];
+        let mut sums = [0.0f64; 4];
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            exp_rows4_sums(&mut x, 4, 8, [0.0; 4], &mut sums);
+        }));
+        assert!(r.is_err(), "a stride shorter than the row must assert");
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            exp_rows4_sums(&mut x, 8, 8, [0.0; 4], &mut sums);
+        }));
+        assert!(r.is_err(), "a buffer shorter than four rows must assert");
     }
 }

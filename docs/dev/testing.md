@@ -140,6 +140,21 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    real-file test uses the 200 texts (16–6976 tokens) and llama.cpp's ids and vectors under
    `tests/fixtures/modern-bert/` for gte-modernbert-base and Granite Embedding R2, F16 and Q8_0,
    and skips a file that is absent.
+   S4.8c's `jina-bert-v2` family is covered the same way: a synthetic four-layer file with
+   the reference files' graph (separate `ffn_gate`/`ffn_up`, no q/k norms), a second with
+   every optional branch llama.cpp reads (`attn_q_norm`/`attn_k_norm`, the second residual
+   and `attn_norm_2`), and a third with the fused `2·n_ff` GEGLU layout; the vector against
+   `tests/support/jina_bert_ref.rs`'s independent scalar forward, which also writes ALiBi's
+   attention out longhand (bit for bit for F32; for Q8_0 exactly on the scalar tier and
+   within the measured int8 distance on the x86 SIMD tiers, one 16-token case included);
+   the invariance matrix; the context limit; the no-allocation pass (both GEGLU layouts);
+   the server and CLI cases (`a_jina_bert_encoder_*`); and
+   `tests/golden/synthetic/<tier>/jina-bert-Q8_0.golden`, recorded on scalar, AVX2 and
+   AVX-512 under SDE (no aarch64 golden). Its ignored real-file test uses the 200 texts
+   (16–8180 tokens) and llama.cpp's ids and F16/Q8_0 vectors under
+   `tests/fixtures/jina-bert/` for jina-embeddings-v2-base-en, and skips a file that is
+   absent. `blocks::bidir`'s ALiBi path is separately held to a row-by-row reference bit
+   for bit, and `peregrine-kernels`' `alibi_slopes`/`alibi_row` have their own tests.
    S4.7b's classifier head is covered like S4.6b's, without model files, by
    `crates/peregrine-models/tests/modern_bert_heads.rs`: a synthetic rank head (one output, no
    `classifier.*` key, so mean pooling and the erf GELU) and a labelled one (three outputs,

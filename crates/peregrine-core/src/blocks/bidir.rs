@@ -64,9 +64,12 @@ pub fn strip_rows(max_len: usize) -> usize {
 ///
 /// `q`, `k` and `v` hold one row per token of the concatenated batch, at the model's
 /// `q_dim` / `kv_dim` strides. `out` has `q_dim` per row. `half_window` is the
-/// symmetric sliding window (`Some(n_swa / 2)`) or `None` for a global layer. `scale`
-/// multiplies each score; the families fold `1/sqrt(head_dim)` into the queries
-/// instead and pass `1.0`, as llama.cpp does.
+/// symmetric sliding window (`Some(n_swa / 2)`) or `None` for a global layer. `alibi`
+/// is the per-query-head slope of an additive `slope · (-|i - j|)` score bias
+/// ([`peregrine_kernels::bidir::alibi_slopes`]), or `None` for a family without one.
+/// `scale` multiplies each score. Most families fold `1/sqrt(head_dim)` into the
+/// queries instead and pass `1.0`; `jina-bert-v2` passes the scale so that ALiBi's
+/// bias is added after it, which is llama.cpp's order.
 ///
 /// The arithmetic is the one `peregrine_kernels::bidir` defines: a score is one
 /// sequential FMA chain over the head dimension, the exponentials are `exp8` /
@@ -82,6 +85,7 @@ pub fn attend_texts(
     out: &mut [f32],
     spans: &[TextSpan],
     half_window: Option<usize>,
+    alibi: Option<&[f32]>,
     scale: f32,
     scratch: &mut BidirScratch,
     pool: &Pool,
@@ -92,6 +96,16 @@ pub fn attend_texts(
     let qd = c.q_dim();
     let kvd = c.kv_dim();
     let gqa = c.gqa();
+    if let Some(slopes) = alibi {
+        // Checked here, not only in the kernel: a short slope list would make a head
+        // read another model's value (or panic inside the strip).
+        assert!(
+            slopes.len() >= c.n_head,
+            "ALiBi needs a slope per query head ({}), got {}",
+            c.n_head,
+            slopes.len()
+        );
+    }
     let nb = spans.iter().map(|s| s.len).sum::<usize>();
     if nb == 0 {
         return;
@@ -185,13 +199,48 @@ pub fn attend_texts(
                                 j0 = j1;
                             }
                             // Then the row's maximum, weights and denominator, once per
-                            // row over its exact band.
-                            for r in 0..cnt {
-                                let (lo, hi) = k::band(local0 + r, n, half_window);
-                                let s = &mut buf[r * n..(r + 1) * n];
+                            // row over its exact band. A global layer's rows share their
+                            // band, so four of them take one batched exponential and
+                            // four interleaved `f64` denominators (S4.9r): each row keeps
+                            // its own ascending fold, and the four chains keep the add
+                            // units busy instead of waiting on one chain's latency.
+                            // ALiBi first, for every row of the strip: llama.cpp's
+                            // soft-max scales the score, then adds
+                            // `slope · (−|p_q − p_k|)`, before the maximum — so the
+                            // bias is in place before either path below reads a row.
+                            if let Some(slopes) = alibi {
+                                for ra in 0..cnt {
+                                    let (lo, hi) = k::band(local0 + ra, n, half_window);
+                                    let s = &mut buf[ra * n..(ra + 1) * n];
+                                    k::alibi_row(s, lo, hi, local0 + ra, slopes[h]);
+                                }
+                            }
+                            let mut r = 0usize;
+                            if half_window.is_none() {
+                                while r + 4 <= cnt {
+                                    let mut mx = [0.0f32; 4];
+                                    for g in 0..4 {
+                                        mx[g] =
+                                            k::max_row(&buf[(r + g) * n..(r + g + 1) * n], 0, n);
+                                    }
+                                    let mut sums = [0.0f64; 4];
+                                    k::exp_rows4_sums(&mut buf[r * n..], n, n, mx, &mut sums);
+                                    for g in 0..4 {
+                                        inv[r + g] = if sums[g] > 0.0 {
+                                            (1.0 / sums[g]) as f32
+                                        } else {
+                                            0.0
+                                        };
+                                    }
+                                    r += 4;
+                                }
+                            }
+                            for rr in r..cnt {
+                                let (lo, hi) = k::band(local0 + rr, n, half_window);
+                                let s = &mut buf[rr * n..(rr + 1) * n];
                                 let max = k::max_row(s, lo, hi);
                                 let l = k::exp_row(s, lo, hi, max);
-                                inv[r] = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
+                                inv[rr] = if l > 0.0 { (1.0 / l) as f32 } else { 0.0 };
                             }
                             k::mix_rows(
                                 buf,
@@ -307,5 +356,187 @@ fn build_panel_head(
                 ja = jb;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod alibi_tests {
+    //! The ALiBi path of [`super::attend_texts`], held to a row-by-row reference.
+
+    use super::*;
+
+    /// The engine's attention for one text, written out: one sequential FMA chain per
+    /// `(row, key)` for the score, `scale`, then ALiBi's `slope·(−|i−j|)`, the maximum,
+    /// the exponentials (`vmath::exp_scalar`, the block's own), an ascending `f64` sum
+    /// and an ascending value mix — the arithmetic `peregrine_kernels::bidir` defines.
+    #[allow(clippy::too_many_arguments)]
+    fn naive(
+        cfg: &Config,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        n: usize,
+        slopes: &[f32],
+        scale: f32,
+    ) -> Vec<f32> {
+        let hd = cfg.head_dim;
+        let qd = cfg.q_dim();
+        let kvd = cfg.kv_dim();
+        let mut out = vec![0.0f32; n * qd];
+        let mut s = vec![0.0f32; n];
+        for h in 0..cfg.n_head {
+            for i in 0..n {
+                for (j, o) in s.iter_mut().enumerate() {
+                    let mut acc = 0.0f32;
+                    for d in 0..hd {
+                        acc = q[i * qd + h * hd + d].mul_add(k[j * kvd + h * hd + d], acc);
+                    }
+                    *o = acc * scale;
+                }
+                for (j, o) in s.iter_mut().enumerate() {
+                    *o += slopes[h] * -(j.abs_diff(i) as f32);
+                }
+                let max = s.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut e = vec![0.0f32; n];
+                for j in 0..n {
+                    e[j] = crate::vmath::exp_scalar(s[j] - max);
+                }
+                let mut sum = 0.0f64;
+                for &x in &e {
+                    sum += x as f64;
+                }
+                let inv = (1.0f64 / sum) as f32;
+                for d in 0..hd {
+                    let mut acc = 0.0f32;
+                    for (j, &ej) in e.iter().enumerate() {
+                        acc = ej.mul_add(v[j * kvd + h * hd + d], acc);
+                    }
+                    out[i * qd + h * hd + d] = acc * inv;
+                }
+            }
+        }
+        out
+    }
+
+    fn cfg() -> Config {
+        Config {
+            arch_name: "jina-bert-v2",
+            rope_neox: false,
+            n_layer: 1,
+            n_kv_layer: 1,
+            n_head: 4,
+            n_kv_head: 4,
+            head_dim: 8,
+            d_model: 32,
+            n_ff: 64,
+            n_vocab: 10,
+            rope_dim: 0,
+            eps: 1e-12,
+            rope_base: 10_000.0,
+            ctx_train: 128,
+            rope_yarn: None,
+        }
+    }
+
+    fn prng(seed: u64, n: usize) -> Vec<f32> {
+        let mut s = seed | 1;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s >> 40) as f32 / 16_777_216.0).mul_add(2.0, -1.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn alibi_attention_is_the_row_by_row_reference_at_every_strip_and_thread_count() {
+        let cfg = cfg();
+        let n = 19;
+        let q = prng(1, n * cfg.q_dim());
+        let k = prng(2, n * cfg.kv_dim());
+        let v = prng(3, n * cfg.kv_dim());
+        let slopes = peregrine_kernels::bidir::alibi_slopes(cfg.n_head, 8.0);
+        let want = naive(&cfg, &q, &k, &v, n, &slopes, 0.5);
+        let spans = [TextSpan { row0: 0, len: n }];
+        let mut got = vec![0.0f32; n * cfg.q_dim()];
+        for threads in [1usize, 3, 4] {
+            let pool = Pool::new(threads);
+            let mut scratch = BidirScratch::default();
+            scratch.resize(n, cfg.head_dim, threads);
+            let mut stats = StepStats::default();
+            got.iter_mut().for_each(|x| *x = 0.0);
+            attend_texts(
+                &cfg,
+                &q,
+                &k,
+                &v,
+                &mut got,
+                &spans,
+                None,
+                Some(&slopes),
+                0.5,
+                &mut scratch,
+                &pool,
+                &mut stats,
+            );
+            for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(a.to_bits(), b.to_bits(), "threads {threads}, index {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_batch_does_not_change_a_text_with_alibi() {
+        let cfg = cfg();
+        let a = 11;
+        let b = 7;
+        let n = a + b;
+        let q = prng(4, n * cfg.q_dim());
+        let k = prng(5, n * cfg.kv_dim());
+        let v = prng(6, n * cfg.kv_dim());
+        let slopes = peregrine_kernels::bidir::alibi_slopes(cfg.n_head, 8.0);
+        let pool = Pool::new(2);
+        let mut stats = StepStats::default();
+
+        let mut run = |span_rows: &[usize]| -> Vec<Vec<f32>> {
+            let mut out = vec![0.0f32; n * cfg.q_dim()];
+            let mut spans = Vec::new();
+            let mut row = 0;
+            for &len in span_rows {
+                spans.push(TextSpan { row0: row, len });
+                row += len;
+            }
+            let mut scratch = BidirScratch::default();
+            scratch.resize(n, cfg.head_dim, 2);
+            attend_texts(
+                &cfg,
+                &q,
+                &k,
+                &v,
+                &mut out,
+                &spans,
+                None,
+                Some(&slopes),
+                0.5,
+                &mut scratch,
+                &pool,
+                &mut stats,
+            );
+            span_rows
+                .iter()
+                .zip(&spans)
+                .map(|(&len, s)| out[s.row0 * cfg.q_dim()..(s.row0 + len) * cfg.q_dim()].to_vec())
+                .collect()
+        };
+
+        // The two texts together, then the first alone from the same rows.
+        let both = run(&[a, b]);
+        let alone = run(&[a]);
+        assert_eq!(
+            both[0], alone[0],
+            "a text's rows must not see its neighbour"
+        );
     }
 }

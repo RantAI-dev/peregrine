@@ -49,6 +49,16 @@ use crate::format::{f16, Format};
 #[derive(Clone)]
 pub struct QuantAct {
     pub n: usize,
+    /// Whether this row carries a *prompt* token for the opt-in fast prompt mode
+    /// (`docs/design/s5.4-fast-prompt.md`, S5.4b). The engine sets it on the rows
+    /// of a prompt chunk and leaves it false on generated (decode) rows and on
+    /// every row of an embedding, rerank or decision pass. It changes nothing
+    /// unless the process's `PEREGRINE_FAST_PROMPT` is on and the matrix has a
+    /// resident 8-bit form (`kq8`): with the option off the field is always false.
+    ///
+    /// `fill` does not touch it, so the flag survives the re-quantisation of each
+    /// layer's activation.
+    pub prompt: bool,
     /// int8 codes, `n` of them.
     pub q: Vec<i8>,
     /// One scale per 32-block: `a_i ≈ q_i · d[i/32]`.
@@ -158,6 +168,7 @@ impl QuantAct {
     pub fn with_capacity(n: usize) -> QuantAct {
         QuantAct {
             n: 0,
+            prompt: false,
             q: Vec::with_capacity(n),
             d: Vec::with_capacity(n / 32 + 1),
             sums: Vec::with_capacity(n / 32 + 1),
@@ -1054,6 +1065,76 @@ pub const KVALUES_IQ4NL: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 ];
 
+/// One row of `F16` weights, widened into `y` — the scalar loop by default, sixteen
+/// halves at a time with F16C where the tier has it (`S4.9r`).
+///
+/// The scalar body is the definition: `f16`'s bit-for-bit widening of a half. F16C's
+/// `vcvtph2ps` is the same conversion in hardware — every finite half is exact, an
+/// infinity stays an infinity, and a NaN keeps its mantissa bits (they are the bits
+/// `f16` shifts into place) — and the tests hold every one of the 65 536 half patterns
+/// to it.
+#[inline]
+fn dequant_f16(w: &[u8], y: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::simd::have_batched() {
+            // SAFETY: AVX2 and F16C checked; `w` holds two bytes per `y` element.
+            unsafe { dequant_f16_avx2(w, y) };
+            return;
+        }
+    }
+    dequant_f16_scalar(w, y);
+}
+
+/// [`dequant_f16`]'s scalar twin.
+#[inline]
+fn dequant_f16_scalar(w: &[u8], y: &mut [f32]) {
+    for (o, c) in y.iter_mut().zip(w.chunks_exact(2)) {
+        *o = f16(u16::from_le_bytes(c.try_into().unwrap()));
+    }
+}
+
+/// [`dequant_f16`] on AVX2: sixteen halves per step with `vcvtph2ps`.
+///
+/// # Safety
+/// AVX2 and F16C must be available, and `w` must hold at least two bytes per element
+/// of `y`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn dequant_f16_avx2(w: &[u8], y: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = y.len();
+    let src = w.as_ptr();
+    let dst = y.as_mut_ptr();
+    let mut i = 0;
+    while i + 16 <= n {
+        let h0 = _mm_loadu_si128(src.add(i * 2) as *const __m128i);
+        let h1 = _mm_loadu_si128(src.add(i * 2 + 16) as *const __m128i);
+        let f0 = _mm256_cvtph_ps(h0);
+        let f1 = _mm256_cvtph_ps(h1);
+        _mm256_storeu_ps(dst.add(i), f0);
+        _mm256_storeu_ps(dst.add(i + 8), f1);
+        // A NaN's payload is not the hardware's to canonicalise: `vcvtph2ps` quiets it
+        // (and drops its mantissa bits), while the definition shifts them into place. No
+        // real weight is a NaN, so this branch never runs on a model; when one is, the
+        // sixteen values are re-widened by the scalar body, which is the definition.
+        let nan = _mm256_or_ps(
+            _mm256_cmp_ps(f0, f0, _CMP_UNORD_Q),
+            _mm256_cmp_ps(f1, f1, _CMP_UNORD_Q),
+        );
+        if _mm256_movemask_ps(nan) != 0 {
+            for j in i..i + 16 {
+                *dst.add(j) = f16(u16::from_le_bytes([*src.add(j * 2), *src.add(j * 2 + 1)]));
+            }
+        }
+        i += 16;
+    }
+    while i < n {
+        *dst.add(i) = f16(u16::from_le_bytes([*src.add(i * 2), *src.add(i * 2 + 1)]));
+        i += 1;
+    }
+}
+
 /// The 16-entry lookup table for GGML's MXFP4 format, transcribed from `kvalues_fp4` / `kvalues_mxfp4`
 /// in `ggml-common.h`. Note that values are doubled relative to OCP E2M1 floats: [0, 1, 2, 3, 4, 6, 8, 12, ...].
 pub const KVALUES_MXFP4: [i8; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
@@ -1073,11 +1154,7 @@ pub fn dequant_row(fmt: Format, w: &[u8], y: &mut [f32]) {
                 *o = f32::from_le_bytes(c.try_into().unwrap());
             }
         }
-        Format::F16 => {
-            for (o, c) in y.iter_mut().zip(w.chunks_exact(2)) {
-                *o = f16(u16::from_le_bytes(c.try_into().unwrap()));
-            }
-        }
+        Format::F16 => dequant_f16(w, y),
         Format::BF16 => {
             for (o, c) in y.iter_mut().zip(w.chunks_exact(2)) {
                 *o = f32::from_bits((u16::from_le_bytes(c.try_into().unwrap()) as u32) << 16);
@@ -2567,6 +2644,50 @@ mod tests {
             assert_eq!(m, (q[j + 4] >> 4) | ((q[j] >> 6) << 4));
             // Six-bit fields: nothing may leak into the top two bits.
             assert!(sc < 64 && m < 64, "j={j} sc={sc} m={m}");
+        }
+    }
+
+    /// Every half pattern widens to the same bit pattern the vector path gives, and
+    /// every row length the encoders use takes the same route.
+    #[test]
+    fn every_f16_row_is_the_scalar_widening() {
+        // The entire half space, as one row of 65 536.
+        let mut w = Vec::with_capacity(65536 * 2);
+        for h in 0u32..65536 {
+            w.extend_from_slice(&(h as u16).to_le_bytes());
+        }
+        let mut fast = vec![0.0f32; 65536];
+        let mut slow = vec![0.0f32; 65536];
+        dequant_f16(&w, &mut fast);
+        dequant_f16_scalar(&w, &mut slow);
+        for h in 0..65536usize {
+            let (a, b) = (fast[h], slow[h]);
+            assert!(
+                (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits(),
+                "half {h:#06x}: {a:?} != {b:?}"
+            );
+        }
+        // Every length from 0 to 40, and the encoder widths and their neighbours.
+        let mut lens: Vec<usize> = (0..=40).collect();
+        lens.extend([127, 128, 129, 383, 384, 385, 511, 512, 513, 1536]);
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        for n in lens {
+            let mut w = Vec::with_capacity(n * 2);
+            for _ in 0..n {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                w.extend_from_slice(&((state >> 48) as u16).to_le_bytes());
+            }
+            let mut fast = vec![0.0f32; n];
+            let mut slow = vec![0.0f32; n];
+            dequant_row(Format::F16, &w, &mut fast);
+            dequant_f16_scalar(&w, &mut slow);
+            assert_eq!(
+                fast.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                slow.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "n {n}"
+            );
         }
     }
 

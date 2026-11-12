@@ -300,6 +300,7 @@ pub fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
         kind: t.kind,
         offset: t.offset + e as u64 * bytes,
         tile_off: None,
+        q8_off: None,
         kq_off: None,
         fp_off: None,
         fp_kind: None,
@@ -838,6 +839,7 @@ mod tests {
             kind: Format::Q8_0,
             offset: 1024,
             tile_off: None,
+            q8_off: None,
             kq_off: None,
             fp_off: None,
             fp_kind: None,
@@ -1036,6 +1038,7 @@ mod tests {
                     tiles: TileStore::default(),
                     kq: KqStore::default(),
                     fp: crate::model::FpStore::default(),
+                    q8: KqStore::default(),
                     #[cfg(feature = "littlebit")]
                     lb: None,
                 },

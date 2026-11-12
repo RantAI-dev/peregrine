@@ -239,29 +239,34 @@ for every timed row, so every engine computes every text.
 tokens at batch 1, 8 and 32, a mixed-length batch of 32 texts (8–512 tokens), and 2 000 tokens for the
 models that accept them. Engines: llama.cpp v0.9.0, OpenVINO 2026.4, ONNX Runtime 1.31, fastembed 0.9
 and text-embeddings-inference 1.9. The four larger families are the S4.9l proof run at `2a5e9f6`; the
-two small BERT rows are re-measured at `4500a6f` plus S4.9p
-([`bluefin-2026-11-12-s4.9p`](../benchmarks/results/bluefin-2026-11-12-s4.9p/README.md)).
+
+two small BERT rows are re-measured at `4500a6f` plus S4.9p and S4.9r
+([`bluefin-2026-11-12-s4.9r`](../benchmarks/results/bluefin-2026-11-12-s4.9r/README.md)).
 
 | Model | File | Fastest other engine | 16 tokens | 128 tokens | 512 tokens | 2 000 tokens | mixed batch |
 |---|---|---|---|---|---|---|---|
-| all-MiniLM-L6-v2 | F16, Q8_0 | OpenVINO, ONNX Runtime | **1.10–1.39×** | 0.98–1.03× | 0.90–0.95× | n/a | **1.52×** |
-| bge-small-en-v1.5 | F32, Q8_0 | OpenVINO, ONNX Runtime, fastembed | 0.97–1.26× | 0.92–0.97× | 0.84–0.89× | n/a | **1.25×** |
+| all-MiniLM-L6-v2 | F16, Q8_0 | OpenVINO, ONNX Runtime, llama.cpp | **1.01–1.46×** | 0.97–1.08× | 0.99–1.03× | n/a | **1.60–1.65×** |
+| bge-small-en-v1.5 | F32, Q8_0 | OpenVINO, ONNX Runtime, fastembed | 0.95–1.23× | 0.93–1.01× | 0.90–0.95× | n/a | **1.31×** |
+
 | bge-m3 | Q8_0 | llama.cpp | **1.18–1.53× across every cell** | | | **1.35×** | |
 | EmbeddingGemma 300M | Q8_0 | llama.cpp | **1.30–1.51× across every cell** | | | | |
 | Qwen3-Embedding 0.6B | Q8_0, F16 | llama.cpp | **1.25–1.51×** (Q8_0), **1.24–1.44×** (F16) | | | | |
 | Nemotron 3.5 Embed 1B | Q8_0 | llama.cpp | **1.34–1.62× across every cell** | | | | |
 
-The four larger families are ahead in every cell (1.05× and up). The cells behind are all on the two
-small BERT encoders at 128 and 512 tokens: MiniLM F16/Q8_0 lose at 128 b8 (0.98–0.99×) and 512
-b1/b8/b32 (0.90–0.95×), bge-small F32/Q8_0 at 16 b32 (0.97×), 128 b1/b8/b32 (0.92–0.97×) and 512
-b1/b8/b32 (0.84–0.89×). The stage profile says where: at 512 tokens the pass is 58–60% matmul, 23–25%
-attention and 17% element-wise, and OpenVINO's own per-node profile on the same cell puts its
-`FullyConnected` at 173 GMAC/s against Peregrine's 165–178 — the matrix kernels are level, while the
-element-wise work is 9.3 ms against OpenVINO's 0.5 ms (18.1 against 1.1 on bge-small) and bge-small's
-attention is 25.7 against 20.7 ms. So the remainder is the per-element passes and bge-small's 32-wide
-attention strip, not the matrix kernel and not quantisation (the F16/F32 and Q8_0 rows still run at
-the same speed). S4.9p closed the halved-precision kernel's conversion overhead and moved MiniLM's
-F16 row 0.87→0.90× at 512 b1 and 0.96→1.02× at 128 b1; the element-wise block is the next lever. The
+
+The four larger families are ahead in every cell (1.05× and up). The two small BERT encoders are
+now level on MiniLM at 512 tokens (0.99–1.03×) and still behind on bge-small (0.90–0.95× at 512,
+0.93–0.95× at 128 b1/b8), plus MiniLM's 128 b8 (0.97×) and the 16 b32 cells (0.95–0.98×). S4.9p
+showed the matrix kernels are level with oneDNN's on this CPU (165–178 against 173 GMAC/s) and put
+the remainder in the element-wise block — 9.3 ms of a 512-token MiniLM pass against OpenVINO's
+2.4 ms and 17.8 against 3.8 ms on bge-small. S4.9r took that block apart step by step: threaded the
+q/k/v biases and the two residual reads (they ran on one thread), ran four softmax denominators at
+once instead of one serial `f64` chain, and widened F16 embedding rows with `vcvtph2ps` — all with
+every vector bit-identical. Element-wise is now **7.5 ms** and **16.0 ms**, attention 10.8 and 21.4
+(from 12.7 and 25.5), and MiniLM's 512-token cells reached level (0.82→0.99×, 0.91→1.00×, 0.93→1.01×). What still holds bge-small back is now one step: its exact-`erf` GELU, 10.7 ms of a
+98.8 ms pass, against OpenVINO's fused approximation, which costs 0 ms as a node because oneDNN
+fuses it into the GEMM epilogue; and its 25 LayerNorms against the `MVN` nodes' 0.8 ms. The
+
 mixed-length batch is a win on both models because Peregrine never pads: the padding engines are
 1.6–4.5× slower there.
 

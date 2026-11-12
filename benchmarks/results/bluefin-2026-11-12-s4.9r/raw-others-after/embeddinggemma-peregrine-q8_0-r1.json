@@ -1,0 +1,170 @@
+{
+ "benchmark": "peregrine-s4.2-embed",
+ "timestamp": "2026-11-12T06:34:21.115489+00:00",
+ "round": 1,
+ "model": {
+  "name": "embeddinggemma",
+  "hf": "google/embeddinggemma-300m",
+  "pooling": "mean",
+  "max_tokens": 2048,
+  "dim": 768,
+  "tokenizer_dir": "embeddinggemma/ref"
+ },
+ "row": {
+  "engine": "peregrine",
+  "precision": "q8_0",
+  "path": "~/models/embed/embeddinggemma/embeddinggemma-Q8_0.gguf",
+  "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+  "size_bytes": 333590944,
+  "fingerprint": {
+   "kind": "file",
+   "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+   "size_bytes": 333590944
+  },
+  "notes": "the encoder path (S4.4): whole texts, no KV cache; S4.9b pass budget"
+ },
+ "machine": {
+  "hostname": "bluefin",
+  "os": "Linux",
+  "kernel": "7.2.7-200.fc44.x86_64",
+  "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+  "cpu_features": [
+   "fma",
+   "avx",
+   "avx2"
+  ],
+  "cores_logical": 8,
+  "threads_tested": 4,
+  "governor": "powersave",
+  "python": "3.14.8"
+ },
+ "engine": {
+  "name": "peregrine",
+  "binary": "~/wt-s49r/target/release/peregrine",
+  "worktree": "~/wt-s49r",
+  "commit": "d77636706373fa1e6030ba934e00bd71177e96a9",
+  "branch": "s4.9r-encoder-elementwise",
+  "server_version": "peregrine 0.2.0"
+ },
+ "start": {
+  "cmd": [
+   "~/wt-s49r/target/release/peregrine",
+   "serve",
+   "-m",
+   "~/models/embed/embeddinggemma/embeddinggemma-Q8_0.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8451",
+   "-t",
+   "4",
+   "-c",
+   "2048",
+   "--slots",
+   "40",
+   "--no-profile"
+  ],
+  "threads": 4,
+  "slots": 40,
+  "pooling": "mean"
+ },
+ "host_before": {
+  "loadavg": [
+   4.96826171875,
+   5.474609375,
+   5.79443359375
+  ],
+  "mem_available_gb": 4.68,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.0
+ },
+ "host_after": {
+  "loadavg": [
+   4.96826171875,
+   5.474609375,
+   5.79443359375
+  ],
+  "mem_available_gb": 4.68,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.0
+ },
+ "preflight": {
+  "loadavg": [
+   5.1396484375,
+   5.5166015625,
+   5.8095703125
+  ],
+  "mem_available_gb": 4.82,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.0
+ },
+ "settings": {
+  "lengths": [
+   128,
+   512
+  ],
+  "batches": [
+   1
+  ],
+  "clients": [
+   1
+  ],
+  "threads": 4,
+  "budget_s": 0.5,
+  "max_requests": 20,
+  "max_big_requests": 2,
+  "max_cell_seconds": 120.0,
+  "texts_file": "/var/tmp/embed-texts-s49l/embeddinggemma.json",
+  "texts_per_length": 128
+ },
+ "cells": {
+  "L128_b1_c1": {
+   "texts_per_s": 13.683,
+   "tokens_per_s": 1751.4,
+   "wall_s": 0.5847,
+   "requests": 8,
+   "texts": 8,
+   "tokens_calibrated": 1024,
+   "tokens_reported": 1024,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.092887,
+    "p99": 0.102694,
+    "min": 0.001275,
+    "max": 0.10293,
+    "n": 8
+   },
+   "length": 128,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 0.58,
+   "tokens_per_text_median": 128
+  },
+  "L512_b1_c1": {
+   "texts_per_s": 4.734,
+   "tokens_per_s": 2423.7,
+   "wall_s": 0.845,
+   "requests": 4,
+   "texts": 4,
+   "tokens_calibrated": 2048,
+   "tokens_reported": 2048,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.206883,
+    "p99": 0.427857,
+    "min": 0.002307,
+    "max": 0.42837,
+    "n": 4
+   },
+   "length": 512,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 0.85,
+   "tokens_per_text_median": 512
+  }
+ }
+}
