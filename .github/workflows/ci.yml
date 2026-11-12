@@ -87,7 +87,7 @@ jobs:
       # S7.1 smoke on Apple Silicon: the release binary runs, reports its version and the kernel
       # tier it picked, and generates from a synthetic model the repository writes itself (the
       # bench examples are x86-only; write_synthetic is the one that is not).
-      - name: smoke (macOS: version, tier, a synthetic run)
+      - name: "smoke (macOS: version, tier, a synthetic run)"
         if: matrix.name == 'macos-aarch64'
         run: |
           cargo build --release --locked -p peregrine
