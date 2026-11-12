@@ -1,0 +1,55 @@
+{
+ "benchmark": "peregrine-s4.2-embed-accuracy",
+ "timestamp": "2026-11-11T23:04:34.753174+00:00",
+ "model": {
+  "name": "qwen3-embed-0.6b",
+  "hf": "Qwen/Qwen3-Embedding-0.6B",
+  "pooling": "last"
+ },
+ "row": {
+  "engine": "peregrine",
+  "precision": "f16",
+  "path": "~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-f16.gguf",
+  "kind": "file",
+  "sha256": "ca1916883dad2a151e9b70b68bad8f59fb3421bfbe8713ae6dc5e88b87f84e04",
+  "size_bytes": 1197629632
+ },
+ "reference": {
+  "label": "torch-fp32",
+  "backend": "torch-fp32",
+  "dim": 1024,
+  "count": 200
+ },
+ "engine": {
+  "name": "peregrine",
+  "binary": "/var/tmp/target-s49l/release/peregrine",
+  "worktree": "~/peregrine",
+  "commit": "2a5e9f6149cca9467365b912a219ca38d4ef9b1c",
+  "branch": "bench-bluefin-s4.9l-proof",
+  "server_version": "peregrine 0.1.2"
+ },
+ "host_before": {
+  "loadavg": [
+   4.3017578125,
+   4.6708984375,
+   4.80712890625
+  ],
+  "mem_available_gb": 7.48,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.29
+ },
+ "cosine": {
+  "mean": 0.999682,
+  "min": 0.999483,
+  "p1": 0.99955,
+  "p50": 0.999694
+ },
+ "norm": {
+  "min": 1.0,
+  "max": 1.0,
+  "mean": 1.0
+ },
+ "dim": 1024,
+ "n": 200
+}

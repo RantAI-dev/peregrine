@@ -1,0 +1,270 @@
+{
+ "source": "benchmarks/results/bluefin-2026-11-12-s4.9l-proof/tests/real-file-tests.log",
+ "records": [
+  {
+   "model": "qwen3-embed-0.6b",
+   "engine": "peregrine",
+   "precision": "q8_0",
+   "reference": "reference forward",
+   "cosine_mean": null,
+   "cosine_min": null,
+   "checks": [
+    {
+     "name": "bit-identical to the reference forward and to llama.cpp ids; no cosine printed",
+     "cosine_mean": null,
+     "cosine_min": null
+    }
+   ]
+  },
+  {
+   "model": "minilm",
+   "engine": "peregrine",
+   "precision": "f16",
+   "reference": "fp32 PyTorch",
+   "cosine_mean": 0.9999998,
+   "cosine_min": 0.9999996,
+   "checks": [
+    {
+     "name": "peregrine vs llama.cpp",
+     "cosine_mean": 0.9999979,
+     "cosine_min": 0.999996
+    },
+    {
+     "name": "peregrine vs fp32 PyTorch",
+     "cosine_mean": 0.9999998,
+     "cosine_min": 0.9999996
+    },
+    {
+     "name": "llama.cpp vs fp32 PyTorch",
+     "cosine_mean": 0.9999975,
+     "cosine_min": 0.9999952
+    }
+   ]
+  },
+  {
+   "model": "minilm",
+   "engine": "peregrine",
+   "precision": "q8_0",
+   "reference": "fp32 PyTorch",
+   "cosine_mean": 0.9997637,
+   "cosine_min": 0.9995207,
+   "checks": [
+    {
+     "name": "peregrine vs llama.cpp",
+     "cosine_mean": 0.9997501,
+     "cosine_min": 0.9995759
+    },
+    {
+     "name": "peregrine vs fp32 PyTorch",
+     "cosine_mean": 0.9997637,
+     "cosine_min": 0.9995207
+    },
+    {
+     "name": "llama.cpp vs fp32 PyTorch",
+     "cosine_mean": 0.9994718,
+     "cosine_min": 0.9991341
+    }
+   ]
+  },
+  {
+   "model": "bge-small",
+   "engine": "peregrine",
+   "precision": "f32",
+   "reference": "fp32 PyTorch",
+   "cosine_mean": 1.0,
+   "cosine_min": 1.0,
+   "checks": [
+    {
+     "name": "peregrine vs llama.cpp",
+     "cosine_mean": 0.9999987,
+     "cosine_min": 0.9999963
+    },
+    {
+     "name": "peregrine vs fp32 PyTorch",
+     "cosine_mean": 1.0,
+     "cosine_min": 1.0
+    },
+    {
+     "name": "llama.cpp vs fp32 PyTorch",
+     "cosine_mean": 0.9999987,
+     "cosine_min": 0.9999963
+    }
+   ]
+  },
+  {
+   "model": "bge-small",
+   "engine": "peregrine",
+   "precision": "q8_0",
+   "reference": "fp32 PyTorch",
+   "cosine_mean": 0.9999283,
+   "cosine_min": 0.9998793,
+   "checks": [
+    {
+     "name": "peregrine vs llama.cpp",
+     "cosine_mean": 0.9999097,
+     "cosine_min": 0.9998713
+    },
+    {
+     "name": "peregrine vs fp32 PyTorch",
+     "cosine_mean": 0.9999283,
+     "cosine_min": 0.9998793
+    },
+    {
+     "name": "llama.cpp vs fp32 PyTorch",
+     "cosine_mean": 0.999839,
+     "cosine_min": 0.999756
+    }
+   ]
+  },
+  {
+   "model": "bge-m3",
+   "engine": "peregrine",
+   "precision": "q8_0",
+   "reference": "fp32 PyTorch",
+   "cosine_mean": 0.9991393,
+   "cosine_min": 0.9968882,
+   "checks": [
+    {
+     "name": "peregrine vs llama.cpp",
+     "cosine_mean": 0.9997594,
+     "cosine_min": 0.9992233
+    },
+    {
+     "name": "peregrine vs fp32 PyTorch",
+     "cosine_mean": 0.9991393,
+     "cosine_min": 0.9968882
+    },
+    {
+     "name": "llama.cpp vs fp32 PyTorch",
+     "cosine_mean": 0.9991207,
+     "cosine_min": 0.9966748
+    }
+   ]
+  },
+  {
+   "model": "embeddinggemma",
+   "engine": "peregrine",
+   "precision": "q8_0",
+   "reference": "llama.cpp F16",
+   "cosine_mean": 0.9994629,
+   "cosine_min": 0.997989,
+   "checks": [
+    {
+     "name": "peregrine vs llama.cpp Q8_0 (768-d)",
+     "cosine_mean": 0.999639,
+     "cosine_min": 0.999099
+    },
+    {
+     "name": "peregrine vs llama.cpp F16 (768-d)",
+     "cosine_mean": 0.9994629,
+     "cosine_min": 0.997989
+    },
+    {
+     "name": "llama.cpp Q8_0 vs llama.cpp F16 (768-d)",
+     "cosine_mean": 0.9994734,
+     "cosine_min": 0.998013
+    },
+    {
+     "name": "peregrine vs llama.cpp Q8_0 (256-d)",
+     "cosine_mean": 0.9997002,
+     "cosine_min": 0.999166
+    },
+    {
+     "name": "peregrine vs llama.cpp F16 (256-d)",
+     "cosine_mean": 0.9995477,
+     "cosine_min": 0.998218
+    },
+    {
+     "name": "llama.cpp Q8_0 vs llama.cpp F16 (256-d)",
+     "cosine_mean": 0.9995551,
+     "cosine_min": 0.998398
+    }
+   ]
+  },
+  {
+   "model": "nemotron-3.5-embed-1b",
+   "engine": "peregrine",
+   "precision": "f16",
+   "reference": "llama.cpp F16",
+   "cosine_mean": 0.99999994,
+   "cosine_min": 0.9999998,
+   "checks": [
+    {
+     "name": "peregrine F16 vs llama.cpp F16 (2048-d)",
+     "cosine_mean": 0.99999994,
+     "cosine_min": 0.9999998
+    },
+    {
+     "name": "peregrine F16 vs llama.cpp F16 (1024-d)",
+     "cosine_mean": 0.99999992,
+     "cosine_min": 0.9999996
+    },
+    {
+     "name": "peregrine F16 vs llama.cpp F16 (512-d)",
+     "cosine_mean": 0.99999989,
+     "cosine_min": 0.9999992
+    }
+   ]
+  },
+  {
+   "model": "nemotron-3.5-embed-1b",
+   "engine": "peregrine",
+   "precision": "q8_0",
+   "reference": "llama.cpp F16",
+   "cosine_mean": 0.9998594,
+   "cosine_min": 0.999775,
+   "checks": [
+    {
+     "name": "peregrine Q8_0 vs llama.cpp Q8_0 (2048-d)",
+     "cosine_mean": 0.9999777,
+     "cosine_min": 0.999944
+    },
+    {
+     "name": "peregrine Q8_0 vs llama.cpp F16 (2048-d)",
+     "cosine_mean": 0.9998594,
+     "cosine_min": 0.999775
+    },
+    {
+     "name": "llama.cpp Q8_0 vs llama.cpp F16 (2048-d)",
+     "cosine_mean": 0.9998549,
+     "cosine_min": 0.999762
+    },
+    {
+     "name": "peregrine Q8_0 vs llama.cpp Q8_0 (1024-d)",
+     "cosine_mean": 0.9999774,
+     "cosine_min": 0.999944
+    },
+    {
+     "name": "peregrine Q8_0 vs llama.cpp F16 (1024-d)",
+     "cosine_mean": 0.9998428,
+     "cosine_min": 0.999686
+    },
+    {
+     "name": "llama.cpp Q8_0 vs llama.cpp F16 (1024-d)",
+     "cosine_mean": 0.9998384,
+     "cosine_min": 0.99968
+    },
+    {
+     "name": "peregrine Q8_0 vs llama.cpp Q8_0 (512-d)",
+     "cosine_mean": 0.9999766,
+     "cosine_min": 0.99994
+    },
+    {
+     "name": "peregrine Q8_0 vs llama.cpp F16 (512-d)",
+     "cosine_mean": 0.9998107,
+     "cosine_min": 0.999519
+    },
+    {
+     "name": "llama.cpp Q8_0 vs llama.cpp F16 (512-d)",
+     "cosine_mean": 0.9998062,
+     "cosine_min": 0.999507
+    },
+    {
+     "name": "64 ids match llama.cpp; 8 vectors bit-identical by text and ids",
+     "cosine_mean": null,
+     "cosine_min": null
+    }
+   ]
+  }
+ ]
+}

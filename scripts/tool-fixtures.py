@@ -18,11 +18,21 @@ only make sense for one template family (thinking, for one).
 
 The request body is stored as the exact text that was sent, so the test parses
 the same bytes llama.cpp parsed (number spellings and key order included).
+
+`--check <fixtures.jsonl>` writes nothing: it renders the cases and compares them with an
+existing fixture file. This is how a variant of a template (another publisher's edit of
+the same text) is shown to belong to a format: every prompt must be the same bytes and
+every refusal must be refused. Only the line number inside a template error may differ.
+
+    python3 scripts/tool-fixtures.py --server ... --model ... --set qwen35 \
+        --template crates/peregrine-core/src/tools/qwen35-optin.jinja \
+        --check crates/peregrine-core/tests/fixtures/tools-qwen35.jsonl
 """
 
 import argparse
 import json
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -57,8 +67,16 @@ def main():
     ap.add_argument("--template")
     ap.add_argument("--cases", default="scripts/tool-cases.json")
     ap.add_argument("--set", help="also run the cases of this named set (for one template family)")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out")
+    ap.add_argument("--check", help="compare with this fixture file instead of writing one")
+    ap.add_argument(
+        "--label",
+        help="write this as each record's \"template\" field (a fixture that mixes "
+        "several wordings of one template names the wording of each line)",
+    )
     a = ap.parse_args()
+    if bool(a.out) == bool(a.check):
+        sys.exit("give exactly one of --out and --check")
 
     spec = json.loads(pathlib.Path(a.cases).read_text(encoding="utf-8"))
     port = free_port()
@@ -92,7 +110,8 @@ def main():
             req.update(case.get("extra", {}))
             body = json.dumps(req, ensure_ascii=False)
             status, text = post(port, "/apply-template", body)
-            rec = {"name": case["name"], "request": body}
+            rec = {"template": a.label} if a.label else {}
+            rec.update({"name": case["name"], "request": body})
             if status == 200:
                 rec["prompt"] = json.loads(text)["prompt"]
             else:
@@ -100,8 +119,24 @@ def main():
                 # refuse it too, not invent a rendering.
                 rec["error"] = json.loads(text).get("error", {}).get("message", text)
             lines.append(json.dumps(rec, ensure_ascii=False))
-        pathlib.Path(a.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
-        print(f"{len(lines)} cases -> {a.out}")
+        if a.check:
+            # A template error names the line of the template it was raised on, and a
+            # variant's lines are numbered differently; nothing else may differ.
+            def norm(line):
+                rec = json.loads(line)
+                if "error" in rec:
+                    rec["error"] = re.sub(r"at line \d+", "at line N", rec["error"])
+                return rec
+
+            want = [norm(l) for l in pathlib.Path(a.check).read_text(encoding="utf-8").splitlines()]
+            got = [norm(l) for l in lines]
+            bad = [g["name"] for g, w in zip(got, want) if g != w]
+            if len(got) != len(want) or bad:
+                sys.exit(f"{len(got)} cases against {len(want)}; differing: {bad}")
+            print(f"{len(got)} cases identical to {a.check}")
+        else:
+            pathlib.Path(a.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            print(f"{len(lines)} cases -> {a.out}")
     finally:
         srv.terminate()
         try:

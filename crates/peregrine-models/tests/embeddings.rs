@@ -2649,15 +2649,21 @@ fn a_modern_berts_vector_is_bit_identical_alone_in_batches_and_in_any_order() {
     }
 }
 
-/// The Q8_0 file takes the repacked int8 tiles (the S4.9m f32-panel rule is for
-/// `bert`), so this exercises the path the Q8_0 casts use. The reference quantises
+/// The Q8_0 file against the reference forward of the path it actually takes.
+///
+/// On x86 the file takes the repacked int8 tiles (the S4.9m f32-panel rule is for
+/// `bert`), so this exercises the path the Q8_0 casts use: the reference quantises
 /// the activation row once and dots it with the scalar twin (`dot_scalar`), which
 /// is the scalar tier's arithmetic bit for bit. On a SIMD tier the eight-row tile
 /// fuses its block scale into the accumulator; a 1-ulp difference there can flip
 /// one activation code in the next layer's quantiser, so the distance to the
-/// reference is the model's own sensitivity, not one kernel call's rounding. The
-/// bound below is the measured worst over these cases; the exact bits per tier are
-/// the golden's.
+/// reference is the model's own sensitivity, not one kernel call's rounding.
+///
+/// On aarch64 the file is dequantised into f32 panels at load (S4.9o), so the
+/// engine runs the float path on the same rows the reference reads and the vector
+/// is the reference's bit for bit — the same claim `bert`'s Q8_0 test makes, and
+/// the assertion below keys on it (`act_layout().quantize` is off exactly when the
+/// file converted).
 #[test]
 fn the_modern_bert_q8_0_vector_is_the_engine_int8_path() {
     let dir = tmpdir("modern-bert-q8-reference");
@@ -2687,7 +2693,8 @@ fn the_modern_bert_q8_0_vector_is_the_engine_int8_path() {
             eprintln!("Q8_0 {pooling:?} len {len}: max abs {max_abs:.3e}, cosine {cos:.12}");
             let scalar_tier = peregrine_core::cpu::tier_name() == "x86_64"
                 || peregrine_core::cpu::tier_name() == "aarch64";
-            if scalar_tier {
+            let float_path = !model.act_layout().quantize;
+            if scalar_tier || float_path {
                 assert_eq!(
                     bits(&got[0]),
                     bits(&want),
@@ -2713,7 +2720,7 @@ fn the_modern_bert_q8_0_vector_is_the_engine_int8_path() {
     );
 }
 
-/// A classifier head is read and ignored: the file still embeds with its own
+/// A classifier head is not part of the encoder: the file still embeds with its own
 /// pooling type, and the head's tensors change nothing about the vector.
 #[test]
 fn a_modern_bert_classifier_file_still_embeds() {
@@ -2725,7 +2732,7 @@ fn a_modern_bert_classifier_file_still_embeds() {
         Format::F32,
         55,
         support::models::ModernBertConfig {
-            classifier: true,
+            head: Some(support::models::ModernBertHeadConfig::default()),
             ..Default::default()
         },
     );

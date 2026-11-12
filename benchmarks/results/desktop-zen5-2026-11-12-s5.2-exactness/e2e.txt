@@ -1,0 +1,18 @@
+End to end at each engine's default pass width (fork -ub 512, Peregrine's adaptive chunk),
+512 prompt tokens then 128 decode tokens, three rounds interleaved, medians, CPU 4 pinned
+for one thread. Load average 2-5 throughout (other tenants).
+
+== prompt processing, 512 tokens, no decode
+  llama1b   1t  fork    78.8   Peregrine    50.4   P/fork 0.639   (chunk 64:    50.3, 0.639)
+  llama1b  12t  fork   527.9   Peregrine   326.2   P/fork 0.618   (chunk 64:   338.2, 0.641)
+  qwen05    1t  fork   171.2   Peregrine    97.3   P/fork 0.568   (chunk 64:    98.5, 0.575)
+  qwen05   12t  fork  1095.2   Peregrine   574.3   P/fork 0.524   (chunk 64:   571.4, 0.522)
+
+== decode, 128 tokens after a 16-token prompt
+  llama1b   1t  fork    50.9   Peregrine    17.3   P/fork 0.340
+  llama1b  12t  fork   279.3   Peregrine    57.5   P/fork 0.206
+  qwen05    1t  fork   107.1   Peregrine    37.6   P/fork 0.351
+  qwen05   12t  fork   498.2   Peregrine    96.7   P/fork 0.194
+
+Ratios are Peregrine divided by the fork. Decode is recorded because the wide pass and
+the k-quant kernels are on that path too; this note makes no decode claim.

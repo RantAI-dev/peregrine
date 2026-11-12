@@ -83,8 +83,8 @@ pub struct Args {
     /// are given (two files with the same stem need an explicit `--alias`).
     #[arg(long = "alias", value_name = "ID")]
     pub alias: Vec<String>,
-    /// The chat template to use, by name (chatml, llama3, qwen3, gemma, mistral-v0,
-    /// mistral-v1, mistral-v7, llama2, llama2-sys-bos). It overrides the template the
+    /// The chat template to use, by name (chatml, phi4, llama3, qwen3, qwen35, gemma,
+    /// mistral-v0, mistral-v1, mistral-v7, llama2, llama2-sys-bos, harmony). It overrides the template the
     /// file declares; a file that declares none needs it, since a model prompted in
     /// a template it was not trained on answers fluently and wrongly.
     #[arg(long = "chat-template", value_name = "NAME")]
@@ -785,7 +785,9 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
     // `server-common.cpp:207-241`): a native decision model answers decisions, not text, and an
     // `openjev` file has no text generation even though it carries an LM head. A file with a
     // classifier head answers rerank or classify (S4.6b): one output with no labels is a
-    // reranker's score, several outputs or named labels are a classifier's.
+    // reranker's score, several outputs or named labels are a classifier's. One output
+    // with a label is both: converters write a dummy `LABEL_0` into a reranker's file
+    // (gte-reranker-modernbert-base), and both endpoints serve it.
     let data: Vec<Value> = s
         .models
         .iter()
@@ -794,10 +796,10 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
                 json!(["decisions"])
             } else if m.model.has_head() {
                 let n_out = m.model.head_width();
-                if n_out == 1 && m.model.head_labels().is_empty() {
-                    json!(["rerank"])
-                } else {
-                    json!(["classify"])
+                match (n_out, m.model.head_labels().is_empty()) {
+                    (1, true) => json!(["rerank"]),
+                    (1, false) => json!(["rerank", "classify"]),
+                    _ => json!(["classify"]),
                 }
             } else {
                 json!(["text"])
@@ -1021,8 +1023,12 @@ struct ToolPlan {
     format: ToolFormat,
     /// The whole prompt, ending where the assistant starts to write.
     prompt: String,
-    /// The tools' names, in request order, for the parser.
-    names: Vec<String>,
+    /// The request's tools, in request order, for the parser: their names, and (for a
+    /// format that writes argument values bare) which parameters are strings.
+    tools: Vec<OrderedValue>,
+    /// The prompt ends inside a thinking block the template opened, so the reply begins
+    /// with the model's reasoning and only the closing tag is written by the model.
+    reasoning_open: bool,
     /// `false` for `tool_choice: "none"`: the tools are rendered, the reply is text.
     parse: bool,
     /// `false` for `parallel_tool_calls: false`: stop at the first complete call.
@@ -1049,9 +1055,14 @@ struct ToolReply {
 }
 
 impl ToolReply {
-    fn new(format: ToolFormat, names: Vec<String>, parallel: bool, call_base: u64) -> ToolReply {
+    fn new(
+        format: ToolFormat,
+        tools: &[OrderedValue],
+        parallel: bool,
+        call_base: u64,
+    ) -> ToolReply {
         ToolReply {
-            parser: CallParser::new(format, names),
+            parser: CallParser::with_tools(format, tools),
             parallel,
             call_base,
             content: String::new(),
@@ -1305,16 +1316,59 @@ fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan,
     let messages = ordered
         .get("messages")
         .ok_or_else(|| "messages must be an array".to_string())?;
-    let messages = tools::messages_from_json(messages)?;
-    let names = tools::tool_names(&tools);
-    let prompt = tools::render(format, &tools, &messages)?;
+    // Each format reads a message's content the way its template does (how the parts of a
+    // list are joined, for one).
+    let messages = tools::messages_from_json_for(format, messages)?;
+    let options = tools::RenderOptions {
+        thinking: thinking_requested(body),
+    };
+    let prompt = tools::render_with(format, &tools, &messages, options)?;
+    let reasoning_open = format.opens_reasoning(&prompt);
+    // Without tools no call can be valid, so the reply is text as the model wrote it.
+    let parse = parse && !tools.is_empty();
     Ok(ToolPlan {
         format,
         prompt,
-        names,
+        tools,
+        reasoning_open,
         parse,
         parallel,
     })
+}
+
+/// Whether a file with this tool format has every chat request rendered by the format,
+/// tools or not.
+///
+/// Qwen 3.5's template (Bonsai 2 carries it too) is not the ChatML the ordinary path
+/// writes: it opens the thinking block at the end of the prompt, trims the messages, and
+/// writes the thinking of earlier turns back. Without the opened block a model trained on
+/// this template may not think at all: the 2B answered at once where llama.cpp's prompt
+/// made it reason first. The format's renderer gives llama.cpp's bytes for a conversation
+/// without tools as well (the fixtures include them), so it serves every request for
+/// these files. Qwen 2.5's template is the ordinary ChatML with a default system message,
+/// which the ordinary path already writes.
+fn renders_every_chat(format: ToolFormat) -> bool {
+    match format {
+        ToolFormat::Hermes => false,
+        // Qwen 3's template writes messages untrimmed, later system messages as turns of
+        // their own, and earlier turns without their thinking; the renderer does the same.
+        ToolFormat::Qwen3(_) => true,
+        ToolFormat::QwenXml => true,
+    }
+}
+
+/// Whether the request lets the model think: `chat_template_kwargs.enable_thinking`
+/// (default on), and `reasoning_effort: "none"` switches it off.
+///
+/// llama.cpp v0.9.0 maps `reasoning_effort: "none"` to thinking off and drops the
+/// effort from the template kwargs (`tools/server/server-common.cpp:1497-1505`).
+fn thinking_requested(b: &Value) -> bool {
+    if b["reasoning_effort"].as_str() == Some("none") {
+        return false;
+    }
+    b["chat_template_kwargs"]["enable_thinking"]
+        .as_bool()
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -1386,10 +1440,6 @@ fn plan_with(b: &Value, tool_path: bool) -> Result<Plan, String> {
             user,
         )
     };
-    let kw = &b["chat_template_kwargs"];
-    // llama.cpp v0.9.0 maps `reasoning_effort: "none"` to thinking off and drops the
-    // effort from the template kwargs (`tools/server/server-common.cpp:1497-1505`).
-    let effort_none = b["reasoning_effort"].as_str() == Some("none");
     let reasoning_format = match b["reasoning_format"].as_str() {
         Some(name) => ReasoningFormat::parse(name).ok_or_else(|| {
             format!("unknown reasoning_format {name:?} — none, auto, deepseek or deepseek-legacy")
@@ -1409,11 +1459,7 @@ fn plan_with(b: &Value, tool_path: bool) -> Result<Plan, String> {
         penalties: sampling_penalties(b)?,
         seed: b["seed"].as_u64().unwrap_or(42),
         n: n as usize,
-        thinking: if effort_none {
-            false
-        } else {
-            kw["enable_thinking"].as_bool().unwrap_or(true)
-        },
+        thinking: thinking_requested(b),
         reasoning_format,
         budget: b["thinking_budget_tokens"]
             .as_u64()
@@ -1462,6 +1508,66 @@ struct Run {
     predicted_ms: f64,
     /// Decode seconds attributed to this request by the engine (its share of the shared steps).
     decode_ms: f64,
+    /// The reply is read the way llama.cpp's chat parser returns one whose thinking block
+    /// the template opened: the reasoning stripped at both ends, and no whitespace between
+    /// the closing tag and the answer.
+    trim: bool,
+    /// At the start of a field (the reasoning, then the answer): whitespace is dropped
+    /// until the first other character.
+    skip_ws: bool,
+    /// Whitespace at the end of the reasoning so far. It is passed on when more reasoning
+    /// follows it and dropped when the closing tag does.
+    held_ws: String,
+}
+
+/// C's `isspace`, which is what llama.cpp strips with.
+fn is_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c')
+}
+
+impl Run {
+    /// The next piece of reasoning as it is returned: nothing before the first character
+    /// that is not whitespace, and trailing whitespace held back until more text follows.
+    fn trimmed_reasoning(&mut self, text: String) -> String {
+        if !self.trim {
+            return text;
+        }
+        let text = if self.skip_ws {
+            let rest = text.trim_start_matches(is_space);
+            if rest.is_empty() {
+                return String::new();
+            }
+            self.skip_ws = false;
+            rest.to_string()
+        } else {
+            text
+        };
+        let mut whole = std::mem::take(&mut self.held_ws);
+        whole.push_str(&text);
+        let keep = whole.trim_end_matches(is_space).len();
+        self.held_ws = whole[keep..].to_string();
+        whole.truncate(keep);
+        whole
+    }
+
+    /// The next piece of the answer: the whitespace after the closing tag is dropped.
+    fn trimmed_content(&mut self, text: String) -> String {
+        if !(self.trim && self.skip_ws) {
+            return text;
+        }
+        let rest = text.trim_start_matches(is_space);
+        if !rest.is_empty() {
+            self.skip_ws = false;
+        }
+        rest.to_string()
+    }
+
+    /// The reasoning has ended: what was held back was its trailing whitespace.
+    fn close_reasoning(&mut self) {
+        self.in_think = false;
+        self.held_ws.clear();
+        self.skip_ws = self.trim;
+    }
 }
 
 /// What the assistant has written when the reasoning budget is hit: the text that was generated, token for token, with
@@ -1893,7 +1999,25 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
         .tool
         .as_ref()
         .filter(|t| t.parse)
-        .map(|t| ToolReply::new(t.format, t.names.clone(), t.parallel, p.call_base));
+        .map(|t| ToolReply::new(t.format, &t.tools, t.parallel, p.call_base));
+    // A tool format whose template opens the thinking block itself (Qwen 3.5's): the reply
+    // starts inside the reasoning span, and the model writes only the closing tag.
+    // The same holds on the ordinary path when the template named for the file is one
+    // that opens the block (`--chat-template qwen35` on a file whose own text is not
+    // recognised).
+    let reasoning_open = match &p.tool {
+        Some(t) => t.reasoning_open,
+        None => app.template.opens_reasoning(p.thinking),
+    };
+    run.in_think = reasoning_open;
+    // Such a reply is returned as llama.cpp returns it: the reasoning stripped, the answer
+    // starting at its first character. With `reasoning_format: none` the span is content
+    // as the model wrote it.
+    // The same goes for a reply rendered by the format of a family that thinks, whose
+    // model opens the block itself (Qwen 3).
+    let thinks = p.tool.as_ref().is_some_and(|t| t.format.thinks());
+    run.trim = (reasoning_open || thinks) && p.reasoning_format.extracts();
+    run.skip_ws = run.trim;
     // gpt-oss's reply is split by control tokens; every other template's reasoning is Qwen3's
     // `<think>` span, below.
     let mut harmony = (p.tool.is_none() && app.template == Template::Harmony).then(Harmony::new);
@@ -2046,16 +2170,24 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
             if Some(em.token) == app.think_close {
                 // Do not carry a held reasoning suffix into `content`: a stop sequence never spans
                 // the two fields.
-                if !push_reply(&mut run, p, &tx, stops.flush(), true, em.logprob) {
+                let extracts = p.reasoning_format.extracts();
+                let held = stops.flush();
+                let held = if extracts {
+                    run.trimmed_reasoning(held)
+                } else {
+                    held
+                };
+                if !push_reply(&mut run, p, &tx, held, extracts, em.logprob) {
                     break;
                 }
-                run.in_think = false;
+                run.close_reasoning();
                 continue;
             }
             if run.in_think && p.reasoning_format.extracts() {
                 run.reasoning_tokens += 1;
                 budget_left = budget_left.saturating_sub(1);
                 let (text, hit) = stops.feed(&em.text);
+                let text = run.trimmed_reasoning(text);
                 if !push_reply(&mut run, p, &tx, text, true, em.logprob) {
                     break;
                 }
@@ -2065,8 +2197,11 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
                     break;
                 }
                 if p.budget.is_some_and(|b| run.reasoning_tokens as usize >= b) {
-                    // The continuation repeats what was generated, so the held suffix is part of it.
-                    if !push_reply(&mut run, p, &tx, stops.flush(), true, em.logprob) {
+                    // The continuation repeats what was generated, so the held suffix is part of
+                    // it, and so is the whitespace held back at the reasoning's end.
+                    let mut held = std::mem::take(&mut run.held_ws);
+                    held.push_str(&stops.flush());
+                    if !push_reply(&mut run, p, &tx, held, true, em.logprob) {
                         break;
                     }
                     run.budget_hit = true;
@@ -2078,8 +2213,16 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
                 run.content_tokens += 1;
                 budget_left = budget_left.saturating_sub(1);
                 let (text, hit) = stops.feed(&em.text);
+                let text = if run.in_think {
+                    text
+                } else {
+                    run.trimmed_content(text)
+                };
                 if !text.is_empty() {
-                    match tools_out.as_mut() {
+                    // Text inside a thinking span is never the parser's, whichever field
+                    // it is returned in: a call the model only thought about is not a call.
+                    let in_think = run.in_think;
+                    match tools_out.as_mut().filter(|_| !in_think) {
                         Some(tool) => {
                             let events = tool.feed(&text);
                             if !route_tool_events(tool, events, em.logprob, &tx) {
@@ -2142,13 +2285,24 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
             let held = stops.flush();
             let reasoning =
                 harmony_channel.is_none() && run.in_think && p.reasoning_format.extracts();
+            // A reply cut off inside its reasoning keeps the whitespace it ended with, as
+            // llama.cpp's does: only a reasoning that was closed is stripped at its end.
+            let held = if reasoning {
+                let mut tail = std::mem::take(&mut run.held_ws);
+                tail.push_str(&held);
+                tail
+            } else if run.in_think {
+                held
+            } else {
+                run.trimmed_content(held)
+            };
             if let Some(channel) = harmony_channel {
                 if !held.is_empty() {
                     let _ = send_harmony_delta(&mut run, p, &tx, 0.0, channel, held);
                 }
             } else if let Some(tool) = tools_out.as_mut() {
-                if reasoning {
-                    if !push_reply(&mut run, p, &tx, held, true, 0.0) {
+                if run.in_think {
+                    if !push_reply(&mut run, p, &tx, held, reasoning, 0.0) {
                         // The caller has gone; there is nothing left to send it.
                     }
                 } else {
@@ -2186,8 +2340,13 @@ async fn generate(app: &Served, p: &Plan, tx: tokio::sync::mpsc::UnboundedSender
         let _ = app.jobs.send(EngineMsg::Cancel(slot));
         let closing = "\n</think>\n\n";
         let _ = tx.send(Msg::Delta(closing.to_string(), true, 0.0));
-        prefix = Some(continuation_prefix(run.saw_open, &run.reasoning, closing));
-        run.in_think = false;
+        prefix = Some(if reasoning_open {
+            // The prompt already ends with the opening tag and its newline.
+            format!("{}{closing}", run.reasoning)
+        } else {
+            continuation_prefix(run.saw_open, &run.reasoning, closing)
+        });
+        run.close_reasoning();
         if budget_left == 0 {
             finish = "length";
             break;
@@ -2740,7 +2899,7 @@ fn rerank_text(v: &Value, what: &str) -> Result<String, String> {
                 .find(|k| o.contains_key(**k))
             {
                 return Err(format!(
-                    "{k} is not supported by /v1/rerank: image and video input need a multimodal projector, and a bert reranker has none"
+                    "{k} is not supported by /v1/rerank: image and video input need a multimodal projector, and an encoder reranker has none"
                 ));
             }
             match o.get("text") {
@@ -2836,7 +2995,8 @@ fn parse_rerank_request(b: &Value) -> Result<RerankSpec, String> {
 ///
 /// Every (query, document) pair is one text of the batch, built by the tokenizer's pair
 /// encoding — `format_prompt_rerank`'s own rule: `[CLS] q [SEP] d` for WordPiece,
-/// `<s> q </s> d </s>` for the XLM-R vocabulary. Each pair is a head slot, so all of them
+/// `<s> q </s> d </s>` for the XLM-R vocabulary, `[CLS] q [SEP] d [SEP]` for the
+/// `modern-bert` GPT-2 one. Each pair is a head slot, so all of them
 /// share weight passes, and the answer is `cls` → activation → `cls.output` at row 0.
 /// The score is that raw logit, as llama.cpp returns it (`send_rerank`: `embd[0]`).
 async fn rerank(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
@@ -2859,7 +3019,7 @@ async fn rerank(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) 
     {
         return bad(
             "this file carries a \"rerank\" chat template (a generative reranker), which is not \
-             supported yet; a bert reranker is scored with its classifier head",
+             supported yet; an encoder reranker is scored with its classifier head",
         );
     }
     let spec = match parse_rerank_request(&body) {
@@ -3285,7 +3445,13 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) 
         ));
     }
     let tool_path = tool_fields_present(&body);
-    let tool = if tool_path {
+    // The request is validated as it always was, so a request without tools is refused
+    // for the same reasons on every model.
+    let mut p = match plan_with(&body, tool_path) {
+        Ok(p) => p,
+        Err(e) => return bad(e),
+    };
+    p.tool = if tool_path {
         let Some(format) = app.tool_format else {
             return bad(format!(
                 "{}'s chat template has no tool format Peregrine supports yet",
@@ -3296,14 +3462,16 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) 
             Ok(tool) => Some(tool),
             Err(e) => return bad(e),
         }
+    } else if let Some(format) = app.tool_format.filter(|f| renders_every_chat(*f)) {
+        // No tools, but this file's template is one the format's renderer reproduces and
+        // the built-in ChatML does not (see `renders_every_chat`).
+        match tool_request(format, &body, &raw) {
+            Ok(tool) => Some(tool),
+            Err(e) => return bad(e),
+        }
     } else {
         None
     };
-    let mut p = match plan_with(&body, tool_path) {
-        Ok(p) => p,
-        Err(e) => return bad(e),
-    };
-    p.tool = tool;
     if body.get("reasoning_format").is_none() {
         p.reasoning_format = state.reasoning_format;
     }
@@ -3482,8 +3650,8 @@ mod tests {
     use super::{
         base64_f32, chat_choice, chunk_json, continuation_prefix, fit_tokens, head_probabilities,
         parse_classify_request, parse_embedding_request, parse_rerank_request, plan,
-        route_tool_events, tool_fields_present, tool_request, EmbedInput, Msg, Penalties,
-        ReasoningFormat, ToolFormat, ToolReply,
+        renders_every_chat, route_tool_events, tool_fields_present, tool_request, tools,
+        EmbedInput, Msg, OrderedValue, Penalties, ReasoningFormat, Run, ToolFormat, ToolReply,
     };
     use axum::Json;
     use serde_json::{json, Value};
@@ -4184,8 +4352,7 @@ mod tests {
     // --- S6.3: the tool path -------------------------------------------------------------
 
     fn tool_format() -> ToolFormat {
-        ToolFormat::for_template(peregrine_core::tools::QWEN25_TEMPLATE)
-            .expect("the hermes template")
+        ToolFormat::for_template(tools::QWEN25_TEMPLATE).expect("the hermes template")
     }
 
     fn weather_tools() -> Value {
@@ -4241,7 +4408,11 @@ mod tests {
     #[test]
     fn a_tool_request_renders_its_tool_names() {
         let t = request(json!({"tools": weather_tools()}));
-        assert_eq!(t.names, vec!["weather".to_string()]);
+        assert_eq!(tools::tool_names(&t.tools), vec!["weather".to_string()]);
+        assert!(
+            !t.reasoning_open,
+            "Qwen 2.5's template has no thinking block"
+        );
         assert!(t.parse, "auto means calls are read");
         assert!(t.parallel, "parallel calls default on");
         assert_eq!(t.format.name(), "hermes");
@@ -4307,15 +4478,24 @@ mod tests {
     const SEARCH_CALL: &str =
         r#"<tool_call>{"name": "search", "arguments": {"query": "museum hours"}}</tool_call>"#;
 
+    /// The tools of the replies below, as a request's `tools` reads.
+    fn two_tools() -> Vec<OrderedValue> {
+        let text = json!([
+            {"type": "function", "function": {"name": "weather", "parameters": {
+                "type": "object", "properties": {"city": {"type": "string"}}}}},
+            {"type": "function", "function": {"name": "search", "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}
+        ])
+        .to_string();
+        let parsed = OrderedValue::parse(&text).expect("the tools");
+        tools::tools_from_json(Some(&parsed)).expect("two tools")
+    }
+
     /// Drive the response path the way `generate` does: pieces of generated content into
     /// the parser, its events into messages.
     fn drive(pieces: &[&str], parallel: bool) -> (String, Vec<super::CallOut>, Vec<Msg>) {
-        let mut tool = ToolReply::new(
-            tool_format(),
-            vec!["weather".into(), "search".into()],
-            parallel,
-            42,
-        );
+        let mut tool = ToolReply::new(tool_format(), &two_tools(), parallel, 42);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         for piece in pieces {
             let events = tool.feed(piece);
@@ -4451,6 +4631,161 @@ mod tests {
         );
         assert_eq!(done["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(done["choices"][0]["delta"], json!({}));
+    }
+
+    #[test]
+    fn a_qwen35_tool_request_knows_whether_its_prompt_opened_the_reasoning() {
+        let xml = ToolFormat::for_template(tools::QWEN35_TEMPLATE).expect("the qwen-xml format");
+        let plan = |extra: Value| {
+            let mut b = tool_body(json!({"tools": weather_tools()}));
+            for (k, v) in extra.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            tool_request(xml, &b, &b.to_string()).expect("the tool request")
+        };
+        // Thinking is on by default: the template opens the block and stops there.
+        let on = plan(json!({}));
+        assert_eq!(on.format.name(), "qwen-xml");
+        assert!(on.reasoning_open);
+        assert!(on.prompt.ends_with("<|im_start|>assistant\n<think>\n"));
+        // Off: the template writes an empty block, and the reply starts as content.
+        let off = plan(json!({"chat_template_kwargs": {"enable_thinking": false}}));
+        assert!(!off.reasoning_open);
+        assert!(off
+            .prompt
+            .ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        // `reasoning_effort: "none"` is the same switch.
+        let none = plan(json!({"reasoning_effort": "none"}));
+        assert_eq!(none.prompt, off.prompt);
+        assert!(!none.reasoning_open);
+        // Any other effort leaves thinking on.
+        assert_eq!(plan(json!({"reasoning_effort": "high"})).prompt, on.prompt);
+    }
+
+    #[test]
+    fn a_qwen3_tool_request_leaves_the_thinking_block_to_the_model() {
+        let qwen3 = ToolFormat::for_template(tools::QWEN3_TEMPLATE).expect("the qwen3 format");
+        assert_eq!(qwen3.name(), "qwen3");
+        assert!(qwen3.thinks());
+        let plan = |extra: Value| {
+            let mut b = tool_body(json!({"tools": weather_tools()}));
+            for (k, v) in extra.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            tool_request(qwen3, &b, &b.to_string()).expect("the tool request")
+        };
+        // Thinking on: the prompt ends with the assistant's header and the model opens
+        // the block itself, so the reply does not start inside one.
+        let on = plan(json!({}));
+        assert!(on.prompt.ends_with("<|im_start|>assistant\n"));
+        assert!(!on.reasoning_open);
+        assert!(on.prompt.contains("# Tools"));
+        assert!(
+            !on.prompt.contains("You are Qwen"),
+            "no default system message"
+        );
+        // Off: the empty block, as for Qwen 3.5.
+        let off = plan(json!({"chat_template_kwargs": {"enable_thinking": false}}));
+        assert!(off
+            .prompt
+            .ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+        assert!(!off.reasoning_open);
+        // A call is the JSON form, read without the schema's help.
+        let mut tool = ToolReply::new(qwen3, &two_tools(), true, 9);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = tool.feed(WEATHER_CALL);
+        assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        let events = tool.finish();
+        assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        assert_eq!(tool.calls.len(), 1);
+        assert_eq!(tool.calls[0].name, "weather");
+    }
+
+    #[test]
+    fn the_reply_parser_is_given_the_tools_schemas() {
+        // The XML format writes values bare, so only the schema says whether `5` is the
+        // text or the number: `query` is declared a string, `limit` an integer.
+        let xml = ToolFormat::for_template(tools::QWEN35_TEMPLATE).expect("the qwen-xml format");
+        let mut tool = ToolReply::new(xml, &two_tools(), true, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let reply = "<tool_call>\n<function=search>\n<parameter=query>\n5\n</parameter>\n\
+                     <parameter=limit>\n5\n</parameter>\n</function>\n</tool_call>";
+        // Fed a few characters at a time, as tokens arrive.
+        let pieces: Vec<String> = reply
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(3)
+            .map(|c| c.iter().collect())
+            .collect();
+        for piece in &pieces {
+            let events = tool.feed(piece);
+            assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        }
+        let events = tool.finish();
+        assert!(route_tool_events(&mut tool, events, 0.0, &tx));
+        assert_eq!(tool.calls.len(), 1, "{:?}", tool.content);
+        assert_eq!(tool.calls[0].name, "search");
+        let arguments: Value = serde_json::from_str(&tool.calls[0].arguments).unwrap();
+        assert_eq!(arguments, json!({"query": "5", "limit": 5}));
+        assert!(tool.content.is_empty());
+        assert!(matches!(rx.try_recv(), Ok(Msg::ToolCall { .. })));
+    }
+
+    #[test]
+    fn a_reply_whose_thinking_the_template_opened_is_stripped_like_llama_cpps() {
+        let mut run = Run {
+            trim: true,
+            skip_ws: true,
+            in_think: true,
+            ..Run::default()
+        };
+        // Nothing before the first character; trailing whitespace waits for what follows.
+        let pieces = ["\n", " The user", " asks.\n", "\n", "Second line.", "\n"];
+        let out: String = pieces
+            .iter()
+            .map(|p| run.trimmed_reasoning(p.to_string()))
+            .collect();
+        assert_eq!(out, "The user asks.\n\nSecond line.");
+        assert_eq!(run.held_ws, "\n", "the last newline is held, not passed on");
+        // The closing tag drops what was held and starts the answer at its first character.
+        run.close_reasoning();
+        assert!(run.held_ws.is_empty() && !run.in_think);
+        let answer: String = ["\n\n", "  Hello", " there! ", "\n"]
+            .iter()
+            .map(|p| run.trimmed_content(p.to_string()))
+            .collect();
+        assert_eq!(
+            answer, "Hello there! \n",
+            "only the leading whitespace is dropped"
+        );
+
+        // A reply that is not read this way is passed through untouched.
+        let mut plain = Run::default();
+        assert_eq!(plain.trimmed_reasoning("\n a \n".into()), "\n a \n");
+        assert_eq!(plain.trimmed_content("\n\n b".into()), "\n\n b");
+    }
+
+    #[test]
+    fn a_file_with_qwen35s_template_renders_every_chat_with_the_format() {
+        assert!(renders_every_chat(ToolFormat::QwenXml));
+        assert!(!renders_every_chat(ToolFormat::Hermes));
+        let qwen3 = ToolFormat::for_template(tools::QWEN3_TEMPLATE).expect("the qwen3 format");
+        assert!(renders_every_chat(qwen3));
+        // A request without tools: the template's prompt, and nothing to parse.
+        let xml = ToolFormat::for_template(tools::QWEN35_TEMPLATE).expect("the qwen-xml format");
+        let b = json!({"messages": [
+            {"role": "system", "content": "  Be brief.  "},
+            {"role": "user", "content": "Hi"}
+        ]});
+        let plain = tool_request(xml, &b, &b.to_string()).expect("a request without tools");
+        assert_eq!(
+            plain.prompt,
+            "<|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n\
+             <|im_start|>assistant\n<think>\n"
+        );
+        assert!(plain.reasoning_open);
+        assert!(!plain.parse, "no tools, so no call can be read");
+        assert!(plain.tools.is_empty());
     }
 
     #[test]

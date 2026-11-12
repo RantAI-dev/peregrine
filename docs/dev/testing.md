@@ -103,7 +103,7 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    that disagree with `cls.output`, an activation llama.cpp does not read), the head slot's refusal
    by name on a file without one, and one tier golden
    (`tests/golden/synthetic/<tier>/bert-heads-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
-   under SDE; no aarch64 golden). `tests/no_alloc.rs` passes a head text through the whole-text
+   under SDE, and on the four aarch64 tiers). `tests/no_alloc.rs` passes a head text through the whole-text
    pass. `crates/peregrine/tests/server_rerank.rs` starts the built server on those files and checks
    `/v1/rerank`'s shape, order, `top_n`, `return_documents`, the four routes, the object form of a
    document, batch independence of a score, `truncate` and the over-length error, the refusals
@@ -126,14 +126,42 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    way: a synthetic four-layer file with a window narrower than the texts, two different RoPE bases,
    F32 and Q8_0 variants, the three gated activations and a classifier-headed variant; the vector
    against `tests/support/modern_bert_ref.rs`'s independent scalar forward (bit for bit for F32;
-   for Q8_0 exactly on the scalar tier, and on SIMD tiers within the measured int8 distance, because
-   a 1-ulp projection difference can flip an activation code in the next layer); the invariance
-   matrix; the context limit; the no-allocation pass; the server and CLI cases
-   (`a_modern_bert_encoder_*`); and
+   for Q8_0 exactly on the scalar x86 tier (the reference's own per-row kernel) and, since
+   S4.9o, bit for bit on `aarch64-neon-dotprod` and `aarch64-neon-i8mm`, where the file is
+   dequantised into f32 panels at load; on the x86 SIMD tiers and the two lower aarch64 tiers it
+   is within the measured int8 distance, because a 1-ulp projection difference can flip an
+   activation code in the next layer); the invariance matrix; the context limit; the
+   no-allocation pass; the server and CLI cases (`a_modern_bert_encoder_*`); and
    `tests/golden/synthetic/<tier>/modern-bert-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
-   under SDE (no aarch64 golden yet). Its ignored real-file test uses the 200 texts (16–6976 tokens)
-   and llama.cpp's ids and vectors under `tests/fixtures/modern-bert/` for gte-modernbert-base and
-   Granite Embedding R2, F16 and Q8_0, and skips a file that is absent.
+   under SDE and on the ARM host for `aarch64`, `aarch64-neon`, `aarch64-neon-dotprod` and
+   `aarch64-neon-i8mm` (the scalar and neon hashes equal the x86_64 one; before S4.9o the two
+   int8 tiers differed, as the Q8_0 tile fuses its block scale, and since S4.9o they take the
+   f32-panel route and hash together with `51c9434cc8ba546e` / `55e17bd3fd81801d`). Its ignored
+   real-file test uses the 200 texts (16–6976 tokens) and llama.cpp's ids and vectors under
+   `tests/fixtures/modern-bert/` for gte-modernbert-base and Granite Embedding R2, F16 and Q8_0,
+   and skips a file that is absent.
+   S4.7b's classifier head is covered like S4.6b's, without model files, by
+   `crates/peregrine-models/tests/modern_bert_heads.rs`: a synthetic rank head (one output, no
+   `classifier.*` key, so mean pooling and the erf GELU) and a labelled one (three outputs,
+   `classifier.activation = tanh`, `classifier.pooling_type = 2`), whose rows must equal
+   `tests/support/modern_bert_ref.rs`'s `reference_head` bit for bit on an F32 file; that the
+   mean and row 0 differ; that `cls.bias`/`cls.norm.bias` (which llama.cpp does not create) change
+   nothing; the invariance matrix (alone, batches of 2/7/64, pass sizes 1 and 13, 1/2/4 threads);
+   the loader's refusals (labels that disagree with `cls.output`, an activation llama.cpp does not
+   read, labels with no projection, a bare `cls.norm`); the head slot's refusal by name on a file
+   without one; and one tier golden
+   (`tests/golden/synthetic/<tier>/modern-bert-heads-Q8_0.golden`, recorded on scalar, AVX2 and
+   AVX-512 under SDE; no aarch64 golden). `tests/no_alloc.rs` passes a head text through the
+   whole-text pass. `crates/peregrine/tests/server_rerank.rs` serves a synthetic modern-bert
+   reranker and a labelled classifier over `/v1/rerank`, `/v1/classify` and `/v1/models`, and
+   `cli_rerank.rs` runs `peregrine rerank` on the reranker. The 100 real-file pairs live in
+   `crates/peregrine-models/tests/fixtures/modern-bert/rerank/` (`texts.tsv`, `ids.txt` from
+   llama.cpp's `format_prompt_rerank`, `q8_0_llama.f32`, `f16_llama.f32`, and a README with the
+   file SHAs and commands); `tests/rerank_real.rs`'s `the_real_modern_bert_reranker_matches_llama_cpp`
+   compares ids, order and scores when `gte-reranker-modernbert-base-Q8_0.gguf` and its F16
+   conversion are in `~/models/embed/` (or `MODERN_BERT_DIR`), and
+   `a_real_modern_bert_scores_are_bit_identical_in_any_batch` checks the batch invariance on the
+   real file. Both are `#[ignore]`d and skip, with a notice, without the files.
    The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
@@ -167,6 +195,20 @@ the 30 s drain timeout for that test; it is for tests only and is not part of th
 The unit tests around `serve_with_drain` in `crates/peregrine-server/src/lib.rs` cover the three
 shutdown paths directly: no shutdown request (the server keeps serving), an idle drain (prompt exit),
 and a drain with a streaming client holding the connection open (it ends at the timeout, not before).
+
+## Starting a server in a test
+
+A test that drives `peregrine serve` over HTTP starts it with `common::start`
+(`crates/peregrine/tests/common/mod.rs`), giving the arguments with `common::PORT` where the port
+goes. The helper asks the system for a free port, starts the server on it, and returns once that
+child has written its own `listening on` line, so the server a test talks to is the one it
+started. If the port was taken between choosing it and the server's `bind` (by another test of the
+same binary, or as the local port of another test's connection), the server exits with
+`cannot listen on`, and the helper starts another on a new port; a server that dies for any other
+reason fails the test with its log. Do not choose a port and poll `/health` on it: a test that did
+either waited out its deadline for a server that never listened, or was answered by another
+test's server until that test ended (both seen in CI). `tests/server_start.rs` tests the helper,
+including the retry.
 
 ## Where tests look for model files
 
@@ -419,6 +461,51 @@ is the file `crates/peregrine-core/src/tools/qwen25.jinja`. The Qwen 3.5 fixture
 same model loaded and `--template crates/peregrine-core/src/tools/qwen35.jinja --set qwen35`: that
 file is the template of `Ternary-Bonsai-2-2B-PQ2_0.gguf`, which llama.cpp cannot load itself, and
 the set adds the cases that only this family has (thinking on and off, thinking in the history).
+
+Publishers ship several texts of Qwen 3.5's template. Qwen's own 4B and 9B files carry the text
+Bonsai 2 does; Qwen's 0.8B and 2B files write the thinking block only when `enable_thinking` is
+true (the others write it unless it is false); unsloth's files walk a call's arguments with a key
+loop where Qwen's uses `|items`, with either thinking rule. llama.cpp always defines
+`enable_thinking`, and arguments that are not an object are refused before rendering, so the four
+texts give the same prompts. That is checked, not assumed: `--check` renders the cases with a
+template and compares them with an existing fixture file instead of writing one, and each text
+under `crates/peregrine-core/src/tools/qwen35*.jinja` passes it against `tools-qwen35.jsonl` (all
+51 cases; only the line number inside a template error differs):
+
+```sh
+for t in qwen35-optin qwen35-unsloth qwen35-unsloth-optin; do
+  python3 scripts/tool-fixtures.py --server "$LLAMA_SERVER" --model "$ANY_SMALL_CHAT_MODEL" \
+      --template crates/peregrine-core/src/tools/$t.jinja --set qwen35 \
+      --check crates/peregrine-core/tests/fixtures/tools-qwen35.jsonl
+done
+```
+
+A text that is not one of these is not served with tools: the template of unsloth's `*-MTP` files
+(a `developer` role, two leading system messages merged, no refusals) renders other prompts and is
+left out until it has a fixture set of its own.
+
+Qwen 3 has four published wordings too: the repository's (bartowski and lmstudio-community carry
+it; `tools/qwen3.jinja`), Qwen's own GGUF files (`qwen3-gguf.jinja`), unsloth's up to 1.7B
+(`qwen3-unsloth.jinja`) and unsloth's 4B and larger (`qwen3-unsloth-large.jinja`).
+`tools-qwen3.jsonl` is the common cases and the `qwen35` set rendered with the repository's
+wording; `--check` gives the same 51 records for the other three. They are not one text in
+different words, though: Qwen's GGUF wording takes a user message that contains a
+`<tool_response>` block anywhere for a tool's result (the others only one that is exactly such a
+block), and unsloth's larger wording counts thinking that is only whitespace as none.
+`tools-qwen3-edges.jsonl` holds eleven corner cases rendered with each of the four wordings (each
+line names its wording in `template`), and the renderer follows the rules of the wording the file
+carries (`Qwen3Text`). It is the four renderings of `scripts/tool-cases-qwen3-edges.json`, one
+after another:
+
+```sh
+for t in qwen3 qwen3-gguf qwen3-unsloth qwen3-unsloth-large; do
+  python3 scripts/tool-fixtures.py --server "$LLAMA_SERVER" --model "$ANY_SMALL_CHAT_MODEL" \
+      --template crates/peregrine-core/src/tools/$t.jinja --label $t \
+      --cases scripts/tool-cases-qwen3-edges.json --out /tmp/edges-$t.jsonl
+done
+cat /tmp/edges-qwen3.jsonl /tmp/edges-qwen3-gguf.jsonl /tmp/edges-qwen3-unsloth.jsonl \
+    /tmp/edges-qwen3-unsloth-large.jsonl > crates/peregrine-core/tests/fixtures/tools-qwen3-edges.jsonl
+```
 
 ### System One prompts: fixtures rendered by llama.cpp
 

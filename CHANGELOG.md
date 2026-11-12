@@ -8,6 +8,91 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Design: an opt-in fast prompt mode (S5.4)**: `docs/design/s5.4-fast-prompt.md` specifies
+  `--fast-prompt`, off by default: prompt passes read the Q4_K and Q6_K weights re-rounded to
+  8 bits per 256-weight block (the arithmetic of ik_llama.cpp's wide pass, which S5.2 found is
+  where its prompt speed comes from), decode stays on the exact weights, results stay
+  independent of batch and chunk size, and the option ships with an accuracy report as ADR 0003
+  requires. Nothing is built yet.
+- **Tool calling for Qwen 3 (S6.2c)**: a file that carries Qwen 3's chat template is served with
+  tools through the new `qwen3` format: Qwen 2.5's tool list and JSON calls, no default system
+  message, messages written untrimmed, the assistant's turns after the last question with their
+  thinking block, and the model opening its own thinking (an empty block ends the prompt when
+  thinking is off). Four published wordings of the template are recognised (the repository's,
+  which bartowski and lmstudio-community carry; Qwen's own GGUF files; unsloth's up to 1.7B;
+  unsloth's larger files). llama.cpp v0.9.0 renders the 51 shared conversations to the same bytes
+  with all four, and the renderer matches them; the wordings differ on two corner rules (whether
+  a user message with a `<tool_response>` block in the middle is a tool's result, and whether
+  thinking that is only whitespace counts), so a file is served by the rules of the text it
+  carries, pinned by 44 more records rendered by llama.cpp. Chat requests without tools on these
+  files are rendered by the same renderer. On `Qwen_Qwen3-1.7B-Q4_K_M.gguf` at temperature 0
+  (16 requests, three tools) the right tool is called on 11 of 12 requests with thinking off in
+  both engines, every call identical, and 13 of 16 whole replies identical; with thinking on,
+  12 of 12 on Peregrine and 11 of 12 on llama.cpp, the same tool on 11 and the same arguments on
+  10 of the 12 (this model's long reasoning parts at near-ties in every request, in llama.cpp's
+  own repeated runs too, so no whole reply is identical).
+- **Tool calling for Qwen 3.5 and Bonsai 2 on the chat endpoint (S6.3b)**: a file that carries
+  Qwen 3.5's chat template is served with tools through the `qwen-xml` format. Four published
+  texts of that template are recognised: the one in Bonsai 2 files and Qwen's 4B and 9B files,
+  the one in Qwen's 0.8B and 2B files, and unsloth's two; llama.cpp v0.9.0 renders all 51 fixture
+  conversations to the same bytes with each (`scripts/tool-fixtures.py --check`). The request's
+  thinking switch reaches the prompt (`chat_template_kwargs.enable_thinking`, or
+  `reasoning_effort: "none"`); with thinking on the template opens the thinking block, so the
+  reply is read from inside it: reasoning up to the closing tag is `reasoning_content`, never
+  read for calls, and what follows goes through the call parser, which takes each argument's
+  type from the tool's schema. The reasoning is returned stripped and the answer starts at its
+  first character, as llama.cpp returns them. On `Qwen_Qwen3.5-2B-Q4_K_M.gguf` at temperature 0
+  (`scripts/tool-e2e.py`, 16 requests, three tools), both engines call the right tool on 12 of 12
+  requests with thinking off and 11 of 12 with it on (the same miss), answer the four others in
+  text, and every call is identical between the engines (same tool, same arguments); 13 of 16
+  whole replies are identical with thinking off and 4 of 16 with it on, where the free-text
+  reasoning parts at near-ties. `Ternary-Bonsai-2-2B-PQ2_0.gguf` (Peregrine only) calls the right
+  tool on 12 of 12 with thinking off and 11 of 12 with it on, and answers a tool's result in text.
+
+### Changed
+
+- **Chat without tools on Qwen 3.5 and Bonsai 2 files uses the template's own prompt**: these
+  files' template opens the thinking block at the end of the prompt, trims each message and
+  writes earlier turns' thinking back, which the built-in ChatML did not. With thinking on, the
+  2B model answered at once on Peregrine where llama.cpp's prompt made it reason first. Every
+  chat request on such a file is now rendered by the format's renderer, tools or not, so
+  `peregrine serve` builds llama.cpp's prompt (the same token counts in the four cases checked:
+  thinking on and off, with and without a system message) and returns the reasoning in
+  `reasoning_content`. A model that thinks spends tokens on it: send
+  `"chat_template_kwargs": {"enable_thinking": false}` for the old behaviour of a direct answer.
+  Requests on other files are unchanged.
+- **`peregrine run` uses Qwen 3.5's own prompt too (S6.3c)**: a file with that template is now
+  the `qwen35` chat template (also a name for `--chat-template`), detected by the template's
+  exact text; any other template with a thinking switch is still read as Qwen 3's. The prompt
+  ends inside the opened thinking block (or after the empty one with `--no-thinking`), messages
+  are trimmed, and an earlier turn is replayed without its thinking. The command prints the
+  opening `<think>` the prompt wrote before the model's reasoning, and `--json`'s `text` starts
+  with it. On Qwen 3.5 2B and Bonsai 2 2B the prompt is 16 tokens with thinking and 18 without,
+  as in llama.cpp, and both models now reason before they answer unless told not to.
+
+### Added
+
+- **The `modern-bert` family's element-wise kernels have NEON bodies, and its aarch64
+  goldens are recorded (roadmap S4.9n)**: `geglu_erf` (the exact erf GELU times the second
+  half) and `layer_norm_rows_nobias` (the f64 two-pass norm with one final multiply and no
+  add) were scalar on every machine; on aarch64 with NEON they now evaluate eight elements
+  and eight rows at a time, lane for lane with the scalar definition — the same erf chain
+  and series selection as `gelu_erf_rows`' NEON body, and the same `f64` index-order sum and
+  variance per row. Unit tests compare the bodies against the scalar twins bit for bit
+  (NaN against NaN) on lengths 0–2304 including every remainder, both zeros, subnormals,
+  `±1e30`, infinities, NaN payloads, a row of all `-0.0`, a constant row, and a 100 000-value
+  sweep in `[-12, 12]`; the golden test is the end-to-end check. The synthetic
+  `modern-bert-Q8_0` golden is recorded for `aarch64`, `aarch64-neon`,
+  `aarch64-neon-dotprod` and `aarch64-neon-i8mm` (scalar and neon reproduce the x86_64
+  hash), and no existing golden moved. On the ARM host (10 threads, nine interleaved
+  rounds, medians) the family's throughput is unchanged within the run spread — 0.990–1.002
+  of the before build — because the element-wise work is about 1 % of a pass beside the
+  matrices; against llama.cpp v0.9.0 `cd959ba` gte-modernbert-base is 1.09× at 16 tokens,
+  0.87–0.94× from 128 tokens up and 0.77× on a batch of 16 short texts in Q8_0 (the int8
+  tiers' Q8_0 path is the slow one: the same file in F16 is 1.15–1.56× llama.cpp). The vectors agree to cosine
+  0.99978 (Q8_0) and 0.9999999 (F16). See
+  `benchmarks/results/spark-arm-2026-11-12-modern-bert/README.md`.
+
 - **The `modern-bert` family: ModernBERT, gte-modernbert and Granite Embedding R2 (roadmap
   S4.7)**: `architecture = "modern-bert"` is the 2024 encoder those files ship as. Its blocks are
   pre-norm and use two LayerNorms with a weight and no bias (layer 0's attention norm is the
@@ -30,9 +115,9 @@ All notable changes to this project are documented here. The format follows
   0.9963540/0.9996125 on gte (llama.cpp's own Q8_0: 0.9981270/0.9996284) and
   0.9998753/0.9999246 on Granite (llama.cpp: 0.9998838/0.9999252): 1.6e-5 and 6.5e-7 below
   llama.cpp's mean distance, inside the design's 1e-4 band. A file with a classifier head
-  (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`) loads, shape-checks and ignores
-  the head with one line of output, and still serves embeddings when it declares a pooling type;
-  `classify`/`rerank` wait for the BERT family's head (S4.6b). A synthetic four-layer file (a
+  (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`) loads and shape-checks the head
+  and still serves embeddings when it declares a pooling type; the head itself is served from
+  S4.7b (below). A synthetic four-layer file (a
   window of 8, two different RoPE bases, F32 and Q8_0, the three activations and a classifier
   variant) is checked bit for bit against an independent scalar reference, is batch- and
   thread-invariant, allocates nothing in a pass, and has a golden on each pinned x86 tier (the
@@ -43,8 +128,38 @@ All notable changes to this project are documented here. The format follows
   one; attention grows from 11 % to 27 %. The fixtures are under
   `crates/peregrine-models/tests/fixtures/modern-bert/`.
 
+- **Rerank and classify for the `modern-bert` family (roadmap S4.7b).** A `modern-bert` file
+  with a classifier head now answers `POST /v1/rerank` (and `/rerank`, `/v1/reranking`,
+  `/reranking`), `POST /v1/classify`, `/v1/models`' modalities and `peregrine rerank` — the same
+  `Want::Head` interface the `bert` family got in S4.6b, with no endpoint change. The head is
+  transcribed step by step from llama.cpp v0.9.0's `build_pooling` rank branch: the mean of the
+  text's `output_norm` rows (or row 0 when the file names another `classifier.pooling_type`; the
+  absent key means mean for this family), `cls.weight` **without** a bias (llama.cpp creates no
+  `cls.bias` for a sequence-classification file), `classifier.activation` (the erf GELU when the
+  key is absent, unlike `bert`'s tanh), `cls.norm` with a weight and no bias, and
+  `cls.output.weight` + `.bias`. A head that disagrees with itself is refused by name (`labels`
+  against `cls.output`, an activation llama.cpp does not read, labels with no projection, a bare
+  `cls.norm`), and a decision checkpoint (`modern-bert.decision.block_count`) is refused by name
+  until S4.12. `Tokenizer::encode_pair` gained the byte-level BPE case, tokenized with
+  `parse_special = false` as llama.cpp's `format_prompt_rerank` does, and assembles
+  `[bos] q [eos] [sep] d [eos]` from the file's flags. On `gte-reranker-modernbert-base` (F16 and
+  Q8_0, 100 pairs of 36–445 tokens, 51 past the 128-token window) the pair ids are identical to
+  llama.cpp's on all 100; at F16 the scores differ by 0.00067 mean / 0.00273 max and all ten query
+  rankings are identical, and the Q8_0 file is 0.01141 / 0.07430 from llama.cpp's Q8_0 and
+  0.02173 / 0.07970 from its F16 reference while llama.cpp's own Q8_0 is 0.02310 / 0.09370 from
+  that reference (its Q8_0 and F16 runs disagree on 5 of the 10 query orders; Peregrine's Q8_0
+  and llama.cpp's agree on 6, the swaps all being documents 2.2e-2 apart). Rerank throughput on a
+  shared 8-vCPU VM, 4 threads, eight pairs per request: 1.14x llama.cpp at 128-token pairs and
+  1.24x at 512-token ones. A head row is bit-identical alone, in any batch and at any pass size
+  or thread count, and a head pass allocates nothing. A synthetic head (a rank one and a labelled
+  one) is checked bit for bit against an independent scalar reference and has a golden on each
+  pinned x86 tier. No published `modern-bert` GGUF with real labels turned up, so `/v1/classify`
+  is covered by the synthetic labelled file and the server tests. The head's fixtures are under
+  `crates/peregrine-models/tests/fixtures/modern-bert/rerank/`.
+
 ### Changed
 
+<<<<<<< HEAD
 - **The halved-precision float panel is widened once, and the small-BERT gap is measured
   against the roof (S4.9p).** The encoder float GEMM's f16/bf16 body carried the format `match`
   and the prefetch guard inside its `k` loop and widened sixteen weights per weight step, on the
@@ -74,7 +189,36 @@ All notable changes to this project are documented here. The format follows
   104.4 ms against 1.14 ms on bge-small — so the remainder is the per-element passes (and, on
   bge-small, the attention strip), not the matrix kernel. Rerank is 1.11–1.42× llama.cpp on both
   bge-reranker files. See `benchmarks/results/bluefin-2026-11-12-s4.9p/README.md` and
-  `docs/design/s4.9-sota.md` §17.
+  `docs/design/s4.9-sota.md` §18.
+=======
+- **Q8_0 encoders take the float path on aarch64, and the missing ARM goldens are recorded
+  (S4.9o).** A Q8_0 `modern-bert` file kept the repacked int8 tiles on every tier, and on aarch64
+  those tiles have no `i8mm` body: `q4k8_gemm_i8mm`, `q5_08_gemm_i8mm` and `q6k8_gemm_i8mm` exist
+  and `q8_08_gemm_i8mm` does not, so a Q8_0 matmul ran the `sdot` eight-row tile on the
+  `aarch64-neon-i8mm` tier too. The packed float panel kernel is faster per multiply than that
+  tile even at four times the weight bytes, so on the two tiers that carry those tiles
+  (`aarch64-neon-dotprod` and up) a `modern-bert` file of at most 256 MiB
+  (`Q8_FLOAT_MAX_BYTES_ARM`; the measured gte file is 151 MiB) is dequantised once at load into
+  f32 panels, exactly as a `bert` file of at most 64 MiB already was (S4.9m). The two lower
+  aarch64 tiers keep the per-row kernel they already ran. The route is the
+  more exact one — `scale × code` is exact in f32 and no activation is quantised — and the
+  synthetic Q8_0 file's vector is now the scalar float reference's bit for bit on both int8
+  tiers. On the 200 real texts against llama.cpp's F16 conversion, gte Q8_0 goes 0.9963540/0.9996125
+  → 0.9994969/0.9997834 (min/mean cosine). x86 keeps the int8 tiles and the 64 MiB `bert` rule;
+  `gemma-embedding`, the causal embedders and `PEREGRINE_Q8_FLOAT=0` are unchanged. Measured on
+  the ARM host (10 threads pinned to the Cortex-X925 cluster, seven interleaved rounds, medians,
+  embedding cache off), gte Q8_0 texts/s before → after, and against llama.cpp (ratio after ÷
+  llama): 16 tokens 80.915 → 103.196 (1.28×, the smallest gain; 1.43× llama), 128 tokens 12.484 →
+  23.199 (1.86×; 1.62× llama), 512 tokens 3.168 → 6.404 (2.02×; 1.77× llama), batch of 16 × 32
+  tokens 48.306 → 98.502 (2.04×; 1.55× llama). The same run's F16 control moves −0.3 % to +0.8 %,
+  and the MiniLM Q8_0 control ±1.7 %. The two int8 tiers' `modern-bert-Q8_0` golden becomes
+  `51c9434cc8ba546e` (mean) and `55e17bd3fd81801d` (cls), where the int8 tile hashed
+  `301cbef7263b78d7` / `bb1ba15a4583cf63`; the `aarch64` and `aarch64-neon` goldens keep
+  `07f65ef98b0e8dc5` / `a05d5ecbd3b65f03`, and `bert-heads-Q8_0.golden` is recorded on the four
+  aarch64 tiers (`ca54d90d43e88fb2`, `e4b7b55d6db4b1bd`, `f65b54f0d4866827`, `79e9c20796542234`,
+  the x86 scalar hashes). No golden of another family or tier changed. See
+  `docs/design/s4.9-sota.md` §17 and `benchmarks/results/spark-arm-2026-11-12-q8-encoders/`.
+>>>>>>> origin/main
 
 - **AVX2 bodies for the modern-bert element-wise kernels (S4.9n).** `geglu_erf` and
   `layer_norm_rows_nobias` were the ModernBERT family's two scalar-only kernels; both now have an
@@ -93,6 +237,35 @@ All notable changes to this project are documented here. The format follows
   tokens, 2.9 % at 512 and 0.8 % at 128, and the 16-text batch cell is inside the noise (the
   per-run spread reaches 2×); single-thread at 512 tokens is 3630 → 3574 ms, 2.4 %, which is the
   3 % the isolated kernel time predicts. See `docs/design/s4.9-sota.md` §16.
+
+- **The fork's fast wide pass is a requantisation, and an exact one buys nothing (S5.2).** §10.6
+  item 1 proposed copying ik_llama.cpp's trick — convert each block of weight rows to 8 bits once
+  per wide pass — and said it could be bit-identical "if the kernel widens, not requantises".
+  Half right: the fork *does* requantise. `iqk_convert_q4_k_r4_q8_k_r16`
+  (`ggml/src/iqk/iqk_gemm_kquants.cpp:2400`) dequantises each 256-weight row-block to f32, takes
+  its largest magnitude, and rounds every weight onto a new grid of `max/127` with one f32 scale
+  per (row, 256 weights) — a 4-bit code with a 6-bit scale reaches 945 and cannot fold into int8,
+  so nothing of the original grid survives. Worst case half a step, `max/254` = 0.394 % of the
+  block's largest weight. Measured on 40 chunks of 512 tokens with `llama-perplexity`'s
+  log-probability files: `-ub 512` is not bit-identical to `-ub 16` (the files differ at the first
+  predicted position), Mean KLD 0.001087, RMS Δp 0.634 %, same top-1 97.873 % — 44 % of the
+  0.00248 that separates Q4_K_M from the unquantised model. Peregrine's chunk 16 and chunk 64 are
+  identical on a real model, as the invariant requires.
+
+  Built exactly as §10.6 item 1 asked — the tile's nibbles widened to one byte per weight once per
+  tile, the per-32 scale multiply and the min term kept, bit-identical to the narrowed kernel at
+  every width — the wide pass measures **73.5 against 73.4 GMAC/s at 128 activation rows, 72.6
+  against 71.7 at 512** (two runs, ±2 % both signs): the nibble split is free and removing it buys
+  nothing, because the busy ports are the byte dot and the int32 multiplier. An exact wide kernel's
+  ceiling is today's 74-76, not the fork's 91; what separates them is the per-32 scale multiply and
+  the min term (28 % of the kernel), which only the requantisation can remove. Nothing was wired
+  in. The Q5_0 kernel was attacked too, and two exact variants — a cheaper fifth-bit decode with a
+  prefetch (+2.4 % at 64 rows, −1.9 % at 512, inside the noise) and sixteen output rows per fold
+  (42.4 against 53.6 GMAC/s at 128 rows, slower at every width) — were measured and withdrawn:
+  Q5_0's 32-weight block makes its fold eight times more frequent per weight than Q4_K's, and that
+  is the gap, not the kernel. Peregrine is at 0.64 of ik_llama.cpp on Llama 3.2 1B and 0.57 on Qwen
+  2.5 0.5B on prompt processing at the default settings (0.62 and 0.52 at twelve threads), unchanged
+  because nothing shipped. See `docs/design/s5-prefill-avx512.md` §11.
 
 - **The Q4_K kernel is at the machine's byte-dot roof, and the fork's is not faster (S5.1b).** This
   item was "rebuild the Q4_K kernel with ik_llama.cpp's instruction mix at 120 GMAC/s per core".

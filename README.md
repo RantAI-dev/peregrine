@@ -144,9 +144,12 @@ curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' -
 The reply's `message.tool_calls` holds the call (`get_weather` with `{"city": "Paris"}`) and
 `finish_reason` is `"tool_calls"`. Run the tool, then send the conversation back with the assistant's
 message and a `tool` message carrying the result, and the model answers in text. Supported today:
-Qwen 2.5 chat models; `tool_choice` `"auto"` and `"none"`; `parallel_tool_calls`; streaming. Other
-model families, and `tool_choice: "required"` or a named function, are refused with a 400 until they
-are built ([design](docs/design/s6-tool-calling.md)).
+Qwen 2.5, Qwen 3, Qwen 3.5 and Bonsai 2 chat models; `tool_choice` `"auto"` and `"none"`;
+`parallel_tool_calls`; streaming. A Qwen 3, Qwen 3.5 or Bonsai 2 model thinks before it answers, and its
+thinking comes back in `reasoning_content`, never read for calls; send
+`"chat_template_kwargs": {"enable_thinking": false}` (or `"reasoning_effort": "none"`) to switch
+it off. Other model families, and `tool_choice: "required"` or a named function, are refused with
+a 400 until they are built ([design](docs/design/s6-tool-calling.md)).
 
 For a long-lived service, `--background` detaches the server, writes a lifecycle state file and a log,
 and returns once it is listening:
@@ -327,7 +330,8 @@ anything else as a string.
 ## Performance
 
 Against llama.cpp v0.9.0 for the Q4_K_M models and PrismML's llama.cpp fork for the ternary Bonsai 2
-files, on the same file, machine and thread count:
+files, on the same file, machine and thread count (embedding models also against OpenVINO, ONNX Runtime,
+fastembed and text-embeddings-inference):
 
 ![Where Peregrine is fastest](docs/img/bench-wins.svg)
 
@@ -342,9 +346,15 @@ files, on the same file, machine and thread count:
 - **Bonsai 2 (ternary): 1.4–2.3× the decode and 1.9–2.6× the prompt speed** of PrismML's fork across
   x86-64 (AVX-512 and AVX2) and ARM64 (NEON), and **1.8–2.8× with 10 users**.
 
+- **Embeddings and decisions: fastest in 55 of 68 embedding cells and all nine decision cells** on the
+  4-core Ryzen 3, against llama.cpp, OpenVINO, ONNX Runtime, fastembed and text-embeddings-inference at
+  equal accuracy: bge-m3, EmbeddingGemma, Qwen3-Embedding and Nemotron 3.5 Embed are **1.18–1.62×**
+  llama.cpp, and `/v1/systemone` decisions **1.33–1.84×**.
+
 - **Where Peregrine is behind:** the ik_llama.cpp fork processes prompts about twice as fast on the
   AVX-512 desktop (Peregrine at 0.39–0.58×). Decode is level with it (0.89–1.06×) and Peregrine is ahead
-  with 10 users (1.05–3.09×).
+  with 10 users (1.05–3.09×). For embeddings, OpenVINO and ONNX Runtime are faster on the two small BERT
+  encoders at 128 and 512 tokens (Peregrine at 0.85–0.99×).
 
 Full tables, charts, accuracy verification, and machine records are in [docs/benchmark.md](docs/benchmark.md).
 
@@ -368,10 +378,10 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 | Weight formats | F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, PQ2_0, PTQ1_0 |
 | CPUs | x86-64 (AVX2, AVX-VNNI, AVX-512 VNNI/GFNI/VBMI), ARM64 (NEON, SDOT, i8mm); others through scalar code |
 | Tokenizers | GPT-2 byte-level BPE (smollm, gpt2 / modern-bert, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
-| Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
+| Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 | Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
-| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format); the prompt is the one llama.cpp builds from the model's template |
-| Rerank and classify | a `bert` file's classifier head (`cls`, `cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3 and bge-reranker-base checked against llama.cpp v0.9.0 |
+| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 (the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the prompt is the one llama.cpp builds from the model's template |
+| Rerank and classify | a `bert` or `modern-bert` file's classifier head (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3, bge-reranker-base and gte-reranker-modernbert-base checked against llama.cpp v0.9.0 |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->
 

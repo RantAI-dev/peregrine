@@ -2,4 +2,6 @@
 *.gguf binary
 *.bin binary
 *.slb binary
+# raw f32 fixture vectors and score files: little-endian floats, not text
+*.f32 binary
 Cargo.lock linguist-generated=false

@@ -39,6 +39,13 @@ pub enum Template {
     /// opens itself — or, with thinking switched off, the template writes an empty
     /// `<think>\n\n</think>\n\n` at the start of the assistant turn.
     Qwen3,
+    /// Qwen 3.5's ChatML, which Bonsai 2 files carry too: the template opens the
+    /// reasoning block itself at the end of the prompt (`<think>\n`, or the empty
+    /// block with thinking off), trims every message, and drops the thinking of
+    /// earlier turns. Recognised by the template's exact text, one of the published
+    /// ones (`crate::tools::ToolFormat::for_template`); its prompt is the tool
+    /// module's renderer with no tools, which is checked against llama.cpp.
+    Qwen35,
     /// `<start_of_turn>user\n…<end_of_turn>\n<start_of_turn>model\n`
     /// Gemma 2/3 has no system role; the system text is prepended to the first user turn.
     Gemma,
@@ -70,6 +77,7 @@ pub const TEMPLATES: &[&str] = &[
     "phi4",
     "llama3",
     "qwen3",
+    "qwen35",
     "gemma",
     "mistral-v0",
     "mistral-v1",
@@ -86,6 +94,7 @@ impl Template {
             Template::Phi4 => "phi4",
             Template::Llama3 => "llama3",
             Template::Qwen3 => "qwen3",
+            Template::Qwen35 => "qwen35",
             Template::Gemma => "gemma",
             Template::MistralV0 => "mistral-v0",
             Template::MistralV1 => "mistral-v1",
@@ -104,6 +113,7 @@ impl Template {
             "phi4" => Template::Phi4,
             "llama3" => Template::Llama3,
             "qwen3" => Template::Qwen3,
+            "qwen35" => Template::Qwen35,
             "gemma" => Template::Gemma,
             "mistral-v0" => Template::MistralV0,
             "mistral-v1" => Template::MistralV1,
@@ -157,6 +167,12 @@ impl Template {
         } else if tpl.contains("<|im_start|>") && tpl.contains("<|im_sep|>") {
             // llama.cpp v0.9.0 src/llama-chat.cpp:99-101.
             Ok(Template::Phi4)
+        } else if crate::tools::ToolFormat::for_template(tpl)
+            == Some(crate::tools::ToolFormat::QwenXml)
+        {
+            // One of the published texts of Qwen 3.5's template, exactly. Any other
+            // template with a thinking switch is read as Qwen 3's below.
+            Ok(Template::Qwen35)
         } else if tpl.contains("<|im_start|>") && tpl.contains("enable_thinking") {
             Ok(Template::Qwen3)
         } else if tpl.contains("<|im_start|>") || (tpl.is_empty() && has("<|im_start|>")) {
@@ -211,7 +227,9 @@ impl Template {
         match self {
             Template::ChatMl => &["<|im_start|>", "<|im_end|>"],
             Template::Phi4 => &["<|im_start|>", "<|im_sep|>", "<|im_end|>"],
-            Template::Qwen3 => &["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
+            Template::Qwen3 | Template::Qwen35 => {
+                &["<|im_start|>", "<|im_end|>", "<think>", "</think>"]
+            }
             Template::Llama3 => &[
                 "<|begin_of_text|>",
                 "<|start_header_id|>",
@@ -239,7 +257,9 @@ impl Template {
     /// emit `<|eom_id|>`; `<|end_of_text|>` ends the document.
     pub fn stop_ids(self, tk: &Tokenizer) -> Vec<u32> {
         let names: &[&str] = match self {
-            Template::ChatMl | Template::Phi4 | Template::Qwen3 => &["<|im_end|>", "<|endoftext|>"],
+            Template::ChatMl | Template::Phi4 | Template::Qwen3 | Template::Qwen35 => {
+                &["<|im_end|>", "<|endoftext|>"]
+            }
             Template::Llama3 => &["<|eot_id|>", "<|eom_id|>", "<|end_of_text|>"],
             Template::Gemma => &["<end_of_turn>"],
             Template::MistralV0
@@ -282,6 +302,7 @@ impl Template {
             Template::Llama3
             | Template::Phi4
             | Template::Qwen3
+            | Template::Qwen35
             | Template::Gemma
             | Template::MistralV0
             | Template::MistralV1
@@ -298,8 +319,18 @@ impl Template {
     pub fn assistant_open(self, thinking: bool) -> &'static str {
         match self {
             Template::Qwen3 if !thinking => "<think>\n\n</think>\n\n",
+            // Qwen 3.5's template opens the block itself, and closes it at once when
+            // thinking is off.
+            Template::Qwen35 if thinking => "<think>\n",
+            Template::Qwen35 => "<think>\n\n</think>\n\n",
             _ => "",
         }
+    }
+
+    /// Whether the prompt ends inside a reasoning block the template opened, so the
+    /// model's reply begins with its reasoning and has no opening tag of its own.
+    pub fn opens_reasoning(self, thinking: bool) -> bool {
+        self == Template::Qwen35 && thinking
     }
 
     /// The text that opens a conversation: the system block, before any user turn.
@@ -310,6 +341,14 @@ impl Template {
         match self {
             Template::ChatMl | Template::Qwen3 => match system {
                 Some(sys) => format!("<|im_start|>system\n{sys}<|im_end|>\n"),
+                None => String::new(),
+            },
+            // Qwen 3.5's template trims every message.
+            Template::Qwen35 => match system {
+                Some(sys) => format!(
+                    "<|im_start|>system\n{}<|im_end|>\n",
+                    crate::tools::jinja_trim(sys)
+                ),
                 None => String::new(),
             },
             Template::Phi4 => match system {
@@ -384,6 +423,10 @@ impl Template {
             Template::ChatMl | Template::Qwen3 => {
                 format!("<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n")
             }
+            Template::Qwen35 => format!(
+                "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                crate::tools::jinja_trim(user)
+            ),
             Template::Phi4 => {
                 format!("<|im_start|>user<|im_sep|>{user}<|im_end|><|im_start|>assistant<|im_sep|>")
             }
@@ -438,6 +481,16 @@ impl Template {
     pub fn assistant_turn(self, text: &str) -> String {
         match self {
             Template::ChatMl | Template::Qwen3 => format!("{text}<|im_end|>\n"),
+            // An earlier turn is written without its thinking: what follows the last
+            // closing tag, trimmed (the template's own split).
+            Template::Qwen35 => {
+                let text = crate::tools::jinja_trim(text);
+                let answer = match text.rfind("</think>") {
+                    Some(at) => text[at + "</think>".len()..].trim_start_matches('\n'),
+                    None => text,
+                };
+                format!("{answer}<|im_end|>\n")
+            }
             Template::Phi4 => format!("{text}<|im_end|>"),
             Template::Llama3 => format!("{text}<|eot_id|>"),
             Template::Gemma => format!("{}<end_of_turn>\n<start_of_turn>user\n", text.trim()),
@@ -483,7 +536,7 @@ impl Template {
     /// holds the answer without its terminator.
     pub fn close_previous(self) -> &'static str {
         match self {
-            Template::ChatMl | Template::Qwen3 => "<|im_end|>\n",
+            Template::ChatMl | Template::Qwen3 | Template::Qwen35 => "<|im_end|>\n",
             Template::Phi4 => "<|im_end|>",
             Template::Llama3 => "<|eot_id|>",
             Template::Gemma => "<end_of_turn>\n<start_of_turn>user\n",
@@ -1138,5 +1191,109 @@ mod tests {
                 || today.ends_with("203")
                 || today.chars().rev().take(4).all(|c| c.is_ascii_digit())
         );
+    }
+    // --- Qwen 3.5's template (Bonsai 2 carries it too) --------------------------------
+
+    /// The conversation as the tool module's renderer writes it, with no tools: the
+    /// bytes llama.cpp renders (`tests/fixtures/tools-qwen35.jsonl`).
+    fn qwen35_reference(
+        system: Option<&str>,
+        pairs: &[(String, String)],
+        user: &str,
+        thinking: bool,
+    ) -> String {
+        use crate::tools::{render_with, Msg, RenderOptions, ToolFormat};
+        let mut messages = Vec::new();
+        if let Some(sys) = system {
+            messages.push(Msg::System(sys.to_string()));
+        }
+        for (u, a) in pairs {
+            messages.push(Msg::User(u.clone()));
+            messages.push(Msg::Assistant {
+                content: a.clone(),
+                reasoning: None,
+                tool_calls: Vec::new(),
+            });
+        }
+        messages.push(Msg::User(user.to_string()));
+        render_with(
+            ToolFormat::QwenXml,
+            &[],
+            &messages,
+            RenderOptions { thinking },
+        )
+        .expect("a plain conversation renders")
+    }
+
+    #[test]
+    fn qwen35_is_detected_by_its_exact_text_and_qwen3_by_the_rest() {
+        assert_eq!(
+            Template::detect_from_str(crate::tools::QWEN35_TEMPLATE),
+            Ok(Template::Qwen35)
+        );
+        for variant in crate::tools::QWEN35_VARIANTS {
+            assert_eq!(Template::detect_from_str(variant), Ok(Template::Qwen35));
+        }
+        // A template with a thinking switch that is not one of those texts is Qwen 3's.
+        let other = crate::tools::QWEN35_TEMPLATE.replace("<function=", "<fn=");
+        assert_eq!(Template::detect_from_str(&other), Ok(Template::Qwen3));
+        assert_eq!(Template::from_name("qwen35"), Some(Template::Qwen35));
+        assert_eq!(Template::Qwen35.name(), "qwen35");
+        assert!(TEMPLATES.contains(&"qwen35"));
+    }
+
+    #[test]
+    fn qwen35_prompts_are_the_tool_renderers_prompts() {
+        let pair = |u: &str, a: &str| (u.to_string(), a.to_string());
+        let histories: Vec<Vec<(String, String)>> = vec![
+            vec![],
+            vec![pair("Hi", "Hello!")],
+            vec![pair("  Hi  ", "\n Hello! \n"), pair("And?", "More.")],
+            // A reply as a session keeps it: the reasoning the model wrote after the
+            // opened block, its closing tag, then the answer.
+            vec![pair(
+                "What time is it?",
+                "Let me think.\n</think>\n\nIt is noon.",
+            )],
+            // The same with the opening tag, as a client might send it back.
+            vec![pair(
+                "What time is it?",
+                "<think>\nLet me think.\n</think>\n\nIt is noon.",
+            )],
+        ];
+        for system in [None, Some("Be brief."), Some("  padded system \n")] {
+            for pairs in &histories {
+                for user in ["Why?", "  spaces around  ", "line one\nline two\n"] {
+                    for thinking in [true, false] {
+                        let got = Template::Qwen35.render(system, pairs, user, "", thinking, None);
+                        let want = qwen35_reference(system, pairs, user, thinking);
+                        assert_eq!(
+                            got, want,
+                            "system {system:?}, {} earlier turns, user {user:?}, thinking {thinking}",
+                            pairs.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn qwen35_opens_the_reasoning_block_itself() {
+        let on = Template::Qwen35.render(None, &[], "Hi", "", true, None);
+        assert!(on.ends_with("<|im_start|>assistant\n<think>\n"), "{on:?}");
+        assert!(Template::Qwen35.opens_reasoning(true));
+        let off = Template::Qwen35.render(None, &[], "Hi", "", false, None);
+        assert!(
+            off.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+            "{off:?}"
+        );
+        assert!(!Template::Qwen35.opens_reasoning(false));
+        // Qwen 3's template leaves the opening to the model.
+        assert!(!Template::Qwen3.opens_reasoning(true));
+        assert!(!Template::ChatMl.opens_reasoning(true));
+        // A continuation follows the opened block.
+        let continued = Template::Qwen35.render(None, &[], "Hi", "", true, Some("So far"));
+        assert!(continued.ends_with("<think>\nSo far"), "{continued:?}");
     }
 }

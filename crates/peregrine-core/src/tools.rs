@@ -12,8 +12,11 @@
 //! the bytes llama.cpp v0.9.0's `POST /apply-template` gives for the same request on the
 //! same template (`tests/tools_render.rs`, fixtures written by `scripts/tool-fixtures.py`).
 //!
-//! A template is recognised by comparing it with the copy kept under `tools/`: a file whose
+//! A template is recognised by comparing it with the copies kept under `tools/`: a file whose
 //! template differs is not guessed at, and a request that carries tools is refused for it.
+//! A format may keep several copies: publishers ship variants of one template whose text
+//! differs and whose prompts do not, and each copy here has been rendered through llama.cpp
+//! on the format's whole fixture set and found byte-identical to the others.
 //!
 //! # Formats
 //!
@@ -21,6 +24,11 @@
 //!   inside `<tools>` in the system message; a call is `{"name": ..., "arguments": {...}}`
 //!   inside `<tool_call>`; results come back inside `<tool_response>` in a user turn,
 //!   consecutive results sharing one turn.
+//! * [`ToolFormat::Qwen3`]: Qwen 3's template. Tools and calls are written as in `Hermes`
+//!   (with no default system message), messages are written untrimmed, and the assistant's
+//!   turns after the last user question carry their thinking block. The model opens its own
+//!   thinking block; with thinking off the prompt ends with an empty one. The publishers'
+//!   wordings of this template agree except on two corner rules ([`Qwen3Text`]).
 //! * [`ToolFormat::QwenXml`]: Qwen 3.5's template, which Bonsai 2 files carry. The same
 //!   `<tools>` list, but a call is `<function=name>` with one `<parameter=key>` block per
 //!   argument inside `<tool_call>`, values written bare (a string as it is, `True`, `None`,
@@ -41,8 +49,62 @@ const QWEN25_DEFAULT_SYSTEM: &str =
 /// Qwen 2.5's chat template, as its GGUF files carry it (`tokenizer.chat_template`).
 pub const QWEN25_TEMPLATE: &str = include_str!("tools/qwen25.jinja");
 
-/// Qwen 3.5's chat template, as Bonsai 2's GGUF files carry it.
+/// Qwen 3.5's chat template, as Bonsai 2's GGUF files and Qwen's own 4B and 9B files
+/// carry it: the model thinks unless `enable_thinking` is false.
 pub const QWEN35_TEMPLATE: &str = include_str!("tools/qwen35.jinja");
+
+/// The variants of Qwen 3.5's template that render the same prompts as [`QWEN35_TEMPLATE`].
+///
+/// * `qwen35-optin.jinja`: Qwen's own 0.8B and 2B files. The model thinks only when
+///   `enable_thinking` is true. llama.cpp always defines `enable_thinking` (true unless the
+///   request says otherwise), and so does this renderer, so the "not defined" branch that
+///   tells the two templates apart is never taken.
+/// * `qwen35-unsloth.jinja` and `qwen35-unsloth-optin.jinja`: unsloth's files, with either
+///   thinking rule. They walk a call's arguments with `is mapping` and a key loop where
+///   Qwen's template uses `|items`: the same text for an object, and arguments that are
+///   not an object are refused before rendering ([`messages_from_json`]).
+///
+/// Each was rendered by llama.cpp v0.9.0 on every case of `tests/fixtures/tools-qwen35.jsonl`
+/// and gave the same prompts and the same refusals (`scripts/tool-fixtures.py --check`).
+pub const QWEN35_VARIANTS: [&str; 3] = [
+    include_str!("tools/qwen35-optin.jinja"),
+    include_str!("tools/qwen35-unsloth.jinja"),
+    include_str!("tools/qwen35-unsloth-optin.jinja"),
+];
+
+/// Qwen 3's chat template as the model's Hugging Face repository has it, which is what
+/// bartowski's and lmstudio-community's GGUF files carry.
+pub const QWEN3_TEMPLATE: &str = include_str!("tools/qwen3.jinja");
+
+/// The other published wordings of Qwen 3's template, each with the rules it follows:
+/// Qwen's own GGUF files, unsloth's files up to 1.7B, and unsloth's larger files.
+///
+/// llama.cpp v0.9.0 renders every case of `tests/fixtures/tools-qwen3.jsonl` to the same
+/// bytes with all four. They part on two corner cases, kept apart by [`Qwen3Text`] and
+/// pinned per wording in `tests/fixtures/tools-qwen3-edges.jsonl`.
+pub const QWEN3_VARIANTS: [(&str, Qwen3Text); 3] = [
+    (include_str!("tools/qwen3-gguf.jinja"), Qwen3Text::QwenGguf),
+    (
+        include_str!("tools/qwen3-unsloth.jinja"),
+        Qwen3Text::Upstream,
+    ),
+    (
+        include_str!("tools/qwen3-unsloth-large.jinja"),
+        Qwen3Text::UnslothLarge,
+    ),
+];
+
+/// Which wording of Qwen 3's template a file carries, where the wordings disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Qwen3Text {
+    /// The repository's template (bartowski, lmstudio-community, unsloth up to 1.7B).
+    Upstream,
+    /// Qwen's own GGUF files: a user message that contains a `<tool_response>` block
+    /// anywhere is taken for a tool's result, not only one that is exactly such a block.
+    QwenGguf,
+    /// unsloth's 4B and larger files: thinking that is only whitespace counts as none.
+    UnslothLarge,
+}
 
 /// The thinking block's tags in the Qwen 3 and 3.5 templates.
 const THINK_OPEN: &str = "<think>";
@@ -56,6 +118,8 @@ const QWEN35_INSTRUCTIONS: &str = "\n\nIf you choose to call a function ONLY rep
 pub enum ToolFormat {
     /// Qwen 2.5: JSON calls inside `<tool_call>` (the "Hermes" convention).
     Hermes,
+    /// Qwen 3: the same calls, and a thinking block the model opens itself.
+    Qwen3(Qwen3Text),
     /// Qwen 3.5 and Bonsai 2: `<function=name>` and `<parameter=key>` blocks inside
     /// `<tool_call>`.
     QwenXml,
@@ -69,15 +133,48 @@ impl ToolFormat {
         if template.trim_end() == QWEN25_TEMPLATE.trim_end() {
             return Some(ToolFormat::Hermes);
         }
-        if template.trim_end() == QWEN35_TEMPLATE.trim_end() {
+        if template.trim_end() == QWEN3_TEMPLATE.trim_end() {
+            return Some(ToolFormat::Qwen3(Qwen3Text::Upstream));
+        }
+        for (text, rules) in QWEN3_VARIANTS {
+            if template.trim_end() == text.trim_end() {
+                return Some(ToolFormat::Qwen3(rules));
+            }
+        }
+        if template.trim_end() == QWEN35_TEMPLATE.trim_end()
+            || QWEN35_VARIANTS
+                .iter()
+                .any(|v| template.trim_end() == v.trim_end())
+        {
             return Some(ToolFormat::QwenXml);
         }
         None
     }
 
+    /// Whether `prompt`, as [`render_with`] wrote it for this format, ends inside a thinking
+    /// block the template opened for the model. The model's reply then begins with its
+    /// reasoning and writes only the closing tag, so whoever reads the reply must start in
+    /// the reasoning span.
+    pub fn opens_reasoning(self, prompt: &str) -> bool {
+        match self {
+            ToolFormat::Hermes | ToolFormat::Qwen3(_) => false,
+            ToolFormat::QwenXml => prompt.ends_with("<think>\n"),
+        }
+    }
+
+    /// Whether the family's models think: their replies may carry a thinking block, and
+    /// their templates take the thinking switch.
+    pub fn thinks(self) -> bool {
+        match self {
+            ToolFormat::Hermes => false,
+            ToolFormat::Qwen3(_) | ToolFormat::QwenXml => true,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             ToolFormat::Hermes => "hermes",
+            ToolFormat::Qwen3(_) => "qwen3",
             ToolFormat::QwenXml => "qwen-xml",
         }
     }
@@ -106,6 +203,10 @@ pub enum Msg {
     Tool {
         content: String,
     },
+    /// A message with a role the template has no branch for. Only a format whose template
+    /// passes over such a message produces it (Qwen 3's); it writes nothing, but it still
+    /// stands between its neighbours, as it does in the template's loop.
+    Other,
 }
 
 /// A message's text: a string, `null` (an assistant message that only calls tools), or a
@@ -242,7 +343,7 @@ pub fn messages_from_json(messages: &Value) -> Result<Vec<Msg>, String> {
 /// parts becomes one text.
 pub fn messages_from_json_for(format: ToolFormat, messages: &Value) -> Result<Vec<Msg>, String> {
     let sep = match format {
-        ToolFormat::Hermes => "\n",
+        ToolFormat::Hermes | ToolFormat::Qwen3(_) => "\n",
         ToolFormat::QwenXml => "",
     };
     let list = messages.as_array().ok_or("messages must be an array")?;
@@ -284,6 +385,8 @@ pub fn messages_from_json_for(format: ToolFormat, messages: &Value) -> Result<Ve
                     tool_calls,
                 });
             }
+            // Qwen 3's template has no branch for another role and no refusal either.
+            _ if matches!(format, ToolFormat::Qwen3(_)) => out.push(Msg::Other),
             other => {
                 return Err(format!(
                     "messages[{i}].role {other:?} is not supported (system, user, assistant, tool)"
@@ -349,6 +452,7 @@ pub fn render_with(
 ) -> Result<String, String> {
     match format {
         ToolFormat::Hermes => render_qwen25(tools, messages),
+        ToolFormat::Qwen3(text) => render_qwen3(tools, messages, options.thinking, text),
         ToolFormat::QwenXml => render_qwen35(tools, messages, options.thinking),
     }
 }
@@ -411,6 +515,8 @@ fn render_qwen25(tools: &[Value], messages: &[Msg]) -> Result<String, String> {
     };
     for (i, m) in messages.iter().enumerate() {
         match m {
+            // Only Qwen 3's reader produces this.
+            Msg::Other => {}
             // The first system message is the header above; a later one is a turn.
             Msg::System(text) => {
                 if i > 0 {
@@ -470,8 +576,184 @@ fn render_qwen25(tools: &[Value], messages: &[Msg]) -> Result<String, String> {
 }
 
 /// Jinja's `trim`: the whitespace C's `isspace` knows, from both ends.
-fn jinja_trim(text: &str) -> &str {
+pub(crate) fn jinja_trim(text: &str) -> &str {
     text.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'))
+}
+
+/// Qwen 3's template, branch for branch (`tools/qwen3.jinja`).
+///
+/// Nothing is trimmed: a message is written as the client sent it. A message with a role
+/// the template has no branch for writes nothing. `text` selects the two rules on which the
+/// published wordings of the template differ.
+fn render_qwen3(
+    tools: &[Value],
+    messages: &[Msg],
+    thinking: bool,
+    text: Qwen3Text,
+) -> Result<String, String> {
+    if messages.is_empty() {
+        return Err("messages must not be empty".into());
+    }
+    let mut s = String::new();
+    let system = match &messages[0] {
+        Msg::System(text) => Some(text.as_str()),
+        _ => None,
+    };
+    if !tools.is_empty() {
+        s.push_str(IM_START);
+        s.push_str("system\n");
+        if let Some(text) = system {
+            s.push_str(text);
+            s.push_str("\n\n");
+        }
+        s.push_str(
+            "# Tools\n\nYou may call one or more functions to assist with the user query.\
+             \n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>",
+        );
+        for t in tools {
+            s.push('\n');
+            s.push_str(&t.to_jinja_json());
+        }
+        s.push_str(
+            "\n</tools>\n\nFor each function call, return a json object with function name and \
+             arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": \
+             <function-name>, \"arguments\": <args-json-object>}\n</tool_call>",
+        );
+        s.push_str(IM_END);
+        s.push('\n');
+    } else if let Some(text) = system {
+        s.push_str(IM_START);
+        s.push_str("system\n");
+        s.push_str(text);
+        s.push_str(IM_END);
+        s.push('\n');
+    }
+
+    // The last real question: the last user message that is not a tool's result written as
+    // a user turn. With none, the template leaves the index at the last message, so no
+    // assistant turn is "after" it.
+    let is_result = |t: &str| match text {
+        Qwen3Text::QwenGguf => t.contains("<tool_response>") && t.contains("</tool_response>"),
+        Qwen3Text::Upstream | Qwen3Text::UnslothLarge => {
+            t.starts_with("<tool_response>") && t.ends_with("</tool_response>")
+        }
+    };
+    let last = messages.len() - 1;
+    let last_query = messages
+        .iter()
+        .rposition(|m| matches!(m, Msg::User(t) if !is_result(t)))
+        .unwrap_or(last);
+
+    // A last assistant message of text is a continuation: it is written like any other and
+    // left open, and no new assistant turn follows it.
+    let continued = match messages.last() {
+        Some(Msg::Assistant { tool_calls, .. }) if tool_calls.is_empty() => true,
+        Some(Msg::Assistant { .. }) => {
+            return Err(
+                "the conversation ends with an assistant tool call; send the tool's result".into(),
+            )
+        }
+        _ => false,
+    };
+    for (i, m) in messages.iter().enumerate() {
+        match m {
+            // The first system message is the header above; a later one is a turn.
+            Msg::System(text) => {
+                if i > 0 {
+                    s.push_str(IM_START);
+                    s.push_str("system\n");
+                    s.push_str(text);
+                    s.push_str(IM_END);
+                    s.push('\n');
+                }
+            }
+            Msg::User(text) => {
+                s.push_str(IM_START);
+                s.push_str("user\n");
+                s.push_str(text);
+                s.push_str(IM_END);
+                s.push('\n');
+            }
+            Msg::Assistant {
+                content,
+                reasoning,
+                tool_calls,
+            } => {
+                // The thinking the client sent back, or the block still inside the text.
+                let (reasoning, content) = match reasoning {
+                    Some(r) => (r.as_str(), content.as_str()),
+                    None if content.contains(THINK_CLOSE) => {
+                        let before = content.split(THINK_CLOSE).next().unwrap_or("");
+                        let before = before.trim_end_matches('\n');
+                        let inner = before.rsplit(THINK_OPEN).next().unwrap_or("");
+                        let after = content.rsplit(THINK_CLOSE).next().unwrap_or("");
+                        (
+                            inner.trim_start_matches('\n'),
+                            after.trim_start_matches('\n'),
+                        )
+                    }
+                    None => ("", content.as_str()),
+                };
+                let has_reasoning = match text {
+                    Qwen3Text::UnslothLarge => !jinja_trim(reasoning).is_empty(),
+                    Qwen3Text::Upstream | Qwen3Text::QwenGguf => !reasoning.is_empty(),
+                };
+                s.push_str(IM_START);
+                s.push_str("assistant\n");
+                if i > last_query && (i == last || has_reasoning) {
+                    s.push_str(THINK_OPEN);
+                    s.push('\n');
+                    s.push_str(reasoning.trim_matches('\n'));
+                    s.push('\n');
+                    s.push_str(THINK_CLOSE);
+                    s.push_str("\n\n");
+                    s.push_str(content.trim_start_matches('\n'));
+                } else {
+                    s.push_str(content);
+                }
+                for (j, c) in tool_calls.iter().enumerate() {
+                    if j > 0 || !content.is_empty() {
+                        s.push('\n');
+                    }
+                    s.push_str("<tool_call>\n{\"name\": \"");
+                    s.push_str(&c.name);
+                    s.push_str("\", \"arguments\": ");
+                    s.push_str(&c.arguments.to_jinja_json());
+                    s.push_str("}\n</tool_call>");
+                }
+                if !(continued && i == last) {
+                    s.push_str(IM_END);
+                    s.push('\n');
+                }
+            }
+            // Consecutive results share one user turn.
+            Msg::Tool { content } => {
+                if i == 0 || !matches!(messages[i - 1], Msg::Tool { .. }) {
+                    s.push_str(IM_START);
+                    s.push_str("user");
+                }
+                s.push_str("\n<tool_response>\n");
+                s.push_str(content);
+                s.push_str("\n</tool_response>");
+                if i == last || !matches!(messages[i + 1], Msg::Tool { .. }) {
+                    s.push_str(IM_END);
+                    s.push('\n');
+                }
+            }
+            Msg::Other => {}
+        }
+    }
+    if !continued {
+        s.push_str(IM_START);
+        s.push_str("assistant\n");
+        if !thinking {
+            s.push_str(THINK_OPEN);
+            s.push_str("\n\n");
+            s.push_str(THINK_CLOSE);
+            s.push_str("\n\n");
+        }
+    }
+    Ok(s)
 }
 
 /// One argument's value as Qwen 3.5's template writes it: a list or an object as JSON,
@@ -549,6 +831,8 @@ fn render_qwen35(tools: &[Value], messages: &[Msg], thinking: bool) -> Result<St
     let last = messages.len() - 1;
     for (i, m) in messages.iter().enumerate() {
         match m {
+            // Only Qwen 3's reader produces this.
+            Msg::Other => {}
             Msg::System(_) => {
                 if i > 0 {
                     return Err("System message must be at the beginning.".into());
@@ -754,14 +1038,18 @@ impl CallParser {
         self.pending.push_str(text);
         match self.format {
             // Both formats frame a call the same way; they differ in its body.
-            ToolFormat::Hermes | ToolFormat::QwenXml => self.step_hermes(false, out),
+            ToolFormat::Hermes | ToolFormat::Qwen3(_) | ToolFormat::QwenXml => {
+                self.step_hermes(false, out)
+            }
         }
     }
 
     /// The output has ended: decide everything that was held back.
     pub fn finish(&mut self, out: &mut Vec<Event>) {
         match self.format {
-            ToolFormat::Hermes | ToolFormat::QwenXml => self.step_hermes(true, out),
+            ToolFormat::Hermes | ToolFormat::Qwen3(_) | ToolFormat::QwenXml => {
+                self.step_hermes(true, out)
+            }
         }
     }
 
@@ -844,7 +1132,7 @@ impl CallParser {
     fn call_or_text(&mut self, body: &str, raw: String, out: &mut Vec<Event>) {
         let ws = std::mem::take(&mut self.ws_before_call);
         let call = match self.format {
-            ToolFormat::Hermes => self.hermes_call(body),
+            ToolFormat::Hermes | ToolFormat::Qwen3(_) => self.hermes_call(body),
             ToolFormat::QwenXml => self.xml_call(body),
         };
         match call {
@@ -1268,6 +1556,133 @@ mod tests {
         );
         assert_eq!(ToolFormat::QwenXml.name(), "qwen-xml");
         assert_ne!(QWEN25_TEMPLATE, QWEN35_TEMPLATE);
+    }
+
+    #[test]
+    fn the_four_wordings_of_qwen3s_template_are_recognised_with_their_rules() {
+        assert_eq!(
+            ToolFormat::for_template(QWEN3_TEMPLATE),
+            Some(ToolFormat::Qwen3(Qwen3Text::Upstream))
+        );
+        let rules: Vec<Qwen3Text> = QWEN3_VARIANTS
+            .iter()
+            .map(|(text, rules)| {
+                assert_ne!(*text, QWEN3_TEMPLATE);
+                assert_eq!(
+                    ToolFormat::for_template(text),
+                    Some(ToolFormat::Qwen3(*rules))
+                );
+                // A trailing newline is forgiven; an edited template is not.
+                assert_eq!(
+                    ToolFormat::for_template(&format!("{text}\n")),
+                    Some(ToolFormat::Qwen3(*rules))
+                );
+                assert_eq!(
+                    ToolFormat::for_template(&text.replace("# Tools", "# Tool")),
+                    None
+                );
+                *rules
+            })
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                Qwen3Text::QwenGguf,
+                Qwen3Text::Upstream,
+                Qwen3Text::UnslothLarge
+            ]
+        );
+        let format = ToolFormat::Qwen3(Qwen3Text::Upstream);
+        assert_eq!(format.name(), "qwen3");
+        assert!(format.thinks() && ToolFormat::QwenXml.thinks() && !ToolFormat::Hermes.thinks());
+        // The model opens its own thinking block: no prompt of this format ends inside one.
+        let ask = vec![Msg::User("Hi".into())];
+        for thinking in [true, false] {
+            let prompt = render_with(format, &[], &ask, RenderOptions { thinking }).unwrap();
+            assert!(!format.opens_reasoning(&prompt), "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn a_qwen3_call_is_read_as_json_and_a_role_without_a_branch_writes_nothing() {
+        let format = ToolFormat::Qwen3(Qwen3Text::Upstream);
+        let mut parser = CallParser::new(format, vec!["get_weather".into()]);
+        let mut events = Vec::new();
+        parser.push(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>",
+            &mut events,
+        );
+        parser.finish(&mut events);
+        assert_eq!(
+            events,
+            vec![call(0, "get_weather", "{\"city\": \"Paris\"}")]
+        );
+
+        // The reader keeps such a message's place and the renderer writes nothing for it;
+        // the other formats refuse it by name.
+        let body = Value::parse(
+            r#"[{"role":"user","content":"a"},{"role":"critic","content":"x"},{"role":"user","content":"b"}]"#,
+        )
+        .unwrap();
+        let messages = messages_from_json_for(format, &body).unwrap();
+        assert_eq!(messages[1], Msg::Other);
+        let prompt = render(format, &[], &messages).unwrap();
+        assert!(
+            !prompt.contains("critic") && !prompt.contains('x'),
+            "{prompt:?}"
+        );
+        assert!(messages_from_json_for(ToolFormat::Hermes, &body).is_err());
+        assert!(messages_from_json_for(ToolFormat::QwenXml, &body).is_err());
+    }
+
+    #[test]
+    fn the_published_variants_of_qwen35s_template_are_the_same_format() {
+        for (i, variant) in QWEN35_VARIANTS.iter().enumerate() {
+            assert_ne!(*variant, QWEN35_TEMPLATE, "variant {i} is a copy");
+            assert_eq!(
+                ToolFormat::for_template(variant),
+                Some(ToolFormat::QwenXml),
+                "variant {i}"
+            );
+            // A GGUF writer may add a newline at the end; nothing else is forgiven.
+            assert_eq!(
+                ToolFormat::for_template(&format!("{variant}\n")),
+                Some(ToolFormat::QwenXml)
+            );
+            assert_eq!(
+                ToolFormat::for_template(&variant.replace("tool_call", "call")),
+                None
+            );
+        }
+        // The variants differ from one another too: three texts, not one text three times.
+        assert_ne!(QWEN35_VARIANTS[0], QWEN35_VARIANTS[1]);
+        assert_ne!(QWEN35_VARIANTS[0], QWEN35_VARIANTS[2]);
+        assert_ne!(QWEN35_VARIANTS[1], QWEN35_VARIANTS[2]);
+    }
+
+    #[test]
+    fn a_prompt_that_ends_inside_a_thinking_block_says_so() {
+        let ask = vec![Msg::User("What time is it?".into())];
+        let xml = ToolFormat::QwenXml;
+        let on = render_with(xml, &[], &ask, RenderOptions { thinking: true }).unwrap();
+        assert!(xml.opens_reasoning(&on), "{on:?}");
+        // Thinking off: the template closes an empty block, so the reply starts as content.
+        let off = render_with(xml, &[], &ask, RenderOptions { thinking: false }).unwrap();
+        assert!(!xml.opens_reasoning(&off), "{off:?}");
+        // A continued assistant text is left open where the client stopped, outside a block.
+        let continued = vec![
+            Msg::User("What time is it?".into()),
+            Msg::Assistant {
+                content: "It is".into(),
+                reasoning: None,
+                tool_calls: vec![],
+            },
+        ];
+        let open = render(xml, &[], &continued).unwrap();
+        assert!(!xml.opens_reasoning(&open), "{open:?}");
+        // Qwen 2.5's template has no thinking block.
+        let hermes = render(ToolFormat::Hermes, &[], &ask).unwrap();
+        assert!(!ToolFormat::Hermes.opens_reasoning(&hermes));
     }
 
     #[test]

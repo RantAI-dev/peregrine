@@ -1,0 +1,54 @@
+{
+ "benchmark": "peregrine-s4.2-embed-accuracy",
+ "timestamp": "2026-11-11T22:55:16.586015+00:00",
+ "model": {
+  "name": "minilm",
+  "hf": "sentence-transformers/all-MiniLM-L6-v2",
+  "pooling": "mean"
+ },
+ "row": {
+  "engine": "fastembed",
+  "precision": "fp32",
+  "path": "~/models/embed/prepared/minilm-onnx-fp32",
+  "kind": "dir",
+  "sha256": "69242f595950aaa2f6bec62c6c3e989607ad7577a61039ef45f0ac68743c5761",
+  "size_bytes": 181509447
+ },
+ "reference": {
+  "label": "torch-fp32",
+  "backend": "torch-fp32",
+  "dim": 384,
+  "count": 200
+ },
+ "engine": {
+  "name": "fastembed",
+  "version": "0.9.1",
+  "runtime": "onnxruntime",
+  "venv": "/var/tmp/embed-venv",
+  "python": "/var/tmp/embed-venv/bin/python"
+ },
+ "host_before": {
+  "loadavg": [
+   4.4619140625,
+   4.693359375,
+   4.83740234375
+  ],
+  "mem_available_gb": 7.09,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.28
+ },
+ "cosine": {
+  "mean": 1.0,
+  "min": 1.0,
+  "p1": 1.0,
+  "p50": 1.0
+ },
+ "norm": {
+  "min": 1.0,
+  "max": 1.0,
+  "mean": 1.0
+ },
+ "dim": 384,
+ "n": 200
+}

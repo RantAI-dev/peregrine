@@ -76,7 +76,7 @@ pub fn support_text() -> String {
     let _ = writeln!(out, "rerank and classify:");
     let _ = writeln!(
         out,
-        "  a bert file's classifier head (cls, cls.output, classifier.output_labels), POST /v1/rerank and POST /v1/classify, peregrine rerank"
+        "  a bert or modern-bert file's classifier head (cls, cls.norm, cls.output, classifier.output_labels), POST /v1/rerank and POST /v1/classify, peregrine rerank"
     );
 
     let _ = writeln!(out, "decisions:");
@@ -132,7 +132,7 @@ pub fn support_markdown() -> String {
 
     // 5. Chat templates
     let tmpl_str = "read from the model file and rendered exactly as llama.cpp renders them: \
-ChatML, Phi-4, Llama 3, Qwen 3, Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) \
+ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) \
 — or named with `--chat-template` for a file that declares none";
 
     // 6. Embeddings
@@ -144,14 +144,15 @@ gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), Gem
 
     // 7. Tool calling
     let tool_str = "OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on \
-`POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format); the prompt \
-is the one llama.cpp builds from the model's template";
+`POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 \
+(the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the \
+prompt is the one llama.cpp builds from the model's template";
 
     // 8. Rerank and classify
-    let rr_str = "a `bert` file's classifier head (`cls`, `cls.output`, \
-`classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), \
-`POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3 and bge-reranker-base checked \
-against llama.cpp v0.9.0";
+    let rr_str = "a `bert` or `modern-bert` file's classifier head (`cls`, `cls.norm`, \
+`cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, \
+`/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3, bge-reranker-base \
+and gte-reranker-modernbert-base checked against llama.cpp v0.9.0";
 
     // 8. Decision models
     let dec_str = "native decision models with a `systemone` template: the `openjev` type, \

@@ -70,6 +70,52 @@ pub(crate) enum GatedAct {
     Swiglu,
 }
 
+/// The classifier head of a `modern-bert` file (roadmap S4.7b), transcribed from
+/// `llm_graph_context::build_pooling`'s `LLAMA_POOLING_TYPE_RANK` branch
+/// (`src/llama-graph.cpp:4185-4220`) and `llama_model_modern_bert::load_arch_tensors`
+/// (`src/models/modern-bert.cpp:90-93`):
+///
+/// ```text
+/// h = pooled(x)                    // mean (the default), or row 0
+/// h = cls.weight · h               // no bias: llama.cpp creates no `cls.bias` here
+/// h = act(h)                       // classifier.activation, GELU_ERF by default
+/// h = layer_norm(h, cls.norm.w)    // weight only, no bias
+/// y = cls.output.weight · h + cls.output.bias
+/// ```
+///
+/// The order is Transformers' `ModernBertPredictionHead`: dense → activation → norm →
+/// decoder. There is no softmax for this family: `/v1/rerank`'s score is `y[0]`, the raw
+/// logit, and a labelled file's scores are the caller's softmax.
+pub(crate) struct ModernBertHead {
+    /// `cls.weight`: the dense layer. Absent on a one-layer head (`cls.output` alone).
+    pub(crate) dense: Option<Linear>,
+    /// `cls.norm.weight`: the head's LayerNorm, weight only (`build_norm` is given a
+    /// NULL bias, `src/llama-graph.cpp:4205-4207`).
+    pub(crate) norm_w: Option<Vec<f32>>,
+    /// `cls.output.weight` (+ `.bias`): the projection to the file's outputs.
+    pub(crate) out: Option<Linear>,
+    pub(crate) out_b: Vec<f32>,
+    pub(crate) act: HeadAct,
+    /// `classifier.pooling_type == 1` (mean) instead of row 0; the default is mean
+    /// (`src/models/modern-bert.cpp:26-28`).
+    pub(crate) mean: bool,
+    /// The width of one output row: `cls.output`'s rows, or `d_model` without one.
+    pub(crate) n_out: usize,
+    /// `classifier.output_labels`, in file order. Empty when the file has none.
+    pub(crate) labels: Vec<String>,
+}
+
+/// `classifier.activation`: llama.cpp's `LLM_CLS_ACT_TYPES_FROM_STRING`
+/// (`src/llama-model.cpp:1209-1213`). Unlike the `bert` family, a `modern-bert` file
+/// without the key gets the **erf** GELU, Transformers' default for this head
+/// (`src/models/modern-bert.cpp:31-35`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeadAct {
+    Tanh,
+    Gelu,
+    Silu,
+}
+
 /// One pre-norm encoder layer.
 pub(crate) struct ModernBertLayer {
     /// `attn_qkv`: **one** matrix with the query, key and value rows concatenated
@@ -96,6 +142,8 @@ pub struct ModernBert {
     pub(crate) layers: Vec<ModernBertLayer>,
     pub(crate) out_norm_w: Vec<f32>,
     pub(crate) act: GatedAct,
+    /// The classifier head, when the file carries one (S4.7b).
+    pub(crate) head: Option<ModernBertHead>,
     /// `attention.sliding_window`: the full window width; a local layer masks a
     /// pair when `|p1 - p0| > window / 2` (`LLAMA_SWA_TYPE_SYMMETRIC`).
     pub(crate) window: usize,
@@ -193,6 +241,22 @@ impl ModernBert {
             return Err("modern-bert.context_length is 0".into());
         }
         let eps = g.f32(&k("attention.layer_norm_epsilon")).unwrap_or(1e-5);
+
+        // A decision checkpoint (`ModernBertDecisionModel`: Laya, Julia-1) appends its
+        // scorer's pre-norm blocks to `block_count` (`src/models/modern-bert.cpp:38-52`,
+        // `conversion/bert.py`'s `_load_decision_hparams`). Reading them as encoder
+        // layers would compute a shape the file's head never saw, so the file is refused
+        // by name until S4.12.
+        match g.u32(&k("decision.block_count")) {
+            Ok(n) if n > 0 => {
+                return Err(format!(
+                    "{}decision.block_count is {n}: a modern-bert decision model's head blocks \
+                     are not read yet (roadmap S4.12)",
+                    k("")
+                ))
+            }
+            _ => {}
+        }
 
         // The window and its pattern: llama.cpp reads `attention.sliding_window`
         // and, when it is positive, `load_swa_pattern(ml, 3, dense_first = true)`
@@ -311,12 +375,10 @@ impl ModernBert {
             });
         }
 
-        // The classifier head. llama.cpp reads `cls` (dense), `cls.norm`,
-        // `cls.output` and `classifier.output_labels`; a file that carries them
-        // still serves embeddings when it declares a pooling type, and Peregrine
-        // does not serve `classify`/`rerank` for this family yet (S4.6b is not on
-        // main), so the tensors are read, checked and named in one line.
-        read_classifier(g, d_model, &k)?;
+        // The classifier head (S4.7b): `cls`, `cls.norm`, `cls.output` and
+        // `classifier.output_labels`. A file that carries them serves `/v1/rerank` and
+        // `/v1/classify` from them; its embeddings still use `pooling_type`.
+        let head = read_head(g, d_model)?;
 
         let cfg = Config {
             arch_name: "modern-bert",
@@ -341,6 +403,11 @@ impl ModernBert {
         for l in &layers {
             linears.extend([&l.wqkv, &l.wo, &l.up, &l.down]);
         }
+        if let Some(h) = &head {
+            // The head's matrices read the same activation rows as a layer's, so they
+            // count for the layout decision too (a Q8_0 `cls.weight` needs the int8 rows).
+            linears.extend(h.dense.iter().chain(h.out.iter()));
+        }
         let k_layout = linears
             .iter()
             .filter_map(|lin| lin.dense())
@@ -361,6 +428,7 @@ impl ModernBert {
                 layers,
                 out_norm_w,
                 act,
+                head,
                 window,
                 rope_local: std::sync::RwLock::new(rope_local),
                 rope_base_local,
@@ -373,73 +441,153 @@ impl ModernBert {
     }
 }
 
-/// Read and check the optional classifier head. `Ok(())` whether or not it is
-/// there; a malformed head is an error, because llama.cpp would abort on it.
+/// Read and check the optional classifier head (S4.7b). `Ok(None)` when the file has
+/// none; a malformed head is an error naming the tensor, because llama.cpp would abort
+/// on it.
 ///
-/// The head is not served: classify and rerank arrive with the BERT family's head
-/// (S4.6b), and until then a file that carries one gets one line of output and its
-/// embeddings, which use `pooling_type` exactly as an embedder's file does.
-fn read_classifier(g: &Gguf, d_model: usize, k: &impl Fn(&str) -> String) -> Result<(), String> {
-    let names = [
-        "cls.weight",
-        "cls.bias",
-        "cls.norm.weight",
-        "cls.norm.bias",
-        "cls.output.weight",
-        "cls.output.bias",
-    ];
-    let present: Vec<&str> = names
-        .iter()
-        .copied()
-        .filter(|n| g.tensor(n).is_ok())
-        .collect();
+/// llama.cpp creates `cls.weight`, `cls.norm.weight`, `cls.output.weight` and
+/// `cls.output.bias` `TENSOR_NOT_REQUIRED` for this family (`src/models/modern-bert.cpp:90-93`)
+/// and sizes the output by `classifier.output_labels` when the file has them, by 1
+/// otherwise (`src/llama-model.cpp:1635-1638`). It creates **no** `cls.bias` and no
+/// `cls.norm.bias` for a sequence-classification file — the dense layer and the head
+/// norm are bias-less — so a file that carries those tensors is read without them, as
+/// llama.cpp reads it.
+fn read_head(g: &Gguf, d_model: usize) -> Result<Option<ModernBertHead>, String> {
+    let arch = "modern-bert";
     let labels = g
-        .arr_str(&k("classifier.output_labels"))
-        .map(|v| v.to_vec())
+        .arr_str(&format!("{arch}.classifier.output_labels"))
+        .map(<[String]>::to_vec)
         .unwrap_or_default();
-    if present.is_empty() && labels.is_empty() {
-        return Ok(());
-    }
-    let n_out = match g.tensor("cls.output.weight") {
-        Ok(t) => t.dims.get(1).copied().unwrap_or(0) as usize,
-        Err(_) => labels.len(),
+    // The converters write a one-output `cls.output.weight` 1-d, as they write
+    // `token_types.weight`; llama.cpp's tensor shape is `{n_embd, 1}` either way.
+    let mat2 = |name: &str| -> Option<TensorInfo> {
+        g.tensor(name).ok().map(|t| {
+            let mut t = t.clone();
+            if t.dims.len() == 1 {
+                t.dims.push(1);
+            }
+            t
+        })
     };
-    if n_out == 0 {
-        return Err(
-            "modern-bert classifier head: neither classifier.output_labels nor cls.output.weight \
-             says how many outputs it has"
-                .into(),
-        );
+    let dense_t = mat2("cls.weight");
+    let out_t = mat2("cls.output.weight");
+    let norm_t = g.tensor("cls.norm.weight").ok().cloned();
+    if dense_t.is_none() && out_t.is_none() && norm_t.is_none() && labels.is_empty() {
+        return Ok(None);
     }
-    if !labels.is_empty() && labels.len() != n_out {
+    if dense_t.is_none() && out_t.is_none() {
+        let named = if norm_t.is_some() {
+            "cls.norm.weight"
+        } else {
+            "classifier.output_labels"
+        };
         return Err(format!(
-            "modern-bert classifier head: {} labels for {n_out} outputs",
-            labels.len()
+            "modern-bert classifier head: {named} is present but the file carries neither \
+             cls.weight nor cls.output.weight, so there is nothing to apply it to"
         ));
     }
-    let shapes: [(&str, usize, usize); 4] = [
-        ("cls.weight", d_model, d_model),
-        ("cls.bias", d_model, 1),
-        ("cls.norm.weight", d_model, 1),
-        ("cls.output.weight", d_model, n_out),
-    ];
-    for (name, d_in, d_out) in shapes {
-        if let Ok(t) = g.tensor(name) {
-            let a = t.dims.first().copied().unwrap_or(0) as usize;
-            let b = t.dims.get(1).copied().unwrap_or(1) as usize;
-            if t.dims.len() > 2 || a != d_in || b != d_out {
+    // llama.cpp sizes `cls.output` by the labels when the file has them, and by 1
+    // otherwise; a mismatch is the metadata's error.
+    let n_out = if labels.is_empty() {
+        out_t.as_ref().map_or(d_model, |t| t.dims[1] as usize)
+    } else {
+        labels.len()
+    };
+    let dense = match dense_t {
+        Some(t) => {
+            shape_of(&t, d_model, d_model)
+                .map_err(|e| format!("the classifier head's cls.weight: {e}"))?;
+            Some(Linear::Dense(t))
+        }
+        None => None,
+    };
+    let out = match out_t {
+        Some(t) => {
+            let want = if labels.is_empty() {
+                "one output".to_string()
+            } else {
+                format!("{} outputs (its labels)", labels.len())
+            };
+            if t.dims[0] as usize != d_model || t.dims[1] as usize != n_out {
                 return Err(format!(
-                    "{name} is {:?}, expected [{d_in}, {d_out}]",
+                    "cls.output.weight is {:?}, expected [{d_model}, {n_out}] for {want}",
                     t.dims
                 ));
             }
+            Some(Linear::Dense(t))
         }
+        None => None,
+    };
+    if out.is_none() && !labels.is_empty() {
+        return Err(format!(
+            "modern-bert.classifier.output_labels names {} outputs but the file carries no \
+             cls.output.weight to produce them",
+            labels.len()
+        ));
     }
-    eprintln!(
-        "info: modern-bert classifier head ({} labels) loaded but not served: classify and \
-         rerank are not available for this family yet, embeddings only",
-        labels.len().max(n_out)
-    );
+    let out_b = if out.is_some() {
+        match g.tensor("cls.output.bias") {
+            Ok(t) => {
+                if t.numel() as usize != n_out {
+                    return Err(format!(
+                        "cls.output.bias has {} entries, expected {n_out}",
+                        t.numel()
+                    ));
+                }
+                vec_f32(g, "cls.output.bias", n_out)?
+            }
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let norm_w = match &norm_t {
+        Some(t) => {
+            shape_of(t, d_model, 1).map_err(|e| format!("cls.norm.weight: {e}"))?;
+            Some(vec_f32(g, "cls.norm.weight", d_model)?)
+        }
+        None => None,
+    };
+    let act = match g.str(&format!("{arch}.classifier.activation")) {
+        Ok("gelu") => HeadAct::Gelu,
+        Ok("silu") => HeadAct::Silu,
+        Ok("tanh") => HeadAct::Tanh,
+        Ok(other) => {
+            return Err(format!(
+                "{arch}.classifier.activation {other:?} is not one llama.cpp reads \
+                 (gelu, silu, tanh)"
+            ))
+        }
+        // `src/models/modern-bert.cpp:31-35`: the file's key, else GELU_ERF.
+        Err(_) => HeadAct::Gelu,
+    };
+    // `classifier.pooling_type`: 1 means mean, anything else is row 0, and the absent
+    // key means mean for this family (`src/models/modern-bert.cpp:26-28`).
+    let mean = g
+        .u32(&format!("{arch}.classifier.pooling_type"))
+        .map_or(true, |v| v == 1);
+    Ok(Some(ModernBertHead {
+        dense,
+        norm_w,
+        out,
+        out_b,
+        act,
+        mean,
+        n_out,
+        labels,
+    }))
+}
+
+/// A tensor's `[d_in, d_out]` shape, with a 1-d tensor read as one output row.
+fn shape_of(t: &TensorInfo, d_in: usize, d_out: usize) -> Result<(), String> {
+    let a = t.dims.first().copied().unwrap_or(0) as usize;
+    let b = t.dims.get(1).copied().unwrap_or(1) as usize;
+    if t.dims.len() > 2 || a != d_in || b != d_out {
+        return Err(format!(
+            "{} is {:?}, expected [{d_in}, {d_out}]",
+            t.name, t.dims
+        ));
+    }
     Ok(())
 }
 
@@ -546,6 +694,14 @@ impl Architecture for ModernBert {
         Causality::Bidirectional
     }
 
+    fn head_width(&self) -> usize {
+        self.head.as_ref().map_or(0, |h| h.n_out)
+    }
+
+    fn head_labels(&self) -> &[String] {
+        self.head.as_ref().map_or(&[], |h| h.labels.as_slice())
+    }
+
     fn act_layout(&self) -> ActLayout {
         let mut keep_f32 = false;
         let mut quantize = false;
@@ -615,6 +771,11 @@ impl Architecture for ModernBert {
                 f(lin)?;
             }
         }
+        if let Some(h) = &mut self.head {
+            for lin in [h.dense.as_mut(), h.out.as_mut()].into_iter().flatten() {
+                f(lin)?;
+            }
+        }
         Ok(())
     }
 
@@ -624,6 +785,11 @@ impl Architecture for ModernBert {
             f(&[&l.wo]);
             f(&[&l.up]);
             f(&[&l.down]);
+        }
+        if let Some(h) = &self.head {
+            for lin in [h.dense.as_ref(), h.out.as_ref()].into_iter().flatten() {
+                f(&[lin]);
+            }
         }
     }
 
@@ -644,8 +810,10 @@ impl Architecture for ModernBert {
     ///    d. `ffn_up` (the gated pair), the first half's activation times the
     ///    second, `ffn_down`; `x = x + that`;
     /// 4. `output_norm`: LayerNorm with a weight and no bias;
-    /// 5. pooling (the caller's type) of the final rows, then the engine's
-    ///    truncation and L2 normalisation.
+    /// 5. the read-out, per text: pooling of those rows by the caller's type (then the
+    ///    engine's truncation and L2 normalisation), or — for a `TextWant::Head` text —
+    ///    the same rows through the classifier head (mean or row 0, `cls`, the head's
+    ///    activation, `cls.norm`, `cls.output`), into `st.head_out`.
     ///
     /// No layer reads a cache, nothing is chunked, and a text's rows are computed
     /// exactly as they would be alone, so its vector is bit-identical in any batch.
@@ -660,17 +828,6 @@ impl Architecture for ModernBert {
         stats: &mut StepStats,
     ) -> Result<(), String> {
         let t_fwd = Instant::now();
-        // The classifier head of a fine-tuned modern-bert file is not read yet (S4.7 part b),
-        // so a head read-out is refused before any row is computed.
-        if wants
-            .iter()
-            .any(|w| matches!(w, peregrine_core::arch::TextWant::Head))
-        {
-            return Err(format!(
-                "the {} model has no classifier head",
-                cfg.arch_name
-            ));
-        }
         let dm = cfg.d_model;
         let ff = cfg.n_ff;
         let qd = cfg.q_dim();
@@ -954,28 +1111,156 @@ impl Architecture for ModernBert {
             nb,
             &mut st.xb,
         );
+        // The read-outs draw on both `st.xb` (as the head's and the pooler's working row)
+        // and these rows, so keep one exact copy of them in `st.x` — the pre-norm rows
+        // there are spent. A copy is exact, so a vector's bits do not change.
+        st.x[..nb * dm].copy_from_slice(&st.xb[..nb * dm]);
 
-        // ---- pooling, text by text (the vector this text's slot reads) ----
+        // ---- read-outs, text by text (the vector or the head row this text's slot reads) ----
         if st.pool_sum.len() < dm {
             st.pool_sum.resize(dm, 0.0);
         }
+        let hw = self.head.as_ref().map_or(0, |h| h.n_out);
         for (i, (t, s)) in texts.iter().zip(&spans).enumerate() {
             let row0 = s.row0;
-            peregrine_core::embed::pool_rows_into(
-                &st.xb[row0 * dm..(row0 + t.len()) * dm],
-                dm,
-                match wants[i] {
-                    peregrine_core::arch::TextWant::Pooled(p) => p,
-                    peregrine_core::arch::TextWant::Head => unreachable!("refused above"),
-                },
-                &mut st.pool_sum,
-                &mut st.xb2[..dm],
-            );
-            st.hidden[row0 * dm..row0 * dm + dm].copy_from_slice(&st.xb2[..dm]);
+            match wants[i] {
+                peregrine_core::arch::TextWant::Pooled(pooling) => {
+                    peregrine_core::embed::pool_rows_into(
+                        &st.x[row0 * dm..(row0 + t.len()) * dm],
+                        dm,
+                        pooling,
+                        &mut st.pool_sum,
+                        &mut st.xb2[..dm],
+                    );
+                    st.hidden[row0 * dm..row0 * dm + dm].copy_from_slice(&st.xb2[..dm]);
+                }
+                peregrine_core::arch::TextWant::Head => {
+                    let h = self.head.as_ref().ok_or_else(|| {
+                        format!("the {} model has no classifier head", cfg.arch_name)
+                    })?;
+                    head_row(w, pool, st, h, cfg.eps, row0, t.len(), dm, hw, stats)?;
+                }
+            }
         }
         st.positions = pos;
         st.spans = spans;
         stats.ns_total += t_fwd.elapsed().as_nanos() as u64;
         Ok(())
     }
+}
+
+/// One text's classifier head row (S4.7b), into `st.head_out[row0 * hw ..]`.
+///
+/// The input is the text's `output_norm` rows (`st.x`), reduced by the head's
+/// `classifier.pooling_type` — the mean, unless the file names another type, or row 0 —
+/// and then exactly `build_pooling`'s rank branch for this family
+/// (`src/llama-graph.cpp:4185-4220`): `cls` (no bias) → `classifier.activation` →
+/// `cls.norm` (weight only) → `cls.output` (+ bias). A head's output does not depend on
+/// the other texts of the pass: every input is that text's own row and each projection
+/// is one row, quantised on its own.
+#[allow(clippy::too_many_arguments)]
+fn head_row(
+    w: &Weights,
+    pool: &Pool,
+    st: &mut State,
+    h: &ModernBertHead,
+    eps: f32,
+    row0: usize,
+    len: usize,
+    dm: usize,
+    hw: usize,
+    stats: &mut StepStats,
+) -> Result<(), String> {
+    // The pooled row, into `st.xb[..dm]` (the head's input row).
+    if h.mean {
+        st.pool_sum[..dm].fill(0.0);
+        for r in st.x[row0 * dm..(row0 + len) * dm].chunks_exact(dm) {
+            for (s, &x) in st.pool_sum[..dm].iter_mut().zip(r) {
+                *s += x as f64;
+            }
+        }
+        let inv = 1.0 / len.max(1) as f64;
+        for (o, &s) in st.xb[..dm].iter_mut().zip(&st.pool_sum[..dm]) {
+            *o = (s * inv) as f32;
+        }
+    } else {
+        st.xb[..dm].copy_from_slice(&st.x[row0 * dm..row0 * dm + dm]);
+    }
+
+    if let Some(dense) = &h.dense {
+        // `cls.weight · h`: the dense layer is bias-less for this family — llama.cpp
+        // creates no `cls.bias` for a sequence-classification file
+        // (`src/models/modern-bert.cpp:92`).
+        linear_rows(
+            w,
+            pool,
+            stats,
+            dense,
+            &mut st.acts,
+            &mut st.lb_x,
+            &mut st.lb_t,
+            &st.xb[..dm],
+            dm,
+            1,
+            &mut st.xb2[..dm],
+            dm,
+            &mut st.kq,
+        );
+        // The head's activation (`hparams.act_cls`), in place.
+        match h.act {
+            HeadAct::Tanh => {
+                for v in st.xb2[..dm].iter_mut() {
+                    *v = v.tanh();
+                }
+            }
+            HeadAct::Gelu => vmath::gelu_erf_rows(&mut st.xb2[..dm]),
+            HeadAct::Silu => {
+                for v in st.xb2[..dm].iter_mut() {
+                    *v *= 1.0 / (1.0 + (-*v).exp());
+                }
+            }
+        }
+        // `cls.norm`: `build_norm(cur, cls_norm, NULL, LLM_NORM, -1)`, the same
+        // weight-less LayerNorm as the encoder's blocks.
+        match &h.norm_w {
+            Some(nw) => {
+                vmath::layer_norm_rows_nobias(&st.xb2[..dm], nw, eps, dm, 1, &mut st.xb[..dm]);
+            }
+            None => st.xb[..dm].copy_from_slice(&st.xb2[..dm]),
+        }
+    }
+
+    match &h.out {
+        // `cls.output.weight · h + cls.output.bias`: the file's outputs.
+        Some(out) => {
+            linear_rows(
+                w,
+                pool,
+                stats,
+                out,
+                &mut st.acts,
+                &mut st.lb_x,
+                &mut st.lb_t,
+                &st.xb[..dm],
+                dm,
+                1,
+                &mut st.head_out[row0 * hw..row0 * hw + hw],
+                hw,
+                &mut st.kq,
+            );
+            // A bias of zeros is skipped, as the encoder's residuals skip it, so a `-0.0`
+            // from the projection stays.
+            if !h.out_b.iter().all(|&b| b == 0.0) {
+                for (o, &b) in st.head_out[row0 * hw..row0 * hw + hw]
+                    .iter_mut()
+                    .zip(&h.out_b)
+                {
+                    *o += b;
+                }
+            }
+        }
+        // A head without `cls.output` *is* its dense layer: `d_model` values out.
+        None => st.head_out[row0 * hw..row0 * hw + hw].copy_from_slice(&st.xb[..hw]),
+    }
+    Ok(())
 }
