@@ -24,6 +24,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The `nomic-bert-moe` family: nomic-embed-text-v2-moe (S4.8b)**: a GGUF with
+  `general.architecture = "nomic-bert-moe"` now loads and serves `/v1/embeddings` and
+  `peregrine embed`. It is llama.cpp v0.9.0's shared `bert` graph with its two
+  `LLM_ARCH_NOMIC_BERT_MOE` branches: the fused `attn_qkv`, NeoX RoPE at base 10000,
+  post-norm blocks, a plain GELU feed-forward on the even layers and a mixture of 8
+  experts (top 2, softmax gating, raw probabilities, no renormalisation, GELU experts,
+  summed in the router's order) on the odd ones, the token-type row and no final norm.
+  The family lives beside `nomic-bert` in `crates/peregrine-models/src/nomic_bert.rs`
+  (`NomicFfn` is the only branch); the shared MoE block gained a gate-less `Gelu` act.
+  The XLM-R SentencePiece-unigram tokenizer is the one `bge-m3` already used. Registered
+  behind `arch-nomic-bert-moe`; chat and label requests are refused by name. Measured
+  against llama.cpp v0.9.0 on 200 texts of 17-511 tokens in 24 languages
+  (`docs/reference/nomic-bert-moe.md`): ids identical; F16 min 0.9997738 / mean
+  0.9999977; Q8_0 against the F16 reference min 0.9625625 / mean 0.9991114 (llama.cpp's
+  own Q8_0: 0.9990825 / 0.9994075). The F16 minimum is one text whose last MoE layer
+  sits on a top-2 boundary, and the Q8_0 mean is 3.0e-4 below llama.cpp's - the note
+  records both as measured deviations from the siblings' bounds, not as passing gates.
+  F16 speed is 0.62-0.99x llama.cpp's until the 3D expert banks join the float pack;
+  Q8_0 is 0.84-1.21x. Tests: a synthetic file with malformed variants, an independent
+  scalar reference that writes the routing out longhand, batch/thread/pass-budget
+  invariance on F32 and Q8_0, refusals by name, the no-allocation pass, server and CLI
+  cases, and a Q8_0 golden on scalar, AVX2 and AVX-512 under SDE.
+
 - **NEON bodies for the 8-bit prompt kernel (S5.4d, ARM)**: `crates/peregrine-kernels/src/neon.rs`
   gains the vectorised build of the Q4_K/Q6_K/Q5_0 forms (`q8k_build_*_neon`) and the multiply on
   `sdot` (`q8k_gemm_sdot`) and `smmla` (`q8k_gemm_i8mm`), with `q8k_gemm` picking the tier's body.

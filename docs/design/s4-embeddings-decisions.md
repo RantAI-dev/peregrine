@@ -63,7 +63,7 @@ Why Peregrine should win here, and where the work is:
 | S4.5 | tokenizers | WordPiece (`bert`), SentencePiece unigram (`t5`, the XLM-R vocabulary) | two tokenizers |
 | S4.6 | `bert` | all-MiniLM-L6/L12, bge-small/base/large-en-v1.5, e5, gte, bge-m3, multilingual-e5; bge-reranker-v2-m3 with its `cls` head | post-norm encoder, absolute positions, the classifier head |
 | S4.7 | `modern-bert` | ModernBERT, gte-modernbert, mmBERT, Granite Embedding R2, and their fine-tuned classifiers (`classifier.output_labels`) | alternating local and global attention, the labelled head |
-| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand; **S4.8a done** (`nomic-bert` = nomic-embed-text v1.5), see §12; **S4.8c done** (`jina-bert-v2` = jina-embeddings-v2), see §11 |
+| S4.8 | `nomic-bert`, `nomic-bert-moe`, `jina-bert-v2/v3` | nomic-embed-text v1.5 / v2, jina-embeddings v2 / v3 | per family, on demand; **S4.8a done** (`nomic-bert` = nomic-embed-text v1.5), see §12; **S4.8b done** (`nomic-bert-moe` = nomic-embed-text-v2-moe), see §13; **S4.8c done** (`jina-bert-v2` = jina-embeddings-v2), see §11 |
 | S4.14 | `mistral3`, non-causal | Nemotron 3.5 Embed 1B and Nemotron 3 Embed 1B (the same text model; mean pooling, 2048 dimensions); the 8B sizes load by the same code | the Tekken pre-tokenizer, the Mistral 3 block in the dense family, a bidirectional pass for dense models |
 
 Out of scope for this stage: `neo-bert`, `eurobert`, DeBERTa (Prompt Guard 2; llama.cpp does not
@@ -358,7 +358,7 @@ Each is one PR unless noted, checked against llama.cpp on a real file before the
 | S4.6a | `bert` family: MiniLM, bge, e5, bge-m3 on `/v1/embeddings`, `peregrine embed`; the WordPiece and XLM-R vocabularies | S4.4, S4.5 |
 | S4.6b | the `cls` head: `Want::Head`, bge-reranker-v2-m3 and bge-reranker-base on `/v1/rerank`, `/v1/classify`, `peregrine rerank` | S4.6a |
 | S4.7 | `modern-bert` and labelled classifier heads. **Done**: the family (pre-norm, fused q/k/v, RoPE with the local/global bases, the alternating local/global window, the gated feed-forward and its three activations, cls/mean pooling, the `modern-bert` GPT-2 pre-tokenizer) against llama.cpp v0.9.0 on gte-modernbert-base and Granite Embedding R2; S4.7b adds its classifier head on `/v1/rerank`, `/v1/classify` and `peregrine rerank` from the same `Want::Head` interface, measured on gte-reranker-modernbert-base F16 and Q8_0 (§9) | S4.6 |
-| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3`. **Part a done**: the `nomic-bert` family — token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused `attn_qkv`, NeoX RoPE at base 1000, SwiGLU (`ffn_gate` through SiLU times `ffn_up`), mean pooling and no final norm — against llama.cpp v0.9.0 on nomic-embed-text v1.5 F16 and Q8_0 (§12). **Part b done (S4.8c)**: the `jina-bert-v2` family (ALiBi instead of positions, the GEGLU pair separate or fused, one LayerNorm between the attention residual and the feed-forward plus the optional `attn_norm_2`, optional q/k LayerNorms, the token-type row, no final output norm, mean/cls pooling) against llama.cpp v0.9.0 on jina-embeddings-v2-base-en F16 and Q8_0 (§11); the id/pair/headless rules as the other encoders. S4.8c also writes down what `jina-bert-v3` would take (a nomic-bert-shaped block with RoPE and a plain GELU, plus the LoRA-adapter files) and does not build it; `nomic-bert-moe` remains S4.8b | S4.6 |
+| S4.8 | `nomic-bert` (+ MoE), `jina-bert-v2/v3`. **Part a done**: the `nomic-bert` family — token type 0, an embedding LayerNorm with a bias, post-norm blocks with a fused `attn_qkv`, NeoX RoPE at base 1000, SwiGLU (`ffn_gate` through SiLU times `ffn_up`), mean pooling and no final norm — against llama.cpp v0.9.0 on nomic-embed-text v1.5 F16 and Q8_0 (§12). **Part b done (S4.8c)**: the `jina-bert-v2` family (ALiBi instead of positions, the GEGLU pair separate or fused, one LayerNorm between the attention residual and the feed-forward plus the optional `attn_norm_2`, optional q/k LayerNorms, the token-type row, no final output norm, mean/cls pooling) against llama.cpp v0.9.0 on jina-embeddings-v2-base-en F16 and Q8_0 (§11); the id/pair/headless rules as the other encoders. S4.8c also writes down what `jina-bert-v3` would take (a nomic-bert-shaped block with RoPE and a plain GELU, plus the LoRA-adapter files) and does not build it. **Part b done (S4.8b)**: the `nomic-bert-moe` family (the same post-norm graph with a plain GELU feed-forward on the even layers and a mixture of 8 experts, top 2, softmax gating and no renormalisation, on the odd ones; the XLM-R unigram tokenizer) against llama.cpp v0.9.0 on nomic-embed-text-v2-moe F16 and Q8_0 (§13) | S4.6 |
 | S4.9 | Speed: F32 / F16 GEMM blocking, the `n × n` attention tiles, small-model thread choice, the duplicate cache; every §4.2 target met on both x86 hosts, then NEON | S4.2, S4.6 |
 | S4.11 | System One, part 2: **kev** (the `cls.output` pointer head) and **vllm-d3** (non-causal Qwen 3.5 attention blocks, whole prompt in one pass) | S4.3, S4.4 |
 | S4.12 | System One, part 3: **laya** and Julia-1 on `modern-bert` with the decision head | S4.7 |
@@ -610,6 +610,63 @@ What this step settled, and why:
    kernel Granite's `modern-bert` file already exercises; the new code is the
    loader and the graph order.
 
-`nomic-bert-moe` (nomic-embed-text-v2-moe) is refused by name: it needs the
-mixture-of-experts feed-forward on every second layer and its XLM-R unigram
-vocabulary, and is left to S4.8b.
+`nomic-bert-moe` (nomic-embed-text-v2-moe) was left to S4.8b at the time; §13 adds
+it in this same file, because llama.cpp's graph is the same one with two branch
+points.
+
+## 13. S4.8b as built: the `nomic-bert-moe` family
+
+`crates/peregrine-models/src/nomic_bert.rs` now carries both registrations:
+`NomicBertFamily` (`nomic-bert`, S4.8a) and `NomicBertMoeFamily`
+(`nomic-bert-moe`, this step), behind `arch-nomic-bert` and
+`arch-nomic-bert-moe`. The reading, the tensor table and the measurements are in
+[`docs/reference/nomic-bert-moe.md`](../reference/nomic-bert-moe.md).
+
+1. **One file, because the reference has one graph.** llama.cpp builds
+   `nomic-bert` and `nomic-bert-moe` in the same `llama_model_bert::graph`, with
+   two branch points: the MoE feed-forward on `il % moe_every_n_layers == 1`
+   (`src/models/bert.cpp:171-184`) and the plain GELU feed-forward everywhere else
+   (`:185-192`). The attention half, the tensor list, RoPE, the two LayerNorms and
+   the missing final norm are identical to §12's. A second file would have been a
+   copy of the whole pass; instead `NomicFfn` is an enum (`SwiGlu`, `Gelu`, `Moe`)
+   and the loader reads the two tensor shapes. The MoE layers keep no `ffn_gate`
+   matrix at all — the reference runs `gelu(ffn_up_exps)` through
+   `ffn_down_exps`, so the shared block gained `MoeAct::Gelu` and an empty gate
+   bank, and no new kernel.
+2. **The routing is the engine's existing block, with its tie rule.** A softmax
+   over all `expert_count` experts, the best `expert_used_count` by probability,
+   the raw probabilities as the weights (no renormalisation), the expert outputs
+   summed in selection order. llama.cpp's `std::sort` leaves exactly equal
+   probabilities unordered; Peregrine keeps probability descending then expert
+   index ascending, per row (`docs/design/moe.md` §1). The Q8_0 file keeps the
+   router in F32, and the block's activations keep their f32 rows.
+3. **GELU is the exact function, not llama.cpp's f16 table** — the ADR 0003
+   difference §11.3 already states for jina's GEGLU. Substituting the table into
+   this family moves the F16 vectors in the eighth decimal only.
+4. **The F16 and Q8_0 bounds are measurements, and this family's F16 minimum is
+   below the siblings'.** On the 200 gate texts (17–511 tokens, 24 languages): ids
+   identical; F16 against llama.cpp min 0.9997738 / mean 0.9999977; Q8_0 against
+   the F16 reference min 0.9625625 / mean 0.9991114, while llama.cpp's own Q8_0 is
+   min 0.9990825 / mean 0.9994075. The reason is the mixture of experts' discrete
+   top-2 choice: truncating the model layer by layer against llama.cpp shows the
+   continuous agreement at 0.9999999 after one layer and 0.999995 after eight, and
+   the last MoE layer's near-tie turns the remaining 0.2 % hidden-state difference
+   into about 2 % on the vector. The S4 clauses (F16 min 0.9999; Q8_0 mean within
+   1e-4 of llama.cpp's) are therefore **not met on this model**; the tests pin the
+   measured values and the reference note records the deviation. No engine bug is
+   involved: the Q8_0 file matches Peregrine's own reference forward within 1e-6
+   at every synthetic length and pooling, and the per-layer Q8-vs-F16 distance is
+   llama.cpp's own (0.9999909 against 0.9999910 on the first layer).
+5. **Speed is below 1.0 on most cells.** The 3D expert banks are not in the float
+   pack (`fpack.rs:18-19` packs 2D matrices only), so the F16 experts run the raw
+   per-row kernel: F16 is 0.99× at 16 tokens, 0.83× at 128, 0.62× at 512 and 0.79×
+   on sixteen 32-token texts; Q8_0 reaches the batched int8 kernel and is 1.21×,
+   0.88×, 0.84× and 0.98×. Packing the expert banks per expert is the follow-up,
+   left out of this step so no other MoE family's goldens move.
+6. **Tests**: a synthetic four-layer file with four experts (two used) and MoE on
+   the odd layers, every optional bias, and the XLM-R unigram vocabulary; the
+   independent scalar reference that writes the routing out longhand; the
+   batch/thread/pass-budget invariance matrix on F32 and Q8_0; the missing-tensor,
+   wrong-expert-count, wrong-router-shape and over-length refusals by name; chat
+   and label refusals; `tests/no_alloc.rs`; server and CLI cases; one golden per
+   pinned x86 tier; and the ignored 200-text real-file gate.

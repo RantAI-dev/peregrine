@@ -19,7 +19,8 @@
 
 use crate::blocks::ffn::{swiglu_oai_rows, swiglu_rows};
 use crate::blocks::linear::{matmul_group, MatJob};
-use crate::blocks::par::OutPtr;
+use crate::blocks::par::{for_row_chunks_2, OutPtr, Sched};
+use crate::blocks::ROW_PARALLEL;
 use crate::gguf::TensorInfo;
 use crate::model::{StepStats, Weights};
 use crate::pool::Pool;
@@ -56,6 +57,11 @@ pub enum MoeGating {
 pub enum MoeAct {
     /// `silu(gate) ⊙ up` — the usual SwiGLU.
     SwiGLU,
+    /// The plain GELU, `gelu(up)` — the experts have **no gate matrix**, only their up
+    /// and down projections (nomic-bert-moe's experts, `src/models/bert.cpp:171-184`
+    /// with `LLM_FFN_GELU` and `gate_exps == NULL`). A `Gelu` layer must pass an empty
+    /// `MoeWeights::gate`.
+    Gelu,
     /// OpenAI's `swiglu_oai`: `min(gate, limit) / (1 + e^(α·(−min(gate, limit))) ⊙
     /// (clamp(up, −limit, limit) + 1)` — gpt-oss's experts
     /// (`src/models/openai-moe.cpp:139`, `ggml/src/ggml-cpu/ops.cpp:3388-3450`).
@@ -259,6 +265,46 @@ fn softmax(x: &mut [f32]) {
     }
 }
 
+/// The plain GELU on a gate-less expert's up projection: `up = gelu(up)`, then the
+/// activated rows for the down projection.
+///
+/// `vmath::gelu_tanh` is the function llama.cpp's `LLM_FFN_GELU` applies
+/// (`ggml_gelu_f32`'s tanh form), evaluated as the function rather than through its
+/// f16 lookup table: the deliberate ADR 0003 difference `jina-bert-v2`'s GEGLU already
+/// states, and the reference forward in the tests computes the same function.
+fn gelu_rows(
+    n_ff: usize,
+    up: &mut [f32],
+    acts: &mut [QuantAct],
+    nb: usize,
+    pool: &Pool,
+    st: &mut StepStats,
+) {
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    for_row_chunks_2(
+        pool,
+        parallel,
+        up,
+        n_ff,
+        acts,
+        1,
+        nb,
+        Sched::Static,
+        |_wk, _rows, uc, ac| {
+            for (i, a) in ac.iter_mut().enumerate() {
+                let row = &mut uc[i * n_ff..(i + 1) * n_ff];
+                for v in row.iter_mut() {
+                    *v = crate::vmath::gelu_tanh(*v);
+                }
+                a.fill(row);
+            }
+        },
+    );
+    if parallel {
+        st.barriers += 1;
+    }
+}
+
 /// The 2D matrix of one expert of a 3D expert tensor.
 ///
 /// GGUF stores `dims[0]` contiguous, so llama.cpp's expert tensors (`[d_in, d_out, n_expert]`,
@@ -314,7 +360,9 @@ pub fn expert_view(t: &TensorInfo, e: usize) -> Result<TensorInfo, String> {
 pub struct MoeWeights<'a> {
     /// The router: `[d_model, n_expert]`, one row of scores per expert.
     pub router: &'a TensorInfo,
-    /// The gate projections, one 2D view per expert: `[d_model, n_ff]`.
+    /// The gate projections, one 2D view per expert: `[d_model, n_ff]`. **Empty** when
+    /// the experts have no gate matrix, as nomic-bert-moe's GELU experts do; the block
+    /// then computes `gelu(up)` alone.
     pub gate: &'a [TensorInfo],
     /// The up projections, one 2D view per expert: `[d_model, n_ff]`.
     pub up: &'a [TensorInfo],
@@ -451,12 +499,24 @@ pub fn moe_ffn(
     pool: &Pool,
     st: &mut StepStats,
 ) {
-    let n_expert = mw.gate.len();
+    let n_expert = mw.up.len();
     let k = mw.n_used;
     let d_model = mw.router.dims[0] as usize;
-    let n_ff = mw.gate[0].dims[1] as usize;
-    assert_eq!(mw.up.len(), n_expert, "the expert banks disagree");
+    let n_ff = mw.up[0].dims[1] as usize;
+    assert!(
+        n_expert > 0,
+        "a mixture of experts needs at least one expert"
+    );
     assert_eq!(mw.down.len(), n_expert, "the expert banks disagree");
+    assert!(
+        mw.gate.is_empty() || mw.gate.len() == n_expert,
+        "the gate bank holds {} experts, the up bank {n_expert}",
+        mw.gate.len()
+    );
+    assert!(
+        !mw.gate.is_empty() || mw.act == MoeAct::Gelu,
+        "a gate-less expert bank only fits the plain GELU"
+    );
     assert_eq!(x.len(), nb * d_model, "the rows are not d_model wide");
     assert_eq!(out.len(), nb * d_model, "the rows are not d_model wide");
     assert!(nb > 0, "a mixture of experts needs at least one row");
@@ -551,8 +611,16 @@ pub fn moe_ffn(
         for j in 0..g {
             scratch.acts[j].fill(&scratch.gathered[j * d_model..(j + 1) * d_model]);
         }
-        // The gate and up projections, sharing one activation.
-        {
+        // The gate and up projections, sharing one activation. A GELU expert has no
+        // gate: one matrix per expert, and the activation applies to its output.
+        if mw.gate.is_empty() {
+            let jobs = [MatJob {
+                w: &mw.up[e],
+                out: OutPtr::new(&mut scratch.up),
+                rows: None,
+            }];
+            matmul_group(w, &jobs, &scratch.acts[..g], g, pool, st, &mut scratch.kq);
+        } else {
             let jobs = [
                 MatJob {
                     w: &mw.gate[e],
@@ -577,19 +645,33 @@ pub fn moe_ffn(
                     &mut scratch.gate[j * n_ff..(j + 1) * n_ff],
                     &mut scratch.up[j * n_ff..(j + 1) * n_ff],
                 );
-                for i in 0..n_ff {
-                    gate[i] += e.gate[i];
-                    up[i] += e.up[i];
+                if mw.gate.is_empty() {
+                    for i in 0..n_ff {
+                        up[i] += e.up[i];
+                    }
+                } else {
+                    for i in 0..n_ff {
+                        gate[i] += e.gate[i];
+                        up[i] += e.up[i];
+                    }
                 }
             }
         }
-        // The activation: SwiGLU, or OpenAI's `swiglu_oai`. The gate is taken in
-        // place, as the dense block does it.
+        // The activation: SwiGLU, the plain GELU, or OpenAI's `swiglu_oai`. The gate
+        // (or the up output, for GELU) is taken in place, as the dense block does it.
         match mw.act {
             MoeAct::SwiGLU => swiglu_rows(
                 n_ff,
                 &mut scratch.gate[..g * n_ff],
                 &scratch.up[..g * n_ff],
+                &mut scratch.acts_ffn[..g],
+                g,
+                pool,
+                st,
+            ),
+            MoeAct::Gelu => gelu_rows(
+                n_ff,
+                &mut scratch.up[..g * n_ff],
                 &mut scratch.acts_ffn[..g],
                 g,
                 pool,

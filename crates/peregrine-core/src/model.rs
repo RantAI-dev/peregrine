@@ -474,11 +474,6 @@ impl Model {
             .iter()
             .find(|f| f.names().contains(&arch_name.as_str()))
             .ok_or_else(|| {
-                if arch_name == "nomic-bert-moe" {
-                    return "architecture \"nomic-bert-moe\" (nomic-embed-text-v2-moe) is not \
-                            supported yet (roadmap S4.8b)"
-                        .to_string();
-                }
                 let feat = match arch_name.as_str() {
                     "llama" => Some("arch-llama"),
                     "qwen2" | "qwen3" => Some("arch-qwen"),
@@ -486,6 +481,7 @@ impl Model {
                     "gemma3" => Some("arch-gemma3"),
                     "gemma-embedding" => Some("arch-gemma-embedding"),
                     "nomic-bert" => Some("arch-nomic-bert"),
+                    "nomic-bert-moe" => Some("arch-nomic-bert-moe"),
                     "jina-bert-v2" => Some("arch-jina-bert"),
                     "phi3" => Some("arch-phi3"),
                     "mistral3" => Some("arch-mistral3"),
