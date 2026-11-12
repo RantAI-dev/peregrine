@@ -160,6 +160,9 @@ pub struct Session {
     kept: Vec<u32>,
     /// Positions the last turn took from the cache instead of prefilling them.
     prefix_reused: usize,
+    /// The constrained-decoding constraint for this conversation (S6.6a), if any.
+    /// `None` is the ordinary, unconstrained path.
+    constraint: Option<Arc<crate::constrain::Constraint>>,
     // snapshots of finished conversations, so a prompt that shares a long beginning with one of them (not
     // only with the last) does not recompute it. Off until `enable_prefix_store`.
     prefixes: Option<crate::prefix::PrefixStore>,
@@ -302,6 +305,7 @@ impl Session {
             kept: Vec::new(),
             prefix_reused: 0,
             prefixes: None,
+            constraint: None,
         })
     }
 
@@ -445,6 +449,14 @@ impl Session {
     pub fn reseed(&mut self, seed: u64) {
         self.cfg.seed = seed;
         self.seed = if seed == 0 { self.seed } else { seed };
+    }
+
+    /// Constrain the next turns' replies (S6.6a). `None` restores the ordinary path.
+    ///
+    /// The engine's stop tokens are the constraint's end tokens; a conversation always has
+    /// them. Speculation is turned off for the turn, as it is for a penalised request.
+    pub fn set_constraint(&mut self, constraint: Option<Arc<crate::constrain::Constraint>>) {
+        self.constraint = constraint;
     }
 
     pub fn exchanges(&self) -> usize {
@@ -729,6 +741,9 @@ impl Session {
             // The drafter is attached below: the conversation's own, kept between
             // its turns.
             drafter: Default::default(),
+            // A constrained conversation turns speculation off in the engine (a draft
+            // cannot be verified against a mask that changes with each accepted token).
+            constraint: self.constraint.clone(),
         };
         // A hybrid model's recurrent state rolls back only to its checkpoint: the
         // turn may be cancelled, and the cache must be able to go back.
@@ -752,8 +767,14 @@ impl Session {
                 return Err(e);
             }
         };
-        // The conversation's drafter, for this turn.
-        let (drafter, depth, is_dspark) = self.take_drafter();
+        // The conversation's drafter, for this turn. A constrained slot never drafts: the
+        // engine would refuse it, and a draft cannot be verified against a mask that
+        // changes with every accepted token.
+        let (drafter, depth, is_dspark) = if self.constraint.is_some() {
+            (None, 0, false)
+        } else {
+            self.take_drafter()
+        };
         if let Some(d) = drafter {
             if let Err(e) = self.engine.attach_drafter_with_depth(id, d, depth) {
                 // The turn cannot run: the conversation takes its cache and its
@@ -971,6 +992,7 @@ impl Session {
             turn: 0,
             kv_rotation: self.model.session_kv_rotation(),
             drafter: Default::default(),
+            constraint: None,
         };
         let id = match self.engine.admit_with_cache(prompt, cfg, kv) {
             Ok(id) => id,

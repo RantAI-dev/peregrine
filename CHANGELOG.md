@@ -105,6 +105,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Constrained decoding and `response_format` (S6.6a)**: `POST /v1/chat/completions` accepts
+  OpenAI's `response_format`: `{"type": "json_object"}` or a JSON Schema document
+  (`{"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`), and the sampler may
+  only pick tokens that keep the reply a valid prefix of that document. The forward pass is
+  untouched: logits are bit-for-bit what they were and the mask is applied between them and the
+  sampler, so an unconstrained request takes exactly today's path. A new dependency-free module,
+  `peregrine_core::constrain`, holds the schema compiler, an incremental byte-level matcher that
+  tracks UTF-8 and surrogate pairs across token boundaries, and a token mask over a vocabulary
+  byte trie with precomputed plain-string bitsets. Supported keywords, and everything refused by
+  name with its JSON pointer, are in `docs/compat.md`; the design is
+  `docs/design/s6.6-constrained-decoding.md`. `peregrine run` gains `--json-schema FILE` and
+  `--json-object`. A constrained slot does not speculate; a reasoning model with thinking on is
+  refused rather than constrained in the wrong span. Measured: 100 % of self-ended replies on
+  200 requests per model over 10 schemas validate (Qwen 2.5 0.5B and Llama 3.2 1B, against
+  llama.cpp v0.9.0's 198/198 and 187/187); the warm mask is 0.14-0.17 ms per token (0.3-0.7 % of a
+  decode step) and decode throughput is 0.99-1.03× the unconstrained engine across
+  json_object/medium/large schemas; the one-time vocabulary preparation is 187-221 ms median on
+  this host (148 ms when it is not saturated). Against llama.cpp v0.9.0 on the same requests,
+  Peregrine is 1.285× (Qwen) and 1.134× (Llama) its tokens/s and closes every object where
+  llama.cpp cut 2/200 (Qwen) and 13/200 (Llama) on `max_tokens`. Results:
+  `benchmarks/results/shiro-2026-11-12-s6.6a/`.
+
 - **macOS on Apple Silicon is a supported platform (roadmap S7.1)**: `release.yml` builds and tests
   `peregrine-vX.Y.Z-macos-aarch64.tar.gz` on the `macos-15` runner (`MACOSX_DEPLOYMENT_TARGET=11.0`,
   `strip -x`, then ad-hoc signed with `codesign --force --sign -`; not notarised), and a

@@ -73,6 +73,16 @@ pub struct RunArgs {
     /// Print one JSON object (text, token counts and timings) instead of streaming text.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+    /// Constrain the reply to one JSON value of this schema file (S6.6a).
+    #[arg(long = "json-schema", value_name = "FILE")]
+    pub json_schema: Option<PathBuf>,
+    /// Constrain the reply to any JSON object (`response_format: {"type":"json_object"}`).
+    #[arg(
+        long = "json-object",
+        default_value_t = false,
+        conflicts_with = "json_schema"
+    )]
+    pub json_object: bool,
     /// Do not print the timing line to stderr.
     #[arg(long, default_value_t = false)]
     pub quiet: bool,
@@ -137,8 +147,33 @@ pub fn run(args: &RunArgs) -> Result<(), String> {
         cfg.threads = t.max(1);
     }
 
+    let constraint = match (&args.json_schema, args.json_object) {
+        (Some(path), _) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let value = peregrine_core::json::Value::parse(&text)
+                .map_err(|e| format!("{} is not JSON: {e}", path.display()))?;
+            let c = peregrine_core::constrain::Constraint::from_schema(
+                peregrine_core::constrain::Schema::new(value),
+            );
+            c.compile().map_err(|e| e.to_string())?;
+            Some(std::sync::Arc::new(c))
+        }
+        (None, true) => Some(std::sync::Arc::new(
+            peregrine_core::constrain::Constraint::json_object(),
+        )),
+        (None, false) => None,
+    };
+
     let mut session = peregrine_models::session::open(&args.model, cfg)
         .map_err(|e| format!("cannot run {}: {e}", args.model.display()))?;
+    if constraint.is_some() && session.template().opens_reasoning(!args.no_thinking) {
+        return Err(
+            "response_format is not supported while the model is thinking; pass --no-thinking"
+                .into(),
+        );
+    }
+    session.set_constraint(constraint);
 
     let started = Instant::now();
     let json = args.json;

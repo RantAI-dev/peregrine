@@ -127,7 +127,8 @@ prompt is the one llama.cpp builds from the model's template, byte for byte. Des
 | S6.3 | The endpoint: `tools`, `tool_choice`, `tool_calls` in requests and responses, streaming — done for the `hermes` format (Qwen 2.5): 15 of 16 replies identical to llama.cpp's on the same file; and for the `qwen-xml` format (Qwen 3.5, Bonsai 2), thinking on or off: every call identical to llama.cpp's on a Qwen 3.5 file (S6.3b). Chat without tools on these files is rendered by the same renderer in `serve`, and `peregrine run` takes the same prompt from the `qwen35` chat template (S6.3c). Qwen 3 is served too: on a 1.7B file the right tool is called on 11 of 12 requests with thinking off (llama.cpp 11) and 12 of 12 with it on (llama.cpp 11) | 1.0 |
 | S6.4 | The `llama3` format (Llama 3.1 / 3.2) | 0.5 |
 | S6.5 | The `harmony` format (gpt-oss) | 0.5 |
-| S6.6 | Constrained sampling for calls: a JSON-schema matcher and a token mask; `tool_choice: "required"` and named choices | 2.0 |
+| S6.6a | Constrained decoding: a JSON-schema matcher and a token mask, `response_format` JSON mode and JSON schema — done; the public sequence/any-of/repeat combinators are the base for S6.6b | 1.5 |
+| S6.6b | Forcing calls: `tool_choice: "required"` and named choices, built on the S6.6a constraint combinators | 0.5 |
 | S6.7 | The `generic` format for templates without a tool section | 0.5 |
 
 ## Stage 7: macOS and Windows
