@@ -60,9 +60,10 @@ pub struct RunArgs {
     /// Run projections a LittleBit sidecar covers from it (off by default, as in `serve`).
     #[arg(long, default_value_t = false)]
     pub littlebit: bool,
-    /// Trade exactness for speed on prompt tokens: their Q4_K and Q6_K weights are read
-    /// from an 8-bit copy built at load, so logits move within the accuracy report's
-    /// numbers (generated tokens stay exact; off by default).
+    /// Experimental and lossy: prompt tokens read their Q4_K and Q6_K weights from an
+    /// 8-bit copy built at load. Prompts get faster and a reply can differ from the
+    /// default engine's; the accuracy report is not published yet (roadmap S5.4c).
+    /// Generated tokens keep the exact kernels. Off by default.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
     /// Print one JSON object (text, token counts and timings) instead of streaming text.

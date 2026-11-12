@@ -375,8 +375,9 @@ pub struct EngineOptions {
     /// `PEREGRINE_FAST_PROMPT=1` (`--fast-prompt`): the Q4_K and Q6_K weights of a
     /// *prompt* row are read from an 8-bit form built at load, one scale per 256
     /// weights, instead of the file's own codes. Prompt passes get faster and
-    /// their logits move within the accuracy report's numbers; generated rows,
-    /// embeddings, rerank and decisions stay exact. Off by default (ADR 0003);
+    /// their logits move (the accuracy report that says by how much is roadmap
+    /// S5.4c, not published yet); generated rows, embeddings, rerank and
+    /// decisions keep the exact kernels. Off by default (ADR 0003);
     /// `docs/design/s5.4-fast-prompt.md`.
     pub fast_prompt: bool,
 

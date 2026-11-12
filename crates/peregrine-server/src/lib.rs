@@ -118,9 +118,10 @@ pub struct Args {
     /// Prompt-lookup speculation on greedy requests (off by default: it applies only to greedy requests).
     #[arg(long, default_value_t = false)]
     pub speculate: bool,
-    /// Trade exactness for speed on prompt tokens: their Q4_K and Q6_K weights are read
-    /// from an 8-bit copy built at load, so logits move within the accuracy report's
-    /// numbers (generated tokens stay exact; off by default).
+    /// Experimental and lossy: prompt tokens read their Q4_K and Q6_K weights from an
+    /// 8-bit copy built at load. Prompts get faster and a reply can differ from the
+    /// default engine's; the accuracy report is not published yet (roadmap S5.4c).
+    /// Generated tokens keep the exact kernels. Off by default.
     #[arg(long = "fast-prompt", default_value_t = false)]
     pub fast_prompt: bool,
     /// Memory (MB) for snapshots of finished conversations' caches, so a prompt that shares a long beginning with an
