@@ -1,7 +1,8 @@
 # S7: macOS and Windows
 
-- Status: design, decided 2026-11-12. S7.1 (macOS on Apple Silicon) and S7.2 (Windows x86-64 builds
-  and passes the suite in CI) built; the rest is not built.
+- Status: design, decided 2026-11-12. S7.1 (macOS on Apple Silicon), S7.2 (Windows x86-64 builds and
+  passes the suite in CI) and S7.3 (Windows lifetime, installer and release archive) built; the rest
+  is not built. §8 and §9 are the two "as built" sections.
 - Owner request: "add support to windows, mac".
 
 ## 0. Where things stand
@@ -10,14 +11,13 @@ Peregrine releases Linux binaries only (x86-64 and aarch64). The code is closer 
 systems than the releases say:
 
 - **macOS on Apple Silicon** builds and passes the test suite in CI on every PR (`test
-  (macos-aarch64)`), with the NEON kernels and its own QoS call for the pool. It has no release
-  archive, the installer refuses it, `peregrine upgrade` has no asset for it, the real and
-  synthetic goldens are not recorded for it (macOS keys its own golden directories and skips), and
-  nothing has been measured on it.
-- **Windows** has never been built. The whole workspace type-checks for `x86_64-pc-windows-gnu`
-  today (the dependencies are portable: `memmap2`, `tokio`, `axum`; the Unix-only pieces already
-  sit behind `cfg`), which says the port is mostly behaviour, tests and packaging, not code that
-  cannot compile.
+  (macos-aarch64)`), with the NEON kernels and its own QoS call for the pool; S7.1 added the
+  release archive, the installer path, the `upgrade` asset and the runner's synthetic goldens (§8).
+  **Windows x86-64** builds and passes the suite too (`test (windows-x86_64)`, S7.2), and S7.3
+  added the lifetime commands, `upgrade`, the installer and the release archive (§9).
+- Neither has a release archive in **v0.2.0**, which shipped the two Linux archives only. Both
+  platforms' archives and installers ship **from the release after v0.2.0**; until then they
+  install with `cargo build --release`. Nothing has been measured on either yet (S7.4).
 
 ## 1. What "supported" means
 
@@ -195,7 +195,9 @@ llama.cpp's Windows build, for decode, prompt and ten users on the three gate mo
 
 ## 8. S7.1 as built
 
-macOS on Apple Silicon is a released platform in this step; the bar in §1 is met for it:
+macOS on Apple Silicon is built, tested and packaged in this step; the bar in §1 is met for it. Its
+archive and installer ship from the release after v0.2.0 — v0.2.0 itself has the two Linux archives
+only, and `scripts/install.sh` says so on a Mac pointed at it.
 
 - **CI.** `test (macos-aarch64)` in `ci.yml` runs the workspace suite in release mode on every pull
   request as before, and after it builds the release binary, prints `peregrine --version` and
@@ -209,10 +211,10 @@ macOS on Apple Silicon is a released platform in this step; the bar in §1 is me
   `peregrine-vX.Y.Z-macos-aarch64.tar.gz`, and `SHA256SUMS` is written with `shasum -a 256` because
   macOS has no `sha256sum`. A manual start is a dry run (`workflow_dispatch` with `dry_run=true`):
   the build jobs upload their archives as workflow artefacts and the publish job is guarded on a
-  tag push, so it cannot run. The binary is ad-hoc signed, not notarised (§7). The dry run on
-  `macos-15` produced `peregrine-v0.2.0-macos-aarch64.tar.gz` (2,717,446 bytes, SHA-256
-  `6fca9591…e17b0`), and the installer installed that artefact on the runner and ran
-  `peregrine --version` and `peregrine tier` (`aarch64-neon-dotprod`).
+  tag push, so it cannot run. The binary is ad-hoc signed, not notarised (§7). A dry run of this
+  branch on `macos-15` produced the archive for the then-current workspace version (`vX.Y.Z`,
+  2,717,446 bytes, SHA-256 `6fca9591…e17b0`), and the installer installed that artefact on the
+  runner and ran `peregrine --version` and `peregrine tier` (`aarch64-neon-dotprod`).
 - **Installer.** `scripts/install.sh` accepts Darwin on arm64 (asset `macos-aarch64`), refuses
   Darwin on x86-64 with the build-from-source line, and uses `sha256sum` where it exists and
   `shasum -a 256` otherwise; the Linux paths are unchanged. `scripts/install-test.sh` exercises all
@@ -247,3 +249,73 @@ macOS on Apple Silicon is a released platform in this step; the bar in §1 is me
 - **Not done.** No notarisation (needs a Developer ID certificate; §7), no Intel Mac archive, and no
   measurement on real Mac hardware: the CI runner's three shared cores are not a benchmark host, so
   `docs/benchmark.md` has no macOS row.
+
+## 9. S7.3 as built
+
+Windows x86-64 reaches the bar in §1 for the lifetime commands, `upgrade`, the installer and the
+release archive; the goldens and the measurement are S7.4's. As with macOS, the archive and the
+installer ship from the release after v0.2.0: v0.2.0 has no Windows zip.
+
+- **Stop and the drain.** Windows has no `SIGTERM`. `peregrine stop` writes
+  `serve-<port>.stop` in the state directory (beside `serve.json`, named for the port like the
+  log), the server watches it every 250 ms, removes it and runs the same drain a Unix `SIGTERM`
+  starts (`serve_with_drain`, 30 s cap), and exits with the same status. `stop` waits the Unix
+  40 s `DRAIN_TIMEOUT` and only then ends the process with `TerminateProcess`. Ctrl-C still works:
+  the Windows `shutdown_signal` selects over `tokio`'s console handler and the stop-file tick.
+- **Liveness and the background server.** `serve --background` spawns the child with
+  `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`, redirects it to the same log file and writes the
+  same state record; the parent waits for the child's state file (written after `bind`, before
+  `listening on` is logged) before it reports success. `status` reads the record and checks the
+  process with `OpenProcess` + `GetExitCodeProcess`; it also probes `/health` and prints the answer.
+  The two calls are hand-written `extern "system"` declarations in
+  `crates/peregrine-core/src/win32.rs` with SAFETY comments on every `unsafe`, like the S7.2
+  topology call; there is no new dependency.
+- **A detached child and the caller's pipes.** Windows' `CreateProcess(bInheritHandles = TRUE)`
+  handed the detached server the caller's stdin/stdout/stderr pipe handles, so
+  `peregrine serve --background | cat` and a test's `Command::output()` never saw EOF. The spawn
+  now clears `HANDLE_FLAG_INHERIT` on this process's three standard handles for the duration of
+  `CreateProcess` and restores them (`win32::NoInheritStdHandles`); the child's own stdio is passed
+  explicitly to the log file and is unaffected.
+- **Tests.** `serve_lifetime.rs` and `server_multi_model.rs` keep their Unix `SIGTERM` tests
+  unchanged and gain Windows counterparts that ask for the drain through the stop file: the
+  in-flight requests finish, a new connection is refused once the listener closes, and the process
+  exits 0. `serve_lifetime.rs` also exercises `serve --background`, `status` (address and
+  `health     ok`) and `stop` end to end. The Windows job runs all of them.
+- **`upgrade`.** `release_platform(os, arch)` maps `windows`/`x86_64` to `windows-x86_64` (Windows
+  on ARM gets the build-from-source answer), the asset is the `.zip`, and the SHA-256 comes from
+  `certutil -hashfile` where Unix uses `sha256sum`/`shasum`. A running `.exe` cannot be overwritten
+  but can be renamed: the installed binary becomes `peregrine.exe.old` (a unique name if that one
+  is still running), the new one is moved into place, and every start removes `<name>.old` copies.
+  Extraction uses PowerShell 5.1's `Expand-Archive`, the one archive tool every Windows has. The
+  mapping is unit-tested by argument, and the rename swap with ordinary temporary files on every
+  platform.
+- **Installer.** `scripts/install.ps1` is Windows PowerShell 5.1 (no `??`, no ternary), needs no
+  administrator rights, and follows `install.sh`'s shape: GitHub's latest tag (or `-Version`),
+  `peregrine-vX.Y.Z-windows-x86_64.zip` and `SHA256SUMS` from `-BaseUrl` (a URL, a `file://` URL or
+  a local directory, as `PEREGRINE_BASE_URL` is for the shell script), a `Get-FileHash` check, and
+  `Expand-Archive` into `%LOCALAPPDATA%\Programs\peregrine` (or `-InstallDir`). It appends the
+  directory to the **user** `Path` only when it is missing, prints the install and the undo
+  commands, and refuses ARM64 with the build-from-source line.
+- **CI.** `test (windows-x86_64)` gains an installer step after its smoke step: build.ps1 builds
+  the zip, `install.ps1 -BaseUrl <repo>/dist -InstallDir <temp>` installs it, and the installed
+  `peregrine.exe` must answer `--version` and `tier` (`x86_64-avx2…`). The job is green in about
+  ten minutes cold.
+- **Release.** `release.yml`'s matrix has `windows-2025` / `x86_64-pc-windows-msvc` /
+  `windows-x86_64`; `scripts/release/build.ps1` is the PowerShell twin of `build.sh` (the Windows
+  runner has no `strip` or `sha256sum`, and `Compress-Archive` writes `\` as an entry separator, so
+  the zip entries are written with `/` through `System.IO.Compression`). The build sets
+  `RUSTFLAGS=-C target-feature=+crt-static` for the release job only, so the `.exe` needs no Visual
+  C++ redistributable; the binary still has no `target-cpu` and dispatches kernels at run time. The
+  archive carries `peregrine.exe`, `LICENSE` and `NOTICE`, exactly like the Linux archives, and
+  its SHA-256 joins `SHA256SUMS` in the same `hash  name` format. The publish job uploads `*.zip`
+  and `install.ps1` beside `*.tar.gz` and `install.sh`, and is guarded on a tag push.
+- **The dry run.** `gh workflow run release.yml --ref s7.3-windows-lifetime -f dry_run=true` was
+  accepted: the three build jobs ran and uploaded artefacts, and the `release` job was skipped.
+  The Windows build (`build (windows-x86_64)`) took 7 m 38 s and produced the archive for the
+  then-current workspace version (`vX.Y.Z`, 3,111,510 bytes, SHA-256 `f900f0cd…908eb0`); its
+  listing is `peregrine-vX.Y.Z-windows-x86_64/{LICENSE,NOTICE,peregrine.exe}` (8,186,389 bytes
+  uncompressed).
+- **Not done.** The Windows goldens (`-windows` directories) and a native Windows measurement are
+  S7.4; every golden suite still skips on Windows. The `.exe` is unsigned (Authenticode needs a
+  certificate, §7), and the installer's `irm … | iex` path is the one that avoids SmartScreen's
+  browser-download mark rather than a signature.

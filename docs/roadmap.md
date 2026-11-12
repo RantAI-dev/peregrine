@@ -139,7 +139,7 @@ archive, an installer, `upgrade`, the server's lifetime commands, goldens. The d
 |---|---|---|
 | S7.1 | macOS on Apple Silicon: release job with a dry run, installer, `upgrade`, performance-core default, synthetic goldens, quickstart — done | 1.0 |
 | S7.2 | Windows x86-64 builds and passes the suite in CI — done: `test (windows-x86_64)` on `windows-2025` runs the release-mode suite (every test but the few that need `SIGTERM` or a freshly recorded Windows golden) and a smoke check of the binary, and `ci-ok` requires it | 1.5 |
-| S7.3 | Windows lifetime commands, `upgrade`, `install.ps1`, release job | 1.5 |
+| S7.3 | Windows lifetime commands, `upgrade`, `install.ps1`, release job — done: `serve --background`, `status`, `stop` and `upgrade` work through a per-user stop file and `OpenProcess`/`GetExitCodeProcess` (the stop falls back to ending the process after the drain timeout), `upgrade` renames the running `.exe` aside and removes it at the next start, `scripts/install.ps1` installs from the zip with a verified hash, `release.yml` builds `peregrine-vX.Y.Z-windows-x86_64.zip` with a static C runtime, and CI runs the installer against the built archive | 1.5 |
 | S7.4 | Windows goldens, docs for both systems, a native Windows measurement on the desktop | 1.0 |
 | S7.5 | A release that ships all four archives | 0.3 |
 

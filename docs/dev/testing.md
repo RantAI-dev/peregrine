@@ -50,7 +50,9 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    `gh run download <id> -n goldens-macos-15 -D /tmp/s7-goldens`, then unpack
    `goldens.tar.gz` over the checkout and commit the files by name. Real-model goldens
    (`tests/golden.rs`) need model files and a machine of that platform; until one exists they are
-   skipped there, and CI has no model files anywhere. For the real-model goldens, `require` fails a
+   skipped there, and CI has no model files anywhere. The workflow's runner choices are `macos-15`,
+   `ubuntu-24.04`, `ubuntu-24.04-arm` and `windows-2025` (the Windows steps run under Git Bash);
+   recording the Windows golden set itself is S7.4, so no `-windows` goldens are committed yet. For the real-model goldens, `require` fails a
    model file that is present but has no golden for the tier, and still skips a file that is absent. A golden pins one upload, byte for byte: a different upload of the same quant (the Qwen official `qwen2.5-0.5b-instruct-q4_k_m.gguf` is not bartowski's `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf`) fails at the golden's `model … bytes` line, so check the SHA-256 listed here before reading a mismatch as a regression.
    `tests/runtime_parity.rs` pins what the session and a one-slot engine must agree on, since ADR 0007
    made the engine the only runtime: the same prompt through `Session` and through a one-slot `Engine`
@@ -685,11 +687,13 @@ not have, so an AVX-512 host still records those itself.
 ## Windows
 
 `test (windows-x86_64)` in `ci.yml` runs on `windows-2025` with the MSVC toolchain, the same
-release-mode suite as the x86-64 Linux entry (`cargo test --workspace --release --locked`), and
-then a smoke step: `peregrine.exe --version`, `peregrine.exe tier` (the first line must be
-`kernel tier   x86_64-avx2…`), and `peregrine.exe run` on a model that
-`cargo run -p peregrine-bench --example write_synthetic -- <dir>` writes. A green job takes
-about seven minutes.
+release-mode suite as the x86-64 Linux entry (`cargo test --workspace --release --locked`), then a
+smoke step and an installer step: `peregrine.exe --version`, `peregrine.exe tier` (the first line
+must be `kernel tier   x86_64-avx2…`), `peregrine.exe run` on a model that
+`cargo run -p peregrine-bench --example write_synthetic -- <dir>` writes, then
+`scripts/release/build.ps1` builds the Windows zip that `scripts/install.ps1` installs into a
+throwaway directory, and the installed `peregrine.exe` must answer `--version` and `tier`. A green
+job takes about ten minutes.
 
 Run it on a branch without waiting for the pull request: a temporary workflow with
 `on: push` for that branch and the same steps. The suite stops at the first failing target
@@ -702,11 +706,14 @@ What is different there:
   `tests/golden/…-windows/` and **skips** while those directories do not exist. The job does not
   set `PEREGRINE_GOLDEN=require`; recording Windows' goldens is S7.4. The session fixture
   (`tests/fixtures/session/`) is keyed the same way and also skips.
-- **Signals.** Windows has no `SIGTERM`. `serve_lifetime.rs` runs its lifetime half everywhere
-  (the server outlives the drain timeout and keeps serving) and its clean-shutdown half only on
-  Unix; `server_multi_model.rs` runs every test but the `SIGTERM` drain there. The
-  `serve --background` / `status` / `stop` lifetime commands are S7.3 and say so on Windows; a
-  foreground `serve` stops cleanly on Ctrl-C.
+- **Signals.** Windows has no `SIGTERM`. `serve_lifetime.rs` and `server_multi_model.rs` run a
+  Windows counterpart of their clean-shutdown test that writes the stop file and gets the same
+  drain (in-flight requests finish, new connections are refused, exit status 0). The Unix `SIGTERM`
+  tests are unchanged. `serve --background`, `status`, `stop` and `upgrade` work on Windows; a
+  foreground `serve` also stops cleanly on Ctrl-C.
+- **What still skips on Windows.** Only the goldens: the synthetic and session fixtures are keyed
+  `-windows` and are recorded in S7.4 (`PEREGRINE_GOLDEN=require` is never set in the Windows job).
+  Measurement on real Windows hardware is S7.4 too.
 - **Mapped files.** Windows refuses to rewrite, rename over or delete a file that is mapped, so a
   test that writes a synthetic model a loaded model still has mapped gets a fresh file name
   (`write_*` in `tests/support/models.rs` returns a new path each time), and the pack cache keeps

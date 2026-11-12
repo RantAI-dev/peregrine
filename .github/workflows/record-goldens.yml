@@ -1,7 +1,12 @@
 # Record the synthetic goldens on one runner and upload them as an artefact to commit
 # (docs/dev/testing.md). The golden directory of a tier carries the system when it is not Linux
-# (`aarch64-neon-dotprod-macos`), so a platform whose goldens are missing records them on its own
-# hardware. This is a manual job: it never commits anything itself.
+# (`aarch64-neon-dotprod-macos`, `x86_64-avx2-windows`), so a platform whose goldens are missing
+# records them on its own hardware. This is a manual job: it never commits anything itself.
+#
+# Every runner choice runs the same bash steps. The Windows steps say `shell: bash` because the
+# runner's default is PowerShell: they use the Git Bash that ships with it, where `$RUNNER_TEMP`,
+# `tee`, `grep` and `tar` are the GNU/bsdtar tools the steps expect. Recording the Windows goldens
+# themselves is S7.4.
 #
 # The same run is then repeated without `PEREGRINE_GOLDEN` and must reproduce every recorded
 # value; a file that differs between two runs of the same commit is a determinism bug, not a
@@ -17,6 +22,7 @@ on:
           - macos-15
           - ubuntu-24.04
           - ubuntu-24.04-arm
+          - windows-2025
         default: macos-15
 permissions:
   contents: read
@@ -33,6 +39,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: count the missing goldens before recording
+        shell: bash
         run: |
           set -o pipefail
           cargo test -p peregrine-models --release --locked \
@@ -41,6 +48,7 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/before.log"
           echo "skips before: $(grep -E -c 'no golden for tier|no recording for tier' "$RUNNER_TEMP/before.log" || true)"
       - name: record the synthetic goldens
+        shell: bash
         env:
           PEREGRINE_GOLDEN: record
           PEREGRINE_SESSION_FIXTURE: record
@@ -51,6 +59,7 @@ jobs:
             --test modern_bert_heads --test session_fixture -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/record.log"
       - name: the same run without the record switch must reproduce them
+        shell: bash
         run: |
           set -o pipefail
           cargo test -p peregrine-models --release --locked \
@@ -66,6 +75,7 @@ jobs:
           echo "skips before: $(grep -E -c 'no golden for tier|no recording for tier' "$RUNNER_TEMP/before.log" || true)"
           echo "skips after:  $(grep -E -c 'no golden for tier|no recording for tier' "$RUNNER_TEMP/verify.log" || true)"
       - name: collect the recorded files
+        shell: bash
         run: |
           git add -A crates/peregrine-models/tests
           git diff --cached --name-only | tee "$RUNNER_TEMP/recorded.txt"

@@ -15,26 +15,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long a stopped server gets to drain its in-flight requests.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(40);
 
-/// Run `serve --background` on Windows: S7.3's work, and it says so.
-#[cfg(windows)]
-pub fn start_background(
-    _port: u16,
-    _log: Option<PathBuf>,
-    _timeout: Duration,
-) -> Result<State, String> {
-    Err(
-        "serve --background is not available on Windows yet (S7.3): the detached start, the \
-         state file and the stop file arrive then; run `peregrine serve` in the foreground"
-            .into(),
-    )
-}
-
 /// Run `serve --background`: start the detached child, wait until it is listening, and return its
-/// state. The parent exits; the child keeps running in its own process group.
-///
-/// Unix only: Windows needs `CREATE_NO_WINDOW`, a liveness check and the stop file, which is
-/// S7.3. A foreground `peregrine serve` works there today and stops on Ctrl-C.
-#[cfg(not(windows))]
+/// state. The parent exits; the child keeps running in its own process group (Unix) or detached
+/// from the console (`CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows, S7.3).
 pub fn start_background(
     port: u16,
     log: Option<PathBuf>,
@@ -63,17 +46,6 @@ pub fn start_background(
 }
 
 /// `peregrine status`: the managed server, or why there is none.
-#[cfg(windows)]
-pub fn status() -> Result<String, String> {
-    Err(
-        "the managed server is not available on Windows yet (S7.3): run `peregrine serve` in \
-         the foreground"
-            .into(),
-    )
-}
-
-/// `peregrine status`: the managed server, or why there is none.
-#[cfg(not(windows))]
 pub fn status() -> Result<String, String> {
     let path = lifecycle::state_path();
     let Some(state) = lifecycle::read(&path) else {
@@ -86,7 +58,7 @@ pub fn status() -> Result<String, String> {
             path.display()
         ));
     }
-    Ok(format!(
+    let out = format!(
         "pid        {}\nversion    {}\nurl        {}\nmodel      {}\nlog        {}\nstarted    {}\nstate      {}\n",
         state.pid,
         state.version,
@@ -98,17 +70,78 @@ pub fn status() -> Result<String, String> {
             .map_or_else(|| "-".to_string(), |p| p.display().to_string()),
         state.started,
         path.display()
-    ))
+    );
+    // Liveness is the exit status; the health line says whether the process is answering yet
+    // (it may still be loading a large model). Windows only: on Unix `status` has never probed
+    // the port, and the job is to stay identical there.
+    #[cfg(windows)]
+    let out = format!("{out}health     {}\n", windows_health(&state));
+    Ok(out)
 }
 
-/// `peregrine stop`: ask the managed server to drain and exit.
+/// Whether the server answers `/health`, for the `status` line. Informational: a process that is
+/// alive but still loading its model is not an error.
+#[cfg(windows)]
+fn windows_health(state: &State) -> String {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    let host = match state.host.as_str() {
+        "0.0.0.0" | "::" | "" => "127.0.0.1",
+        h => h,
+    };
+    let attempt = || -> Option<bool> {
+        let addr = (host, state.port).to_socket_addrs().ok()?.next()?;
+        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .ok()?;
+        let mut out = String::new();
+        stream.read_to_string(&mut out).ok()?;
+        Some(out.starts_with("HTTP/1.1 200") || out.starts_with("HTTP/1.0 200"))
+    };
+    match attempt() {
+        Some(true) => "ok".into(),
+        Some(false) => "not ok".into(),
+        None => "not reachable".into(),
+    }
+}
+
+/// `peregrine stop` on Windows: create the stop file the server watches, wait for the drain, and
+/// end the process hard only when the drain timeout passes. `SIGTERM` is the Unix path below.
 #[cfg(windows)]
 pub fn stop() -> Result<String, String> {
-    Err(
-        "the managed server is not available on Windows yet (S7.3): stop a foreground \
-         `peregrine serve` with Ctrl-C, which drains in-flight requests"
-            .into(),
-    )
+    let path = lifecycle::state_path();
+    let Some(state) = lifecycle::read(&path) else {
+        return Ok("no managed server\n".into());
+    };
+    if !lifecycle::alive(state.pid) {
+        let _ = std::fs::remove_file(lifecycle::stop_path(state.port));
+        let _ = std::fs::remove_file(&path);
+        return Ok(format!("pid {} was not running\n", state.pid));
+    }
+    stop_managed(&state, DRAIN_TIMEOUT)?;
+    lifecycle::remove_if_ours(&path, state.pid);
+    Ok(format!("stopped pid {}\n", state.pid))
+}
+
+/// Ask a Windows server to drain and wait for it to exit, ending the process only after
+/// `timeout`. The server removes the stop file as it starts the drain.
+#[cfg(windows)]
+fn stop_managed(state: &State, timeout: Duration) -> Result<(), String> {
+    let stop = lifecycle::stop_path(state.port);
+    lifecycle::request_stop(state.port)?;
+    match wait_gone(state.pid, timeout) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&stop);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&stop);
+            lifecycle::terminate(state.pid).map_err(|e2| format!("{e}; then {e2}"))?;
+            wait_gone(state.pid, Duration::from_secs(10))
+        }
+    }
 }
 
 /// `peregrine stop`: ask the managed server to drain and exit.
@@ -183,13 +216,18 @@ pub fn upgrade(args: &UpgradeArgs) -> Result<String, String> {
             .canonicalize()
             .map_err(|e| format!("cannot resolve this binary: {e}"))?,
     };
-    if !args.force && target.to_string_lossy().contains("/target/") {
+    if !args.force
+        && target
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("/target/")
+    {
         return Err(format!(
             "{} is a cargo build; `cargo build --release` it, or pass --exe/--force",
             target.display()
         ));
     }
-    let asset = format!("peregrine-{tag}-{platform}.tar.gz");
+    let asset = format!("peregrine-{tag}-{platform}.{}", archive_extension(platform));
     let tmp = std::env::temp_dir().join(format!("peregrine-upgrade-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
@@ -201,7 +239,7 @@ pub fn upgrade(args: &UpgradeArgs) -> Result<String, String> {
         let attempt = tmp.join(format!("try-{i}"));
         std::fs::create_dir_all(&attempt)
             .map_err(|e| format!("cannot create {}: {e}", attempt.display()))?;
-        match install(base, &tag, &asset, &attempt, &target) {
+        match install(base, &tag, platform, &asset, &attempt, &target) {
             Ok(()) => {
                 installed = true;
                 break;
@@ -236,26 +274,55 @@ pub fn upgrade(args: &UpgradeArgs) -> Result<String, String> {
         .log
         .clone()
         .unwrap_or_else(|| lifecycle::log_path(old.port));
-    let new = spawn(&target, old.args.clone(), &log, START_TIMEOUT).map_err(|e| {
-        format!(
-            "installed {tag}, but the replacement did not start ({e}); pid {} still serves the \
-             old binary from its mapped image",
-            old.pid
-        )
-    })?;
-    lifecycle::terminate(old.pid)?;
-    wait_gone(old.pid, DRAIN_TIMEOUT).map_err(|e| {
-        format!(
-            "installed {tag}; pid {} is still draining ({e}), pid {} is serving",
+    // Windows cannot bind the port beside the old server (`SO_REUSEPORT` is Unix-only) and a
+    // running `.exe` cannot be replaced while it serves, so an upgrade drains the old server
+    // first and starts the new binary after it: a short gap, and the command says so. Linux and
+    // macOS keep the zero-downtime handoff.
+    #[cfg(windows)]
+    {
+        stop_managed(&old, DRAIN_TIMEOUT).map_err(|e| {
+            format!(
+                "installed {tag}, but pid {} did not stop ({e}); `peregrine stop` it and start \
+                 the new binary",
+                old.pid
+            )
+        })?;
+        let new = spawn(&target, old.args.clone(), &log, START_TIMEOUT).map_err(|e| {
+            format!(
+                "installed {tag} and stopped pid {}, but the replacement did not start ({e}); \
+                 start it with `peregrine serve --background`",
+                old.pid
+            )
+        })?;
+        Ok(format!(
+            "upgraded to {tag}: pid {} -> {}\nWindows has no zero-downtime handoff: the old \
+             server drained and the new one started after it\n",
             old.pid, new.pid
-        )
-    })?;
-    Ok(format!(
-        "upgraded to {tag}: pid {} -> {}\nno connection was refused: both servers shared {} during the handoff\n",
-        old.pid,
-        new.pid,
-        old.url()
-    ))
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let new = spawn(&target, old.args.clone(), &log, START_TIMEOUT).map_err(|e| {
+            format!(
+                "installed {tag}, but the replacement did not start ({e}); pid {} still serves the \
+                 old binary from its mapped image",
+                old.pid
+            )
+        })?;
+        lifecycle::terminate(old.pid)?;
+        wait_gone(old.pid, DRAIN_TIMEOUT).map_err(|e| {
+            format!(
+                "installed {tag}; pid {} is still draining ({e}), pid {} is serving",
+                old.pid, new.pid
+            )
+        })?;
+        Ok(format!(
+            "upgraded to {tag}: pid {} -> {}\nno connection was refused: both servers shared {} during the handoff\n",
+            old.pid,
+            new.pid,
+            old.url()
+        ))
+    }
 }
 
 /// Start one detached server and wait until it has written its own ready state.
@@ -293,14 +360,25 @@ fn wait_gone(pid: u32, timeout: Duration) -> Result<(), String> {
 
 /// The release asset's platform name for a system and architecture, e.g. `macos-aarch64`.
 ///
-/// The names match the release archives' (`scripts/release/build.sh`). Intel Macs have no
-/// archive: they build from source.
+/// The names match the release archives' (`scripts/release/build.sh`, `scripts/release/build.ps1`).
+/// Intel Macs and Windows on ARM have no archive: they build from source
+/// (docs/design/s7-platforms.md §2).
 fn release_platform(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
         ("linux", "x86_64") => Some("linux-x86_64"),
         ("linux", "aarch64") => Some("linux-aarch64"),
         ("macos", "aarch64") => Some("macos-aarch64"),
+        ("windows", "x86_64") => Some("windows-x86_64"),
         _ => None,
+    }
+}
+
+/// The archive format a platform ships: `.zip` on Windows, `.tar.gz` elsewhere.
+fn archive_extension(platform: &str) -> &'static str {
+    if platform.starts_with("windows") {
+        "zip"
+    } else {
+        "tar.gz"
     }
 }
 
@@ -382,7 +460,14 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// Download the archive and its `SHA256SUMS`, verify, and install over `target` atomically.
-fn install(base: &str, tag: &str, asset: &str, tmp: &Path, target: &Path) -> Result<(), String> {
+fn install(
+    base: &str,
+    tag: &str,
+    platform: &str,
+    asset: &str,
+    tmp: &Path,
+    target: &Path,
+) -> Result<(), String> {
     let dir = format!("{}/{tag}", base.trim_end_matches('/'));
     let archive = tmp.join(asset);
     let archive_s = archive.to_string_lossy().into_owned();
@@ -392,28 +477,70 @@ fn install(base: &str, tag: &str, asset: &str, tmp: &Path, target: &Path) -> Res
     curl(&["-o", &sums_s, &format!("{dir}/SHA256SUMS")])?;
     verify_checksum(&archive, asset, &sums)?;
 
-    let status = Command::new("tar")
-        .args([
-            "-xzf",
-            &archive.to_string_lossy(),
-            "-C",
-            &tmp.to_string_lossy(),
-        ])
-        .status()
-        .map_err(|e| format!("cannot run tar: {e}"))?;
-    if !status.success() {
-        return Err("the archive did not extract".into());
-    }
-    let staged = tmp
-        .join(asset.trim_end_matches(".tar.gz"))
-        .join("peregrine");
+    unpack(&archive, tmp)?;
+    let binary = if cfg!(windows) {
+        "peregrine.exe"
+    } else {
+        "peregrine"
+    };
+    let staged = tmp.join(format!("peregrine-{tag}-{platform}")).join(binary);
     if !staged.is_file() {
         return Err(format!("the archive has no {}", staged.display()));
     }
     verify(&staged)?;
-    // Copy beside the target and rename: an atomic replace, never a half-written binary.
+    place(&staged, target)?;
+    Ok(())
+}
+
+/// Extract `archive` into `dest` with the system's own tool: `tar` on Unix and PowerShell's
+/// `Expand-Archive` on Windows (PowerShell 5.1 ships with every Windows). The paths go through
+/// the environment so no quoting rule differs between the two.
+fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Expand-Archive -LiteralPath $env:PEREGRINE_UNZIP_FROM -DestinationPath $env:PEREGRINE_UNZIP_TO -Force",
+        ]);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = Command::new("tar");
+        command.args([
+            "-xzf",
+            &archive.to_string_lossy(),
+            "-C",
+            &dest.to_string_lossy(),
+        ]);
+        command
+    };
+    #[cfg(windows)]
+    {
+        command.env("PEREGRINE_UNZIP_FROM", archive);
+        command.env("PEREGRINE_UNZIP_TO", dest);
+    }
+    let status = command
+        .status()
+        .map_err(|e| format!("cannot extract {}: {e}", archive.display()))?;
+    if !status.success() {
+        return Err(format!("the archive {} did not extract", archive.display()));
+    }
+    Ok(())
+}
+
+/// Move the staged binary over `target`.
+///
+/// Unix replaces it with an atomic rename (a running server keeps its old inode). Windows cannot
+/// replace a running `.exe`, but it can rename one: the current binary becomes `<name>.old` and
+/// the new one takes its place; [`clean_old_binaries`] removes the leftover on the next start.
+fn place(staged: &Path, target: &Path) -> Result<(), String> {
+    // Copy beside the target first, so a failed copy never disturbs the installed binary.
     let beside = target.with_file_name(format!(".peregrine-{}", std::process::id()));
-    std::fs::copy(&staged, &beside)
+    std::fs::copy(staged, &beside)
         .map_err(|e| format!("cannot write {}: {e}", beside.display()))?;
     #[cfg(unix)]
     {
@@ -421,45 +548,80 @@ fn install(base: &str, tag: &str, asset: &str, tmp: &Path, target: &Path) -> Res
         std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("cannot chmod {}: {e}", beside.display()))?;
     }
-    std::fs::rename(&beside, target)
-        .map_err(|e| format!("cannot replace {}: {e}", target.display()))?;
-    Ok(())
-}
-
-/// The SHA-256 of a file as hex, with `sha256sum` (Linux) or `shasum -a 256` (macOS).
-fn sha256_hex(path: &Path) -> Result<String, String> {
-    let (program, args): (&str, &[&str]) = if command_exists("sha256sum") {
-        ("sha256sum", &[])
-    } else if command_exists("shasum") {
-        ("shasum", &["-a", "256"])
-    } else {
-        return Err("neither sha256sum nor shasum is installed".into());
-    };
-    let out = Command::new(program)
-        .args(args)
-        .arg(path)
-        .output()
-        .map_err(|e| format!("cannot run {program}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "{program} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    #[cfg(windows)]
+    {
+        if target.exists() {
+            let mut old = old_binary_path(target);
+            // A previous `.old` may still be running and cannot be removed yet: give this one a
+            // unique name instead of failing the upgrade.
+            if old.exists() && std::fs::remove_file(&old).is_err() {
+                let name = target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "peregrine.exe".into());
+                old = target.with_file_name(format!("{name}.{}.old", std::process::id()));
+            }
+            std::fs::rename(target, &old).map_err(|e| {
+                format!(
+                    "cannot move {} aside for the upgrade: {e}",
+                    target.display()
+                )
+            })?;
+        }
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string())
+    std::fs::rename(&beside, target)
+        .map_err(|e| format!("cannot replace {}: {e}", target.display()))
 }
 
-fn command_exists(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+/// `<name>.old`, the name `place` gives the replaced binary on Windows.
+#[cfg(windows)]
+fn old_binary_path(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "peregrine.exe".into());
+    target.with_file_name(format!("{name}.old"))
+}
+
+/// Remove the `<name>.old` copies a previous Windows upgrade left behind. Called at every start;
+/// a copy whose process still runs cannot be removed and is retried next time.
+#[cfg(windows)]
+pub fn clean_old_binaries() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let (Some(dir), Some(name)) = (
+        exe.parent(),
+        exe.file_name().map(|n| n.to_string_lossy().into_owned()),
+    ) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let file = file.to_string_lossy();
+        if file.starts_with(name.as_str()) && file.ends_with(".old") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn curl(args: &[&str]) -> Result<(), String> {
+    let out = Command::new("curl")
+        .arg("-fsSL")
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run curl: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "download failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 fn verify_checksum(archive: &Path, asset: &str, sums: &Path) -> Result<(), String> {
@@ -479,20 +641,71 @@ fn verify_checksum(archive: &Path, asset: &str, sums: &Path) -> Result<(), Strin
     }
     Ok(())
 }
-fn curl(args: &[&str]) -> Result<(), String> {
-    let out = Command::new("curl")
-        .arg("-fsSL")
-        .args(args)
-        .output()
-        .map_err(|e| format!("cannot run curl: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
+
+/// The SHA-256 of a file as lower-case hex, with the system's own tool: `certutil` on Windows,
+/// `sha256sum` on Linux, `shasum -a 256` on macOS.
+fn sha256_hex(path: &Path) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        let out = Command::new("certutil")
+            .args(["-hashfile", &path.to_string_lossy(), "SHA256"])
+            .output()
+            .map_err(|e| format!("cannot run certutil: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "certutil failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        // certutil prints a header, the hash (possibly grouped in bytes), and a footer.
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let hex: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok(hex.to_ascii_lowercase());
+            }
+        }
         Err(format!(
-            "download failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "certutil printed no SHA-256 for {}",
+            path.display()
         ))
     }
+    #[cfg(not(windows))]
+    {
+        let (program, args): (&str, &[&str]) = if command_exists("sha256sum") {
+            ("sha256sum", &[])
+        } else if command_exists("shasum") {
+            ("shasum", &["-a", "256"])
+        } else {
+            return Err("neither sha256sum nor shasum is installed".into());
+        };
+        let out = Command::new(program)
+            .args(args)
+            .arg(path)
+            .output()
+            .map_err(|e| format!("cannot run {program}: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "{program} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase())
+    }
+}
+
+#[cfg(not(windows))]
+fn command_exists(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn verify(binary: &Path) -> Result<(), String> {
@@ -538,28 +751,88 @@ mod tests {
     }
 
     #[test]
-    fn the_archive_names_the_platform() {
-        // All four cases the task names, by argument: the mapping is a function of the system and
-        // architecture, not of the machine this test runs on.
-        assert_eq!(release_platform("linux", "x86_64"), Some("linux-x86_64"));
-        assert_eq!(release_platform("linux", "aarch64"), Some("linux-aarch64"));
-        assert_eq!(release_platform("macos", "aarch64"), Some("macos-aarch64"));
-        assert_eq!(release_platform("macos", "x86_64"), None);
-        assert_eq!(release_platform("windows", "x86_64"), None);
+    fn the_release_platform_names_the_system_and_architecture() {
+        // The mapping is a function of the system and architecture, not of the machine this test
+        // runs on, so every case is checked by argument. The four names are the four archives the
+        // release workflow builds; the two `None`s are the platforms that build from source.
+        let cases = [
+            (("linux", "x86_64"), Some("linux-x86_64")),
+            (("linux", "aarch64"), Some("linux-aarch64")),
+            (("macos", "aarch64"), Some("macos-aarch64")),
+            (("windows", "x86_64"), Some("windows-x86_64")),
+            // Intel macOS and Windows on ARM have no release archive.
+            (("macos", "x86_64"), None),
+            (("windows", "aarch64"), None),
+        ];
+        for ((os, arch), expected) in cases {
+            assert_eq!(release_platform(os, arch), expected, "{os} on {arch}");
+        }
     }
 
     #[test]
-    fn the_release_asset_is_named_after_the_platform() {
-        let tag = "v0.2.0";
-        let platform = release_platform("macos", "aarch64").unwrap();
-        assert_eq!(
-            format!("peregrine-{tag}-{platform}.tar.gz"),
-            "peregrine-v0.2.0-macos-aarch64.tar.gz"
-        );
-        let platform = release_platform("linux", "x86_64").unwrap();
-        assert_eq!(
-            format!("peregrine-{tag}-{platform}.tar.gz"),
-            "peregrine-v0.2.0-linux-x86_64.tar.gz"
-        );
+    fn the_archive_name_matches_the_platform() {
+        // The tag is a stand-in, never a released version: the name is what the mapping plus the
+        // extension produces.
+        let tag = "vX.Y.Z";
+        let cases = [
+            ("linux", "x86_64", "peregrine-vX.Y.Z-linux-x86_64.tar.gz"),
+            ("linux", "aarch64", "peregrine-vX.Y.Z-linux-aarch64.tar.gz"),
+            ("macos", "aarch64", "peregrine-vX.Y.Z-macos-aarch64.tar.gz"),
+            ("windows", "x86_64", "peregrine-vX.Y.Z-windows-x86_64.zip"),
+        ];
+        for (os, arch, expected) in cases {
+            let platform = release_platform(os, arch).unwrap();
+            assert_eq!(
+                format!("peregrine-{tag}-{platform}.{}", archive_extension(platform)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn the_new_binary_replaces_the_old_one_in_place() {
+        // Runs on every platform: on Windows the running binary's rename-swap is exercised with
+        // ordinary files (nothing is running here), elsewhere the atomic rename.
+        let dir = std::env::temp_dir().join(format!(
+            "pg-upgrade-place-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(if cfg!(windows) {
+            "peregrine.exe"
+        } else {
+            "peregrine"
+        });
+        let staged = dir.join("staged");
+        std::fs::write(&target, b"old binary").unwrap();
+        std::fs::write(&staged, b"new binary").unwrap();
+
+        place(&staged, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new binary");
+        #[cfg(windows)]
+        {
+            let old = old_binary_path(&target);
+            assert_eq!(
+                std::fs::read(&old).unwrap(),
+                b"old binary",
+                "the replaced binary is kept as {} until the next start",
+                old.display()
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let leftovers: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".old"))
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "Unix replaces with one rename and leaves no copy behind"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

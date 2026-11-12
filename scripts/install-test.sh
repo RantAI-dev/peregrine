@@ -51,20 +51,29 @@ for short in linux-x86_64 linux-aarch64 macos-aarch64; do
     stub "$short"
 done
 
+# The v0.2.0 release has the two Linux archives only. A Mac pointed at such a release must be told
+# the archive is not in it — and that it ships from the release after v0.2.0 — not shown curl's 404.
+release_linux_only="$tmp/release-linux-only"
+mkdir -p "$release_linux_only"
+cp "$release/peregrine-v$version-linux-x86_64.tar.gz" \
+    "$release/peregrine-v$version-linux-aarch64.tar.gz" "$release/SHA256SUMS" "$release_linux_only/"
+
 fail=0
 pass() { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1" >&2; fail=1; }
 
-# One case: OS, machine, expected asset (or "refuse"), and a phrase the refusal must contain.
+# One case: OS, machine, expected asset (or "refuse"), a phrase the refusal must contain, and the
+# release directory to install from (default: the one with every stub archive).
 try() {
     os=$1
     machine=$2
     want=$3
     phrase=$4
+    base=${5:-$release}
     out="$tmp/out-$os-$machine"
     prefix="$tmp/prefix-$os-$machine"
     set +e
-    PEREGRINE_BASE_URL="file://$release" \
+    PEREGRINE_BASE_URL="file://$base" \
         PEREGRINE_INSTALL_TEST_OS="$os" \
         PEREGRINE_INSTALL_TEST_MACHINE="$machine" \
         sh "$root/scripts/install.sh" --version "v$version" --prefix "$prefix" \
@@ -101,6 +110,8 @@ try Linux aarch64 linux-aarch64 ""
 try Darwin arm64 macos-aarch64 ""
 try Darwin aarch64 macos-aarch64 ""
 try Darwin x86_64 refuse "Apple Silicon (arm64) only"
+try Darwin arm64 refuse "macOS on Apple Silicon ships from the release after v0.2.0" \
+    "$release_linux_only"
 try FreeBSD amd64 refuse "build from source"
 try Linux riscv64 refuse "build from source"
 
