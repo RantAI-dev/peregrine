@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Prompt processing: the 512-token path's value mix takes two rows per V pass (S5.2c)**: the
+  widened f32 tile — the one a prompt below 1024 positions uses — had no pair body, so the
+  trick S5.2b shipped for the F16 tile applied to nothing at 512 tokens. Two query rows of one
+  KV head see the same positions, so each f32 value is now loaded once and feeds both rows'
+  fused multiply-adds; each row keeps its own accumulators and its own ascending position
+  order, so no result bit moves (no golden file changed; the new
+  `the_prefill_f32_pair_mix_is_each_rows_own_mix` pins it to the solo mix row by row on the
+  S5.2b grid). The mix's own time at one thread falls to 0.78 (Llama 3.2 1B) and 0.86 (Qwen
+  2.5 0.5B) of what it was, and the 512-token prompt gains **+3.3 % and +2.7 %**; at six and
+  twelve threads the pass does not resolve the 4-6 % bucket it lives in (both arm orders
+  straddle 1.0). 4096 tokens, decode and ten users are unchanged. **Still below
+  ik_llama.cpp**: 0.37-0.60 of it at twelve threads (and 0.62 of llama.cpp on Qwen at 512),
+  unchanged in cause from S5.2b — the fork's requantising weight kernel.
 - **Prompt processing: the attention value mix takes two rows per V pass (S5.2b)**: on a
   4096-token prompt attention is 35-45 % of a pass and the value mix alone is twice the score
   stage, running at 8.6-9.3 GMAC/s per core, a sixth of this machine's f32 FMA roof. Two query
@@ -21,6 +34,18 @@ All notable changes to this project are documented here. The format follows
   and 0.47 at 512, where the prompt takes the widened f32 tile and this body does not apply;
   the remaining gap is the weight matmul (the fork runs a requantising kernel at 91 GMAC/s
   against Peregrine's exact 72-75, §11.3-11.4 of `docs/design/s5-prefill-avx512.md`).
+
+### Fixed
+
+- **Prompt processing: a pass's "6-10 % of the caller's serial work" is not serial work
+  (S5.2c)**: SwiGLU had no timer, and the pass's step account now names every step over 0.5 %
+  (quantise 2.6-6.3 %, SwiGLU 2.4-5.9 %, residual 0.7-4.4 %, RoPE 0.4-1.7 %, RMSNorm
+  0.2-1.1 %, KV write **0.9-1.8 %**). Only the KV write is serial; the rest is pool work
+  paying one fork-join, and the 13-24 % "barrier wait" is workers parked by the OS on a shared
+  host — 12 385 joins a 4096 pass at 0.17 ms each with 6 347 parks of 1-5 ms, level 0 of the
+  spin ladder, and an even 24-task split — not imbalance. Nothing was threaded or fused that
+  the numbers did not pay for; the reasons and the measured candidates are in
+  `docs/design/s5-prefill-avx512.md` §13.
 
 ### Added
 

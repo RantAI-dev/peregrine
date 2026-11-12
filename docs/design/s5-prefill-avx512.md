@@ -1734,3 +1734,180 @@ for the widened f32 tile, worth about 3 % of a 512-token pass.
   per dimension, which is a different order of additions.
 - **The 512-token prompt's mix is still single-row** (the widened f32 tile has no pair body),
   so this change is worth nothing there. That is the next candidate, not a result.
+
+## 13. Round 6: the f32 tile's pair mix, the serial remainder, and the mix against its roof (S5.2c)
+
+- Status: **built and measured**; the widened f32 tile takes the two-row value mix, the pass's
+  remaining steps are named and priced, and the mix body's ceiling is written down
+- Date: 2026-11-12 (15:20–18:15 local, UTC+7)
+- Host: AMD Ryzen AI 9 HX 370 (Zen 5, 12 cores / 24 threads, AVX-512 F/BW/DQ/VL/VNNI/VBMI/BF16),
+  WSL2, 11.7 GiB, **shared for the whole window** (S5.4c's accuracy report; load 3–23)
+- Peregrine: `s5.2c-prefill-serial` = `origin/main` `e4ad034` plus this round's commits;
+  ik_llama.cpp `479074c`, llama.cpp `v0.9.0`, both the builds of §10–§12
+- Raw data, the four drivers and every before/after: `benchmarks/results/desktop-zen5-2026-11-12-s5.2c/`
+- Every ratio is two builds alternating inside each round. **Where the round's ranges
+  straddle 1.0 the cell is called no change**, which is what most of the 12-thread table is:
+  the host was 10–20 busy threads on the same 24 logical CPUs.
+
+§12 left three things open: the widened f32 tile had no pair body, "6–10 % of a pass is the
+caller's serial work" was a lump with no step list, and the mix's "a sixth of the roof" had no
+arithmetic behind it. This round answers all three, and ships only the first.
+
+### 13.1 Part A: the f32 tile's pair mix, same bits
+
+`mix_pair_same` (`attn.rs`) is the F16 tile's `mix_f16_pair_same` for the tile below
+`DIRECT_MIN_VIS` — the one a 512-token prompt takes. Two rows of one KV head that see the
+same positions read each **f32** value once and feed both rows' fused multiply-adds; each row
+keeps its own four accumulators and its own ascending position order. Sixteen-lane body for
+`head_dim % 16 == 0`, eight-lane for `% 8` (four lanes per row in flight), and the two solo
+mixes otherwise.
+
+**Why the bits cannot move.** The pair changes where the multiplied operand came from, not
+the operation: each output element still computes `α·o + p_1·v_1 + … + p_vis·v_vis` with the
+same fused multiply-add, the same operands and the same ascending `j`. The chunk boundaries,
+the banking of partial results and the merge order are the caller's, untouched. The test
+`the_prefill_f32_pair_mix_is_each_rows_own_mix` checks the body against `mix` row by row, bit
+for bit, on the same grid as the F16 body's: lengths 1…70, 127/128/129, 511/512/513, 4095/4096;
+head dims 64, 128, 80, 72, 16; random scores and the edge values a softmax produces.
+
+**Measured** (five interleaved rounds; `~/.cache/peregrine-bench/s52c/`):
+
+| model | prompt | threads | before | after | ratio | rounds |
+|---|---|---:|---:|---:|---|---|
+| Llama 1B | 512 | 1 | 35.2 | **36.2** | **1.033** | 1.013–1.068 |
+| Qwen 0.5B | 512 | 1 | 72.7 | **74.6** | **1.027** | 1.000–1.203 |
+| Llama 1B | 512 | 6 / 12 | 171.9 / 244.6 | 177.9 / 262.7 | 1.057 / 1.075 | 0.999–1.220 / 0.957–1.132 |
+| Qwen 0.5B | 512 | 6 / 12 | 346.9 / 522.9 | 379.5 / 470.4 | 1.089 / 0.955 | 0.874–1.163 / 0.899–1.040 |
+
+With the arm order reversed those four cells read 0.995, 1.011, 1.031 and 1.029, so **at six
+and twelve threads the pass-level result is "no change"** — the bucket is 4–6 % of a 512-token
+pass and the host's ±10 % cannot resolve 1.5 %. At one thread the order cannot hide it and
+the bucket says where it comes from: `attn mix` (mix + softmax) over the five rounds,
+622→476, 599→470, 598→484, 599→464, 610→462 ns for Llama (**0.784**, 1.28×) and
+408→354, 419→357, 428→359, 382→341, 411→335 for Qwen (**0.861**, 1.16×). The body pays; the
+pass at twelve threads is simply not where it can be seen. 4096 tokens takes the F16 tile and
+is unchanged (1.02 Llama, 0.98 Qwen at twelve threads, 1.01/1.01 at six, both inside range).
+
+### 13.2 Part B: the serial remainder, step by step
+
+The account now has no unmeasured step above 0.5 %: **SwiGLU had no timer** and is now wrapped
+in `Slot::Swiglu` in the dense forward (the decode-path variant already was). The slots stay
+per pass — S5.2b measured that a per-row timer costs a quarter of a pass.
+
+Twelve threads, medians of 2–3 passes, shares of the engine's own `prefill_s`:
+
+| step | 512 tokens, Llama / Qwen | 4096 tokens, Llama / Qwen | serial? |
+|---|---|---:|---|
+| activation quantise (attention out) | 3.3 / 2.6 % | 3.5 / 6.3 % | no (`for_row_chunks_2`) |
+| SwiGLU | 4.7 / 5.9 % | 2.4 / 4.6 % | no (prefill branch) |
+| residual add | 2.6 / 2.8 % | 0.7 / 4.4 % | no |
+| RoPE + bias + q/k norm | 1.5 / 1.6 % | 0.4 / 1.7 % | no |
+| **KV write** | **1.8 / 1.3 %** | **1.4 / 0.9 %** | **yes** |
+| RMSNorm | 0.6 / 1.1 % | 0.2 / 0.2 % | no |
+
+**The lump was mis-described.** Of the six steps only the KV write is serial; the other five
+run on the pool, and their wall is what a fork–join costs here — the same step read 4.2–8.4 %
+on one thread and 8.5–18.1 % on twelve, i.e. it grew as the pass got faster, which is a join,
+not work. The attention bucket hides the same thing: at 4096 its worker-side sub-timers
+divided by the pool width account for 21.9 % of the 28.7 % the caller sees (Llama) and
+24.3 % of 32.8 % (Qwen), and the caller's
+own fork and prologue are **6.8 % (Llama) and 8.4 % (Qwen)** — a larger serial-looking term
+than the whole `rest`.
+
+**What each step over 0.5 % was offered, and the verdict.**
+
+- *Quantise, SwiGLU, norms, RoPE*: already threaded; no fuse is left that does not change a
+  neighbour's interface. SwiGLU is 537 M `silu`s a pass at 4096 and runs 7.6× on twelve
+  threads — at its floor. Verdict: no change.
+- *Residual add*: could be fused into the following norm (a pending add, one fork instead of
+  two, one less read and write of `x`). It is worth about 2 % of a pass and would change the
+  signature of `attention_rows`, the dense loop and the head in every family. Verdict:
+  **written down, not built** — this round does not spend that much bit-exactness surface on a
+  2 % estimate it cannot resolve on this host.
+- *KV write*: the one truly serial step. It is 65 k f32→f16 conversions a chunk-layer: 20 µs
+  over twelve threads against the ~200 µs a fork–join costs here, so running it *on* the pool
+  cannot pay. Fusing it into `prepare_rows` — the pass immediately before it, which already
+  walks the same rows — would need `&mut Caches` inside a work-splitting closure, i.e. two
+  threads holding `&mut` to one `Shared` cache. Verdict: **dropped**, with the numbers.
+
+**The barrier wait.** 12 385 joins a pass at 4096 (12 a layer a 64-token chunk), 0.17 ms of
+caller wait each (Llama) and 0.24 ms (Qwen); 1 633 and 2 449 joins at 512. The workers' own
+accounting (`PEREGRINE_ADAPTIVE_LOG=1`) says where the time goes: the adaptive ladder never
+left **level 0** (the 1000 µs spin — so not the spin window, and S5.2b's sweep already showed
+4000 µs is worse), and the pass recorded **6 347 parks of 1–5 ms** plus 2 182 of 0.5–1 ms and
+1 361 under 0.5 ms. The task split is even: `plan()` makes 24 tasks — `n_kv_head ×
+ceil(2·workers / n_kv_head)` — and `pool.run` divides them by the pool width, 12, two each,
+the caller taking share 0 like any worker; every task is one KV head × whole rows of one
+chunk, and the rows of a chunk see the same ±64-position context. So the wait is not uneven
+work and not one serial step between joins: a worker that finds no job after its spin parks,
+and the next job waits for the futex wake **and** for the OS to schedule that worker again —
+milliseconds when another tenant holds 10–20 of the 24 logical CPUs. **That is a scheduling
+choice only in how often the pass forks**, and the one lever measured is the pass width:
+chunk 128 at 4096 read +2.0/+3.0 % (Llama) and +3.4/+2.4 % (Qwen) over chunk 64 in four
+cells of four, two rounds. It is not shipped: 128 rows is twice the prompt-row scratch of every
+engine (`WIDE_CHUNK_DEFAULT` is 64 because the scratch already holds 64 speculative rows), it
+was 3–5 % *worse* at 512 in S5.2b, and it would double a decoding user's wait beside a long
+prompt. A default from a two-round probe on this host is what §12 refused to do.
+
+### 13.3 Part C: the mix body against its roof
+
+**The operation count.** `head_dim 64`, one row: four `zmm` accumulators. Per position, one
+broadcast, **four 64-byte loads** and **four `vfmadd231ps`** = 64 MACs; per output element and
+position, one load and one FMA. The F16 body adds a `vcvtph2ps` per accumulator.
+
+**The chain.** Each element's additions are one FMA per position in ascending `j`, and Zen 5's
+FMA latency is four cycles. A row at `head_dim 64` has **four** chains, so the one-row body can
+issue one FMA a cycle: **16 MAC/cycle = 29.6 GMAC/s**, half the 32 MAC/cycle roof. At
+`head_dim 128` a row has eight chains and the chain bound is the roof. **Two rows double the
+chains without touching any element's order**, so the pair body's bound is the roof itself;
+a fourth row has 16 chains, more than two FMAs a cycle can use, which is why §12's four-row
+body measured the same as two.
+
+**What the bodies reach** (L1-resident, same loops, one core shared with the other tenant,
+200 000 repetitions; `%` of the 59.0 GMAC/s roof):
+
+| body | head_dim 64 | head_dim 128 |
+|---|---:|---:|
+| f32 1 row / 2 rows / 4 rows | 18.8 / 21.2 / 25.4 GMAC/s (32 / 36 / 43 %) | 14.0–15.9 / 19.7–19.9 / 24.3 |
+| f16 1 row / 2 rows / 4 rows | 11.8 / 15.0 / 20.2 | 15.2 / 23.8 / 22.7 |
+| f32 1 row, two accumulators per element (a different order) | 14.7 | 14.2 |
+| the softmax alone (`max` + `exp_shift_sum` + `det_exp`) | 2.18 ns a score | 2.28 |
+
+**The bucket's 9.3 GMAC/s decomposes.** The softmax is 39 % of what the `attn mix` slot times
+(a 64-position tile: 218 ns of mix, 139 ns of softmax; a pair: 386 + 278), and the same bench
+with the softmax in the loop reads 11.9 GMAC/s for the solo body and 12.6 for the pair against
+the in-situ 9.3. So: the body is at **32–36 % of the roof**, the softmax is 39 % of the bucket,
+and the rest is the tile stream and the five chunk cuts a 4096-token row's mix is taken in.
+The "two accumulators per element" line prices the order directly: splitting an element's
+chain in half (never shippable — a different summation) buys nothing, 14.7 against 18.8, so
+the order is not what binds; the loads and conversions are, and the pair body halves those.
+
+**Verdict: no code.** The same-bits ceiling at `head_dim 64` is the roof with two rows and no
+more, and both tiles now take it. Nothing in the arithmetic leaves ≥ 10 % of mix time that a
+body with the same order could win, so this is the deliverable.
+
+### 13.4 What is still behind the fork
+
+Twelve threads, interleaved with both engines in the same rounds, medians of three rounds at
+512 and two at 4096 (load 16–22; the raw files carry the `±`):
+
+| model | prompt | Peregrine | ik `-ub 512` | llama.cpp | P ÷ ik | P ÷ llama |
+|---|---:|---:|---:|---:|---:|---:|
+| Llama 1B | 512 | 238.1 | 397.0 | 238.9 | **0.60** | 1.00 |
+| | 4096 | 204.1 | 385.3 | 185.0 | **0.53** | 1.10 |
+| Qwen 0.5B | 512 | 332.9 | 896.6 | 372.0 | **0.37** | **0.62** |
+| | 4096 | 361.5 | 642.3 | 252.6 | **0.56** | 1.43 |
+
+Every cell below 1.0 is named: **all four against ik_llama.cpp** and **Qwen's 512 against
+llama.cpp**. At 4096 Peregrine is now above llama.cpp on both models. The ranking against ik is
+not settled by this window (its own Qwen 512 cells read 765/955/897), and §12.4's explanation
+is unchanged: the fork's lead is the weight pass — its requantising kernel at 91 GMAC/s against
+Peregrine's exact 72–75 — plus 512-bit kernels throughout, which is a different arithmetic.
+
+### 13.5 Bits
+
+No golden file changed (`git diff --stat origin/main...HEAD -- '*.golden'` is empty), the
+default engine is exact, and the f32 pair body is pinned to `mix` row by row on the grid
+above. The only other code change is a timer. Real-model Llama 3.2 1B goldens pass on the
+native, AVX2 and scalar tiers; the Qwen 2.5 0.5B and SmolLM2 goldens are the two known
+mismatches of this machine (§12.5), failing on the `bytes` line with or without this branch.
