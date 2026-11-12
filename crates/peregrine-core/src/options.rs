@@ -239,9 +239,10 @@ pub const SMALL_FLOAT_ENCODER_BYTES: u64 = 256 << 20;
 /// [`Q8_FLOAT_MAX_BYTES_ARM`] instead (S4.9o).
 pub const Q8_FLOAT_MAX_BYTES: u64 = 64 << 20;
 
-/// The largest Q8_0 `modern-bert` file whose matrices are dequantised into f32 panels on
-/// aarch64 (S4.9o). It equals [`SMALL_FLOAT_ENCODER_BYTES`], so a converted file is still a
-/// "small float encoder" for [`pass_rows_default_for`] and its panels stay under 1 GiB.
+/// The largest Q8_0 `modern-bert` file whose matrices are dequantised into f32 panels on the
+/// aarch64 tiers that carry the Q8_0 int8 tiles (`dotprod` and up; S4.9o). It equals
+/// [`SMALL_FLOAT_ENCODER_BYTES`], so a converted file is still a "small float encoder" for
+/// [`pass_rows_default_for`] and its panels stay under 1 GiB.
 ///
 /// Measured on this ARM host (10 threads, medians, cache off) against the int8 tiles the
 /// int8 tiers would otherwise run: gte-modernbert-base Q8_0 (151 MiB) 12.25 → 20.63 texts/s

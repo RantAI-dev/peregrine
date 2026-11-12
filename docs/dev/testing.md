@@ -126,16 +126,20 @@ Hygiene: `scripts/hygiene.sh` checks tracked files for credential files and stri
    way: a synthetic four-layer file with a window narrower than the texts, two different RoPE bases,
    F32 and Q8_0 variants, the three gated activations and a classifier-headed variant; the vector
    against `tests/support/modern_bert_ref.rs`'s independent scalar forward (bit for bit for F32;
-   for Q8_0 exactly on the scalar tier, and on SIMD tiers within the measured int8 distance, because
-   a 1-ulp projection difference can flip an activation code in the next layer); the invariance
-   matrix; the context limit; the no-allocation pass; the server and CLI cases
-   (`a_modern_bert_encoder_*`); and
+   for Q8_0 exactly on the scalar x86 tier (the reference's own per-row kernel) and, since
+   S4.9o, bit for bit on `aarch64-neon-dotprod` and `aarch64-neon-i8mm`, where the file is
+   dequantised into f32 panels at load; on the x86 SIMD tiers and the two lower aarch64 tiers it
+   is within the measured int8 distance, because a 1-ulp projection difference can flip an
+   activation code in the next layer); the invariance matrix; the context limit; the
+   no-allocation pass; the server and CLI cases (`a_modern_bert_encoder_*`); and
    `tests/golden/synthetic/<tier>/modern-bert-Q8_0.golden`, recorded on scalar, AVX2 and AVX-512
-   under SDE, and on the ARM host for `aarch64`, `aarch64-neon`, `aarch64-neon-dotprod` and
-   `aarch64-neon-i8mm` (the scalar and neon hashes equal the x86_64 one; the two int8 tiers
-   differ, as the Q8_0 tile fuses its block scale). Its ignored real-file test uses the 200 texts (16–6976 tokens)
-   and llama.cpp's ids and vectors under `tests/fixtures/modern-bert/` for gte-modernbert-base and
-   Granite Embedding R2, F16 and Q8_0, and skips a file that is absent.
+   under SDE and on the ARM host for `aarch64`, `aarch64-neon`, `aarch64-neon-dotprod` and
+   `aarch64-neon-i8mm` (the scalar and neon hashes equal the x86_64 one; before S4.9o the two
+   int8 tiers differed, as the Q8_0 tile fuses its block scale, and since S4.9o they take the
+   f32-panel route and hash together with `51c9434cc8ba546e` / `55e17bd3fd81801d`). Its ignored
+   real-file test uses the 200 texts (16–6976 tokens) and llama.cpp's ids and vectors under
+   `tests/fixtures/modern-bert/` for gte-modernbert-base and Granite Embedding R2, F16 and Q8_0,
+   and skips a file that is absent.
    The same file covers S4.4: a synthetic bidirectional `gemma-embedding` file (mean/cls/last),
    the vector against an independent scalar reference forward in `tests/support/embed_ref.rs`,
    the invariance matrix (alone, batches of 2/7/64, mixed lengths, 1/2/4/8 threads, both
