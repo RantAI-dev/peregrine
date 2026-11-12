@@ -142,5 +142,6 @@ matters, or run two units behind a reverse proxy.
 - One managed server per user/state directory. Run one process per model, as with llama-server.
 - The log is appended, not rotated; point `--log-file` at a logrotate-managed path for long-lived services.
 - `SO_REUSEPORT` and the zero-downtime handoff are Unix features; Windows uses the stop file and a
-  short restart gap instead. `--background`, `status`, `stop`, `upgrade` and the release archives
-  exist on Linux, macOS on Apple Silicon and Windows on x86-64.
+  short restart gap instead. `--background`, `status` and `stop` exist on Linux, macOS and Windows
+  on x86-64; `upgrade` and the release archives exist on Linux today and on Windows x86-64 from the
+  release after v0.2.0.

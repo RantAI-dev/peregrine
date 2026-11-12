@@ -3,9 +3,9 @@
 Run a model, call it. About five minutes: one binary (or one container), one small model, one
 request — the same requests then work against any bigger model file.
 
-You need Linux on x86-64 or aarch64, macOS on Apple Silicon, or Windows on x86-64 (Intel Macs:
-build from source below), and about 300 MB of disk for the example model. macOS on Apple Silicon is
-covered below; the Windows install is PowerShell.
+You need Linux on x86-64 or aarch64, or Windows on x86-64 (macOS: build from source below), and
+about 300 MB of disk for the example model. The Windows archive and installer ship from the release
+after v0.2.0; until then build from source on Windows too.
 
 ## 1. Get Peregrine
 
@@ -27,7 +27,8 @@ Pass `--version vX.Y.Z` to pin a release and `--prefix /usr/local` for a system-
 
 ### Windows x86-64
 
-Windows 10 or 11 on x86-64. In PowerShell (the version every Windows ships, 5.1, is enough):
+Windows 10 or 11 on x86-64, from the release after v0.2.0 (v0.2.0 has no Windows archive; build
+from source until then). In PowerShell (the version every Windows ships, 5.1, is enough):
 
 ```powershell
 irm https://peregrine.rantai.dev/install.ps1 | iex

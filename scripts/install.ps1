@@ -1,7 +1,7 @@
 # Install the `peregrine` CLI from a GitHub release on Windows x86-64.
 #
 #   irm https://peregrine.rantai.dev/install.ps1 | iex
-#   irm https://peregrine.rantai.dev/install.ps1 -OutFile install.ps1; .\install.ps1 -Version v0.2.0
+#   irm https://peregrine.rantai.dev/install.ps1 -OutFile install.ps1; .\install.ps1 -Version vX.Y.Z
 #
 # The vanity host redirects to this script in the newest GitHub release (the same lakehouse
 # pattern as install.sh); the GitHub URL is the same file:
@@ -16,7 +16,7 @@
 # Written for Windows PowerShell 5.1, the version every supported Windows ships.
 #
 # Parameters:
-#   -Version TAG      a release tag such as v0.2.0 (default: the newest release)
+#   -Version TAG      a release tag, vX.Y.Z (default: the newest release; Windows archives exist from the release after v0.2.0)
 #   -InstallDir DIR   install to DIR (default: %LOCALAPPDATA%\Programs\peregrine)
 #   -BaseUrl URL|DIR  release download base: a mirror, or a local directory in tests
 #   -Repo OWNER/REPO  GitHub repository (default: RantAI-dev/peregrine)
@@ -38,15 +38,15 @@ function Show-Help {
 Install the peregrine CLI from a GitHub release.
 
   irm https://peregrine.rantai.dev/install.ps1 | iex
-  irm https://peregrine.rantai.dev/install.ps1 -OutFile install.ps1; .\install.ps1 -Version v0.2.0
-  .\install.ps1 -Version v0.2.0 -InstallDir C:\tools\peregrine
+  irm https://peregrine.rantai.dev/install.ps1 -OutFile install.ps1; .\install.ps1 -Version vX.Y.Z
+  .\install.ps1 -Version vX.Y.Z -InstallDir C:\tools\peregrine
 
 The zip is verified against the release's SHA256SUMS with Get-FileHash. It installs to
 %LOCALAPPDATA%\Programs\peregrine and adds that directory to your user Path (never the machine
 Path); no administrator rights are needed. Windows x86-64 only: there is no ARM64 archive yet.
 
 Parameters:
-  -Version TAG      a release tag such as v0.2.0 (default: the newest release)
+  -Version TAG      a release tag, vX.Y.Z (default: the newest release; Windows archives exist from the release after v0.2.0)
   -InstallDir DIR   install to DIR (default: %LOCALAPPDATA%\Programs\peregrine)
   -BaseUrl URL|DIR  release download base: a mirror, or a local directory (for tests)
   -Repo OWNER/REPO  GitHub repository (default: RantAI-dev/peregrine)
