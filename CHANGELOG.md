@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Prompt processing: the attention value mix takes two rows per V pass (S5.2b)**: on a
+  4096-token prompt attention is 35-45 % of a pass and the value mix alone is twice the score
+  stage, running at 8.6-9.3 GMAC/s per core, a sixth of this machine's f32 FMA roof. Two query
+  rows of one KV head see the same positions, so the prefill tile now loads and widens each V
+  half-vector once and feeds both rows' fused multiply-adds from it; each row keeps its own
+  accumulators and its own ascending position order, so no result bit moves (no golden file
+  changed; the Llama 1B real-model golden passes on all three tiers). Measured on Llama 3.2 1B and Qwen 2.5 0.5B Q4_K_M, 4096 tokens:
+  **+5.7 % at twelve threads on both models**, +2-4 % at one and six, the mix's own time
+  29.3 -> 23.6 s at one thread. Decode (0.99-1.01) and ten users on one pool are unchanged.
+  **Still below ik_llama.cpp**: 0.66 (Llama) and 0.58 (Qwen) at 4096, twelve threads, and 0.57
+  and 0.47 at 512, where the prompt takes the widened f32 tile and this body does not apply;
+  the remaining gap is the weight matmul (the fork runs a requantising kernel at 91 GMAC/s
+  against Peregrine's exact 72-75, §11.3-11.4 of `docs/design/s5-prefill-avx512.md`).
+
 ### Added
 
 - **Tool calling for Qwen 3.5 and Bonsai 2 on the chat endpoint (S6.3b)**: a file that carries
