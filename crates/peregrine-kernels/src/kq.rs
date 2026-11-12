@@ -790,6 +790,14 @@ pub struct KqActs {
     /// because the same ones are read by every output row of a tile, and `|S|`
     /// is at most 4 064, so the narrowing is exact.
     pub bsp: Vec<i32>,
+    /// The whole-super-block sum of every row: `groups · super_blocks · 4`.
+    ///
+    /// The 8-bit prompt form of S5.4 (`crate::kq8`) stores its weights biased by
+    /// 128 so that `vpdpbusd` can take them as its unsigned operand, and pays the
+    /// bias back with `-128 · Σ a` over the block. `Σ a` is this field: the exact
+    /// int32 sum of the row's 256 activation codes, `|Σ| ≤ 32 512`. The exact
+    /// k-quant kernels do not read it.
+    pub sum256: Vec<i32>,
     /// The rows filled.
     pub rows: usize,
     /// The activation width.
@@ -842,6 +850,8 @@ impl KqActs {
         self.bs16.resize(groups * n_sb * ACT_GROUP * 16, 0);
         self.bsp.clear();
         self.bsp.resize(groups * n_sb * ACT_GROUP * 4, 0);
+        self.sum256.clear();
+        self.sum256.resize(groups * n_sb * ACT_GROUP, 0);
         for g in 0..groups {
             for sb in 0..n_sb {
                 let base = (g * n_sb + sb) * 1024;
@@ -881,6 +891,14 @@ impl KqActs {
                     for (j, &s) in rs.iter().enumerate() {
                         self.bs16[bbase16 + t * 16 + j] = s as i32;
                     }
+                    // The whole super-block's sum of codes, for the 8-bit form's
+                    // 128 bias (`crate::kq8`). Eight int32 adds per (row, block),
+                    // and the exact k-quant kernels never read it.
+                    let mut total = 0i32;
+                    for j in 0..8 {
+                        total += self.bs[bbase + t * 8 + j];
+                    }
+                    self.sum256[dbase + t] = total;
                 }
             }
         }
