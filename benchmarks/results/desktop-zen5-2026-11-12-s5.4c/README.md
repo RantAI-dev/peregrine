@@ -244,6 +244,13 @@ p-value below covers.
 | | MMLU | 150 | 46.7 / 46.7 | 47.3 | +0.7 | 5 lost / 6 gained | 1.00 |
 | | HumanEval+ | 50 | 54.0 / 54.0 | 60.0 | +6.0 | 1 lost / 4 gained | 0.38 |
 
+This table was measured with the s5.4b-era binary (`engine_version` in each manifest), i.e.
+before S5.4f's per-tier format table; S5.4f leaves the AVX-512 set unchanged (Q4_K and Q6_K,
+and Q5_0 is not selected on any x86 tier), which is why the A runs were re-measured on the
+merged tree and matched to the digit (`raw/spot/`). **C and D were not re-run** after that
+merge; on AVX-512 they describe the same format set, and the manifests name the commit they
+were measured on.
+
 Read as: no cell is significantly different (every p ≥ 0.15, the suite's gate is p ≥ 0.05),
 and the largest point difference (Qwen3 GSM8K +7.5 on 80 items, 3 lost / 9 gained) is a
 handful of near-ties in the fast mode's favour, not a trend — the other 11 cells straddle
