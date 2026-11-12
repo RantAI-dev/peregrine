@@ -111,6 +111,13 @@ Two engine settings were needed and are recorded rather than hidden:
 
 ## Part 1 — the standings
 
+> **Superseded for the batch cells (2026-11-13).** S4.8b (`#251`) landed on `main` after this
+> run and gives a float-only encoder over 256 MiB 128 rows a pass instead of 32. The two F16
+> rows' batch cells were re-measured on the merged build: nomic's 16-token cells become
+> **1.019×** and **1.088×**, jina's 0.938× and 0.964×, and the pair is **24 of 36** cells
+> fastest (was 21), twelve behind (was fifteen). The 128-token and 512-token cells did not
+> move. Tables and raws: `benchmarks/results/bluefin-2026-11-13-s4.9u-merge/`.
+
 ### Peregrine F16 against the best equal-accuracy engine, before → after
 
 Cells are Peregrine texts/s, the winning engine and its texts/s, and Peregrine ÷ it. All
