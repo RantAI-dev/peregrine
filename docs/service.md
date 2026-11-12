@@ -15,19 +15,32 @@ peregrine status
 peregrine stop
 ```
 
-`--background` re-executes the same binary in its own process group, redirects stdout/stderr to a log
+`--background` re-executes the same binary in its own process group (Unix) or detached from the
+console (`CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`, Windows), redirects stdout/stderr to a log
 and records lifecycle state; the command returns only after the server is listening, so the first
 `curl` works immediately. `--startup-timeout` (default 300 s) bounds the wait for a large model.
 
 | | |
 |---|---|
-| State | `$PEREGRINE_STATE_DIR` → `$XDG_STATE_HOME/peregrine` → `~/.local/state/peregrine/serve.json` |
+| State | `$PEREGRINE_STATE_DIR` → `$XDG_STATE_HOME/peregrine` → `%LOCALAPPDATA%\peregrine` on Windows → `~/.local/state/peregrine` (`serve.json`) |
 | Log | `serve-<port>.log` in the state directory, or `--log-file PATH` |
 | Address | `status` prints the URL and the pid |
 
 `peregrine status` is also the check for a supervisor: exit status 0 means a managed server exists,
 1 means none (or a stale state file, which the message names). The state file is removed on a graceful
-stop, and a stale file (dead pid) is reported rather than treated as a server.
+stop, and a stale file (dead pid) is reported rather than treated as a server. On Windows `status`
+also probes `/health` and prints its answer (a server that is still loading a model is alive but not
+yet healthy).
+
+### Stopping on Windows
+
+Windows has no `SIGTERM`. `peregrine stop` writes `serve-<port>.stop` in the state directory; the
+server watches it every 250 ms, removes it and drains exactly as a Unix server does on `SIGTERM`.
+`stop` waits 40 s for the drain (the Unix `DRAIN_TIMEOUT`) and only then ends the process with
+`TerminateProcess`. A foreground `serve` stops on Ctrl-C, which `tokio` delivers on Windows too.
+
+`status` checks liveness with `OpenProcess` and `GetExitCodeProcess` (hand-written Win32 in
+`crates/peregrine-core/src/win32.rs`, no new dependency).
 
 ## Upgrading without downtime
 
@@ -41,17 +54,22 @@ peregrine upgrade             # install the newest release, replace the managed 
 1. reads the newest release tag from `peregrine.rantai.dev`, falling back to GitHub
    (`--version vX.Y.Z` pins one; `--base-url`/`PEREGRINE_RELEASE_BASE` and
    `PEREGRINE_RELEASE_LATEST` point at a mirror);
-2. downloads the Linux archive and its `SHA256SUMS` (vanity host first, GitHub as the fallback),
-   verifies the checksum, extracts it, and runs the new binary with `--version` **before** touching
-   anything;
-3. copies it beside the installed binary and renames it into place, so the replacement is atomic and a
-   running server keeps serving from its already-mapped old image;
-4. if a managed server is running, starts the new binary with the same `serve` arguments and
-   `SO_REUSEPORT`, waits for its lifecycle state, and only then sends the old process `SIGTERM`.
-   The old process stops accepting, drains in-flight requests (30 s cap), and exits.
+2. downloads the platform's archive (`linux-x86_64`, `linux-aarch64`, `windows-x86_64`) and its
+   `SHA256SUMS` (vanity host first, GitHub as the fallback), verifies the checksum, extracts it,
+   and runs the new binary with `--version` **before** touching anything;
+3. copies it beside the installed binary and renames it into place, so the replacement is atomic and
+   a running server keeps serving from its already-mapped old image. On Windows a running `.exe`
+   cannot be overwritten but can be renamed, so `peregrine.exe` becomes `peregrine.exe.old` and the
+   new one takes its place; the next start removes the `.old` copy;
+4. if a managed server is running, on Linux and macOS starts the new binary with the same `serve`
+   arguments and `SO_REUSEPORT`, waits for its lifecycle state, and only then sends the old process
+   `SIGTERM`. The old process stops accepting, drains in-flight requests (30 s cap), and exits. On
+   Windows there is no `SO_REUSEPORT` and no `SIGTERM`: the old server is asked to drain through the
+   stop file first, and the new binary starts after it has exited, so a Windows upgrade has a short
+   gap rather than a zero-downtime handoff.
 
-Because both processes listen on the same port during the handoff, no connection is refused. Tested
-with 300 requests in flight across the swap: zero failures.
+On Linux and macOS both processes listen on the same port during the handoff, so no connection is
+refused. Tested with 300 requests in flight across the swap: zero failures.
 
 The running server must have been started with `--background` (which enables `SO_REUSEPORT`).
 `--reuse-port` exposes the same socket option for a foreground server; without it a replacement
@@ -63,6 +81,9 @@ managed: `upgrade` replaces the file and tells you to restart.
 `--exe PATH` to install somewhere else explicitly.
 
 ## Reloading a rebuilt binary (SIGHUP)
+
+Unix only: Windows has neither `SIGHUP` nor `SO_REUSEPORT`. There, replace the binary with
+`peregrine upgrade` or `peregrine stop` followed by `peregrine serve --background`.
 
 Rebuilding over the installed path does not change a running process. To hand off to the new binary
 without downtime:
@@ -120,4 +141,7 @@ matters, or run two units behind a reverse proxy.
 
 - One managed server per user/state directory. Run one process per model, as with llama-server.
 - The log is appended, not rotated; point `--log-file` at a logrotate-managed path for long-lived services.
-- `SO_REUSEPORT` and the background mode are Linux features; the release binaries are Linux-only.
+- `SO_REUSEPORT` and the zero-downtime handoff are Unix features; Windows uses the stop file and a
+  short restart gap instead. `--background`, `status` and `stop` exist on Linux, macOS and Windows
+  on x86-64; `upgrade` and the release archives exist on Linux today and on Windows x86-64 from the
+  release after v0.2.0.

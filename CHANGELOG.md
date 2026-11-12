@@ -24,6 +24,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Windows lifetime commands, `upgrade`, installer and release archive (roadmap S7.3)**:
+  `serve --background`, `status`, `stop` and `upgrade` work on Windows. Windows has no `SIGTERM`,
+  so `peregrine stop` writes `serve-<port>.stop` in the state directory; the server notices it
+  within about 250 ms, removes it and runs the same drain a Unix `SIGTERM` starts, and `stop` ends
+  the process with `TerminateProcess` only after the 40 s drain timeout. `status` reads the same
+  state file and checks liveness with hand-written `OpenProcess`/`GetExitCodeProcess` calls (one
+  more declaration in `crates/peregrine-core/src/win32.rs`, no new dependency); `--background`
+  starts the child with `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` and logs to the same log file
+  as Unix. `upgrade` maps Windows x86-64 to `windows-x86_64`, verifies the zip against
+  `SHA256SUMS` with `certutil`, renames the running `peregrine.exe` to `peregrine.exe.old` before
+  putting the new one in place (removed at the next start), and restarts a managed server after it
+  drains (a short gap: Windows has no `SO_REUSEPORT`). `scripts/install.ps1` is a PowerShell 5.1
+  installer (`irm … | iex`) that verifies `Get-FileHash`, installs to
+  `%LOCALAPPDATA%\Programs\peregrine`, adds that directory to the user `Path`, refuses ARM64 and
+  prints how to undo it. `release.yml` gains a `windows-2025` / `x86_64-pc-windows-msvc` job that
+  builds `peregrine-vX.Y.Z-windows-x86_64.zip` with `-C target-feature=+crt-static` (no Visual C++
+  redistributable needed), and a `workflow_dispatch` dry run that builds artefacts without
+  publishing. CI's Windows job runs the installer against the archive it just built. Windows
+  counterparts of the `SIGTERM` drain tests go through the stop file with the same assertions.
 - **NEON bodies for the 8-bit prompt kernel (S5.4d, ARM)**: `crates/peregrine-kernels/src/neon.rs`
   gains the vectorised build of the Q4_K/Q6_K/Q5_0 forms (`q8k_build_*_neon`) and the multiply on
   `sdot` (`q8k_gemm_sdot`) and `smmla` (`q8k_gemm_i8mm`), with `q8k_gemm` picking the tier's body.

@@ -212,6 +212,12 @@ struct App {
 
 /// Run the server until it is stopped. Logging must already be set up (see [`init_logging`]).
 pub async fn run(a: Args) {
+    // A stop file left by a crashed or force-killed predecessor on this port must not make this
+    // server exit the moment it starts (S7.3: Windows has no signals, so `stop` is a file).
+    #[cfg(windows)]
+    {
+        let _ = std::fs::remove_file(lifecycle::stop_path(a.port));
+    }
     // Engine options are process-wide (one thread count, one pass budget, one set of
     // kernel switches), so a default tuning profile is looked up for the first model.
     let first = &a.model[0];
@@ -535,7 +541,7 @@ pub async fn run(a: Args) {
     match serve_with_drain(
         listener,
         router,
-        shutdown_signal(a.state_file.clone(), a.log_file.clone()),
+        shutdown_signal(a.state_file.clone(), a.log_file.clone(), a.port),
         drain,
     )
     .await
@@ -706,12 +712,18 @@ async fn bind(host: &str, port: u16, reuse_port: bool) -> std::io::Result<tokio:
 /// Resolve on `Ctrl-C` or `SIGTERM`; on `SIGHUP`, re-exec the binary on disk beside this process
 /// with `SO_REUSEPORT` and drain once the replacement is listening. A handoff that fails leaves
 /// this process serving.
+///
+/// Windows has no signals: Ctrl-C arrives through `tokio`, and `peregrine stop` is the stop file
+/// in the state directory (`lifecycle::stop_path`), watched every 250 ms and removed here before
+/// the same drain a Unix `SIGTERM` starts (S7.3).
 async fn shutdown_signal(
     state_file: Option<std::path::PathBuf>,
     log_file: Option<std::path::PathBuf>,
+    port: u16,
 ) {
     #[cfg(unix)]
     {
+        let _ = port;
         use tokio::signal::unix::{signal, SignalKind};
         let mut term = match signal(SignalKind::terminate()) {
             Ok(s) => s,
@@ -799,8 +811,28 @@ async fn shutdown_signal(
     #[cfg(not(unix))]
     {
         let _ = (state_file, log_file);
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("shutdown requested; draining in-flight requests");
+        let stop = lifecycle::stop_path(port);
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        // The first tick is immediate; a stale file was removed at startup, so this only sees a
+        // request made after this server started listening.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("shutdown requested; draining in-flight requests");
+                    return;
+                }
+                _ = tick.tick() => {
+                    if stop.exists() {
+                        // Removing it before the drain lets `peregrine stop` tell a finished
+                        // request from one that was never seen.
+                        let _ = std::fs::remove_file(&stop);
+                        tracing::info!("stop requested; draining in-flight requests");
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 
