@@ -785,7 +785,9 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
     // `server-common.cpp:207-241`): a native decision model answers decisions, not text, and an
     // `openjev` file has no text generation even though it carries an LM head. A file with a
     // classifier head answers rerank or classify (S4.6b): one output with no labels is a
-    // reranker's score, several outputs or named labels are a classifier's.
+    // reranker's score, several outputs or named labels are a classifier's. One output
+    // with a label is both: converters write a dummy `LABEL_0` into a reranker's file
+    // (gte-reranker-modernbert-base), and both endpoints serve it.
     let data: Vec<Value> = s
         .models
         .iter()
@@ -794,10 +796,10 @@ async fn models(State(s): State<Arc<App>>) -> Json<Value> {
                 json!(["decisions"])
             } else if m.model.has_head() {
                 let n_out = m.model.head_width();
-                if n_out == 1 && m.model.head_labels().is_empty() {
-                    json!(["rerank"])
-                } else {
-                    json!(["classify"])
+                match (n_out, m.model.head_labels().is_empty()) {
+                    (1, true) => json!(["rerank"]),
+                    (1, false) => json!(["rerank", "classify"]),
+                    _ => json!(["classify"]),
                 }
             } else {
                 json!(["text"])
@@ -2897,7 +2899,7 @@ fn rerank_text(v: &Value, what: &str) -> Result<String, String> {
                 .find(|k| o.contains_key(**k))
             {
                 return Err(format!(
-                    "{k} is not supported by /v1/rerank: image and video input need a multimodal projector, and a bert reranker has none"
+                    "{k} is not supported by /v1/rerank: image and video input need a multimodal projector, and an encoder reranker has none"
                 ));
             }
             match o.get("text") {
@@ -2993,7 +2995,8 @@ fn parse_rerank_request(b: &Value) -> Result<RerankSpec, String> {
 ///
 /// Every (query, document) pair is one text of the batch, built by the tokenizer's pair
 /// encoding — `format_prompt_rerank`'s own rule: `[CLS] q [SEP] d` for WordPiece,
-/// `<s> q </s> d </s>` for the XLM-R vocabulary. Each pair is a head slot, so all of them
+/// `<s> q </s> d </s>` for the XLM-R vocabulary, `[CLS] q [SEP] d [SEP]` for the
+/// `modern-bert` GPT-2 one. Each pair is a head slot, so all of them
 /// share weight passes, and the answer is `cls` → activation → `cls.output` at row 0.
 /// The score is that raw logit, as llama.cpp returns it (`send_rerank`: `embd[0]`).
 async fn rerank(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) -> Response {
@@ -3016,7 +3019,7 @@ async fn rerank(State(state): State<Arc<App>>, OpenAiJson(body, _): OpenAiJson) 
     {
         return bad(
             "this file carries a \"rerank\" chat template (a generative reranker), which is not \
-             supported yet; a bert reranker is scored with its classifier head",
+             supported yet; an encoder reranker is scored with its classifier head",
         );
     }
     let spec = match parse_rerank_request(&body) {

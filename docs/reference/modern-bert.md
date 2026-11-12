@@ -24,7 +24,8 @@ transformer with two LayerNorms per block instead of BERT's post-norm layout, Ro
 instead of a learned position table, alternating local (sliding-window) and global
 attention, and a gated feed-forward. A file with a classifier head
 (`ModernBertForSequenceClassification`) carries `cls`, `cls.norm`, `cls.output` and
-`classifier.output_labels`; the head is read here but not served (see below).
+`classifier.output_labels`; S4.7b serves it on `/v1/rerank` and `/v1/classify` (see
+"The classifier head" below).
 
 ## Metadata
 
@@ -82,12 +83,16 @@ The reference files and their SHA-256:
 | `blk.N.ffn_up.weight` | `[n_embd, 2·n_ff]` | the gate's first half and the up second half |
 | `blk.N.ffn_down.weight` | `[n_ff, n_embd]` | |
 | `output_norm.weight` | `[n_embd]` | the final LayerNorm; no bias |
-| `cls.weight` / `.bias` | `[n_embd, n_embd]` / `[n_embd]` | optional classifier dense |
-| `cls.norm.weight` / `.bias` | `[n_embd]` | optional classifier LayerNorm |
-| `cls.output.weight` / `.bias` | `[n_embd, n_cls_out]` / `[n_cls_out]` | optional classifier projection |
+| `cls.weight` | `[n_embd, n_embd]` | optional classifier dense; **no bias** |
+| `cls.norm.weight` | `[n_embd]` | optional classifier LayerNorm; **no bias** |
+| `cls.output.weight` / `.bias` | `[n_embd, n_cls_out]` / `[n_cls_out]` | optional classifier projection (the weight is written 1-d when `n_cls_out = 1`) |
 
 `src/models/modern-bert.cpp:64-93` creates exactly this list, with the projections
-**without biases** and only layer 0's `attn_norm` marked `TENSOR_NOT_REQUIRED`.
+**without biases** and only layer 0's `attn_norm` marked `TENSOR_NOT_REQUIRED`. The head's
+`cls` and `cls.norm` are created weight-only (lines 92-93): for a sequence-classification
+file llama.cpp creates neither `cls.bias` nor `cls.norm.bias` — `cls_b` is created only in
+the decision-model branch (line 125), and the head norm is built with a NULL bias
+(`src/llama-graph.cpp:4205-4207`).
 Every norm has a weight and no bias: llama.cpp's `build_norm` multiplies the
 centred, scaled row by the weight alone (`src/llama-graph.cpp:1808-1821`), unlike
 the `bert` family's weight-plus-bias LayerNorm.
@@ -161,19 +166,88 @@ these three rules (`src/llama-graph.cpp:576-616`, `build_attn_inp_no_cache` at
 endpoint L2-normalises after pooling (`common_embd_normalize(..., 2)`).
 
 A classifier file has `classifier.output_labels` (the labels), `cls` (a dense
-`n_embd × n_embd`), `cls.norm`, and `cls.output` (`n_embd × n_labels`). llama.cpp
-builds it in `build_cls_out` for `pooling_type = RANK` only:
-pool (the file's `classifier.pooling_type`, mean by default —
-`src/models/modern-bert.cpp:26-29`), then `cls` + bias, the classifier activation
-(`classifier.activation`; the default is `GELU_ERF`, lines 31-35), then `cls.norm` +
-bias, then `cls.output` + bias (`src/llama-graph.cpp:4140-4230`). The order is
-Transformers' `ModernBertPredictionHead`: dense → activation → norm → decoder.
+`n_embd × n_embd`), `cls.norm`, and `cls.output` (`n_embd × n_labels`). The head is
+built in `build_pooling`'s `LLAMA_POOLING_TYPE_RANK` branch, which the server selects
+with `--reranking` (`src/llama-graph.cpp:4185-4220`, reached from
+`src/llama-model.cpp:3453`). S4.7b's transcription is below; a classifier file that
+declares a `pooling_type` still serves embeddings from the encoder, exactly as
+llama.cpp serves `/v1/embeddings` from it.
 
-Peregrine reads and shape-checks these tensors and says once at load that the head
-is not served: `classify` and `rerank` arrive with the BERT family's head (S4.6b,
-not on `main` when this step landed). A classifier file that declares a
-`pooling_type` still serves embeddings from the encoder, exactly as llama.cpp
-serves `/v1/embeddings` from it.
+### The classifier head (S4.7b)
+
+This is `build_pooling`'s `LLAMA_POOLING_TYPE_RANK` branch as it runs for this family
+(`src/llama-graph.cpp:4185-4220`), every step read from that source:
+
+```text
+h = mean(x)                      // the text's output_norm rows, or row 0
+h = cls.weight · h               // no bias
+h = act_cls(h)                   // classifier.activation, GELU_ERF when absent
+h = layer_norm(h, cls.norm.w)    // weight only, no bias; skipped when absent
+y = cls.output.weight · h + cls.output.bias
+score = y[0]                     // llama.cpp's /v1/rerank reads embd[0]
+```
+
+1. **The matrix the branch runs under.** The switch is on the *request's* pooling type,
+   `cparams.pooling_type == LLAMA_POOLING_TYPE_RANK`, which `llama-server --reranking`
+   sets. `<arch>.pooling_type` — the embeddings key read at
+   `src/llama-model.cpp:1473` — has no part in the head. So the head is a property of
+   the tensors, exactly as it is for the `bert` family (design §8).
+2. **The pooled row.** `hparams.pooling_type_cls` is `classifier.pooling_type`; when the
+   file has no such key it is set to `MEAN` for this family
+   (`src/models/modern-bert.cpp:26-28`). `build_pooling` takes the mean when the value is
+   `MEAN` and **row 0 otherwise** — there is no other branch
+   (`src/llama-graph.cpp:4187-4194`). The mean is over *every* token of the sequence,
+   specials included: `build_inp_mean` fills a one-hot row per sequence with `1/n`
+   (`src/llama-graph.cpp:389-429`) and the graph computes
+   `transpose(x) · mean` (`4187-4191`).
+3. **The dense layer and its bias.** `if (cls) { cur = ggml_mul_mat(cls, cur); if (cls_b)
+   add }` (`4199-4202`). For a sequence-classification `modern-bert` file `cls_b` is
+   **null**: `llama_model_modern_bert::load_arch_tensors` creates `cls` weight-only
+   (`src/models/modern-bert.cpp:92`), and creates `cls_b` only in the decision-model
+   branch (line 125). A file that carries a `cls.bias` tensor is therefore read without
+   it, and so is a `cls.norm.bias`: the head norm is built with a NULL bias
+   (`build_norm(cur, cls_norm, NULL, LLM_NORM, -1)`, `4205-4207`). The converters do not
+   write either for this family unless `classifier_bias` / `norm_bias` are on, and
+   Transformers' `ModernBertConfig` defaults both to false.
+4. **The activation.** `ggml_unary(cur, hparams.act_cls)` (`4204`). `act_cls` comes from
+   `classifier.activation` through `LLM_CLS_ACT_TYPES_FROM_STRING` — `gelu` is
+   `GGML_UNARY_OP_GELU_ERF`, `silu`, `tanh` (`src/llama-model.cpp:1209-1213`) — and when
+   the key is absent this family's loader sets `GGML_UNARY_OP_GELU_ERF`
+   (`src/models/modern-bert.cpp:31-35`). Note the difference from `bert`: that family's
+   default is TANH.
+5. **The head norm.** Inside the same `if (cls)`, after the activation:
+   `build_norm(cur, cls_norm, NULL, LLM_NORM, -1)` (`4205-4207`) — the same weight-less
+   LayerNorm the encoder's blocks use (above).
+6. **The projection.** `if (cls_out) { cur = ggml_mul_mat(cls_out, cur); if (cls_out_b)
+   add }` (`4215-4220`). `cls_out` is `{n_embd, n_cls_out}` (`src/models/modern-bert.cpp:90`);
+   `n_cls_out` is the number of `classifier.output_labels`, or 1 when the file has none
+   (`src/llama-model.cpp:1635-1638`, default at `src/llama-hparams.h:271`). The
+   converters write the weight 1-d when that number is 1.
+7. **No softmax.** The only softmax in the branch is for Qwen 3's generative reranker
+   (`4222-4225`); a `modern-bert` score is the raw logit. `/v1/rerank`'s
+   `relevance_score` is that number (`send_rerank` reads `embd[0]`,
+   `tools/server/server-context.cpp:2599-2627`), and `/v1/classify`'s probabilities are
+   the caller's softmax over the outputs.
+
+The order is Transformers' `ModernBertPredictionHead`: dense → activation → norm →
+decoder, which is also what the branch computes.
+
+A **decision model** (`ModernBertDecisionModel`: Laya, Julia-1) appends scorer blocks to
+`block_count` (`modern-bert.decision.block_count`) and then applies `cls`/`cls.norm` with
+biases (`src/models/modern-bert.cpp:38-52`, `125-131`, `build_decision_head` at
+`248-310`). That is S4.12; this step refuses such a file by name at load rather than
+reading its head blocks as encoder layers.
+
+The **pair** llama.cpp scores is built by `format_prompt_rerank` when the file has no
+`rerank` chat template (`tools/server/server-common.cpp:2019-2046`): both halves are
+tokenized with `add_special = false` and `parse_special = false` (`2021-2022`), then
+`[bos] q [eos] [sep] d [eos]`, each of the three specials present only when the file's
+`add_bos` / `add_eos` / `add_sep` says so, and `eos` falling back to `sep` when the file
+has no EOS id (`2024-2041`). For the gte reranker (`add_sep = false`, BOS `[CLS]`, EOS
+`[SEP]`) that is `[CLS] q [SEP] d [SEP]`. `parse_special = false` matters for this
+vocabulary: `[CLS]` or `<|endoftext|>` inside a query is ordinary text, while the
+`[unused*]` and `|||EMAIL_ADDRESS|||` user-defined tokens are still matched, as
+`tokenizer_st_partition` does (`src/llama-vocab.cpp:3645-3658`).
 
 ### The tokenizer
 
@@ -186,14 +260,15 @@ llama.cpp maps that pre-tokenizer to `LLAMA_VOCAB_PRE_TYPE_GPT2`
 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
 ```
 
-The vocabulary is byte-level BPE with `<bos>`/`<eos>` specials; the converter
-writes `add_bos_token`, `add_eos_token` and `add_sep_token` true
-(`conversion/bert.py:604-607`), and llama.cpp's BPE tokenizer adds the BOS and the
-EOS around the text (`src/llama-vocab.cpp:3891-3900`). `add_sep` is stored but
-never used by `tokenize`, so a text is exactly `<bos> … <eos>`; there is no pair
-path in llama.cpp's tokenizer (the converter's `add_sep_token` is not a pair
-separator). Peregrine's new `PreType::Gpt2` is that pattern, and its ids match
-llama.cpp on all 200 gate texts for both files.
+The vocabulary is byte-level BPE with `<bos>`/`<eos>` specials (gte's conversion spells
+them `[CLS]`/`[SEP]`, ids 50281/50282); the converter writes `add_bos_token`,
+`add_eos_token` and `add_sep_token` true (`conversion/bert.py:604-607`), and llama.cpp's
+BPE tokenizer adds the BOS and the EOS around one text (`src/llama-vocab.cpp:3891-3900`).
+`add_sep` is stored and used only by the rerank pair path above, so a text is
+`[CLS] … [SEP]` and a pair is `[CLS] q [SEP] [SEP] d [SEP]` for a file that sets the key
+(gte-reranker's conversion sets it false: `[CLS] q [SEP] d [SEP]`). Peregrine's
+`PreType::Gpt2` is that pattern, and its ids match llama.cpp on all 200 gate texts for
+both files and on all 100 rerank pairs.
 
 mmBERT's vocabulary says `tokenizer.ggml.pre = "mmbert"`
 (`src/llama-vocab.cpp:2550`), a metaspace pre-tokenizer whose words are split in
@@ -235,7 +310,42 @@ against the F16 conversion (llama.cpp's own Q8_0: 0.9981270/0.9996284) and
 0.9999936/0.9999997. The numbers in the table are still the x86 measurement, and a
 Granite R2 Q8_0 file on ARM takes the same f32-panel route.
 
+### The classifier head (S4.7b)
+
+`gte-reranker-modernbert-base` on the 100 pairs in
+`crates/peregrine-models/tests/fixtures/modern-bert/rerank/` (36–445 tokens per pair,
+51 of them past the 128-token window; ten documents per query), 4 threads, the raw
+score's absolute difference. The F16 conversion is the full-precision reference, as
+the gate states.
+
+| Our file | Compared with | ids | mean abs | max abs | order |
+|---|---|---|---|---|---|
+| F16 | llama.cpp F16 | identical | **0.00067** | **0.00273** | 10/10 queries identical |
+| Q8_0 | llama.cpp Q8_0 | identical | 0.01141 | 0.07430 | 6/10; the four swaps are documents ≤ 2.24e-2 apart in llama.cpp's own scores |
+| Q8_0 | llama.cpp F16 (the reference) | identical | 0.02173 | 0.07970 | — |
+| llama.cpp Q8_0 | llama.cpp F16 | — | 0.02310 | 0.09370 | 5/10 |
+
+So the Q8_0 file's own head row is closer to llama.cpp's **F16** run than llama.cpp's
+Q8_0 run is, and llama.cpp's two precisions disagree on order for 5 of the 10 queries
+while Peregrine's Q8_0 and llama.cpp's Q8_0 disagree on 4. The swaps are the same
+phenomenon as the embeddings' per-text minimum: the int8 activation code flips and two
+documents whose true scores are a couple of hundredths apart trade places. The ignored
+test therefore allows a 3e-2 near-tie on the Q8_0 comparisons and 1e-2 at F16 (where
+the measured mean is 7e-4), and requires the ids and the F16 order exactly.
+
 ## Speed
+
+Rerank, `/v1/rerank`, one request with eight pairs, `gte-reranker-modernbert-base-Q8_0.gguf`,
+both engines at once on the same **shared 8-vCPU VM** (timings here are rough: other jobs
+were running), 4 threads each, five alternating runs, medians; pairs/s:
+
+| tokens per pair | llama.cpp | Peregrine | Peregrine ÷ llama.cpp |
+|---|---|---|---|
+| 128 (1016-token request) | 3.82 [3.48–3.98] | **4.35** [4.14–4.39] | 1.14 |
+| 512 (4056-token request) | 0.73 [0.73–0.74] | **0.91** [0.89–0.92] | 1.24 |
+
+The head itself is two row projections per pair and does not move these numbers; what
+does is the encoder pass, where Peregrine is ahead as it is for embeddings.
 
 `/v1/embeddings` on `gte-modernbert-base-F16.gguf` on H0 (8 vCPU Xeon E5-2680 v4,
 AVX2+FMA, **shared host**: other jobs were running), 4 threads, one engine at a
@@ -288,13 +398,36 @@ but not this family's no-bias form or its GeGLU, which are scalar today.
   added if it is `to_bits` equal to the scalar twin.
 - The family refuses a text longer than `context_length`, naming it, and the
   engine refuses chat and label requests on it (`is an embedding model …`).
-- The classifier head is read and ignored; embeddings use `pooling_type` only.
+- **The head** (S4.7b) is `ModernBertHead` in `modern_bert.rs`. The loader reads
+  `cls.weight`, `cls.norm.weight`, `cls.output.weight`, `cls.output.bias` and
+  `classifier.output_labels`, with `classifier.activation` and
+  `classifier.pooling_type`; it refuses by name a label count that disagrees with
+  `cls.output`, an activation llama.cpp does not read, labels with no projection,
+  and a `cls.norm` with nothing to apply it to, and it refuses a decision model
+  (`modern-bert.decision.block_count > 0`) by name. `cls.bias` and `cls.norm.bias`
+  are read without, exactly as llama.cpp reads them. A `Want::Head` text leaves its
+  row in `State::head_out` at `row0 * head_width()`; the read-out start is the mean
+  (the family's default) or row 0, and the two projections are one row each, so a
+  row is bit-identical alone, in any batch, at any pass size and thread count, and a
+  head pass allocates nothing. `head_width()` is `cls.output`'s rows (or `d_model`
+  for a one-layer head), and `head_labels()` is the file's list, so `/v1/rerank`,
+  `/v1/classify`, `/v1/models` and `peregrine rerank` serve the family with no
+  endpoint change. The read-out reuses the pooled row's finding: it copies the
+  `output_norm` rows into `st.x` (an exact copy) so the head's and the pooler's
+  scratch rows do not fight over `st.xb`.
+- **The rerank pair** is `format_prompt_rerank`'s: `Tokenizer::encode_pair` now
+  tokenizes a byte-level BPE pair with `parse_special = false` and assembles
+  `[bos] q [eos] [sep] d [eos]` from the file's flags. It matched llama.cpp on all
+  100 fixture pairs.
 - Tests: a synthetic `modern-bert` file (`tests/support/models.rs`) with four
-  layers, a window of 8, both rope bases different, F32 and Q8_0 variants, a
-  classifier-headed variant and the three activations; the independent scalar
-  reference (`tests/support/modern_bert_ref.rs`); the batch/thread invariance
-  matrix; the no-allocation test; server and CLI tests; one golden per pinned x86
-  tier (`tests/golden/synthetic/<tier>/modern-bert-Q8_0.golden`: scalar, AVX2 and
-  AVX-512 under SDE). The aarch64 goldens are not recorded on this x86 host.
+  layers, a window of 8, both rope bases different, F32 and Q8_0 variants, the three
+  activations and two headed variants (a rank head and a labelled one); the
+  independent scalar reference (`tests/support/modern_bert_ref.rs`, including
+  `reference_head`); the batch/thread invariance matrix; the no-allocation test;
+  server and CLI tests; one golden per pinned x86 tier for the encoder
+  (`tests/golden/synthetic/<tier>/modern-bert-Q8_0.golden`, with aarch64 ones recorded
+  on the ARM host in S4.9n) and one for the heads (`modern-bert-heads-Q8_0.golden`:
+  scalar, AVX2 and AVX-512 under SDE; no aarch64 one yet).
 - The 200-text fixtures and the ignored real-file test live in
-  `tests/fixtures/modern-bert/` and `tests/embeddings.rs`.
+  `tests/fixtures/modern-bert/` and `tests/embeddings.rs`; the 100 rerank pairs live
+  in `tests/fixtures/modern-bert/rerank/` and run from `tests/rerank_real.rs`.

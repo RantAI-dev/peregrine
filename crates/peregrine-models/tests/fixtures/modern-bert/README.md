@@ -38,3 +38,11 @@ curl -s http://127.0.0.1:PORT/v1/embeddings -H 'content-type: application/json' 
 The 195 short texts are the first 195 lines of
 `crates/peregrine-models/tests/fixtures/bert/texts.txt`; the five long ones are
 concatenations of those lines trimmed to 390, 793, 1199, 1998 and 6976 tokens.
+
+## The rerank pairs (S4.7b)
+
+`rerank/` holds 100 (query, document) pairs built from `../bert/texts.txt`, llama.cpp's own
+`format_prompt_rerank` ids and its `/v1/rerank` scores on gte-reranker-modernbert-base F16
+and Q8_0; its README lists the files, the SHAs and the commands.
+`crates/peregrine-models/tests/rerank_real.rs` runs them when the GGUF files are on the
+machine (the test is `#[ignore]`d: CI has none).

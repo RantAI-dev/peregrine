@@ -2720,7 +2720,7 @@ fn the_modern_bert_q8_0_vector_is_the_engine_int8_path() {
     );
 }
 
-/// A classifier head is read and ignored: the file still embeds with its own
+/// A classifier head is not part of the encoder: the file still embeds with its own
 /// pooling type, and the head's tensors change nothing about the vector.
 #[test]
 fn a_modern_bert_classifier_file_still_embeds() {
@@ -2732,7 +2732,7 @@ fn a_modern_bert_classifier_file_still_embeds() {
         Format::F32,
         55,
         support::models::ModernBertConfig {
-            classifier: true,
+            head: Some(support::models::ModernBertHeadConfig::default()),
             ..Default::default()
         },
     );
