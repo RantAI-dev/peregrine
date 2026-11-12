@@ -2780,6 +2780,141 @@ pub unsafe fn q8k_build_q5_0_neon(tile: &[u8], n_blk: usize, form: &mut [u8]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The attention value mix's row pair (S4.9s)
+// ---------------------------------------------------------------------------
+//
+// `attn.rs`'s `mix_f16` walks one row's positions outermost and its dimensions
+// innermost: for every key it loads the row's output, multiplies the stored half
+// by the softmax weight, adds, and stores the output back. At a two-thousand-token
+// text that reloads and re-stores the whole output row once per key, and a second
+// row sharing the same KV head reads the same V halves again. The pair body below
+// turns the loop inside out: one eight-dimension slice of both outputs stays in
+// registers while the keys walk ascending, and each stored V half-vector is
+// widened once and used by both rows.
+//
+// The arithmetic is the single-row body's, element for element: `α·o` first (when
+// α is not one), then `o + p_j·v_j` per ascending key, each a separate multiply and
+// a separate add in the same order, so no output bit can move. Only the load and
+// the widening are shared.
+
+/// `o = α·o + Σ_j p_j · v_j` for two rows over one F16 V tile: the scalar
+/// definition the NEON body is held to.
+///
+/// `p0` and `p1` must be the same length; `v` holds at least `p0.len() · hd`
+/// halves.
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+pub fn mix_f16_pair_scalar(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    v: &[u8],
+    hd: usize,
+) {
+    assert_eq!(p0.len(), p1.len(), "a pair mixes the same positions");
+    assert!(v.len() >= p0.len() * hd * 2, "the V tile is shorter than p");
+    if alpha0 != 1.0 {
+        o0[..hd].iter_mut().for_each(|x| *x *= alpha0);
+    }
+    if alpha1 != 1.0 {
+        o1[..hd].iter_mut().for_each(|x| *x *= alpha1);
+    }
+    for (j, (&w0, &w1)) in p0.iter().zip(p1).enumerate() {
+        let row = j * hd;
+        for d in 0..hd {
+            let h = u16::from_le_bytes([v[(row + d) * 2], v[(row + d) * 2 + 1]]);
+            let value = f16(h);
+            o0[d] += w0 * value;
+            o1[d] += w1 * value;
+        }
+    }
+}
+
+/// The NEON body of [`mix_f16_pair_scalar`]: both rows' outputs stay in
+/// registers eight dimensions at a time while the keys walk ascending, and each
+/// stored V half-vector is loaded and widened once for both rows.
+///
+/// # Safety
+/// The CPU must have NEON; `p0` and `p1` must be the same length, `o0` and `o1`
+/// at least `hd` floats, and `v` at least `p0.len() · hd · 2` bytes.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn mix_f16_pair(
+    o0: &mut [f32],
+    o1: &mut [f32],
+    alpha0: f32,
+    alpha1: f32,
+    p0: &[f32],
+    p1: &[f32],
+    v: &[u8],
+    hd: usize,
+) {
+    use std::arch::aarch64::*;
+    assert_eq!(p0.len(), p1.len(), "a pair mixes the same positions");
+    assert!(v.len() >= p0.len() * hd * 2, "the V tile is shorter than p");
+    assert!(
+        o0.len() >= hd && o1.len() >= hd,
+        "an output row is shorter than hd"
+    );
+    if alpha0 != 1.0 {
+        for d in 0..hd {
+            *o0.get_unchecked_mut(d) *= alpha0;
+        }
+    }
+    if alpha1 != 1.0 {
+        for d in 0..hd {
+            *o1.get_unchecked_mut(d) *= alpha1;
+        }
+    }
+    let vp = v.as_ptr();
+    let mut d = 0;
+    while d + 8 <= hd {
+        let mut a0 = [
+            vld1q_f32(o0.as_ptr().add(d)),
+            vld1q_f32(o0.as_ptr().add(d + 4)),
+        ];
+        let mut a1 = [
+            vld1q_f32(o1.as_ptr().add(d)),
+            vld1q_f32(o1.as_ptr().add(d + 4)),
+        ];
+        for (j, (&w0, &w1)) in p0.iter().zip(p1).enumerate() {
+            let at = (j * hd + d) * 2;
+            let v0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at) as *const u16)));
+            let v1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(at + 8) as *const u16)));
+            let wv0 = vdupq_n_f32(w0);
+            a0[0] = vaddq_f32(a0[0], vmulq_f32(wv0, v0));
+            a0[1] = vaddq_f32(a0[1], vmulq_f32(wv0, v1));
+            let wv1 = vdupq_n_f32(w1);
+            a1[0] = vaddq_f32(a1[0], vmulq_f32(wv1, v0));
+            a1[1] = vaddq_f32(a1[1], vmulq_f32(wv1, v1));
+        }
+        vst1q_f32(o0.as_mut_ptr().add(d), a0[0]);
+        vst1q_f32(o0.as_mut_ptr().add(d + 4), a0[1]);
+        vst1q_f32(o1.as_mut_ptr().add(d), a1[0]);
+        vst1q_f32(o1.as_mut_ptr().add(d + 4), a1[1]);
+        d += 8;
+    }
+    while d < hd {
+        let mut x0 = *o0.get_unchecked(d);
+        let mut x1 = *o1.get_unchecked(d);
+        for (j, (&w0, &w1)) in p0.iter().zip(p1).enumerate() {
+            let at = (j * hd + d) * 2;
+            let h = u16::from_le_bytes([*vp.add(at), *vp.add(at + 1)]);
+            let value = f16(h);
+            x0 += w0 * value;
+            x1 += w1 * value;
+        }
+        *o0.get_unchecked_mut(d) = x0;
+        *o1.get_unchecked_mut(d) = x1;
+        d += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

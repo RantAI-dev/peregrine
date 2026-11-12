@@ -1,0 +1,95 @@
+{
+ "qwen3-embed-0.6b-f16": {
+  "path": "~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-f16.gguf",
+  "pooling": "last",
+  "ctx": 2048,
+  "cells": {
+   "16": {
+    "texts": 1,
+    "tokens_per_text": 16,
+    "peregrine": [
+     14.217,
+     16.564,
+     9.362
+    ],
+    "llama.cpp": [
+     5.43,
+     4.953,
+     3.363
+    ],
+    "peregrine_median": 14.217,
+    "llama_median": 4.953,
+    "ratio": 2.87,
+    "peregrine_spread_pct": 50.66,
+    "llama_spread_pct": 41.73
+   },
+   "128": {
+    "texts": 1,
+    "tokens_per_text": 247,
+    "peregrine": [
+     1.108,
+     1.274,
+     1.86
+    ],
+    "llama.cpp": [
+     1.461,
+     1.446,
+     1.287
+    ],
+    "peregrine_median": 1.274,
+    "llama_median": 1.446,
+    "ratio": 0.881,
+    "peregrine_spread_pct": 59.03,
+    "llama_spread_pct": 12.03
+   },
+   "512": {
+    "texts": 1,
+    "tokens_per_text": 863,
+    "peregrine": [
+     0.237,
+     0.345,
+     0.347
+    ],
+    "llama.cpp": [
+     0.394,
+     0.367,
+     0.35
+    ],
+    "peregrine_median": 0.345,
+    "llama_median": 0.367,
+    "ratio": 0.94,
+    "peregrine_spread_pct": 31.88,
+    "llama_spread_pct": 11.99
+   },
+   "2000": {
+    "texts": 1,
+    "tokens_per_text": 2000,
+    "peregrine": [
+     0.11,
+     0.122,
+     0.125
+    ],
+    "llama.cpp": [
+     0.149,
+     0.149,
+     0.146
+    ],
+    "peregrine_median": 0.122,
+    "llama_median": 0.149,
+    "ratio": 0.819,
+    "peregrine_spread_pct": 12.3,
+    "llama_spread_pct": 2.01
+   }
+  },
+  "peregrine": {
+   "cmd": "~/peregrine/target/release/peregrine serve -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-f16.gguf --host 127.0.0.1 --port 18401 -t 10 -c 2048 --slots 32 --no-profile --opt EMBED_CACHE_MB=0",
+   "version": [
+    "peregrine 0.2.0"
+   ]
+  },
+  "llama.cpp": {
+   "cmd": "~/.cache/peregrine-bench/llama.cpp-v0.9.0/build/bin/llama-server -m ~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-f16.gguf --embedding --pooling last -t 10 -c 65792 -b 2048 -ub 2048 -np 32 -fa auto --host 127.0.0.1 --port 18402",
+   "version": []
+  }
+ }
+}
