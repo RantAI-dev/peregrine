@@ -163,7 +163,10 @@ macOS on Apple Silicon is a released platform in this step; the bar in §1 is me
   `peregrine-vX.Y.Z-macos-aarch64.tar.gz`, and `SHA256SUMS` is written with `shasum -a 256` because
   macOS has no `sha256sum`. A manual start is a dry run (`workflow_dispatch` with `dry_run=true`):
   the build jobs upload their archives as workflow artefacts and the publish job is guarded on a
-  tag push, so it cannot run. The binary is ad-hoc signed, not notarised (§7).
+  tag push, so it cannot run. The binary is ad-hoc signed, not notarised (§7). The dry run on
+  `macos-15` produced `peregrine-v0.2.0-macos-aarch64.tar.gz` (2,717,446 bytes, SHA-256
+  `6fca9591…e17b0`), and the installer installed that artefact on the runner and ran
+  `peregrine --version` and `peregrine tier` (`aarch64-neon-dotprod`).
 - **Installer.** `scripts/install.sh` accepts Darwin on arm64 (asset `macos-aarch64`), refuses
   Darwin on x86-64 with the build-from-source line, and uses `sha256sum` where it exists and
   `shasum -a 256` otherwise; the Linux paths are unchanged. `scripts/install-test.sh` exercises all
@@ -177,14 +180,21 @@ macOS on Apple Silicon is a released platform in this step; the bar in §1 is me
   `hw.physicalcpu`, then to `available_parallelism`, and is clamped to the CPUs the process may run
   on. The default decode width, the narrow decode pool, the prefill-chunk default, calibration and
   `tune` all use it; an explicit width still wins. A macOS-only unit test prints both counts and
-  checks the performance-core count is between 1 and `available_parallelism`.
+  checks the performance-core count is between 1 and `available_parallelism`. On the `macos-15`
+  runner the two counts are both 3 (`hw.perflevel0.physicalcpu = hw.physicalcpu = hw.ncpu = 3`): a
+  three-core VM with no efficiency cores, so the check is of the API, not of a mixed-chip default.
 - **Goldens.** The synthetic set for the runner's tier is recorded on `macos-15` and committed
-  (`tests/golden/synthetic/<tier>-macos/`, `tests/fixtures/session/<tier>-macos.txt`).
-  `.github/workflows/record-goldens.yml` is the permanent, manually started recorder: it runs the
-  suite with `PEREGRINE_GOLDEN=record` and `PEREGRINE_SESSION_FIXTURE=record`, runs it again without
-  the switch to prove the values reproduce, counts the skip lines before and after, and uploads the
-  changed files. Real-model goldens still need a Mac with model files; until one exists they are
-  skipped there, as §3 says.
+  (`tests/golden/synthetic/aarch64-neon-dotprod-macos/`, 58 files, and
+  `tests/fixtures/session/aarch64-neon-dotprod-macos.txt`). Before recording, the five golden
+  suites printed 52 "no golden for tier" skips on the runner; after committing the set and running
+  again without `PEREGRINE_GOLDEN`, 0. `.github/workflows/record-goldens.yml` is the permanent,
+  manually started recorder: it runs the suite with `PEREGRINE_GOLDEN=record` and
+  `PEREGRINE_SESSION_FIXTURE=record`, runs it again without the switch to prove the values
+  reproduce, counts the skip lines before and after, and uploads the changed files. Real-model
+  goldens still need a Mac with model files; until one exists they are skipped there, as §3 says.
+  (The calibration test's golden name was `llama-q8_0`, which on macOS's case-insensitive
+  filesystem aliased the dense test's `llama-Q8_0` golden for a different seed; it is
+  `llama-calibration-q8_0` now, so the collision cannot come back.)
 - **Docs.** `docs/quickstart.md` has the macOS section (install line, quarantine, cache location,
   thread choice), `README.md` names the platform, and `docs/dev/releasing.md` has the archive and the
   dry-run command.
