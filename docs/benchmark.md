@@ -361,8 +361,8 @@ interleaved rounds, `pairs/s` (Peregrine ÷ llama.cpp, above 1.00 is Peregrine a
 | 8 | 7.41 | 5.39 | **1.38×** |
 | 32 | 7.19 | 5.31 | **1.35×** |
 
-The Bluefin table above is the shared development VM; on the quiet ARM host Peregrine is 35–38%
-ahead at 123-token pairs too. Full details:
+The table above is bluefin (AVX2, 4 threads); on the ARM host Peregrine is 35–38%
+ahead at 124–128-token pairs too. Full details:
 [`spark-arm-2026-11-12-embeddings-cache-off`](../benchmarks/results/spark-arm-2026-11-12-embeddings-cache-off/README.md).
 
 ## Task accuracy and decoding invariance
