@@ -437,6 +437,7 @@ impl Model {
                     "gemma3" => Some("arch-gemma3"),
                     "gemma-embedding" => Some("arch-gemma-embedding"),
                     "nomic-bert" => Some("arch-nomic-bert"),
+                    "jina-bert-v2" => Some("arch-jina-bert"),
                     "phi3" => Some("arch-phi3"),
                     "mistral3" => Some("arch-mistral3"),
                     _ => None,

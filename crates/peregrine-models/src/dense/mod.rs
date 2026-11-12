@@ -817,6 +817,7 @@ impl Dense {
                     &mut st.xb,
                     &spans,
                     None,
+                    None,
                     kq_scale,
                     &mut st.attn.bidir,
                     pool,
