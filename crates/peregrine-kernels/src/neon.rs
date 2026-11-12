@@ -2188,6 +2188,598 @@ pub unsafe fn dot_batch(fmt: Format, w: &[u8], acts: &[QuantAct], out: &mut [f32
     }
 }
 
+// ---------------------------------------------------------------------------
+// The 8-bit prompt form (S5.4d): the NEON bodies of the build and the multiply
+// ---------------------------------------------------------------------------
+//
+// `crate::kq8` defines the form and its scalar twin; these are the aarch64 bodies
+// of both, asserted bit for bit equal to the twin at every width. The arithmetic
+// is the fork's (`docs/design/s5.4-fast-prompt.md` §2):
+//
+//   * build: the block's 256 weights as f32 with the format's own formula, the
+//     largest magnitude, `dq = m/127`, `id = 1/dq`, `round_to_nearest_even(w·id)`;
+//   * multiply: `sdot` (or `smmla`) over the signed codes, one `d·dk` multiply and
+//     one fused multiply-add per (row, super-block).
+//
+// The form stores `code + 128` so that x86's `vpdpbusd` can take the weights as
+// its unsigned operand. `sdot` and `smmla` are signed, so this file undoes the
+// bias with one `eor 0x80` per 16-byte load and computes `Σ code·a` directly; the
+// float epilogue is then the twin's own expression in its own order:
+// `x = d·dk`, `acc = (s as f32).mul_add(x, acc)`. The integer sums are exact in
+// any grouping, so the bias and the grouping cannot move a bit.
+
+/// The eight signed codes of one row's eight-weight group, with the form's +128
+/// bias undone (stored `(code + 128) as u8`, XOR 0x80, reinterpreted signed).
+#[inline(always)]
+unsafe fn q8k_codes(p: *const u8) -> int8x16_t {
+    let stored = vld1q_u8(p);
+    vreinterpretq_s8_u8(veorq_u8(stored, vdupq_n_u8(0x80)))
+}
+
+/// The eight rows' f32 scales of one super-block of the form (the form stores
+/// them as f32, unlike the file's f16 tile scales).
+#[inline(always)]
+unsafe fn q8k_scales(t: &[u8]) -> [float32x4_t; 2] {
+    let p = t.as_ptr().add(crate::kq8::Q8K_D) as *const f32;
+    [vld1q_f32(p), vld1q_f32(p.add(4))]
+}
+
+/// One super-block of the 8-bit form against `N` activation rows, on `sdot`.
+///
+/// The form is eight output rows interleaved per super-block; a 16-byte load is
+/// two rows of eight codes, which is one `sdot` operand. The activation's eight
+/// codes for a row are duplicated to the operand's other half, so the four lanes
+/// are `[r0 low, r0 high, r1 low, r1 high]` and [`rows_of`] folds them to eight
+/// rows. All 32 groups accumulate into one exact int32 sum per row; the epilogue
+/// is the twin's.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn q8k_sb_sdot<const N: usize>(
+    t: &[u8],
+    n_sb: usize,
+    acts: &KqActs,
+    sb: usize,
+    row0: usize,
+    facc: &mut [[float32x4_t; 2]; N],
+) {
+    let mut acc = [[vdupq_n_s32(0); 4]; N];
+    for g in 0..crate::kq8::Q8K_GROUPS {
+        let base = t.as_ptr().add(g * 64);
+        let c0 = q8k_codes(base);
+        let c1 = q8k_codes(base.add(16));
+        let c2 = q8k_codes(base.add(32));
+        let c3 = q8k_codes(base.add(48));
+        for u in 0..N {
+            let row = row0 + u;
+            let ag = row / ACT_GROUP;
+            let at = ag * n_sb * 1024 + sb * 1024 + g * 32 + (row % ACT_GROUP) * 8;
+            let a = vld1_s8(acts.q.as_ptr().add(at));
+            let av = vcombine_s8(a, a);
+            acc[u][0] = sdot(acc[u][0], c0, av);
+            acc[u][1] = sdot(acc[u][1], c1, av);
+            acc[u][2] = sdot(acc[u][2], c2, av);
+            acc[u][3] = sdot(acc[u][3], c3, av);
+        }
+    }
+    let dv = q8k_scales(t);
+    for u in 0..N {
+        let row = row0 + u;
+        let at = ((row / ACT_GROUP) * n_sb + sb) * ACT_GROUP + row % ACT_GROUP;
+        let dk = vdupq_n_f32(acts.d[at]);
+        let s = rows_of(&acc[u]);
+        for h in 0..2 {
+            let x = vmulq_f32(dv[h], dk);
+            facc[u][h] = vfmaq_f32(facc[u][h], vcvtq_f32_s32(s[h]), x);
+        }
+    }
+}
+
+/// Eight output rows of an 8-bit form against `N` activation rows, on `sdot`.
+#[inline]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn q8k_group_sdot<const N: usize>(
+    form: &[u8],
+    n_sb: usize,
+    acts: &KqActs,
+    row0: usize,
+    out: &mut [f32],
+) {
+    assert!((1..=4).contains(&N), "one to four activation rows");
+    assert!(
+        out.len() >= N * ROWS,
+        "the output holds eight rows per activation"
+    );
+    let mut facc = [[vdupq_n_f32(0.0); 2]; N];
+    for sb in 0..n_sb {
+        let t = &form[sb * crate::kq8::Q8K_SIZE..];
+        q8k_sb_sdot::<N>(t, n_sb, acts, sb, row0, &mut facc);
+    }
+    for u in 0..N {
+        vst1q_f32(out.as_mut_ptr().add(u * ROWS), facc[u][0]);
+        vst1q_f32(out.as_mut_ptr().add(u * ROWS + 4), facc[u][1]);
+    }
+}
+
+// Test-only counts of the two 8-bit bodies' calls, so the dispatch test can see
+// which one the tier's entry point takes. `thread_local` keeps a concurrently
+// running test out of the count.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static Q8K_SDOT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static Q8K_I8MM_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Eight output rows of an 8-bit form against a batch of activations, on `sdot`.
+///
+/// # Safety
+/// The CPU must have `asimddp`; the form must hold `n_sb` super-blocks, the
+/// activation at least as many and at least `nb` rows, and `out` `nb · 8` floats.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn q8k_gemm_sdot(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    #[cfg(test)]
+    Q8K_SDOT_CALLS.with(|c| c.set(c.get() + 1));
+    assert!(
+        form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+        "the form holds fewer than n_sb super-blocks"
+    );
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        acts.super_blocks() >= n_sb,
+        "the activation is shorter than the weights"
+    );
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let mut b0 = 0;
+    while nb - b0 >= ACT_GROUP {
+        q8k_group_sdot::<4>(form, n_sb, acts, b0, &mut out[b0 * ROWS..]);
+        b0 += ACT_GROUP;
+    }
+    match nb - b0 {
+        3 => q8k_group_sdot::<3>(form, n_sb, acts, b0, &mut out[b0 * ROWS..]),
+        2 => q8k_group_sdot::<2>(form, n_sb, acts, b0, &mut out[b0 * ROWS..]),
+        1 => q8k_group_sdot::<1>(form, n_sb, acts, b0, &mut out[b0 * ROWS..]),
+        _ => {}
+    }
+}
+
+/// Eight output rows of an 8-bit form against four activation rows (two pairs)
+/// on `smmla`, folded onto `facc[activation pair][row pair]`.
+///
+/// The form's window — two output rows of eight codes — is `smmla`'s first
+/// operand as it stands (after the bias is undone), and two activation rows'
+/// eight codes joined are its second. One instruction forms the 32 products of
+/// two output rows by two activations, and four cover the eight output rows. The
+/// 32 groups accumulate into one exact int32 sum per (row pair, activation pair);
+/// the fold is the twin's, super-block by super-block in the form's order, so a
+/// row is bit-identical to the `sdot` body.
+#[inline]
+#[target_feature(enable = "neon,i8mm")]
+unsafe fn q8k_group_i8mm(form: &[u8], n_sb: usize, acts: &KqActs, b0: usize, out: &mut [f32]) {
+    assert!(b0 % ACT_GROUP == 0, "an i8mm group starts at four rows");
+    // [activation pair][row pair]; the lanes are [r0·a0, r0·a1, r1·a0, r1·a1].
+    let mut facc = [[vdupq_n_f32(0.0); 4]; 2];
+    for sb in 0..n_sb {
+        let t = &form[sb * crate::kq8::Q8K_SIZE..];
+        let dv = q8k_scales(t);
+        let mut d8 = [0.0f32; 8];
+        vst1q_f32(d8.as_mut_ptr(), dv[0]);
+        vst1q_f32(d8.as_mut_ptr().add(4), dv[1]);
+        let mut acc = [[vdupq_n_s32(0); 4]; 2];
+        for g in 0..crate::kq8::Q8K_GROUPS {
+            let base = t.as_ptr().add(g * 64);
+            let codes = [
+                q8k_codes(base),
+                q8k_codes(base.add(16)),
+                q8k_codes(base.add(32)),
+                q8k_codes(base.add(48)),
+            ];
+            for q in 0..2 {
+                let a0 = b0 + 2 * q;
+                let at = (a0 / ACT_GROUP) * n_sb * 1024 + sb * 1024 + g * 32 + (a0 % ACT_GROUP) * 8;
+                let lo = vld1_s8(acts.q.as_ptr().add(at));
+                let hi = vld1_s8(acts.q.as_ptr().add(at + 8));
+                let bv = vcombine_s8(lo, hi);
+                for p in 0..4 {
+                    acc[q][p] = smmla(acc[q][p], codes[p], bv);
+                }
+            }
+        }
+        for q in 0..2 {
+            let a0 = b0 + 2 * q;
+            let a1 = a0 + 1;
+            let at0 = ((a0 / ACT_GROUP) * n_sb + sb) * ACT_GROUP + a0 % ACT_GROUP;
+            let at1 = ((a1 / ACT_GROUP) * n_sb + sb) * ACT_GROUP + a1 % ACT_GROUP;
+            let dk = pair_f32(acts.d[at0], acts.d[at1]);
+            for p in 0..4 {
+                // The lanes are [row 2p · a0, row 2p · a1, row 2p+1 · a0, row 2p+1 · a1].
+                let dp = quad_f32(d8[2 * p], d8[2 * p + 1]);
+                let x = vmulq_f32(dp, dk);
+                facc[q][p] = vfmaq_f32(facc[q][p], vcvtq_f32_s32(acc[q][p]), x);
+            }
+        }
+    }
+    for q in 0..2 {
+        for p in 0..4 {
+            let mut lanes = [0.0f32; 4];
+            vst1q_f32(lanes.as_mut_ptr(), facc[q][p]);
+            let a = 2 * q;
+            out[a * ROWS + 2 * p] = lanes[0];
+            out[(a + 1) * ROWS + 2 * p] = lanes[1];
+            out[a * ROWS + 2 * p + 1] = lanes[2];
+            out[(a + 1) * ROWS + 2 * p + 1] = lanes[3];
+        }
+    }
+}
+
+/// Eight output rows of an 8-bit form against a batch of activations, on `smmla`
+/// for whole groups of four and on the `sdot` body for the 1–3-row tail.
+///
+/// # Safety
+/// The CPU must have `asimd`, `asimddp` and `i8mm`; the form must hold `n_sb`
+/// super-blocks, the activation at least as many and at least `nb` rows, and
+/// `out` `nb · 8` floats.
+#[target_feature(enable = "neon,i8mm")]
+pub unsafe fn q8k_gemm_i8mm(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    #[cfg(test)]
+    Q8K_I8MM_CALLS.with(|c| c.set(c.get() + 1));
+    assert!(
+        form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+        "the form holds fewer than n_sb super-blocks"
+    );
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        acts.super_blocks() >= n_sb,
+        "the activation is shorter than the weights"
+    );
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    let mut b0 = 0;
+    while nb - b0 >= ACT_GROUP {
+        q8k_group_i8mm(form, n_sb, acts, b0, &mut out[b0 * ROWS..]);
+        b0 += ACT_GROUP;
+    }
+    match nb - b0 {
+        3 => q8k_group_sdot::<3>(form, n_sb, acts, b0, &mut out[b0 * ROWS..]),
+        2 => q8k_group_sdot::<2>(form, n_sb, acts, b0, &mut out[b0 * ROWS..]),
+        1 => q8k_group_sdot::<1>(form, n_sb, acts, b0, &mut out[b0 * ROWS..]),
+        _ => {}
+    }
+}
+
+/// Eight output rows of an 8-bit form against a batch of activations, on the
+/// widest body the CPU tier allows: `smmla` on `neon-i8mm`, `sdot` on
+/// `neon-dotprod`, and the scalar twin on `neon` or `scalar`.
+///
+/// This is the tier entry point the S5.4d tests call; nothing in the engine
+/// dispatches it yet (the option arrives with S5.4b).
+///
+/// # Safety
+/// The form must hold `n_sb` super-blocks, the activation at least as many and at
+/// least `nb` rows, and `out` `nb · 8` floats. The CPU's own tier is checked
+/// before a vector body is entered.
+pub unsafe fn q8k_gemm(form: &[u8], n_sb: usize, acts: &KqActs, nb: usize, out: &mut [f32]) {
+    assert!(
+        form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+        "the form holds fewer than n_sb super-blocks"
+    );
+    assert!(nb <= acts.rows, "more activations than the buffer holds");
+    assert!(
+        acts.super_blocks() >= n_sb,
+        "the activation is shorter than the weights"
+    );
+    assert!(
+        out.len() >= nb * ROWS,
+        "the output holds fewer than eight rows per activation"
+    );
+    if crate::cpu::have_i8mm() {
+        q8k_gemm_i8mm(form, n_sb, acts, nb, out);
+    } else if crate::cpu::have_dotprod() {
+        q8k_gemm_sdot(form, n_sb, acts, nb, out);
+    } else {
+        crate::kq8::gemm_q8k(form, n_sb, acts, nb, out);
+    }
+}
+
+/// The f32 weights of one block of eight rows, built from a Q4_K or Q5_0 tile.
+///
+/// This is the twin's `q4k_weights`/`q5_0_weights` for one row, vectorised: a
+/// 32-weight sub-block is four eight-byte nibble loads, the codes widen to f32,
+/// and each weight is one fused multiply-add of an exact integer product with
+/// the sub-block's min term.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn q8k_weights_q4k(t: &[u8], row: usize, w: &mut [f32; crate::kq8::Q8K_WEIGHTS]) {
+    let d = f16_ptr(t.as_ptr().add(q4_d() + row * 2));
+    let dmin = f16_ptr(t.as_ptr().add(q4_dmin() + row * 2));
+    let dv = vdupq_n_f32(d);
+    let lo_mask = vdup_n_u8(0x0F);
+    for sub in 0..8 {
+        let ld = tile_q4k_scale(t, sub, row) as i32;
+        let lm = tile_q4k_min(t, sub, row) as i32;
+        // The fork's `vm = dmin * (-1)`, then `mm = vm * Lm`.
+        let mm = vdupq_n_f32((-dmin) * lm as f32);
+        let ldv = vdupq_n_f32(ld as f32);
+        let base = q4_qs() + (sub / 2) * 4 * 64 + row * 8;
+        let p = t.as_ptr().add(base);
+        let g0 = vld1_u8(p);
+        let g1 = vld1_u8(p.add(64));
+        let g2 = vld1_u8(p.add(128));
+        let g3 = vld1_u8(p.add(192));
+        let mut nib = [0u8; 32];
+        vst1_u8(nib.as_mut_ptr(), g0);
+        vst1_u8(nib.as_mut_ptr().add(8), g1);
+        vst1_u8(nib.as_mut_ptr().add(16), g2);
+        vst1_u8(nib.as_mut_ptr().add(24), g3);
+        for chunk in 0..4 {
+            let v = vld1_u8(nib.as_ptr().add(chunk * 8));
+            let q = if sub % 2 == 0 {
+                vand_u8(v, lo_mask)
+            } else {
+                vshr_n_u8::<4>(v)
+            };
+            let wide = vmovl_u8(q);
+            let lo = vmovl_u16(vget_low_u16(wide));
+            let hi = vmovl_u16(vget_high_u16(wide));
+            // `(q·ld) as f32` is exact: both are small integers, and so is the product.
+            let f0 = vmulq_f32(vcvtq_f32_u32(lo), ldv);
+            let f1 = vmulq_f32(vcvtq_f32_u32(hi), ldv);
+            let at = sub * 32 + chunk * 8;
+            vst1q_f32(w.as_mut_ptr().add(at), vfmaq_f32(mm, f0, dv));
+            vst1q_f32(w.as_mut_ptr().add(at + 4), vfmaq_f32(mm, f1, dv));
+        }
+    }
+}
+
+/// The 256 integer products `(q − 32)·L` of one Q6_K row, vectorised.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn q8k_products_q6k(t: &[u8], row: usize, p: &mut [i32; crate::kq8::Q8K_WEIGHTS]) {
+    for run in 0..16 {
+        let c = run / 8;
+        let g = (run % 8) / 2;
+        let hf = run % 2;
+        let nib_at = if g % 2 == 0 { 0 } else { 32 };
+        let high = g >= 2;
+        let ql = crate::kq::q6_ql() + (c * 8 + nib_at / 8 + hf * 2) * 64 + row * 8;
+        let qh = crate::kq::q6_qh() + (c * 4 + hf * 2) * 64 + row * 8;
+        let l = vcombine_u8(
+            vld1_u8(t.as_ptr().add(ql)),
+            vld1_u8(t.as_ptr().add(ql + 64)),
+        );
+        let nib = if high {
+            vandq_u8(vshrq_n_u8::<4>(l), vdupq_n_u8(0x0F))
+        } else {
+            vandq_u8(l, vdupq_n_u8(0x0F))
+        };
+        let hb = vcombine_u8(
+            vld1_u8(t.as_ptr().add(qh)),
+            vld1_u8(t.as_ptr().add(qh + 64)),
+        );
+        let shifted = vshlq_u16(vreinterpretq_u16_u8(hb), vdupq_n_s16(-((2 * g) as i16)));
+        let bits = vandq_u8(vreinterpretq_u8_u16(shifted), vdupq_n_u8(0x03));
+        let code = vaddq_u8(nib, vshlq_n_u8::<4>(bits));
+        let sc = t[crate::kq::q6_sc() + run * 8 + row] as i8 as i32;
+        let scv = vdupq_n_s32(sc);
+        let wide_lo = vmovl_u8(vget_low_u8(code));
+        let wide_hi = vmovl_u8(vget_high_u8(code));
+        let lo = vmovl_u16(vget_low_u16(wide_lo));
+        let hi = vmovl_u16(vget_high_u16(wide_lo));
+        let hi2 = vmovl_u16(vget_low_u16(wide_hi));
+        let hi3 = vmovl_u16(vget_high_u16(wide_hi));
+        let c0 = vsubq_s32(vreinterpretq_s32_u32(lo), vdupq_n_s32(32));
+        let c1 = vsubq_s32(vreinterpretq_s32_u32(hi), vdupq_n_s32(32));
+        let c2 = vsubq_s32(vreinterpretq_s32_u32(hi2), vdupq_n_s32(32));
+        let c3 = vsubq_s32(vreinterpretq_s32_u32(hi3), vdupq_n_s32(32));
+        vst1q_s32(p.as_mut_ptr().add(run * 16), vmulq_s32(c0, scv));
+        vst1q_s32(p.as_mut_ptr().add(run * 16 + 4), vmulq_s32(c1, scv));
+        vst1q_s32(p.as_mut_ptr().add(run * 16 + 8), vmulq_s32(c2, scv));
+        vst1q_s32(p.as_mut_ptr().add(run * 16 + 12), vmulq_s32(c3, scv));
+    }
+}
+
+/// The requantisation half of the build: `w`'s 256 floats, `id = 1/dq`, and the
+/// form's +128 bias, written into one (row, super-block).
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn q8k_requant_store_f32(
+    form: &mut [u8],
+    n_sb: usize,
+    sb: usize,
+    row: usize,
+    w: &[f32; crate::kq8::Q8K_WEIGHTS],
+) -> f32 {
+    assert!(
+        form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+        "the form holds fewer than n_sb super-blocks"
+    );
+    let mut vmax = vdupq_n_f32(0.0);
+    for i in 0..crate::kq8::Q8K_WEIGHTS / 4 {
+        vmax = vmaxq_f32(vmax, vabsq_f32(vld1q_f32(w.as_ptr().add(i * 4))));
+    }
+    let mut lanes = [0.0f32; 4];
+    vst1q_f32(lanes.as_mut_ptr(), vmax);
+    let m = lanes.iter().fold(0.0f32, |a, &x| a.max(x));
+    let dq = m / 127.0f32;
+    let id = if dq != 0.0 { 1.0f32 / dq } else { 0.0 };
+    let idv = vdupq_n_f32(id);
+    let bias = vdup_n_u8(0x80);
+    let out = form.as_mut_ptr();
+    for gi in 0..crate::kq8::Q8K_GROUPS {
+        let a = vcvtnq_s32_f32(vmulq_f32(vld1q_f32(w.as_ptr().add(gi * 8)), idv));
+        let b = vcvtnq_s32_f32(vmulq_f32(vld1q_f32(w.as_ptr().add(gi * 8 + 4)), idv));
+        let c = vcombine_s16(vqmovn_s32(a), vqmovn_s32(b));
+        let bytes = veor_u8(vreinterpret_u8_s8(vqmovn_s16(c)), bias);
+        vst1_u8(out.add(crate::kq8::code_at(sb, gi, row, 0)), bytes);
+    }
+    let at = crate::kq8::scale_at(sb, row);
+    std::ptr::write_unaligned(out.add(at) as *mut f32, dq);
+    dq
+}
+
+/// The 8-bit form of `n_sb` repacked Q4_K super-blocks, on NEON.
+///
+/// The weights are the fork's: `fma((q·Ld) as f32, d, (−dmin)·Lm)` per weight.
+///
+/// # Safety
+/// The tile must hold `n_sb` super-blocks and `form` `n_sb · Q8K_SIZE` bytes.
+#[target_feature(enable = "neon")]
+pub unsafe fn q8k_build_q4k_neon(tile: &[u8], n_sb: usize, form: &mut [u8]) {
+    assert!(
+        tile.len() >= n_sb * Q4K8::SIZE,
+        "the tile holds fewer than n_sb super-blocks"
+    );
+    assert!(
+        form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+        "the form holds fewer than n_sb super-blocks"
+    );
+    let mut w = [0.0f32; crate::kq8::Q8K_WEIGHTS];
+    for sb in 0..n_sb {
+        let t = &tile[sb * Q4K8::SIZE..(sb + 1) * Q4K8::SIZE];
+        for row in 0..ROWS {
+            q8k_weights_q4k(t, row, &mut w);
+            q8k_requant_store_f32(form, n_sb, sb, row, &w);
+        }
+    }
+}
+
+/// The 8-bit form of `n_sb` repacked Q6_K super-blocks, on NEON.
+///
+/// Q6_K's own arithmetic is the int16 product `(q − 32)·L`; the form's scale is
+/// `d · max|p| / 127` (or exactly `d` in the fork's exact case), so the products
+/// are what is requantised.
+///
+/// # Safety
+/// The tile must hold `n_sb` super-blocks and `form` `n_sb · Q8K_SIZE` bytes.
+#[target_feature(enable = "neon")]
+pub unsafe fn q8k_build_q6k_neon(tile: &[u8], n_sb: usize, form: &mut [u8]) {
+    assert!(
+        tile.len() >= n_sb * Q6K8::SIZE,
+        "the tile holds fewer than n_sb super-blocks"
+    );
+    assert!(
+        form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+        "the form holds fewer than n_sb super-blocks"
+    );
+    let bias = vdup_n_u8(0x80);
+    for sb in 0..n_sb {
+        let t = &tile[sb * Q6K8::SIZE..(sb + 1) * Q6K8::SIZE];
+        for row in 0..ROWS {
+            let d = f16_ptr(t.as_ptr().add(crate::kq::q6_d() + row * 2));
+            let mut p = [0i32; crate::kq8::Q8K_WEIGHTS];
+            q8k_products_q6k(t, row, &mut p);
+            // `m = max |p|`, as the twin's int loop.
+            let mut vmax = vdupq_n_s32(0);
+            for i in 0..crate::kq8::Q8K_WEIGHTS / 4 {
+                vmax = vmaxq_s32(vmax, vabsq_s32(vld1q_s32(p.as_ptr().add(i * 4))));
+            }
+            let mut lanes = [0i32; 4];
+            vst1q_s32(lanes.as_mut_ptr(), vmax);
+            let m = lanes.iter().fold(0i32, |a, &x| a.max(x));
+            let dnew = m as f32 * (1.0f32 / 127.0f32);
+            // The fork's exact case: `dnew < 1` keeps the products and the scale `d`.
+            let exact = dnew < 1.0;
+            let id = if exact {
+                0.0
+            } else if dnew.abs() > 1e-9 {
+                1.0f32 / dnew
+            } else {
+                0.0
+            };
+            let scale = if exact { d } else { d * dnew };
+            let idv = vdupq_n_f32(id);
+            let out = form.as_mut_ptr();
+            for gi in 0..crate::kq8::Q8K_GROUPS {
+                let a = vld1q_s32(p.as_ptr().add(gi * 8));
+                let b = vld1q_s32(p.as_ptr().add(gi * 8 + 4));
+                let (ca, cb) = if exact {
+                    (a, b)
+                } else {
+                    (
+                        vcvtnq_s32_f32(vmulq_f32(vcvtq_f32_s32(a), idv)),
+                        vcvtnq_s32_f32(vmulq_f32(vcvtq_f32_s32(b), idv)),
+                    )
+                };
+                let c = vcombine_s16(vqmovn_s32(ca), vqmovn_s32(cb));
+                let bytes = veor_u8(vreinterpret_u8_s8(vqmovn_s16(c)), bias);
+                vst1_u8(out.add(crate::kq8::code_at(sb, gi, row, 0)), bytes);
+            }
+            let at = crate::kq8::scale_at(sb, row);
+            std::ptr::write_unaligned(out.add(at) as *mut f32, scale);
+        }
+    }
+}
+
+/// The 8-bit form of `n_blk` repacked Q5_0 blocks, eight to a super-block, on
+/// NEON.
+///
+/// Q5_0's own formula is `w = d · (q − 16)`; the requantisation that follows is
+/// Q4_K's, so the same kernel multiplies with the result.
+///
+/// # Safety
+/// The tile must hold `n_blk` blocks and `form` the `n_blk / 8` super-blocks it
+/// needs.
+#[cfg(feature = "fmt-legacy")]
+#[target_feature(enable = "neon")]
+pub unsafe fn q8k_build_q5_0_neon(tile: &[u8], n_blk: usize, form: &mut [u8]) {
+    assert!(
+        tile.len() >= n_blk * Q5_08::SIZE,
+        "the tile holds fewer than n_blk blocks"
+    );
+    let n_sb = n_blk.div_ceil(crate::kq8::Q8K_WEIGHTS / Q5_0_WEIGHTS);
+    assert!(
+        form.len() >= n_sb * crate::kq8::Q8K_SIZE,
+        "the form holds fewer than n_blk blocks"
+    );
+    let lo_mask = vdup_n_u8(0x0F);
+    let bit = vld1_u8([1u8, 2, 4, 8, 16, 32, 64, 128].as_ptr());
+    let fifth = vdup_n_u8(16);
+    for sb in 0..n_sb {
+        let b0 = sb * 8;
+        let nb = (n_blk - b0).min(8);
+        let t = &tile[b0 * Q5_08::SIZE..(b0 + nb) * Q5_08::SIZE];
+        for row in 0..ROWS {
+            let mut w = [0.0f32; crate::kq8::Q8K_WEIGHTS];
+            for b in 0..nb {
+                let at = b * Q5_08::SIZE;
+                let d = f16_ptr(t.as_ptr().add(at + crate::kq::q5_d() + row * 2));
+                let dv = vdupq_n_f32(d);
+                for h in 0..4 {
+                    let qs = t.as_ptr().add(
+                        at + crate::kq::q5_qs()
+                            + (h % 2) * crate::kq::Q5_WINDOW
+                            + row * crate::kq::Q5_QS_ROW,
+                    );
+                    let v = vld1_u8(qs);
+                    let nib = if h < 2 {
+                        vand_u8(v, lo_mask)
+                    } else {
+                        vshr_n_u8::<4>(v)
+                    };
+                    let qh = vdup_n_u8(*t.as_ptr().add(at + crate::kq::q5_qh() + h * 8 + row));
+                    let set = vceq_u8(vand_u8(qh, bit), bit);
+                    let code = vorr_u8(nib, vand_u8(set, fifth));
+                    let wide = vmovl_u8(code);
+                    let lo = vmovl_u16(vget_low_u16(wide));
+                    let hi = vmovl_u16(vget_high_u16(wide));
+                    let c0 = vsubq_s32(vreinterpretq_s32_u32(lo), vdupq_n_s32(16));
+                    let c1 = vsubq_s32(vreinterpretq_s32_u32(hi), vdupq_n_s32(16));
+                    let at_w = b * 32 + h * 8;
+                    vst1q_f32(w.as_mut_ptr().add(at_w), vmulq_f32(vcvtq_f32_s32(c0), dv));
+                    vst1q_f32(
+                        w.as_mut_ptr().add(at_w + 4),
+                        vmulq_f32(vcvtq_f32_s32(c1), dv),
+                    );
+                }
+            }
+            q8k_requant_store_f32(form, n_sb, sb, row, &w);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3039,5 +3631,186 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The 8-bit prompt form (S5.4d): the NEON bodies against the twin
+    // -----------------------------------------------------------------------
+
+    /// The NEON build of the 8-bit form is the twin's, byte for byte, on random
+    /// tiles and on every edge tile: all-zero, one huge weight, the six-bit
+    /// limits, exact halves, Q6_K's exact case and one just outside it.
+    #[test]
+    fn the_eight_bit_build_is_bit_identical_to_the_twin_on_neon() {
+        if !crate::cpu::have_neon() {
+            return;
+        }
+        let mut rng = crate::kq8::tiles::Rng(0x8A8A_1111);
+        let q4: Vec<(Vec<u8>, usize)> = vec![
+            (crate::kq8::tiles::zero_tile(), 1),
+            (crate::kq8::tiles::huge_tile(), 1),
+            (crate::kq8::tiles::limits_tile(), 1),
+            (crate::kq8::tiles::tie_tile(), 1),
+            (crate::kq8::tiles::q4k_tile(&mut rng, 1), 1),
+            (crate::kq8::tiles::q4k_tile(&mut rng, 3), 3),
+        ];
+        for (tile, n_sb) in q4.iter() {
+            let mut want = vec![0u8; n_sb * crate::kq8::Q8K_SIZE];
+            let mut got = vec![0u8; n_sb * crate::kq8::Q8K_SIZE];
+            crate::kq8::build_q4k(tile, *n_sb, &mut want);
+            unsafe { q8k_build_q4k_neon(tile, *n_sb, &mut got) };
+            assert_eq!(want, got, "the Q4_K build differs on {n_sb} super-blocks");
+        }
+        let q6: Vec<(Vec<u8>, usize)> = vec![
+            (crate::kq8::tiles::exact_q6k_tile(), 1),
+            (crate::kq8::tiles::outside_q6k_tile(), 1),
+            (crate::kq8::tiles::q6k_tile(&mut rng, 1), 1),
+            (crate::kq8::tiles::q6k_tile(&mut rng, 3), 3),
+        ];
+        for (tile, n_sb) in q6.iter() {
+            let mut want = vec![0u8; n_sb * crate::kq8::Q8K_SIZE];
+            let mut got = vec![0u8; n_sb * crate::kq8::Q8K_SIZE];
+            crate::kq8::build_q6k(tile, *n_sb, &mut want);
+            unsafe { q8k_build_q6k_neon(tile, *n_sb, &mut got) };
+            assert_eq!(want, got, "the Q6_K build differs on {n_sb} super-blocks");
+        }
+        #[cfg(feature = "fmt-legacy")]
+        {
+            for n_blk in [8usize, 16, 21] {
+                let tile = crate::kq8::tiles::q5_08_tile(&mut rng, n_blk);
+                let n_sb = n_blk.div_ceil(8);
+                let mut want = vec![0u8; n_sb * crate::kq8::Q8K_SIZE];
+                let mut got = vec![0u8; n_sb * crate::kq8::Q8K_SIZE];
+                crate::kq8::build_q5_0(&tile, n_blk, &mut want);
+                unsafe { q8k_build_q5_0_neon(&tile, n_blk, &mut got) };
+                assert_eq!(want, got, "the Q5_0 build differs on {n_blk} blocks");
+            }
+        }
+    }
+
+    /// The NEON multiply is the twin's, bit for bit, at every activation width:
+    /// every width from one to forty, the rows either side of the four-row group,
+    /// and 63/64/65, 127/128/129 and 511/512/513.
+    ///
+    /// The Q4_K random form, the tie tile and the Q6_K block just outside the exact
+    /// case all carry codes at the int8 limits; the Q5_0 form is built from random
+    /// blocks through the same construction.
+    #[test]
+    fn the_eight_bit_kernel_is_bit_identical_to_the_twin_on_neon() {
+        if !crate::cpu::have_dotprod() {
+            return;
+        }
+        let mut rng = Rng(0x8A8A_2222);
+        let n_sb = 2;
+        let n = n_sb * 256;
+        let mut forms: Vec<Vec<u8>> = Vec::new();
+        let mut trng = crate::kq8::tiles::Rng(0x8A8A_4444);
+        let tile = crate::kq8::tiles::q4k_tile(&mut trng, n_sb);
+        let mut f = vec![0u8; crate::kq8::form_size(n_sb)];
+        crate::kq8::build_q4k(&tile, n_sb, &mut f);
+        forms.push(f);
+        let tie = crate::kq8::tiles::tie_tile();
+        let mut f = vec![0u8; crate::kq8::form_size(1)];
+        crate::kq8::build_q4k(&tie, 1, &mut f);
+        forms.push(f);
+        let out6 = crate::kq8::tiles::outside_q6k_tile();
+        let mut f = vec![0u8; crate::kq8::form_size(1)];
+        crate::kq8::build_q6k(&out6, 1, &mut f);
+        forms.push(f);
+        #[cfg(feature = "fmt-legacy")]
+        {
+            let n_blk = 16;
+            let tile5 = crate::kq8::tiles::q5_08_tile(&mut trng, n_blk);
+            let mut f = vec![0u8; (n_blk / 8) * crate::kq8::Q8K_SIZE];
+            crate::kq8::build_q5_0(&tile5, n_blk, &mut f);
+            forms.push(f);
+        }
+        let mut widths: Vec<usize> = (1..=40).collect();
+        widths.extend_from_slice(&[63, 64, 65, 127, 128, 129, 511, 512, 513]);
+        let many: Vec<QuantAct> = (0..513).map(|_| activations(&mut rng, n)).collect();
+        for &nb in widths.iter() {
+            let mut kq = KqActs::default();
+            kq.fill(&many[..nb]);
+            for form in forms.iter() {
+                let sb = form.len() / crate::kq8::Q8K_SIZE;
+                let mut got = vec![0.0f32; nb * 8];
+                unsafe { q8k_gemm_sdot(form, sb, &kq, nb, &mut got) };
+                for b in 0..nb {
+                    for r in 0..8 {
+                        let want = crate::kq8::dot_q8k(form, sb, r, &kq, b);
+                        assert_eq!(
+                            got[b * 8 + r].to_bits(),
+                            want.to_bits(),
+                            "sdot, width {nb}, row {r}, activation {b}: {} against {want}",
+                            got[b * 8 + r]
+                        );
+                    }
+                }
+                if crate::cpu::have_i8mm() {
+                    let mut got = vec![0.0f32; nb * 8];
+                    unsafe { q8k_gemm_i8mm(form, sb, &kq, nb, &mut got) };
+                    for b in 0..nb {
+                        for r in 0..8 {
+                            let want = crate::kq8::dot_q8k(form, sb, r, &kq, b);
+                            assert_eq!(
+                                got[b * 8 + r].to_bits(),
+                                want.to_bits(),
+                                "i8mm, width {nb}, row {r}, activation {b}: {} against {want}",
+                                got[b * 8 + r]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tier entry point takes `smmla` on `neon-i8mm` and `sdot` on
+    /// `neon-dotprod`; running the tests under `PEREGRINE_ISA` shows each cap
+    /// picking its own body.
+    #[test]
+    fn each_tier_takes_its_own_eight_bit_body() {
+        if !crate::cpu::have_dotprod() {
+            return;
+        }
+        let mut rng = Rng(0x8A8A_5555);
+        let n_sb = 2;
+        let n = n_sb * 256;
+        let tile = crate::kq8::tiles::q4k_tile(&mut crate::kq8::tiles::Rng(0x8A8A_6666), n_sb);
+        let mut form = vec![0u8; crate::kq8::form_size(n_sb)];
+        crate::kq8::build_q4k(&tile, n_sb, &mut form);
+        let acts: Vec<QuantAct> = (0..4).map(|_| activations(&mut rng, n)).collect();
+        let mut kq = KqActs::default();
+        kq.fill(&acts);
+        let mut out = vec![0.0f32; 4 * 8];
+        Q8K_SDOT_CALLS.with(|c| c.set(0));
+        Q8K_I8MM_CALLS.with(|c| c.set(0));
+        unsafe { q8k_gemm(&form, n_sb, &kq, 4, &mut out) };
+        if crate::cpu::have_i8mm() {
+            assert_eq!(
+                Q8K_I8MM_CALLS.with(|c| c.get()),
+                1,
+                "the i8mm tier took another body"
+            );
+            assert_eq!(
+                Q8K_SDOT_CALLS.with(|c| c.get()),
+                0,
+                "the i8mm tier fell back to sdot"
+            );
+        } else {
+            assert_eq!(
+                Q8K_SDOT_CALLS.with(|c| c.get()),
+                1,
+                "the dotprod tier took another body"
+            );
+            assert_eq!(
+                Q8K_I8MM_CALLS.with(|c| c.get()),
+                0,
+                "the dotprod tier took the i8mm body"
+            );
+        }
+        // The i8mm body's 1–3-row tail stays on sdot, so the result is still the
+        // twin's (checked above at every width); here only the full group is counted.
+        let _ = &mut out;
     }
 }
