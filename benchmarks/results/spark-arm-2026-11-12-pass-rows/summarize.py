@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The pass-width table: PASS_ROWS=32 against 128, per model, thread count and cell.
+"""The pass-width table: a pass budget of 32 against 128, per model, thread count and cell.
 
 The per-round ratio (128's tokens/s over 32's, same round, alternating order) is the
 claim; the medians and the round-to-round spread are beside it. Files are

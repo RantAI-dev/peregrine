@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The pass width of large float encoders on ARM: PASS_ROWS=32 against 128.
+"""The pass width of large float encoders on ARM: a pass budget of 32 against 128.
 
 Two `peregrine serve` processes of the same file and thread count, one with
 `--opt PASS_ROWS=32` (what a large float encoder carried before #251) and one with
