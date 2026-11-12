@@ -100,12 +100,15 @@ jobs:
         run: |
           git add -A crates/peregrine-models/tests
           git diff --cached --name-only | tee "$RUNNER_TEMP/recorded.txt"
+          # The Windows runner's tar reads an archive path of the form `D:\...` as a remote host
+          # (`D:`); a POSIX path from the shell reads as local (MSYS maps /d/... back).
+          out="$(cd "$RUNNER_TEMP" && pwd)/goldens.tar.gz"
           # An empty file list still produces an artefact; a re-record with nothing changed is a
           # valid run (the second suite proved the committed values reproduce).
           if [ -s "$RUNNER_TEMP/recorded.txt" ]; then
-            tar -czf "$RUNNER_TEMP/goldens.tar.gz" -T "$RUNNER_TEMP/recorded.txt"
+            tar -czf "$out" -T "$RUNNER_TEMP/recorded.txt"
           else
-            tar -czf "$RUNNER_TEMP/goldens.tar.gz" -T /dev/null
+            tar -czf "$out" -T /dev/null
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
