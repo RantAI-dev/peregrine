@@ -1,0 +1,10 @@
+== old qwen05b
+Mean    KLD:   0.003850 ±   0.000050
+Median  KLD:   0.002877
+RMS Δp    :  1.492 ± 0.038 %
+Same top p: 96.196 ± 0.189 %
+== new qwen05b
+Mean    KLD:   0.003854 ±   0.000053
+Median  KLD:   0.002860
+RMS Δp    :  1.444 ± 0.029 %
+Same top p: 96.324 ± 0.186 %
