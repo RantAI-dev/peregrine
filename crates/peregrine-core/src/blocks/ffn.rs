@@ -68,15 +68,28 @@ pub fn swiglu_rows(
             let ptr = ActPtr(a as *mut QuantAct);
             let out = crate::blocks::par::Disjoint::new(&mut hb[..f]);
             crate::prof::time(crate::prof::Slot::Swiglu, || {
-                pool.run(move |wk, nw| {
-                    let (b0, b1) = crate::pool::share(f / 256, wk, nw);
-                    let (lo, hi) = (b0 * 256, b1 * 256);
-                    // SAFETY: `lo..hi` is this worker's exclusive share of the row.
-                    let g = unsafe { out.chunk(lo, hi - lo) };
-                    crate::vmath::swiglu(g, &up[lo..hi]);
-                    // SAFETY: the same exclusive range, 256-aligned, in `ActPtr`.
-                    unsafe { (*ptr.get()).fill_range(g, lo) };
-                });
+                let blocks = f / 256;
+                if pool.claiming() {
+                    let claim = (blocks / (pool.width() * 2)).max(1);
+                    pool.run_claimed(blocks, claim, |_wk, _nw, b0, b1| {
+                        let (lo, hi) = (b0 * 256, b1 * 256);
+                        // SAFETY: the pool hands `[b0, b1)` to one worker only.
+                        let g = unsafe { out.chunk(lo, hi - lo) };
+                        crate::vmath::swiglu(g, &up[lo..hi]);
+                        // SAFETY: the same exclusive range, 256-aligned, in `ActPtr`.
+                        unsafe { (*ptr.get()).fill_range(g, lo) };
+                    });
+                } else {
+                    pool.run(move |wk, nw| {
+                        let (b0, b1) = crate::pool::share(blocks, wk, nw);
+                        let (lo, hi) = (b0 * 256, b1 * 256);
+                        // SAFETY: `lo..hi` is this worker's exclusive share of the row.
+                        let g = unsafe { out.chunk(lo, hi - lo) };
+                        crate::vmath::swiglu(g, &up[lo..hi]);
+                        // SAFETY: the same exclusive range, 256-aligned, in `ActPtr`.
+                        unsafe { (*ptr.get()).fill_range(g, lo) };
+                    });
+                }
             });
             stats.barriers += 1;
         } else {

@@ -81,6 +81,14 @@ jobs:
       - name: test (x86-64, every target)
         if: runner.arch == 'X64'
         run: cargo test --workspace --release --locked
+      # S5.6: a stalled pool hands work out in claimed ranges, which a quiet runner never takes.
+      # This forces them on every fork-join and compares the same goldens: who computes a row
+      # must not change its bits. Linux x86-64 and aarch64 (the pool is the same code elsewhere).
+      - name: goldens through the claimed partitions (S5.6)
+        if: runner.os == 'Linux'
+        env:
+          PEREGRINE_ADAPTIVE_STALL: claim
+        run: cargo test -p peregrine-models --release --locked --test synthetic --test embeddings --test prefill_chunk
       # peregrine-bench's examples are x86-only benchmarks; the library, binaries and tests must build
       # warning-free and pass everywhere.
       - name: clippy (non-x86)

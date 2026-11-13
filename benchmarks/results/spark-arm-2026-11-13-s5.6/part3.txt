@@ -1,0 +1,90 @@
+== before: Peregrine's fraction of its own quiet cell, and its ratio to each engine
+prompt512   t4  l0 pg   369.05 own 1.000  ÷llama  3.03x  ÷ik  0.79x
+prompt512   t4  l1 pg   368.07 own 0.997  ÷llama  3.03x  ÷ik  0.79x
+prompt512   t4  l2 pg   243.63 own 0.660  ÷llama  2.35x  ÷ik  1.14x
+prompt512   t4  l4 pg   172.57 own 0.468  ÷llama  2.85x  ÷ik  0.82x
+prompt512   t8  l0 pg   685.09 own 1.000  ÷llama  2.88x  ÷ik  0.76x
+prompt512   t8  l1 pg   210.33 own 0.307  ÷llama  1.02x  ÷ik  0.55x
+prompt512   t8  l2 pg   213.59 own 0.312  ÷llama  1.04x  ÷ik  0.55x
+prompt512   t8  l4 pg   228.00 own 0.333  ÷llama  1.31x  ÷ik  0.76x
+prompt512   t10 l0 pg   718.98 own 1.000  ÷llama  2.50x  ÷ik  0.66x
+prompt512   t10 l1 pg   213.63 own 0.297  ÷llama  0.84x  ÷ik  0.47x
+prompt512   t10 l2 pg   201.81 own 0.281  ÷llama  0.88x  ÷ik  0.53x
+prompt512   t10 l4 pg   280.10 own 0.390  ÷llama  1.60x  ÷ik  0.90x
+prompt4096  t4  l0 pg   265.49 own 1.000
+prompt4096  t4  l1 pg   265.23 own 0.999
+prompt4096  t4  l2 pg   265.07 own 0.998
+prompt4096  t4  l4 pg   117.68 own 0.443
+prompt4096  t8  l0 pg   508.56 own 1.000  ÷llama  2.50x
+prompt4096  t8  l1 pg   169.52 own 0.333  ÷llama  0.90x
+prompt4096  t8  l2 pg   169.73 own 0.334  ÷llama  0.84x
+prompt4096  t8  l4 pg   173.46 own 0.341  ÷llama  1.16x
+prompt4096  t10 l0 pg   518.41 own 1.000  ÷llama  2.15x  ÷ik  0.64x
+prompt4096  t10 l1 pg   180.89 own 0.349  ÷llama  0.85x  ÷ik  0.49x
+prompt4096  t10 l2 pg   169.22 own 0.326  ÷llama  0.88x  ÷ik  0.58x
+prompt4096  t10 l4 pg   234.27 own 0.452  ÷llama  1.61x  ÷ik  0.97x
+decode      t4  l0 pg    56.06 own 1.000  ÷llama  0.48x  ÷ik  0.26x
+decode      t4  l1 pg    55.98 own 0.999  ÷llama  0.48x  ÷ik  0.26x
+decode      t4  l2 pg    56.04 own 1.000  ÷llama  0.48x  ÷ik  0.58x
+decode      t4  l4 pg    43.37 own 0.774  ÷llama  0.81x  ÷ik  0.45x
+decode      t8  l0 pg   117.99 own 1.000  ÷llama  0.53x  ÷ik  0.30x
+decode      t8  l1 pg    32.31 own 0.274  ÷llama  0.23x  ÷ik  0.22x
+decode      t8  l2 pg    35.20 own 0.298  ÷llama  0.26x  ÷ik  0.24x
+decode      t8  l4 pg    66.34 own 0.562  ÷llama  0.53x  ÷ik  0.44x
+decode      t10 l0 pg   124.51 own 1.000  ÷llama  0.50x  ÷ik  0.27x
+decode      t10 l1 pg     9.89 own 0.079  ÷llama  0.06x  ÷ik  0.07x
+decode      t10 l2 pg    59.21 own 0.476  ÷llama  0.41x  ÷ik  0.40x
+decode      t10 l4 pg    64.11 own 0.515  ÷llama  0.62x  ÷ik  0.40x
+embed32x128 t4  l0 pg    11.26 own 1.000
+embed32x128 t4  l1 pg    11.25 own 0.999
+embed32x128 t4  l2 pg    11.26 own 0.999
+embed32x128 t4  l4 pg    11.27 own 1.000
+embed32x128 t10 l0 pg    22.30 own 1.000  ÷llama  1.31x
+embed32x128 t10 l1 pg     2.66 own 0.119  ÷llama  0.22x
+embed32x128 t10 l2 pg     4.42 own 0.198  ÷llama  0.41x
+embed32x128 t10 l4 pg     6.87 own 0.308  ÷llama  0.83x
+== after: Peregrine's fraction of its own quiet cell, and its ratio to each engine
+prompt512   t4  l0 pg   368.87 own 1.000  ÷llama  3.03x  ÷ik  0.79x
+prompt512   t4  l1 pg   366.77 own 0.994  ÷llama  3.02x  ÷ik  0.78x
+prompt512   t4  l2 pg   255.85 own 0.694  ÷llama  2.46x  ÷ik  1.20x
+prompt512   t4  l4 pg   252.32 own 0.684  ÷llama  4.16x  ÷ik  1.20x
+prompt512   t8  l0 pg   686.51 own 1.000  ÷llama  2.88x  ÷ik  0.76x
+prompt512   t8  l1 pg   517.80 own 0.754  ÷llama  2.52x  ÷ik  1.35x
+prompt512   t8  l2 pg   511.57 own 0.745  ÷llama  2.49x  ÷ik  1.33x
+prompt512   t8  l4 pg   402.37 own 0.586  ÷llama  2.32x  ÷ik  1.33x
+prompt512   t10 l0 pg   715.52 own 1.000  ÷llama  2.49x  ÷ik  0.65x
+prompt512   t10 l1 pg   591.90 own 0.827  ÷llama  2.31x  ÷ik  1.29x
+prompt512   t10 l2 pg   554.58 own 0.775  ÷llama  2.41x  ÷ik  1.45x
+prompt512   t10 l4 pg   436.65 own 0.610  ÷llama  2.49x  ÷ik  1.40x
+prompt4096  t4  l0 pg   266.98 own 1.000
+prompt4096  t4  l1 pg   266.64 own 0.999
+prompt4096  t4  l2 pg   181.81 own 0.681
+prompt4096  t4  l4 pg   161.64 own 0.605
+prompt4096  t8  l0 pg   508.93 own 1.000  ÷llama  2.50x
+prompt4096  t8  l1 pg   367.05 own 0.721  ÷llama  1.95x
+prompt4096  t8  l2 pg   366.59 own 0.720  ÷llama  1.81x
+prompt4096  t8  l4 pg   327.25 own 0.643  ÷llama  2.18x
+prompt4096  t10 l0 pg   515.29 own 1.000  ÷llama  2.13x  ÷ik  0.63x
+prompt4096  t10 l1 pg   442.57 own 0.859  ÷llama  2.07x  ÷ik  1.19x
+prompt4096  t10 l2 pg   414.05 own 0.804  ÷llama  2.15x  ÷ik  1.41x
+prompt4096  t10 l4 pg   322.29 own 0.625  ÷llama  2.22x  ÷ik  1.34x
+decode      t4  l0 pg    56.06 own 1.000  ÷llama  0.48x  ÷ik  0.26x
+decode      t4  l1 pg    55.90 own 0.997  ÷llama  0.48x  ÷ik  0.26x
+decode      t4  l2 pg    51.81 own 0.924  ÷llama  0.44x  ÷ik  0.53x
+decode      t4  l4 pg    51.71 own 0.922  ÷llama  0.96x  ÷ik  0.53x
+decode      t8  l0 pg   117.26 own 1.000  ÷llama  0.52x  ÷ik  0.30x
+decode      t8  l1 pg   103.89 own 0.886  ÷llama  0.75x  ÷ik  0.70x
+decode      t8  l2 pg   102.82 own 0.877  ÷llama  0.75x  ÷ik  0.69x
+decode      t8  l4 pg    85.92 own 0.733  ÷llama  0.69x  ÷ik  0.57x
+decode      t10 l0 pg   124.35 own 1.000  ÷llama  0.50x  ÷ik  0.27x
+decode      t10 l1 pg   105.73 own 0.850  ÷llama  0.67x  ÷ik  0.73x
+decode      t10 l2 pg   104.65 own 0.842  ÷llama  0.72x  ÷ik  0.71x
+decode      t10 l4 pg    92.19 own 0.741  ÷llama  0.89x  ÷ik  0.58x
+embed32x128 t4  l0 pg    11.20 own 1.000
+embed32x128 t4  l1 pg    11.16 own 0.996
+embed32x128 t4  l2 pg    11.25 own 1.004
+embed32x128 t4  l4 pg    11.18 own 0.998
+embed32x128 t10 l0 pg    20.98 own 1.000  ÷llama  1.24x
+embed32x128 t10 l1 pg    17.40 own 0.829  ÷llama  1.44x
+embed32x128 t10 l2 pg    16.32 own 0.778  ÷llama  1.52x
+embed32x128 t10 l4 pg    13.39 own 0.638  ÷llama  1.61x
