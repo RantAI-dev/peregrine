@@ -664,21 +664,24 @@ fn matmul_block(
 
 /// The activation rows one packed-float unit covers.
 ///
-/// At most [`peregrine_kernels::fpack::row_block`] (half of L2), and few enough rows
-/// that a matrix with too few panels still fills the pool: a group of one panel pair
-/// (a router, the MTP head's slice) would otherwise be one unit, one thread. The
-/// block only changes how often a panel is read, never a result.
-fn fp_row_block(n_in: usize, nb: usize, per: usize, width: usize) -> usize {
+/// One block of the whole pass, cut only so that a group with fewer units than the pool
+/// still fills it: a group of one panel pair (a router, the MTP head's slice) would
+/// otherwise be one unit, one thread. The block changes how often a panel is read, never
+/// a result — but the read is the point. S4.9w measured the old cap at
+/// [`peregrine_kernels::fpack::row_block`] (half of L2): at 128 activation rows it cut a
+/// 768-wide matrix into two blocks and a 3 072-wide one into seven, so the down
+/// projection's weights were streamed seven times, **9–10 % of a 128-token pass**. The
+/// pass's activation, even 512 rows × 3 072 × 4 bytes = 6 MB, fits L3, where the weights
+/// never do; one pass over them is the cheaper side of the trade. S4.9w report, §27.
+fn fp_row_block(_n_in: usize, nb: usize, per: usize, width: usize) -> usize {
     let want = (width / per.max(1)).max(1);
-    nb.div_ceil(want)
-        .min(peregrine_kernels::fpack::row_block(n_in))
-        .max(1)
+    nb.div_ceil(want).max(1)
 }
 
 /// The packed float panels of a group, one work unit at a time (S4.9f).
 ///
-/// A unit is [`FP_UNIT_PANELS`] panels against one [`row_block`](peregrine_kernels::fpack::row_block)
-/// of activation rows; the units of every job are concatenated and partitioned
+/// A unit is [`FP_UNIT_PANELS`] panels against one block of activation rows;
+/// the units of every job are concatenated and partitioned
 /// exactly as `matmul_group`'s row space is, so nothing about who computed a unit
 /// can reach the result. Threading: with few activation rows there is one block and
 /// the units are panels (a weight stream per worker); with many there are several
