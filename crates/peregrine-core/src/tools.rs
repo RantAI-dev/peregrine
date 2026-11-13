@@ -905,6 +905,165 @@ fn render_qwen25(tools: &[Value], messages: &[Msg]) -> Result<String, String> {
     Ok(s)
 }
 
+/// Llama 3.2's chat template as the model's files carry it (`tools/llama32.jinja`).
+pub const LLAMA32_TEMPLATE: &str = include_str!("tools/llama32.jinja");
+
+const LLAMA3_HEADER_OPEN: &str = "<|start_header_id|>";
+const LLAMA3_HEADER_CLOSE: &str = "<|end_header_id|>\n\n";
+const LLAMA3_EOT: &str = "<|eot_id|>";
+
+/// Today's date as Llama 3's template writes it (`strftime_now("%d %b %Y")`): `13 Nov 2026`.
+/// The day is the UTC day; llama.cpp reads the local clock, so the two differ for the hours
+/// a timezone is on another date. A request can pin the date with
+/// `chat_template_kwargs.date_string`, as it can with llama.cpp.
+pub fn today_date_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    date_string_of_day((secs / 86_400) as i64)
+}
+
+/// `%d %b %Y` for a day counted from 1970-01-01 (the proleptic Gregorian calendar).
+fn date_string_of_day(days: i64) -> String {
+    // Howard Hinnant's `civil_from_days`.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!("{day:02} {} {year}", MONTHS[(month - 1) as usize])
+}
+
+/// Llama 3.2's template, branch for branch (`tools/llama32.jinja`), with its defaults:
+/// the tools go into the first user message (`tools_in_user_message`), and `date` is the
+/// template's `date_string`.
+///
+/// What the template does that a reader might not expect, each pinned by
+/// `tests/fixtures/tools-llama3.jsonl`: the system message, the first message and every
+/// later message's text are trimmed; with tools the first message's text goes under the
+/// tool list whatever its role; an assistant message with a call writes the call alone
+/// (its text is dropped) and may carry only one call; a tool's result is written as a JSON
+/// string under the `ipython` role.
+pub fn render_llama3(tools: &[Value], messages: &[Msg], date: &str) -> Result<String, String> {
+    if messages.is_empty() {
+        return Err("messages must not be empty".into());
+    }
+    let header = |s: &mut String, role: &str| {
+        s.push_str(LLAMA3_HEADER_OPEN);
+        s.push_str(role);
+        s.push_str(LLAMA3_HEADER_CLOSE);
+    };
+    // A last assistant message of text is continued, not closed.
+    let (messages, prefill) = match messages.split_last() {
+        Some((
+            Msg::Assistant {
+                content,
+                tool_calls,
+                ..
+            },
+            rest,
+        )) if tool_calls.is_empty() => (rest, Some(content.as_str())),
+        Some((Msg::Assistant { .. }, _)) => {
+            return Err(
+                "the conversation ends with an assistant tool call; send the tool's result".into(),
+            )
+        }
+        _ => (messages, None),
+    };
+    let (system, mut rest) = match messages.first() {
+        Some(Msg::System(text)) => (jinja_trim(text), &messages[1..]),
+        _ => ("", messages),
+    };
+    let mut s = String::new();
+    header(&mut s, "system");
+    if !tools.is_empty() {
+        s.push_str("Environment: ipython\n");
+    }
+    s.push_str("Cutting Knowledge Date: December 2023\nToday Date: ");
+    s.push_str(date);
+    s.push_str("\n\n");
+    s.push_str(system);
+    s.push_str(LLAMA3_EOT);
+    if !tools.is_empty() {
+        let Some((first, after)) = rest.split_first() else {
+            return Err(
+                "Cannot put tools in the first user message when there's no first user message!"
+                    .into(),
+            );
+        };
+        let text = match first {
+            Msg::System(t) | Msg::User(t) => t.as_str(),
+            Msg::Assistant { content, .. } | Msg::Tool { content } => content.as_str(),
+            Msg::Other => "",
+        };
+        header(&mut s, "user");
+        s.push_str(
+            "Given the following functions, please respond with a JSON for a function call \
+             with its proper arguments that best answers the given prompt.\n\nRespond in the \
+             format {\"name\": function name, \"parameters\": dictionary of argument name and \
+             its value}.Do not use variables.\n\n",
+        );
+        for t in tools {
+            s.push_str(&t.to_jinja_json_indent(4));
+            s.push_str("\n\n");
+        }
+        s.push_str(jinja_trim(text));
+        s.push_str(LLAMA3_EOT);
+        rest = after;
+    }
+    for m in rest {
+        match m {
+            Msg::Other => {}
+            Msg::System(text) => {
+                header(&mut s, "system");
+                s.push_str(jinja_trim(text));
+                s.push_str(LLAMA3_EOT);
+            }
+            Msg::User(text) => {
+                header(&mut s, "user");
+                s.push_str(jinja_trim(text));
+                s.push_str(LLAMA3_EOT);
+            }
+            Msg::Assistant {
+                content,
+                tool_calls,
+                ..
+            } => {
+                header(&mut s, "assistant");
+                match tool_calls.as_slice() {
+                    [] => s.push_str(jinja_trim(content)),
+                    [call] => {
+                        s.push_str("{\"name\": \"");
+                        s.push_str(&call.name);
+                        s.push_str("\", \"parameters\": ");
+                        s.push_str(&call.arguments.to_jinja_json());
+                        s.push('}');
+                    }
+                    _ => return Err("This model only supports single tool-calls at once!".into()),
+                }
+                s.push_str(LLAMA3_EOT);
+            }
+            Msg::Tool { content } => {
+                header(&mut s, "ipython");
+                s.push_str(&Value::Str(content.clone()).to_jinja_json());
+                s.push_str(LLAMA3_EOT);
+            }
+        }
+    }
+    header(&mut s, "assistant");
+    if let Some(text) = prefill {
+        s.push_str(text);
+    }
+    Ok(s)
+}
+
 /// Jinja's `trim`: the whitespace C's `isspace` knows, from both ends.
 pub(crate) fn jinja_trim(text: &str) -> &str {
     text.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'))
@@ -2348,5 +2507,14 @@ mod tests {
         assert!(feed(&c, &with("{\"at\": {\"x\": \"1\"}}", "None", "3")).is_err());
         assert!(feed(&c, &with("{\"at\": {\"x\": 1}}", "null", "3")).is_err());
         assert!(feed(&c, &with("{\"at\": {\"x\": 1}}", "None", "4")).is_err());
+    }
+
+    #[test]
+    fn the_templates_date_is_day_month_year() {
+        assert_eq!(date_string_of_day(0), "01 Jan 1970");
+        assert_eq!(date_string_of_day(11_016), "29 Feb 2000");
+        assert_eq!(date_string_of_day(19_930), "26 Jul 2024");
+        assert_eq!(date_string_of_day(20_770), "13 Nov 2026");
+        assert_eq!(today_date_string().len(), 11);
     }
 }

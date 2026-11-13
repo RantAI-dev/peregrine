@@ -135,3 +135,65 @@ fn qwen3_wordings_part_where_llama_cpp_parts_them() {
     assert_eq!(n, 44, "eleven cases under four wordings");
     println!("tools (qwen 3): {n} corner cases agree with llama.cpp, wording by wording");
 }
+
+/// Llama 3.2's template (S6.4). The fixture pins the template's clock with
+/// `chat_template_kwargs.date_string`, which the renderer takes as its date.
+#[test]
+fn llama3_prompts_match_llama_cpp_byte_for_byte() {
+    let mut seen = 0;
+    for (n, line) in include_str!("fixtures/tools-llama3.jsonl")
+        .lines()
+        .enumerate()
+    {
+        let case = Value::parse(line).unwrap_or_else(|e| panic!("line {}: {e}", n + 1));
+        let name = case.get("name").and_then(Value::as_str).expect("name");
+        let request = case
+            .get("request")
+            .and_then(Value::as_str)
+            .expect("request");
+        let request = Value::parse(request).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let tools = tools_from_json(request.get("tools")).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let messages = messages_from_json_for(
+            ToolFormat::Hermes,
+            request.get("messages").expect("messages"),
+        );
+        let date = request
+            .get("chat_template_kwargs")
+            .and_then(|k| k.get("date_string"))
+            .and_then(Value::as_str)
+            .expect("the fixture pins the date");
+        let rendered =
+            messages.and_then(|m| peregrine_core::tools::render_llama3(&tools, &m, date));
+        match case.get("prompt").and_then(Value::as_str) {
+            Some(want) => {
+                let got = rendered.unwrap_or_else(|e| panic!("{name}: {e}"));
+                if got != want {
+                    let i = got
+                        .bytes()
+                        .zip(want.bytes())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(got.len().min(want.len()));
+                    let mut lo = i.saturating_sub(60);
+                    while !got.is_char_boundary(lo) {
+                        lo -= 1;
+                    }
+                    let end = |t: &str| {
+                        let mut e = (i + 80).min(t.len());
+                        while !t.is_char_boundary(e) {
+                            e -= 1;
+                        }
+                        e
+                    };
+                    panic!(
+                        "{name}: the prompt differs from llama.cpp's at byte {i}\n  ours:   {:?}\n  theirs: {:?}",
+                        &got[lo..end(&got)],
+                        &want[lo.min(want.len())..end(want)]
+                    );
+                }
+            }
+            None => assert!(rendered.is_err(), "{name}: llama.cpp refused this request"),
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 34);
+}

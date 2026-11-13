@@ -67,6 +67,12 @@ def main():
     ap.add_argument("--template")
     ap.add_argument("--cases", default="scripts/tool-cases.json")
     ap.add_argument("--set", help="also run the cases of this named set (for one template family)")
+    ap.add_argument(
+        "--extra",
+        help="a JSON object merged into every request (a case's own \"extra\" wins): for a "
+        "template that reads the clock, pin what it reads, e.g. "
+        "'{\"chat_template_kwargs\": {\"date_string\": \"26 Jul 2024\"}}'",
+    )
     ap.add_argument("--out")
     ap.add_argument("--check", help="compare with this fixture file instead of writing one")
     ap.add_argument(
@@ -107,6 +113,8 @@ def main():
             if case.get("tools"):
                 req["tools"] = [spec["tools"][t] for t in case["tools"]]
             # Extra request fields, such as chat_template_kwargs to turn thinking off.
+            if a.extra:
+                req.update(json.loads(a.extra))
             req.update(case.get("extra", {}))
             body = json.dumps(req, ensure_ascii=False)
             status, text = post(port, "/apply-template", body)
