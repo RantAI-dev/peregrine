@@ -683,10 +683,10 @@ fn fp_row_block(_n_in: usize, nb: usize, per: usize, width: usize) -> usize {
 /// A unit is [`FP_UNIT_PANELS`] panels against one block of activation rows;
 /// the units of every job are concatenated and partitioned
 /// exactly as `matmul_group`'s row space is, so nothing about who computed a unit
-/// can reach the result. Threading: with few activation rows there is one block and
-/// the units are panels (a weight stream per worker); with many there are several
-/// blocks and the batch is split too, which is the same work the kernel would do
-/// serially and the same total weight traffic.
+/// can reach the result. Threading: a group with more units than the pool gives each
+/// worker a run of panels over the pass's whole row block; a group with fewer splits
+/// the rows instead, so the pool is never left with an idle worker. Both are the same
+/// work the kernel would do serially and the same total weight traffic.
 fn fp_group(
     w: &Weights,
     jobs: &[MatJob],
