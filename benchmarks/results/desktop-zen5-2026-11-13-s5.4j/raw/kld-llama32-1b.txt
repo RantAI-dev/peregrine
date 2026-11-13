@@ -1,0 +1,28 @@
+# kld --ref-self --fast-prompt, wikitext-2 40x512, Llama 3.2 1B Q4_K_M, 12 threads.
+# before = the S5.4i build (/tmp/kld-base), after = this branch (/tmp/kld-new).
+#   PEREGRINE_FAST_PROMPT=1 kld --base /var/tmp/pg/s54c/base/llama32-1b.base.bin \
+#       --model ~/models-ab/Llama-3.2-1B-Instruct-Q4_K_M.gguf --threads 12 --ref-self --fast-prompt
+
+before (S5.4i build)
+Mean    KLD:   0.003514 +/-   0.000049
+99.9%   KLD:   0.045853
+99.0%   KLD:   0.023960
+Median  KLD:   0.002472
+Mean    dp: -0.015 +/- 0.014 %
+99.9%   dp:  0.090%
+99.0%   dp:  0.043%
+Median  dp: -0.000%
+RMS dp    :  1.408 +/- 0.035 %
+Same top p: 96.745 +/- 0.176 %
+
+after (this branch)
+Mean    KLD:   0.003464 +/-   0.000047
+99.9%   KLD:   0.047641
+99.0%   KLD:   0.022973
+Median  KLD:   0.002456
+Mean    dp: -0.030 +/- 0.013 %
+99.9%   dp:  0.079%
+99.0%   dp:  0.041%
+Median  dp: -0.000%
+RMS dp    :  1.359 +/- 0.031 %
+Same top p: 96.667 +/- 0.178 %

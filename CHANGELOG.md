@@ -8,6 +8,57 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The fast prompt mode's attention order, and the pass's non-kernel share (S5.4j)**: the opt-in
+  8-bit prompt pass was 0.80-0.95× ik_llama.cpp's `-rtr` path on all eight cells and the account
+  put 9.1 % of a 512-token pass and 38 % of a 4096-token one in **attention** (2.1× the fork's
+  absolute time). This step gives a prompt row of the mode its **own summation order** for
+  attention on AVX-512 and takes the pass's other terms apart. The order is a written definition
+  implemented twice — a scalar twin that *is* the definition and a 16-lane body, bit-identical to
+  it on the whole grid (every key count 1…70, 127/128/129, 511/512/513, 4 095/4 096, head dims
+  64/128/80/72/16, random and soft-max-edge values): a score is one accumulator chain over
+  ascending 16-lane dimension blocks, reduced by `T16(v) = T8(v[l] + v[l+8])`; the denominator
+  folds 16-key groups from the piece's first key, in `f32`, into the row's `f64`; the mix is the
+  exact formula. A row's pieces are the absolute 64-key tiles, so its bits cannot depend on the
+  batch, the chunk, the pass budget or the pool — the invariance test passes unchanged and grew a
+  4 096-token case. Up to four rows share one pass over K and V. Attention is **16.8 % faster at
+  512 tokens and 12 threads and 3.0 % at 4 096** in situ (10-16 % in isolation at 512; level at one
+  thread, where the bucket is the tile's decode), which is **2-6 % of a pass**;
+  the mean KL divergence of fast against exact on the 1B moved 0.003514 → 0.003464 (invisible at
+  the reported precision) and the same top token 96.75 % → 96.67 %. The mode's **accuracy bound is
+  re-baselined to 0.0040** on the project lead's recommendation (the arithmetic it implements
+  measures 0.0035; the fork's `-rtr` 0.0034), with the owner's confirmation pending, so the
+  option stays labelled Experimental. The pass's **non-kernel share** is taken apart: the only
+  serial steps are the KV write and the form's interleaved activation fill, and the largest wait
+  is workers parking between fork–joins. The pool's spin window **follows the measured gap
+  between joins** (a prompt pass's gaps are 1-5 ms, its configured window was 1 ms): +3.3 % on the
+  fast 512-token 12-thread cell and the exact engine level. The eight cells are 0.82-0.97× ik's
+  `-rtr` and 1.04-1.22× its defaults, 1.26-1.46× the exact engine and 1.58-1.99× llama.cpp, with
+  every cell below 1.0 named. One fast golden per tier moved (the AVX-512 `llama-Q6_K-fast`); the
+  exact engine, the AVX2 and scalar fast goldens, decode and the ten-user cell did not. Report:
+  `benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`; design:
+  `docs/design/s5.4-fast-prompt.md` §5k/§5l.
+
+- **The float GEMM at small row counts: the tile is not the deficit (S4.9v)**: S4.9u left the
+  128-token cells to "a small-M tile in `fpack`", on 180–181 GMAC/s against MLAS's 202–206 at
+  128 rows. Measured from both ends, that is not where the loss is. A new kernel bench
+  (`peregrine-bench`'s `mgemm`) calls the packed float GEMM as the engine does — units of two
+  panels over a spinning four-thread pool, the strided output, three sweeps of 15 calls — and
+  MLAS is timed on the same shapes through ONNX Runtime's `MatMul` with the weight packed once:
+  at 128 rows the 6-row × 16-column tile runs at **199–228 GMAC/s** against MLAS's **208–222**
+  (0.99–1.08×, ahead on the wide matrices, level on the narrow), and **MLAS only leads at 512
+  rows** (0.85–0.99×) — the crossing is the opposite of the small-M story. The rate falls below
+  ~64 rows because a unit streams its panels once per call (`M/2` MAC per weight byte: 8 at 16
+  rows, where 23 GB/s of L2/L3 is the measured limit), a pass-width question S4.8b already
+  answered. The engine's own counters put the *pass* at 180 (128 tokens) and 179 (512), a flat
+  12–14 % above its own isolated kernel, and the parts were measured one at a time: activation
+  copy 1 ms of the 80 ms matmul bucket, unit granularity (2 → 4 panels) neutral end to end, the
+  store layout identical, the 21-row block for `n_in` 3 072 level with the rest. What is left is
+  the per-layer dispatch (48 calls, 3 456 units, 289 barriers per 128-row pass) — same-bits work
+  in `peregrine-core`, which this account names as the next step. The only way to widen the tile
+  is a second accumulator per output (8 rows × 16 columns needs 19 `ymm` registers), which
+  changes the summation order and the bits. **No engine file changed**, no golden moved, and
+  every standings cell stands: 24 of 36 for these two families, 79 of 104. Numbers, raw sweeps
+  and the ONNX Runtime script: `benchmarks/results/bluefin-2026-11-13-s4.9v/`; design §26.
 - **nomic-bert and jina-bert-v2 against every engine on bluefin (S4.9u)**: the two newest
   encoder families had only been timed against llama.cpp, on a noisy shared VM. This run puts
   them through the S4.9l proof — llama.cpp v0.9.0, ONNX Runtime 1.31, OpenVINO 2026.4,
