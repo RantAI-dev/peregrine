@@ -124,6 +124,9 @@ pub enum ToolFormat {
     /// Qwen 3.5 and Bonsai 2: `<function=name>` and `<parameter=key>` blocks inside
     /// `<tool_call>`.
     QwenXml,
+    /// Llama 3.2: the tools are listed in the first user message, and a call is the whole
+    /// reply, one JSON object `{"name": T, "parameters": {...}}`. One call per reply.
+    Llama3,
 }
 
 impl ToolFormat {
@@ -149,6 +152,9 @@ impl ToolFormat {
         {
             return Some(ToolFormat::QwenXml);
         }
+        if template.trim_end() == LLAMA32_TEMPLATE.trim_end() {
+            return Some(ToolFormat::Llama3);
+        }
         None
     }
 
@@ -158,7 +164,7 @@ impl ToolFormat {
     /// the reasoning span.
     pub fn opens_reasoning(self, prompt: &str) -> bool {
         match self {
-            ToolFormat::Hermes | ToolFormat::Qwen3(_) => false,
+            ToolFormat::Hermes | ToolFormat::Qwen3(_) | ToolFormat::Llama3 => false,
             ToolFormat::QwenXml => prompt.ends_with("<think>\n"),
         }
     }
@@ -167,9 +173,16 @@ impl ToolFormat {
     /// their templates take the thinking switch.
     pub fn thinks(self) -> bool {
         match self {
-            ToolFormat::Hermes => false,
+            ToolFormat::Hermes | ToolFormat::Llama3 => false,
             ToolFormat::Qwen3(_) | ToolFormat::QwenXml => true,
         }
+    }
+
+    /// Whether one reply may carry more than one call. Llama 3's template writes one call
+    /// per assistant message and refuses a message with more, so a reply stops at its
+    /// first call whatever `parallel_tool_calls` says.
+    pub fn parallel_calls(self) -> bool {
+        !matches!(self, ToolFormat::Llama3)
     }
 
     pub fn name(self) -> &'static str {
@@ -177,6 +190,7 @@ impl ToolFormat {
             ToolFormat::Hermes => "hermes",
             ToolFormat::Qwen3(_) => "qwen3",
             ToolFormat::QwenXml => "qwen-xml",
+            ToolFormat::Llama3 => "llama3",
         }
     }
 }
@@ -386,6 +400,7 @@ pub fn after_reasoning(reasoning: Reasoning, content: Constraint) -> Constraint 
 /// * the Hermes convention (Qwen 2.5, Qwen 3):
 ///   `<tool_call>\n{"name": "T", "arguments": A}\n</tool_call>`, where `A` is one JSON
 ///   value of the tool's own `parameters` schema;
+/// * Llama 3: `{"name": "T", "parameters": A}`, the whole reply, one call only;
 /// * the XML convention (Qwen 3.5): `<tool_call>\n<function=T>\n`, one
 ///   `<parameter=K>\nV\n</parameter>\n` block per property in the schema's order (a
 ///   property that is not required may be left out), `</function>\n</tool_call>`. A
@@ -443,6 +458,11 @@ pub fn forced_calls(
                 Part::Literal("}\n</tool_call>".into()),
             ]),
             ToolFormat::QwenXml => xml_call(name, &arguments, i)?,
+            ToolFormat::Llama3 => Constraint::sequence(vec![
+                Part::Literal(format!("{{\"name\": \"{name}\", \"parameters\": ")),
+                Part::Json(Schema::new(arguments)),
+                Part::Literal("}".into()),
+            ]),
         };
         // Each tool's schema is checked on its own, so the error can name the tool.
         call.compile()
@@ -464,7 +484,7 @@ pub fn forced_calls(
         Constraint::any_of(calls)
     };
     let out = match forced {
-        Forced::Any if parallel => Constraint::concat(vec![
+        Forced::Any if parallel && format.parallel_calls() => Constraint::concat(vec![
             one.clone(),
             Constraint::repeat(
                 Constraint::concat(vec![
@@ -673,7 +693,7 @@ pub fn messages_from_json(messages: &Value) -> Result<Vec<Msg>, String> {
 /// parts becomes one text.
 pub fn messages_from_json_for(format: ToolFormat, messages: &Value) -> Result<Vec<Msg>, String> {
     let sep = match format {
-        ToolFormat::Hermes | ToolFormat::Qwen3(_) => "\n",
+        ToolFormat::Hermes | ToolFormat::Qwen3(_) | ToolFormat::Llama3 => "\n",
         ToolFormat::QwenXml => "",
     };
     let list = messages.as_array().ok_or("messages must be an array")?;
@@ -761,15 +781,21 @@ pub fn render(format: ToolFormat, tools: &[Value], messages: &[Msg]) -> Result<S
 
 /// What a request may choose about its prompt besides the conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RenderOptions {
+pub struct RenderOptions<'a> {
     /// Whether the model may think before it answers (`enable_thinking`). Formats without
     /// a thinking block ignore it.
     pub thinking: bool,
+    /// The date a template writes (`chat_template_kwargs.date_string`), as the template
+    /// formats it; `None` is today (UTC). Only Llama 3's template writes one.
+    pub date: Option<&'a str>,
 }
 
-impl Default for RenderOptions {
+impl Default for RenderOptions<'_> {
     fn default() -> Self {
-        RenderOptions { thinking: true }
+        RenderOptions {
+            thinking: true,
+            date: None,
+        }
     }
 }
 
@@ -778,12 +804,16 @@ pub fn render_with(
     format: ToolFormat,
     tools: &[Value],
     messages: &[Msg],
-    options: RenderOptions,
+    options: RenderOptions<'_>,
 ) -> Result<String, String> {
     match format {
         ToolFormat::Hermes => render_qwen25(tools, messages),
         ToolFormat::Qwen3(text) => render_qwen3(tools, messages, options.thinking, text),
         ToolFormat::QwenXml => render_qwen35(tools, messages, options.thinking),
+        ToolFormat::Llama3 => match options.date {
+            Some(date) => render_llama3(tools, messages, date),
+            None => render_llama3(tools, messages, &crate::template::today_llama3()),
+        },
     }
 }
 
@@ -911,35 +941,6 @@ pub const LLAMA32_TEMPLATE: &str = include_str!("tools/llama32.jinja");
 const LLAMA3_HEADER_OPEN: &str = "<|start_header_id|>";
 const LLAMA3_HEADER_CLOSE: &str = "<|end_header_id|>\n\n";
 const LLAMA3_EOT: &str = "<|eot_id|>";
-
-/// Today's date as Llama 3's template writes it (`strftime_now("%d %b %Y")`): `13 Nov 2026`.
-/// The day is the UTC day; llama.cpp reads the local clock, so the two differ for the hours
-/// a timezone is on another date. A request can pin the date with
-/// `chat_template_kwargs.date_string`, as it can with llama.cpp.
-pub fn today_date_string() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    date_string_of_day((secs / 86_400) as i64)
-}
-
-/// `%d %b %Y` for a day counted from 1970-01-01 (the proleptic Gregorian calendar).
-fn date_string_of_day(days: i64) -> String {
-    // Howard Hinnant's `civil_from_days`.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    format!("{day:02} {} {year}", MONTHS[(month - 1) as usize])
-}
 
 /// Llama 3.2's template, branch for branch (`tools/llama32.jinja`), with its defaults:
 /// the tools go into the first user message (`tools_in_user_message`), and `date` is the
@@ -1471,6 +1472,8 @@ pub struct CallParser {
     /// knows them). The XML format writes values bare, so the schema says whether `5` is
     /// the number or the text.
     string_params: Vec<(String, Vec<String>)>,
+    /// Llama 3: the reply was found not to begin with a call, so all of it is text.
+    plain: bool,
 }
 
 impl CallParser {
@@ -1486,6 +1489,7 @@ impl CallParser {
             after_call: false,
             ws_before_call: String::new(),
             string_params: Vec::new(),
+            plain: false,
         }
     }
 
@@ -1530,6 +1534,7 @@ impl CallParser {
             ToolFormat::Hermes | ToolFormat::Qwen3(_) | ToolFormat::QwenXml => {
                 self.step_hermes(false, out)
             }
+            ToolFormat::Llama3 => self.step_llama3(false, out),
         }
     }
 
@@ -1539,6 +1544,7 @@ impl CallParser {
             ToolFormat::Hermes | ToolFormat::Qwen3(_) | ToolFormat::QwenXml => {
                 self.step_hermes(true, out)
             }
+            ToolFormat::Llama3 => self.step_llama3(true, out),
         }
     }
 
@@ -1623,6 +1629,7 @@ impl CallParser {
         let call = match self.format {
             ToolFormat::Hermes | ToolFormat::Qwen3(_) => self.hermes_call(body),
             ToolFormat::QwenXml => self.xml_call(body),
+            ToolFormat::Llama3 => self.llama3_call(body),
         };
         match call {
             Some(ev) => {
@@ -1725,6 +1732,157 @@ impl CallParser {
             arguments: Value::Obj(arguments).to_jinja_json(),
         })
     }
+}
+
+/// The tag Llama 3 models may write before a call (`<|python_tag|>`), when the server
+/// passes control tokens through as text.
+const LLAMA3_PYTHON_TAG: &str = "<|python_tag|>";
+
+impl CallParser {
+    /// Llama 3's framing: a call is a JSON object that begins the reply (after whitespace
+    /// and an optional `<|python_tag|>`); after a call, another may follow past whitespace
+    /// or `;` (the separator the 1B writes). Anything else makes the rest of the reply
+    /// text. Unlike the tagged formats a call has no closing tag: it ends where its object
+    /// closes, so the parser follows strings and nesting to find that byte.
+    fn step_llama3(&mut self, end: bool, out: &mut Vec<Event>) {
+        loop {
+            if self.in_call {
+                match json_object_end(&self.pending) {
+                    Some(n) => {
+                        let body: String = self.pending.drain(..n).collect();
+                        self.in_call = false;
+                        self.llama3_decide(&body, out);
+                        continue;
+                    }
+                    None => {
+                        if end {
+                            let body = std::mem::take(&mut self.pending);
+                            self.in_call = false;
+                            self.llama3_decide(&body, out);
+                        }
+                        return;
+                    }
+                }
+            }
+            if self.plain {
+                // After a call, trailing whitespace is held back and dropped at the end; a
+                // reply with no call is passed through as written.
+                let keep = if self.calls > 0 && !end {
+                    self.pending.trim_end().len()
+                } else if self.calls > 0 {
+                    self.pending.truncate(self.pending.trim_end().len());
+                    self.pending.len()
+                } else {
+                    self.pending.len()
+                };
+                let ready: String = self.pending.drain(..keep).collect();
+                self.text(&ready, out);
+                return;
+            }
+            // Before the first call, or between calls: is a call next?
+            let gap = if self.calls > 0 {
+                self.pending.len().saturating_sub(
+                    self.pending
+                        .trim_start_matches(|c: char| c.is_whitespace() || c == ';')
+                        .len(),
+                )
+            } else {
+                self.pending.len() - self.pending.trim_start().len()
+            };
+            let after_gap = &self.pending[gap..];
+            let after_tag = after_gap
+                .strip_prefix(LLAMA3_PYTHON_TAG)
+                .unwrap_or(after_gap);
+            if after_tag.starts_with('{') {
+                let start = self.pending.len() - after_tag.len();
+                self.ws_before_call = self.pending[..start].to_string();
+                self.pending.drain(..start);
+                self.in_call = true;
+                continue;
+            }
+            let undecided = after_tag.is_empty()
+                || (after_tag.len() == after_gap.len() && LLAMA3_PYTHON_TAG.starts_with(after_gap));
+            if undecided && !end {
+                return;
+            }
+            if undecided {
+                // The reply ended in whitespace (or half a tag): after a call it is
+                // dropped, a reply with no call keeps it.
+                let rest = std::mem::take(&mut self.pending);
+                if self.calls == 0 {
+                    self.text(&rest, out);
+                }
+                return;
+            }
+            self.plain = true;
+        }
+    }
+
+    /// A finished object: a call, or text, after which the whole rest is text too.
+    fn llama3_decide(&mut self, body: &str, out: &mut Vec<Event>) {
+        let before = self.calls;
+        self.call_or_text(body, body.to_string(), out);
+        if self.calls == before {
+            self.plain = true;
+        }
+    }
+
+    /// One JSON object of Llama 3's form, `{"name": T, "parameters": {...}}`, if it is a
+    /// call to one of the request's tools. `arguments` is read too, as some fine-tunes
+    /// write it.
+    fn llama3_call(&mut self, body: &str) -> Option<Event> {
+        let v = Value::parse(body.trim()).ok()?;
+        v.as_object()?;
+        let name = v.get("name")?.as_str()?;
+        if !self.names.iter().any(|n| n == name) {
+            return None;
+        }
+        let arguments = match v.get("parameters").or_else(|| v.get("arguments")) {
+            None | Some(Value::Null) => Value::Obj(Vec::new()),
+            Some(Value::Str(s)) => Value::parse(s).ok()?,
+            Some(a) => a.clone(),
+        };
+        arguments.as_object()?;
+        let index = self.calls;
+        self.calls += 1;
+        Some(Event::Call {
+            index,
+            name: name.to_string(),
+            arguments: arguments.to_jinja_json(),
+        })
+    }
+}
+
+/// The length of the JSON object `text` begins with (`text` starts with `{`), or `None`
+/// while it is still open. Strings and escapes are followed, so a brace inside a string
+/// does not count.
+fn json_object_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, b) in text.bytes().enumerate() {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The length of the longest tail of `text` that is a proper prefix of `tag`.
@@ -2087,7 +2245,16 @@ mod tests {
         // The model opens its own thinking block: no prompt of this format ends inside one.
         let ask = vec![Msg::User("Hi".into())];
         for thinking in [true, false] {
-            let prompt = render_with(format, &[], &ask, RenderOptions { thinking }).unwrap();
+            let prompt = render_with(
+                format,
+                &[],
+                &ask,
+                RenderOptions {
+                    thinking,
+                    date: None,
+                },
+            )
+            .unwrap();
             assert!(!format.opens_reasoning(&prompt), "{prompt:?}");
         }
     }
@@ -2153,10 +2320,28 @@ mod tests {
     fn a_prompt_that_ends_inside_a_thinking_block_says_so() {
         let ask = vec![Msg::User("What time is it?".into())];
         let xml = ToolFormat::QwenXml;
-        let on = render_with(xml, &[], &ask, RenderOptions { thinking: true }).unwrap();
+        let on = render_with(
+            xml,
+            &[],
+            &ask,
+            RenderOptions {
+                thinking: true,
+                date: None,
+            },
+        )
+        .unwrap();
         assert!(xml.opens_reasoning(&on), "{on:?}");
         // Thinking off: the template closes an empty block, so the reply starts as content.
-        let off = render_with(xml, &[], &ask, RenderOptions { thinking: false }).unwrap();
+        let off = render_with(
+            xml,
+            &[],
+            &ask,
+            RenderOptions {
+                thinking: false,
+                date: None,
+            },
+        )
+        .unwrap();
         assert!(!xml.opens_reasoning(&off), "{off:?}");
         // A continued assistant text is left open where the client stopped, outside a block.
         let continued = vec![
@@ -2509,12 +2694,104 @@ mod tests {
         assert!(feed(&c, &with("{\"at\": {\"x\": 1}}", "None", "4")).is_err());
     }
 
+    fn llama3(text: &str) -> Vec<Event> {
+        parse_with(text, || CallParser::new(ToolFormat::Llama3, names()))
+    }
+
     #[test]
-    fn the_templates_date_is_day_month_year() {
-        assert_eq!(date_string_of_day(0), "01 Jan 1970");
-        assert_eq!(date_string_of_day(11_016), "29 Feb 2000");
-        assert_eq!(date_string_of_day(19_930), "26 Jul 2024");
-        assert_eq!(date_string_of_day(20_770), "13 Nov 2026");
-        assert_eq!(today_date_string().len(), 11);
+    fn a_llama3_reply_that_is_one_object_is_a_call() {
+        let paris = "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}";
+        let want = vec![call(0, "get_weather", "{\"city\": \"Paris\"}")];
+        assert_eq!(llama3(paris), want);
+        assert_eq!(llama3(&format!("\n {paris} \n")), want);
+        assert_eq!(llama3(&format!("<|python_tag|>{paris}")), want);
+        // A brace inside a string does not close the object.
+        assert_eq!(
+            llama3("{\"name\": \"get_weather\", \"parameters\": {\"city\": \"a}\\\"{b\"}}"),
+            vec![call(0, "get_weather", "{\"city\": \"a}\\\"{b\"}")]
+        );
+        // `arguments` is read as well, and a call without parameters has none.
+        assert_eq!(llama3("{\"name\": \"now\"}"), vec![call(0, "now", "{}")]);
+        // The 1B joins two calls with "; ".
+        assert_eq!(
+            llama3(&format!(
+                "{paris}; {{\"name\": \"now\", \"arguments\": {{}}}}"
+            )),
+            vec![
+                call(0, "get_weather", "{\"city\": \"Paris\"}"),
+                call(1, "now", "{}")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_llama3_reply_that_does_not_begin_with_a_call_is_text() {
+        for text in [
+            "Hello! I am well.  \n",
+            "Sure: {\"name\": \"now\", \"parameters\": {}}",
+            "{\"name\": \"unknown\", \"parameters\": {}}",
+            "{\"answer\": 42}",
+            // A call cut off by the end of the output.
+            "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Par",
+            // After text that looked like an object, a call is text too.
+            "{\"a\": 1} {\"name\": \"now\", \"parameters\": {}}",
+            "  ",
+        ] {
+            assert_eq!(llama3(text), vec![Event::Text(text.into())], "{text:?}");
+        }
+        // Text after a call is text, its trailing whitespace dropped.
+        assert_eq!(
+            llama3("{\"name\": \"now\", \"parameters\": {}}\nDone.  \n"),
+            vec![call(0, "now", "{}"), Event::Text("Done.".into())]
+        );
+    }
+
+    #[test]
+    fn llama3_is_recognised_and_makes_one_call_per_reply() {
+        assert_eq!(
+            ToolFormat::for_template(LLAMA32_TEMPLATE),
+            Some(ToolFormat::Llama3)
+        );
+        assert_eq!(ToolFormat::Llama3.name(), "llama3");
+        assert!(!ToolFormat::Llama3.parallel_calls() && ToolFormat::Hermes.parallel_calls());
+        assert!(!ToolFormat::Llama3.thinks());
+        let tools = forced_tools();
+        let any = forced_calls(ToolFormat::Llama3, &tools, &Forced::Any, true).unwrap();
+        let paris = "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}";
+        assert_eq!(feed(&any, paris), Ok((true, true)));
+        assert!(feed(&any, &format!("{paris}\n{paris}")).is_err());
+        let named = forced_calls(
+            ToolFormat::Llama3,
+            &tools,
+            &Forced::Named("now".into()),
+            false,
+        )
+        .unwrap();
+        assert!(feed(&named, paris).is_err());
+        assert_eq!(
+            feed(&named, "{\"name\": \"now\", \"parameters\": {}}"),
+            Ok((true, true))
+        );
+    }
+
+    #[test]
+    fn llama3_renders_with_the_requests_date_or_today() {
+        let ask = [Msg::User("Hi".into())];
+        let pinned = render_with(
+            ToolFormat::Llama3,
+            &[],
+            &ask,
+            RenderOptions {
+                date: Some("26 Jul 2024"),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(pinned.contains("Today Date: 26 Jul 2024\n"));
+        let today = render(ToolFormat::Llama3, &[], &ask).unwrap();
+        assert!(today.contains(&format!(
+            "Today Date: {}\n",
+            crate::template::today_llama3()
+        )));
     }
 }

@@ -1220,7 +1220,10 @@ mod tests {
             ToolFormat::QwenXml,
             &[],
             &messages,
-            RenderOptions { thinking },
+            RenderOptions {
+                thinking,
+                date: None,
+            },
         )
         .expect("a plain conversation renders")
     }

@@ -1484,7 +1484,8 @@ fn tool_fields_present(b: &Value) -> bool {
 fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan, String> {
     let choice = tool_choice(body)?;
     let parse = choice != ToolChoice::None;
-    let parallel = parallel_tool_calls(body)?;
+    // A format whose template writes one call per message stops at the first call.
+    let parallel = parallel_tool_calls(body)? && format.parallel_calls();
     let ordered =
         OrderedValue::parse(raw).map_err(|e| format!("the request body is not valid JSON: {e}"))?;
     let tools = tools::tools_from_json(ordered.get("tools"))?;
@@ -1494,8 +1495,10 @@ fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan,
     // Each format reads a message's content the way its template does (how the parts of a
     // list are joined, for one).
     let messages = tools::messages_from_json_for(format, messages)?;
+    // `chat_template_kwargs.date_string` pins the date a template writes, as in llama.cpp.
     let options = tools::RenderOptions {
         thinking: thinking_requested(body),
+        date: body["chat_template_kwargs"]["date_string"].as_str(),
     };
     let prompt = tools::render_with(format, &tools, &messages, options)?;
     let reasoning_open = format.opens_reasoning(&prompt);
@@ -1549,6 +1552,8 @@ fn renders_every_chat(format: ToolFormat) -> bool {
         // their own, and earlier turns without their thinking; the renderer does the same.
         ToolFormat::Qwen3(_) => true,
         ToolFormat::QwenXml => true,
+        // Llama 3.2's template without tools is the ordinary Llama 3 prompt.
+        ToolFormat::Llama3 => false,
     }
 }
 

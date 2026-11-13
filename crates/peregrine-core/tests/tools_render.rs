@@ -35,7 +35,10 @@ fn check_each(fixture: &str, format_of: &dyn Fn(&Value) -> ToolFormat) -> usize 
             .get("chat_template_kwargs")
             .and_then(|k| k.get("enable_thinking"))
             != Some(&Value::Bool(false));
-        let options = RenderOptions { thinking };
+        let options = RenderOptions {
+            thinking,
+            date: None,
+        };
         match case.get("prompt").and_then(Value::as_str) {
             Some(want) => {
                 let messages = messages.unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -154,7 +157,7 @@ fn llama3_prompts_match_llama_cpp_byte_for_byte() {
         let request = Value::parse(request).unwrap_or_else(|e| panic!("{name}: {e}"));
         let tools = tools_from_json(request.get("tools")).unwrap_or_else(|e| panic!("{name}: {e}"));
         let messages = messages_from_json_for(
-            ToolFormat::Hermes,
+            ToolFormat::Llama3,
             request.get("messages").expect("messages"),
         );
         let date = request
@@ -162,8 +165,11 @@ fn llama3_prompts_match_llama_cpp_byte_for_byte() {
             .and_then(|k| k.get("date_string"))
             .and_then(Value::as_str)
             .expect("the fixture pins the date");
-        let rendered =
-            messages.and_then(|m| peregrine_core::tools::render_llama3(&tools, &m, date));
+        let options = RenderOptions {
+            thinking: true,
+            date: Some(date),
+        };
+        let rendered = messages.and_then(|m| render_with(ToolFormat::Llama3, &tools, &m, options));
         match case.get("prompt").and_then(Value::as_str) {
             Some(want) => {
                 let got = rendered.unwrap_or_else(|e| panic!("{name}: {e}"));
