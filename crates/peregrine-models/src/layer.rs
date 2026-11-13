@@ -116,8 +116,14 @@ pub(crate) fn attention_rows(
         });
     }
     // ---- the biases, the per-head q/k norms and RoPE ----
+    //
+    // A chunk that is one run of consecutive positions writes its keys and values in
+    // this pass's own join, row by row, instead of in a serial write afterwards
+    // (S5.4o): the rows' positions are distinct, so a row's write is the worker's own.
+    let kvw = peregrine_core::blocks::attn::kv_run(caches, nb, positions);
+    let in_join = kvw.is_some();
     peregrine_core::prof::time(peregrine_core::prof::Slot::Rope, || {
-        peregrine_core::blocks::attn::prepare_rows(
+        peregrine_core::blocks::attn::prepare_rows_kv(
             cfg,
             l.bq.as_deref(),
             l.bk.as_deref(),
@@ -131,21 +137,26 @@ pub(crate) fn attention_rows(
             nb,
             positions,
             pool,
+            kvw.map(|w| (w, li)),
             stats,
         );
     });
     let qd = cfg.q_dim();
     peregrine_core::prof::time(peregrine_core::prof::Slot::KvWrite, || {
-        peregrine_core::blocks::attn::write_kv_rows(
-            caches,
-            li,
-            &st.k,
-            &st.v,
-            nb,
-            positions,
-            cfg.n_kv_head,
-            cfg.head_dim,
-        );
+        if in_join {
+            peregrine_core::blocks::attn::advance_kv_rows(caches, nb, positions);
+        } else {
+            peregrine_core::blocks::attn::write_kv_rows(
+                caches,
+                li,
+                &st.k,
+                &st.v,
+                nb,
+                positions,
+                cfg.n_kv_head,
+                cfg.head_dim,
+            );
+        }
     });
 
     let t_attn = std::time::Instant::now();

@@ -3,7 +3,7 @@
 use crate::attn;
 use crate::blocks::par::{for_row_chunks_3, Disjoint, Sched};
 use crate::blocks::ROW_PARALLEL;
-use crate::kv::KvCache;
+use crate::kv::{KvCache, KvWriter};
 use crate::model::{Caches, Config, StepStats};
 use crate::pool::{share, Pool};
 
@@ -90,12 +90,49 @@ pub fn write_kv_rows(
             kv.put(li, h, pos, &k[ks..ks + head_dim], &v[ks..ks + head_dim]);
         }
     }
-    // Every position in this batch is now readable, so a later row of the
-    // batch can attend to an earlier one — which is what makes prefill and
-    // speculative verification a single call rather than a loop.
+    advance_kv_rows(caches, nb, positions);
+}
+
+/// Make every position of this step readable, after its K/V write.
+///
+/// Every position in a batch is readable once it is written, so a later row of the
+/// batch can attend to an earlier one — which is what makes prefill and speculative
+/// verification a single call rather than a loop.
+pub fn advance_kv_rows(caches: &mut Caches<'_>, nb: usize, positions: &[usize]) {
     for b in 0..nb {
         caches.get_mut(b).advance(positions[b] + 1);
     }
+}
+
+/// The K/V write of a chunk that is **one run of consecutive positions**, as the
+/// preparation pass's own join writes it (S5.4o); `None` keeps the serial
+/// [`write_kv_rows`].
+///
+/// The fast prompt mode's cells are one run: a prompt chunk's rows are consecutive
+/// positions of one cache, so worker `w`'s rows are its own vectors and the write rides
+/// in a join the pass already pays instead of a serial pass after it (3 % of a
+/// 512-token pass, measured). A mixed pass (a prompt chunk beside other users' decode
+/// rows) has several runs and keeps the serial write.
+pub fn kv_run<'a>(
+    caches: &'a mut Caches<'_>,
+    nb: usize,
+    positions: &[usize],
+) -> Option<KvWriter<'a>> {
+    if nb == 0 || positions.len() < nb {
+        return None;
+    }
+    let cache = {
+        let mut runs = caches.runs(nb);
+        match (runs.next(), runs.next()) {
+            (Some((0, l, c)), None) if l == nb => Some(c),
+            _ => None,
+        }
+    };
+    let cache = cache?;
+    if positions[..nb].windows(2).any(|w| w[1] != w[0] + 1) {
+        return None;
+    }
+    Some(caches.cache_mut(cache).writer())
 }
 
 /// Per batch row, before attention: the projection biases (Qwen2), the per-head
@@ -118,6 +155,36 @@ pub fn prepare_rows(
     nb: usize,
     positions: &[usize],
     pool: &Pool,
+    stats: &mut StepStats,
+) {
+    prepare_rows_kv(
+        cfg, bq, bk, bv, q_norm, k_norm, rope_table, q, k, v, nb, positions, pool, None, stats,
+    )
+}
+
+/// [`prepare_rows`] that also writes each row's keys and values into the cache, when
+/// the caller has one run of consecutive positions ([`kv_run`]).
+///
+/// `kv` is some only for a chunk of one cache's consecutive positions; every row of the
+/// chunk is then one position of every KV head, so the row's write is disjoint from
+/// every other row's and the worker that prepared the row writes it (S5.4o). The
+/// caller still calls [`advance_kv_rows`] after the join.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_rows_kv(
+    cfg: &Config,
+    bq: Option<&[f32]>,
+    bk: Option<&[f32]>,
+    bv: Option<&[f32]>,
+    q_norm: Option<&[f32]>,
+    k_norm: Option<&[f32]>,
+    rope_table: &[f32],
+    q: &mut [f32],
+    k: &mut [f32],
+    v: &mut [f32],
+    nb: usize,
+    positions: &[usize],
+    pool: &Pool,
+    kv: Option<(KvWriter<'_>, usize)>,
     stats: &mut StepStats,
 ) {
     let c = cfg;
@@ -174,6 +241,12 @@ pub fn prepare_rows(
                     c.rope_dim,
                     c.rope_neox,
                 );
+                if let Some((kv, layer)) = kv {
+                    // SAFETY: this worker prepared row `b`, and its position is its own
+                    // (the chunk is one run of consecutive positions), so no other
+                    // worker writes the vectors of `pos`.
+                    unsafe { kv.put_row(layer, pos, k_row, v_row) };
+                }
             }
         },
     );
