@@ -154,6 +154,15 @@ const LOAD_MIN_RUNNABLE: Duration = Duration::from_millis(4);
 /// threads, the fast prompt mode: a 2 000 µs window +6 %, 4 000 µs +8 %, 8 000 µs +4 %
 /// against the calibrated 1 000 µs, and the park log showed 675 of 1 006 parks lasting
 /// 1–5 ms.
+///
+/// **Only on a host that is not oversubscribed** (S5.6r). Stretching assumes the
+/// workers are there to be kept warm; when the run queue is deeper than the pool's
+/// cores, every spinning waiter takes a core the late worker needs, which is exactly
+/// the loss S5.6's stall gate parks to avoid. The stretch therefore applies only while
+/// the smoothed run-queue delay is below [`STALL_GATE_PERMILLE`]. Measured on the ARM
+/// host (ten Cortex-X925 cores, co-tenants, load 3–11 through the window), a 512-token
+/// and a 4 096-token exact prefill at ten threads: the stretch cost 1.6–2.6 % in every
+/// disturbed cell and in the quiet ones (`benchmarks/results/spark-arm-2026-11-13-s5.6-reread/`).
 const GAP_CAP_US: u64 = 8000;
 
 /// A gap longer than this is a pass boundary (an idle session), not a fork-to-fork gap:
@@ -272,8 +281,9 @@ struct WaitControl {
     claim_always: bool,
     /// Smoothed gap between the end of one fork–join and the start of the next, in
     /// nanoseconds (0 until the first measured gap). The worker's spin window is
-    /// stretched to cover it: that is the wait a spin can save, and a prompt pass's gap
-    /// is longer than the wake latency the configured window is sized by.
+    /// stretched to cover it — only while the host is not oversubscribed — because
+    /// that is the wait a spin can save, and a prompt pass's gap is longer than the
+    /// wake latency the configured window is sized by.
     gap_ns: AtomicU64,
     /// When the previous fork–join ended, in nanoseconds since the pool's first join.
     /// Only the caller thread writes it; `0` means "no join has finished yet".
@@ -539,7 +549,7 @@ impl WaitControl {
                 let configured = self.max_spin_us;
                 // A caller that asks for no spinning (`PEREGRINE_SPIN_US=0`, and the
                 // calibration's own wake probe) keeps none.
-                if configured == 0 || !self.enabled {
+                if configured == 0 || !self.enabled || self.oversubscribed() {
                     configured
                 } else {
                     configured.max(self.gap_us())
@@ -549,6 +559,18 @@ impl WaitControl {
         };
         let yld = self.max_yield_us.max(spin);
         (Duration::from_micros(spin), Duration::from_micros(yld))
+    }
+
+    /// Whether the smoothed run-queue delay says the host has more runnable threads
+    /// than free cores.
+    ///
+    /// The same evidence the stall gate uses ([`STALL_GATE_PERMILLE`]): on such a host
+    /// a longer spin does not bridge the join gap, it takes a core from the worker the
+    /// join is waiting for, so the gap stretch is off and the configured window is kept.
+    #[inline]
+    fn oversubscribed(&self) -> bool {
+        u32::try_from(self.ewma.load(Ordering::Relaxed) / 1024).unwrap_or(1000)
+            >= STALL_GATE_PERMILLE
     }
 
     /// The measured join gap, in µs, capped at [`GAP_CAP_US`].
@@ -2362,6 +2384,30 @@ mod tests {
             w.observe(1000, t);
         }
         assert_eq!(w.budgets().0, Duration::from_micros(1000));
+    }
+
+    /// The join-gap stretch is a quiet-host lever: on an oversubscribed host the extra
+    /// spin takes a core from the worker the join is waiting for, so the configured
+    /// window is kept (S5.6r, measured on the ARM host).
+    #[test]
+    fn the_gap_stretch_stops_on_an_oversubscribed_host() {
+        let w = WaitControl::new(1000, 0, true, true);
+        w.gap_ns.store(5_000_000, Ordering::Relaxed); // a 5 ms prompt-pass gap
+        assert_eq!(w.budgets().0, Duration::from_micros(5000));
+        // A run queue as deep as the stall gate's evidence: no stretch.
+        let t = feed(
+            &w,
+            Instant::now(),
+            STALL_GATE_PERMILLE + 120,
+            8,
+            Duration::from_millis(10),
+        );
+        assert!(w.oversubscribed());
+        assert_eq!(w.budgets().0, Duration::from_micros(1000));
+        // The co-tenant leaves and the stretch comes back.
+        let _ = feed(&w, t, 0, 40, Duration::from_millis(10));
+        assert!(!w.oversubscribed());
+        assert_eq!(w.budgets().0, Duration::from_micros(5000));
     }
 
     #[test]
