@@ -1,0 +1,31 @@
+adaptive: +    2.123 ms trial start on level 0 (smoothed 423)
+adaptive: +    4.181 ms stall park (hold 512 joins)
+adaptive: t=500 ms level 0 smoothed 426 permille
+adaptive: t=1002 ms level 0 smoothed 556 permille
+adaptive: t=1502 ms level 0 smoothed 559 permille
+adaptive: t=2002 ms level 0 smoothed 595 permille
+adaptive: t=2502 ms level 0 smoothed 480 permille
+adaptive: t=3003 ms level 0 smoothed 518 permille
+adaptive: t=3503 ms level 0 smoothed 581 permille
+adaptive: t=4003 ms level 0 smoothed 437 permille
+adaptive: t=4504 ms level 0 smoothed 459 permille
+adaptive: + 4512.218 ms stall probe (hold 512 joins)
+adaptive: + 4513.859 ms stall park (hold 1024 joins)
+adaptive: t=5005 ms level 0 smoothed 497 permille
+adaptive: t=5505 ms level 0 smoothed 532 permille
+adaptive: t=6006 ms level 0 smoothed 554 permille
+adaptive: t=6508 ms level 0 smoothed 476 permille
+adaptive: t=7009 ms level 0 smoothed 453 permille
+adaptive: t=7511 ms level 0 smoothed 510 permille
+adaptive: t=8012 ms level 0 smoothed 518 permille
+adaptive: t=8512 ms level 0 smoothed 535 permille
+adaptive: t=9012 ms level 0 smoothed 434 permille
+adaptive: t=9512 ms level 0 smoothed 491 permille
+adaptive: t=10013 ms level 0 smoothed 397 permille
+adaptive: t=10513 ms level 0 smoothed 445 permille
+adaptive: t=11014 ms level 0 smoothed 401 permille
+adaptive: t=11517 ms level 0 smoothed 539 permille
+adaptive: t=12020 ms level 0 smoothed 546 permille
+adaptive: t=12524 ms level 0 smoothed 366 permille
+adaptive: ladder wall per thread: level0 126789.3 ms (10951), level1 0.0 ms (0), level2 0.0 ms (0), transitions 0
+adaptive: park durations <100us 30805, <500us 44559, <1ms 10330, <5ms 13286, >=5ms 211

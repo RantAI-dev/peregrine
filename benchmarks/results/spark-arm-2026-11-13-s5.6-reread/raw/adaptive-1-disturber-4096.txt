@@ -1,0 +1,21 @@
+adaptive: +   24.213 ms stall park (hold 512 joins)
+adaptive: t=501 ms level 0 smoothed 115 permille
+adaptive: t=1001 ms level 0 smoothed 148 permille
+adaptive: t=1506 ms level 0 smoothed 150 permille
+adaptive: t=2006 ms level 0 smoothed 142 permille
+adaptive: t=2506 ms level 0 smoothed 103 permille
+adaptive: t=3006 ms level 0 smoothed 124 permille
+adaptive: t=3506 ms level 0 smoothed 70 permille
+adaptive: t=4011 ms level 0 smoothed 113 permille
+adaptive: t=4511 ms level 0 smoothed 189 permille
+adaptive: t=5011 ms level 0 smoothed 126 permille
+adaptive: t=5515 ms level 0 smoothed 134 permille
+adaptive: t=6015 ms level 0 smoothed 181 permille
+adaptive: t=6517 ms level 0 smoothed 133 permille
+adaptive: t=7017 ms level 0 smoothed 150 permille
+adaptive: t=7523 ms level 0 smoothed 98 permille
+adaptive: t=8023 ms level 0 smoothed 81 permille
+adaptive: t=8523 ms level 0 smoothed 157 permille
+adaptive: t=9023 ms level 0 smoothed 122 permille
+adaptive: ladder wall per thread: level0 91919.4 ms (9779), level1 0.0 ms (0), level2 0.0 ms (0), transitions 0
+adaptive: park durations <100us 39345, <500us 51769, <1ms 4212, <5ms 4743, >=5ms 0

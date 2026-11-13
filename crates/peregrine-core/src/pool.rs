@@ -154,7 +154,27 @@ const LOAD_MIN_RUNNABLE: Duration = Duration::from_millis(4);
 /// threads, the fast prompt mode: a 2 000 µs window +6 %, 4 000 µs +8 %, 8 000 µs +4 %
 /// against the calibrated 1 000 µs, and the park log showed 675 of 1 006 parks lasting
 /// 1–5 ms.
+///
+/// **Only on a host that is not oversubscribed** (S5.6r). Stretching assumes the
+/// workers are there to be kept warm; when the run queue is deeper than the pool's
+/// cores, every spinning waiter takes a core the late worker needs, which is exactly
+/// the loss S5.6's stall gate parks to avoid. The stretch therefore applies only while
+/// the smoothed run-queue delay is below [`STALL_GATE_PERMILLE`]. Measured on the ARM
+/// host (ten Cortex-X925 cores, co-tenants, load 3–11 through the window), a 512-token
+/// and a 4 096-token exact prefill at ten threads: the stretch cost 1.6–2.6 % in every
+/// disturbed cell and in the quiet ones (`benchmarks/results/spark-arm-2026-11-13-s5.6-reread/`).
+///
+/// **Per architecture, by what was measured.** On x86-64 the stretch is on: +3.3 % on
+/// the AVX-512 desktop's fast 512-token twelve-thread cell (S5.4j) and level on the
+/// four-core AVX2 host (0.98–1.04 with the stall gate either way, S4.9w). On aarch64 it
+/// is off ([`GAP_STRETCH`]): on the ARM host a quiet ten-thread exact prefill was 1.6–2.0 %
+/// *slower* with it, and 1.2–2.6 % slower under one to four competing threads (S5.6r),
+/// with no reading of the host that tells the two machines apart. An aarch64 machine
+/// that is truly idle has not been measured.
 const GAP_CAP_US: u64 = 8000;
+
+/// Whether the join-gap stretch is on for this architecture (see [`GAP_CAP_US`]).
+const GAP_STRETCH: bool = cfg!(not(target_arch = "aarch64"));
 
 /// A gap longer than this is a pass boundary (an idle session), not a fork-to-fork gap:
 /// it must not stretch the window, because no worker is waiting across it.
@@ -272,8 +292,9 @@ struct WaitControl {
     claim_always: bool,
     /// Smoothed gap between the end of one fork–join and the start of the next, in
     /// nanoseconds (0 until the first measured gap). The worker's spin window is
-    /// stretched to cover it: that is the wait a spin can save, and a prompt pass's gap
-    /// is longer than the wake latency the configured window is sized by.
+    /// stretched to cover it — only while the host is not oversubscribed — because
+    /// that is the wait a spin can save, and a prompt pass's gap is longer than the
+    /// wake latency the configured window is sized by.
     gap_ns: AtomicU64,
     /// When the previous fork–join ended, in nanoseconds since the pool's first join.
     /// Only the caller thread writes it; `0` means "no join has finished yet".
@@ -539,7 +560,7 @@ impl WaitControl {
                 let configured = self.max_spin_us;
                 // A caller that asks for no spinning (`PEREGRINE_SPIN_US=0`, and the
                 // calibration's own wake probe) keeps none.
-                if configured == 0 || !self.enabled {
+                if configured == 0 || !self.enabled || self.oversubscribed() {
                     configured
                 } else {
                     configured.max(self.gap_us())
@@ -551,15 +572,30 @@ impl WaitControl {
         (Duration::from_micros(spin), Duration::from_micros(yld))
     }
 
+    /// Whether the smoothed run-queue delay says the host has more runnable threads
+    /// than free cores.
+    ///
+    /// The same evidence the stall gate uses ([`STALL_GATE_PERMILLE`]): on such a host
+    /// a longer spin does not bridge the join gap, it takes a core from the worker the
+    /// join is waiting for, so the gap stretch is off and the configured window is kept.
+    #[inline]
+    fn oversubscribed(&self) -> bool {
+        u32::try_from(self.ewma.load(Ordering::Relaxed) / 1024).unwrap_or(1000)
+            >= STALL_GATE_PERMILLE
+    }
+
     /// The measured join gap, in µs, capped at [`GAP_CAP_US`].
     fn gap_us(&self) -> u64 {
+        if !GAP_STRETCH {
+            return 0;
+        }
         (self.gap_ns.load(Ordering::Relaxed) / 1000).min(GAP_CAP_US)
     }
 
     /// Record the gap a worker would have to bridge: the time from the end of the last
     /// fork–join to the start of this one.
     fn observe_gap(&self, now: Instant) {
-        if !self.enabled || self.max_spin_us == 0 {
+        if !GAP_STRETCH || !self.enabled || self.max_spin_us == 0 {
             return;
         }
         let nanos = nanos_since_base(now);
@@ -582,7 +618,7 @@ impl WaitControl {
 
     /// Mark the end of this fork–join, which is where the next gap is measured from.
     fn mark_join_end(&self, now: Instant) {
-        if !self.enabled || self.max_spin_us == 0 {
+        if !GAP_STRETCH || !self.enabled || self.max_spin_us == 0 {
             return;
         }
         self.last_end
@@ -2362,6 +2398,33 @@ mod tests {
             w.observe(1000, t);
         }
         assert_eq!(w.budgets().0, Duration::from_micros(1000));
+    }
+
+    /// The join-gap stretch is a quiet-host lever: on an oversubscribed host the extra
+    /// spin takes a core from the worker the join is waiting for, so the configured
+    /// window is kept (S5.6r, measured on the ARM host).
+    #[test]
+    fn the_gap_stretch_stops_on_an_oversubscribed_host() {
+        let w = WaitControl::new(1000, 0, true, true);
+        // A 5 ms prompt-pass gap. Where the stretch is on it covers the gap; where it
+        // is off (aarch64) the configured window stands.
+        w.gap_ns.store(5_000_000, Ordering::Relaxed);
+        let stretched = if GAP_STRETCH { 5000 } else { 1000 };
+        assert_eq!(w.budgets().0, Duration::from_micros(stretched));
+        // A run queue as deep as the stall gate's evidence: no stretch.
+        let t = feed(
+            &w,
+            Instant::now(),
+            STALL_GATE_PERMILLE + 120,
+            8,
+            Duration::from_millis(10),
+        );
+        assert!(w.oversubscribed());
+        assert_eq!(w.budgets().0, Duration::from_micros(1000));
+        // The co-tenant leaves and the stretch comes back.
+        let _ = feed(&w, t, 0, 40, Duration::from_millis(10));
+        assert!(!w.oversubscribed());
+        assert_eq!(w.budgets().0, Duration::from_micros(stretched));
     }
 
     #[test]

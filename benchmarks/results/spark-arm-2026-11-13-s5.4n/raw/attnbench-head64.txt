@@ -1,0 +1,8 @@
+1b exact 512/1: prefill ctx 512 chunk 128 threads 1: 330.5 ms  1549.2 tok/s  52.1 GFLOP/s  (chk 8.616)
+1b fast 512/1: prefill ctx 512 chunk 128 threads 1: 298.9 ms  1713.2 tok/s  57.6 GFLOP/s  (chk 8.616)
+1b exact 512/10: prefill ctx 512 chunk 128 threads 10: 45.0 ms  11387.4 tok/s  382.8 GFLOP/s  (chk 8.616)
+1b fast 512/10: prefill ctx 512 chunk 128 threads 10: 38.3 ms  13384.5 tok/s  450.0 GFLOP/s  (chk 8.616)
+1b exact 4096/1: prefill ctx 4096 chunk 128 threads 1: 19840.9 ms  206.4 tok/s  55.4 GFLOP/s  (chk 29.741)
+1b fast 4096/1: prefill ctx 4096 chunk 128 threads 1: 18345.6 ms  223.3 tok/s  59.9 GFLOP/s  (chk 29.741)
+1b exact 4096/10: prefill ctx 4096 chunk 128 threads 10: 2603.4 ms  1573.3 tok/s  422.4 GFLOP/s  (chk 59.482)
+1b fast 4096/10: prefill ctx 4096 chunk 128 threads 10: 2463.6 ms  1662.6 tok/s  446.4 GFLOP/s  (chk 59.482)

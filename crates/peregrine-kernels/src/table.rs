@@ -402,24 +402,33 @@ impl MatKernels {
     }
 
     /// Whether this tier computes a fast prompt row's attention in the fast prompt
-    /// mode's own order (S5.4j).
+    /// mode's own order (S5.4j, S5.4n).
     ///
     /// A per-tier property, like the form's formats above: the mode is lossy by
     /// definition, and a prompt row of it may score its keys, fold its soft-max
     /// denominator and mix its values in a tiled order of the same sums (a rounding
-    /// difference, orders of magnitude below the 8-bit form's error). **AVX-512**
-    /// takes it — it is the tier the row tiling is built for
-    /// (`crates/peregrine-core/src/attn.rs`, `mod fast`); AVX2, aarch64 and scalar
-    /// keep the exact engine's attention for prompt rows in this step, so their
-    /// fast-mode goldens do not move. The definition and its numbers are in
-    /// `docs/design/s5.4-fast-prompt.md` §5k.
+    /// difference, orders of magnitude below the 8-bit form's error). **AVX-512** and
+    /// **aarch64's three NEON tiers** take it — they are the tiers the row tiling is
+    /// built for (`crates/peregrine-core/src/attn.rs`, `mod fast`); AVX2 and scalar
+    /// keep the exact engine's attention for prompt rows. The definition is one for
+    /// every tier and the bodies are bit-identical to its scalar twins; the numbers
+    /// are in `docs/design/s5.4-fast-prompt.md` §5k and §5n.
     #[inline]
     pub fn fast_attn(&self) -> bool {
         #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
         {
             crate::kqsimd::have_zmm512()
         }
-        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
+        #[cfg(all(target_arch = "aarch64", feature = "fmt-kquant"))]
+        {
+            // `PEREGRINE_ISA=scalar` caps this to false, so the forced scalar tier
+            // keeps the exact engine (its goldens must not move).
+            crate::cpu::have_neon()
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", feature = "fmt-kquant"),
+            all(target_arch = "aarch64", feature = "fmt-kquant")
+        )))]
         {
             false
         }
