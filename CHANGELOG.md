@@ -19,8 +19,9 @@ Read this before upgrading:
   `peregrine serve` and `peregrine run`, so these models reason before they answer unless the
   request turns thinking off (`chat_template_kwargs.enable_thinking: false`); budget `max_tokens`
   for the reasoning.
-- The default engine's outputs did not move: no golden recorded for v0.2.0 changed (new ones were
-  added for the new families and for Windows); only `--fast-prompt`'s own goldens did.
+- The default engine's outputs did not move since v0.2.0: new goldens were added for the new
+  families and for Windows, `--fast-prompt`'s own goldens moved, and one stale golden
+  (Qwen3-30B-A3B on AVX2) was re-recorded to the bits v0.2.0 already produced.
 
 ### Changed
 
