@@ -34,7 +34,7 @@ compared with OpenVINO, ONNX Runtime, fastembed and text-embeddings-inference. W
   text-embeddings-inference at equal accuracy. bge-m3, EmbeddingGemma, Qwen3-Embedding and Nemotron 3.5
   Embed are **1.18–1.62×** llama.cpp and decisions **1.33–1.84×**. The 25 cells behind are the two small
   BERT encoders at 128 and 512 tokens (**0.85–0.99×** OpenVINO and ONNX Runtime) and the two newest
-  families at 128 and 16-token batches (nomic-bert 0.93×, jina-bert-v2 0.89–0.97×). On ARM every measured
+  families at 128 and 16-token batches (nomic-bert 0.93×, jina-bert-v2 0.91–0.96×). On ARM every measured
   model is ahead of llama.cpp except four near-parity cells (0.95–0.99×). See
   [Embeddings, rerank and decisions](#embeddings-rerank-and-decisions).
 
@@ -329,7 +329,7 @@ batch cells re-measured on the merged build after S4.8b's wider float pass
 | all-MiniLM-L6-v2 | F16, Q8_0 | OpenVINO, ONNX Runtime, llama.cpp | **1.01–1.46×** | 0.97–1.08× | 0.99–1.03× | n/a | **1.60–1.65×** |
 | bge-small-en-v1.5 | F32, Q8_0 | OpenVINO, ONNX Runtime, fastembed | 0.95–1.23× | 0.93–1.01× | 0.90–0.95× | n/a | **1.31×** |
 | nomic-embed-text v1.5 | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.51×** (b1), **1.02–1.09×** (b8/b32) | 0.93–1.00× | **1.04–1.11×** | **1.07–1.09×** | **1.71–1.72×** |
-| jina-embeddings-v2-base-en | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.34×** (b1), 0.94–0.97× (b8/b32) | 0.91–0.92× | **1.00–1.06×** | **1.01–1.21×** | **1.67–1.69×** |
+| jina-embeddings-v2-base-en | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.34×** (b1), 0.94–0.96× (b8/b32) | 0.91–0.92× | **1.00–1.06×** | **1.01–1.21×** | **1.67–1.69×** |
 
 | bge-m3 | Q8_0 | llama.cpp | **1.18–1.53× across every cell** | | | **1.35×** | |
 | EmbeddingGemma 300M | Q8_0 | llama.cpp | **1.30–1.51× across every cell** | | | | |
