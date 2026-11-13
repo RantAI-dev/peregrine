@@ -655,9 +655,12 @@ impl Model {
         st.set_lb_scratch(lx, lt);
         // The fast prompt mode's attention order (S5.4j) needs the tier to have it and
         // the model to carry the 8-bit form: a model whose formats are all outside the
-        // tier's table is the exact engine, attention included.
-        st.fast_attn =
-            peregrine_kernels::table::MatKernels::get().fast_attn() && !self.q8_form().is_empty();
+        // tier's table is the exact engine, attention included. It also needs a head the
+        // 16-lane bodies cover: at any other width only the definition's plain loops
+        // would run, far slower than the exact attention the row keeps instead.
+        st.fast_attn = peregrine_kernels::table::MatKernels::get().fast_attn()
+            && !self.q8_form().is_empty()
+            && self.cfg.head_dim.is_multiple_of(16);
         if self.causality() == crate::arch::Causality::Bidirectional {
             // An encoder's strip scratch (S4.9g): the pass allocates nothing.
             st.attn.bidir.resize(max_batch, self.cfg.head_dim, threads);

@@ -467,6 +467,9 @@ pub fn attend_mapped(
     let c = cfg;
     let hd = c.head_dim;
     let qd = c.q_dim();
+    // A tier whose table keeps the exact attention ignores the flags on this path too
+    // (S5.4j), as `attend_scaled_window` does for the runs below.
+    let fast = fast.filter(|_| attn::fast::tier());
     // The runs, and the rows that are alone in their cache, into reused buffers.
     let mut runs = std::mem::take(&mut scratch.runs);
     runs.clear();
@@ -672,5 +675,80 @@ mod tests {
             serial, parallel,
             "a row's bits must not depend on how its call is partitioned"
         );
+    }
+
+    /// A fast prompt row that is alone in its cache beside another user's row takes the
+    /// per-row path of a mapped pass (`attn::run_row`). Its pieces are still the absolute
+    /// key tiles, so its bits are the ones a pass of that row alone gives it: a row's
+    /// result must not depend on which other users shared its pass (S5.4j).
+    #[test]
+    fn a_fast_row_alone_in_its_cache_is_the_solo_row() {
+        let cfg = test_config(8, 2, 64);
+        let (hd, qd) = (cfg.head_dim, cfg.q_dim());
+        // Long enough that an exact row is cut into several position chunks.
+        let n = 700usize;
+        let fill = |seed: usize| {
+            let mut kv = KvCache::new(KvPrec::F16, 1, cfg.n_kv_head, hd, n + 8);
+            for p in 0..=n {
+                for h in 0..cfg.n_kv_head {
+                    let k = prng((seed + p * 31 + h * 7 + 1) as u64, hd);
+                    let v = prng((seed + p * 17 + h * 5 + 2) as u64, hd);
+                    kv.put(0, h, p, &k, &v);
+                }
+            }
+            kv.advance(n + 1);
+            kv
+        };
+        let (mut a, mut b) = (fill(0), fill(1 << 20));
+        let q = prng(0x5a5a, 2 * qd);
+        let flags = [true, true];
+        let pool = Pool::new(4);
+        let mut stats = StepStats::default();
+
+        let mut scratch = AttnScratch::new(&cfg, 2, 4);
+        // The exact rows first (no flags): the same comparison, which is the exact
+        // engine's own rule and shows the two calls below are the same row.
+        for marked in [false, true] {
+            let fast = marked.then_some(&flags[..]);
+            let mut solo = vec![0.0f32; qd];
+            attend_marked(
+                &cfg,
+                &mut scratch,
+                &q[..qd],
+                &mut solo,
+                &a,
+                &pool,
+                0,
+                1,
+                n,
+                0,
+                fast.map(|f| &f[..1]),
+                &mut stats,
+            );
+            let mut both = vec![0.0f32; 2 * qd];
+            {
+                let mut refs: [&mut KvCache; 2] = [&mut a, &mut b];
+                let caches = Caches::PerRow(&mut refs);
+                attend_mapped(
+                    &cfg,
+                    &mut scratch,
+                    &q,
+                    &mut both,
+                    &caches,
+                    &pool,
+                    0,
+                    2,
+                    &[n, n],
+                    fast,
+                    &mut stats,
+                );
+            }
+            assert!(
+                solo.iter()
+                    .zip(&both[..qd])
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "marked {marked}: a row's bits depend on the rows that shared its pass"
+            );
+        }
     }
 }

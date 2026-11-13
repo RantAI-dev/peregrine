@@ -1376,7 +1376,6 @@ pub(crate) fn run_row<O: RowSink>(
     let hd = sh.head_dim;
     let gqa = sh.gqa();
     let n_ctx = pos + 1;
-    let count = row_chunks(sh, n_ctx);
     // The row alone, at its own position: the shape a solo decode would see.
     let one = Shape {
         nb: 1,
@@ -1384,6 +1383,15 @@ pub(crate) fn run_row<O: RowSink>(
         // This row's own flag: `sh.fast` is indexed by batch row.
         fast: sh.fast.map(|f| &f[row..row + 1]),
         ..*sh
+    };
+    // A fast prompt row's pieces are the absolute key tiles, never position chunks
+    // (S5.4j): one walk over its whole visible range, exactly as [`plan`] gives a solo
+    // fast row one chunk. Cutting it here would make its bits depend on whether the row
+    // was alone in its cache in this pass.
+    let count = if fast_row(&one, 0) {
+        1
+    } else {
+        row_chunks(sh, n_ctx)
     };
     // The same visible-position cut [`task`] makes for a solo row.
     let v0 = visible_start(&one, n_ctx);
