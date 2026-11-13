@@ -1,0 +1,10 @@
+== old llama1b
+Mean    KLD:   0.003487 ±   0.000047
+Median  KLD:   0.002460
+RMS Δp    :  1.357 ± 0.031 %
+Same top p: 96.451 ± 0.183 %
+== new llama1b
+Mean    KLD:   0.003496 ±   0.000045
+Median  KLD:   0.002470
+RMS Δp    :  1.413 ± 0.034 %
+Same top p: 96.422 ± 0.184 %

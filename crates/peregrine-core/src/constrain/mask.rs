@@ -15,10 +15,20 @@
 //! * everything else is walked through the full trie, with the branch pruned at the first
 //!   byte the matcher rejects.
 //!
-//! Special/control tokens are never content; the end tokens are passed to
+//! * a state inside a free-text part (`Part::Until`) is walked with the part's own
+//!   `Copy` item, the terminator search and the UTF-8 check, with no matcher clone per
+//!   trie node; almost every token is allowed there, so the walk is the whole trie once
+//!   per search state and the result is memoised like any other mask.
+//!
+//! Control and unknown tokens are never allowed. A **user-defined** token (`<tool_call>`,
+//! `</think>` in Qwen's files) is a *marker*: it is not content — never part of a JSON
+//! string or of free text — but it is allowed where the constraint spells its bytes, in
+//! a literal part or as a free-text part's terminator (`Matcher::spelled`). A model
+//! trained to write one token for a tag is then not made to spell the tag out of
+//! ordinary tokens, which is text it never saw. The end tokens are passed to
 //! [`Vocabulary::allowed`] on every call and are added only when the matcher may end.
 
-use super::matcher::{str_step, Matcher, StrStep};
+use super::matcher::{str_step, until_step, Matcher, StrStep, UntilItem, UntilStep};
 use crate::tokenizer::Tokenizer;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -184,8 +194,11 @@ impl Iterator for TokenMaskIter<'_> {
 /// A model's vocabulary as the mask needs it.
 pub struct Vocabulary {
     n_vocab: usize,
-    /// Raw bytes per token id (empty for a token that is never content).
+    /// Raw bytes per token id (empty for a token that is neither content nor a marker).
     bytes: Vec<Vec<u8>>,
+    /// The marker tokens: user-defined tokens and their text, allowed only where the
+    /// constraint spells those bytes.
+    markers: Vec<(u32, Vec<u8>)>,
     content: Trie,
     quoted: Trie,
     /// Content-boundary tokens that close a string, with the characters before the close
@@ -218,7 +231,28 @@ pub struct Vocabulary {
     /// after its first request.
     mask_cache: Mutex<MaskMemo>,
     mask_tick: std::sync::atomic::AtomicU64,
+    /// Free-text masks by (terminator, bytes of it matched), shared by every request of
+    /// this model: which tokens are text there does not depend on the constraint around
+    /// the part, only the few tokens that complete the terminator do.
+    until_tables: Mutex<UntilTables>,
 }
+
+/// The free-text tables by (terminator, bytes of it matched).
+type UntilTables = HashMap<(Vec<u8>, u32), std::sync::Arc<UntilTable>>;
+
+/// What a free-text state allows, as far as the vocabulary alone decides it.
+struct UntilTable {
+    /// The tokens that are text from this state: they keep the stream well-formed UTF-8
+    /// and do not complete the terminator.
+    stay: TokenMask,
+    /// The tokens that complete the terminator, with the number of their bytes it takes.
+    /// Whether one is allowed depends on what follows the part: the rest of its bytes
+    /// must be read by the frames below.
+    completing: Vec<(u32, u32)>,
+}
+
+/// More terminators than any format has; past it the tables are dropped and rebuilt.
+const UNTIL_TABLES_CAP: usize = 64;
 
 type MaskEntry = (Matcher, Vec<u32>, TokenMask, u64);
 
@@ -238,7 +272,8 @@ struct MaskMemo {
 }
 
 impl Vocabulary {
-    /// Build from a model's tokenizer: detokenised bytes, special tokens excluded.
+    /// Build from a model's tokenizer: detokenised bytes; control and unknown tokens
+    /// excluded, user-defined tokens kept as markers.
     pub fn new(tk: &Tokenizer) -> Vocabulary {
         let n = tk.n_vocab;
         let mut special = vec![false; n];
@@ -247,7 +282,6 @@ impl Vocabulary {
                 special[id as usize] = true;
             }
         }
-        let mut bytes = vec![Vec::new(); n];
         let mut content = Vec::with_capacity(n);
         for id in 0..n as u32 {
             if special[id as usize] {
@@ -257,10 +291,19 @@ impl Vocabulary {
             if b.is_empty() {
                 continue;
             }
-            bytes[id as usize] = b.clone();
             content.push((id, b));
         }
-        Self::from_content(n, content)
+        let mut markers = Vec::new();
+        for id in tk.user_defined_ids() {
+            if (id as usize) < n {
+                let b = tk.token_bytes(id);
+                if !b.is_empty() {
+                    markers.push((id, b));
+                }
+            }
+        }
+        markers.sort();
+        Self::from_content(n, content, markers)
     }
 
     /// Build from raw token bytes (tests, and callers with their own tokenizer). A token
@@ -274,11 +317,37 @@ impl Vocabulary {
             .filter(|(_, b)| !b.is_empty())
             .map(|(i, b)| (i as u32, b))
             .collect();
-        Self::from_content(n, content)
+        Self::from_content(n, content, Vec::new())
     }
 
-    fn from_content(n: usize, content: Vec<(u32, Vec<u8>)>) -> Vocabulary {
+    /// [`from_tokens`](Self::from_tokens) with some ids as marker tokens: those are not
+    /// content, and are allowed only where a constraint spells their bytes.
+    pub fn from_tokens_with_markers(tokens: Vec<Vec<u8>>, markers: &[u32]) -> Vocabulary {
+        let n = tokens.len();
+        let mut content = Vec::new();
+        let mut marked = Vec::new();
+        for (i, b) in tokens.into_iter().enumerate() {
+            if b.is_empty() {
+                continue;
+            }
+            if markers.contains(&(i as u32)) {
+                marked.push((i as u32, b));
+            } else {
+                content.push((i as u32, b));
+            }
+        }
+        Self::from_content(n, content, marked)
+    }
+
+    fn from_content(
+        n: usize,
+        content: Vec<(u32, Vec<u8>)>,
+        markers: Vec<(u32, Vec<u8>)>,
+    ) -> Vocabulary {
         let mut bytes = vec![Vec::new(); n];
+        for (id, b) in &markers {
+            bytes[*id as usize] = b.clone();
+        }
         let mut plain = Vec::new();
         let mut closing: Vec<ClosingToken> = Vec::new();
         let mut nonclosing = Vec::new();
@@ -348,6 +417,7 @@ impl Vocabulary {
         Vocabulary {
             n_vocab: n,
             bytes,
+            markers,
             content: content_trie,
             quoted: quoted_trie,
             closing,
@@ -363,6 +433,7 @@ impl Vocabulary {
             boundary_tick: std::sync::atomic::AtomicU64::new(0),
             mask_cache: Mutex::new(MaskMemo::default()),
             mask_tick: std::sync::atomic::AtomicU64::new(0),
+            until_tables: Mutex::new(HashMap::new()),
         }
     }
 
@@ -376,7 +447,8 @@ impl Vocabulary {
         self.n_vocab == 0
     }
 
-    /// The bytes the engine appends to the reply for `id` (empty when it is not content).
+    /// The bytes the engine appends to the reply for `id` (empty when it is neither content
+    /// nor a marker).
     pub fn token_bytes(&self, id: u32) -> &[u8] {
         self.bytes.get(id as usize).map_or(&[], Vec::as_slice)
     }
@@ -440,7 +512,14 @@ impl Vocabulary {
             }
             return mask;
         }
-        if let Some((chars, _min, max)) = matcher.simple_string() {
+        if let Some((below, item)) = matcher.until_split() {
+            if item.between_characters() {
+                self.until_content(&mut mask, matcher, below, item);
+            } else {
+                // Inside a character only its continuation bytes go on: a short walk.
+                self.walk_until_node(&self.content, matcher, below, item, 0, &mut mask);
+            }
+        } else if let Some((chars, _min, max)) = matcher.simple_string() {
             self.string_content(&mut mask, matcher, chars, max);
         } else {
             // A value or key position: a token that begins with `"` and continues with
@@ -459,6 +538,7 @@ impl Vocabulary {
             let skip = skip_quote.then_some(b'"');
             self.walk(&self.content, matcher, 0, &mut mask, skip.unwrap_or(b'\0'));
         }
+        self.marker_bits(&mut mask, matcher);
         for &e in ends {
             mask.remove(e);
         }
@@ -698,6 +778,133 @@ impl Vocabulary {
         }
     }
 
+    /// Add the marker tokens the state allows: those whose every byte the constraint
+    /// spells from here (`Matcher::spelled`). Markers that share a first byte share the
+    /// test of that byte, so a state that spells nothing costs one check per first byte.
+    fn marker_bits(&self, mask: &mut TokenMask, matcher: &Matcher) {
+        let mut first: [Option<bool>; 256] = [None; 256];
+        for (id, bytes) in &self.markers {
+            let ok = *first[bytes[0] as usize].get_or_insert_with(|| matcher.spelled(&bytes[..1]));
+            if ok && (bytes.len() == 1 || matcher.spelled(bytes)) {
+                mask.insert(*id);
+            }
+        }
+    }
+
+    /// The mask of a free-text state that stands between characters: the vocabulary's
+    /// table for (terminator, matched bytes), built once per model, plus the tokens that
+    /// complete the terminator and whose remaining bytes the frames below read.
+    fn until_content(
+        &self,
+        mask: &mut TokenMask,
+        matcher: &Matcher,
+        below: &[super::matcher::Item],
+        item: UntilItem,
+    ) {
+        let table = self.until_table(matcher, item);
+        mask.insert_all(&table.stay);
+        if table.completing.is_empty() {
+            return;
+        }
+        let Some(next) = matcher.resume_below(below) else {
+            return;
+        };
+        for &(id, used) in &table.completing {
+            let rest = &self.bytes[id as usize][used as usize..];
+            if rest.is_empty() || next.clone().advance_bytes(rest).is_ok() {
+                mask.insert(id);
+            }
+        }
+    }
+
+    fn until_table(&self, matcher: &Matcher, item: UntilItem) -> std::sync::Arc<UntilTable> {
+        let schema = matcher.until_schema(item);
+        let key = (schema.term.clone(), item.k);
+        {
+            let tables = self.until_tables.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = tables.get(&key) {
+                return t.clone();
+            }
+        }
+        let mut table = UntilTable {
+            stay: TokenMask::new(self.n_vocab),
+            completing: Vec::new(),
+        };
+        self.fill_until_table(schema, item, 0, 0, &mut table);
+        table.completing.sort_unstable();
+        let table = std::sync::Arc::new(table);
+        let mut tables = self.until_tables.lock().unwrap_or_else(|e| e.into_inner());
+        if tables.len() >= UNTIL_TABLES_CAP {
+            tables.clear();
+        }
+        tables.insert(key, table.clone());
+        table
+    }
+
+    fn fill_until_table(
+        &self,
+        schema: &super::schema::UntilSchema,
+        item: UntilItem,
+        node: u32,
+        depth: u32,
+        table: &mut UntilTable,
+    ) {
+        for &id in &self.content.tokens[node as usize] {
+            table.stay.insert(id);
+        }
+        for &(b, child) in &self.content.children[node as usize] {
+            match until_step(schema, item, b) {
+                UntilStep::More(next) => {
+                    self.fill_until_table(schema, next, child, depth + 1, table)
+                }
+                UntilStep::Done => self.collect_subtree(child, depth + 1, &mut table.completing),
+                UntilStep::No => {}
+            }
+        }
+    }
+
+    /// Every token at or below `node` of the content trie, with `used`.
+    fn collect_subtree(&self, node: u32, used: u32, out: &mut Vec<(u32, u32)>) {
+        for &id in &self.content.tokens[node as usize] {
+            out.push((id, used));
+        }
+        for &(_, child) in &self.content.children[node as usize] {
+            self.collect_subtree(child, used, out);
+        }
+    }
+
+    /// Walk a token trie inside a free-text part with the part's item alone: a trie node
+    /// costs a terminator-search step and a UTF-8 step, not a matcher clone. A token that
+    /// completes the terminator hands the rest of its bytes to the general walk from the
+    /// frames below.
+    fn walk_until_node(
+        &self,
+        trie: &Trie,
+        matcher: &Matcher,
+        below: &[super::matcher::Item],
+        item: UntilItem,
+        node: u32,
+        mask: &mut TokenMask,
+    ) {
+        for &id in &trie.tokens[node as usize] {
+            mask.insert(id);
+        }
+        let schema = matcher.until_schema(item);
+        for &(b, child) in &trie.children[node as usize] {
+            match until_step(schema, item, b) {
+                UntilStep::More(next) => {
+                    self.walk_until_node(trie, matcher, below, next, child, mask)
+                }
+                UntilStep::Done => {
+                    if let Some(next) = matcher.resume_below(below) {
+                        self.walk(trie, &next, child, mask, 0);
+                    }
+                }
+                UntilStep::No => {}
+            }
+        }
+    }
+
     /// Walk `trie` with `matcher`, inserting every leaf whose bytes leave a non-empty
     /// state. At the root, `skip` (when not zero) is not descended into.
     fn walk(&self, trie: &Trie, matcher: &Matcher, node: u32, mask: &mut TokenMask, skip: u8) {
@@ -723,6 +930,8 @@ impl Vocabulary {
                 if let Some((below, item)) = next.string_split() {
                     let schema = next.string_schema(item);
                     self.walk_string_node(trie, &next, below, schema, item, child, mask, 0);
+                } else if let Some((below, item)) = next.until_split() {
+                    self.walk_until_node(trie, &next, below, item, child, mask);
                 } else {
                     self.walk(trie, &next, child, mask, b'\0');
                 }
@@ -906,5 +1115,217 @@ mod tests {
         assert!(m.advance_bytes(b"[]").is_ok());
         assert!(m.is_closed());
         assert_eq!(v.allowed(&m, &[261]).ids(), vec![261]);
+    }
+
+    // ---- free text and marker tokens (S6.6c) ----
+
+    use crate::constrain::Part;
+
+    /// Single bytes, some multi-byte pieces, and three markers (`<a>`, `</t>`, `<a>{`).
+    fn marked_vocab() -> (Vocabulary, [u32; 3]) {
+        let mut tokens: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
+        for piece in [
+            &b"hello"[..],
+            b" wor",
+            b"ld</",
+            b"t>",
+            b"</t>\n",
+            b"x</t>\n<a>",
+            b"<a",
+            b"a>{\"",
+            b"\": ",
+            "é".as_bytes(),
+            b"\xC3",
+            b"</",
+            b"\n<",
+        ] {
+            tokens.push(piece.to_vec());
+        }
+        let base = tokens.len() as u32;
+        tokens.push(b"<a>".to_vec());
+        tokens.push(b"</t>".to_vec());
+        tokens.push(b"<a>{".to_vec());
+        let markers = [base, base + 1, base + 2];
+        (
+            Vocabulary::from_tokens_with_markers(tokens, &markers),
+            markers,
+        )
+    }
+
+    /// The mask by definition: a content token is allowed when the matcher reads its bytes,
+    /// a marker when every one of its bytes is spelled.
+    fn brute_force(v: &Vocabulary, markers: &[u32], state: &Matcher, ends: &[u32]) -> Vec<u32> {
+        let mut want = Vec::new();
+        for id in 0..v.len() as u32 {
+            let bytes = v.token_bytes(id);
+            if bytes.is_empty() || ends.contains(&id) {
+                continue;
+            }
+            let ok = if markers.contains(&id) {
+                state.spelled(bytes)
+            } else {
+                state.clone().advance_bytes(bytes).is_ok()
+            };
+            if ok {
+                want.push(id);
+            }
+        }
+        if state.can_end() {
+            want.extend(ends.iter().copied());
+        }
+        want.sort_unstable();
+        want.dedup();
+        want
+    }
+
+    fn think_then_call() -> Constraint {
+        Constraint::sequence(vec![
+            Part::Until("</t>".into()),
+            Part::Literal("\n<a>".into()),
+            Part::Json(schema(
+                r#"{"type":"object","properties":{"k":{"type":"string"}},"required":["k"],"additionalProperties":false}"#,
+            )),
+            Part::Literal("</t>".into()),
+        ])
+    }
+
+    #[test]
+    fn the_mask_with_free_text_and_markers_is_the_brute_force_mask() {
+        let (v, markers) = marked_vocab();
+        let c = think_then_call();
+        let start = Matcher::new(&c).unwrap();
+        let ends = [0u32];
+        let prefixes: [&[u8]; 12] = [
+            b"",
+            b"some text",
+            b"text <",
+            b"text </",
+            b"text </t",
+            b"caf\xC3",
+            b"a</t>",
+            b"a</t>\n",
+            b"a</t>\n<a",
+            b"a</t>\n<a>",
+            b"a</t>\n<a>{\"k\": \"v",
+            b"a</t>\n<a>{\"k\": \"v\"}",
+        ];
+        for prefix in prefixes {
+            let mut state = start.clone();
+            assert!(state.advance_bytes(prefix).is_ok(), "{prefix:?}");
+            let got = v.allowed(&state, &ends).ids();
+            assert_eq!(
+                got,
+                brute_force(&v, &markers, &state, &ends),
+                "after {prefix:?}"
+            );
+            // And again from the memo.
+            assert_eq!(v.allowed(&state, &ends).ids(), got, "memo after {prefix:?}");
+        }
+    }
+
+    #[test]
+    fn a_marker_is_allowed_only_where_the_constraint_spells_it() {
+        let (v, [open, close, open_brace]) = marked_vocab();
+        let c = think_then_call();
+        let at = |prefix: &[u8]| {
+            let mut m = Matcher::new(&c).unwrap();
+            assert!(m.advance_bytes(prefix).is_ok(), "{prefix:?}");
+            v.allowed(&m, &[])
+        };
+        // In free text: the terminator's marker, and no other. Ordinary tokens are text.
+        let m = at(b"thinking");
+        assert!(m.contains(close));
+        assert!(!m.contains(open) && !m.contains(open_brace));
+        assert!(m.contains(b'<' as u32) && m.contains(b'h' as u32));
+        // The text's tail may already look like the terminator's start: the marker then
+        // begins the match anew, and is still the terminator.
+        assert!(at(b"thinking <").contains(close));
+        // After the terminator the literal is spelled: its marker, and the ordinary
+        // spelling beside it. The marker that runs on into the JSON is not allowed: its
+        // last byte would be JSON, which nothing spells.
+        let m = at(b"x</t>\n");
+        assert!(m.contains(open));
+        assert!(m.contains(b'<' as u32));
+        assert!(!m.contains(open_brace) && !m.contains(close));
+        // Inside the JSON string a marker is never content, even where its text would be
+        // legal string content.
+        let m = at(b"x</t>\n<a>{\"k\": \"");
+        assert!(!m.contains(open) && !m.contains(close) && !m.contains(open_brace));
+        assert!(m.contains(b'<' as u32));
+        // The closing literal after the JSON is spelled again.
+        assert!(at(b"x</t>\n<a>{\"k\": \"v\"}").contains(close));
+    }
+
+    /// Random replies under a constraint with free text, markers, alternatives and a
+    /// repetition: the mask is never empty before the end, and every finished reply has
+    /// the shape the constraint describes.
+    #[test]
+    fn random_replies_with_free_text_and_markers_satisfy_the_constraint() {
+        let (v, _) = marked_vocab();
+        let call = Constraint::sequence(vec![
+            Part::Literal("\n<a>".into()),
+            Part::Json(schema(r#"{"enum":["p","q"]}"#)),
+            Part::Literal("</t>".into()),
+        ]);
+        let c = Constraint::concat(vec![
+            // An optional thinking block …
+            Constraint::repeat(
+                Constraint::sequence(vec![Part::Until("</t>".into())]),
+                0,
+                Some(1),
+            ),
+            // … then one to three calls.
+            Constraint::repeat(call, 1, Some(3)),
+        ]);
+        let end = 0u32;
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut finished = 0;
+        for _ in 0..400 {
+            let mut m = Matcher::new(&c).unwrap();
+            let mut text: Vec<u8> = Vec::new();
+            for _ in 0..200 {
+                let ids = v.allowed(&m, &[end]).ids();
+                assert!(!ids.is_empty(), "no token allowed after {text:?}");
+                // Lean towards ending and towards the terminator so replies finish.
+                let pick = if ids.contains(&end) && next() % 2 == 0 {
+                    end
+                } else {
+                    ids[(next() % ids.len() as u64) as usize]
+                };
+                if pick == end {
+                    assert!(m.can_end());
+                    finished += 1;
+                    let s = String::from_utf8(text.clone()).expect("well-formed UTF-8");
+                    // Strip the optional thinking block, then one to three calls remain.
+                    let mut rest = s.as_str();
+                    if !rest.starts_with("\n<a>") {
+                        let at = rest.find("</t>").expect("a terminator");
+                        rest = &rest[at + 4..];
+                    }
+                    let mut calls = 0;
+                    while !rest.is_empty() {
+                        let body = rest
+                            .strip_prefix("\n<a>")
+                            .unwrap_or_else(|| panic!("{s:?}"));
+                        let close = body.find("</t>").unwrap_or_else(|| panic!("{s:?}"));
+                        assert!(matches!(body[..close].trim(), "\"p\"" | "\"q\""), "{s:?}");
+                        rest = &body[close + 4..];
+                        calls += 1;
+                    }
+                    assert!((1..=3).contains(&calls), "{s:?}");
+                    break;
+                }
+                let bytes = v.token_bytes(pick).to_vec();
+                assert!(m.advance_bytes(&bytes).is_ok(), "{text:?} + {bytes:?}");
+                text.extend_from_slice(&bytes);
+            }
+        }
+        assert!(finished > 100, "only {finished} of 400 replies finished");
     }
 }

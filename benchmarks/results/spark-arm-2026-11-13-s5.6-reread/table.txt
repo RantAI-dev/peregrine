@@ -1,0 +1,86 @@
+=== before the fix
+-- prompt512
+| arm | L0 | L1 | L2 | L4 |
+|---|---|---|---|---|
+| head | 729.3 (±0.4 %) | 598.4 (±0.7 %) | 551.0 (±0.9 %) | 441.3 (±1.0 %) |
+| merged | 717.8 (±0.5 %) | 596.1 (±1.3 %) | 547.0 (±1.6 %) | 433.3 (±3.6 %) |
+| gap0 | 731.6 (±0.5 %) | 611.2 (±2.5 %) | 561.6 (±1.0 %) | 439.5 (±5.7 %) |
+  L0: merged/gap0 0.981, merged/head 0.984
+  L1: merged/gap0 0.975, merged/head 0.996
+  L2: merged/gap0 0.974, merged/head 0.993
+  L4: merged/gap0 0.986, merged/head 0.982
+-- prompt4096
+| arm | L0 | L1 | L2 | L4 |
+|---|---|---|---|---|
+| head | 518.6 (±0.5 %) | 445.6 (±0.4 %) | 416.9 (±0.4 %) | 325.1 (±0.7 %) |
+| merged | 512.8 (±0.6 %) | 439.2 (±0.8 %) | 412.4 (±0.4 %) | 320.6 (±0.5 %) |
+| gap0 | 521.3 (±0.1 %) | 447.1 (±0.4 %) | 417.3 (±0.5 %) | 327.6 (±0.3 %) |
+  L0: merged/gap0 0.984, merged/head 0.989
+  L1: merged/gap0 0.982, merged/head 0.986
+  L2: merged/gap0 0.988, merged/head 0.989
+  L4: merged/gap0 0.979, merged/head 0.986
+-- decode
+| arm | L0 | L1 | L2 | L4 |
+|---|---|---|---|---|
+| head | 123.8 (±1.4 %) | 106.3 (±1.1 %) | 104.0 (±0.4 %) | 92.3 (±3.2 %) |
+| merged | 124.2 (±0.8 %) | 106.0 (±1.5 %) | 103.7 (±0.3 %) | 92.2 (±4.3 %) |
+| gap0 | 123.6 (±0.5 %) | 105.6 (±1.3 %) | 103.5 (±0.4 %) | 92.0 (±4.2 %) |
+  L0: merged/gap0 1.005, merged/head 1.003
+  L1: merged/gap0 1.004, merged/head 0.998
+  L2: merged/gap0 1.002, merged/head 0.997
+  L4: merged/gap0 1.003, merged/head 0.999
+-- embed32x128
+| arm | L0 | L1 | L2 | L4 |
+|---|---|---|---|---|
+| head | 20.0 (±5.4 %) | 17.0 (±1.7 %) | 15.9 (±0.8 %) | 13.1 (±0.7 %) |
+| merged | 20.3 (±4.4 %) | 17.2 (±1.2 %) | 16.1 (±0.2 %) | 13.3 (±0.8 %) |
+| gap0 | 20.3 (±6.6 %) | 17.2 (±1.6 %) | 16.1 (±0.7 %) | 13.2 (±0.8 %) |
+  L0: merged/gap0 1.002, merged/head 1.013
+  L1: merged/gap0 1.005, merged/head 1.017
+  L2: merged/gap0 1.000, merged/head 1.011
+  L4: merged/gap0 1.005, merged/head 1.012
+=== after the fix
+-- prompt512
+| arm | L0 | L1 | L2 | L4 |
+|---|---|---|---|---|
+| head | 721.2 (±0.8 %) | 605.0 (±0.6 %) | 553.2 (±0.9 %) | 438.4 (±1.0 %) |
+| merged | 715.5 (±0.4 %) | 596.2 (±1.0 %) | 540.0 (±2.5 %) | 434.4 (±3.7 %) |
+| fixed | 718.5 (±0.7 %) | 601.7 (±1.8 %) | 554.9 (±1.8 %) | 438.8 (±1.3 %) |
+| gap0 | 728.2 (±0.8 %) | 606.8 (±2.0 %) | 558.0 (±2.1 %) | 442.9 (±0.7 %) |
+  L0: merged/gap0 0.983, merged/head 0.992, fixed/gap0 0.987, fixed/merged 1.004
+  L1: merged/gap0 0.983, merged/head 0.985, fixed/gap0 0.992, fixed/merged 1.009
+  L2: merged/gap0 0.968, merged/head 0.976, fixed/gap0 0.995, fixed/merged 1.027
+  L4: merged/gap0 0.981, merged/head 0.991, fixed/gap0 0.991, fixed/merged 1.010
+-- prompt4096
+| arm | L0 | L1 | L2 | L4 |
+|---|---|---|---|---|
+| head | 516.5 (±0.5 %) | 444.1 (±0.7 %) | 415.1 (±0.5 %) | 325.2 (±0.5 %) |
+| merged | 509.9 (±0.8 %) | 438.4 (±1.1 %) | 409.9 (±0.3 %) | 320.8 (±0.3 %) |
+| fixed | 512.9 (±0.6 %) | 441.6 (±0.4 %) | 412.6 (±0.3 %) | 321.9 (±0.7 %) |
+| gap0 | 516.8 (±0.7 %) | 446.9 (±0.5 %) | 417.1 (±0.4 %) | 324.9 (±0.2 %) |
+  L0: merged/gap0 0.987, merged/head 0.987, fixed/gap0 0.992, fixed/merged 1.006
+  L1: merged/gap0 0.981, merged/head 0.987, fixed/gap0 0.988, fixed/merged 1.007
+  L2: merged/gap0 0.983, merged/head 0.987, fixed/gap0 0.989, fixed/merged 1.006
+  L4: merged/gap0 0.987, merged/head 0.986, fixed/gap0 0.991, fixed/merged 1.004
+-- decode
+| arm | L0 | L1 | L2 | L4 |
+|---|---|---|---|---|
+| head | 123.8 (±0.6 %) | 104.0 (±4.2 %) | 103.7 (±2.9 %) | 92.0 (±19.3 %) |
+| merged | 123.2 (±7.6 %) | 104.1 (±2.7 %) | 102.9 (±9.3 %) | 91.8 (±0.4 %) |
+| fixed | 123.2 (±8.2 %) | 104.7 (±1.2 %) | 103.1 (±17.8 %) | 91.9 (±2.6 %) |
+| gap0 | 123.4 (±3.0 %) | 103.7 (±1.8 %) | 103.3 (±16.8 %) | 89.7 (±23.0 %) |
+  L0: merged/gap0 0.999, merged/head 0.995, fixed/gap0 0.998, fixed/merged 0.999
+  L1: merged/gap0 1.004, merged/head 1.001, fixed/gap0 1.009, fixed/merged 1.006
+  L2: merged/gap0 0.996, merged/head 0.992, fixed/gap0 0.998, fixed/merged 1.002
+  L4: merged/gap0 1.023, merged/head 0.998, fixed/gap0 1.024, fixed/merged 1.000
+-- embed32x128
+| arm | L0 | L1 | L2 | L4 |
+|---|---|---|---|---|
+| head | 20.9 (±11.4 %) | 17.6 (±1.8 %) | 16.1 (±4.5 %) | 10.4 (±24.1 %) |
+| merged | 20.3 (±14.0 %) | 17.3 (±1.6 %) | 15.0 (±8.1 %) | 10.8 (±14.8 %) |
+| fixed | 20.2 (±17.6 %) | 17.1 (±2.8 %) | 15.3 (±10.9 %) | 13.1 (±16.2 %) |
+| gap0 | 20.0 (±1.7 %) | 17.1 (±5.1 %) | 15.1 (±11.3 %) | 13.2 (±10.2 %) |
+  L0: merged/gap0 1.016, merged/head 0.971, fixed/gap0 1.014, fixed/merged 0.998
+  L1: merged/gap0 1.011, merged/head 0.983, fixed/gap0 0.998, fixed/merged 0.988
+  L2: merged/gap0 0.995, merged/head 0.930, fixed/gap0 1.015, fixed/merged 1.020
+  L4: merged/gap0 0.819, merged/head 1.035, fixed/gap0 0.999, fixed/merged 1.220

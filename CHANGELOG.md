@@ -30,6 +30,25 @@ All notable changes to this project are documented here. The format follows
   `benchmarks/results/desktop-zen5-2026-11-13-s5.4o/`; design: `docs/design/s5.4-fast-prompt.md`
   §5o (and §5k's int8 sentence is corrected). `promptbench --kv` and `kld --ref-kv` are the two
   measurement-tool changes the grid needed.
+- **The fast prompt mode's attention order on NEON (S5.4n)**: S5.4j defined the mode's own
+  attention summation order and built it for AVX-512; the ARM tier kept the exact attention.
+  This step adds aarch64's three bodies — sixteen lanes in four `f32x4` accumulators per score
+  row with up to four rows sharing one pass over the key, the `T16` reduction in registers, the
+  four-row value mix, and the 16-key denominator fold on `exp4` — bit-identical to the same
+  scalar twins on the twin tests' whole grid, and reads the F16 cache in registers so the order
+  streams no more bytes than the exact path (the conversion is exact). `MatKernels::fast_attn()`
+  is now true on `neon`, `neon-dotprod` and `neon-i8mm` and still false under
+  `PEREGRINE_ISA=scalar`; the `head_dim % 16` rule and every other piece of the definition are
+  unchanged. The kernel bench is 1.06-1.18× the exact attention at head width 64 and
+  1.70-1.76× at 128; a 4 096-token fast pass gains 5.3 % at one thread and 4.2 % at ten, and
+  attention's bucket falls 5.8-11.4 %. The mode's mean KL against exact moves +0.26 % and
+  +0.10 % of itself (inside the run's error); generated rows, embeddings, rerank, decisions and
+  the whole exact engine are the same bits. Eight goldens move — the three aarch64 NEON tiers'
+  `llama-*-fast` files, Linux and macOS — and nothing else. The pool's join-gap spin stretch
+  (S5.4j) is now taken only while the host run queue is below the stall gate: the re-read on
+  the merged build measured it costing 1.2-2.6 % of prefill at ten threads on the shared ARM
+  host, quiet and disturbed. Report: `benchmarks/results/spark-arm-2026-11-13-s5.4n/` and
+  `benchmarks/results/spark-arm-2026-11-13-s5.6-reread/`.
 - **The pool degrades gracefully on a contended host (S5.6)**: a controlled disturbance (N busy
   threads pinned to the same cores) showed that one co-tenant thread made a ten-thread decode step
   run at **9.9 tok/s against 124.5 quiet**, because every fork–join waited a scheduler timeslice
@@ -78,6 +97,27 @@ All notable changes to this project are documented here. The format follows
   `benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`; design:
   `docs/design/s5.4-fast-prompt.md` §5k/§5l.
 
+- **The float GEMM at small row counts: the tile is not the deficit (S4.9v)**: S4.9u left the
+  128-token cells to "a small-M tile in `fpack`", on 180–181 GMAC/s against MLAS's 202–206 at
+  128 rows. Measured from both ends, that is not where the loss is. A new kernel bench
+  (`peregrine-bench`'s `mgemm`) calls the packed float GEMM as the engine does — units of two
+  panels over a spinning four-thread pool, the strided output, three sweeps of 15 calls — and
+  MLAS is timed on the same shapes through ONNX Runtime's `MatMul` with the weight packed once:
+  at 128 rows the 6-row × 16-column tile runs at **199–228 GMAC/s** against MLAS's **208–222**
+  (0.99–1.08×, ahead on the wide matrices, level on the narrow), and **MLAS only leads at 512
+  rows** (0.85–0.99×) — the crossing is the opposite of the small-M story. The rate falls below
+  ~64 rows because a unit streams its panels once per call (`M/2` MAC per weight byte: 8 at 16
+  rows, where 23 GB/s of L2/L3 is the measured limit), a pass-width question S4.8b already
+  answered. The engine's own counters put the *pass* at 180 (128 tokens) and 179 (512), a flat
+  12–14 % above its own isolated kernel, and the parts were measured one at a time: activation
+  copy 1 ms of the 80 ms matmul bucket, unit granularity (2 → 4 panels) neutral end to end, the
+  store layout identical, the 21-row block for `n_in` 3 072 level with the rest. What is left is
+  the per-layer dispatch (48 calls, 3 456 units, 289 barriers per 128-row pass) — same-bits work
+  in `peregrine-core`, which this account names as the next step. The only way to widen the tile
+  is a second accumulator per output (8 rows × 16 columns needs 19 `ymm` registers), which
+  changes the summation order and the bits. **No engine file changed**, no golden moved, and
+  every standings cell stands: 24 of 36 for these two families, 79 of 104. Numbers, raw sweeps
+  and the ONNX Runtime script: `benchmarks/results/bluefin-2026-11-13-s4.9v/`; design §26.
 - **nomic-bert and jina-bert-v2 against every engine on bluefin (S4.9u)**: the two newest
   encoder families had only been timed against llama.cpp, on a noisy shared VM. This run puts
   them through the S4.9l proof — llama.cpp v0.9.0, ONNX Runtime 1.31, OpenVINO 2026.4,
@@ -331,6 +371,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`tool_choice: "required"`, a named function, and `tools` beside a `response_format`
+  (S6.6b, S6.6c)**: a forced tool choice is now a constraint on the sampler. The reply is
+  calls in the model's own call syntax — the Hermes JSON form for Qwen 2.5 and Qwen 3, the
+  `<function=…>`/`<parameter=…>` form for Qwen 3.5 and Bonsai 2 — whose arguments fit the
+  tool's `parameters` schema, whatever the model would have written: at least one call for
+  `"required"`, exactly one for a named function or with `parallel_tool_calls: false`.
+  `tools` may be sent with a `response_format`: the reply is then calls or JSON of the
+  schema (with `"none"`, the schema alone). On Qwen 3, Qwen 3.5 and Bonsai 2 a constraint
+  is laid after the model's thinking, which stays free text, so `response_format` and a
+  forced choice now work with thinking on. Under it the constraint engine gained a
+  free-text part (`Part::Until`, text up to the first occurrence of a terminator),
+  `Constraint::concat`, and marker tokens: a user-defined token such as `<tool_call>` is
+  allowed where the constraint spells its bytes, so a forced call is the same 26 tokens as
+  an unforced one on Qwen 2.5 0.5B instead of 31 with the tags spelled out. Measured on
+  that file against llama.cpp v0.9.0, 20 forced requests, three rounds: every Peregrine
+  reply carries schema-valid calls (20 of 20; llama.cpp answers four of the twenty in
+  prose), at 1.11–1.36× llama.cpp's decode speed on a loaded host. A request that cannot be
+  honoured is a 400 that names the tool: a named function that is not among the tools,
+  parameters that are not an object schema, a schema keyword the constraint compiler
+  refuses. Design: `docs/design/s6.6-constrained-decoding.md` §12 and §13; results:
+  `benchmarks/results/shiro-2026-11-13-s6.6b/`.
 - **Constrained decoding and `response_format` (S6.6a)**: `POST /v1/chat/completions` accepts
   OpenAI's `response_format`: `{"type": "json_object"}` or a JSON Schema document
   (`{"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`), and the sampler may

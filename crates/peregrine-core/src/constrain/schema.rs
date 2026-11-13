@@ -125,12 +125,18 @@ pub enum Part {
     Literal(String),
     /// One JSON value of this schema.
     Json(Schema),
+    /// Free text up to and including the first occurrence of this terminator (S6.6c): any
+    /// well-formed UTF-8 that does not contain the terminator, then the terminator. The
+    /// text may be empty; the reply cannot end inside the part. An empty terminator is a
+    /// compile error.
+    Until(String),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum Ast {
     Lit(Vec<u8>),
     Json(Schema),
+    Until(Vec<u8>),
     Seq(Vec<Ast>),
     Alt(Vec<Ast>),
     Repeat(Box<Ast>, u32, u32),
@@ -156,6 +162,7 @@ impl Constraint {
             .map(|p| match p {
                 Part::Literal(s) => Ast::Lit(s.into_bytes()),
                 Part::Json(s) => Ast::Json(s),
+                Part::Until(t) => Ast::Until(t.into_bytes()),
             })
             .collect();
         Constraint {
@@ -168,6 +175,15 @@ impl Constraint {
     pub fn any_of(alts: Vec<Constraint>) -> Constraint {
         Constraint {
             ast: Ast::Alt(alts.into_iter().map(|c| c.ast).collect()),
+        }
+    }
+
+    /// Several constraints one after another: the reply is a text of the first, then a
+    /// text of the second, and so on. This is [`sequence`](Constraint::sequence) for parts
+    /// that are themselves constraints (an alternative, a repetition).
+    pub fn concat(parts: Vec<Constraint>) -> Constraint {
+        Constraint {
+            ast: Ast::Seq(parts.into_iter().map(|c| c.ast).collect()),
         }
     }
 
@@ -320,6 +336,61 @@ pub(crate) enum Node {
     Any,
     /// `inner` repeated `min..=max` times (`max == u32::MAX` = unbounded).
     Repeat { inner: u32, min: u32, max: u32 },
+    /// Free text ended by a terminator (`untils` entry).
+    Until(u32),
+}
+
+/// A free-text part's terminator and its string-search table.
+#[derive(Debug, Clone)]
+pub(crate) struct UntilSchema {
+    pub(crate) term: Vec<u8>,
+    /// The failure function of the terminator: `fail[i]` is the length of the longest
+    /// proper prefix of `term[..=i]` that is also its suffix. With it the matcher keeps
+    /// one number — how much of the terminator the text's tail currently matches — and
+    /// finds the first occurrence without ever looking back.
+    pub(crate) fail: Vec<u32>,
+}
+
+impl UntilSchema {
+    fn new(term: Vec<u8>) -> UntilSchema {
+        let mut fail = vec![0u32; term.len()];
+        let mut k = 0usize;
+        for i in 1..term.len() {
+            while k > 0 && term[i] != term[k] {
+                k = fail[k - 1] as usize;
+            }
+            if term[i] == term[k] {
+                k += 1;
+            }
+            fail[i] = k as u32;
+        }
+        UntilSchema { term, fail }
+    }
+
+    /// The matched-prefix length after reading `b` with `k` bytes matched so far.
+    #[inline]
+    pub(crate) fn next(&self, k: u32, b: u8) -> u32 {
+        let mut k = k as usize;
+        while k > 0 && self.term[k] != b {
+            k = self.fail[k - 1] as usize;
+        }
+        if self.term[k] == b {
+            k += 1;
+        }
+        k as u32
+    }
+}
+
+/// The bytes that may begin a UTF-8 character: ASCII and the lead bytes `C2..=F4`.
+pub(crate) fn utf8_lead_bytes() -> ByteSet {
+    let mut set = ByteSet::EMPTY;
+    for b in 0x00..=0x7Fu8 {
+        set.insert(b);
+    }
+    for b in 0xC2..=0xF4u8 {
+        set.insert(b);
+    }
+    set
 }
 
 /// The compiled constraint: one arena of instructions and the tables they name.
@@ -327,6 +398,7 @@ pub(crate) enum Node {
 pub struct Compiled {
     pub(crate) nodes: Vec<Node>,
     pub(crate) lits: Vec<Vec<u8>>,
+    pub(crate) untils: Vec<UntilSchema>,
     pub(crate) objects: Vec<ObjectSchema>,
     pub(crate) arrays: Vec<ArraySchema>,
     pub(crate) strings: Vec<StringSchema>,
@@ -368,6 +440,9 @@ impl Compiled {
             for i in 0..n {
                 let v = match &self.nodes[i] {
                     Node::Lit(l) => self.lits[*l as usize].len().min(u32::MAX as usize) as u32,
+                    Node::Until(u) => {
+                        self.untils[*u as usize].term.len().min(u32::MAX as usize) as u32
+                    }
                     Node::Str(_) | Node::Num(_) | Node::Obj(_) | Node::Arr(_) | Node::Any => 1,
                     Node::Seq(children) => {
                         let mut sum = 0u32;
@@ -436,6 +511,7 @@ impl Compiled {
                             set.insert(b);
                         }
                     }
+                    Node::Until(_) => set = utf8_lead_bytes(),
                     Node::Str(_) => set.insert(b'"'),
                     Node::Num(num) => {
                         let s = self.numbers[*num as usize];
@@ -552,6 +628,7 @@ impl<'a> Compiler<'a> {
         let mut out = Compiled {
             nodes: Vec::new(),
             lits: Vec::new(),
+            untils: Vec::new(),
             objects: Vec::new(),
             arrays: Vec::new(),
             strings: Vec::new(),
@@ -617,6 +694,19 @@ impl<'a> Compiler<'a> {
     fn ast(&mut self, ast: &'a Ast) -> Result<u32, SchemaError> {
         match ast {
             Ast::Lit(bytes) => Ok(self.out.lit(bytes.clone())),
+            Ast::Until(term) => {
+                if term.is_empty() {
+                    return Err(SchemaError::new(
+                        "until",
+                        "#",
+                        "a free-text part needs a terminator: with an empty one it would end \
+                         before its first byte",
+                    ));
+                }
+                let id = self.out.untils.len() as u32;
+                self.out.untils.push(UntilSchema::new(term.clone()));
+                Ok(self.out.push(Node::Until(id)))
+            }
             Ast::Json(schema) => self.json_part(&schema.value, schema.strict),
             Ast::Seq(parts) => {
                 let mut ids = Vec::with_capacity(parts.len());

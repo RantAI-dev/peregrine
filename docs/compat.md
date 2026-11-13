@@ -99,12 +99,23 @@ That includes `pattern`, `format`, `patternProperties`, `dependentRequired`, `if
 
 ### Interactions
 
-* **`tools` and `response_format` together**: `400 response_format with tools is not supported yet`.
-  The project lead joins the two in S6.6b; the public combinators
-  (`Constraint::sequence`, `any_of`, `repeat`) are the base.
-* **Reasoning models**: a reply that opens in a thinking span is refused while thinking is on:
+* **`tools` and `response_format` together** (S6.6b): the reply is either tool calls, in the
+  model's call syntax with each tool's `parameters` as its arguments' schema, or JSON of the response
+  schema; never text, and never both. The tools' schemas are then constraints too, so a keyword the
+  compiler refuses in a tool's `parameters` is a 400 naming the tool. With `tool_choice: "none"` the
+  response schema stands alone; with `"required"` or a named function the reply is calls and the
+  response schema has nothing to describe. The schema is not written into the prompt: as with any
+  `response_format`, tell the model in the conversation what to answer.
+* **`tool_choice: "required"` and a named function** (S6.6b): the reply is constrained to calls
+  (at least one; exactly one for a named function or with `parallel_tool_calls: false`). Refused
+  with a 400: a named function that is not among `tools`, no `tools`, parameters that are not an
+  object schema.
+* **Reasoning models**: on Qwen 3, Qwen 3.5 and Bonsai 2 files a constraint (a `response_format`, a
+  forced tool choice, or both) is laid after the model's thinking, which stays free text. A reply
+  that runs out of `max_tokens` while still thinking has no content. For any other template that
+  opens a thinking span the request is refused while thinking is on:
   `400 response_format is not supported while the model is thinking; send the request with thinking
-  off`. The engine's sampler cannot be told when the server's reasoning parser closes the span.
+  off`.
 * **`max_tokens`**: still cuts a reply short (`finish_reason: "length"`); the text is then an
   incomplete prefix of a valid document, as OpenAI documents for JSON mode. A `stop` sequence does
   the same.
