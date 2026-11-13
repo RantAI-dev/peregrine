@@ -101,10 +101,9 @@ Work down the list; do not cut the tag until every line holds.
   C++ redistributable. It is **unsigned**: there is no Authenticode certificate yet, so SmartScreen
   warns about a browser download; the installer's download path does not carry the zone identifier.
   Windows on ARM64 has no archive: it builds from source.
-- **v0.2.0 shipped the two Linux archives only.** The `macos-aarch64` and `windows-x86_64` archives
-  and their two installers ship from the release after v0.2.0; both platforms already build and
-  pass the full suite on every change, so until that release they install with
-  `cargo build --release`. `scripts/install.sh` says exactly that on a Mac pointed at v0.2.0.
+- **v0.2.0 shipped the two Linux archives only**; v0.3.0 is the first release with all four and
+  both installers. `scripts/install.sh` still tells a Mac pointed at v0.2.0 or older that the
+  release has no macOS archive.
 - Container images are not in the first release (the Dockerfile ships first, an image publish comes
   with it).
 
