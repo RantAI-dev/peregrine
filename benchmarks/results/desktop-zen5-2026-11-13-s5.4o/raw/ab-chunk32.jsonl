@@ -1,0 +1,16 @@
+{"arm": "a", "p": 512, "t": 12, "round": 1, "tok_s": 417.33777147925963, "load1": 3.87, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 1, "tok_s": 477.51632077338286, "load1": 3.64, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "a", "p": 512, "t": 12, "round": 2, "tok_s": 492.95777705820285, "load1": 4.31, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 2, "tok_s": 470.08358242177894, "load1": 4.31, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "a", "p": 512, "t": 12, "round": 3, "tok_s": 450.6943644292008, "load1": 4.93, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 3, "tok_s": 441.8584669992162, "load1": 4.93, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "a", "p": 512, "t": 12, "round": 4, "tok_s": 443.48020875545427, "load1": 4.61, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 4, "tok_s": 475.3379532388349, "load1": 4.61, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "a", "p": 512, "t": 12, "round": 5, "tok_s": 444.51046466666145, "load1": 4.32, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 5, "tok_s": 469.4233926415164, "load1": 4.94, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "a", "p": 512, "t": 12, "round": 1, "tok_s": 460.5230896306636, "load1": 3.79, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 1, "tok_s": 472.58174537429034, "load1": 4.45, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "a", "p": 512, "t": 12, "round": 2, "tok_s": 449.4503561865105, "load1": 4.45, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 2, "tok_s": 464.8154107428711, "load1": 5.05, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "a", "p": 512, "t": 12, "round": 3, "tok_s": 453.39752920467424, "load1": 5.05, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 3, "tok_s": 476.3988590418531, "load1": 4.81, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}

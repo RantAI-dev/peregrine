@@ -861,6 +861,30 @@ impl KqActs {
     }
 
     fn fill_impl(&mut self, acts: &[QuantAct], sum256: bool, padded: bool) {
+        self.size_for(acts, sum256, padded);
+        let n_sb = self.n_sb;
+        for g in 0..self.groups() {
+            fill_group(
+                &mut self.q[g * n_sb * 1024..(g + 1) * n_sb * 1024],
+                &mut self.d[g * n_sb * ACT_GROUP..(g + 1) * n_sb * ACT_GROUP],
+                &mut self.bs[g * n_sb * ACT_GROUP * 8..(g + 1) * n_sb * ACT_GROUP * 8],
+                &mut self.bs16[g * n_sb * ACT_GROUP * 16..(g + 1) * n_sb * ACT_GROUP * 16],
+                &mut self.bsp[g * n_sb * ACT_GROUP * 4..(g + 1) * n_sb * ACT_GROUP * 4],
+                sum256.then(|| &mut self.sum256[g * n_sb * ACT_GROUP..(g + 1) * n_sb * ACT_GROUP]),
+                acts,
+                g,
+                n_sb,
+            );
+        }
+    }
+
+    /// The sizing half of `KqActs::fill_with`: sets `rows`, `n` and `n_sb` and sizes
+    /// (zeroing) the six buffers.
+    ///
+    /// Split out so a fill split across a pool can size the buffer once, on the caller,
+    /// and then have each worker write only its own groups (S5.4o). The bytes are the
+    /// same as the serial fill's.
+    pub fn size_for(&mut self, acts: &[QuantAct], sum256: bool, padded: bool) {
         assert!(!acts.is_empty(), "no activation to interleave");
         let n = acts[0].n;
         let n_sb = if n.is_multiple_of(256) {
@@ -894,57 +918,75 @@ impl KqActs {
         if sum256 {
             self.sum256.resize(groups * n_sb * ACT_GROUP, 0);
         }
-        for g in 0..groups {
-            for sb in 0..n_sb {
-                let base = (g * n_sb + sb) * 1024;
-                for j in 0..32 {
-                    let dst = base + j * 32;
-                    for t in 0..ACT_GROUP {
-                        let b = g * ACT_GROUP + t;
-                        if b >= acts.len() {
-                            continue;
-                        }
-                        let src = &acts[b].qk[sb * 256 + j * 8..sb * 256 + j * 8 + 8];
-                        self.q[dst + t * 8..dst + t * 8 + 8].copy_from_slice(src);
-                    }
+    }
+}
+
+/// Interleaves one group — [`ACT_GROUP`] activation rows — into the six buffers, whose
+/// slices are this group's own (offset 0 is group `g`'s first super-block).
+///
+/// The whole layout definition; `KqActs`'s serial fill calls it group by group, and a
+/// fill split across a pool calls it once per group per worker (S5.4o). `sum256` is
+/// `Some` only for the 8-bit form, which reads the whole-super-block sums.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_group(
+    q: &mut [i8],
+    d: &mut [f32],
+    bs: &mut [i32],
+    bs16: &mut [i32],
+    bsp: &mut [i32],
+    mut sum256: Option<&mut [i32]>,
+    acts: &[QuantAct],
+    g: usize,
+    n_sb: usize,
+) {
+    for sb in 0..n_sb {
+        let base = sb * 1024;
+        for j in 0..32 {
+            let dst = base + j * 32;
+            for t in 0..ACT_GROUP {
+                let b = g * ACT_GROUP + t;
+                if b >= acts.len() {
+                    continue;
                 }
-                let dbase = (g * n_sb + sb) * ACT_GROUP;
-                let bbase = (g * n_sb + sb) * ACT_GROUP * 8;
-                let bbase16 = (g * n_sb + sb) * ACT_GROUP * 16;
-                let pbase = (g * n_sb + sb) * ACT_GROUP * 4;
-                for t in 0..ACT_GROUP {
-                    let b = g * ACT_GROUP + t;
-                    if b >= acts.len() {
-                        continue;
-                    }
-                    self.d[dbase + t] = acts[b].dk[sb];
-                    // The per-32-weight sums, from the per-16 run sums.
-                    let rs = &acts[b].bsums[sb * 16..sb * 16 + 16];
-                    for j in 0..8 {
-                        self.bs[bbase + t * 8 + j] = rs[2 * j] as i32 + rs[2 * j + 1] as i32;
-                    }
-                    // The same sums, two to a lane, for the AVX-512 min term.
-                    for p in 0..4 {
-                        let lo = self.bs[bbase + t * 8 + 2 * p] & 0xFFFF;
-                        let hi = self.bs[bbase + t * 8 + 2 * p + 1] << 16;
-                        self.bsp[pbase + t * 4 + p] = lo | hi;
-                    }
-                    // The per-16 run sums themselves, for Q6_K's offset and scale.
-                    for (j, &s) in rs.iter().enumerate() {
-                        self.bs16[bbase16 + t * 16 + j] = s as i32;
-                    }
-                    // The whole super-block's sum of codes, for the 8-bit form's
-                    // 128 bias (`crate::kq8`). Eight int32 adds per (row, block),
-                    // and the exact k-quant kernels never read it — so it is built
-                    // only when the fast prompt mode is on.
-                    if sum256 {
-                        let mut total = 0i32;
-                        for j in 0..8 {
-                            total += self.bs[bbase + t * 8 + j];
-                        }
-                        self.sum256[dbase + t] = total;
-                    }
+                let src = &acts[b].qk[sb * 256 + j * 8..sb * 256 + j * 8 + 8];
+                q[dst + t * 8..dst + t * 8 + 8].copy_from_slice(src);
+            }
+        }
+        let dbase = sb * ACT_GROUP;
+        let bbase = sb * ACT_GROUP * 8;
+        let bbase16 = sb * ACT_GROUP * 16;
+        let pbase = sb * ACT_GROUP * 4;
+        for t in 0..ACT_GROUP {
+            let b = g * ACT_GROUP + t;
+            if b >= acts.len() {
+                continue;
+            }
+            d[dbase + t] = acts[b].dk[sb];
+            // The per-32-weight sums, from the per-16 run sums.
+            let rs = &acts[b].bsums[sb * 16..sb * 16 + 16];
+            for j in 0..8 {
+                bs[bbase + t * 8 + j] = rs[2 * j] as i32 + rs[2 * j + 1] as i32;
+            }
+            // The same sums, two to a lane, for the AVX-512 min term.
+            for p in 0..4 {
+                let lo = bs[bbase + t * 8 + 2 * p] & 0xFFFF;
+                let hi = bs[bbase + t * 8 + 2 * p + 1] << 16;
+                bsp[pbase + t * 4 + p] = lo | hi;
+            }
+            // The per-16 run sums themselves, for Q6_K's offset and scale.
+            for (j, &s) in rs.iter().enumerate() {
+                bs16[bbase16 + t * 16 + j] = s as i32;
+            }
+            // The whole super-block's sum of codes, for the 8-bit form's 128 bias
+            // (`crate::kq8`). Eight int32 adds per (row, block), and the exact
+            // k-quant kernels never read it — so it is built only when the fast
+            // prompt mode is on.
+            if let Some(s) = sum256.as_deref_mut() {
+                let mut total = 0i32;
+                for j in 0..8 {
+                    total += bs[bbase + t * 8 + j];
                 }
+                s[dbase + t] = total;
             }
         }
     }

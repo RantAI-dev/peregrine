@@ -200,6 +200,65 @@ pub fn matmul_group(
     st.ns_matmul += t0.elapsed().as_nanos() as u64;
 }
 
+/// The form's interleaved activation, filled on the pool (S5.4o).
+///
+/// [`KqActs::fill_with`] is the caller's own work: every output row of the group reads
+/// the whole interleaved buffer, and each group of four activation rows is an
+/// independent transpose, so a worker can write the groups it owns and no byte of the
+/// buffer depends on who wrote it. Measured at 512 tokens and twelve threads, the
+/// serial fill was **6 %** of a fast pass (78 ms of 1.23 s, 112 MiB of interleaving —
+/// S5.4j's estimate of 24 MiB was low by the size of the `down` group's 32
+/// super-blocks), which is worth the one join it costs; below ~256 KiB of interleaved
+/// codes the join costs more than the copy, and the serial fill is kept.
+fn fill_form(pool: &Pool, kq: &mut peregrine_kernels::kq::KqActs, acts: &[QuantAct], sum256: bool) {
+    use peregrine_kernels::kq::{fill_group, ACT_GROUP};
+    kq.size_for(acts, sum256, false);
+    let groups = acts.len().div_ceil(ACT_GROUP);
+    let n_sb = kq.n_sb;
+    if pool.width() < 2 || groups < 2 || groups * n_sb < 256 {
+        for g in 0..groups {
+            fill_group(
+                &mut kq.q[g * n_sb * 1024..(g + 1) * n_sb * 1024],
+                &mut kq.d[g * n_sb * ACT_GROUP..(g + 1) * n_sb * ACT_GROUP],
+                &mut kq.bs[g * n_sb * ACT_GROUP * 8..(g + 1) * n_sb * ACT_GROUP * 8],
+                &mut kq.bs16[g * n_sb * ACT_GROUP * 16..(g + 1) * n_sb * ACT_GROUP * 16],
+                &mut kq.bsp[g * n_sb * ACT_GROUP * 4..(g + 1) * n_sb * ACT_GROUP * 4],
+                sum256.then(|| &mut kq.sum256[g * n_sb * ACT_GROUP..(g + 1) * n_sb * ACT_GROUP]),
+                acts,
+                g,
+                n_sb,
+            );
+        }
+        return;
+    }
+    let q = Disjoint::new(kq.q.as_mut_slice());
+    let d = Disjoint::new(kq.d.as_mut_slice());
+    let bs = Disjoint::new(kq.bs.as_mut_slice());
+    let bs16 = Disjoint::new(kq.bs16.as_mut_slice());
+    let bsp = Disjoint::new(kq.bsp.as_mut_slice());
+    let sums = Disjoint::new(kq.sum256.as_mut_slice());
+    pool.run(|wk, nw| {
+        let (g0, g1) = share(groups, wk, nw);
+        for g in g0..g1 {
+            // SAFETY: the groups of one fill are disjoint in every buffer, and worker
+            // `wk` writes only the groups `[g0, g1)` it was given. `sums` is only sized
+            // (and only read) when the 8-bit form asked for the whole-block sums.
+            let (q, d, bs, bs16, bsp) = unsafe {
+                (
+                    q.chunk(g * n_sb * 1024, n_sb * 1024),
+                    d.chunk(g * n_sb * ACT_GROUP, n_sb * ACT_GROUP),
+                    bs.chunk(g * n_sb * ACT_GROUP * 8, n_sb * ACT_GROUP * 8),
+                    bs16.chunk(g * n_sb * ACT_GROUP * 16, n_sb * ACT_GROUP * 16),
+                    bsp.chunk(g * n_sb * ACT_GROUP * 4, n_sb * ACT_GROUP * 4),
+                )
+            };
+            let sums =
+                sum256.then(|| unsafe { sums.chunk(g * n_sb * ACT_GROUP, n_sb * ACT_GROUP) });
+            fill_group(q, d, bs, bs16, bsp, sums, acts, g, n_sb);
+        }
+    });
+}
+
 /// [`matmul_group`] for one block of at most `MAX_BATCH` activation rows (a fast prompt
 /// pass's width; the default is [`DEFAULT_BATCH`]), starting at batch row
 /// `b0` of the caller's batch. `b0` only shifts where the results are written: a row's value is
@@ -266,7 +325,7 @@ fn matmul_block(
             .iter()
             .any(|j| j.w.q8_off.is_some() && !(j.w.dims[0] as usize).is_multiple_of(256));
     if (kq_fill && nb >= 4) || q8_plain {
-        kq.fill_with(&acts[..nb], q8_plain);
+        fill_form(pool, kq, &acts[..nb], q8_plain);
     }
     let mut kq_pad = peregrine_kernels::kq::KqActs::default();
     if q8_pad {
@@ -601,7 +660,19 @@ fn matmul_block(
     // slowest core. Workers instead claim chunks of rows from a counter, so a fast core takes more of them.
     // Which worker computes a row never changes the row's value, so the output is identical either way.
     if dynamic_rows() && pool.width() > 1 {
-        let mut chunk = (total / (pool.width() * 8)).clamp(8, 256);
+        // The grain is a tail, not just a load-balance knob: the caller's share ends
+        // when the counter is exhausted, so what it then waits for is the chunk (or
+        // two) another worker claimed just before — at 512 tokens and twelve threads
+        // that tail was 287 µs a join, 11 % of the pass. One 32nd of the row space per
+        // worker (at most 64 rows) is the grain that measured best (S5.4o: +6.7 % on
+        // the fast 512-token cell, +1.7 % at 4 096, and the exact engine gains too);
+        // finer than that and the claims themselves cost more than the tail they save.
+        // A *decode* step is the other side of it: one activation row per matmul, 224
+        // joins a token, and no tail worth chasing — the finer grain cost 11 % of the
+        // decode rate in the first cut, so a one-row pass keeps the grain it had.
+        // Which worker takes which range still cannot change a row's value.
+        let (div, cap) = if nb == 1 { (8, 256) } else { (32, 64) };
+        let mut chunk = (total / (pool.width() * div)).clamp(8, cap);
         if tiled {
             chunk = chunk.div_ceil(16) * 16;
         }
@@ -1411,5 +1482,49 @@ fn lb_block(
     for &(ti, _) in jobs {
         let t = &slb.tensors[ti];
         st.macs += t.macs_per_row() * nb as u64;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The form's activation, filled on the pool, is the serial fill's bytes (S5.4o).
+    ///
+    /// The fill is the one step that moved onto the pool, and a group's bytes depend on
+    /// its own four activation rows only, so who writes a group cannot reach another
+    /// group — but the buffers are shared, so the property is worth pinning: 71 rows is
+    /// not a whole number of groups (the last one is padded with zero codes) and the
+    /// shape is past the size gate the parallel path needs.
+    #[test]
+    fn the_parallel_form_fill_is_the_serial_fill() {
+        let (n, rows) = (4096usize, 71usize);
+        let mut acts: Vec<QuantAct> = (0..rows)
+            .map(|b| {
+                let x: Vec<f32> = (0..n)
+                    .map(|i| (((b * 37 + i * 13) % 251) as f32 - 125.0) / 64.0)
+                    .collect();
+                let mut a = QuantAct::with_capacity(n);
+                a.fill(&x);
+                a
+            })
+            .collect();
+        acts[0].prompt = true;
+        for sum256 in [true, false] {
+            let mut serial = peregrine_kernels::kq::KqActs::default();
+            serial.fill_with(&acts, sum256);
+            let mut parallel = peregrine_kernels::kq::KqActs::default();
+            let pool = Pool::new(4);
+            fill_form(&pool, &mut parallel, &acts, sum256);
+            assert_eq!(serial.q, parallel.q, "codes, sum256={sum256}");
+            assert_eq!(serial.d, parallel.d, "scales, sum256={sum256}");
+            assert_eq!(serial.bs, parallel.bs, "run sums, sum256={sum256}");
+            assert_eq!(serial.bs16, parallel.bs16, "16-run sums, sum256={sum256}");
+            assert_eq!(serial.bsp, parallel.bsp, "paired sums, sum256={sum256}");
+            assert_eq!(
+                serial.sum256, parallel.sum256,
+                "whole-block sums, sum256={sum256}"
+            );
+        }
     }
 }

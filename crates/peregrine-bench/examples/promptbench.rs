@@ -9,7 +9,11 @@
 //!
 //! ```text
 //! cargo run --release -p peregrine-bench --example promptbench -- \
-//!     model.gguf corpus.txt 512,4096 1,6,12,24 [--decode 32] [--slots 1] [--chunk 16]
+//!     model.gguf corpus.txt 512,4096 1,6,12,24 [--decode 32] [--slots 1] [--chunk 16] \
+//!     [--kv f16|f32|i8]
+//!
+//! `--kv` is the precision of the KV cache (f16 by default), so the profile of a pass
+//! can be taken on the same cache its speed cell uses.
 //! ```
 //!
 //! One cell is one fresh engine: the KV cache is empty, as a benchmark's must be, and
@@ -39,6 +43,7 @@ fn main() {
     let mut decode = 0usize;
     let mut slots = 1usize;
     let mut chunk: Option<usize> = None;
+    let mut kv = KvPrec::F16;
     let mut i = 4;
     while i < args.len() {
         match args[i].as_str() {
@@ -52,6 +57,11 @@ fn main() {
             }
             "--chunk" => {
                 chunk = args.get(i + 1).and_then(|s| s.parse().ok());
+                i += 2;
+            }
+            "--kv" => {
+                let v = args.get(i + 1).expect("--kv needs a precision");
+                kv = KvPrec::parse(v).expect("--kv: unknown precision — f16, f32 or i8");
                 i += 2;
             }
             _ => i += 1,
@@ -74,10 +84,8 @@ fn main() {
         for &th in &threads {
             let max_ctx = len + decode + 16;
             let mut engine = match chunk {
-                Some(c) => {
-                    Engine::new_with_chunk(model.clone(), th, max_ctx, slots, KvPrec::F16, 0, c)
-                }
-                None => Engine::new(model.clone(), th, max_ctx, slots, KvPrec::F16, 0),
+                Some(c) => Engine::new_with_chunk(model.clone(), th, max_ctx, slots, kv, 0, c),
+                None => Engine::new(model.clone(), th, max_ctx, slots, kv, 0),
             };
             let width = engine.pool().width().max(1);
             // Every slot gets its own window of the corpus, so a shared prefix cannot

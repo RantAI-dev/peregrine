@@ -1,0 +1,17 @@
+{"arm": "exact", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 38.506859125223116, "load1": 2.46}
+{"arm": "fast-before", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 51.27312517224359, "load1": 1.39}
+{"arm": "fast", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 51.181074970955116, "load1": 1.1}
+{"arm": "ik", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 48.114658, "load1": 1.31}
+{"arm": "ik-rtr", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 56.966568, "load1": 1.1}
+{"arm": "llama", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 30.246864, "load1": 1.07}
+{"arm": "exact", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 37.62161802281915, "load1": 1.02}
+{"arm": "fast-before", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 51.20621760231868, "load1": 1.08}
+{"arm": "fast", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 51.07725522578335, "load1": 1.02}
+{"arm": "ik", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 49.370674, "load1": 1.25}
+{"arm": "ik-rtr", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 57.115139, "load1": 1.2}
+{"arm": "llama", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 30.007087, "load1": 1.12}
+{"arm": "exact", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 38.261565522137474, "load1": 1.21}
+{"arm": "fast-before", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 51.268205303545805, "load1": 1.05}
+{"arm": "fast", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 50.714365893535465, "load1": 1.13}
+{"arm": "ik", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 49.380828, "load1": 1.08}
+{"arm": "ik-rtr", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 57.087316, "load1": 1.05}
