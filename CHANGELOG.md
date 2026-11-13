@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
+The first release with archives and installers for **macOS on Apple Silicon** and **Windows on
+x86-64**, beside the two Linux ones. It adds forced tool calls (`tool_choice: "required"` or a named
+function), tools beside a `response_format`, constrained decoding, tool calling on Llama 3.2, three
+embedding families (nomic-bert, nomic-bert-moe, jina-bert-v2), faster encoders and prompt passes,
+and `--fast-prompt`, an opt-in 8-bit prompt pass that is lossy, experimental and off by default.
+Read this before upgrading:
+
+- **Chat on Qwen 3.5 and Bonsai 2 files without tools now uses the template's own prompt** in
+  `peregrine serve` and `peregrine run`, so these models reason before they answer unless the
+  request turns thinking off (`chat_template_kwargs.enable_thinking: false`); budget `max_tokens`
+  for the reasoning.
+- The default engine's outputs did not move since v0.2.0: new goldens were added for the new
+  families and for Windows, `--fast-prompt`'s own goldens moved, and one stale golden
+  (Qwen3-30B-A3B on AVX2) was re-recorded to the bits v0.2.0 already produced.
+
 ### Changed
 
 - **A prompt pass's tails, its form's fill and its KV write, and the int8 key measured (S5.4o)**:

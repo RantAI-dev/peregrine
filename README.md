@@ -16,10 +16,8 @@ own memory-bandwidth ceiling.
 
 ## Install
 
-Linux x86-64 and Linux aarch64 have release archives today. macOS on Apple Silicon and Windows on
-x86-64 build and pass the whole suite on every change, and their archives and installers ship
-**from the release after v0.2.0**; until then build either from source (`cargo build --release`).
-On Linux and macOS the installer detects the architecture, downloads the matching release archive,
+Linux x86-64, Linux aarch64, macOS on Apple Silicon and Windows on x86-64 have release archives
+(macOS and Windows from v0.3.0). On Linux and macOS the installer detects the architecture, downloads the matching release archive,
 verifies it against `SHA256SUMS`, and installs `peregrine` to `~/.local/bin`:
 
 ```sh
@@ -27,7 +25,7 @@ curl -fsSL https://peregrine.rantai.dev/install.sh | sh
 peregrine tier      # the SIMD tier picked for this CPU: AVX-512, AVX2, NEON, i8mm, or scalar
 ```
 
-On Windows, from the release after v0.2.0, in PowerShell (no administrator rights; the installer
+On Windows, in PowerShell (no administrator rights; the installer
 uses your user `Path`):
 
 ```powershell
@@ -38,7 +36,7 @@ peregrine tier      # the SIMD tier picked for this CPU: AVX-512, AVX2, or scala
 Pin a release or choose the install directory by passing arguments to `sh`:
 
 ```sh
-curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --version v0.2.0
+curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --version v0.3.0
 curl -fsSL https://peregrine.rantai.dev/install.sh | sh -s -- --prefix /usr/local
 peregrine upgrade            # self-update in place to the newest release
 ```
@@ -46,11 +44,11 @@ peregrine upgrade            # self-update in place to the newest release
 On Windows pass `-Version vX.Y.Z` to the script and `-InstallDir DIR` to choose the directory.
 
 The release archives on the [releases page](https://github.com/RantAI-dev/peregrine/releases) are
-`peregrine-v0.2.0-linux-x86_64.tar.gz` and `peregrine-v0.2.0-linux-aarch64.tar.gz`; they contain
+`peregrine-v0.3.0-linux-x86_64.tar.gz`, `peregrine-v0.3.0-linux-aarch64.tar.gz`,
+`peregrine-v0.3.0-macos-aarch64.tar.gz` and `peregrine-v0.3.0-windows-x86_64.zip`; they contain
 portable binaries built for the baseline of each architecture. AVX-512, AVX2, AVX-VNNI, ARM NEON and
 i8mm are selected at run time, so one binary runs on every CPU of that architecture;
-`peregrine tier` prints what it picked. From the release after v0.2.0 the page also carries
-`peregrine-vX.Y.Z-macos-aarch64.tar.gz` and `peregrine-vX.Y.Z-windows-x86_64.zip`. The macOS archive
+`peregrine tier` prints what it picked. The macOS archive
 is ad-hoc signed, not notarised: installed with `curl` it runs as is; see the
 [quickstart](docs/quickstart.md#macos-on-apple-silicon) for a browser download, and Intel Macs
 build from source. The Windows build links the C runtime statically, so it needs no Visual C++

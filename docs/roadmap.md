@@ -143,7 +143,47 @@ archive, an installer, `upgrade`, the server's lifetime commands, goldens. The d
 | S7.2 | Windows x86-64 builds and passes the suite in CI — done: `test (windows-x86_64)` on `windows-2025` runs the release-mode suite (every test but the few that need `SIGTERM` or a freshly recorded Windows golden) and a smoke check of the binary, and `ci-ok` requires it | 1.5 |
 | S7.3 | Windows lifetime commands, `upgrade`, `install.ps1`, release job — done: `serve --background`, `status`, `stop` and `upgrade` work through a per-user stop file and `OpenProcess`/`GetExitCodeProcess` (the stop falls back to ending the process after the drain timeout), `upgrade` renames the running `.exe` aside and removes it at the next start, `scripts/install.ps1` installs from the zip with a verified hash, `release.yml` builds `peregrine-vX.Y.Z-windows-x86_64.zip` with a static C runtime, and CI runs the installer against the built archive | 1.5 |
 | S7.4 | Windows goldens, docs for both systems, a first measurement — done: the synthetic goldens and session fixtures for Windows' scalar, AVX2 and AVX-512 tiers are recorded on `windows-2025` (the AVX-512 set when a native recording drew an AVX-512 runner) and every PR compares the pinned AVX2 set and the macOS set, failing on a missing one instead of skipping; `install.ps1` keeps the user `Path`'s `%VARIABLES%` and its `ExpandString` kind; the first measurements are GitHub-runner numbers (same-CPU pairs are within 0.80-0.95 of Linux), and a native measurement on real Windows hardware is still open | 1.0 |
-| S7.5 | A release that ships all four archives | 0.3 |
+| S7.5 | A release that ships all four archives — done: v0.3.0 | 0.3 |
+
+## After v0.3.0: what is left
+
+Development stopped at v0.3.0 so the release could carry what was finished. These are the items
+that were open then, with what was measured; each is a step of its own, none blocks using the
+release.
+
+**Speed (the default engine and `--fast-prompt`)**
+
+| Item | Where it stands |
+|---|---|
+| S5.4q: `--fast-prompt` attention at long prompts | 4 096 tokens on the AVX-512 desktop: 0.787 (Llama 3.2 1B) and 0.864 (Qwen3 1.7B) of ik_llama.cpp's `-rtr` at twelve threads, 0.895 / 0.883 at one; attention is 41-45 % of the pass, against the fork's f16-key flash attention. Plan: more query rows per pass over a key tile, same bits (S5.4o's report, `docs/design/s5.4-fast-prompt.md` §5o) |
+| `--fast-prompt` at 512 tokens | 0.925 / 0.957 of `-rtr` at twelve threads (S5.4o): the caller's wait (8.9 %) and attention (8.4 %) hold it |
+| `--fast-prompt` on ARM, Qwen 2.5 0.5B, one thread | 0.55 (512 tokens) and 0.63 (4 096) of ik_llama.cpp: the matmul at 512, int8 attention at 4 096 (S5.4n); every other ARM cell is at or above 1.0 |
+| `--fast-prompt` leaves "Experimental" | needs the owner's accuracy bound (0.0040 proposed), the KL check on thinking prompts, and tool calling measured with the mode on |
+| S5.4p: the padded Q5_0 activation layout per model | `kq8::PADDED_Q5_FORM` is process-wide: once one model builds a Q5_0 form with a short last super-block, every model's activations build the padded layout. It never changes a number (a matrix without a form never reads those codes); it costs other models in the same server a little prompt time |
+| Embeddings on bluefin (AVX2) | 30 of 36 standings cells at or above 1.0; behind: jina-embeddings-v2 Q8_0's five cells and its F16 128-token batch of 32 (0.993) |
+| The float row block (S4.9w) off bluefin | the 2 MiB activation bound is measured on bluefin only; the ARM host (2 MiB L2) and Zen 5 (1 MiB L2) are not |
+| Windows | decode 0.80 of Linux on the same CPU (the pool's wait path); a native measurement on real Windows hardware; the AVX-512 fast goldens are not recorded (no AVX-512 runner was drawn) |
+| S2.6 step 2: AVX-VNNI-256 kernels | #77, on hold |
+| S3.6 | faster PTQ1_0 for the 27B |
+
+**Features**
+
+| Item | Where it stands |
+|---|---|
+| S6.4 rest: Llama 3.1 / 3.3 tool calling | their templates (built-in tools, `<|eom_id|>`) are not recognised; Llama 3.2's is. With `tool_choice: "none"` a `<|python_tag|>` the model writes reaches the content as text |
+| S6.5: the `harmony` tool format (gpt-oss) | not started |
+| S6.7: the `generic` tool format | not started; it relies on constrained decoding (S6.6) |
+| S4.13: Qwen3-Reranker on `/v1/rerank` | not started |
+| S4.11 / S4.12: System One parts 2 and 3 | not started |
+| bge-small's GELU | a shorter `erf` would be faster but changes bits; needs a decision |
+
+**Release and infrastructure (the owner's)**
+
+- Code signing: an Authenticode certificate for Windows, an Apple Developer ID and notarisation for
+  macOS. Both archives ship unsigned until then (`docs/dev/releasing.md`).
+- The `peregrine.rantai.dev/install.ps1` redirect rule in the `rantai.dev` zone.
+- A container image publish.
+- A cloud x86 machine with 16 GB or more, for the large models' goldens.
 
 ## Open decisions
 

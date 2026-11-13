@@ -144,6 +144,5 @@ matters, or run two units behind a reverse proxy.
 - The log is appended, not rotated; point `--log-file` at a logrotate-managed path for long-lived services.
 - `SO_REUSEPORT` and the zero-downtime handoff are Unix features; Windows uses the stop file and a
   short restart gap instead. `--background`, `status`, `stop` and `upgrade` exist on Linux, macOS
-  and Windows on x86-64. The release archives exist on Linux x86-64 and aarch64 today; the
-  `macos-aarch64` and `windows-x86_64` archives (and their installers) ship from the release after
-  v0.2.0, so `upgrade` names the right asset but v0.2.0 has none to download until then.
+  and Windows on x86-64. Release archives exist for all four targets from v0.3.0 (v0.2.0 had the
+  two Linux ones only), so `upgrade` finds its asset on every supported system.

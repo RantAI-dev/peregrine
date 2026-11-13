@@ -4,10 +4,8 @@ Run a model, call it. About five minutes: one binary (or one container), one sma
 request — the same requests then work against any bigger model file.
 
 You need Linux on x86-64 or aarch64, or macOS on Apple Silicon, or Windows on x86-64 (Intel Macs:
-build from source below), and about 300 MB of disk for the example model. Linux x86-64 and aarch64
-have release archives today; the macOS on Apple Silicon and Windows on x86-64 archives and
-installers ship **from the release after v0.2.0**, and both platforms build and pass the suite on
-every change in the meantime.
+build from source below), and about 300 MB of disk for the example model. All four have release
+archives and installers; macOS on Apple Silicon and Windows on x86-64 have them from v0.3.0.
 
 ## 1. Get Peregrine
 
@@ -29,11 +27,8 @@ Pass `--version vX.Y.Z` to pin a release and `--prefix /usr/local` for a system-
 
 ### macOS on Apple Silicon
 
-macOS on Apple Silicon has no archive in v0.2.0: its archive and this installer line ship **from
-the release after v0.2.0**. Against v0.2.0 the installer stops and says so — no macOS archive in
-that release, build from source (`cargo build --release`) or wait for the next release — instead of
-fetching a 404. So build from source (below) until then. From the next release the same line
-installs the Apple Silicon archive:
+The same line installs the Apple Silicon archive (from v0.3.0; asked for v0.2.0 or older, which had
+no macOS archive, the installer stops and says so instead of fetching a 404):
 
 ```sh
 curl -fsSL https://peregrine.rantai.dev/install.sh | sh
@@ -65,8 +60,7 @@ hw.perflevel0.physicalcpu hw.ncpu` shows both counts.
 
 ### Windows x86-64
 
-Windows 10 or 11 on x86-64, from the release after v0.2.0 (v0.2.0 has no Windows archive; build
-from source until then). In PowerShell (the version every Windows ships, 5.1, is enough):
+Windows 10 or 11 on x86-64, from v0.3.0 (v0.2.0 and older had no Windows archive). In PowerShell (the version every Windows ships, 5.1, is enough):
 
 ```powershell
 irm https://peregrine.rantai.dev/install.ps1 | iex
@@ -108,7 +102,7 @@ Download the archive for your architecture from the
 [releases page](https://github.com/RantAI-dev/peregrine/releases) and put the binary on your `PATH`:
 
 ```sh
-VERSION=v0.2.0   # the newest release tag on the releases page
+VERSION=v0.3.0   # the newest release tag on the releases page
 ARCH=$(uname -m) # x86_64 or aarch64
 curl -fLO "https://github.com/RantAI-dev/peregrine/releases/download/$VERSION/peregrine-$VERSION-linux-$ARCH.tar.gz"
 tar -xzf "peregrine-$VERSION-linux-$ARCH.tar.gz"
@@ -118,9 +112,8 @@ peregrine tier   # the kernel tier picked for your CPU (AVX-512 / AVX2 / NEON / 
 
 The binary is built for the plain baseline of each architecture: AVX2, AVX-VNNI and AVX-512 are
 picked at run time on x86-64, NEON variants on aarch64 — the same file runs on any CPU of its
-architecture. `peregrine tier` prints what it picked. On macOS, from the release after v0.2.0,
-replace `linux-$ARCH` with `macos-aarch64` (and see the quarantine note above); v0.2.0 has no macOS
-archive. On Windows, from that same release, the archive is
+architecture. `peregrine tier` prints what it picked. On macOS replace `linux-$ARCH` with `macos-aarch64` (and
+see the quarantine note above). On Windows the archive is
 `peregrine-vX.Y.Z-windows-x86_64.zip` (unzip it and run `peregrine.exe`), and `install.ps1` is the
 installer described above.
 
