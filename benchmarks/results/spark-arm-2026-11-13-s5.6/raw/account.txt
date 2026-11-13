@@ -1,0 +1,60 @@
+=== before d=0 load1=9.50
+wall_s 7.840731 tok_s 523.07 barriers 12385
+adaptive: t=4011 ms level 0 smoothed 0 permille
+adaptive: t=4512 ms level 0 smoothed 0 permille
+adaptive: t=5014 ms level 0 smoothed 0 permille
+adaptive: t=5516 ms level 0 smoothed 0 permille
+adaptive: t=6019 ms level 0 smoothed 0 permille
+adaptive: t=6522 ms level 0 smoothed 0 permille
+adaptive: t=7026 ms level 0 smoothed 0 permille
+adaptive: t=7527 ms level 0 smoothed 0 permille
+=== before d=1 load1=9.57
+wall_s 22.712584 tok_s 181.23 barriers 12385
+adaptive: t=19048 ms level 0 smoothed 90 permille
+adaptive: t=19548 ms level 0 smoothed 116 permille
+adaptive: t=20050 ms level 0 smoothed 152 permille
+adaptive: t=20550 ms level 0 smoothed 221 permille
+adaptive: t=21050 ms level 0 smoothed 104 permille
+adaptive: t=21552 ms level 0 smoothed 106 permille
+adaptive: t=22052 ms level 0 smoothed 138 permille
+adaptive: t=22552 ms level 0 smoothed 110 permille
+=== before d=4 load1=8.41
+wall_s 17.625814 tok_s 232.7 barriers 12385
+adaptive: t=14528 ms level 2 smoothed 488 permille
+adaptive: t=15028 ms level 2 smoothed 447 permille
+adaptive: t=15528 ms level 2 smoothed 352 permille
+adaptive: +15807.688 ms trial chose level 2 (challenger 1594.0 us, incumbent 734.4 us)
+adaptive: t=16028 ms level 2 smoothed 445 permille
+adaptive: t=16531 ms level 2 smoothed 423 permille
+adaptive: t=17031 ms level 2 smoothed 425 permille
+adaptive: t=17531 ms level 2 smoothed 496 permille
+=== after d=0 load1=9.24
+wall_s 7.907798 tok_s 518.64 barriers 12385
+adaptive: t=5514 ms level 0 smoothed 0 permille
+adaptive: t=6016 ms level 0 smoothed 0 permille
+adaptive: t=6519 ms level 0 smoothed 0 permille
+adaptive: t=7019 ms level 0 smoothed 0 permille
+adaptive: t=7520 ms level 0 smoothed 0 permille
+joins: 12385 (12385 per join), wait 1.181 s (15.5 %), share 6.434 s, max wait 1.993 ms
+joins: straggler gap mean 0.010 ms, max 0.969 ms
+joins: last worker histogram [0:1790 1:548 2:2541 3:289 4:1644 5:366 6:514 7:1841 8:401 9:2451]
+=== after d=1 load1=9.36
+wall_s 9.327896 tok_s 439.7 barriers 12385
+adaptive: t=7009 ms level 0 smoothed 132 permille
+adaptive: t=7509 ms level 0 smoothed 175 permille
+adaptive: t=8009 ms level 0 smoothed 112 permille
+adaptive: t=8515 ms level 0 smoothed 100 permille
+adaptive: t=9017 ms level 0 smoothed 97 permille
+joins: 12385 (12385 per join), wait 0.776 s (8.7 %), share 8.159 s, max wait 1.960 ms
+joins: straggler gap mean 0.019 ms, max 1.683 ms
+joins: last worker histogram [1:1382 2:1325 3:1411 4:1395 5:1437 6:1398 7:1330 8:1343 9:1364]
+=== after d=4 load1=9.54
+wall_s 12.738716 tok_s 321.95 barriers 12385
+adaptive: t=10529 ms level 0 smoothed 417 permille
+adaptive: t=11029 ms level 0 smoothed 447 permille
+adaptive: t=11533 ms level 0 smoothed 368 permille
+adaptive: t=12035 ms level 0 smoothed 447 permille
+adaptive: t=12538 ms level 0 smoothed 446 permille
+joins: 12385 (12385 per join), wait 0.910 s (7.4 %), share 11.433 s, max wait 3.272 ms
+joins: straggler gap mean 0.029 ms, max 2.522 ms
+joins: last worker histogram [1:1366 2:1352 3:1394 4:1378 5:1399 6:1363 7:1376 8:1387 9:1370]

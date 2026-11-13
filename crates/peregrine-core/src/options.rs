@@ -388,6 +388,12 @@ pub struct EngineOptions {
     /// oversubscribed. On by default: the window shortens (and finally drops) when the
     /// thread's run-queue delay says there are more runnable threads than cores.
     pub adaptive_spin: bool,
+    /// `PEREGRINE_ADAPTIVE_STALL=0`: keep the configured spin window and the blocks'
+    /// static partitions even when a fork–join's wait says a worker was taken off the
+    /// CPU. On by default (S5.6): a stalled join parks the waiters and lets the
+    /// blocks claim work in units, so a descheduled worker no longer holds the join
+    /// open. Output-neutral: only who computes a row changes.
+    pub adaptive_stall: bool,
     /// `PEREGRINE_DECODE_THREADS`: width of the narrower pool for one-row steps (default: physical cores).
     pub decode_threads: Option<usize>,
     /// `PEREGRINE_AFFINITY=1`: pin each pool worker to its own physical core (Linux), so a pool as wide as
@@ -542,6 +548,7 @@ impl Default for EngineOptions {
             spin_us: SPIN_DEFAULT_US,
             yield_us: 0,
             adaptive_spin: true,
+            adaptive_stall: true,
             decode_threads: None,
             affinity: false,
             isa: None,
@@ -714,6 +721,7 @@ impl EngineOptions {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.yield_us),
             adaptive_spin: unless("ADAPTIVE_SPIN", "0"),
+            adaptive_stall: unless("ADAPTIVE_STALL", "0"),
             decode_threads: num("DECODE_THREADS").filter(|&v| v > 0),
             affinity: only("AFFINITY", "1"),
             isa,
@@ -858,6 +866,7 @@ impl EngineOptions {
             ("spin_us", self.spin_us.to_string()),
             ("yield_us", self.yield_us.to_string()),
             ("adaptive_spin", self.adaptive_spin.to_string()),
+            ("adaptive_stall", self.adaptive_stall.to_string()),
             ("decode_threads", opt(self.decode_threads)),
             ("affinity", self.affinity.to_string()),
             (
@@ -938,6 +947,7 @@ pub const NAMES: &[&str] = &[
     "SPIN_US",
     "YIELD_US",
     "ADAPTIVE_SPIN",
+    "ADAPTIVE_STALL",
     "DECODE_THREADS",
     "AFFINITY",
     "ISA",

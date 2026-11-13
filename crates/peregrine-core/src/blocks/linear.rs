@@ -601,21 +601,30 @@ fn matmul_block(
     // slowest core. Workers instead claim chunks of rows from a counter, so a fast core takes more of them.
     // Which worker computes a row never changes the row's value, so the output is identical either way.
     if dynamic_rows() && pool.width() > 1 {
-        let next = std::sync::atomic::AtomicUsize::new(0);
         let mut chunk = (total / (pool.width() * 8)).clamp(8, 256);
         if tiled {
             chunk = chunk.div_ceil(16) * 16;
         }
-        pool.run(|_wk, _nw| {
-            let mut tmp = [0.0f32; MAX_BATCH];
-            loop {
-                let lo = next.fetch_add(chunk, std::sync::atomic::Ordering::Relaxed);
-                if lo >= total {
-                    break;
+        if pool.claiming() {
+            // The pool is stalled on a worker the host has taken away: the join waits
+            // only for the ranges in flight, not for that worker to come back.
+            pool.run_claimed(total, chunk, |_wk, _nw, lo, hi| {
+                let mut tmp = [0.0f32; MAX_BATCH];
+                rows_range(lo, hi, &mut tmp);
+            });
+        } else {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            pool.run(|_wk, _nw| {
+                let mut tmp = [0.0f32; MAX_BATCH];
+                loop {
+                    let lo = next.fetch_add(chunk, std::sync::atomic::Ordering::Relaxed);
+                    if lo >= total {
+                        break;
+                    }
+                    rows_range(lo, (lo + chunk).min(total), &mut tmp);
                 }
-                rows_range(lo, (lo + chunk).min(total), &mut tmp);
-            }
-        });
+            });
+        }
     } else {
         pool.run(|wk, nw| {
             let (lo, hi) = if tiled {
@@ -782,14 +791,22 @@ fn fp_group(
         }
     };
     if dynamic_rows() && pool.width() > 1 {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        pool.run(|_wk, _nw| loop {
-            let u = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if u >= total {
-                break;
-            }
-            unit(u);
-        });
+        if pool.claiming() {
+            pool.run_claimed(total, 1, |_wk, _nw, lo, hi| {
+                for u in lo..hi {
+                    unit(u);
+                }
+            });
+        } else {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            pool.run(|_wk, _nw| loop {
+                let u = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if u >= total {
+                    break;
+                }
+                unit(u);
+            });
+        }
     } else {
         pool.run(|wk, nw| {
             let (lo, hi) = share(total, wk, nw);

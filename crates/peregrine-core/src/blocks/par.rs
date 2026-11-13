@@ -178,6 +178,19 @@ pub enum Sched {
     Dynamic(usize),
 }
 
+/// The rows one claimed range covers when the pool is stealing (S5.6).
+///
+/// A quarter of a static share per worker, clamped to 1..=256 rows: enough units that
+/// a descheduled worker holds little, few enough that the atomic claim is noise on a
+/// region's work. Only used while [`Pool::claiming`] is true, so a healthy host keeps
+/// the partition its block chose.
+#[inline]
+fn claim_rows(rows: usize, width: usize, align: usize) -> usize {
+    let align = align.max(1);
+    let want = (rows / (width.max(1) * 4)).max(1);
+    want.div_ceil(align).max(1) * align
+}
+
 /// Carve disjoint row ranges of `buf` across worker threads.
 ///
 /// If `parallel` is false or `pool.width() <= 1`, runs synchronously on the calling thread as worker 0.
@@ -220,6 +233,30 @@ pub fn for_row_chunks<T, F>(
         // is handed the entire exclusive range 0..n_rows * stride.
         let slice = unsafe { std::slice::from_raw_parts_mut(raw as *mut T, len) };
         f(0, 0..n_rows, slice);
+        return;
+    }
+
+    // A stalled pool claims ranges from the pool's counter: a worker the host has
+    // taken away does not hold the join open. Healthy, the block keeps its schedule.
+    if pool.claiming() {
+        let align = match sched {
+            Sched::StaticAligned(a) => a.max(1),
+            _ => 1,
+        };
+        let claim = match sched {
+            Sched::Dynamic(c) => c.max(1),
+            _ => claim_rows(n_rows, pool.width(), align),
+        };
+        pool.run_claimed(n_rows, claim, |wk, _nw, lo, hi| {
+            let off = lo * stride;
+            let len = (hi - lo) * stride;
+            #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
+            tracker.claim_range(off, len);
+            // SAFETY: the pool hands `[lo, hi)` to one worker only, so the slices are
+            // disjoint; the slice does not outlive this call.
+            let chunk = unsafe { std::slice::from_raw_parts_mut((raw as *mut T).add(off), len) };
+            f(wk, lo..hi, chunk);
+        });
         return;
     }
 
@@ -351,6 +388,31 @@ pub fn for_row_chunks_2<T1, T2, F>(
         let s1 = unsafe { std::slice::from_raw_parts_mut(raw1 as *mut T1, len1) };
         let s2 = unsafe { std::slice::from_raw_parts_mut(raw2 as *mut T2, len2) };
         f(0, 0..n_rows, s1, s2);
+        return;
+    }
+
+    if pool.claiming() {
+        let align = match sched {
+            Sched::StaticAligned(a) => a.max(1),
+            _ => 1,
+        };
+        let claim = match sched {
+            Sched::Dynamic(c) => c.max(1),
+            _ => claim_rows(n_rows, pool.width(), align),
+        };
+        pool.run_claimed(n_rows, claim, |wk, _nw, lo, hi| {
+            let (off1, len1) = (lo * stride1, (hi - lo) * stride1);
+            let (off2, len2) = (lo * stride2, (hi - lo) * stride2);
+            #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
+            {
+                tracker1.claim_range(off1, len1);
+                tracker2.claim_range(off2, len2);
+            }
+            // SAFETY: `[lo, hi)` belongs to one worker only.
+            let c1 = unsafe { std::slice::from_raw_parts_mut((raw1 as *mut T1).add(off1), len1) };
+            let c2 = unsafe { std::slice::from_raw_parts_mut((raw2 as *mut T2).add(off2), len2) };
+            f(wk, lo..hi, c1, c2);
+        });
         return;
     }
 
@@ -508,6 +570,34 @@ pub fn for_row_chunks_3<T1, T2, T3, F>(
         let s2 = unsafe { std::slice::from_raw_parts_mut(raw2 as *mut T2, len2) };
         let s3 = unsafe { std::slice::from_raw_parts_mut(raw3 as *mut T3, len3) };
         f(0, 0..n_rows, s1, s2, s3);
+        return;
+    }
+
+    if pool.claiming() {
+        let align = match sched {
+            Sched::StaticAligned(a) => a.max(1),
+            _ => 1,
+        };
+        let claim = match sched {
+            Sched::Dynamic(c) => c.max(1),
+            _ => claim_rows(n_rows, pool.width(), align),
+        };
+        pool.run_claimed(n_rows, claim, |wk, _nw, lo, hi| {
+            let (off1, len1) = (lo * stride1, (hi - lo) * stride1);
+            let (off2, len2) = (lo * stride2, (hi - lo) * stride2);
+            let (off3, len3) = (lo * stride3, (hi - lo) * stride3);
+            #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
+            {
+                tracker1.claim_range(off1, len1);
+                tracker2.claim_range(off2, len2);
+                tracker3.claim_range(off3, len3);
+            }
+            // SAFETY: `[lo, hi)` belongs to one worker only.
+            let c1 = unsafe { std::slice::from_raw_parts_mut((raw1 as *mut T1).add(off1), len1) };
+            let c2 = unsafe { std::slice::from_raw_parts_mut((raw2 as *mut T2).add(off2), len2) };
+            let c3 = unsafe { std::slice::from_raw_parts_mut((raw3 as *mut T3).add(off3), len3) };
+            f(wk, lo..hi, c1, c2, c3);
+        });
         return;
     }
 
@@ -817,6 +907,26 @@ impl<'a, T> Disjoint<'a, T> {
     #[inline(always)]
     pub unsafe fn get(&self, i: usize) -> &'a mut T {
         self.get_mut(i)
+    }
+
+    /// Per-item mutable access for a slot the caller owns by construction.
+    ///
+    /// The attention scratch is one slot per pool worker, and a worker index is its
+    /// own for the whole call: a claimed job may call the worker's closure more than
+    /// once (once per claimed range), so the debug overlap tracker must not see the
+    /// second fetch of the same slot as a second writer.
+    ///
+    /// # Safety
+    /// `i` must be in bounds and this task must be the only writer of element `i` for
+    /// as long as the returned reference lives.
+    #[inline(always)]
+    pub unsafe fn unclaimed_mut(&self, i: usize) -> &'a mut T {
+        assert!(
+            i < self.len,
+            "Disjoint::unclaimed_mut out of bounds: index {i} >= total {}",
+            self.len
+        );
+        &mut *self.ptr.add(i)
     }
 
     /// Shared read-only view of a range.

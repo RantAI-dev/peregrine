@@ -1,0 +1,12 @@
+{"engine": "ik", "level": 0, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 0, "value": 815.630895, "wall_s": 5.414, "idle": 0.064, "load1": 7.58, "tag": ""}
+{"engine": "ik", "level": 1, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 0, "value": 357.704693, "wall_s": 11.882, "idle": 0.027, "load1": 7.77, "tag": ""}
+{"engine": "ik", "level": 2, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 0, "value": 293.316023, "wall_s": 14.39, "idle": 0.02, "load1": 8.56, "tag": ""}
+{"engine": "ik", "level": 4, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 0, "value": 240.607616, "wall_s": 17.405, "idle": 0.01, "load1": 9.32, "tag": ""}
+{"engine": "ik", "level": 0, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 1, "value": 813.378167, "wall_s": 5.435, "idle": 0.065, "load1": 10.36, "tag": ""}
+{"engine": "ik", "level": 1, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 1, "value": 405.591494, "wall_s": 10.526, "idle": 0.031, "load1": 9.58, "tag": ""}
+{"engine": "ik", "level": 2, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 1, "value": 292.129088, "wall_s": 14.416, "idle": 0.018, "load1": 9.8, "tag": ""}
+{"engine": "ik", "level": 4, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 1, "value": 241.284646, "wall_s": 17.388, "idle": 0.011, "load1": 10.29, "tag": ""}
+{"engine": "ik", "level": 0, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 2, "value": 812.149046, "wall_s": 5.393, "idle": 0.057, "load1": 11.42, "tag": ""}
+{"engine": "ik", "level": 1, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 2, "value": 370.44925, "wall_s": 11.495, "idle": 0.029, "load1": 11.39, "tag": ""}
+{"engine": "ik", "level": 2, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 2, "value": 299.916476, "wall_s": 14.08, "idle": 0.02, "load1": 11.33, "tag": ""}
+{"engine": "ik", "level": 4, "threads": 10, "cell": "prompt4096", "pin": "yes", "run": 2, "value": 222.053913, "wall_s": 18.875, "idle": 0.011, "load1": 11.48, "tag": ""}

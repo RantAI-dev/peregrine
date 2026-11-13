@@ -100,6 +100,21 @@ against 12 at the full window). Consecutive quiet samples widen it back. `PEREGR
 keeps the window fixed, which is how to reproduce the pre-adaptive numbers. The probe is Linux-only;
 elsewhere the configured window is used unchanged.
 
+## Stalls on a shared host
+
+A second controller (S5.6) watches the caller's post-share wait instead of the schedstat reading.
+When the wait is at least half the fork–join and the host's smoothed run-queue delay says the
+machine is oversubscribed (at least 80 permille), four such joins in a row make every waiter park
+at once, and blocks that can split their work ask the pool for claimed ranges instead of static
+shares: the caller then returns when the units are exhausted and none is in flight, without waiting
+for a worker the host has not scheduled yet. After a hold of unstalled joins the window is probed
+back; a probe that stalls parks again and doubles the hold. `PEREGRINE_ADAPTIVE_STALL=0` turns both
+parts off (the default path is then the old one), and the claimed partitions themselves are only
+used while the controller says the pool is stalled, so a quiet host keeps the partition each block
+was tuned with. The signal is Linux-only; the claimed paths are portable. Measurements and the
+account are in `benchmarks/results/spark-arm-2026-11-13-s5.6/` and
+`docs/design/s5.6-pool-contended.md`.
+
 ## Startup calibration
 
 `peregrine serve` calibrates `decode_threads` and `spin_us` at startup (< 200 ms budget) when no

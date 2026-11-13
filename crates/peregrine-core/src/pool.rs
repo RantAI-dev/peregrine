@@ -20,25 +20,52 @@
 //! per-row synchronisation: the ranges are disjoint by construction, which is what
 //! makes the raw-pointer writes in `matmul` sound.
 
-use std::cell::{RefCell, UnsafeCell};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// A type-erased `Fn(worker_index, worker_count)`.
+/// A job published for the workers, read through the pool's seqlock (S5.6).
+///
+/// The closure and its shape are written as plain atomics before [`Inner::epoch`] is
+/// stored, and a sequence counter brackets the write. A worker reads them with a
+/// retry if the sequence changed under it, so a worker that was descheduled across a
+/// job boundary never mixes one generation's call pointer with another's data. That
+/// race is new with claimed jobs: they are the first jobs whose caller may return
+/// before every worker has observed them.
+#[derive(Clone, Copy)]
+struct Published {
+    generation: u64,
+    kind: u8,
+    data: *const (),
+    call: usize,
+    units: usize,
+    claim: usize,
+}
+
+const JOB_NONE: u8 = 0;
+const JOB_WHOLE: u8 = 1;
+const JOB_CLAIM: u8 = 2;
+
+/// A type-erased `Fn(worker_index, worker_count)`, or the claimed form
+/// `Fn(worker_index, worker_count, lo, hi)`.
 ///
 /// Erased through a monomorphised trampoline rather than by transmuting a `&dyn` fat
 /// pointer into two words — the trampoline is a plain function pointer and makes no
 /// assumption about trait-object layout.
-#[derive(Clone, Copy)]
-struct Job {
-    data: *const (),
-    call: unsafe fn(*const (), usize, usize),
-}
-
 unsafe fn trampoline<F: Fn(usize, usize) + Sync>(p: *const (), w: usize, n: usize) {
     (*(p as *const F))(w, n)
+}
+
+unsafe fn claim_trampoline<F: Fn(usize, usize, usize, usize) + Sync>(
+    p: *const (),
+    w: usize,
+    n: usize,
+    lo: usize,
+    hi: usize,
+) {
+    (*(p as *const F))(w, n, lo, hi)
 }
 
 /// How long a worker spins on the epoch before parking on the condvar.
@@ -152,6 +179,39 @@ const INITIAL_HOLD_JOINS: u32 = 256;
 /// previous rung's stragglers.
 const SKIP_JOINS: u32 = 8;
 
+/// A join whose wait is at least this long, and at least [`STALL_SHARE_PERMILLE`] of
+/// the fork–join, says the caller is waiting for a worker the host has taken away,
+/// not for a share that is still being computed.
+///
+/// Measured on this host (S5.6): a quiet 4 096-token prefill at ten threads waits
+/// 17 % of its wall (1.35 s of 7.9 s) for ordinary imbalance, while one busy thread
+/// on the same cores raises the wait to 42 % (5.6 s of 13.3 s). The threshold sits
+/// between the two, and the absolute floor keeps a tiny decode join from counting
+/// scheduler noise as a stall.
+const STALL_WAIT_NS: u64 = 50_000;
+const STALL_SHARE_PERMILLE: u64 = 400;
+
+/// The host's smoothed run-queue delay that must accompany a stalled join.
+///
+/// The ratio alone is not enough: a pass whose rows are unevenly cheap (a batch of
+/// texts of different lengths, a pooled pass that waits for the other slots) can
+/// leave the caller waiting a large share of the join without any worker having been
+/// descheduled. On a quiet host the delay sample is near zero, so the claim machinery
+/// stays off; a co-tenant on the pool's cores read 85-207 permille at one busy thread
+/// and 250-600 at four on the S5.6 host.
+const STALL_GATE_PERMILLE: u32 = 80;
+
+/// Consecutive stalls that force the waiters to park. Four joins is under a
+/// millisecond of evidence on a loaded host, so the ladder reacts within a token.
+const STALL_STRIKES: u32 = 4;
+
+/// Joins without a stall that a forced park waits before it tests the spin window
+/// again. It doubles after every failed probe (up to [`STALL_HOLD_MAX`] joins), so a
+/// host that stays contended is not re-probed for long; a host that quiets down gets
+/// its window back within a millisecond or two of a decode step.
+const STALL_HOLD: u32 = 512;
+const STALL_HOLD_MAX: u32 = 8192;
+
 /// The spin window, and how much of it the pool believes it can afford.
 ///
 /// The common case on a quiet host is "level 0, delay below the gate". It must cost the
@@ -171,10 +231,18 @@ struct WaitControl {
     seeded: AtomicBool,
     /// Whether the join-wait trials are running (a cheap check before the mutex).
     trialing: AtomicBool,
+    /// Set by the caller when recent joins stalled on a descheduled worker: waiters
+    /// park at once instead of spinning, whatever the ladder's rung says. Cleared
+    /// again after a hold of unstalled joins, so a host that quiets down gets its
+    /// window back.
+    forced_park: AtomicBool,
     /// Last diagnostic print, for `PEREGRINE_ADAPTIVE_LOG` (milliseconds).
     logged: AtomicU64,
     /// `PEREGRINE_ADAPTIVE_SPIN=0` keeps the configured window.
     enabled: bool,
+    /// `PEREGRINE_ADAPTIVE_STALL=0` turns the stall detection (and the claimed
+    /// partitions it enables) off, leaving the spin ladder exactly as it was.
+    stall_enabled: bool,
     /// Trial state; only the caller thread uses it, one join at a time.
     trial: Mutex<Trial>,
 }
@@ -231,6 +299,112 @@ fn park_bucket(d: Duration) -> usize {
     }
 }
 
+/// Join-wait accounting for the S5.6 account, printed at `Pool::drop` when
+/// `PEREGRINE_PROF2` is on.
+///
+/// `JOIN_WAIT_NS` overlaps the forward's wall (it is the caller's post-share wait),
+/// so it is reported as a share, never added to a stage. `LATE_GAP_NS` is the
+/// difference between the last worker to finish and the one before it: a few
+/// microseconds of ordinary imbalance when the pool is healthy, a scheduler
+/// timeslice when the host has taken a worker away. `LATE_HIST[w]` counts which
+/// worker was last, so a pinning mistake or one permanently busy core is visible.
+static JOIN_N: AtomicU64 = AtomicU64::new(0);
+static JOIN_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static JOIN_SHARE_NS: AtomicU64 = AtomicU64::new(0);
+static JOIN_MAX_NS: AtomicU64 = AtomicU64::new(0);
+static LATE_GAP_NS: AtomicU64 = AtomicU64::new(0);
+static LATE_GAP_MAX: AtomicU64 = AtomicU64::new(0);
+static LATE_HIST: [AtomicU64; 32] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+fn print_join_totals() {
+    if !crate::prof::enabled() {
+        return;
+    }
+    let n = JOIN_N.load(Ordering::Relaxed);
+    if n == 0 {
+        return;
+    }
+    let wait = JOIN_WAIT_NS.load(Ordering::Relaxed);
+    let share = JOIN_SHARE_NS.load(Ordering::Relaxed);
+    eprintln!(
+        "joins: {n} ({} per join), wait {:.3} s ({:.1} %), share {:.3} s, max wait {:.3} ms",
+        n,
+        wait as f64 / 1e9,
+        100.0 * wait as f64 / (wait + share).max(1) as f64,
+        share as f64 / 1e9,
+        JOIN_MAX_NS.load(Ordering::Relaxed) as f64 / 1e6,
+    );
+    eprintln!(
+        "joins: straggler gap mean {:.3} ms, max {:.3} ms",
+        if n == 0 {
+            0.0
+        } else {
+            LATE_GAP_NS.load(Ordering::Relaxed) as f64 / 1e6 / n as f64
+        },
+        LATE_GAP_MAX.load(Ordering::Relaxed) as f64 / 1e6,
+    );
+    let hist: Vec<String> = LATE_HIST
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.load(Ordering::Relaxed) > 0)
+        .map(|(w, c)| format!("{w}:{}", c.load(Ordering::Relaxed)))
+        .collect();
+    eprintln!("joins: last worker histogram [{}]", hist.join(" "));
+}
+
+/// Whether one join looks like a worker taken off the CPU rather than ordinary imbalance.
+///
+/// Both conditions: the wait is long enough that a scheduler timeslice could be behind
+/// it, and it dominates the caller's own share. A quiet ten-thread 4 096-token pass
+/// waits 13-17 % of the fork–join; one busy thread on the same cores raises that past
+/// 60 % in the unmodified pool.
+#[inline]
+fn is_stall(wait_ns: u64, share_ns: u64) -> bool {
+    let total = wait_ns.saturating_add(share_ns).max(1);
+    wait_ns >= STALL_WAIT_NS
+        && u128::from(wait_ns) * 1000 / u128::from(total) >= u128::from(STALL_SHARE_PERMILLE)
+}
+
+/// Nanoseconds since a process-wide origin, for the per-worker finish timestamps.
+fn now_ns() -> u64 {
+    use std::sync::OnceLock;
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
 /// Whether `PEREGRINE_ADAPTIVE_LOG` asks for the ladder diagnostic.
 fn adaptive_log() -> bool {
     use std::sync::OnceLock;
@@ -274,7 +448,7 @@ fn print_adaptive_totals() {
 }
 
 impl WaitControl {
-    fn new(spin_us: u64, yield_us: u64, enabled: bool) -> WaitControl {
+    fn new(spin_us: u64, yield_us: u64, enabled: bool, stall_enabled: bool) -> WaitControl {
         WaitControl {
             max_spin_us: spin_us,
             max_yield_us: yield_us,
@@ -282,8 +456,10 @@ impl WaitControl {
             ewma: AtomicU64::new(0),
             seeded: AtomicBool::new(false),
             trialing: AtomicBool::new(false),
+            forced_park: AtomicBool::new(false),
             logged: AtomicU64::new(0),
             enabled,
+            stall_enabled,
             trial: Mutex::new(Trial {
                 active: false,
                 rung: 0,
@@ -297,12 +473,21 @@ impl WaitControl {
         }
     }
 
+    /// Force every waiter to park (or release the force). The caller owns the
+    /// transition; workers only read the flag in [`WaitControl::budgets`].
+    fn force_park(&self, on: bool) {
+        self.forced_park.store(on, Ordering::Relaxed);
+    }
+
     /// The (spin, yield) deadlines for the current level.
     ///
     /// The yield deadline is never earlier than the spin deadline: `backoff` treats both
     /// as absolute offsets from the start of the wait, so a configured `YIELD_US` of 0
     /// means "no yield phase" and not "yield for minus one millisecond".
     fn budgets(&self) -> (Duration, Duration) {
+        if self.forced_park.load(Ordering::Relaxed) {
+            return (Duration::ZERO, Duration::ZERO);
+        }
         let spin = match self.level.load(Ordering::Relaxed) {
             0 => self.max_spin_us,
             _ => 0,
@@ -606,9 +791,22 @@ struct Inner {
     /// compare epochs rather than read a flag, so a worker that was slow to notice a
     /// job cannot run it twice or miss the next one.
     epoch: Aligned<AtomicU64>,
-    /// Written by `run` before the epoch is published (Release) and read by workers
-    /// after they observe it (Acquire).
-    job: UnsafeCell<Option<Job>>,
+    /// The published job's fields. Written by the caller under `job_seq` (odd while
+    /// writing, even when stable) before the epoch is stored, and read by a worker
+    /// with the same sequence check.
+    job_seq: AtomicU64,
+    job_gen: AtomicU64,
+    job_kind: AtomicU8,
+    job_data: AtomicUsize,
+    job_call: AtomicUsize,
+    job_units: AtomicUsize,
+    job_claim: AtomicUsize,
+    /// Claimed-job state (S5.6), also published before the epoch. `claim_next` is the
+    /// next unit; `busy` counts workers inside a claim loop; `closed` names the last
+    /// generation whose closure must not be entered again.
+    claim_next: Aligned<AtomicUsize>,
+    busy: Aligned<AtomicUsize>,
+    closed: AtomicU64,
     /// Workers still running the current job, on its own cache line so finishing
     /// workers do not invalidate `epoch` and `job` for workers still waking up.
     remaining: Aligned<AtomicUsize>,
@@ -644,15 +842,19 @@ struct Inner {
     n: usize,
     /// The spin window and its adaptive ladder (see [`WaitControl`]).
     wait: WaitControl,
+    /// The caller's stall detection (S5.6). Only the caller reads and writes these:
+    /// one join runs at a time, so relaxed atomics are enough and no worker takes a
+    /// lock or a shared cache line in its wait.
+    strikes: AtomicU32,
+    healthy: AtomicU32,
+    hold: AtomicU32,
+    /// Whether the unforced window currently being measured is a probe (the forced
+    /// park was released and is being tested).
+    probing: AtomicBool,
+    /// Finish time of each worker in the current job, nanoseconds since [`now_ns`]'s
+    /// origin; written only when `PEREGRINE_PROF2` is on.
+    finish: Vec<Aligned<AtomicU64>>,
 }
-
-// SAFETY: `job` is written only by the thread inside `run`, before it publishes a new
-// epoch with Release ordering and while no worker is running a job (the previous
-// `run` waited for `remaining == 0`); workers read it only after an Acquire load of
-// the new epoch. The pointer it holds is valid until `run` returns, which is after
-// every worker has finished.
-unsafe impl Sync for Inner {}
-unsafe impl Send for Inner {}
 
 /// Pin a pool thread to a physical core when `PEREGRINE_AFFINITY=1`; a no-op otherwise
 /// and on platforms without `sched_setaffinity`.
@@ -738,6 +940,50 @@ pub fn physical_cpu_map() -> Option<&'static Vec<Vec<usize>>> {
     .as_ref()
 }
 
+impl Inner {
+    /// Publish one job under the sequence lock, before the epoch that announces it.
+    fn publish(
+        &self,
+        generation: u64,
+        kind: u8,
+        data: *const (),
+        call: usize,
+        units: usize,
+        claim: usize,
+    ) {
+        self.job_seq.fetch_add(1, Ordering::SeqCst);
+        self.job_gen.store(generation, Ordering::Relaxed);
+        self.job_kind.store(kind, Ordering::Relaxed);
+        self.job_data.store(data as usize, Ordering::Relaxed);
+        self.job_call.store(call, Ordering::Relaxed);
+        self.job_units.store(units, Ordering::Relaxed);
+        self.job_claim.store(claim, Ordering::Relaxed);
+        self.job_seq.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Read the published job, retrying if a publish crossed the read.
+    fn read_job(&self) -> Published {
+        loop {
+            let first = self.job_seq.load(Ordering::Acquire);
+            if first & 1 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let job = Published {
+                generation: self.job_gen.load(Ordering::Relaxed),
+                kind: self.job_kind.load(Ordering::Relaxed),
+                data: self.job_data.load(Ordering::Relaxed) as *const (),
+                call: self.job_call.load(Ordering::Relaxed),
+                units: self.job_units.load(Ordering::Relaxed),
+                claim: self.job_claim.load(Ordering::Relaxed),
+            };
+            if self.job_seq.load(Ordering::Acquire) == first {
+                return job;
+            }
+        }
+    }
+}
+
 pub struct Pool {
     n: usize,
     inner: Arc<Inner>,
@@ -779,7 +1025,16 @@ impl Pool {
         let o = crate::options::get();
         let inner = Arc::new(Inner {
             epoch: Aligned(AtomicU64::new(0)),
-            job: UnsafeCell::new(None),
+            job_seq: AtomicU64::new(0),
+            job_gen: AtomicU64::new(0),
+            job_kind: AtomicU8::new(JOB_NONE),
+            job_data: AtomicUsize::new(0),
+            job_call: AtomicUsize::new(0),
+            job_units: AtomicUsize::new(0),
+            job_claim: AtomicUsize::new(0),
+            claim_next: Aligned(AtomicUsize::new(0)),
+            busy: Aligned(AtomicUsize::new(0)),
+            closed: AtomicU64::new(0),
             remaining: Aligned(AtomicUsize::new(0)),
             shutdown: AtomicBool::new(false),
             poisoned: AtomicBool::new(false),
@@ -791,11 +1046,14 @@ impl Pool {
             done_mu: Mutex::new(()),
             done_cv: Condvar::new(),
             n,
-            wait: WaitControl::new(o.spin_us, o.yield_us, o.adaptive_spin),
+            wait: WaitControl::new(o.spin_us, o.yield_us, o.adaptive_spin, o.adaptive_stall),
+            strikes: AtomicU32::new(0),
+            healthy: AtomicU32::new(0),
+            hold: AtomicU32::new(STALL_HOLD),
+            probing: AtomicBool::new(false),
+            finish: (0..n).map(|_| Aligned(AtomicU64::new(0))).collect(),
         });
         let mut handles = Vec::with_capacity(n - 1);
-        // Worker 0 is the calling thread, so only n-1 are spawned. That keeps the
-        // caller busy instead of blocked, and makes `n == 1` allocate nothing.
         for w in 1..n {
             let inner = Arc::clone(&inner);
             handles.push(std::thread::spawn(move || {
@@ -836,22 +1094,87 @@ impl Pool {
                     if inner.shutdown.load(Ordering::Acquire) {
                         return;
                     }
-                    seen = inner.epoch.0.load(Ordering::Acquire);
-                    // SAFETY: see the `Sync` impl — published before the epoch.
-                    let job = unsafe { *inner.job.get() };
-                    if let Some(j) = job {
-                        // SAFETY: `j.data` points at the closure passed to `run`,
-                        // which spins until `remaining` reaches zero — so the closure
-                        // is still alive here.
-                        let ok =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-                                (j.call)(j.data, w, inner.n)
-                            }));
-                        if ok.is_err() {
-                            inner.poisoned.store(true, Ordering::Release);
-                        }
+                    let epoch_now = inner.epoch.0.load(Ordering::Acquire);
+                    // SAFETY: the job is published before the epoch, and the sequence
+                    // lock makes the fields a consistent generation even when a publish
+                    // crossed this read. The data pointer and call pointer are therefore
+                    // the pair the caller stored for this generation.
+                    let job = inner.read_job();
+                    if job.generation != epoch_now {
+                        // The fields moved between the epoch load and the job read. Do
+                        // not run a generation the epoch does not name: a worker that
+                        // observed E must wait for the publish of E+1 rather than run
+                        // E+1 twice.
+                        seen = job.generation.min(epoch_now);
+                        continue;
                     }
-                    if inner.remaining.0.fetch_sub(1, Ordering::SeqCst) == 1
+                    seen = job.generation;
+                    let mut whole = false;
+                    match job.kind {
+                        JOB_WHOLE => {
+                            whole = true;
+                            // SAFETY: the pointer was stored from a function of type
+                            // `unsafe fn(*const (), usize, usize)` and the data it
+                            // points at is the closure passed to `run`.
+                            let call: unsafe fn(*const (), usize, usize) =
+                                unsafe { std::mem::transmute(job.call) };
+                            let ok =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                                    call(job.data, w, inner.n)
+                                }));
+                            if ok.is_err() {
+                                inner.poisoned.store(true, Ordering::Release);
+                            }
+                        }
+                        JOB_CLAIM => {
+                            // SAFETY: as above, for the claimed form.
+                            let call: unsafe fn(*const (), usize, usize, usize, usize) =
+                                unsafe { std::mem::transmute(job.call) };
+                            let generation = job.generation;
+                            let (units, claim) = (job.units, job.claim);
+                            // A worker the host has only now scheduled must not enter
+                            // a closed job; it costs nothing to skip, which is the
+                            // point of the claimed form.
+                            if inner.closed.load(Ordering::Acquire) < generation {
+                                inner.busy.0.fetch_add(1, Ordering::SeqCst);
+                                if inner.closed.load(Ordering::SeqCst) < generation {
+                                    loop {
+                                        let lo =
+                                            inner.claim_next.0.fetch_add(claim, Ordering::Relaxed);
+                                        if lo >= units {
+                                            break;
+                                        }
+                                        let hi = (lo + claim).min(units);
+                                        // SAFETY: `[lo, hi)` was claimed by this
+                                        // worker alone, and the caller is still inside
+                                        // `run_claimed` (it waits for `busy == 0`).
+                                        let ok =
+                                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                                || unsafe { call(job.data, w, inner.n, lo, hi) },
+                                            ));
+                                        if ok.is_err() {
+                                            inner.poisoned.store(true, Ordering::Release);
+                                            break;
+                                        }
+                                    }
+                                }
+                                inner.busy.0.fetch_sub(1, Ordering::SeqCst);
+                                if inner.busy.0.load(Ordering::SeqCst) == 0
+                                    && inner.caller_sleeping.load(Ordering::SeqCst)
+                                {
+                                    let _g =
+                                        inner.done_mu.lock().unwrap_or_else(|e| e.into_inner());
+                                    inner.done_cv.notify_one();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if crate::prof::enabled() {
+                        inner.finish[w].0.store(now_ns(), Ordering::Relaxed);
+                    }
+                    if whole
+                        && inner.remaining.0.fetch_sub(1, Ordering::SeqCst) == 1
                         && inner.caller_sleeping.load(Ordering::SeqCst)
                     {
                         // Last one out: wake the caller if it went to sleep. Taking the
@@ -899,16 +1222,17 @@ impl Pool {
             }
         }
         let _running = Running(&self.inner.in_run);
-        let job = Job {
-            data: &f as *const F as *const (),
-            call: trampoline::<F>,
-        };
-        // SAFETY: this is the only caller inside `run` (checked above), no worker is
-        // running a job (the previous call waited for `remaining == 0`), and none reads
-        // `job` until it sees the new epoch.
-        unsafe { *self.inner.job.get() = Some(job) };
+        let generation = self.inner.epoch.0.load(Ordering::SeqCst) + 1;
+        self.inner.publish(
+            generation,
+            JOB_WHOLE,
+            &f as *const F as *const (),
+            trampoline::<F> as *const () as usize,
+            0,
+            0,
+        );
         self.inner.remaining.0.store(self.n - 1, Ordering::Release);
-        self.inner.epoch.0.fetch_add(1, Ordering::SeqCst);
+        self.inner.epoch.0.store(generation, Ordering::SeqCst);
         if self.inner.sleepers.load(Ordering::SeqCst) > 0 {
             let g = self.inner.park.lock().unwrap_or_else(|e| e.into_inner());
             if *g > 0 {
@@ -916,7 +1240,12 @@ impl Pool {
             }
         }
         // The caller takes share 0 rather than blocking immediately.
+        let share_t0 = Instant::now();
         let mine = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(0, self.n)));
+        let share_ns = share_t0.elapsed().as_nanos() as u64;
+        if crate::prof::enabled() {
+            self.inner.finish[0].0.store(now_ns(), Ordering::Relaxed);
+        }
         // How long the caller then waits for the last worker. `PEREGRINE_PROF2` reports
         // it as "barrier wait"; it overlaps the matmul wall and is never added to it.
         let wait_t0 = crate::prof::enabled().then(Instant::now);
@@ -954,6 +1283,15 @@ impl Pool {
             drop(g);
             PROBE.with(|p| p.borrow_mut().add_parked(idle));
         }
+        let wait_ns = t0.elapsed().as_nanos() as u64;
+        self.note_join(wait_ns, share_ns);
+        if crate::prof::enabled() {
+            JOIN_N.fetch_add(1, Ordering::Relaxed);
+            JOIN_WAIT_NS.fetch_add(wait_ns, Ordering::Relaxed);
+            JOIN_SHARE_NS.fetch_add(share_ns, Ordering::Relaxed);
+            JOIN_MAX_NS.fetch_max(wait_ns, Ordering::Relaxed);
+            self.record_straggler();
+        }
         if self.inner.wait.wants_sample() {
             self.inner
                 .wait
@@ -971,11 +1309,248 @@ impl Pool {
             panic!("a pool worker panicked while running a job");
         }
     }
+
+    /// Whether recent joins stalled on a worker the host had taken away.
+    ///
+    /// Blocks that can split their work into independent units ask this and use
+    /// [`Pool::run_claimed`] when it is true: a claimed job does not wait for a
+    /// worker that has not arrived, which is the only way a fork–join over borrowed
+    /// data can stop paying a scheduling latency for a descheduled participant.
+    /// On a healthy host the flag is false and every block keeps the partition it
+    /// was tuned with.
+    pub fn claiming(&self) -> bool {
+        self.inner.wait.stall_enabled && self.inner.wait.forced_park.load(Ordering::Relaxed)
+    }
+
+    /// Run `f(worker, width, lo, hi)` for every claimed range of `units`.
+    ///
+    /// Ranges are `[lo, min(lo + claim, units))` from a counter that the caller and
+    /// every worker that arrives claim from. The caller returns once the counter is
+    /// exhausted and no range is in flight; a worker the host has descheduled does
+    /// not hold the join open, because the caller closes the job (publishing
+    /// `generation` in `closed`) before it returns and the late worker skips it.
+    /// This is sound for exactly the same reason the static form is: every unit is
+    /// claimed by one worker, so the writes are disjoint, and the closure is alive
+    /// for every worker that is inside it (`busy` counts them).
+    pub fn run_claimed<F: Fn(usize, usize, usize, usize) + Sync>(
+        &self,
+        units: usize,
+        claim: usize,
+        f: F,
+    ) {
+        if units == 0 {
+            return;
+        }
+        #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
+        crate::blocks::par::bump_epoch();
+        if self.n == 1 {
+            f(0, 1, 0, units);
+            return;
+        }
+        if self.inner.in_run.swap(true, Ordering::Acquire) {
+            panic!(
+                "Pool::run was entered by two callers at once; engines that share a pool \
+                 must hold the pass turn"
+            );
+        }
+        struct Running<'a>(&'a AtomicBool);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _running = Running(&self.inner.in_run);
+        let claim = claim.max(1);
+        let generation = self.inner.epoch.0.load(Ordering::SeqCst) + 1;
+        self.inner.publish(
+            generation,
+            JOB_CLAIM,
+            &f as *const F as *const (),
+            claim_trampoline::<F> as *const () as usize,
+            units,
+            claim,
+        );
+        self.inner.claim_next.0.store(0, Ordering::Relaxed);
+        // `busy` is deliberately not reset here: a worker from the previous claimed
+        // job may be between its first closed-check and its increment, and a reset
+        // would let its decrement underflow the counter. It always reaches zero on
+        // its own.
+        self.inner.remaining.0.store(0, Ordering::Release);
+        self.inner.epoch.0.store(generation, Ordering::SeqCst);
+        if self.inner.sleepers.load(Ordering::SeqCst) > 0 {
+            let g = self.inner.park.lock().unwrap_or_else(|e| e.into_inner());
+            if *g > 0 {
+                self.inner.wake.notify_all();
+            }
+        }
+        let share_t0 = Instant::now();
+        self.inner.busy.0.fetch_add(1, Ordering::SeqCst);
+        let mine = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
+            let lo = self.inner.claim_next.0.fetch_add(claim, Ordering::Relaxed);
+            if lo >= units {
+                break;
+            }
+            f(0, self.n, lo, (lo + claim).min(units));
+        }));
+        self.inner.busy.0.fetch_sub(1, Ordering::SeqCst);
+        let share_ns = share_t0.elapsed().as_nanos() as u64;
+        // Close the job before returning: a worker that has not arrived yet will see
+        // this and skip, and one that is between its two closed-checks will leave.
+        self.inner.closed.store(generation, Ordering::SeqCst);
+        let (spin, yld) = self.inner.wait.budgets();
+        let t0 = Instant::now();
+        sample_load(&self.inner.wait, t0);
+        loop {
+            if self.inner.busy.0.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            let e = t0.elapsed();
+            if e < spin {
+                std::hint::spin_loop();
+                continue;
+            }
+            if e < yld {
+                std::thread::yield_now();
+                continue;
+            }
+            let mut g = self.inner.done_mu.lock().unwrap_or_else(|e| e.into_inner());
+            self.inner.caller_sleeping.store(true, Ordering::SeqCst);
+            let parked = Instant::now();
+            while self.inner.busy.0.load(Ordering::SeqCst) > 0 {
+                g = self
+                    .inner
+                    .done_cv
+                    .wait(g)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+            let idle = parked.elapsed();
+            self.inner.caller_sleeping.store(false, Ordering::SeqCst);
+            drop(g);
+            PROBE.with(|p| p.borrow_mut().add_parked(idle));
+        }
+        let wait_ns = t0.elapsed().as_nanos() as u64;
+        self.note_join(wait_ns, share_ns);
+        if crate::prof::enabled() {
+            JOIN_N.fetch_add(1, Ordering::Relaxed);
+            JOIN_WAIT_NS.fetch_add(wait_ns, Ordering::Relaxed);
+            JOIN_SHARE_NS.fetch_add(share_ns, Ordering::Relaxed);
+            JOIN_MAX_NS.fetch_max(wait_ns, Ordering::Relaxed);
+            self.record_straggler();
+        }
+        crate::blocks::par::bump_epoch();
+        let poisoned = self.inner.poisoned.swap(false, Ordering::AcqRel);
+        if let Err(p) = mine {
+            std::panic::resume_unwind(p);
+        }
+        if poisoned {
+            panic!("a pool worker panicked while running a job");
+        }
+    }
+
+    /// What one join's wait says about the host, and whether to stop spinning.
+    ///
+    /// The wait is the caller's post-share wait; the share is its own work. On a
+    /// healthy host the wait is a fraction of the share (17 % of the wall on a quiet
+    /// ten-thread 4 096-token pass); when a worker is off-CPU the join waits for a
+    /// scheduling timeslice and the wait dominates. Four such joins in a row force
+    /// every waiter to park at once — the window is what takes the cores the late
+    /// worker needs — and after a hold of unstalled joins the window is tested again.
+    /// A failed probe doubles the hold, so a permanently loaded host is not re-probed
+    /// often. Nothing here changes what a worker computes.
+    fn note_join(&self, wait_ns: u64, share_ns: u64) {
+        if !self.inner.wait.enabled || !self.inner.wait.stall_enabled {
+            return;
+        }
+        let busy =
+            u32::try_from(self.inner.wait.ewma.load(Ordering::Relaxed) / 1024).unwrap_or(1000);
+        let stalled = busy >= STALL_GATE_PERMILLE && is_stall(wait_ns, share_ns);
+        if stalled {
+            self.inner.healthy.store(0, Ordering::Relaxed);
+            let forced = self.inner.wait.forced_park.load(Ordering::Relaxed);
+            if forced {
+                return;
+            }
+            let strikes = self.inner.strikes.fetch_add(1, Ordering::Relaxed) + 1;
+            let probing = self.inner.probing.swap(false, Ordering::Relaxed);
+            if strikes >= STALL_STRIKES || probing {
+                // A probe that stalls is evidence the host is still contended: park
+                // again and wait longer before the next test.
+                let hold = if probing {
+                    (self.inner.hold.load(Ordering::Relaxed) * 2).min(STALL_HOLD_MAX)
+                } else {
+                    self.inner.hold.load(Ordering::Relaxed)
+                };
+                self.inner.hold.store(hold, Ordering::Relaxed);
+                self.inner.strikes.store(0, Ordering::Relaxed);
+                self.inner.wait.force_park(true);
+                self.log_stall("park", hold);
+            }
+            return;
+        }
+        self.inner.strikes.store(0, Ordering::Relaxed);
+        let forced = self.inner.wait.forced_park.load(Ordering::Relaxed);
+        if !forced {
+            if self.inner.probing.load(Ordering::Relaxed) {
+                let healthy = self.inner.healthy.fetch_add(1, Ordering::Relaxed) + 1;
+                if healthy >= self.inner.hold.load(Ordering::Relaxed) {
+                    // The window survived a whole hold: accept it and reset the hold.
+                    self.inner.probing.store(false, Ordering::Relaxed);
+                    self.inner.healthy.store(0, Ordering::Relaxed);
+                    self.inner.hold.store(STALL_HOLD, Ordering::Relaxed);
+                    self.log_stall("keep", 0);
+                }
+            }
+            return;
+        }
+        let healthy = self.inner.healthy.fetch_add(1, Ordering::Relaxed) + 1;
+        if healthy >= self.inner.hold.load(Ordering::Relaxed) {
+            self.inner.healthy.store(0, Ordering::Relaxed);
+            self.inner.probing.store(true, Ordering::Relaxed);
+            self.inner.wait.force_park(false);
+            self.log_stall("probe", self.inner.hold.load(Ordering::Relaxed));
+        }
+    }
+
+    fn log_stall(&self, what: &str, hold: u32) {
+        if adaptive_log() {
+            let start = *ADAPTIVE_START.get_or_init(Instant::now);
+            eprintln!(
+                "adaptive: +{:>9.3} ms stall {what} (hold {hold} joins)",
+                start.elapsed().as_secs_f64() * 1e3
+            );
+        }
+    }
+
+    /// Which worker finished last, and by how much over the one before it.
+    ///
+    /// Diagnostic only (`PEREGRINE_PROF2`): the finish timestamps are written by the
+    /// workers in their job-exit path.
+    fn record_straggler(&self) {
+        let n = self.inner.n;
+        let mut first = 0u64;
+        let mut second = 0u64;
+        let mut who = 0usize;
+        for w in 0..n {
+            let t = self.inner.finish[w].0.load(Ordering::Relaxed);
+            if t >= first {
+                second = first;
+                first = t;
+                who = w;
+            } else if t > second {
+                second = t;
+            }
+        }
+        let gap = first.saturating_sub(second);
+        LATE_GAP_NS.fetch_add(gap, Ordering::Relaxed);
+        LATE_GAP_MAX.fetch_max(gap, Ordering::Relaxed);
+        LATE_HIST[who % 32].fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Drop for Pool {
     fn drop(&mut self) {
         print_adaptive_totals();
+        print_join_totals();
         self.inner.shutdown.store(true, Ordering::Release);
         {
             let _g = self.inner.park.lock().unwrap_or_else(|e| e.into_inner());
@@ -1614,7 +2189,7 @@ mod tests {
 
     #[test]
     fn a_quiet_host_keeps_the_configured_window() {
-        let w = WaitControl::new(1000, 0, true);
+        let w = WaitControl::new(1000, 0, true, true);
         let t = feed(&w, Instant::now(), 0, 50, Duration::from_millis(10));
         assert!(!w.wants_sample());
         joins(&w, t, 10_000, 100, Duration::from_millis(10));
@@ -1625,7 +2200,7 @@ mod tests {
     fn a_busy_host_tries_both_rungs_and_keeps_the_faster_one() {
         // Two per core: the gate opens (smoothed above 150) but the starting rung is
         // the configured window. If parking makes the join wait longer, it goes back.
-        let w = WaitControl::new(1000, 0, true);
+        let w = WaitControl::new(1000, 0, true, true);
         let mut t = feed(&w, Instant::now(), 530, 200, Duration::from_millis(10));
         assert!(w.wants_sample());
         t = joins(&w, t, 1000, 1, Duration::from_millis(1));
@@ -1640,7 +2215,7 @@ mod tests {
 
         // Three per core: the gate is deep, so the trial starts parked, and a window
         // whose wait is shorter than the parked one keeps it there.
-        let w = WaitControl::new(1000, 0, true);
+        let w = WaitControl::new(1000, 0, true, true);
         let mut t = feed(&w, Instant::now(), 750, 200, Duration::from_millis(10));
         t = joins(&w, t, 5000, 1, Duration::from_millis(1));
         assert_eq!(w.budgets().0, Duration::ZERO);
@@ -1652,7 +2227,7 @@ mod tests {
 
     #[test]
     fn the_trials_stop_when_the_host_goes_quiet() {
-        let w = WaitControl::new(1000, 0, true);
+        let w = WaitControl::new(1000, 0, true, true);
         let t = feed(&w, Instant::now(), 750, 200, Duration::from_millis(10));
         joins(&w, t, 5000, 1, Duration::from_millis(1));
         assert_eq!(w.budgets().0, Duration::ZERO);
@@ -1665,7 +2240,7 @@ mod tests {
 
     #[test]
     fn adaptation_can_be_turned_off() {
-        let w = WaitControl::new(1000, 0, false);
+        let w = WaitControl::new(1000, 0, false, true);
         let t = Instant::now();
         for _ in 0..20 {
             w.observe(1000, t);
@@ -1676,7 +2251,7 @@ mod tests {
     #[test]
     fn the_yield_deadline_is_never_before_the_spin_deadline() {
         // Defaults: YIELD_US is 0, which means "no yield phase", not "yield backwards".
-        let w = WaitControl::new(1000, 0, true);
+        let w = WaitControl::new(1000, 0, true, true);
         assert_eq!(
             w.budgets(),
             (Duration::from_micros(1000), Duration::from_micros(1000))
@@ -1692,7 +2267,7 @@ mod tests {
         w.decide(0, t);
         assert_eq!(w.budgets(), (Duration::ZERO, Duration::ZERO));
         // A configured yield window still applies at full spin.
-        let w = WaitControl::new(1000, 2000, true);
+        let w = WaitControl::new(1000, 2000, true, true);
         assert_eq!(
             w.budgets(),
             (Duration::from_micros(1000), Duration::from_micros(2000))
@@ -1824,6 +2399,48 @@ mod tests {
         assert_eq!(turn.max_holders(), 1);
     }
 
+    /// The wait/share test: ordinary imbalance is not a stall, a scheduling
+    /// timeslice is.
+    #[test]
+    fn a_join_is_a_stall_only_when_the_wait_dominates_the_share() {
+        // Quiet: 17 % of the fork–join at ten threads (S5.6's account).
+        assert!(!is_stall(1_350_000, 6_500_000));
+        assert!(!is_stall(10_000, 10_000_000));
+        // A worker taken off the CPU: a millisecond of wait on a 100 µs share.
+        assert!(is_stall(1_000_000, 100_000));
+        // Long but still the smaller half is not evidence.
+        assert!(!is_stall(400_000, 1_200_000));
+        // The absolute floor keeps a tiny decode join's scheduler noise out.
+        assert!(!is_stall(10_000, 1_000));
+        // Exactly at the threshold is a stall (>=).
+        assert!(is_stall(STALL_WAIT_NS, STALL_WAIT_NS * 2 / 3));
+    }
+
+    /// Repeated stalls force every waiter to park; a run of healthy joins probes the
+    /// configured window back, and a stalled probe parks again with a longer hold.
+    #[test]
+    fn the_stall_gate_parks_and_probes_back() {
+        let p = Pool::new(4);
+        assert!(!p.claiming(), "a fresh pool is not stalled");
+        // A busy host: the run-queue sample has to say so before a join can be a stall.
+        for _ in 0..50 {
+            p.inner.wait.observe(500, Instant::now());
+        }
+        for _ in 0..STALL_STRIKES {
+            p.note_join(1_000_000, 100_000);
+        }
+        assert!(p.claiming(), "consecutive stalls must park the waiters");
+        for _ in 0..STALL_HOLD {
+            p.note_join(2_000, 1_000_000);
+        }
+        assert!(
+            !p.claiming(),
+            "a hold of healthy joins tests the window again"
+        );
+        p.note_join(1_000_000, 100_000);
+        assert!(p.claiming(), "a stalled probe parks again");
+    }
+
     /// Poll a condition from a test thread, with a deadline so a bug fails instead of hanging.
     fn wait_until(mut done: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1831,5 +2448,49 @@ mod tests {
             assert!(Instant::now() < deadline, "the condition never became true");
             std::thread::yield_now();
         }
+    }
+
+    /// Every unit of a claimed job is processed exactly once, and the job can be
+    /// repeated: the close of one generation must not hide the next.
+    #[test]
+    fn claimed_ranges_cover_every_unit_exactly_once() {
+        let p = Pool::new(4);
+        for _ in 0..200 {
+            let hits: Vec<AtomicUsize> = (0..501).map(|_| AtomicUsize::new(0)).collect();
+            p.run_claimed(501, 7, |_, _, lo, hi| {
+                for h in hits.iter().take(hi).skip(lo) {
+                    h.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            assert!(
+                hits.iter().all(|h| h.load(Ordering::SeqCst) == 1),
+                "a claimed unit was missed or run twice"
+            );
+        }
+    }
+
+    /// A claimed job returns even when one worker is held off the CPU: the units are
+    /// claimed by whoever is running, and the join does not wait for the absent one.
+    #[test]
+    fn a_claimed_job_does_not_wait_for_a_descheduled_worker() {
+        let p = Pool::new(4);
+        let stop = Arc::new(AtomicBool::new(false));
+        // A worker is somewhere inside the pool; this test only checks that the call
+        // returns and the work is complete, not what the scheduler did with it.
+        let t = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            })
+        };
+        let done = AtomicUsize::new(0);
+        p.run_claimed(64, 1, |_, _, lo, hi| {
+            done.fetch_add(hi - lo, Ordering::SeqCst);
+        });
+        assert_eq!(done.load(Ordering::SeqCst), 64);
+        stop.store(true, Ordering::SeqCst);
+        t.join().unwrap();
     }
 }

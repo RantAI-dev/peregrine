@@ -8,6 +8,25 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The pool degrades gracefully on a contended host (S5.6)**: a controlled disturbance (N busy
+  threads pinned to the same cores) showed that one co-tenant thread made a ten-thread decode step
+  run at **9.9 tok/s against 124.5 quiet**, because every fork–join waited a scheduler timeslice
+  for a descheduled worker and the nine finished workers spun on its core. Two mechanisms fix it,
+  both output-neutral. A join whose wait dominates its wall (and whose host run-queue sample says
+  the machine is busy) now parks every waiter at once instead of spinning; after a hold it probes
+  the window back, doubling the hold after a failed probe. And blocks that can split their work
+  ask the pool to **claim ranges** (`run_claimed`) while the pool is stalled: the caller returns
+  when the units are exhausted and none is in flight, publishing a closed generation so a worker
+  the host has not scheduled yet skips the closure instead of holding the join open. The job is
+  published through a sequence lock, so a worker descheduled across a job boundary cannot mix one
+  generation's call pointer with another's data. At ten threads with one disturber: prefill 4 096
+  **181 → 443 tok/s**, prefill 512 214 → 592, decode 9.9 → 106, the embedding cell 2.7 → 17.4
+  texts/s; with four disturbers prefill 4 096 235 → 322 and decode 64 → 92. Quiet cells are within
+  spread (the claim machinery is off). `PEREGRINE_ADAPTIVE_STALL=0` restores the old behaviour.
+  Report: `benchmarks/results/spark-arm-2026-11-13-s5.6/`; design:
+  `docs/design/s5.6-pool-contended.md`. No `.golden` file moves; the greedy tokens under four
+  disturbers are byte-identical to the quiet run.
+
 - **The fast prompt pass measured against ik_llama.cpp's `-rtr` path, and a per-32 form as a
   prototype (S5.4i)**: the opt-in 8-bit prompt pass was 0.74-0.94× the fork's `-rtr` path on all
   eight cells (S5.4c), and this step accounts for it. **The 8-bit kernel is not where the pass
