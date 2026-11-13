@@ -1,0 +1,1 @@
+{"cell":"L512_b1","batch":1,"tokens":512,"bytes":3119,"bytes_acts":111669149696,"bytes_weights":6981681152,"texts_per_s":0.373,"tokens_per_s":191.2,"wall_s":2.6775,"tokenise_s":0.000469,"tokenise_ms_per_text":0.469,"stats_ms":{"matmul":2355.499,"head":0.000,"attention":419.768,"other":0.000,"total":2677.498,"barriers":592},"prof_ms":{}}

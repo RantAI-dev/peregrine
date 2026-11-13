@@ -397,7 +397,13 @@ twelve cells that were behind: nomic F16 is now **12 of 12** (128 tokens 1.019�
 **11 of 12** (16 b8/b32 1.014/1.045×, 128 b1/b8 1.011/1.033×, 128 b32 0.993×), jina Q8_0
 **7 of 12** (its eight-row tile is outside the packed-float path). The count on this table is
 **30 of the 36 cells these two models add, 85 of 104** with the existing table (24 and 79
-before); the six still behind are named in §27 and in the S4.9w report.
+before); the six still behind are named in §27 and in the S4.9w report. The block is **bounded
+at two mebibytes of activations**, not uncapped: as a third arm on every float encoder on the
+host, the bound equals the whole pass in `bytes_acts` and in the matmul bucket at every cell
+because a pass is 128 rows (the matmul driver's `DEFAULT_BATCH`; a 2 000-token text is 16 such
+passes), binds only on Nemotron F16's 6 144-wide down projection (two blocks, 0.995×), and
+one mebibyte loses 1.4–2.8 % on the 128-token cells while four is indistinguishable — so 2 MiB
+is the measured floor and the standings count above does not move.
 
 Accuracy on the same texts: Q8_0 agrees with llama.cpp's Q8_0 within 3e-4 cosine and is closer to the
 fp32 reference on all three BERT models; the F16 and F32 rows are exact against the fp32 engines;

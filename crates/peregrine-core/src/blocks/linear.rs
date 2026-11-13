@@ -670,11 +670,15 @@ fn matmul_block(
 /// (half of L2, 21 rows at 3 072 inputs on a 512 KiB L2): a 128-row pass was cut into
 /// seven blocks and the down projection's weights were streamed seven times, 9–10 % of
 /// a 128-token pass, while the whole pass's activation (128 × 3 072 × 4 bytes = 1.5 MiB)
-/// sat in L3 unused. Two mebibytes covers a 128-row pass at every width the encoders
-/// have (128 × 4 096 × 4), and bounds the other side of the trade: a single long text is
-/// one pass of thousands of rows, and without a bound each unit would stream tens of
-/// megabytes of activations from memory, which costs more than the weight reads it
-/// saves on a machine whose L2 already held a large block.
+/// sat in L3 unused. The matmul driver splits every pass that is not a fast prompt at
+/// [`DEFAULT_BATCH`] rows, so a unit's block is at most 128 rows (1.5 MiB at 3 072
+/// inputs) and two mebibytes cover it up to 4 096 inputs. The bound binds below that only
+/// on the measured 6 144-wide FFN down projection (Nemotron F16, two blocks, 0.995×
+/// whole, inside the round spread) and above it on a wide fast-prompt pass; it is what
+/// keeps a 512-row pass from streaming its 6 MB activation per unit. One mebibyte was
+/// measured too: it splits a 128-row pass at 3 072 inputs and loses 1.4–2.8 % on the
+/// 128-token cells, so 2 MiB is the measured floor; 4 MiB is indistinguishable from it
+/// and has identical counters.
 const FP_BLOCK_BYTES: usize = 2 << 20;
 
 /// The activation rows one packed-float unit covers.

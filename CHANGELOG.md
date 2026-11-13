@@ -24,7 +24,15 @@ All notable changes to this project are documented here. The format follows
   nomic F16 is **12 of 12**, jina F16 **11 of 12** (16 b8/b32 1.014/1.045x, 128 b1/b8
   1.011/1.033x, b32 0.993x) and jina Q8_0 **7 of 12** (its eight-row tile is outside the
   packed-float path). That is **30 of the 36 cells these two models add, 85 of 104** with the
-  existing table (24 and 79 before); the six still behind are named. A 256-row pass was built
+  existing table (24 and 79 before); the six still behind are named. The block is **bounded at
+  two mebibytes of activations**, not uncapped: the measured three arms (old cap, whole pass,
+  bound) on every float encoder on the host put OLD/WHOLE/BOUND at 1.04-1.16x old for nomic
+  and jina, with BOUND equal to WHOLE in `bytes_acts` and in the matmul bucket on every cell
+  because **a pass is already 128 rows** (the matmul driver's `DEFAULT_BATCH`; a 2 000-token
+  text is 16 such passes, its counter 15.625x the 128-token one). The bound binds only on the
+  6 144-wide FFN down projection of Nemotron F16 (two blocks, 0.995x whole, inside the spread);
+  1 MiB loses 1.4-2.8 % on the 128-token cells and 4 MiB is indistinguishable, so 2 MiB is the
+  measured floor. No standings cell changes. A 256-row pass was built
   and dropped (0.973-0.976x at 128 tokens: the activation working set costs more in L3 than
   the halved weight stream saves). No golden moved and no result depends on batch, chunk, pass
   budget or threads. Report: `benchmarks/results/bluefin-2026-11-13-s4.9w/`; design §27.

@@ -18,7 +18,10 @@ flips **six of the twelve** standings cells that were behind. The other half of 
 (5.3 ms) is the one pass over 212 MB of weights that the isolated `mgemm` benchmark
 amortises over fifteen calls. The 289 fork-joins cost 1.5 ms of wait (1.8 %), so fewer
 fork-joins would not have paid; the next real lever for the remaining cells is the
-bit-changing 8 × 16 tile, not a schedule.
+bit-changing 8 × 16 tile, not a schedule. Review then pointed out the cap had been removed
+rather than bounded, so the branch head bounds a unit's block at **two mebibytes of
+activations**; Part 2b measures the three arms (old cap, whole pass, bound) on every float
+encoder here and finds the bound costs nothing, because **a pass is already 128 rows**.
 
 ## Part 0 — the two pool changes on this host
 
@@ -112,8 +115,10 @@ reads* do.
 
 ## Part 2 — the lever the account supports, and the ones it does not
 
-**Built: the float path's row block is the pass, not half of L2** (commit 1). `fp_row_block`
-now cuts a block only to fill the pool; it no longer caps at
+**Built: the float path's row block is the pass, not half of L2** (commit 1, bounded at 2 MiB
+by the review commit and measured in Part 2b). `fp_row_block`
+now cuts a block only to fill the pool and to keep a block's activations inside
+`FP_BLOCK_BYTES`; it no longer caps at
 `peregrine_kernels::fpack::row_block` (half of L2). At 128 rows a 3 072-input matrix was seven
 blocks, its 4.7 MB of weights read seven times a layer; the pass's activation (up to
 512 × 3 072 × 4 = 6 MB) fits L3, where the weights never do. A/B through `cellprof`, three
@@ -158,6 +163,120 @@ the account says the joins are not the cost.
 **Dropped: larger unit claims.** One atomic claim per two-panel unit is 3 456–3 744 claims a
 pass. At ~50 ns an atomic that is <0.02 % of the pass, and S4.9v's `FP_UNIT_PANELS` 2 → 4
 test was already neutral end to end. Not built.
+
+## Part 2b — the bound, measured: OLD, WHOLE, BOUND on every float encoder
+
+The first commit removed the cap instead of bounding it. A unit streams its block's activations
+once (for its two panels) and its panels once, so a block has two sides: bigger reads the
+weights fewer times, smaller streams fewer activation bytes per unit. The branch head bounds a
+unit's block at two mebibytes of activations (`FP_BLOCK_BYTES`, never fewer than
+`fpack::row_block`). **OLD** is the pre-S4.9w rule, **WHOLE** the first commit, **BOUND** the
+branch head; the three binaries differ in that one expression only (`/tmp` builds, not
+committed).
+
+**The pass is already 128 rows, so the review's 24.6 MB block cannot occur.** The matmul driver
+splits every pass that is not a fast prompt at `DEFAULT_BATCH` = 128 rows, so a unit's block is
+at most 128 rows = 1.5 MiB at 3 072 inputs, and a 2 000-token text is 16 such passes. The
+engine's own counter says it exactly (nomic F16, `cellprof`): `bytes_acts` 3 456 MiB at 128
+tokens and 54 000 MiB at 2 000 (15.625× = 2 000/128); 512 tokens is 4 × 3 456; and
+`PEREGRINE_PREFILL_CHUNK=512` leaves all three unchanged. Two mebibytes therefore never binds
+below 4 096 inputs; the only measured cell where it binds is Nemotron F16's 6 144-wide FFN down
+projection (two blocks).
+
+Five interleaved rounds, cache off (`PEREGRINE_EMBED_CACHE_MB=0`), four threads, fresh
+different texts per request (`--budget 0.5 --max-requests 20 --max-big-requests 2`), OLD →
+WHOLE → BOUND inside every round; CPU idle **49.1–53.1 % of every arm-round** (`/proc/stat` in
+`parts/part1/*-cpu.txt`). Cells: nomic and jina F16 16 b32, 128 b1/b32, 512 b1/b8, 2 000 b1,
+mixed b32; the other float encoders 128/512/2 000 as specified. Medians, texts/s, ratios
+recomputed from the medians:
+
+| model / cell | OLD | WHOLE | BOUND | BOUND/OLD | WHOLE/OLD | BOUND/WHOLE |
+|---|---:|---:|---:|---:|---:|---:|
+| nomic 16 b32 | 77.28 | 90.55 | 89.61 | 1.160 | 1.172 | 0.990 |
+| nomic 128 b1 | 10.42 | 11.54 | 11.07 | 1.062 | 1.107 | 0.960 |
+| nomic 128 b32 | 10.33 | 11.59 | 11.56 | 1.119 | 1.122 | 0.997 |
+| nomic 512 b1 | 2.248 | 2.587 | 2.597 | 1.155 | 1.151 | 1.004 |
+| nomic 512 b8 | 2.423 | 2.591 | 2.638 | 1.089 | 1.069 | 1.018 |
+| nomic 2 000 b1 | 0.488 | 0.510 | 0.519 | 1.064 | 1.045 | 1.018 |
+| nomic mixed b32 | 11.87 | 12.76 | 11.38 | 0.959 | 1.075 | 0.892 |
+| jina 16 b32 | 86.81 | 93.51 | 84.52 | 0.974 | 1.077 | 0.904 |
+| jina 128 b1 | 10.85 | 11.42 | 9.81 | 0.904 | 1.052 | 0.859 |
+| jina 128 b32 | 10.90 | 11.76 | 11.31 | 1.037 | 1.078 | 0.962 |
+| jina 512 b1 | 2.547 | 2.682 | 2.701 | 1.060 | 1.053 | 1.007 |
+| jina 512 b8 | 2.557 | 2.712 | 2.633 | 1.030 | 1.061 | 0.971 |
+| jina 2 000 b1 | 0.482 | 0.489 | 0.505 | 1.048 | 1.015 | 1.033 |
+| jina mixed b32 | 12.28 | 12.01 | 12.71 | 1.035 | 0.978 | 1.058 |
+| Qwen3 0.6B 128 b1 | 2.259 | 2.263 | 2.181 | 0.965 | 1.002 | 0.964 |
+| Qwen3 0.6B 512 b1 | 0.566 | 0.548 | 0.519 | 0.917 | 0.968 | 0.947 |
+| Qwen3 0.6B 2 000 b1 | 0.115 | 0.115 | 0.112 | 0.974 | 1.000 | 0.974 |
+| bge-small 128 b32 | 49.73 | 48.69 | 46.62 | 0.937 | 0.979 | 0.958 |
+| bge-small 512 b8 | 10.057 | 9.909 | 10.149 | 1.009 | 0.985 | 1.024 |
+| MiniLM 128 b32 | 100.21 | 102.27 | 95.20 | 0.950 | 1.020 | 0.931 |
+| MiniLM 512 b8 | 20.18 | 20.19 | 19.12 | 0.947 | 1.000 | 0.947 |
+| Nemotron 1B 512 b1 | 0.327 | 0.359 | 0.362 | 1.107 | 1.098 | 1.008 |
+
+Floats not on this host, so not measured: **bge-m3 F16, EmbeddingGemma 300M F32** (only the
+Q8_0 files are here), **gte-modernbert-base F16** (no file); and **no F16 chat model**, so the
+decoder prompt cell is absent. Nemotron 3.5 Embed 1B F16 is new to this grid (its file was on
+disk, the registry had only Q8_0); its row is added to `benchmarks/embed_models.json`.
+
+**No cell is below OLD or WHOLE by more than its inter-round ratio spread** (median ratio
+below 1 by more than the range of the five per-round ratios). The wide raw deficits are the
+harness's one-request cells on a loaded host; the same build's `cellprof` — 3 rounds, the
+engine's counters and the matmul bucket — puts OLD/WHOLE/BOUND together on every one of them:
+
+| model / cell | `bytes_acts` OLD / WHOLE / BOUND, MiB | matmul OLD / WHOLE / BOUND, ms |
+|---|---|---|
+| nomic 128 b1 | 11 232 / 3 456 / 3 456 | 81.0 / 74.5 / 74.5 |
+| nomic 128 b32 | 359 424 / 110 592 / 110 592 | 2 603.9 / 2 403.6 / 2 395.5 |
+| nomic 512 b1 | 44 928 / 13 824 / 13 824 | 319.1 / 294.1 / 298.9 |
+| nomic 512 b8 | 359 424 / 110 592 / 110 592 | 2 607.6 / 2 401.6 / 2 401.4 |
+| nomic 2 000 b1 | 172 260 / 54 000 / 54 000 | 1 278.5 / 1 184.6 / 1 179.2 |
+| nomic mixed b32 | 287 982 / 94 932 / 94 932 | 2 236.9 / 2 052.9 / 2 054.0 |
+| jina 128 b1 | 11 232 / 3 456 / 3 456 | 80.4 / 74.2 / 73.9 |
+| jina 2 000 b1 | 172 260 / 54 000 / 54 000 | 1 273.4 / 1 191.5 / 1 194.3 |
+| Qwen3 0.6B 128 b1 | 13 440 / 13 440 / 13 440 | 396.1 / 395.5 / 395.9 |
+| Qwen3 0.6B 2 000 b1 | 210 000 / 210 000 / 210 000 | 5 927.5 / 5 936.9 / 5 943.3 |
+| bge-small 128 b32 | 41 472 / 20 736 / 20 736 | 454.4 / 449.0 / 453.9 |
+| MiniLM 128 b32 | 20 736 / 10 368 / 10 368 | 226.6 / 219.7 / 219.7 |
+| Nemotron 1B 512 b1 | 684 032 / 106 496 / 131 072 | 2 639.9 / 2 364.4 / 2 367.6 |
+
+Qwen3-Embedding 0.6B is the null control: its causal path is not the packed-float panel path,
+so all three arms have identical `bytes_acts` and matmul, and its Part 2b rows are host noise.
+Only Nemotron's 6 144-wide down projection makes the bound bind, two blocks against one:
++23 % counted activation traffic and 0.995× wall, inside the spread.
+
+**The constant.** The same harness with 1 MiB and 4 MiB, three interleaved rounds, on the
+128- and 2 000-token cells:
+
+| model / cell | 1 MiB | 2 MiB | 4 MiB | 1/2 | 4/2 |
+|---|---:|---:|---:|---:|---:|
+| nomic 128 b1 | 11.196 | 11.283 | 11.573 | 0.992 | 1.026 |
+| nomic 128 b32 | 11.406 | 11.568 | 11.470 | 0.986 | 0.992 |
+| nomic 2 000 b1 | 0.517 | 0.524 | 0.523 | 0.987 | 0.998 |
+| jina 128 b1 | 11.198 | 11.515 | 11.775 | 0.972 | 1.023 |
+| jina 128 b32 | 11.633 | 11.892 | 11.866 | 0.978 | 0.998 |
+| jina 2 000 b1 | 0.512 | 0.510 | 0.507 | 1.004 | 0.994 |
+| Qwen3 0.6B 128 b1 | 2.299 | 2.327 | 2.307 | 0.988 | 0.991 |
+| Qwen3 0.6B 2 000 b1 | 0.116 | 0.116 | 0.115 | 1.000 | 0.991 |
+| bge-small 128 b32 | 50.217 | 50.139 | 50.291 | 1.002 | 1.003 |
+| MiniLM 128 b32 | 102.481 | 101.227 | 103.511 | 1.012 | 1.023 |
+
+One mebibyte is 85 rows at 3 072 inputs, so it splits a 128-row pass into two blocks and loses
+1.4–2.8 % on the 128-token cells. Four mebibytes is the same block as two at every measured
+width — identical counters — and within ±2.6 % of it. **The rule ends as the branch head has it:
+2 MiB is the measured floor, the bound stays.**
+
+Its two sides per 128-token pass, from the counter table: activation reads 11 232 → 3 456 MiB
+(counted), weight reads 7 → 1 for the 3 072-input matrices, matmul 81.0 → 74.5 ms; a 2 000-token
+text repeats the same 16 passes. This host's L2 is 512 KiB, so OLD was 21 rows at 3 072 inputs;
+**the ARM host (2 MiB L2) and the AVX-512 desktop (1 MiB) have not measured the bound: their
+old block was already 85 and 42 rows at 3 072 inputs, and it doubles or quadruples it.**
+
+**The standings do not move.** Every standings cell runs 128-row passes, where BOUND and WHOLE
+are the same block; Nemotron is not on the table. The count stays **30 of the 36 cells these
+families add, 85 of 104** (the S4.9u method was not re-read: there is no cell whose block
+changed).
 
 ## Part 3 — the standings
 
@@ -241,8 +360,8 @@ different kernel. Not built: the bits are `fpack`'s definition.
 | flags | `fma avx avx2`, 4 threads, cache off (`PEREGRINE_EMBED_CACHE_MB=0`) |
 | BEFORE | `5d603a48` (`main` with #262) |
 | AFTER | `23d86c8` (`origin/s5.6-pool-contended`) |
-| this PR | `s4.9w-encoder-dispatch`, one engine commit on the AFTER tree |
-| host | load average 2.1–5.0, **CPU idle 49.7–54.8 % of every Part 0 round**, steal not recorded separately; swap 7.4 GB of 8 GB in use (the condition S4.9l–S4.9v recorded) |
+| this PR | `s4.9w-encoder-dispatch`, two engine commits on the AFTER tree (the row block, then its 2 MiB bound) |
+| host | load average 2.1–5.0 (Part 0), 3.7–7.6 (Part 2b), **CPU idle 49.7–54.8 % of every Part 0 round and 49.1–53.1 % of every Part 2b arm-round**, steal not recorded separately; swap 7.4 GB of 8 GB in use (the condition S4.9l–S4.9v recorded) |
 
 ## Reproducing
 
@@ -272,6 +391,24 @@ done; done
 benchmarks/results/bluefin-2026-11-13-s4.9w/rowblock-ab.sh <round> orig|noblock nomic|jina
 python3 benchmarks/results/bluefin-2026-11-13-s4.9w/summarize2.py
 
+# Part 2b: the three arms (OLD, WHOLE, BOUND), five rounds, and the 1/2/4 MiB constant
+for a in old whole bound; do
+  python3 benchmarks/results/bluefin-2026-11-13-s4.9w/part1-variant.py $a   # local only
+  cargo build --release -p peregrine && cp target/release/peregrine /tmp/opencode/bin/pg-$a
+done
+git checkout -- crates/peregrine-core/src/blocks/linear.rs
+for r in 1 2 3 4 5; do
+  benchmarks/results/bluefin-2026-11-13-s4.9w/part1.sh $r
+done
+for r in 1 2 3; do
+  benchmarks/results/bluefin-2026-11-13-s4.9w/part1-side.sh $r   # 1 MiB, 2 MiB, 4 MiB
+done
+python3 benchmarks/results/bluefin-2026-11-13-s4.9w/summarize1.py
+# the counters: cellprof with bytes_acts, and the same three arms as examples
+cargo build --release -p peregrine-bench --example cellprof \
+  --features peregrine-models/arch-nomic-bert,peregrine-models/arch-jina-bert,peregrine-models/arch-bert,peregrine-models/arch-mistral3,peregrine-models/arch-qwen
+python3 benchmarks/results/bluefin-2026-11-13-s4.9w/summarize1-account.py
+
 # Part 3
 for r in 1 2 3; do for a in peregrine competitors; do
   benchmarks/results/bluefin-2026-11-13-s4.9w/part3.sh $r $a
@@ -282,7 +419,12 @@ python3 benchmarks/results/bluefin-2026-11-13-s4.9w/summarize3.py
 
 Raw files: `parts/part0/` (JSON per arm/round, one per model, and the `/proc/stat` deltas),
 `parts/part0-gen/` (the generation run sets), `parts/part1/` (`cellprof` stdout and the
-join/adaptive stderr), `parts/rowblock/` and `parts/pass256/` (the lever JSONL), and
+join/adaptive stderr, plus the five-round three-arm run's JSON and logs under
+`r<round>-<arm>/`; the `/proc/stat` deltas are `r*-cpu.txt`), `parts/part1-side/` (the
+1 MiB / 2 MiB / 4 MiB arms), `parts/part1-nemotron/` (the five-arm Nemotron cells),
+`parts/part1-account/` (the `cellprof` control with `bytes_acts` and the matmul bucket),
+`parts/part2b-chunk-probe/` (the `PEREGRINE_PREFILL_CHUNK=512` probe: the pass stays 128
+rows), `parts/rowblock/` and `parts/pass256/` (the lever JSONL), and
 `parts/part3/` (the harness logs, one per row and round — the raw record
 `summarize3.py` reads; the runner also writes a per-cell JSON, and the logs carry the same
 numbers plus the spread, so only the logs were retained for this report).
