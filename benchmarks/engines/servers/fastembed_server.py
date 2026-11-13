@@ -81,7 +81,8 @@ def main() -> None:
             enc = tokenizer.encode_batch(texts, add_special_tokens=True)
             tokens = sum(len(e.ids) for e in enc)
             with lock:
-                vecs = [list(map(float, v)) for v in model.embed(texts, batch_size=max(1, len(texts)))]
+                vecs = [list(map(float, v)) for v in model.embed(
+                    texts, batch_size=max(1, min(args.batch_size, len(texts))))]
             self._send(200, {"embeddings": vecs, "tokens": tokens})
 
     class Server(HTTPServer):

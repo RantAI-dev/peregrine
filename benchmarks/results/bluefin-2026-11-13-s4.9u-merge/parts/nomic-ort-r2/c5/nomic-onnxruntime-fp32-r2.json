@@ -1,0 +1,179 @@
+{
+ "benchmark": "peregrine-s4.2-embed",
+ "timestamp": "2026-11-12T20:36:50.059791+00:00",
+ "round": 2,
+ "model": {
+  "name": "nomic",
+  "hf": "nomic-ai/nomic-embed-text-v1.5",
+  "pooling": "mean",
+  "max_tokens": 2048,
+  "dim": 768,
+  "tokenizer_dir": "ref-nomic"
+ },
+ "row": {
+  "engine": "onnxruntime",
+  "precision": "fp32",
+  "path": "~/models/embed/nomic/onnx-fp32",
+  "sha256": "fb145ee73c0234bbe62bdca23ee066b592aef1df5e54e2d825db104b2009bf59",
+  "size_bytes": 1095567878,
+  "fingerprint": {
+   "kind": "dir",
+   "sha256": "fb145ee73c0234bbe62bdca23ee066b592aef1df5e54e2d825db104b2009bf59",
+   "size_bytes": 1095567878,
+   "files": [
+    {
+     "name": "config.json",
+     "size": 2538,
+     "sha256": "9ab00bd92cee80a569f708140b7b6c1661a65891ff3765b1519e181ba2f2c92b"
+    },
+    {
+     "name": "model.onnx",
+     "size": 547310275,
+     "sha256": "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965"
+    },
+    {
+     "name": "onnx/model.onnx",
+     "size": 547310275,
+     "sha256": "147d5aa88c2101237358e17796cf3a227cead1ec304ec34b465bb08e9d952965"
+    },
+    {
+     "name": "special_tokens_map.json",
+     "size": 695,
+     "sha256": "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a"
+    },
+    {
+     "name": "tokenizer.json",
+     "size": 711396,
+     "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+    },
+    {
+     "name": "tokenizer_config.json",
+     "size": 1191,
+     "sha256": "d7e0000bcc80134debd2222220427e6bf5fa20a669f40a0d0d1409cc18e0a9bc"
+    },
+    {
+     "name": "vocab.txt",
+     "size": 231508,
+     "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+   ]
+  },
+  "notes": "onnx/model.onnx fp32, plain ONNX Runtime, mean pooling over last_hidden_state"
+ },
+ "machine": {
+  "hostname": "bluefin",
+  "os": "Linux",
+  "kernel": "7.2.7-200.fc44.x86_64",
+  "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+  "cpu_features": [
+   "fma",
+   "avx",
+   "avx2"
+  ],
+  "cores_logical": 8,
+  "threads_tested": 4,
+  "governor": "powersave",
+  "python": "3.14.8"
+ },
+ "engine": {
+  "name": "onnxruntime",
+  "backend": "CPUExecutionProvider",
+  "venv": "/var/tmp/embed-venv",
+  "python": "/var/tmp/embed-venv/bin/python",
+  "version": "1.31.1"
+ },
+ "start": {
+  "cmd": [
+   "/var/tmp/embed-venv/bin/python",
+   "~/peregrine/benchmarks/engines/servers/ort_server.py",
+   "--model-path",
+   "~/models/embed/nomic/onnx-fp32",
+   "--pooling",
+   "mean",
+   "--port",
+   "8676",
+   "--threads",
+   "4"
+  ],
+  "pooling": "mean",
+  "threads": 4,
+  "intra_op_num_threads": 4
+ },
+ "host_before": {
+  "loadavg": [
+   5.15185546875,
+   19.63818359375,
+   24.423828125
+  ],
+  "mem_available_gb": 4.23,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.73
+ },
+ "host_after": {
+  "loadavg": [
+   5.22021484375,
+   19.41162109375,
+   24.32470703125
+  ],
+  "mem_available_gb": 3.76,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.73
+ },
+ "preflight": {
+  "loadavg": [
+   5.33935546875,
+   19.91943359375,
+   24.53955078125
+  ],
+  "mem_available_gb": 5.24,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.73
+ },
+ "settings": {
+  "lengths": [
+   512
+  ],
+  "batches": [
+   8,
+   32
+  ],
+  "clients": [
+   1
+  ],
+  "threads": 4,
+  "budget_s": 0.5,
+  "max_requests": 20,
+  "max_big_requests": 2,
+  "max_cell_seconds": 300.0,
+  "texts_file": "/var/tmp/embed-texts-s49u/nomic.json",
+  "texts_per_length": 128
+ },
+ "cells": {
+  "L512_b8_c1": {
+   "texts_per_s": 2.113,
+   "tokens_per_s": 1081.7,
+   "wall_s": 3.7866,
+   "requests": 1,
+   "texts": 8,
+   "tokens_calibrated": 4096,
+   "tokens_reported": 4096,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 3.784953,
+    "p99": 3.784953,
+    "min": 3.784953,
+    "max": 3.784953,
+    "n": 1
+   },
+   "length": 512,
+   "batch": 8,
+   "clients": 1,
+   "elapsed_s": 3.79,
+   "tokens_per_text_median": 512
+  }
+ }
+}
