@@ -206,7 +206,33 @@ pub fn attend(
     stats: &mut StepStats,
 ) {
     attend_window(
-        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, None, stats,
+        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, None, None, stats,
+    )
+}
+
+/// [`attend`] with the fast prompt mode's row flags (S5.4j): `fast[b]` says batch row
+/// `b` of this call is a prompt row whose attention takes the mode's own order
+/// (`peregrine_core::attn::fast`).
+///
+/// `None` — the default engine, every read-out, every tier without the order, and
+/// every family that does not pass the flags — is the exact engine, bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub fn attend_marked(
+    cfg: &Config,
+    scratch: &mut AttnScratch,
+    q: &[f32],
+    xb: &mut [f32],
+    kv: &KvCache,
+    pool: &Pool,
+    li: usize,
+    nb: usize,
+    start_pos: usize,
+    row0: usize,
+    fast: Option<&[bool]>,
+    stats: &mut StepStats,
+) {
+    attend_scaled_window(
+        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, None, None, None, fast, stats,
     )
 }
 
@@ -225,10 +251,11 @@ pub fn attend_window(
     // the first row of `q` / `xb` this call reads and writes (0 for a shared cache).
     row0: usize,
     window: Option<usize>,
+    fast: Option<&[bool]>,
     stats: &mut StepStats,
 ) {
     attend_scaled_window(
-        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, window, None, None, stats,
+        cfg, scratch, q, xb, kv, pool, li, nb, start_pos, row0, window, None, None, fast, stats,
     )
 }
 
@@ -276,12 +303,21 @@ pub fn attend_scaled_window(
     scale: Option<f32>,
     // the attention sinks, one per query head (gpt-oss): `None` for every other model.
     sinks: Option<&[f32]>,
+    // which of this call's rows are fast prompt rows (S5.4j); `None` for none.
+    fast: Option<&[bool]>,
     stats: &mut StepStats,
 ) {
     let c = cfg;
     let hd = c.head_dim;
     let gqa = c.gqa();
     let qd = c.q_dim();
+    // The rows' flags are the *call's* (`row0..row0 + nb`); a row outside it is never
+    // a fast row of this call. A tier whose table keeps the exact attention ignores the
+    // flags entirely (S5.4j) — the engine never sets them there, and this makes that a
+    // property of the tier rather than of every caller.
+    let fast = fast
+        .filter(|_| attn::fast::tier())
+        .map(|f| &f[row0..row0 + nb]);
     let sh = attn::Shape {
         n_head: c.n_head,
         n_kv_head: c.n_kv_head,
@@ -291,6 +327,7 @@ pub fn attend_scaled_window(
         scale: scale.unwrap_or_else(|| 1.0 / (hd as f32).sqrt()),
         window,
         sinks,
+        fast,
     };
     let plan = attn::plan(&sh, pool.width());
     let tasks = plan.tasks(&sh);
@@ -321,7 +358,14 @@ pub fn attend_scaled_window(
                 attn::run_rows(kv, li, &sh, q, &t, sc, &mut dst);
                 continue;
             }
-            attn::run(kv, li, &sh, q, &t, sc);
+            if attn::fast_row(&sh, t.b0) {
+                // A fast prompt row's pieces are the absolute key tiles, so the pool
+                // never splits its positions (`plan` gives it one chunk) and the walk
+                // leaves one `(o, m, l)` per row for `finish_row` below.
+                attn::run_fast(kv, li, &sh, q, &t, sc);
+            } else {
+                attn::run(kv, li, &sh, q, &t, sc);
+            }
             let pi = i % plan.pos_chunks;
             for bi in 0..t.b1 - t.b0 {
                 let b = t.b0 + bi;
@@ -416,11 +460,16 @@ pub fn attend_mapped(
     li: usize,
     nb: usize,
     positions: &[usize],
+    // which rows are fast prompt rows (S5.4j); `None` for none.
+    fast: Option<&[bool]>,
     stats: &mut StepStats,
 ) {
     let c = cfg;
     let hd = c.head_dim;
     let qd = c.q_dim();
+    // A tier whose table keeps the exact attention ignores the flags on this path too
+    // (S5.4j), as `attend_scaled_window` does for the runs below.
+    let fast = fast.filter(|_| attn::fast::tier());
     // The runs, and the rows that are alone in their cache, into reused buffers.
     let mut runs = std::mem::take(&mut scratch.runs);
     runs.clear();
@@ -447,6 +496,7 @@ pub fn attend_mapped(
             scale: 1.0 / (hd as f32).sqrt(),
             window: None,
             sinks: None,
+            fast,
         };
         let tasks = rows.len() * c.n_kv_head;
         let out = Disjoint::new(&mut xb[..nb * qd]);
@@ -472,6 +522,7 @@ pub fn attend_mapped(
                     li,
                     &sh,
                     &q[b * qd..],
+                    b,
                     kh,
                     positions[b],
                     sc,
@@ -513,6 +564,7 @@ pub fn attend_mapped(
             None,
             None,
             None,
+            fast,
             stats,
         );
     }
@@ -575,6 +627,7 @@ mod tests {
             scale: 1.0 / (head_dim as f32).sqrt(),
             window: None,
             sinks: None,
+            fast: None,
         };
         // The plan splits the rows across workers and keeps a task per KV head, so
         // tasks with different KV heads cover the same rows.
@@ -622,5 +675,80 @@ mod tests {
             serial, parallel,
             "a row's bits must not depend on how its call is partitioned"
         );
+    }
+
+    /// A fast prompt row that is alone in its cache beside another user's row takes the
+    /// per-row path of a mapped pass (`attn::run_row`). Its pieces are still the absolute
+    /// key tiles, so its bits are the ones a pass of that row alone gives it: a row's
+    /// result must not depend on which other users shared its pass (S5.4j).
+    #[test]
+    fn a_fast_row_alone_in_its_cache_is_the_solo_row() {
+        let cfg = test_config(8, 2, 64);
+        let (hd, qd) = (cfg.head_dim, cfg.q_dim());
+        // Long enough that an exact row is cut into several position chunks.
+        let n = 700usize;
+        let fill = |seed: usize| {
+            let mut kv = KvCache::new(KvPrec::F16, 1, cfg.n_kv_head, hd, n + 8);
+            for p in 0..=n {
+                for h in 0..cfg.n_kv_head {
+                    let k = prng((seed + p * 31 + h * 7 + 1) as u64, hd);
+                    let v = prng((seed + p * 17 + h * 5 + 2) as u64, hd);
+                    kv.put(0, h, p, &k, &v);
+                }
+            }
+            kv.advance(n + 1);
+            kv
+        };
+        let (mut a, mut b) = (fill(0), fill(1 << 20));
+        let q = prng(0x5a5a, 2 * qd);
+        let flags = [true, true];
+        let pool = Pool::new(4);
+        let mut stats = StepStats::default();
+
+        let mut scratch = AttnScratch::new(&cfg, 2, 4);
+        // The exact rows first (no flags): the same comparison, which is the exact
+        // engine's own rule and shows the two calls below are the same row.
+        for marked in [false, true] {
+            let fast = marked.then_some(&flags[..]);
+            let mut solo = vec![0.0f32; qd];
+            attend_marked(
+                &cfg,
+                &mut scratch,
+                &q[..qd],
+                &mut solo,
+                &a,
+                &pool,
+                0,
+                1,
+                n,
+                0,
+                fast.map(|f| &f[..1]),
+                &mut stats,
+            );
+            let mut both = vec![0.0f32; 2 * qd];
+            {
+                let mut refs: [&mut KvCache; 2] = [&mut a, &mut b];
+                let caches = Caches::PerRow(&mut refs);
+                attend_mapped(
+                    &cfg,
+                    &mut scratch,
+                    &q,
+                    &mut both,
+                    &caches,
+                    &pool,
+                    0,
+                    2,
+                    &[n, n],
+                    fast,
+                    &mut stats,
+                );
+            }
+            assert!(
+                solo.iter()
+                    .zip(&both[..qd])
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "marked {marked}: a row's bits depend on the rows that shared its pass"
+            );
+        }
     }
 }

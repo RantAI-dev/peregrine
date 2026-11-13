@@ -1,0 +1,12 @@
+{"arm": "exact", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 257.55308275615806, "load1": 10.79}
+{"arm": "fast-before", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 330.929435735118, "load1": 10.23}
+{"arm": "fast", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 337.1634251404966, "load1": 9.24}
+{"arm": "ik", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 319.034823, "load1": 9.85}
+{"arm": "ik-rtr", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 380.219854, "load1": 10.33}
+{"arm": "llama", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 198.942077, "load1": 11.27}
+{"arm": "exact", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 169.551059346742, "load1": 11.64}
+{"arm": "fast-before", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 209.99503701287549, "load1": 10.04}
+{"arm": "fast", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 214.91043813691334, "load1": 9.92}
+{"arm": "ik", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 216.362749, "load1": 10.51}
+{"arm": "ik-rtr", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 244.931053, "load1": 10.25}
+{"arm": "llama", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 12, "round": 1, "tok_s": 124.542458, "load1": 11.38}

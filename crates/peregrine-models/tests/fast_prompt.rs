@@ -102,8 +102,9 @@ fn read_in_pieces(
 ) -> (Vec<f32>, Vec<f32>) {
     let c = model.cfg;
     let pool = Pool::new(threads);
-    let mut st = model.new_state(256, 1, 512, threads);
-    let mut kv = model.new_cache(KvPrec::F16, 512);
+    let ctx = toks.len() + 1;
+    let mut st = model.new_state(1024, 1, ctx, threads);
+    let mut kv = model.new_cache(KvPrec::F16, ctx);
     let mut ss = StepStats::default();
     let mut fed = 0usize;
     let mut logits = Vec::new();
@@ -133,9 +134,9 @@ fn read_in_pieces(
 fn read_beside_a_decoder(model: &Model, chunk: usize, threads: usize, toks: &[u32]) -> Vec<f32> {
     let c = model.cfg;
     let pool = Pool::new(threads);
-    let mut st = model.new_state(256, 1, 512, threads);
-    let mut kv_a = model.new_cache(KvPrec::F16, 512);
-    let mut kv_b = model.new_cache(KvPrec::F16, 512);
+    let mut st = model.new_state(256, 1, toks.len() + 16, threads);
+    let mut kv_a = model.new_cache(KvPrec::F16, toks.len() + 16);
+    let mut kv_b = model.new_cache(KvPrec::F16, toks.len() + 16);
     let mut ss = StepStats::default();
     // The decoder's own beginning, then one generated row per pass. Its rows are
     // never fast rows; the prompt's are.
@@ -298,6 +299,71 @@ fn fast_mode_is_prompt_invariant() {
     assert!(
         failures.is_empty(),
         "the fast prompt mode is not prompt-invariant:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// The same invariance at 4 096 tokens, where a prompt row's attention takes the
+/// tiles past the exact engine's F16-direct crossover and the fast mode's order has
+/// many more pieces to agree on (S5.4j). A small model, so the whole staged read is a
+/// few seconds; the prompt is longer than any chunk the sweep uses and every row is a
+/// prompt row.
+#[test]
+fn fast_attention_is_prompt_invariant_at_4096_tokens() {
+    let dir = tmpdir("invariant-4096");
+    let Some(fmt) = form_formats().first().copied() else {
+        return;
+    };
+    let shape = Dense {
+        d_model: 128,
+        n_layer: 1,
+        n_head: 4,
+        n_head_kv: 2,
+        n_ff: 256,
+        ctx: 4096,
+        tied: false,
+    };
+    let path = write_dense(&dir, "llama", fmt, 9600, shape);
+    let model = load_fast(&path);
+    assert!(!model.q8_form().is_empty(), "no form was built");
+    let toks: Vec<u32> = (0..4096u32).map(|i| (i * 37 + 11) % 300).collect();
+    let mut failures = Vec::new();
+    let (cache0, logits0) = read_in_pieces(&model, 128, 4, &toks);
+    for chunk in [16usize, 64, 128, 256] {
+        let (cache, logits) = read_in_pieces(&model, chunk, 4, &toks);
+        if cache != cache0 {
+            let first = cache.iter().zip(cache0.iter()).position(|(a, b)| a != b);
+            failures.push(format!(
+                "the cache differs at chunk {chunk} (first at {first:?})"
+            ));
+        }
+        if logits != logits0 {
+            failures.push(format!("the logits differ at chunk {chunk}"));
+        }
+    }
+    for threads in [1usize, 2, 6] {
+        let (cache, logits) = read_in_pieces(&model, 128, threads, &toks);
+        if cache != cache0 {
+            failures.push(format!("the cache differs at {threads} threads"));
+        }
+        if logits != logits0 {
+            failures.push(format!("the logits differ at {threads} threads"));
+        }
+    }
+    // Beside a decoder, which walks the same tiles through the exact path.
+    for &chunk in &[16usize, 128] {
+        let cache = read_beside_a_decoder(&model, chunk, 4, &toks);
+        if cache != cache0 {
+            let first = cache.iter().zip(cache0.iter()).position(|(a, b)| a != b);
+            failures.push(format!(
+                "the cache differs beside a decoder at chunk {chunk} (first at {first:?})"
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        failures.is_empty(),
+        "the fast prompt mode is not prompt-invariant at 4 096 tokens:\n{}",
         failures.join("\n")
     );
 }

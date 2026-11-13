@@ -1,0 +1,29 @@
+adaptive: t=508 ms level 0 smoothed 0 permille
+adaptive: t=1014 ms level 0 smoothed 0 permille
+adaptive: t=1523 ms level 0 smoothed 0 permille
+adaptive: t=2030 ms level 0 smoothed 0 permille
+adaptive: t=2538 ms level 0 smoothed 0 permille
+adaptive: t=3043 ms level 0 smoothed 0 permille
+adaptive: t=3553 ms level 0 smoothed 0 permille
+adaptive: t=4065 ms level 0 smoothed 1 permille
+adaptive: t=4565 ms level 0 smoothed 0 permille
+adaptive: t=5066 ms level 0 smoothed 0 permille
+adaptive: t=5566 ms level 0 smoothed 0 permille
+adaptive: t=6066 ms level 0 smoothed 0 permille
+adaptive: t=6566 ms level 0 smoothed 0 permille
+adaptive: t=7067 ms level 0 smoothed 3 permille
+adaptive: t=7580 ms level 0 smoothed 0 permille
+adaptive: t=8084 ms level 0 smoothed 1 permille
+adaptive: t=8584 ms level 0 smoothed 0 permille
+adaptive: t=9091 ms level 0 smoothed 0 permille
+adaptive: t=9592 ms level 0 smoothed 0 permille
+adaptive: t=10097 ms level 0 smoothed 0 permille
+adaptive: t=10609 ms level 0 smoothed 0 permille
+adaptive: t=11113 ms level 0 smoothed 0 permille
+adaptive: t=11634 ms level 0 smoothed 0 permille
+adaptive: t=12134 ms level 0 smoothed 0 permille
+adaptive: t=12637 ms level 0 smoothed 1 permille
+adaptive: t=13138 ms level 0 smoothed 0 permille
+{"len":4096,"threads":12,"slots":1,"decode_want":0,"width":12,"prefill_rows":4095,"prefill_s":13.260192,"prefill_tok_s":308.82,"decode_rows":1,"decode_s":0.044158,"decode_tok_s":22.65,"wall_s":13.304447,"steps_pre":16,"steps_dec":1,"macs":4535882350592,"bytes_weights":10156896256,"stats_ms":{"matmul":6969.210,"head":7.601,"attention":4686.643,"other":1639.978,"total":13303.431,"barriers":3169},"prof_ms":{"matmul qkv":678279602,"matmul wo":613555887,"matmul gate/up":3182044913,"matmul down":2474569865,"attention":4673250987,"norms":36478523,"quantise":456816088,"rope+bias":40480868,"kv write":489615083,"residual":76654852,"swiglu":417563400,"barrier wait":1562861496,"  fmt Q6_K":11042694160,"  fmt Q4_K":56630633816,"dec matmul qkv":3025750,"dec matmul wo":1707390,"dec matmul gate/up":7466265,"dec matmul down":10152035,"dec attention":12062263,"dec norms":111550,"dec quantise":477804,"dec rope+bias":157137,"dec kv write":521605,"dec residual":50172,"dec swiglu":666126,"dec barrier wait":8985954,"dec   attn scores":33499168,"dec   attn softmax":5404401,"dec   attn mix":41041944,"dec   fmt Q6_K":198689734,"dec   fmt Q4_K":98284700}}
+adaptive: ladder wall per thread: level0 160076.5 ms (10091), level1 0.0 ms (0), level2 0.0 ms (0), transitions 0
+adaptive: park durations <100us 25, <500us 805, <1ms 1481, <5ms 5841, >=5ms 880

@@ -167,49 +167,56 @@ The other tables on this page were measured earlier and against llama.cpp only.
 
 Not the default engine — a separate, opt-in mode, and this table is kept apart from the
 tables above because it trades accuracy for speed. Prompt tokens read their Q4_K and Q6_K
-weights from an 8-bit copy built at load; generated tokens keep the exact kernels.
-2026-11-12/13, desktop, AVX-512, the whole CPU set pinned (`taskset -c 0-23` for 12 threads,
-`taskset -c 0` for 1), five interleaved rounds per 512-token cell, three for the 4096-token
-12-thread cells and one for the two 4096-token 1-thread cells, medians, the 1-minute load
-recorded beside every run. Prompt tok/s:
+weights from an 8-bit copy built at load, and on AVX-512 a prompt row's attention is computed in
+the mode's own tiled summation order too (S5.4j); generated rows keep the exact kernels and the
+exact attention on every tier.
+2026-11-13, desktop, AVX-512, the whole CPU set pinned (`taskset -c 0-23` for 12 threads,
+`taskset -c 0` for 1), five interleaved rounds per 512-token cell and three per 4096-token cell,
+medians, the 1-minute load recorded beside every run. Prompt tok/s:
 
 | Model | prompt / threads | Per. default | Per. fast | ik (defaults) | ik (`-rtr`) | llama.cpp | fast ÷ default | fast ÷ ik | fast ÷ ik `-rtr` | fast ÷ llama |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Llama 3.2 1B | 512 / 12 | 349.1 | **486.5** | 440.2 | 592.3 | 290.7 | **1.39×** | **1.11×** | **0.82×** | **1.67×** |
-| Llama 3.2 1B | 512 / 1 | 55.4 | **80.7** | 67.4 | 85.3 | 42.0 | **1.46×** | **1.20×** | **0.95×** | **1.92×** |
-| Llama 3.2 1B | 4096 / 12 | 264.6 | **339.3** | 326.4 | 388.0 | 195.0 | **1.28×** | **1.04×** | **0.87×** | **1.74×** |
-| Llama 3.2 1B | 4096 / 1 | 41.2 | **53.3** | — | 57.6 | 28.2 | **1.29×** | — | **0.93×** | **1.89×** |
-| Qwen3 1.7B | 512 / 12 | 233.4 | **309.3** | 296.1 | 387.8 | 193.2 | **1.33×** | **1.05×** | **0.80×** | **1.60×** |
-| Qwen3 1.7B | 512 / 1 | 37.6 | **52.6** | 43.5 | 57.9 | 27.6 | **1.40×** | **1.21×** | **0.91×** | **1.91×** |
-| Qwen3 1.7B | 4096 / 12 | 173.8 | **214.1** | 215.5 | 249.5 | 126.0 | **1.23×** | **0.99×** | **0.86×** | **1.70×** |
-| Qwen3 1.7B | 4096 / 1 | 27.6 | **35.4** | — | 38.0 | — | **1.28×** | — | **0.93×** | — |
+| Llama 3.2 1B | 512 / 12 | 332.8 | **462.2** | 431.0 | 561.9 | 287.4 | **1.39×** | **1.07×** | **0.82×** | **1.61×** |
+| Llama 3.2 1B | 512 / 1 | 54.1 | **79.1** | 65.3 | 83.8 | 43.8 | **1.46×** | **1.21×** | **0.94×** | **1.81×** |
+| Llama 3.2 1B | 4096 / 12 | 257.6 | **338.6** | 319.5 | 380.2 | 198.9 | **1.32×** | **1.06×** | **0.89×** | **1.70×** |
+| Llama 3.2 1B | 4096 / 1 | 39.8 | **52.6** | — | 57.0 | 30.5 | **1.32×** | — | **0.92×** | **1.72×** |
+| Qwen3 1.7B | 512 / 12 | 227.9 | **300.5** | 289.7 | 368.3 | 189.7 | **1.32×** | **1.04×** | **0.82×** | **1.58×** |
+| Qwen3 1.7B | 512 / 1 | 36.7 | **53.3** | 43.6 | 55.3 | 26.8 | **1.45×** | **1.22×** | **0.96×** | **1.99×** |
+| Qwen3 1.7B | 4096 / 12 | 168.8 | **215.5** | 206.1 | 245.2 | 125.5 | **1.28×** | **1.05×** | **0.88×** | **1.72×** |
+| Qwen3 1.7B | 4096 / 1 | 24.9 | **31.3** | — | 32.2 | — | **1.26×** | — | **0.97×** | — |
 
 **Cells below 1.0, named:** against ik_llama.cpp with `-rtr` (its own fast path, the one
-that uses the same `q8_k_r16` arithmetic) the fast mode is behind on **all eight** cells,
-0.80-0.95×; against ik at its defaults it is behind on **one**, Qwen3 1.7B at 4096 tokens
-and 12 threads (0.99×, level). The fast mode is ahead of the exact default everywhere
-(1.23-1.46×) and of llama.cpp everywhere (1.60-1.92×). The design's 0.85× target on Llama 3.2
-1B at 12 threads was written against ik's defaults and is met there (1.11× at 512 tokens,
-1.04× at 4096); against the fork's `-rtr` path it is 0.82-0.87×.
+that uses the same `q8_k_r16` arithmetic) the fast mode is behind on **all eight** cells
+(0.82-0.97×); against ik at its defaults it is ahead on all six measured cells (1.04-1.22×).
+The fast mode is ahead of the exact default everywhere (1.26-1.46×) and of llama.cpp everywhere
+(1.58-1.99×). S5.4j's change is in this table already: the fast mode was 0.80-0.95× `-rtr` in
+S5.4i's window (+2-6 % per cell from the attention order and the pool's gap-matched spin
+window), and the mode's bound is re-baselined to 0.0040 (design §4; the owner's confirmation
+pending).
 
-**Where the fast pass loses, measured (S5.4i).** Not in the 8-bit kernel: in situ on
-Llama 3.2 1B at 512 tokens it runs at **96.2 GMAC/s for Q4_K and 103.9 for Q6_K**
+**Where the fast pass loses, measured (S5.4i, extended by S5.4j).** Not in the 8-bit kernel: in
+situ on Llama 3.2 1B at 512 tokens it runs at **96.2 GMAC/s for Q4_K and 103.9 for Q6_K**
 (`PEREGRINE_PROF2`), against the fork's own `q8_k_r16` at **94.9 GMAC/s** at 512 activation
 rows and 85.1 at 256, called through the fork's library. At 12 threads **36 % of the
-512-token pass is not the kernel** (barrier wait 10.4 %, the caller's serial steps 13.5 %,
-attention 9.1 %, the activation's fill and the output's untile 3 %), and at 4096 tokens
-**attention is 38 % of the pass against 20.5 % of the fork's own** (`-fa 0`: 399.9 → 317.9
-tok/s), i.e. 2.1× the fork's attention in absolute time. A sixteen-output-row kernel (the
-fork's `r16` shape) and a 128-row prompt chunk were built and measured as candidates: +4-6 %
-and +2-5 % at one thread and at 512 tokens, -2 to -4 % where it counts, so neither ships.
-The account, both engines' timings and the eight cells:
-[`benchmarks/results/desktop-zen5-2026-11-12-s5.4i/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4i/README.md).
+512-token pass is not the kernel** (the caller's wait for parked workers 10.4 %, the caller's
+serial steps 11.2 %, attention 9.1 %, the activation's fill and the output's untile 3 %), and at
+4096 tokens **attention is 38 % of the pass against 20.5 % of the fork's own** (`-fa 0`:
+399.9 → 317.9 tok/s), i.e. 2.1× the fork's attention in absolute time. S5.4j gives a prompt row
+its own attention order (17 % off attention's own time at 512/12, 3 % at 4096/12, 2-6 % of a pass) and makes the pool's
+spin window follow the measured gap between joins (a prompt pass's joins are 1-5 ms apart
+against a 1 ms window: +3.3 % on the 512-token 12-thread cell); the rest of the attention gap is
+the fork's **int8** dot product, a different arithmetic. The account, both engines' timings and
+the eight cells: S5.4i's
+[`benchmarks/results/desktop-zen5-2026-11-12-s5.4i/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4i/README.md)
+and S5.4j's
+[`benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`](../benchmarks/results/desktop-zen5-2026-11-13-s5.4j/README.md).
 
 **Accuracy** (the full report and the F16 comparison:
 [`benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4c/README.md)):
 on Llama 3.2 1B Q4_K_M the prompt's logits move **0.0035 nats of mean KL divergence** from
 the default engine's, median 0.0025, 99 % 0.024, with 96.75 % of positions keeping the same
-top token; RMS Δp 1.41 %. That is 1.16 % of the model's distance from F16 (0.0386), and it is
+top token; RMS Δp 1.41 % (S5.4j re-measured the same corpus with the attention order in:
+0.003464, 96.67 % same top token). That is 1.16 % of the model's distance from F16 (0.0386), and it is
 the same arithmetic ik_llama.cpp's `-rtr` path measures (0.0034 on the same file and corpus).
 The other four gate models: 0.0026-0.0171 nats. Task scores (GSM8K/MMLU/HumanEval+, the four
 gate models) are not significantly different from the default engine's in any cell (largest

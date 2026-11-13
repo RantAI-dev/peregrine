@@ -1,0 +1,15 @@
+{"arm": "exact", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 39.78690733586216, "load1": 2.59}
+{"arm": "fast-before", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 50.9706734494117, "load1": 1.48}
+{"arm": "fast", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 52.48065617499227, "load1": 1.39}
+{"arm": "ik-rtr", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 56.957307, "load1": 1.38}
+{"arm": "llama", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 30.31479, "load1": 1.07}
+{"arm": "exact", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 39.52035022006564, "load1": 1.09}
+{"arm": "fast-before", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 51.51807904691602, "load1": 1.08}
+{"arm": "fast", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 52.80667747870908, "load1": 1.05}
+{"arm": "ik-rtr", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 57.39156, "load1": 1.25}
+{"arm": "llama", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 2, "tok_s": 30.452074, "load1": 1.06}
+{"arm": "exact", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 39.89729311601517, "load1": 1.18}
+{"arm": "fast-before", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 50.77975223000262, "load1": 1.04}
+{"arm": "fast", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 52.584982719435615, "load1": 1.06}
+{"arm": "ik-rtr", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 56.240613, "load1": 1.04}
+{"arm": "llama", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 3, "tok_s": 30.569381, "load1": 1.12}

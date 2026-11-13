@@ -401,6 +401,30 @@ impl MatKernels {
         self.q8k_formats().contains(&kind)
     }
 
+    /// Whether this tier computes a fast prompt row's attention in the fast prompt
+    /// mode's own order (S5.4j).
+    ///
+    /// A per-tier property, like the form's formats above: the mode is lossy by
+    /// definition, and a prompt row of it may score its keys, fold its soft-max
+    /// denominator and mix its values in a tiled order of the same sums (a rounding
+    /// difference, orders of magnitude below the 8-bit form's error). **AVX-512**
+    /// takes it — it is the tier the row tiling is built for
+    /// (`crates/peregrine-core/src/attn.rs`, `mod fast`); AVX2, aarch64 and scalar
+    /// keep the exact engine's attention for prompt rows in this step, so their
+    /// fast-mode goldens do not move. The definition and its numbers are in
+    /// `docs/design/s5.4-fast-prompt.md` §5k.
+    #[inline]
+    pub fn fast_attn(&self) -> bool {
+        #[cfg(all(target_arch = "x86_64", feature = "fmt-kquant"))]
+        {
+            crate::kqsimd::have_zmm512()
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "fmt-kquant")))]
+        {
+            false
+        }
+    }
+
     /// [`MatKernels::q8k_uses_form`] as a list, for the startup line, `peregrine
     /// tier` and the option's help text.
     pub fn q8k_formats(&self) -> &'static [Format] {

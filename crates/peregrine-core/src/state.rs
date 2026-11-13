@@ -105,6 +105,17 @@ pub struct State {
     /// layer of every token — 20 000 transcendental calls per decode step.
     pub rope: Vec<f32>,
     pub acts: Vec<QuantAct>,
+    /// One flag per batch row: this pass's row is a **fast prompt row** — a prompt row
+    /// of the opt-in fast prompt mode whose attention takes the mode's own order
+    /// (S5.4j). Filled by the family's attention step from [`State::acts`]' rows, never
+    /// by a read-out: pooled, label and head slots clear every flag, as the weight
+    /// dispatch does.
+    pub fast_rows: Vec<bool>,
+    /// Whether the fast prompt mode's attention order is in play for this model at all:
+    /// the tier has it **and** the model carries at least one format's 8-bit form. A
+    /// model whose every format is outside the tier's table therefore stays the exact
+    /// engine bit for bit, attention included (S5.4j, design §3's tier row).
+    pub fast_attn: bool,
     /// The interleaved k-quant activation (S3.4): four rows side by side, for
     /// the repacked k-quant kernel. Filled per matmul group; empty when the
     /// model has no k-quant matrices.
@@ -222,6 +233,8 @@ impl State {
             v: vec![0.0; b * cfg.kv_dim()],
             attn: AttnScratch::new(cfg, b, threads),
             rope,
+            fast_rows: vec![false; b],
+            fast_attn: false,
             acts: (0..b)
                 .map(|_| {
                     // The activation rows are as wide as the model (the residual, the attention

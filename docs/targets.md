@@ -127,14 +127,18 @@ against off, "against F16" is the unquantised file of the same upload:
 | Qwen3-1.7B | 0.017115 ± 0.000993 | 0.006523 / 0.148500 | 3.75 % | 93.91 % | 0.112264 | 0.111481 | −0.70 % |
 
 The share is `(KL_fast_vs_F16 − KL_exact_vs_F16) / KL_exact_vs_F16`; two of the five are negative, which means the
-addition is smaller than the run's own error, not an improvement. The design's ship bound (mean KLD ≤ 0.0015 on the
-1B) is **not met**: 0.0035 was measured, and the fork's own `q8_k_r16` arithmetic measures 0.0034 on the same file
-and corpus when its repacked path is on (`-rtr`); the 0.000945 that the bound was taken from is the fork's *default*
-wide path, a finer `Q8_1`/`Q8_0` conversion (design §5c, results README §4). Task scores (GSM8K/MMLU/HumanEval+,
-`benchmarks/accuracy/`) move by at most +7.5 points at n = 80, every paired McNemar p ≥ 0.15. Prompt speed is
-1.18-1.46× the default engine's in the eight measured cells (AVX-512; the per-tier format table of
-S5.4f keeps the mode to Q6_K on AVX2, where it is 1.05-1.08× the exact engine on the 1B); the ratio against ik_llama.cpp is in
-`docs/benchmark.md`.
+addition is smaller than the run's own error, not an improvement. The design's ship bound was 0.0015 on the 1B
+until S5.4j; 0.0035 was measured, and the fork's own `q8_k_r16` arithmetic measures 0.0034 on the same file and
+corpus when its repacked path is on (`-rtr`), while the 0.000945 that the original bound was taken from is the
+fork's *default* wide path, a finer `Q8_1`/`Q8_0` conversion (design §5c). **S5.4j re-baselines the bound to 0.0040
+on the 1B, the same top token on ≥ 96 % of positions and no task score outside the paired test's noise, on the
+project lead's recommendation; the owner's confirmation is pending, so the option stays labelled Experimental**
+(design §4). S5.4j's own accuracy run, fast against exact on the same corpus and chunks, is 0.003464 on the 1B and
+0.017336 on Qwen3 1.7B — 1.4 % below and 1.3 % above S5.4c's numbers, inside the runs' error (the attention order
+moves rounding only). Task scores (GSM8K/MMLU/HumanEval+, `benchmarks/accuracy/`) move by at most +7.5 points at
+n = 80, every paired McNemar p ≥ 0.15. Prompt speed is 1.26-1.46× the default engine's in the eight measured cells
+(AVX-512; the per-tier format table of S5.4f keeps the mode to Q6_K on AVX2, where it is 1.05-1.08× the exact
+engine on the 1B); the ratio against ik_llama.cpp is in `docs/benchmark.md`.
 
 ## 2. Speed
 
