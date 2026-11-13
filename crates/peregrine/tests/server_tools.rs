@@ -638,6 +638,86 @@ fn tools_beside_a_response_format_answer_with_calls_or_the_schemas_json() {
     assert_eq!(called + answered, 12);
 }
 
+/// The XML call syntax (Qwen 3.5's template) under a forced choice, with thinking off so
+/// the reply begins with its content: a file of random weights still answers with calls
+/// that parse and fit the tool. The values here are finite languages (a boolean, an enum),
+/// so every reply closes; a string value is free text, which a random model need not end.
+#[test]
+fn a_forced_choice_in_the_xml_syntax_answers_with_valid_calls() {
+    let (_server, port) =
+        serve_qwen35_model("forced-xml", 43, peregrine_core::tools::QWEN35_TEMPLATE);
+    let tools = json!([
+        {"type": "function", "function": {"name": "set_mode", "description": "Set the mode",
+            "parameters": {"type": "object",
+                "properties": {"mode": {"enum": ["fast", "exact"]}, "verbose": {"type": "boolean"},
+                               "level": {"enum": [1, 2, 3]}},
+                "required": ["mode", "verbose"]}}},
+        {"type": "function", "function": {"name": "reset"}}
+    ]);
+    for seed in 0..6u64 {
+        for choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "set_mode"}}),
+        ] {
+            let (status, body) = post(
+                port,
+                tool_request(json!({
+                    "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 200,
+                    "tool_choice": choice, "parallel_tool_calls": false,
+                    "chat_template_kwargs": {"enable_thinking": false}
+                })),
+            );
+            assert_eq!(status, 200, "{body}");
+            let c = &body["choices"][0];
+            assert_eq!(c["finish_reason"], "tool_calls", "{body}");
+            let calls = c["message"]["tool_calls"].as_array().expect("calls");
+            assert_eq!(calls.len(), 1, "{body}");
+            let name = calls[0]["function"]["name"].as_str().unwrap();
+            let args: Value =
+                serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap())
+                    .unwrap_or_else(|e| panic!("arguments are not JSON ({e}): {body}"));
+            match name {
+                "set_mode" => {
+                    assert!(
+                        matches!(args["mode"].as_str(), Some("fast" | "exact")),
+                        "{body}"
+                    );
+                    assert!(args["verbose"].is_boolean(), "{body}");
+                    assert!(
+                        args.get("level")
+                            .is_none_or(|l| matches!(l.as_i64(), Some(1..=3))),
+                        "{body}"
+                    );
+                }
+                "reset" => {
+                    assert!(
+                        choice.is_string(),
+                        "the named choice called another tool: {body}"
+                    );
+                    assert_eq!(args, json!({}), "{body}");
+                }
+                other => panic!("a call to {other:?}: {body}"),
+            }
+        }
+    }
+    // Thinking on: the forced call follows the model's reasoning. A random model never
+    // closes its thinking, so the reply is reasoning up to the token limit; the request
+    // is served, not refused.
+    let (status, body) = post(
+        port,
+        tool_request(json!({"tools": tools, "tool_choice": "required", "max_tokens": 24})),
+    );
+    assert_eq!(status, 200, "{body}");
+    let c = &body["choices"][0];
+    assert_eq!(c["finish_reason"], "length", "{body}");
+    assert!(
+        c["message"]["tool_calls"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "{body}"
+    );
+}
+
 #[test]
 fn tools_on_a_file_without_a_tool_format_are_refused() {
     let dir = tmpdir("no-format");

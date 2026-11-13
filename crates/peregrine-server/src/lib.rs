@@ -1129,6 +1129,9 @@ struct ToolPlan {
     parallel: bool,
     /// `tool_choice: "required"` or a named function: the reply is held to calls (S6.6b).
     constraint: Option<Arc<Constraint>>,
+    /// Where the reply's thinking stands, for a constraint laid over the reply: it holds
+    /// what follows the thinking, never the thinking itself.
+    reasoning: tools::Reasoning,
 }
 
 /// One call the model wrote, as the response returns it.
@@ -1404,6 +1407,10 @@ fn tool_choice(b: &Value) -> Result<ToolChoice, String> {
 ///   or content of the response schema. Never a mixture: text before a call would not be
 ///   the schema's JSON.
 /// * Otherwise (`"none"`, no tools, no tool path) the content's constraint stands alone.
+///
+/// On a file whose template is one of the tool formats the constraint is laid after the
+/// reply's thinking ([`tools::after_reasoning`]): the reasoning is the model's own text,
+/// and what follows the closing tag is held.
 fn join_tool_constraint(
     tool: Option<&ToolPlan>,
     content: Option<Arc<Constraint>>,
@@ -1411,21 +1418,31 @@ fn join_tool_constraint(
     let Some(tool) = tool else {
         return Ok((content, "response_format"));
     };
+    // The constraint is on what follows the model's thinking; the thinking stays free.
+    let after_thinking = |c: Arc<Constraint>| match tool.reasoning {
+        tools::Reasoning::None => Ok(c),
+        reasoning => {
+            let c = tools::after_reasoning(reasoning, (*c).clone());
+            peregrine_core::constrain::Matcher::new(&c)
+                .map(|_| Arc::new(c))
+                .map_err(|e| e.message())
+        }
+    };
     if let Some(forced) = &tool.constraint {
-        return Ok((Some(forced.clone()), "tool_choice"));
+        return Ok((Some(after_thinking(forced.clone())?), "tool_choice"));
     }
     let Some(content) = content else {
         return Ok((None, "response_format"));
     };
     if !tool.parse || tool.tools.is_empty() {
-        return Ok((Some(content), "response_format"));
+        return Ok((Some(after_thinking(content)?), "response_format"));
     }
     let calls = tools::forced_calls(tool.format, &tool.tools, &tools::Forced::Any, tool.parallel)
         .map_err(|e| format!("response_format with tools: {e}"))?;
     let either = Constraint::any_of(vec![calls, (*content).clone()]);
     peregrine_core::constrain::Matcher::new(&either)
         .map_err(|e| format!("response_format with tools: {}", e.message()))?;
-    Ok((Some(Arc::new(either)), "response_format"))
+    Ok((Some(after_thinking(Arc::new(either))?), "response_format"))
 }
 
 fn parallel_tool_calls(b: &Value) -> Result<bool, String> {
@@ -1480,6 +1497,15 @@ fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan,
     };
     let prompt = tools::render_with(format, &tools, &messages, options)?;
     let reasoning_open = format.opens_reasoning(&prompt);
+    // The template opened the block for the model (Qwen 3.5), or the model may open one
+    // itself (Qwen 3; with thinking off its template closes an empty block in the prompt).
+    let reasoning = if reasoning_open {
+        tools::Reasoning::Open
+    } else if matches!(format, ToolFormat::Qwen3(_)) && options.thinking {
+        tools::Reasoning::Optional
+    } else {
+        tools::Reasoning::None
+    };
     // A forced choice holds the sampler to the format's call syntax and the tool's own
     // parameter schema (S6.6b). The prompt is the one `"auto"` gets: the tools are
     // described the same way, only the reply is constrained.
@@ -1499,6 +1525,7 @@ fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan,
         parse,
         parallel,
         constraint,
+        reasoning,
     })
 }
 
@@ -3721,21 +3748,14 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) 
         }
         Err(e) => return bad_param(e, "tools"),
     };
-    // A constrained reply is the assistant's content. A reasoning model's reply starts in
-    // its thinking span, and the engine's sampler cannot be told when the server's parser
-    // closes it; refuse instead of constraining the wrong span.
-    let opens_in_reasoning = app.template.opens_reasoning(p.thinking)
-        || p.tool.as_ref().is_some_and(|t| t.reasoning_open);
-    if p.constraint.is_some() && opens_in_reasoning {
-        let what = if constrained_by == "tool_choice" {
-            "a required or named tool_choice"
-        } else {
-            "response_format"
-        };
+    // A constrained reply is the assistant's content. On a tool format's file the
+    // constraint was laid after the thinking above. Any other reasoning template opens a
+    // span whose shape the server does not know as a constraint; refuse instead of
+    // constraining the wrong span.
+    if p.constraint.is_some() && p.tool.is_none() && app.template.opens_reasoning(p.thinking) {
         return bad_param(
-            format!(
-                "{what} is not supported while the model is thinking; send the request with thinking off"
-            ),
+            "response_format is not supported while the model is thinking; send the request with thinking off"
+                .into(),
             constrained_by,
         );
     }
