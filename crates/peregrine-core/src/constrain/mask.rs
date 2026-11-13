@@ -234,8 +234,11 @@ pub struct Vocabulary {
     /// Free-text masks by (terminator, bytes of it matched), shared by every request of
     /// this model: which tokens are text there does not depend on the constraint around
     /// the part, only the few tokens that complete the terminator do.
-    until_tables: Mutex<HashMap<(Vec<u8>, u32), std::sync::Arc<UntilTable>>>,
+    until_tables: Mutex<UntilTables>,
 }
+
+/// The free-text tables by (terminator, bytes of it matched).
+type UntilTables = HashMap<(Vec<u8>, u32), std::sync::Arc<UntilTable>>;
 
 /// What a free-text state allows, as far as the vocabulary alone decides it.
 struct UntilTable {
