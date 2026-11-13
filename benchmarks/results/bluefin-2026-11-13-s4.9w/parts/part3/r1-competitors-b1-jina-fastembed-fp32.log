@@ -1,0 +1,4 @@
+
+== jina / fastembed / fp32 (round 1) ==
+  L128_b1_c1              11.70 texts/s    1497.6 tok/s p50    82.2 ms p99     98.8 ms n=6 (0.51s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r1-competitors/b1/jina-fastembed-fp32-r1.json

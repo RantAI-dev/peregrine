@@ -1,0 +1,5 @@
+adaptive: ladder wall per thread: level0 766.8 ms (75), level1 0.0 ms (0), level2 0.0 ms (0), transitions 0
+adaptive: park durations <100us 0, <500us 0, <1ms 0, <5ms 0, >=5ms 3
+joins: 578 (578 per join), wait 0.003 s (1.7 %), share 0.157 s, max wait 0.281 ms
+joins: straggler gap mean 0.003 ms, max 0.044 ms
+joins: last worker histogram [0:162 1:90 2:165 3:161]

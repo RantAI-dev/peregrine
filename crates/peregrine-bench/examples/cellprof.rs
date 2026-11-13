@@ -164,7 +164,9 @@ fn main() {
             }
         }
         let line = format!(
-            "{{\"cell\":\"{key}\",\"batch\":{batch},\"tokens\":{total_tokens},\"bytes\":{bytes},\"texts_per_s\":{:.3},\"tokens_per_s\":{:.1},\"wall_s\":{:.4},\"tokenise_s\":{:.6},\"tokenise_ms_per_text\":{:.3},\"stats_ms\":{{\"matmul\":{:.3},\"head\":{:.3},\"attention\":{:.3},\"other\":{:.3},\"total\":{:.3},\"barriers\":{}}},\"prof_ms\":{{{prof_txt}}}}}",
+            "{{\"cell\":\"{key}\",\"batch\":{batch},\"tokens\":{total_tokens},\"bytes\":{bytes},\"bytes_acts\":{},\"bytes_weights\":{},\"texts_per_s\":{:.3},\"tokens_per_s\":{:.1},\"wall_s\":{:.4},\"tokenise_s\":{:.6},\"tokenise_ms_per_text\":{:.3},\"stats_ms\":{{\"matmul\":{:.3},\"head\":{:.3},\"attention\":{:.3},\"other\":{:.3},\"total\":{:.3},\"barriers\":{}}},\"prof_ms\":{{{prof_txt}}}}}",
+            st.bytes_acts,
+            st.bytes_weights,
             (batch as f64) / wall,
             (total_tokens as f64) / wall,
             wall,

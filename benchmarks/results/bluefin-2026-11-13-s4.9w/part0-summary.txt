@@ -1,0 +1,51 @@
+| cell | before | after | after/before | nostall | nostall/before |
+|---|---:|---:|---:|---:|---:|
+| nomic L16_b8_c1 | 80.839 | 84.319 | 1.043 | 84.462 | 1.045 |
+| nomic L16_b32_c1 | 86.137 | 85.661 | 0.994 | 84.951 | 0.986 |
+| nomic L128_b1_c1 | 10.725 | 10.644 | 0.992 | 10.514 | 0.980 |
+| nomic L128_b8_c1 | 10.730 | 10.732 | 1.000 | 10.760 | 1.003 |
+| nomic L128_b32_c1 | 10.588 | 10.648 | 1.006 | 10.737 | 1.014 |
+| nomic L512_b8_c1 | 2.466 | 2.496 | 1.012 | 2.488 | 1.009 |
+| jina L16_b8_c1 | 86.768 | 85.595 | 0.986 | 86.436 | 0.996 |
+| jina L16_b32_c1 | 88.199 | 87.286 | 0.990 | 87.549 | 0.993 |
+| jina L128_b1_c1 | 10.967 | 10.865 | 0.991 | 10.945 | 0.998 |
+| jina L128_b8_c1 | 11.068 | 11.034 | 0.997 | 11.041 | 0.998 |
+| jina L128_b32_c1 | 11.019 | 10.968 | 0.995 | 11.054 | 1.003 |
+| jina L512_b8_c1 | 2.590 | 2.587 | 0.999 | 2.582 | 0.997 |
+| bge-small L128_b32_c1 | 50.047 | 49.590 | 0.991 | 49.798 | 0.995 |
+| minilm L128_b32_c1 | 101.984 | 100.151 | 0.982 | 100.511 | 0.986 |
+| qwen3-embed-0.6b L512_b1_c1 | 0.574 | 0.569 | 0.991 | 0.569 | 0.991 |
+
+spreads (min-max of the five rounds):
+- nomic L16_b8_c1: before 80.63-85.27, after 82.94-85.33, nostall 82.19-85.26
+- nomic L16_b32_c1: before 84.19-86.70, after 80.43-87.08, nostall 83.13-86.26
+- nomic L128_b1_c1: before 10.52-10.87, after 9.79-10.84, nostall 9.98-10.78
+- nomic L128_b8_c1: before 8.99-10.94, after 10.62-10.80, nostall 10.66-10.86
+- nomic L128_b32_c1: before 10.05-10.92, after 10.53-10.80, nostall 10.58-10.83
+- nomic L512_b8_c1: before 2.42-2.50, after 2.48-2.53, nostall 2.41-2.50
+- jina L16_b8_c1: before 86.44-87.12, after 72.85-86.82, nostall 86.17-86.60
+- jina L16_b32_c1: before 88.08-88.59, after 85.42-87.85, nostall 86.18-87.98
+- jina L128_b1_c1: before 10.85-11.07, after 10.79-11.04, nostall 10.90-10.97
+- jina L128_b8_c1: before 10.92-11.18, after 8.91-11.18, nostall 10.43-11.12
+- jina L128_b32_c1: before 10.94-11.19, after 10.29-11.15, nostall 11.00-11.11
+- jina L512_b8_c1: before 2.58-2.61, after 2.52-2.59, nostall 2.58-2.60
+- bge-small L128_b32_c1: before 48.31-50.45, after 44.91-50.49, nostall 48.95-50.30
+- minilm L128_b32_c1: before 99.24-102.96, after 90.83-102.39, nostall 77.14-101.36
+- qwen3-embed-0.6b L512_b1_c1: before 0.56-0.58, after 0.53-0.58, nostall 0.56-0.57
+
+CPU idle share per round (idle / total ticks):
+- r1-after-cpu.txt: idle 54.1%  busy 12066 idle 14235
+- r1-after_nostall-cpu.txt: idle 53.7%  busy 12389 idle 14356
+- r1-before-cpu.txt: idle 54.8%  busy 12035 idle 14597
+- r2-after-cpu.txt: idle 53.3%  busy 12369 idle 14138
+- r2-after_nostall-cpu.txt: idle 53.7%  busy 12270 idle 14230
+- r2-before-cpu.txt: idle 53.8%  busy 12241 idle 14234
+- r3-after-cpu.txt: idle 52.2%  busy 12797 idle 13969
+- r3-after_nostall-cpu.txt: idle 49.7%  busy 12404 idle 12258
+- r3-before-cpu.txt: idle 53.1%  busy 12408 idle 14046
+- r4-after-cpu.txt: idle 53.1%  busy 12596 idle 14255
+- r4-after_nostall-cpu.txt: idle 53.4%  busy 12255 idle 14030
+- r4-before-cpu.txt: idle 54.2%  busy 12111 idle 14311
+- r5-after-cpu.txt: idle 53.3%  busy 12378 idle 14116
+- r5-after_nostall-cpu.txt: idle 53.8%  busy 12304 idle 14303
+- r5-before-cpu.txt: idle 53.7%  busy 12356 idle 14340
