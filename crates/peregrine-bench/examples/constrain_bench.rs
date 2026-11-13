@@ -188,6 +188,63 @@ fn main() {
         }
     }
 
+    // S6.6c: free text and marker tokens. A forced call after thinking: reasoning up to
+    // the closing tag, then the call's literal wrapper around a small JSON value.
+    if std::env::var_os("PEREGRINE_MICRO").is_some() {
+        use peregrine_core::constrain::Part;
+        let after_thinking = || {
+            Constraint::sequence(vec![
+                Part::Until("</think>".into()),
+                Part::Literal("\n\n<tool_call>\n{\"name\": \"f\", \"arguments\": ".into()),
+                Part::Json(Schema::new(
+                    Value::parse(r#"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}"#)
+                        .expect("schema"),
+                )),
+                Part::Literal("}\n</tool_call>".into()),
+            ])
+        };
+        let cases: [(&str, &[u8]); 6] = [
+            ("free-text", b"Let me think about this"),
+            ("free-text-partial-terminator", b"Let me think </thi"),
+            ("free-text-inside-a-character", b"caf\xC3"),
+            ("literal-with-marker", b"done</think>\n\n"),
+            ("literal-middle", b"done</think>\n\n<tool_call>\n{\"na"),
+            (
+                "json-after-literal",
+                b"done</think>\n\n<tool_call>\n{\"name\": \"f\", \"arguments\": ",
+            ),
+        ];
+        for (name, prefix) in cases {
+            // A fresh constraint per case: the memo is per compiled constraint, so the
+            // first call is what the first request to reach this state pays.
+            let c = after_thinking();
+            let mut m = Matcher::new(&c).unwrap();
+            assert!(m.advance_bytes(prefix).is_ok(), "{name}");
+            let t0 = Instant::now();
+            let first = vocab.allowed(&m, &[0]).count();
+            let first_ns = t0.elapsed().as_nanos();
+            // The next request to reach the same state: a new constraint, so the whole
+            // mask is not memoised, but the vocabulary's free-text table is.
+            let c2 = after_thinking();
+            let mut m2 = Matcher::new(&c2).unwrap();
+            assert!(m2.advance_bytes(prefix).is_ok(), "{name}");
+            let t1 = Instant::now();
+            let again = vocab.allowed(&m2, &[0]).count();
+            let next_ns = t1.elapsed().as_nanos();
+            assert_eq!(again, first);
+            let n = 200;
+            let t = Instant::now();
+            let mut sink = 0usize;
+            for _ in 0..n {
+                sink += vocab.allowed(&m, &[0]).count();
+            }
+            let ns = t.elapsed().as_nanos() as f64 / n as f64;
+            println!(
+                "micro {name}: first {first_ns} ns, next request {next_ns} ns, warm {ns:.0} ns/call (allowed {first}, sink {sink})"
+            );
+        }
+    }
+
     // A compile check for the two schema shapes (and a Matcher, so the automaton is built).
     for c in [medium(), large(), Constraint::json_object()] {
         Matcher::new(&c).expect("the schema compiles");
