@@ -2335,18 +2335,12 @@ pub mod fast {
         while g < s.len() {
             let n = s.len() - g;
             let (v0, v1, v2, v3) = if n >= LANES {
-                let v0 = peregrine_kernels::vmath::exp4(vsubq_f32(
-                    vld1q_f32(s.as_ptr().add(g)),
-                    sh,
-                ));
-                let v1 = peregrine_kernels::vmath::exp4(vsubq_f32(
-                    vld1q_f32(s.as_ptr().add(g + 4)),
-                    sh,
-                ));
-                let v2 = peregrine_kernels::vmath::exp4(vsubq_f32(
-                    vld1q_f32(s.as_ptr().add(g + 8)),
-                    sh,
-                ));
+                let v0 =
+                    peregrine_kernels::vmath::exp4(vsubq_f32(vld1q_f32(s.as_ptr().add(g)), sh));
+                let v1 =
+                    peregrine_kernels::vmath::exp4(vsubq_f32(vld1q_f32(s.as_ptr().add(g + 4)), sh));
+                let v2 =
+                    peregrine_kernels::vmath::exp4(vsubq_f32(vld1q_f32(s.as_ptr().add(g + 8)), sh));
                 let v3 = peregrine_kernels::vmath::exp4(vsubq_f32(
                     vld1q_f32(s.as_ptr().add(g + 12)),
                     sh,
@@ -2419,8 +2413,12 @@ pub mod fast {
                 let at = d * 2;
                 let k0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16)));
                 let k1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16)));
-                let k2 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 16) as *const u16)));
-                let k3 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 24) as *const u16)));
+                let k2 = vcvt_f32_f16(vreinterpret_f16_u16(
+                    vld1_u16(kp.add(at + 16) as *const u16),
+                ));
+                let k3 = vcvt_f32_f16(vreinterpret_f16_u16(
+                    vld1_u16(kp.add(at + 24) as *const u16),
+                ));
                 for r in 0..nrows {
                     let qp = q.add(rows[r] * hd + d);
                     a[r][0] = vfmaq_f32(a[r][0], vld1q_f32(qp), k0);
@@ -6578,4 +6576,3 @@ mod tests {
         }
     }
 }
-
