@@ -5327,9 +5327,7 @@ mod tests {
         let mut p = plan_with(&b, true).unwrap();
         apply_response_format(&mut p, &raw).unwrap();
         let tool = tool_request(tool_format(), &b, &raw).unwrap();
-        let e = super::join_tool_constraint(Some(&tool), p.constraint.take())
-            .err()
-            .expect("refused");
+        let e = super::join_tool_constraint(Some(&tool), p.constraint.take()).expect_err("refused");
         assert!(
             e.starts_with("response_format with tools: tools[0].function.parameters: "),
             "{e}"
