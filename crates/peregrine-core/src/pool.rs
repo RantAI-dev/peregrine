@@ -163,7 +163,18 @@ const LOAD_MIN_RUNNABLE: Duration = Duration::from_millis(4);
 /// host (ten Cortex-X925 cores, co-tenants, load 3–11 through the window), a 512-token
 /// and a 4 096-token exact prefill at ten threads: the stretch cost 1.6–2.6 % in every
 /// disturbed cell and in the quiet ones (`benchmarks/results/spark-arm-2026-11-13-s5.6-reread/`).
+///
+/// **Per architecture, by what was measured.** On x86-64 the stretch is on: +3.3 % on
+/// the AVX-512 desktop's fast 512-token twelve-thread cell (S5.4j) and level on the
+/// four-core AVX2 host (0.98–1.04 with the stall gate either way, S4.9w). On aarch64 it
+/// is off ([`GAP_STRETCH`]): on the ARM host a quiet ten-thread exact prefill was 1.6–2.0 %
+/// *slower* with it, and 1.2–2.6 % slower under one to four competing threads (S5.6r),
+/// with no reading of the host that tells the two machines apart. An aarch64 machine
+/// that is truly idle has not been measured.
 const GAP_CAP_US: u64 = 8000;
+
+/// Whether the join-gap stretch is on for this architecture (see [`GAP_CAP_US`]).
+const GAP_STRETCH: bool = cfg!(not(target_arch = "aarch64"));
 
 /// A gap longer than this is a pass boundary (an idle session), not a fork-to-fork gap:
 /// it must not stretch the window, because no worker is waiting across it.
@@ -575,13 +586,16 @@ impl WaitControl {
 
     /// The measured join gap, in µs, capped at [`GAP_CAP_US`].
     fn gap_us(&self) -> u64 {
+        if !GAP_STRETCH {
+            return 0;
+        }
         (self.gap_ns.load(Ordering::Relaxed) / 1000).min(GAP_CAP_US)
     }
 
     /// Record the gap a worker would have to bridge: the time from the end of the last
     /// fork–join to the start of this one.
     fn observe_gap(&self, now: Instant) {
-        if !self.enabled || self.max_spin_us == 0 {
+        if !GAP_STRETCH || !self.enabled || self.max_spin_us == 0 {
             return;
         }
         let nanos = nanos_since_base(now);
@@ -604,7 +618,7 @@ impl WaitControl {
 
     /// Mark the end of this fork–join, which is where the next gap is measured from.
     fn mark_join_end(&self, now: Instant) {
-        if !self.enabled || self.max_spin_us == 0 {
+        if !GAP_STRETCH || !self.enabled || self.max_spin_us == 0 {
             return;
         }
         self.last_end
@@ -2392,8 +2406,11 @@ mod tests {
     #[test]
     fn the_gap_stretch_stops_on_an_oversubscribed_host() {
         let w = WaitControl::new(1000, 0, true, true);
-        w.gap_ns.store(5_000_000, Ordering::Relaxed); // a 5 ms prompt-pass gap
-        assert_eq!(w.budgets().0, Duration::from_micros(5000));
+        // A 5 ms prompt-pass gap. Where the stretch is on it covers the gap; where it
+        // is off (aarch64) the configured window stands.
+        w.gap_ns.store(5_000_000, Ordering::Relaxed);
+        let stretched = if GAP_STRETCH { 5000 } else { 1000 };
+        assert_eq!(w.budgets().0, Duration::from_micros(stretched));
         // A run queue as deep as the stall gate's evidence: no stretch.
         let t = feed(
             &w,
@@ -2407,7 +2424,7 @@ mod tests {
         // The co-tenant leaves and the stretch comes back.
         let _ = feed(&w, t, 0, 40, Duration::from_millis(10));
         assert!(!w.oversubscribed());
-        assert_eq!(w.budgets().0, Duration::from_micros(5000));
+        assert_eq!(w.budgets().0, Duration::from_micros(stretched));
     }
 
     #[test]

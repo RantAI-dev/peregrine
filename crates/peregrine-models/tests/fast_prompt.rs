@@ -425,22 +425,6 @@ fn a_q5_0_row_that_is_not_a_whole_super_block_is_prompt_invariant() {
     let toks = prompt();
     let mut failures = Vec::new();
     let (cache0, logits0) = read_in_pieces(&model, CHUNKS[0], 4, &toks);
-    {
-        let (c1, _) = read_in_pieces(&model, CHUNKS[0], 1, &toks);
-        let first = c1.iter().zip(&cache0).position(|(a, b)| a != b);
-        eprintln!(
-            "DEBUG 16t1 vs 16t4 first diff {first:?} of {}",
-            cache0.len()
-        );
-        if let Some(i) = first {
-            eprintln!(
-                "DEBUG at {i}: {} vs {}; neighbours {:?}",
-                c1[i],
-                cache0[i],
-                &cache0[i.saturating_sub(3)..(i + 4).min(cache0.len())]
-            );
-        }
-    }
     for &chunk in &CHUNKS[1..] {
         let (cache, logits) = read_in_pieces(&model, chunk, 4, &toks);
         if cache != cache0 {
