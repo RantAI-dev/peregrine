@@ -36,6 +36,7 @@
 //!   their thinking block, and the prompt ends inside one, or after an empty one when
 //!   thinking is off.
 
+use crate::constrain::{Constraint, Part, Schema};
 use crate::json::Value;
 
 /// ChatML's turn markers, as the Qwen templates write them.
@@ -327,6 +328,335 @@ pub fn tool_names(tools: &[Value]) -> Vec<String> {
         .filter_map(|t| t.get("function")?.get("name")?.as_str())
         .map(str::to_string)
         .collect()
+}
+
+/// Which call a reply is required to make: OpenAI's `tool_choice` beyond `"auto"` and
+/// `"none"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Forced {
+    /// `"required"`: at least one call, to any of the request's tools.
+    Any,
+    /// A named function: exactly one call, to this tool.
+    Named(String),
+}
+
+/// Where a reply's thinking stands when a constraint is laid over the reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reasoning {
+    /// The reply begins with its content: the model does not think, or the prompt
+    /// already closed an empty thinking block.
+    None,
+    /// The prompt opened the thinking block (Qwen 3.5 with thinking on): the reply begins
+    /// with the model's reasoning and writes only the closing tag.
+    Open,
+    /// The model may open a thinking block itself (Qwen 3 with thinking on).
+    Optional,
+}
+
+/// `content`, after the reply's thinking (S6.6b): the reasoning is free text up to the
+/// closing tag, then the two newlines the templates put before the content, then the
+/// constraint. The thinking is the model's own; only what follows it is held.
+pub fn after_reasoning(reasoning: Reasoning, content: Constraint) -> Constraint {
+    let close = || {
+        vec![
+            Part::Until(THINK_CLOSE.to_string()),
+            Part::Literal("\n\n".to_string()),
+        ]
+    };
+    match reasoning {
+        Reasoning::None => content,
+        Reasoning::Open => Constraint::concat(vec![Constraint::sequence(close()), content]),
+        Reasoning::Optional => {
+            let mut block = vec![Part::Literal(THINK_OPEN.to_string())];
+            block.extend(close());
+            Constraint::concat(vec![
+                Constraint::repeat(Constraint::sequence(block), 0, Some(1)),
+                content,
+            ])
+        }
+    }
+}
+
+/// The constraint that makes a reply consist of tool calls and nothing else (S6.6b).
+///
+/// The reply is written in the format's own call syntax, byte for byte as its template
+/// writes an earlier turn's calls, so what the sampler is held to is text the model was
+/// trained on:
+///
+/// * the Hermes convention (Qwen 2.5, Qwen 3):
+///   `<tool_call>\n{"name": "T", "arguments": A}\n</tool_call>`, where `A` is one JSON
+///   value of the tool's own `parameters` schema;
+/// * the XML convention (Qwen 3.5): `<tool_call>\n<function=T>\n`, one
+///   `<parameter=K>\nV\n</parameter>\n` block per property in the schema's order (a
+///   property that is not required may be left out), `</function>\n</tool_call>`. A
+///   value is written bare, as the template writes it: a string as free text up to the
+///   closing tag, a boolean as `True` or `False`, null as `None`, an `enum` as one of its
+///   values, a number, list or object as JSON of the property's schema.
+///
+/// Calls are joined by one newline. The wrapper is literal, so the arguments are valid
+/// for the tool by construction.
+///
+/// * [`Forced::Any`]: one call to any tool, and with `parallel` any number of further
+///   calls (the model ends the reply when it has made the calls it wants).
+/// * [`Forced::Named`]: exactly one call to that tool.
+///
+/// `tools` is [`tools_from_json`]'s list. An error names the tool it is about: a name
+/// that is not in the list, parameters that are not an object schema, or a schema keyword
+/// the constraint compiler refuses.
+pub fn forced_calls(
+    format: ToolFormat,
+    tools: &[Value],
+    forced: &Forced,
+    parallel: bool,
+) -> Result<Constraint, String> {
+    if tools.is_empty() {
+        return Err("a required or named tool_choice needs tools".into());
+    }
+    let mut calls = Vec::new();
+    for (i, t) in tools.iter().enumerate() {
+        let Some(f) = t.get("function") else { continue };
+        let Some(name) = f.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Forced::Named(want) = forced {
+            if want != name {
+                continue;
+            }
+        }
+        // The templates write a call's name as it is, between quotes or inside a tag; a
+        // name that would need an escape there has no faithful literal.
+        if name
+            .chars()
+            .any(|c| matches!(c, '"' | '\\' | '>' | '<') || c.is_control())
+        {
+            return Err(format!(
+                "tools[{i}].function.name {name:?} cannot be the target of a required or named tool_choice: the call syntax cannot write it"
+            ));
+        }
+        let arguments = argument_schema(f.get("parameters"), i)?;
+        let call = match format {
+            ToolFormat::Hermes | ToolFormat::Qwen3(_) => Constraint::sequence(vec![
+                Part::Literal(format!(
+                    "<tool_call>\n{{\"name\": \"{name}\", \"arguments\": "
+                )),
+                Part::Json(Schema::new(arguments)),
+                Part::Literal("}\n</tool_call>".into()),
+            ]),
+            ToolFormat::QwenXml => xml_call(name, &arguments, i)?,
+        };
+        // Each tool's schema is checked on its own, so the error can name the tool.
+        call.compile()
+            .and_then(|_| crate::constrain::Matcher::new(&call).map(|_| ()))
+            .map_err(|e| format!("tools[{i}].function.parameters: {}", e.message()))?;
+        calls.push(call);
+    }
+    if calls.is_empty() {
+        return Err(match forced {
+            Forced::Named(want) => {
+                format!("tool_choice names {want:?}, which is not one of the request's tools")
+            }
+            Forced::Any => "a required tool_choice needs tools".into(),
+        });
+    }
+    let one = if calls.len() == 1 {
+        calls.remove(0)
+    } else {
+        Constraint::any_of(calls)
+    };
+    let out = match forced {
+        Forced::Any if parallel => Constraint::concat(vec![
+            one.clone(),
+            Constraint::repeat(
+                Constraint::concat(vec![
+                    Constraint::sequence(vec![Part::Literal("\n".into())]),
+                    one,
+                ]),
+                0,
+                None,
+            ),
+        ]),
+        _ => one,
+    };
+    // The whole constraint can be too large to match even when every tool's own schema
+    // is not (many tools); that is the request's doing, refused here.
+    crate::constrain::Matcher::new(&out).map_err(|e| format!("tools: {}", e.message()))?;
+    Ok(out)
+}
+
+/// One call in the XML convention: the function tag, a block per property, the closing
+/// tags. `arguments` is the tool's object schema ([`argument_schema`]).
+fn xml_call(name: &str, arguments: &Value, i: usize) -> Result<Constraint, String> {
+    let required: Vec<&str> = arguments
+        .get("required")
+        .and_then(Value::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut parts = vec![Constraint::sequence(vec![Part::Literal(format!(
+        "<tool_call>\n<function={name}>\n"
+    ))])];
+    let properties = arguments.get("properties").and_then(Value::as_object);
+    for (key, schema) in properties.unwrap_or(&[]) {
+        if key.is_empty()
+            || key
+                .chars()
+                .any(|c| matches!(c, '>' | '<') || c.is_control())
+        {
+            return Err(format!(
+                "tools[{i}].function.parameters: the property {key:?} cannot be written as a <parameter=…> tag"
+            ));
+        }
+        let open = format!("<parameter={key}>\n");
+        const CLOSE: &str = "\n</parameter>\n";
+        let block = match xml_value(schema, arguments) {
+            XmlValue::Text => {
+                Constraint::sequence(vec![Part::Literal(open), Part::Until(CLOSE.to_string())])
+            }
+            XmlValue::Choices(values) => Constraint::any_of(
+                values
+                    .into_iter()
+                    .map(|v| Constraint::sequence(vec![Part::Literal(format!("{open}{v}{CLOSE}"))]))
+                    .collect(),
+            ),
+            XmlValue::Json(schema) => Constraint::sequence(vec![
+                Part::Literal(open),
+                Part::Json(Schema::new(schema)),
+                Part::Literal(CLOSE.to_string()),
+            ]),
+        };
+        if required.contains(&key.as_str()) {
+            parts.push(block);
+        } else {
+            parts.push(Constraint::repeat(block, 0, Some(1)));
+        }
+    }
+    parts.push(Constraint::sequence(vec![Part::Literal(
+        "</function>\n</tool_call>".into(),
+    )]));
+    Ok(Constraint::concat(parts))
+}
+
+/// How one argument's value is held in the XML convention.
+enum XmlValue {
+    /// Free text up to the closing tag: a string, and any schema with no single bare
+    /// spelling (the parser reads such a value as text too).
+    Text,
+    /// One of these exact texts: an `enum`'s or `const`'s values, a boolean, null.
+    Choices(Vec<String>),
+    /// One JSON value of this schema: a number, a list, an object.
+    Json(Value),
+}
+
+/// The value form of a property, following how the template writes a value
+/// ([`qwen35_value`]) and how [`CallParser`] reads one back.
+fn xml_value(schema: &Value, root: &Value) -> XmlValue {
+    let choices = |values: &[Value]| {
+        XmlValue::Choices(values.iter().map(qwen35_value).collect::<Vec<String>>())
+    };
+    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+        if !values.is_empty() {
+            return choices(values);
+        }
+    }
+    if let Some(value) = schema.get("const") {
+        return choices(std::slice::from_ref(value));
+    }
+    match schema.get("type") {
+        Some(Value::Str(t)) => match t.as_str() {
+            "boolean" => XmlValue::Choices(vec!["True".into(), "False".into()]),
+            "null" => XmlValue::Choices(vec!["None".into()]),
+            "integer" | "number" | "array" | "object" => match with_definitions(schema, root) {
+                Some(schema) => XmlValue::Json(schema),
+                None => XmlValue::Text,
+            },
+            _ => XmlValue::Text,
+        },
+        _ => XmlValue::Text,
+    }
+}
+
+/// `schema` as a schema that stands on its own: a property's schema is compiled apart
+/// from the tool's, so `$ref`s into the tool's `$defs` or `definitions` need those tables
+/// beside it. `None` when it refers to the tool's root (`"$ref": "#"`), which has no
+/// meaning once the property stands alone.
+fn with_definitions(schema: &Value, root: &Value) -> Option<Value> {
+    fn refers(v: &Value, to_root: &mut bool) -> bool {
+        match v {
+            Value::Obj(fields) => {
+                let mut any = false;
+                for (k, v) in fields {
+                    if k == "$ref" {
+                        any = true;
+                        if v.as_str() == Some("#") {
+                            *to_root = true;
+                        }
+                    }
+                    any |= refers(v, to_root);
+                }
+                any
+            }
+            Value::Arr(items) => {
+                let mut any = false;
+                for v in items {
+                    any |= refers(v, to_root);
+                }
+                any
+            }
+            _ => false,
+        }
+    }
+    let mut to_root = false;
+    if !refers(schema, &mut to_root) {
+        return Some(schema.clone());
+    }
+    if to_root {
+        return None;
+    }
+    let mut fields = schema.as_object()?.to_vec();
+    for table in ["$defs", "definitions"] {
+        if schema.get(table).is_none() {
+            if let Some(defs) = root.get(table) {
+                fields.push((table.to_string(), defs.clone()));
+            }
+        }
+    }
+    Some(Value::Obj(fields))
+}
+
+/// The schema a forced call's `arguments` must satisfy: the tool's `parameters`.
+///
+/// Arguments are a JSON object in every format, so the schema must describe one. Missing
+/// or empty parameters mean the function takes none, and the arguments are `{}`. A schema
+/// without `type` is read as an object schema; any other type is refused.
+fn argument_schema(parameters: Option<&Value>, i: usize) -> Result<Value, String> {
+    let none = || {
+        Value::Obj(vec![
+            ("type".to_string(), Value::Str("object".to_string())),
+            ("properties".to_string(), Value::Obj(Vec::new())),
+            ("additionalProperties".to_string(), Value::Bool(false)),
+        ])
+    };
+    let Some(p) = parameters else {
+        return Ok(none());
+    };
+    let Some(fields) = p.as_object() else {
+        return Err(format!("tools[{i}].function.parameters must be an object"));
+    };
+    if fields.is_empty() {
+        return Ok(none());
+    }
+    match p.get("type") {
+        Some(Value::Str(t)) if t == "object" => Ok(p.clone()),
+        Some(_) => Err(format!(
+            "tools[{i}].function.parameters must be a schema of type \"object\""
+        )),
+        None => {
+            let mut fields = fields.to_vec();
+            fields.insert(0, ("type".to_string(), Value::Str("object".to_string())));
+            Ok(Value::Obj(fields))
+        }
+    }
 }
 
 /// The `messages` of a chat request as [`Msg`]s.
@@ -1710,5 +2040,313 @@ mod tests {
         let b = render(ToolFormat::QwenXml, &[], &inline).unwrap();
         assert_eq!(a, b);
         assert!(a.ends_with("It is noon."), "a continuation is left open");
+    }
+
+    // ---- forced calls (S6.6b) ----
+
+    fn forced_tools() -> Vec<Value> {
+        let raw = Value::parse(
+            r#"[
+            {"type":"function","function":{"name":"get_weather","description":"w",
+              "parameters":{"type":"object","properties":{"city":{"type":"string"},
+                "unit":{"enum":["c","f"]}},"required":["city"],"additionalProperties":false}}},
+            {"type":"function","function":{"name":"now"}}
+        ]"#,
+        )
+        .unwrap();
+        tools_from_json(Some(&raw)).unwrap()
+    }
+
+    /// Feed `text` to a fresh matcher of `c`: `Ok((can_end, closed))`, or the byte offset
+    /// the constraint refused.
+    fn feed(c: &Constraint, text: &str) -> Result<(bool, bool), usize> {
+        let mut m = crate::constrain::Matcher::new(c).expect("the constraint starts");
+        m.advance_bytes(text.as_bytes())?;
+        Ok((m.can_end(), m.is_closed()))
+    }
+
+    const WEATHER: &str =
+        "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+    const NOW: &str = "<tool_call>\n{\"name\": \"now\", \"arguments\": {}}\n</tool_call>";
+
+    #[test]
+    fn a_named_choice_is_exactly_one_call_to_that_tool() {
+        let tools = forced_tools();
+        for format in [ToolFormat::Hermes, ToolFormat::Qwen3(Qwen3Text::Upstream)] {
+            let c =
+                forced_calls(format, &tools, &Forced::Named("get_weather".into()), true).unwrap();
+            // The call, whole: the reply may end there and nothing may follow it.
+            assert_eq!(feed(&c, WEATHER), Ok((true, true)));
+            // Not prose, not the other tool, not a second call.
+            assert_eq!(feed(&c, "Sure"), Err(0));
+            assert!(feed(&c, NOW).is_err());
+            assert!(feed(&c, &format!("{WEATHER}\n{WEATHER}")).is_err());
+            // The arguments are the tool's own schema: a missing required key, a key the
+            // schema does not have and a value outside the enum are all refused.
+            for bad in [
+                "{\"unit\": \"c\"}",
+                "{\"city\": \"Paris\", \"day\": 1}",
+                "{\"city\": \"Paris\", \"unit\": \"k\"}",
+            ] {
+                let text = format!(
+                    "<tool_call>\n{{\"name\": \"get_weather\", \"arguments\": {bad}}}\n</tool_call>"
+                );
+                assert!(feed(&c, &text).is_err(), "{bad}");
+            }
+            // A prefix is not an end.
+            assert_eq!(feed(&c, &WEATHER[..WEATHER.len() - 1]), Ok((false, false)));
+        }
+    }
+
+    #[test]
+    fn a_required_choice_is_one_call_or_several_joined_by_a_newline() {
+        let tools = forced_tools();
+        let any = forced_calls(ToolFormat::Hermes, &tools, &Forced::Any, true).unwrap();
+        // Either tool; after a call the reply may end or go on with another call.
+        assert_eq!(feed(&any, WEATHER), Ok((true, false)));
+        assert_eq!(feed(&any, NOW), Ok((true, false)));
+        assert_eq!(
+            feed(&any, &format!("{NOW}\n{WEATHER}\n{NOW}")),
+            Ok((true, false))
+        );
+        // Between calls exactly one newline, and never text.
+        assert!(feed(&any, &format!("{NOW}{WEATHER}")).is_err());
+        assert!(feed(&any, &format!("{NOW}\n\n{WEATHER}")).is_err());
+        assert!(feed(&any, &format!("{NOW}\nDone.")).is_err());
+        assert_eq!(feed(&any, "I will"), Err(0));
+        // A tool without parameters takes no arguments.
+        assert!(feed(
+            &any,
+            "<tool_call>\n{\"name\": \"now\", \"arguments\": {\"tz\": 1}}\n</tool_call>"
+        )
+        .is_err());
+
+        // `parallel_tool_calls: false`: exactly one.
+        let one = forced_calls(ToolFormat::Hermes, &tools, &Forced::Any, false).unwrap();
+        assert_eq!(feed(&one, NOW), Ok((true, true)));
+        assert!(feed(&one, &format!("{NOW}\n{WEATHER}")).is_err());
+    }
+
+    #[test]
+    fn what_a_forced_reply_says_is_what_the_parser_reads() {
+        let tools = forced_tools();
+        let any = forced_calls(ToolFormat::Hermes, &tools, &Forced::Any, true).unwrap();
+        let reply = format!("{WEATHER}\n{NOW}");
+        assert_eq!(feed(&any, &reply), Ok((true, false)));
+        let events = parse_with(&reply, || {
+            CallParser::with_tools(ToolFormat::Hermes, &tools)
+        });
+        assert_eq!(
+            events,
+            vec![
+                call(0, "get_weather", "{\"city\": \"Paris\"}"),
+                call(1, "now", "{}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_forced_choice_that_cannot_be_honoured_is_refused_by_name() {
+        let tools = forced_tools();
+        let err = |r: Result<Constraint, String>| r.expect_err("refused");
+        assert!(err(forced_calls(
+            ToolFormat::Hermes,
+            &tools,
+            &Forced::Named("nope".into()),
+            true
+        ))
+        .contains("\"nope\", which is not one of the request's tools"));
+        assert!(
+            err(forced_calls(ToolFormat::Hermes, &[], &Forced::Any, true)).contains("needs tools")
+        );
+        let parse = |text: &str| tools_from_json(Some(&Value::parse(text).unwrap())).unwrap();
+        // Arguments are an object: a schema of another type cannot be a tool's parameters.
+        let scalar = parse(
+            r#"[{"type":"function","function":{"name":"f","parameters":{"type":"string"}}}]"#,
+        );
+        assert!(err(forced_calls(
+            ToolFormat::Hermes,
+            &scalar,
+            &Forced::Any,
+            true
+        ))
+        .contains("tools[0].function.parameters must be a schema of type \"object\""));
+        // A keyword the constraint compiler refuses names the tool it is in.
+        let pattern = parse(
+            r#"[{"type":"function","function":{"name":"ok","parameters":{"type":"object"}}},
+                {"type":"function","function":{"name":"f","parameters":{"type":"object",
+                 "properties":{"a":{"type":"string","pattern":"^a+$"}}}}}]"#,
+        );
+        let e = err(forced_calls(
+            ToolFormat::Hermes,
+            &pattern,
+            &Forced::Any,
+            true,
+        ));
+        assert!(e.starts_with("tools[1].function.parameters: "), "{e}");
+        assert!(e.contains("pattern"), "{e}");
+        // Naming the other tool does not trip over it.
+        assert!(forced_calls(
+            ToolFormat::Hermes,
+            &pattern,
+            &Forced::Named("ok".into()),
+            true
+        )
+        .is_ok());
+        // A schema without `type` is read as an object schema.
+        let untyped = parse(
+            r#"[{"type":"function","function":{"name":"f","parameters":{"properties":{"a":{"type":"integer"}},"required":["a"]}}}]"#,
+        );
+        let c = forced_calls(ToolFormat::Hermes, &untyped, &Forced::Any, false).unwrap();
+        assert_eq!(
+            feed(
+                &c,
+                "<tool_call>\n{\"name\": \"f\", \"arguments\": {\"a\": 3}}\n</tool_call>"
+            ),
+            Ok((true, true))
+        );
+        assert!(feed(
+            &c,
+            "<tool_call>\n{\"name\": \"f\", \"arguments\": 3}\n</tool_call>"
+        )
+        .is_err());
+    }
+
+    // ---- forced calls in the XML convention, and after thinking (S6.6b) ----
+
+    fn forced_xml_tools() -> Vec<Value> {
+        let raw = Value::parse(
+            r#"[
+            {"type":"function","function":{"name":"web_search","description":"s",
+              "parameters":{"type":"object","properties":{
+                "query":{"type":"string"},
+                "limit":{"type":"integer"},
+                "safe":{"type":"boolean"},
+                "site":{"enum":["docs","blog"]},
+                "tags":{"type":"array","items":{"type":"string"}}},
+              "required":["query","safe"]}}},
+            {"type":"function","function":{"name":"now"}}
+        ]"#,
+        )
+        .unwrap();
+        tools_from_json(Some(&raw)).unwrap()
+    }
+
+    #[test]
+    fn a_forced_call_in_the_xml_convention_is_the_templates_own_text() {
+        let tools = forced_xml_tools();
+        let c = forced_calls(
+            ToolFormat::QwenXml,
+            &tools,
+            &Forced::Named("web_search".into()),
+            true,
+        )
+        .unwrap();
+        // Every property, in the schema's order, each value in its bare spelling.
+        let full = "<tool_call>\n<function=web_search>\n<parameter=query>\nrust 2024\nedition\n</parameter>\n<parameter=limit>\n5\n</parameter>\n<parameter=safe>\nTrue\n</parameter>\n<parameter=site>\ndocs\n</parameter>\n<parameter=tags>\n[\"a\", \"b\"]\n</parameter>\n</function>\n</tool_call>";
+        assert_eq!(feed(&c, full), Ok((true, true)));
+        // Only the required ones.
+        let least = "<tool_call>\n<function=web_search>\n<parameter=query>\nrust\n</parameter>\n<parameter=safe>\nFalse\n</parameter>\n</function>\n</tool_call>";
+        assert_eq!(feed(&c, least), Ok((true, true)));
+        // What the constraint says is what the parser reads, and it reads the arguments
+        // the schema describes.
+        let events = parse_with(full, || CallParser::with_tools(ToolFormat::QwenXml, &tools));
+        assert_eq!(
+            events,
+            vec![call(
+                0,
+                "web_search",
+                "{\"query\": \"rust 2024\\nedition\", \"limit\": 5, \"safe\": true, \"site\": \"docs\", \"tags\": [\"a\", \"b\"]}"
+            )]
+        );
+        // Refused: a required property left out, a property out of order, a value outside
+        // its type or its enum, a property the schema does not have, JSON's own `true`.
+        let with = |params: &str| {
+            format!("<tool_call>\n<function=web_search>\n{params}</function>\n</tool_call>")
+        };
+        for bad in [
+            "<parameter=query>\nrust\n</parameter>\n",
+            "<parameter=safe>\nTrue\n</parameter>\n<parameter=query>\nrust\n</parameter>\n",
+            "<parameter=query>\nrust\n</parameter>\n<parameter=limit>\nfive\n</parameter>\n<parameter=safe>\nTrue\n</parameter>\n",
+            "<parameter=query>\nrust\n</parameter>\n<parameter=safe>\nTrue\n</parameter>\n<parameter=site>\nwiki\n</parameter>\n",
+            "<parameter=query>\nrust\n</parameter>\n<parameter=safe>\nTrue\n</parameter>\n<parameter=lang>\nen\n</parameter>\n",
+            "<parameter=query>\nrust\n</parameter>\n<parameter=safe>\ntrue\n</parameter>\n",
+        ] {
+            assert!(feed(&c, &with(bad)).is_err(), "{bad:?}");
+        }
+        // A tool without parameters, any tool, and several calls joined by a newline.
+        let any = forced_calls(ToolFormat::QwenXml, &tools, &Forced::Any, true).unwrap();
+        let now = "<tool_call>\n<function=now>\n</function>\n</tool_call>";
+        assert_eq!(feed(&any, now), Ok((true, false)));
+        assert_eq!(feed(&any, &format!("{least}\n{now}")), Ok((true, false)));
+        assert!(feed(&any, &format!("{least}{now}")).is_err());
+        assert_eq!(feed(&any, "Let me"), Err(0));
+    }
+
+    #[test]
+    fn a_constraint_after_thinking_leaves_the_thinking_free() {
+        let tools = forced_tools();
+        let calls = || forced_calls(ToolFormat::Hermes, &tools, &Forced::Any, false).unwrap();
+        // The prompt opened the block: reasoning, the closing tag, two newlines, the call.
+        let open = after_reasoning(Reasoning::Open, calls());
+        assert_eq!(
+            feed(
+                &open,
+                &format!("They want <tool_call> weather.\n</think>\n\n{NOW}")
+            ),
+            Ok((true, true))
+        );
+        assert_eq!(feed(&open, &format!("</think>\n\n{NOW}")), Ok((true, true)));
+        assert!(feed(&open, &format!("thinking</think>{NOW}")).is_err());
+        assert!(feed(&open, "thinking</think>\n\nSure.").is_err());
+        // The reply cannot end in the reasoning, however long it is.
+        assert_eq!(feed(&open, "still thinking"), Ok((false, false)));
+        // The model may open a block itself, or go straight to the call.
+        let optional = after_reasoning(Reasoning::Optional, calls());
+        assert_eq!(feed(&optional, NOW), Ok((true, true)));
+        assert_eq!(
+            feed(&optional, &format!("<think>\nhm\n</think>\n\n{NOW}")),
+            Ok((true, true))
+        );
+        assert!(feed(&optional, &format!("hm</think>\n\n{NOW}")).is_err());
+        assert!(feed(
+            &optional,
+            &format!("<think>a</think>\n\n<think>b</think>\n\n{NOW}")
+        )
+        .is_err());
+        // No thinking: the constraint as it is.
+        assert_eq!(
+            feed(&after_reasoning(Reasoning::None, calls()), NOW),
+            Ok((true, true))
+        );
+    }
+
+    #[test]
+    fn an_xml_value_follows_the_propertys_schema() {
+        let parse = |text: &str| tools_from_json(Some(&Value::parse(text).unwrap())).unwrap();
+        let tools = parse(
+            r##"[{"type":"function","function":{"name":"f","parameters":{"type":"object",
+              "$defs":{"point":{"type":"object","properties":{"x":{"type":"integer"}},"required":["x"],"additionalProperties":false}},
+              "properties":{
+                "p":{"$ref":"#/$defs/point"},
+                "o":{"type":"object","properties":{"at":{"$ref":"#/$defs/point"}},"required":["at"],"additionalProperties":false},
+                "n":{"type":"null"},
+                "c":{"const":3},
+                "u":{"type":["string","null"]}},
+              "required":["p","o","n","c","u"]}}}]"##,
+        );
+        let c = forced_calls(ToolFormat::QwenXml, &tools, &Forced::Any, false).unwrap();
+        let with = |o: &str, n: &str, c: &str| {
+            format!("<tool_call>\n<function=f>\n<parameter=p>\nanything at all\n</parameter>\n<parameter=o>\n{o}\n</parameter>\n<parameter=n>\n{n}\n</parameter>\n<parameter=c>\n{c}\n</parameter>\n<parameter=u>\nfree\n</parameter>\n</function>\n</tool_call>")
+        };
+        // A bare `$ref` and a union have no single bare spelling: free text. An object is
+        // JSON of its schema, with the tool's definitions beside it.
+        assert_eq!(
+            feed(&c, &with("{\"at\": {\"x\": 1}}", "None", "3")),
+            Ok((true, true))
+        );
+        assert!(feed(&c, &with("{\"at\": {\"x\": \"1\"}}", "None", "3")).is_err());
+        assert!(feed(&c, &with("{\"at\": {\"x\": 1}}", "null", "3")).is_err());
+        assert!(feed(&c, &with("{\"at\": {\"x\": 1}}", "None", "4")).is_err());
     }
 }

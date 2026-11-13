@@ -1,0 +1,14 @@
+# forced_cmp.py: 20 forced requests per round (10 questions x "required" and a named function), Qwen2.5-0.5B-Instruct-Q4_K_M,
+# 4 threads, temperature 0, max_tokens 160; Peregrine and llama.cpp v0.9.0 (--jinja) one after the other in every round.
+# Host: a shared 8-vCPU VM under outside load (load average 7-10 during the run).
+peregrine r1: replies with a call 20/20, calls valid for their schema 22/22, decode tok/s median 35.8 (min 23.6, max 38.6)
+   no call: required | Is it late in America/New_York? | length 'To determine if it\'s late in America/New_York, I\'ll use the `get_ti
+   no call: required | Hello! | length "Hello! How can I assist you today? Please let me know if you need any
+   no call: named | Is it late in America/New_York? | stop "To determine if it's late in America/New_York, I'll use the `get_time
+   no call: named | Hello! | stop 'Hello! How can I assist you today?'
+llama.cpp r1: replies with a call 16/20, calls valid for their schema 20/20, decode tok/s median 32.2 (min 27.5, max 36.1)
+peregrine r2: replies with a call 20/20, calls valid for their schema 22/22, decode tok/s median 39.5 (min 33.1, max 46.2)
+llama.cpp r2: replies with a call 16/20, calls valid for their schema 20/20, decode tok/s median 32.8 (min 30.4, max 39.3)
+peregrine r3: replies with a call 20/20, calls valid for their schema 22/22, decode tok/s median 38.9 (min 33.0, max 43.8)
+llama.cpp r3: replies with a call 16/20, calls valid for their schema 20/20, decode tok/s median 28.5 (min 16.6, max 32.3)
+# (the four "no call" lines are llama.cpp's replies of round 1; rounds 2 and 3 were the same four)

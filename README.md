@@ -167,12 +167,15 @@ curl -s localhost:8201/v1/chat/completions -H 'content-type: application/json' -
 The reply's `message.tool_calls` holds the call (`get_weather` with `{"city": "Paris"}`) and
 `finish_reason` is `"tool_calls"`. Run the tool, then send the conversation back with the assistant's
 message and a `tool` message carrying the result, and the model answers in text. Supported today:
-Qwen 2.5, Qwen 3, Qwen 3.5 and Bonsai 2 chat models; `tool_choice` `"auto"` and `"none"`;
-`parallel_tool_calls`; streaming. A Qwen 3, Qwen 3.5 or Bonsai 2 model thinks before it answers, and its
+Qwen 2.5, Qwen 3, Qwen 3.5 and Bonsai 2 chat models; `tool_choice` `"auto"`, `"none"`, `"required"`
+and a named function; `parallel_tool_calls`; `tools` beside a `response_format`; streaming. A
+required or named choice is a constraint on the sampler, not an instruction: the reply is calls in
+the model's own call syntax whose arguments fit the tool's `parameters` schema, whatever the model
+would have written. A Qwen 3, Qwen 3.5 or Bonsai 2 model thinks before it answers, and its
 thinking comes back in `reasoning_content`, never read for calls; send
 `"chat_template_kwargs": {"enable_thinking": false}` (or `"reasoning_effort": "none"`) to switch
-it off. Other model families, and `tool_choice: "required"` or a named function, are refused with
-a 400 until they are built ([design](docs/design/s6-tool-calling.md)).
+it off; with thinking on, a forced call follows the model's thinking. Other model families are
+refused with a 400 until they are built ([design](docs/design/s6-tool-calling.md)).
 
 For a long-lived service, `--background` detaches the server, writes a lifecycle state file and a log,
 and returns once it is listening:
@@ -422,7 +425,7 @@ Full tables, charts, accuracy verification, and machine records are in [docs/ben
 | Tokenizers | GPT-2 byte-level BPE (smollm, gpt2 / modern-bert, llama-bpe, qwen2, qwen35, gpt-4o, dbrx, tekken / pixtral, tekken-num3, nemotron-3.5-embed), SentencePiece BPE (llama), WordPiece (bert), SentencePiece unigram (t5) |
 | Chat templates | read from the model file and rendered exactly as llama.cpp renders them: ChatML, Phi-4, Llama 3, Qwen 3, Qwen 3.5 (Bonsai 2), Gemma, Mistral (v0, v1, v7), Llama 2, OpenAI Harmony (gpt-oss) — or named with `--chat-template` for a file that declares none |
 | Embeddings | causal decoders as embedders (`<arch>.pooling_type`: last or mean), and bidirectional encoders: BERT (MiniLM, BGE, E5, GTE, bge-m3: cls/mean), ModernBERT (ModernBERT, gte-modernbert, Granite Embedding R2: cls/mean, local and global attention), NomicBERT (nomic-embed-text v1.5: mean, RoPE, SwiGLU), NomicBERT-MoE (nomic-embed-text-v2-moe: mean, RoPE, a mixture of experts on every second layer), Jina BERT v2 (jina-embeddings-v2: ALiBi, GEGLU, mean/cls), Gemma 3 (EmbeddingGemma: mean/cls with `dense_2`/`dense_3`) and Mistral 3 (Nemotron 3.5 Embed 1B: mean); `POST /v1/embeddings`, `peregrine embed` |
-| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 (the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the prompt is the one llama.cpp builds from the model's template |
+| Tool calling | OpenAI `tools`, `tool_choice` (`auto`, `none`, `required`, a named function) and `tool_calls` on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 (the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the prompt is the one llama.cpp builds from the model's template |
 | Rerank and classify | a `bert` or `modern-bert` file's classifier head (`cls`, `cls.norm`, `cls.output`, `classifier.output_labels`): `POST /v1/rerank` (and `/rerank`, `/v1/reranking`, `/reranking`), `POST /v1/classify`, `peregrine rerank`; bge-reranker-v2-m3, bge-reranker-base and gte-reranker-modernbert-base checked against llama.cpp v0.9.0 |
 | Decision models | native decision models with a `systemone` template: the `openjev` type, `POST /v1/systemone`, `peregrine decide` |
 <!-- support:end -->

@@ -1129,6 +1129,11 @@ struct ToolPlan {
     parse: bool,
     /// `false` for `parallel_tool_calls: false`: stop at the first complete call.
     parallel: bool,
+    /// `tool_choice: "required"` or a named function: the reply is held to calls (S6.6b).
+    constraint: Option<Arc<Constraint>>,
+    /// Where the reply's thinking stands, for a constraint laid over the reply: it holds
+    /// what follows the thinking, never the thinking itself.
+    reasoning: tools::Reasoning,
 }
 
 /// One call the model wrote, as the response returns it.
@@ -1343,30 +1348,103 @@ fn refuse_legacy_tools(b: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether a reply may carry calls. `"required"` and a named function need constrained
-/// sampling (S6.6); an option that cannot be honoured is refused, not ignored.
-fn tool_choice(b: &Value) -> Result<bool, String> {
+/// OpenAI's `tool_choice`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolChoice {
+    /// The model decides: text, calls, or both (the default).
+    Auto,
+    /// The tools are rendered and the reply is text as the model wrote it.
+    None,
+    /// The reply is at least one call (constrained sampling, S6.6b).
+    Required,
+    /// The reply is exactly one call to this function.
+    Named(String),
+}
+
+impl ToolChoice {
+    /// The call the reply must make, if the choice forces one.
+    fn forced(&self) -> Option<tools::Forced> {
+        match self {
+            ToolChoice::Auto | ToolChoice::None => None,
+            ToolChoice::Required => Some(tools::Forced::Any),
+            ToolChoice::Named(name) => Some(tools::Forced::Named(name.clone())),
+        }
+    }
+}
+
+/// Read `tool_choice`: `"auto"` (the default), `"none"`, `"required"`, or a named function
+/// (`{"type": "function", "function": {"name": "…"}}`). Anything else is refused.
+fn tool_choice(b: &Value) -> Result<ToolChoice, String> {
+    const FORMS: &str = "tool_choice must be \"auto\", \"none\", \"required\" or a named function                          ({\"type\": \"function\", \"function\": {\"name\": \"…\"}})";
     match b.get("tool_choice") {
-        None | Some(Value::Null) => Ok(true),
-        Some(Value::String(s)) if s == "auto" => Ok(true),
-        Some(Value::String(s)) if s == "none" => Ok(false),
-        Some(Value::String(s)) if s == "required" => Err(
-            "tool_choice \"required\" needs constrained sampling, which is not built yet".into(),
-        ),
+        None | Some(Value::Null) => Ok(ToolChoice::Auto),
+        Some(Value::String(s)) if s == "auto" => Ok(ToolChoice::Auto),
+        Some(Value::String(s)) if s == "none" => Ok(ToolChoice::None),
+        Some(Value::String(s)) if s == "required" => Ok(ToolChoice::Required),
         Some(Value::Object(o)) => {
-            let name = o
+            if o.get("type").and_then(Value::as_str) != Some("function") {
+                return Err(FORMS.into());
+            }
+            match o
                 .get("function")
                 .and_then(|f| f.get("name"))
                 .and_then(Value::as_str)
-                .unwrap_or("a function");
-            Err(format!(
-                "tool_choice naming {name:?} needs constrained sampling, which is not built yet"
-            ))
+            {
+                Some(name) if !name.is_empty() => Ok(ToolChoice::Named(name.to_string())),
+                _ => Err("tool_choice.function.name must be a non-empty string".into()),
+            }
         }
-        Some(_) => {
-            Err("tool_choice must be \"auto\", \"none\", \"required\" or a named function".into())
-        }
+        Some(_) => Err(FORMS.into()),
     }
+}
+
+/// The reply's constraint once the tools have had their say (S6.6b). `content` is
+/// `response_format`'s constraint, if the request has one. Also says which request field
+/// the constraint comes from, for an error's `param`.
+///
+/// * A forced `tool_choice` wins: the reply is calls and has no content for a schema to
+///   describe.
+/// * Tools the model may call (`"auto"`) beside a `response_format`: the reply is either
+///   calls, in the format's syntax with each tool's parameters as its arguments' schema,
+///   or content of the response schema. Never a mixture: text before a call would not be
+///   the schema's JSON.
+/// * Otherwise (`"none"`, no tools, no tool path) the content's constraint stands alone.
+///
+/// On a file whose template is one of the tool formats the constraint is laid after the
+/// reply's thinking ([`tools::after_reasoning`]): the reasoning is the model's own text,
+/// and what follows the closing tag is held.
+fn join_tool_constraint(
+    tool: Option<&ToolPlan>,
+    content: Option<Arc<Constraint>>,
+) -> Result<(Option<Arc<Constraint>>, &'static str), String> {
+    let Some(tool) = tool else {
+        return Ok((content, "response_format"));
+    };
+    // The constraint is on what follows the model's thinking; the thinking stays free.
+    let after_thinking = |c: Arc<Constraint>| match tool.reasoning {
+        tools::Reasoning::None => Ok(c),
+        reasoning => {
+            let c = tools::after_reasoning(reasoning, (*c).clone());
+            peregrine_core::constrain::Matcher::new(&c)
+                .map(|_| Arc::new(c))
+                .map_err(|e| e.message())
+        }
+    };
+    if let Some(forced) = &tool.constraint {
+        return Ok((Some(after_thinking(forced.clone())?), "tool_choice"));
+    }
+    let Some(content) = content else {
+        return Ok((None, "response_format"));
+    };
+    if !tool.parse || tool.tools.is_empty() {
+        return Ok((Some(after_thinking(content)?), "response_format"));
+    }
+    let calls = tools::forced_calls(tool.format, &tool.tools, &tools::Forced::Any, tool.parallel)
+        .map_err(|e| format!("response_format with tools: {e}"))?;
+    let either = Constraint::any_of(vec![calls, (*content).clone()]);
+    peregrine_core::constrain::Matcher::new(&either)
+        .map_err(|e| format!("response_format with tools: {}", e.message()))?;
+    Ok((Some(after_thinking(Arc::new(either))?), "response_format"))
 }
 
 fn parallel_tool_calls(b: &Value) -> Result<bool, String> {
@@ -1404,7 +1482,8 @@ fn tool_fields_present(b: &Value) -> bool {
 /// (for its fields); `raw` is the same body's text, parsed again with the order-keeping
 /// JSON, because a tool's schema is written into the prompt in the request's own order.
 fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan, String> {
-    let parse = tool_choice(body)?;
+    let choice = tool_choice(body)?;
+    let parse = choice != ToolChoice::None;
     let parallel = parallel_tool_calls(body)?;
     let ordered =
         OrderedValue::parse(raw).map_err(|e| format!("the request body is not valid JSON: {e}"))?;
@@ -1420,6 +1499,24 @@ fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan,
     };
     let prompt = tools::render_with(format, &tools, &messages, options)?;
     let reasoning_open = format.opens_reasoning(&prompt);
+    // The template opened the block for the model (Qwen 3.5), or the model may open one
+    // itself (Qwen 3; with thinking off its template closes an empty block in the prompt).
+    let reasoning = if reasoning_open {
+        tools::Reasoning::Open
+    } else if matches!(format, ToolFormat::Qwen3(_)) && options.thinking {
+        tools::Reasoning::Optional
+    } else {
+        tools::Reasoning::None
+    };
+    // A forced choice holds the sampler to the format's call syntax and the tool's own
+    // parameter schema (S6.6b). The prompt is the one `"auto"` gets: the tools are
+    // described the same way, only the reply is constrained.
+    let constraint = match choice.forced() {
+        Some(forced) => Some(Arc::new(tools::forced_calls(
+            format, &tools, &forced, parallel,
+        )?)),
+        None => None,
+    };
     // Without tools no call can be valid, so the reply is text as the model wrote it.
     let parse = parse && !tools.is_empty();
     Ok(ToolPlan {
@@ -1429,6 +1526,8 @@ fn tool_request(format: ToolFormat, body: &Value, raw: &str) -> Result<ToolPlan,
         reasoning_open,
         parse,
         parallel,
+        constraint,
+        reasoning,
     })
 }
 
@@ -1474,10 +1573,9 @@ fn plan(b: &Value) -> Result<Plan, String> {
 
 fn plan_with(b: &Value, tool_path: bool) -> Result<Plan, String> {
     refuse_legacy_tools(b)?;
-    // Validate the tool choice even without tools: `"required"` cannot be honoured.
-    tool_choice(b)?;
-    if tool_path && b.get("response_format").is_some_and(|v| !v.is_null()) {
-        return Err("response_format with tools is not supported yet".into());
+    // Validate the tool choice even without tools: a forced call has nothing to call.
+    if tool_choice(b)?.forced().is_some() && !tool_path {
+        return Err("a required or named tool_choice needs tools".into());
     }
     reject_unsupported_sampling(b)?;
     let n = b["n"].as_u64().unwrap_or(1).max(1);
@@ -3644,16 +3742,23 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) 
     if let Err(e) = apply_response_format(&mut p, &raw) {
         return bad_param(e, "response_format");
     }
-    // A constrained reply is the assistant's content. A reasoning model's reply starts in
-    // its thinking span, and the engine's sampler cannot be told when the server's parser
-    // closes it; refuse instead of constraining the wrong span.
-    let opens_in_reasoning = app.template.opens_reasoning(p.thinking)
-        || p.tool.as_ref().is_some_and(|t| t.reasoning_open);
-    if p.constraint.is_some() && opens_in_reasoning {
+    // Then the tools' say: a forced choice, or calls beside the content's schema.
+    let constrained_by = match join_tool_constraint(p.tool.as_ref(), p.constraint.take()) {
+        Ok((constraint, by)) => {
+            p.constraint = constraint;
+            by
+        }
+        Err(e) => return bad_param(e, "tools"),
+    };
+    // A constrained reply is the assistant's content. On a tool format's file the
+    // constraint was laid after the thinking above. Any other reasoning template opens a
+    // span whose shape the server does not know as a constraint; refuse instead of
+    // constraining the wrong span.
+    if p.constraint.is_some() && p.tool.is_none() && app.template.opens_reasoning(p.thinking) {
         return bad_param(
             "response_format is not supported while the model is thinking; send the request with thinking off"
                 .into(),
-            "response_format",
+            constrained_by,
         );
     }
     if body.get("reasoning_format").is_none() {
@@ -4611,21 +4716,108 @@ mod tests {
         assert!(!t.prompt.is_empty());
     }
 
+    /// Feed `text` to a fresh matcher of a forced plan's constraint: whether it was
+    /// accepted whole, and whether the reply is then closed.
+    fn forced_accepts(t: &super::ToolPlan, text: &str) -> (bool, bool) {
+        let c = t
+            .constraint
+            .as_ref()
+            .expect("a forced choice has a constraint");
+        let mut m = peregrine_core::constrain::Matcher::new(c).expect("it starts");
+        let ok = m.advance_bytes(text.as_bytes()).is_ok();
+        (ok, ok && m.is_closed())
+    }
+
     #[test]
-    fn required_and_named_choices_are_refused_for_constrained_sampling() {
+    fn required_and_named_choices_constrain_the_reply_to_calls() {
+        const CALL: &str =
+            "<tool_call>\n{\"name\": \"weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+        // The default and `"none"` leave the sampler alone.
+        assert!(request(json!({"tools": weather_tools()}))
+            .constraint
+            .is_none());
+        assert!(
+            request(json!({"tools": weather_tools(), "tool_choice": "none"}))
+                .constraint
+                .is_none()
+        );
+        // `"required"`: a call, and (parallel calls are on by default) possibly another.
+        let t = request(json!({"tools": weather_tools(), "tool_choice": "required"}));
+        assert!(t.parse);
+        assert_eq!(forced_accepts(&t, CALL), (true, false));
+        assert_eq!(
+            forced_accepts(&t, &format!("{CALL}\n{CALL}")),
+            (true, false)
+        );
+        assert_eq!(forced_accepts(&t, "The weather"), (false, false));
+        // One call when the request says so.
+        let t = request(json!({
+            "tools": weather_tools(), "tool_choice": "required", "parallel_tool_calls": false
+        }));
+        assert_eq!(forced_accepts(&t, CALL), (true, true));
+        // A named function: exactly that call. The prompt is the one `"auto"` gets.
+        let named = json!({"type": "function", "function": {"name": "weather"}});
+        let t = request(json!({"tools": weather_tools(), "tool_choice": named}));
+        assert_eq!(forced_accepts(&t, CALL), (true, true));
+        assert_eq!(t.prompt, request(json!({"tools": weather_tools()})).prompt);
+    }
+
+    #[test]
+    fn a_forced_choice_that_cannot_be_honoured_is_refused() {
+        let refused = |extra: Value| {
+            let b = tool_body(extra);
+            tool_request(tool_format(), &b, &b.to_string())
+                .err()
+                .expect("refused")
+        };
+        // A function that is not among the tools.
+        let e = refused(json!({
+            "tools": weather_tools(),
+            "tool_choice": {"type": "function", "function": {"name": "stocks"}}
+        }));
+        assert!(
+            e.contains("\"stocks\", which is not one of the request's tools"),
+            "{e}"
+        );
+        // The forms OpenAI defines, and nothing else.
+        for bad in [
+            json!("always"),
+            json!(1),
+            json!({"type": "tool", "function": {"name": "weather"}}),
+            json!({"type": "function"}),
+            json!({"type": "function", "function": {"name": ""}}),
+        ] {
+            let e = refused(json!({"tools": weather_tools(), "tool_choice": bad}));
+            assert!(e.starts_with("tool_choice"), "{bad}: {e}");
+        }
+        // Parameters the constraint cannot express name the tool.
+        let e = refused(json!({
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {
+                "type": "object", "properties": {"a": {"type": "string", "pattern": "^x"}}
+            }}}],
+            "tool_choice": "required"
+        }));
+        assert!(e.starts_with("tools[0].function.parameters: "), "{e}");
+        // The same tools under `"auto"` are served as before: the schema is only a
+        // constraint when the choice forces a call.
+        let b = tool_body(json!({
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {
+                "type": "object", "properties": {"a": {"type": "string", "pattern": "^x"}}
+            }}}]
+        }));
+        assert!(tool_request(tool_format(), &b, &b.to_string()).is_ok());
+        // Nothing to call: no tools at all, on either path.
         for choice in [
             json!("required"),
             json!({"type": "function", "function": {"name": "weather"}}),
         ] {
-            let b = tool_body(json!({"tools": weather_tools(), "tool_choice": choice}));
-            let err = tool_request(tool_format(), &b, &b.to_string())
-                .err()
-                .expect("refused");
-            assert!(err.contains("constrained sampling"), "{err}");
+            let b = tool_body(json!({"tool_choice": choice}));
+            let e = plan(&b).err().expect("refused without tools");
+            assert!(e.contains("needs tools"), "{e}");
+            let b = tool_body(json!({"tools": [], "tool_choice": choice}));
+            let e = plan(&b).err().expect("refused with an empty list");
+            assert!(e.contains("needs tools"), "{e}");
         }
-        let b = tool_body(json!({"tools": weather_tools(), "tool_choice": "required"}));
-        let err = plan(&b).err().expect("refused even without the tool path");
-        assert!(err.contains("required"), "{err}");
     }
 
     #[test]
@@ -5101,13 +5293,66 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_response_format_are_refused_together() {
-        let body = json!({
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
-            "response_format": {"type": "json_object"},
-        });
-        let err = plan_with(&body, true).err().expect("refused");
-        assert_eq!(err, "response_format with tools is not supported yet");
+    fn tools_and_response_format_together_allow_calls_or_the_schemas_content() {
+        const CALL: &str =
+            "<tool_call>\n{\"name\": \"weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+        let schema = json!({"type": "json_schema", "json_schema": {"name": "a", "schema": {
+            "type": "object", "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"], "additionalProperties": false
+        }}});
+        let joined = |extra: Value| {
+            let mut b = tool_body(extra);
+            b["response_format"] = schema.clone();
+            let raw = b.to_string();
+            let mut p = plan_with(&b, true).expect("the plan");
+            apply_response_format(&mut p, &raw).expect("the schema");
+            let tool = tool_request(tool_format(), &b, &raw).expect("the tool request");
+            super::join_tool_constraint(Some(&tool), p.constraint.take()).expect("joined")
+        };
+        let accepts = |c: &Option<std::sync::Arc<peregrine_core::constrain::Constraint>>,
+                       text: &str| {
+            let mut m = peregrine_core::constrain::Matcher::new(c.as_ref().expect("a constraint"))
+                .expect("it starts");
+            m.advance_bytes(text.as_bytes()).is_ok() && m.can_end()
+        };
+        // The model may call or answer: a call, or the schema's JSON, and not both.
+        let (c, by) = joined(json!({"tools": weather_tools()}));
+        assert_eq!(by, "response_format");
+        assert!(accepts(&c, CALL));
+        assert!(accepts(&c, "{\"ok\": true}"));
+        assert!(!accepts(&c, "{\"ok\": 1}"));
+        assert!(!accepts(&c, "Sure."));
+        assert!(!accepts(&c, &format!("{{\"ok\": true}}\n{CALL}")));
+        // `"none"`: the content's schema alone.
+        let (c, _) = joined(json!({"tools": weather_tools(), "tool_choice": "none"}));
+        assert!(accepts(&c, "{\"ok\": false}"));
+        assert!(!accepts(&c, CALL));
+        // A forced choice: calls only; a forced reply has no content.
+        let (c, by) = joined(json!({"tools": weather_tools(), "tool_choice": "required"}));
+        assert_eq!(by, "tool_choice");
+        assert!(accepts(&c, CALL));
+        assert!(!accepts(&c, "{\"ok\": true}"));
+        // Without a response_format the default tool path is not constrained at all.
+        let b = tool_body(json!({"tools": weather_tools()}));
+        let tool = tool_request(tool_format(), &b, &b.to_string()).unwrap();
+        assert!(super::join_tool_constraint(Some(&tool), None)
+            .unwrap()
+            .0
+            .is_none());
+        // Tools whose parameters the constraint cannot express are refused by name here,
+        // because the calls have to be constrained too.
+        let mut b = tool_body(json!({"tools": [{"type": "function", "function": {
+            "name": "f", "parameters": {"type": "object",
+                "properties": {"a": {"type": "string", "pattern": "^x"}}}}}]}));
+        b["response_format"] = json!({"type": "json_object"});
+        let raw = b.to_string();
+        let mut p = plan_with(&b, true).unwrap();
+        apply_response_format(&mut p, &raw).unwrap();
+        let tool = tool_request(tool_format(), &b, &raw).unwrap();
+        let e = super::join_tool_constraint(Some(&tool), p.constraint.take()).expect_err("refused");
+        assert!(
+            e.starts_with("response_format with tools: tools[0].function.parameters: "),
+            "{e}"
+        );
     }
 }

@@ -317,13 +317,14 @@ fn the_400s_are_openai_shaped_and_name_the_field() {
             "response_format": {"type": "json_object"}
         })),
     );
+    // Tools beside a response_format are served: the reply is calls or the format's JSON
+    // (S6.6b). This file's chat template has no tool format, which is the refusal here.
     assert_eq!(status, 400, "{v}");
-    assert_eq!(v["error"]["param"], "response_format");
     assert!(
         v["error"]["message"]
             .as_str()
             .unwrap_or("")
-            .contains("response_format with tools is not supported yet"),
+            .contains("no tool format"),
         "{v}"
     );
 }
@@ -360,7 +361,7 @@ fn an_unconstrained_request_is_unaffected_and_two_slots_do_not_interfere() {
 }
 
 #[test]
-fn a_reasoning_model_is_refused_while_thinking_and_served_when_it_is_off() {
+fn a_reasoning_model_thinks_first_and_the_schema_holds_what_follows() {
     let dir = tmpdir("reasoning");
     let model = write_dense_with_template(
         &dir,
@@ -372,14 +373,19 @@ fn a_reasoning_model_is_refused_while_thinking_and_served_when_it_is_off() {
     );
     let (_server, port) = serve("reasoning-serve", &model);
     let schema: Value = serde_json::from_str(SMALL_SCHEMA).unwrap();
+    // Thinking on: the template opened the thinking block, so the reply begins as
+    // reasoning, which is the model's own free text; the schema holds what follows the
+    // closing tag (S6.6b). A file of random weights never writes that tag, so the whole
+    // reply is reasoning and it runs to the token limit: no content, and no refusal.
     let (status, v) = post(port, &json_schema(schema.clone(), true, 64));
-    assert_eq!(status, 400, "{v}");
-    assert_eq!(v["error"]["param"], "response_format");
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(finish_of(&v), "length", "{v}");
+    assert_eq!(content_of(&v), "", "{v}");
     assert!(
-        v["error"]["message"]
+        !v["choices"][0]["message"]["reasoning_content"]
             .as_str()
             .unwrap_or("")
-            .contains("response_format is not supported while the model is thinking"),
+            .is_empty(),
         "{v}"
     );
 

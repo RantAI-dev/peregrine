@@ -128,7 +128,7 @@ prompt is the one llama.cpp builds from the model's template, byte for byte. Des
 | S6.4 | The `llama3` format (Llama 3.1 / 3.2) | 0.5 |
 | S6.5 | The `harmony` format (gpt-oss) | 0.5 |
 | S6.6a | Constrained decoding: a JSON-schema matcher and a token mask, `response_format` JSON mode and JSON schema — done; the public sequence/any-of/repeat combinators are the base for S6.6b | 1.5 |
-| S6.6b | Forcing calls: `tool_choice: "required"` and named choices, built on the S6.6a constraint combinators | 0.5 |
+| S6.6b | Forcing calls: `tool_choice: "required"` and a named function on the Hermes and XML call syntaxes, `tools` beside a `response_format`, and a constraint laid after a thinking model's reasoning — done; with S6.6c under it (the constraint engine's free-text part and marker tokens, so a tag the model has one token for is written as that token). On Qwen 2.5 0.5B, 20 of 20 forced requests answered with schema-valid calls (llama.cpp v0.9.0: 16 of 20) at 1.11–1.36× its decode speed | 0.5 |
 | S6.7 | The `generic` format for templates without a tool section | 0.5 |
 
 ## Stage 7: macOS and Windows

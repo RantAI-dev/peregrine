@@ -1,0 +1,6 @@
+# either.py against Peregrine, Qwen2.5-0.5B-Instruct-Q4_K_M; the question asks for a JSON object and needs no tool
+no tools, no format          stop       content='```json\n{\n  "answer": "Yes",\n  "confident": true\n}\n```' calls=[]
+tools only (auto)            tool_calls content=None calls=[('get_weather', '{"city": "water"}')]
+format only                  stop       content='{\n  "answer": "Yes",\n  "confident": true\n}' calls=[]
+tools + format               tool_calls content=None calls=[('get_weather', '{"city": "water"}')]
+tools + format, choice none  stop       content='{"answer": "Yes", "confident": true}' calls=[]

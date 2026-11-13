@@ -475,10 +475,14 @@ fn what_cannot_be_honoured_is_refused_by_name() {
             "{extra}: {message:?} lacks {word:?}"
         );
     };
-    refused(json!({"tool_choice": "required"}), "constrained sampling");
     refused(
-        json!({"tool_choice": {"type": "function", "function": {"name": "get_weather"}}}),
-        "constrained sampling",
+        json!({"tool_choice": {"type": "function", "function": {"name": "get_stocks"}}}),
+        "which is not one of the request's tools",
+    );
+    refused(json!({"tool_choice": "always"}), "tool_choice must be");
+    refused(
+        json!({"tools": [], "tool_choice": "required"}),
+        "needs tools",
     );
     refused(json!({"functions": [{"name": "f"}]}), "functions");
     refused(json!({"function_call": "auto"}), "function_call");
@@ -501,6 +505,216 @@ fn what_cannot_be_honoured_is_refused_by_name() {
             {"role": "tool", "content": "1"}
         ]}),
         "not JSON",
+    );
+}
+
+/// A forced choice is a constraint on the sampler, so even a file of random weights
+/// answers with calls that parse and fit the tool's schema (S6.6b). The tool's arguments
+/// are a finite language here, so every reply closes well inside the token limit.
+#[test]
+fn a_forced_choice_answers_with_valid_calls_whatever_the_model_writes() {
+    let (_server, port) = serve_tool_model("forced");
+    let tools = json!([
+        {"type": "function", "function": {"name": "set_unit", "description": "Set the unit",
+            "parameters": {"type": "object",
+                "properties": {"unit": {"enum": ["celsius", "fahrenheit"]}, "exact": {"type": "boolean"}},
+                "required": ["unit"], "additionalProperties": false}}},
+        {"type": "function", "function": {"name": "reset"}}
+    ]);
+    let check_call = |call: &Value| {
+        assert_eq!(call["type"], "function", "{call}");
+        let name = call["function"]["name"].as_str().expect("a name");
+        let args: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap())
+            .unwrap_or_else(|e| panic!("arguments are not JSON ({e}): {call}"));
+        let args = args.as_object().expect("arguments are an object");
+        match name {
+            "set_unit" => {
+                assert!(
+                    matches!(args["unit"].as_str(), Some("celsius" | "fahrenheit")),
+                    "{call}"
+                );
+                assert!(args.keys().all(|k| k == "unit" || k == "exact"), "{call}");
+                assert!(args.get("exact").is_none_or(Value::is_boolean), "{call}");
+            }
+            "reset" => assert!(args.is_empty(), "{call}"),
+            other => panic!("a call to {other:?}, which is not a tool of the request"),
+        }
+        name.to_string()
+    };
+    for seed in 0..6u64 {
+        // A named function: exactly one call, to it, and nothing else in the message.
+        for name in ["set_unit", "reset"] {
+            let (status, body) = post(
+                port,
+                tool_request(json!({
+                    "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 200,
+                    "tool_choice": {"type": "function", "function": {"name": name}}
+                })),
+            );
+            assert_eq!(status, 200, "{body}");
+            let choice = &body["choices"][0];
+            assert_eq!(choice["finish_reason"], "tool_calls", "{body}");
+            assert!(choice["message"]["content"].is_null(), "{body}");
+            let calls = choice["message"]["tool_calls"].as_array().expect("calls");
+            assert_eq!(calls.len(), 1, "{body}");
+            assert_eq!(check_call(&calls[0]), name);
+        }
+        // `"required"` with one call allowed: one call to either tool.
+        let (status, body) = post(
+            port,
+            tool_request(json!({
+                "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 200,
+                "tool_choice": "required", "parallel_tool_calls": false
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        let choice = &body["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls", "{body}");
+        let calls = choice["message"]["tool_calls"].as_array().expect("calls");
+        assert_eq!(calls.len(), 1, "{body}");
+        check_call(&calls[0]);
+        // `"required"` with parallel calls: at least one, each valid. A random model may
+        // keep calling until the token limit; whatever it completed is still valid.
+        let (status, body) = post(
+            port,
+            tool_request(json!({
+                "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 120,
+                "tool_choice": "required"
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        let choice = &body["choices"][0];
+        let calls = choice["message"]["tool_calls"].as_array().expect("calls");
+        assert!(!calls.is_empty(), "{body}");
+        calls.iter().for_each(|c| {
+            check_call(c);
+        });
+    }
+}
+
+/// Tools beside a `response_format`: the reply is calls or JSON of the response schema,
+/// never anything else, on a file of random weights too (S6.6b).
+#[test]
+fn tools_beside_a_response_format_answer_with_calls_or_the_schemas_json() {
+    let (_server, port) = serve_tool_model("either");
+    let tools = json!([{"type": "function", "function": {"name": "reset"}}]);
+    let format = json!({"type": "json_schema", "json_schema": {"name": "verdict", "schema": {
+        "type": "object", "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"], "additionalProperties": false
+    }}});
+    let (mut called, mut answered) = (0, 0);
+    for seed in 0..12u64 {
+        let (status, body) = post(
+            port,
+            tool_request(json!({
+                "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 120,
+                "response_format": format, "parallel_tool_calls": false
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        let choice = &body["choices"][0];
+        let message = &choice["message"];
+        match message["tool_calls"].as_array() {
+            Some(calls) if !calls.is_empty() => {
+                called += 1;
+                assert_eq!(calls.len(), 1, "{body}");
+                assert_eq!(calls[0]["function"]["name"], "reset", "{body}");
+                assert_eq!(calls[0]["function"]["arguments"], "{}", "{body}");
+                assert!(message["content"].is_null(), "{body}");
+                assert_eq!(choice["finish_reason"], "tool_calls", "{body}");
+            }
+            _ => {
+                answered += 1;
+                let content = message["content"].as_str().expect("content");
+                let v: Value = serde_json::from_str(content)
+                    .unwrap_or_else(|e| panic!("content is not JSON ({e}): {body}"));
+                let o = v.as_object().expect("an object");
+                assert_eq!(o.len(), 1, "{body}");
+                assert!(o["ok"].is_boolean(), "{body}");
+                assert_eq!(choice["finish_reason"], "stop", "{body}");
+            }
+        }
+    }
+    assert_eq!(called + answered, 12);
+}
+
+/// The XML call syntax (Qwen 3.5's template) under a forced choice, with thinking off so
+/// the reply begins with its content: a file of random weights still answers with calls
+/// that parse and fit the tool. The values here are finite languages (a boolean, an enum),
+/// so every reply closes; a string value is free text, which a random model need not end.
+#[test]
+fn a_forced_choice_in_the_xml_syntax_answers_with_valid_calls() {
+    let (_server, port) =
+        serve_qwen35_model("forced-xml", 43, peregrine_core::tools::QWEN35_TEMPLATE);
+    let tools = json!([
+        {"type": "function", "function": {"name": "set_mode", "description": "Set the mode",
+            "parameters": {"type": "object",
+                "properties": {"mode": {"enum": ["fast", "exact"]}, "verbose": {"type": "boolean"},
+                               "level": {"enum": [1, 2, 3]}},
+                "required": ["mode", "verbose"]}}},
+        {"type": "function", "function": {"name": "reset"}}
+    ]);
+    for seed in 0..6u64 {
+        for choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "set_mode"}}),
+        ] {
+            let (status, body) = post(
+                port,
+                tool_request(json!({
+                    "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 200,
+                    "tool_choice": choice, "parallel_tool_calls": false,
+                    "chat_template_kwargs": {"enable_thinking": false}
+                })),
+            );
+            assert_eq!(status, 200, "{body}");
+            let c = &body["choices"][0];
+            assert_eq!(c["finish_reason"], "tool_calls", "{body}");
+            let calls = c["message"]["tool_calls"].as_array().expect("calls");
+            assert_eq!(calls.len(), 1, "{body}");
+            let name = calls[0]["function"]["name"].as_str().unwrap();
+            let args: Value =
+                serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap())
+                    .unwrap_or_else(|e| panic!("arguments are not JSON ({e}): {body}"));
+            match name {
+                "set_mode" => {
+                    assert!(
+                        matches!(args["mode"].as_str(), Some("fast" | "exact")),
+                        "{body}"
+                    );
+                    assert!(args["verbose"].is_boolean(), "{body}");
+                    assert!(
+                        args.get("level")
+                            .is_none_or(|l| matches!(l.as_i64(), Some(1..=3))),
+                        "{body}"
+                    );
+                }
+                "reset" => {
+                    assert!(
+                        choice.is_string(),
+                        "the named choice called another tool: {body}"
+                    );
+                    assert_eq!(args, json!({}), "{body}");
+                }
+                other => panic!("a call to {other:?}: {body}"),
+            }
+        }
+    }
+    // Thinking on: the forced call follows the model's reasoning. A random model never
+    // closes its thinking, so the reply is reasoning up to the token limit; the request
+    // is served, not refused.
+    let (status, body) = post(
+        port,
+        tool_request(json!({"tools": tools, "tool_choice": "required", "max_tokens": 24})),
+    );
+    assert_eq!(status, 200, "{body}");
+    let c = &body["choices"][0];
+    assert_eq!(c["finish_reason"], "length", "{body}");
+    assert!(
+        c["message"]["tool_calls"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "{body}"
     );
 }
 
