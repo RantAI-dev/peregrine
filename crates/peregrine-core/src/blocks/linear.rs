@@ -662,20 +662,32 @@ fn matmul_block(
     st.barriers += 1;
 }
 
+/// The most activation bytes one packed-float unit reads per pass over its panels.
+///
+/// A unit streams its row block's activations once (for its two panels) and its panels
+/// once, so a larger block means fewer reads of the weights and a larger activation to
+/// keep near. S4.9w measured the old block, [`peregrine_kernels::fpack::row_block`]
+/// (half of L2, 21 rows at 3 072 inputs on a 512 KiB L2): a 128-row pass was cut into
+/// seven blocks and the down projection's weights were streamed seven times, 9–10 % of
+/// a 128-token pass, while the whole pass's activation (128 × 3 072 × 4 bytes = 1.5 MiB)
+/// sat in L3 unused. Two mebibytes covers a 128-row pass at every width the encoders
+/// have (128 × 4 096 × 4), and bounds the other side of the trade: a single long text is
+/// one pass of thousands of rows, and without a bound each unit would stream tens of
+/// megabytes of activations from memory, which costs more than the weight reads it
+/// saves on a machine whose L2 already held a large block.
+const FP_BLOCK_BYTES: usize = 2 << 20;
+
 /// The activation rows one packed-float unit covers.
 ///
-/// One block of the whole pass, cut only so that a group with fewer units than the pool
-/// still fills it: a group of one panel pair (a router, the MTP head's slice) would
-/// otherwise be one unit, one thread. The block changes how often a panel is read, never
-/// a result — but the read is the point. S4.9w measured the old cap at
-/// [`peregrine_kernels::fpack::row_block`] (half of L2): at 128 activation rows it cut a
-/// 768-wide matrix into two blocks and a 3 072-wide one into seven, so the down
-/// projection's weights were streamed seven times, **9–10 % of a 128-token pass**. The
-/// pass's activation, even 512 rows × 3 072 × 4 bytes = 6 MB, fits L3, where the weights
-/// never do; one pass over them is the cheaper side of the trade. S4.9w report, §27.
-fn fp_row_block(_n_in: usize, nb: usize, per: usize, width: usize) -> usize {
+/// As many as [`FP_BLOCK_BYTES`] holds (never fewer than the kernel's own L2 block), cut
+/// further only so that a group with fewer units than the pool still fills it: a group of
+/// one panel pair (a router, the MTP head's slice) would otherwise be one unit, one
+/// thread. The block changes how often a panel and an activation row are read, never a
+/// result. S4.9w report, design §27.
+fn fp_row_block(n_in: usize, nb: usize, per: usize, width: usize) -> usize {
     let want = (width / per.max(1)).max(1);
-    nb.div_ceil(want).max(1)
+    let fit = (FP_BLOCK_BYTES / (4 * n_in.max(1))).max(peregrine_kernels::fpack::row_block(n_in));
+    nb.div_ceil(want).min(fit).max(1)
 }
 
 /// The packed float panels of a group, one work unit at a time (S4.9f).
