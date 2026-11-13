@@ -16,7 +16,7 @@
 //!
 //! The state is all scalar `Copy` items, so cloning and hashing it are cheap.
 
-use super::schema::{Additional, ByteSet, Compiled, Node, Sign};
+use super::schema::{utf8_lead_bytes, Additional, ByteSet, Compiled, Node, Sign, UntilSchema};
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -179,6 +179,87 @@ pub(crate) struct NumItem {
     pub(crate) state: NumState,
 }
 
+/// Where a free-text part stands inside the UTF-8 character it is reading: `need`
+/// continuation bytes are still owed (`0` = between characters), and the next one must
+/// lie in `lo..=hi` (the first continuation byte's range depends on the lead byte, which
+/// is how overlong forms, surrogates and code points above `U+10FFFF` are refused).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct Utf8Tail {
+    need: u8,
+    lo: u8,
+    hi: u8,
+}
+
+impl Utf8Tail {
+    const BOUNDARY: Utf8Tail = Utf8Tail {
+        need: 0,
+        lo: 0,
+        hi: 0,
+    };
+
+    #[inline]
+    fn step(self, b: u8) -> Option<Utf8Tail> {
+        let tail = |need, lo, hi| Some(Utf8Tail { need, lo, hi });
+        if self.need == 0 {
+            return match b {
+                0x00..=0x7F => Some(Utf8Tail::BOUNDARY),
+                0xC2..=0xDF => tail(1, 0x80, 0xBF),
+                0xE0 => tail(2, 0xA0, 0xBF),
+                0xED => tail(2, 0x80, 0x9F),
+                0xE1..=0xEC | 0xEE..=0xEF => tail(2, 0x80, 0xBF),
+                0xF0 => tail(3, 0x90, 0xBF),
+                0xF1..=0xF3 => tail(3, 0x80, 0xBF),
+                0xF4 => tail(3, 0x80, 0x8F),
+                _ => None,
+            };
+        }
+        if b < self.lo || b > self.hi {
+            return None;
+        }
+        if self.need == 1 {
+            Some(Utf8Tail::BOUNDARY)
+        } else {
+            tail(self.need - 1, 0x80, 0xBF)
+        }
+    }
+}
+
+/// A free-text part in progress (S6.6c): which part, how many bytes of its terminator the
+/// text's tail matches, and the UTF-8 character being read.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct UntilItem {
+    pub(crate) until: u32,
+    pub(crate) k: u32,
+    pub(crate) tail: Utf8Tail,
+}
+
+pub(crate) enum UntilStep {
+    /// The byte is text (or a piece of a terminator match in progress).
+    More(UntilItem),
+    /// The byte completed the terminator: the part is over.
+    Done,
+    /// The byte would make the text ill-formed UTF-8.
+    No,
+}
+
+/// Feed one byte to a free-text part. The text and its terminator are one UTF-8 stream;
+/// the part ends at the first byte that completes the terminator.
+#[inline]
+pub(crate) fn until_step(schema: &UntilSchema, item: UntilItem, b: u8) -> UntilStep {
+    let Some(tail) = item.tail.step(b) else {
+        return UntilStep::No;
+    };
+    let k = schema.next(item.k, b);
+    if k as usize == schema.term.len() {
+        return UntilStep::Done;
+    }
+    UntilStep::More(UntilItem {
+        until: item.until,
+        k,
+        tail,
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) enum Item {
     /// Expand this grammar node.
@@ -192,6 +273,8 @@ pub(crate) enum Item {
     Arr(ArrItem),
     Str(StrItem),
     Num(NumItem),
+    /// Free text up to a terminator.
+    Until(UntilItem),
     /// Repeat `inner`; `count` iterations have completed.
     Rep {
         inner: u32,
@@ -427,6 +510,14 @@ impl Matcher {
                 }));
                 true
             }
+            Node::Until(id) => {
+                stack.push(Item::Until(UntilItem {
+                    until: *id,
+                    k: 0,
+                    tail: Utf8Tail::BOUNDARY,
+                }));
+                true
+            }
             Node::Num(id) => {
                 stack.push(Item::Num(NumItem {
                     number: *id,
@@ -494,6 +585,16 @@ impl Matcher {
                 }
                 Item::Str(s) => {
                     set.union(self.str_allowed(s));
+                    break;
+                }
+                Item::Until(u) => {
+                    if u.tail.need == 0 {
+                        set.union(utf8_lead_bytes());
+                    } else {
+                        for b in u.tail.lo..=u.tail.hi {
+                            set.insert(b);
+                        }
+                    }
                     break;
                 }
                 Item::Num(n) => {
@@ -575,6 +676,18 @@ impl Matcher {
                     }
                     StrStep::Done => out.push(below()),
                     StrStep::No => {}
+                }
+                true
+            }
+            Item::Until(item) => {
+                match until_step(self.until_schema(item), item, b) {
+                    UntilStep::More(next) => {
+                        let mut s = below();
+                        s.push(Item::Until(next));
+                        out.push(s);
+                    }
+                    UntilStep::Done => out.push(below()),
+                    UntilStep::No => {}
                 }
                 true
             }
@@ -1067,6 +1180,153 @@ impl Matcher {
         }
     }
 
+    /// The state "one stack whose top is a free-text part": the frames below it and the
+    /// part's own item. The mask walks a token trie through free text with the item alone
+    /// (a `Copy` state), as it does inside a string.
+    pub(crate) fn until_split(&self) -> Option<(&[Item], UntilItem)> {
+        if self.stacks.len() != 1 {
+            return None;
+        }
+        let stack = &self.stacks[0];
+        match stack.last()? {
+            Item::Until(item) => Some((&stack[..stack.len() - 1], *item)),
+            _ => None,
+        }
+    }
+
+    /// The terminator table a free-text item belongs to.
+    pub(crate) fn until_schema(&self, item: UntilItem) -> &UntilSchema {
+        &self.prog.untils[item.until as usize]
+    }
+
+    /// The matcher that continues from the frames `below` a part that has just ended,
+    /// with the next instructions expanded (the part after a free text is usually a node
+    /// that has not been opened yet). `None` when the continuation is too large to follow.
+    pub(crate) fn resume_below(&self, below: &[Item]) -> Option<Matcher> {
+        let mut out = BTreeSet::new();
+        let mut budget = MAX_EXPANSIONS;
+        if !self.close_into(below.to_vec(), &mut out, &mut budget) {
+            return None;
+        }
+        Some(Matcher {
+            prog: self.prog.clone(),
+            stacks: out.into_iter().collect(),
+        })
+    }
+
+    /// Whether `bytes` can be read from here with **every byte consumed by a position the
+    /// constraint spells**: a byte of a literal part, or a byte of a free-text part's
+    /// terminator match. This is the rule for a marker token (S6.6c): a user-defined
+    /// token such as `<tool_call>` may stand where the constraint writes those very
+    /// bytes, and nowhere else — not as JSON content and not as free text.
+    ///
+    /// Inside a free-text part the first byte may begin the terminator's match (whatever
+    /// the text's tail matched before); every later byte must extend that same match, so
+    /// the whole token lies inside one occurrence of the terminator and what follows it.
+    pub(crate) fn spelled(&self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() || self.stacks.is_empty() {
+            return false;
+        }
+        let mut stacks = self.stacks.clone();
+        for (i, &b) in bytes.iter().enumerate() {
+            let mut out = BTreeSet::new();
+            let mut budget = MAX_EXPANSIONS;
+            for stack in &stacks {
+                let mut raw = Vec::new();
+                if !self.step_spelled(stack, b, i == 0, &mut raw, &mut budget) {
+                    return false;
+                }
+                for s in raw {
+                    if !self.close_into(s, &mut out, &mut budget) {
+                        return false;
+                    }
+                }
+            }
+            if out.is_empty() {
+                return false;
+            }
+            stacks = out.into_iter().collect();
+        }
+        true
+    }
+
+    /// [`step_stack`](Self::step_stack) restricted to spelled positions (see
+    /// [`spelled`](Self::spelled)): a stack whose next byte would be JSON content or free
+    /// text yields nothing.
+    fn step_spelled(
+        &self,
+        stack: &[Item],
+        b: u8,
+        first: bool,
+        out: &mut Vec<Stack>,
+        budget: &mut usize,
+    ) -> bool {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let Some(&top) = stack.last() else {
+            return true;
+        };
+        let below = &stack[..stack.len() - 1];
+        match top {
+            Item::Node(_) => {
+                let mut closed = BTreeSet::new();
+                if !self.close_into(stack.to_vec(), &mut closed, budget) {
+                    return false;
+                }
+                for s in closed {
+                    if !self.step_spelled(&s, b, first, out, budget) {
+                        return false;
+                    }
+                }
+                true
+            }
+            Item::Lit { .. } => self.step_stack(stack, b, out, budget),
+            Item::Until(item) => {
+                let k = self.until_schema(item).next(item.k, b);
+                let in_match = item.tail.need == 0 && k >= 1 && (first || k == item.k + 1);
+                if in_match {
+                    self.step_stack(stack, b, out, budget)
+                } else {
+                    true
+                }
+            }
+            Item::Rep {
+                inner,
+                count,
+                min,
+                max,
+            } => {
+                if count < max && self.prog.first_of(inner).contains(b) {
+                    let mut s = below.to_vec();
+                    s.push(Item::Rep {
+                        inner,
+                        count: count + 1,
+                        min,
+                        max,
+                    });
+                    s.push(Item::Node(inner));
+                    let mut closed = BTreeSet::new();
+                    if !self.close_into(s, &mut closed, budget) {
+                        return false;
+                    }
+                    for s in closed {
+                        if !self.step_spelled(&s, b, first, out, budget) {
+                            return false;
+                        }
+                    }
+                }
+                if count >= min {
+                    return self.step_spelled(below, b, first, out, budget);
+                }
+                true
+            }
+            // JSON content is never a spelled position.
+            Item::Obj(_) | Item::Arr(_) | Item::Str(_) | Item::Num(_) => true,
+        }
+    }
+
     fn num_allowed(&self, item: NumItem) -> ByteSet {
         let schema = self.prog.numbers[item.number as usize];
         let mut set = ByteSet::EMPTY;
@@ -1467,6 +1727,196 @@ mod tests {
 
     fn accepted(m: &mut Matcher, text: &[u8]) -> bool {
         m.advance_bytes(text).is_ok()
+    }
+
+    // ---- free text (S6.6c) ----
+
+    fn until(term: &str, after: &str) -> Constraint {
+        Constraint::sequence(vec![Part::Until(term.into()), Part::Literal(after.into())])
+    }
+
+    /// Whether `text` is a whole reply of `c`.
+    fn whole(c: &Constraint, text: &[u8]) -> bool {
+        let mut m = matcher(c);
+        accepted(&mut m, text) && m.is_closed()
+    }
+
+    #[test]
+    fn free_text_ends_at_the_first_occurrence_of_its_terminator() {
+        let c = until("</think>", "!");
+        assert!(whole(&c, b"some thoughts</think>!"));
+        // The text may be empty, and may hold pieces of the terminator.
+        assert!(whole(&c, b"</think>!"));
+        assert!(whole(&c, b"</thi</think>!"));
+        assert!(whole(&c, b"a < b, a </ b, </think </think>!"));
+        // The part is over at the first occurrence: what follows is the literal, not text.
+        assert!(!whole(&c, b"a</think>b</think>!"));
+        let mut m = matcher(&c);
+        assert!(accepted(&mut m, b"a</think>"));
+        assert_eq!(m.accepted_bytes(), vec![b'!']);
+        // A terminator whose prefix repeats: the search must fall back, not restart.
+        let c = until("aab", "!");
+        assert!(whole(&c, b"aaab!"));
+        assert!(whole(&c, b"aaaaab!"));
+        assert!(whole(&c, b"abaab!"));
+        assert!(!whole(&c, b"aabb!"));
+        let c = until("abab", ".");
+        assert!(whole(&c, b"abab."));
+        assert!(
+            !whole(&c, b"ababab."),
+            "the first occurrence ends at the fourth byte, and the text does not go on"
+        );
+        assert!(whole(&c, b"aabab."));
+    }
+
+    #[test]
+    fn a_reply_cannot_end_inside_free_text() {
+        let c = Constraint::sequence(vec![Part::Until("END".into())]);
+        let mut m = matcher(&c);
+        for chunk in [&b"text"[..], b" E", b"N", b"x EN"] {
+            assert!(accepted(&mut m, chunk));
+            assert!(!m.can_end() && !m.is_closed(), "after {chunk:?}");
+        }
+        assert!(accepted(&mut m, b"D"));
+        assert!(m.can_end() && m.is_closed());
+        // A reply that never writes the terminator never becomes acceptable.
+        let mut m = matcher(&c);
+        for _ in 0..500 {
+            assert!(accepted(&mut m, b"EN ND E"));
+            assert!(!m.can_end());
+        }
+    }
+
+    #[test]
+    fn free_text_is_well_formed_utf8() {
+        let c = until("</t>", "");
+        // Multi-byte characters, fed whole and one byte at a time.
+        let text = "é ✓ 🦅</t>".as_bytes();
+        assert!(whole(&c, text));
+        let mut m = matcher(&c);
+        for &b in text {
+            assert!(m.advance(b));
+        }
+        assert!(m.is_closed());
+        // Ill-formed sequences are refused at the byte that makes them so.
+        let refused_at = |bytes: &[u8]| matcher(&c).advance_bytes(bytes).err();
+        assert_eq!(refused_at(b"\xFF"), Some(0));
+        assert_eq!(
+            refused_at(b"a\x80"),
+            Some(1),
+            "a continuation byte with no lead"
+        );
+        assert_eq!(refused_at(b"\xC0\xAF"), Some(0), "an overlong form");
+        assert_eq!(
+            refused_at(b"\xE0\x80\x80"),
+            Some(1),
+            "an overlong three-byte form"
+        );
+        assert_eq!(refused_at(b"\xED\xA0\x80"), Some(1), "a surrogate");
+        assert_eq!(refused_at(b"\xF4\x90\x80\x80"), Some(1), "above U+10FFFF");
+        assert_eq!(
+            refused_at(b"\xC3</t>"),
+            Some(1),
+            "a character cut short by the terminator"
+        );
+        // Inside a character only its continuation bytes are offered.
+        let mut m = matcher(&c);
+        assert!(accepted(&mut m, b"\xE2\x9C"));
+        assert_eq!(m.accepted_bytes(), (0x80..=0xBFu8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn free_text_composes_with_the_other_parts() {
+        let call = Constraint::sequence(vec![
+            Part::Until("</think>".into()),
+            Part::Literal("\n\n<tool_call>\n".into()),
+            Part::Json(schema(
+                r#"{"type":"object","properties":{"n":{"type":"integer"}},"required":["n"],"additionalProperties":false}"#,
+            )),
+            Part::Literal("\n</tool_call>".into()),
+        ]);
+        assert!(whole(
+            &call,
+            b"hm, {\"n\": oops}</think>\n\n<tool_call>\n{\"n\": 3}\n</tool_call>"
+        ));
+        assert!(!whole(
+            &call,
+            b"hm</think>\n\n<tool_call>\n{\"n\": \"3\"}\n</tool_call>"
+        ));
+        // Optional (a repetition of none or one) and beside an alternative.
+        let c = Constraint::concat(vec![
+            Constraint::repeat(
+                Constraint::sequence(vec![Part::Until("|".into())]),
+                0,
+                Some(1),
+            ),
+            Constraint::any_of(vec![
+                Constraint::sequence(vec![Part::Literal("yes".into())]),
+                Constraint::sequence(vec![Part::Until(";".into()), Part::Literal("no".into())]),
+            ]),
+        ]);
+        for ok in [
+            &b"yes"[..],
+            b"thinking|yes",
+            b"|yes",
+            b"maybe;no",
+            b"a|b;no",
+            b"yes;no",
+        ] {
+            assert!(whole(&c, ok), "{:?}", std::str::from_utf8(ok));
+        }
+        for bad in [&b"ye"[..], b"a|b|yes", b"maybe;yes", b"a|b;n"] {
+            assert!(!whole(&c, bad), "{:?}", std::str::from_utf8(bad));
+        }
+        // An empty terminator is refused when the constraint is compiled.
+        let e = Constraint::sequence(vec![Part::Until(String::new())])
+            .compile()
+            .expect_err("refused");
+        assert_eq!(e.keyword, "until");
+    }
+
+    #[test]
+    fn spelled_bytes_are_literal_bytes_and_terminator_bytes() {
+        let c = Constraint::sequence(vec![
+            Part::Until("</t>".into()),
+            Part::Literal("\n<c>".into()),
+            Part::Json(schema(r#"{"type":"string"}"#)),
+        ]);
+        let at = |prefix: &[u8]| {
+            let mut m = matcher(&c);
+            assert!(accepted(&mut m, prefix));
+            m
+        };
+        // In free text: the terminator, a piece of it from its start, the terminator and
+        // the literal after it in one piece. Never text, never text and then terminator.
+        let m = at(b"abc");
+        assert!(m.spelled(b"</t>") && m.spelled(b"</") && m.spelled(b"</t>\n<c>"));
+        assert!(!m.spelled(b"x") && !m.spelled(b"x</t>") && !m.spelled(b"</t>z"));
+        assert!(!m.spelled(b"/t>"), "not from the terminator's start");
+        // With a match in progress a piece may extend it, or the terminator may start anew.
+        let m = at(b"abc<");
+        assert!(m.spelled(b"/t>") && m.spelled(b"</t>"));
+        assert!(!m.spelled(b"t>"));
+        // In the literal: its bytes, from where it stands; not past it into the JSON.
+        let m = at(b"abc</t>");
+        assert!(m.spelled(b"\n<c>") && m.spelled(b"\n<"));
+        assert!(!m.spelled(b"<c>") && !m.spelled(b"\n<c>\""));
+        // In the JSON string nothing is spelled.
+        let m = at(b"abc</t>\n<c>\"so ");
+        assert!(!m.spelled(b"</t>") && !m.spelled(b"<c>") && !m.spelled(b"\""));
+        // A literal at the head of a repeated part is spelled at the repetition's edge.
+        let c = Constraint::repeat(
+            Constraint::sequence(vec![
+                Part::Literal("<x>".into()),
+                Part::Json(schema(r#"{"const":1}"#)),
+            ]),
+            1,
+            Some(3),
+        );
+        let mut m = matcher(&c);
+        assert!(m.spelled(b"<x>"));
+        assert!(accepted(&mut m, b"<x>1"));
+        assert!(m.spelled(b"<x>") && !m.spelled(b"1"));
     }
 
     #[test]
