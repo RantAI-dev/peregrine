@@ -1,0 +1,7 @@
+{
+ "L2000_b8_c1": {
+  "skipped": "8 x 2 000 = 16 000 tokens; after the same row's batch-1 cell ONNX Runtime's arena grew to 6.8 GB and the server was OOM-killed on this 13 GB host (kernel log). The fp32 row measured the cell; this int8 row's 2 000-token batch-1 cell is measured.",
+  "batch_tokens": 16000,
+  "batch_token_cap": 16384
+ }
+}

@@ -29,11 +29,12 @@ compared with OpenVINO, ONNX Runtime, fastembed and text-embeddings-inference. W
   twice as fast (Peregrine at 0.39-0.58×); decode is level (0.89-1.06×) and Peregrine is ahead with 10
   users (1.05-3.09×). See [Against ik_llama.cpp](#against-ik_llamacpp-desktop-avx-512).
 
-- **Embeddings and decisions: fastest engine in 55 of 68 embedding cells and all nine decision cells on
+- **Embeddings and decisions: fastest engine in 79 of 104 embedding cells and all nine decision cells on
   the 4-core Ryzen 3**, against llama.cpp, OpenVINO, ONNX Runtime, fastembed and
   text-embeddings-inference at equal accuracy. bge-m3, EmbeddingGemma, Qwen3-Embedding and Nemotron 3.5
-  Embed are **1.18–1.62×** llama.cpp and decisions **1.33–1.84×**. The 13 cells behind are the two small
-  BERT encoders at 128 and 512 tokens (**0.85–0.99×** OpenVINO and ONNX Runtime). On ARM every measured
+  Embed are **1.18–1.62×** llama.cpp and decisions **1.33–1.84×**. The 25 cells behind are the two small
+  BERT encoders at 128 and 512 tokens (**0.85–0.99×** OpenVINO and ONNX Runtime) and the two newest
+  families at 128 and 16-token batches (nomic-bert 0.93×, jina-bert-v2 0.91–0.96×). On ARM every measured
   model is ahead of llama.cpp except four near-parity cells (0.95–0.99×). See
   [Embeddings, rerank and decisions](#embeddings-rerank-and-decisions).
 
@@ -316,14 +317,19 @@ for every timed row, so every engine computes every text.
 tokens at batch 1, 8 and 32, a mixed-length batch of 32 texts (8–512 tokens), and 2 000 tokens for the
 models that accept them. Engines: llama.cpp v0.9.0, OpenVINO 2026.4, ONNX Runtime 1.31, fastembed 0.9
 and text-embeddings-inference 1.9. The four larger families are the S4.9l proof run at `2a5e9f6`; the
-
 two small BERT rows are re-measured at `4500a6f` plus S4.9p and S4.9r
-([`bluefin-2026-11-12-s4.9r`](../benchmarks/results/bluefin-2026-11-12-s4.9r/README.md)).
+([`bluefin-2026-11-12-s4.9r`](../benchmarks/results/bluefin-2026-11-12-s4.9r/README.md)); nomic-bert
+and jina-bert-v2 are the S4.9u run on `773ebf8` plus three same-bits commits
+([`bluefin-2026-11-12-s4.9u`](../benchmarks/results/bluefin-2026-11-12-s4.9u/README.md)), with their
+batch cells re-measured on the merged build after S4.8b's wider float pass
+([`bluefin-2026-11-13-s4.9u-merge`](../benchmarks/results/bluefin-2026-11-13-s4.9u-merge/README.md)).
 
 | Model | File | Fastest other engine | 16 tokens | 128 tokens | 512 tokens | 2 000 tokens | mixed batch |
 |---|---|---|---|---|---|---|---|
 | all-MiniLM-L6-v2 | F16, Q8_0 | OpenVINO, ONNX Runtime, llama.cpp | **1.01–1.46×** | 0.97–1.08× | 0.99–1.03× | n/a | **1.60–1.65×** |
 | bge-small-en-v1.5 | F32, Q8_0 | OpenVINO, ONNX Runtime, fastembed | 0.95–1.23× | 0.93–1.01× | 0.90–0.95× | n/a | **1.31×** |
+| nomic-embed-text v1.5 | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.51×** (b1), **1.02–1.09×** (b8/b32) | 0.93–1.00× | **1.04–1.11×** | **1.07–1.09×** | **1.71–1.72×** |
+| jina-embeddings-v2-base-en | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.34×** (b1), 0.94–0.96× (b8/b32) | 0.91–0.92× | **1.00–1.06×** | **1.01–1.21×** | **1.67–1.69×** |
 
 | bge-m3 | Q8_0 | llama.cpp | **1.18–1.53× across every cell** | | | **1.35×** | |
 | EmbeddingGemma 300M | Q8_0 | llama.cpp | **1.30–1.51× across every cell** | | | | |
@@ -346,6 +352,29 @@ fuses it into the GEMM epilogue; and its 25 LayerNorms against the `MVN` nodes' 
 
 mixed-length batch is a win on both models because Peregrine never pads: the padding engines are
 1.6–4.5× slower there.
+
+**S4.9u adds the two newest encoder families.** Both are ahead in every 512- and 2 000-token
+cell (nomic 1.04–1.11× and 1.07–1.09×, jina 1.00–1.06× and 1.01–1.21×) and on the mixed batch
+(1.71× and 1.69×), and behind at 128 tokens and in the 16-token batch cells: nomic 0.93× at
+128 b32, jina 0.94–0.96× at 16 b8/b32 and 0.91–0.92× at 128, against ONNX Runtime or fastembed
+(both MLAS) at 128 and OpenVINO at the larger cells. The account is not the element-wise block
+this time: at 128 tokens the matrix product is 89–90 % of the pass, and Peregrine's GEMM runs at
+180–181 GMAC/s against MLAS's 202–206 for 128 rows (it is level, 179 against 184–190, at 512
+rows). ONNX Runtime's own non-matmul work there is 11.5 ms (jina) and 20.1 ms (nomic, its
+graph's transposes) against Peregrine's 8.7 and 9.5, so the whole deficit is the small-M GEMM.
+The fixes S4.9u shipped are bit-identical and move jina's 512-token cells from 0.96–1.00 to
+1.01–1.06×: an AVX2 body for ALiBi's `slope · (−|i−j|)` bias (attention 48.8 → 37.3 ms) and the
+q/k/v biases, query scale and residual walks on the pool (element-wise 46.9 → 38.2 ms on nomic,
+33.6 → 26.8 on jina). S4.8b's pass width then moved the two 16-token batch cells — a float-only
+encoder over 256 MiB now carries 128 rows a pass, which packs eight 16-token texts where 32 rows
+packed two — so those cells and the 128-token batch cells were re-read on the merged build:
+nomic 0.94/0.98 → **1.02/1.09×** at 16 b8/b32 and 0.95 → 1.00× at 128 b8, jina 0.89/0.89 →
+0.94/0.96×, the 128-token cells unchanged (a pass of 128 rows holds one 128-token text either
+way). nomic's Q8_0 file is 0.9983 against the fp32 reference — below the 0.999 class floor for
+both engines — so its row is listed without ratios; the F16 row is the standings row. The two
+families' 2 000-token cells run on all five engines; nomic's GGUF declares a 2 048-token context
+(not 8 192), and TEI's jina row caps its copy at 2 048 because candle's 8 192² ALiBi mask does
+not fit this 13 GB host.
 
 Accuracy on the same texts: Q8_0 agrees with llama.cpp's Q8_0 within 3e-4 cosine and is closer to the
 fp32 reference on all three BERT models; the F16 and F32 rows are exact against the fp32 engines;

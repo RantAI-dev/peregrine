@@ -798,6 +798,108 @@ fn add_opt_bias_residual(out: &mut [f32], residual: &[f32], bias: Option<&[f32]>
     }
 }
 
+/// `q[row][i] *= scale` over the pool (S4.9u). Rows are independent, so which thread
+/// scales a row cannot change its bits; the multiply is the serial loop's own.
+fn qscale_rows_par(
+    pool: &Pool,
+    stats: &mut StepStats,
+    q: &mut [f32],
+    qd: usize,
+    nb: usize,
+    scale: f32,
+) {
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    peregrine_core::blocks::par::for_row_chunks(
+        pool,
+        parallel,
+        q,
+        qd,
+        nb,
+        Sched::Static,
+        |_wk, _rows, qc| {
+            for v in qc.iter_mut() {
+                *v *= scale;
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
+}
+
+/// `out[row][i] += residual[row][i]` over the pool (S4.9u): the layer's second
+/// residual reads the same row on the same worker, and the add is the serial loop's.
+fn add_residual_par(
+    pool: &Pool,
+    stats: &mut StepStats,
+    out: &mut [f32],
+    residual: &mut [f32],
+    dim: usize,
+    nb: usize,
+) {
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    for_row_chunks_2(
+        pool,
+        parallel,
+        out,
+        dim,
+        residual,
+        dim,
+        nb,
+        Sched::Static,
+        |_wk, _rows, oc, rc| {
+            for (o, &r) in oc.iter_mut().zip(rc.iter()) {
+                *o += r;
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
+}
+
+/// `out[row][i] = (out[row][i] + bias[i]) + residual[row][i]` over the pool
+/// (S4.9u). One row's bias walk and residual walk stay on one worker; the operation
+/// order is the serial walk's, and an all-zero bias still skips so a `-0.0` stays.
+fn add_bias_residual_par(
+    pool: &Pool,
+    stats: &mut StepStats,
+    out: &mut [f32],
+    residual: &mut [f32],
+    bias: &[f32],
+    dim: usize,
+    nb: usize,
+) {
+    let parallel = nb >= ROW_PARALLEL && pool.width() > 1;
+    let has_bias = !bias.iter().all(|&b| b == 0.0);
+    for_row_chunks_2(
+        pool,
+        parallel,
+        out,
+        dim,
+        residual,
+        dim,
+        nb,
+        Sched::Static,
+        |_wk, _rows, oc, rc| {
+            if has_bias {
+                for (row, res) in oc.chunks_mut(dim).zip(rc.chunks_exact(dim)) {
+                    for ((o, &b), &r) in row.iter_mut().zip(bias).zip(res) {
+                        *o = (*o + b) + r;
+                    }
+                }
+            } else {
+                for (o, &r) in oc.iter_mut().zip(rc.iter()) {
+                    *o += r;
+                }
+            }
+        },
+    );
+    if parallel {
+        stats.barriers += 1;
+    }
+}
+
 impl Architecture for NomicBert {
     fn causality(&self) -> Causality {
         Causality::Bidirectional
@@ -1113,19 +1215,28 @@ impl Architecture for NomicBert {
                 if parallel {
                     stats.barriers += 1;
                 }
-                if l.bqkv.iter().any(|&b| b != 0.0) {
-                    add_bias(&mut st.q[..nb * qd], qd, nb, &l.bqkv[..qd]);
-                    add_bias(&mut st.k[..nb * kvd], kvd, nb, &l.bqkv[qd..qd + kvd]);
-                    add_bias(&mut st.v[..nb * kvd], kvd, nb, &l.bqkv[qd + kvd..]);
-                }
             }
 
             // ---- RoPE (NeoX pairing) on q and k ----
+            // The fused bias is applied inside the same fork-join, row by row, before
+            // the rotation (S4.9u): `q += bq` (and k, v) then `rope(q)` is the order
+            // the serial bias walk ran in, and a row's bits do not depend on which
+            // worker owns it.
+            let has_b = l.bqkv.iter().any(|&b| b != 0.0);
+            let (bq, bk, bv) = if has_b {
+                (
+                    Some(&l.bqkv[..qd]),
+                    Some(&l.bqkv[qd..qd + kvd]),
+                    Some(&l.bqkv[qd + kvd..]),
+                )
+            } else {
+                (None, None, None)
+            };
             peregrine_core::blocks::attn::prepare_rows(
                 cfg,
-                None,
-                None,
-                None,
+                bq,
+                bk,
+                bv,
                 None,
                 None,
                 &st.rope,
@@ -1140,9 +1251,7 @@ impl Architecture for NomicBert {
             // llama.cpp passes `kq_scale = 1/√head_dim` to the attention; folding it
             // into Q is the same product and keeps the block's interface.
             let scale = 1.0 / (cfg.head_dim as f32).sqrt();
-            for q in &mut st.q[..nb * qd] {
-                *q *= scale;
-            }
+            qscale_rows_par(pool, stats, &mut st.q[..nb * qd], qd, nb, scale);
 
             // ---- attention: one n × n block per text, no window ----
             peregrine_core::blocks::bidir::attend_texts(
@@ -1178,7 +1287,15 @@ impl Architecture for NomicBert {
                 dm,
                 &mut st.kq,
             );
-            add_bias_residual(&mut st.xb2[..nb * dm], &st.x[..nb * dm], &l.bo, dm);
+            add_bias_residual_par(
+                pool,
+                stats,
+                &mut st.xb2[..nb * dm],
+                &mut st.x[..nb * dm],
+                &l.bo,
+                dm,
+                nb,
+            );
             norm_rows_fill(
                 pool,
                 stats,
@@ -1247,9 +1364,14 @@ impl Architecture for NomicBert {
                         dm,
                         &mut st.kq,
                     );
-                    for i in 0..nb * dm {
-                        st.xb2[i] += st.xb[i];
-                    }
+                    add_residual_par(
+                        pool,
+                        stats,
+                        &mut st.xb2[..nb * dm],
+                        &mut st.xb[..nb * dm],
+                        dm,
+                        nb,
+                    );
                 }
                 NomicFfn::Gelu {
                     up,

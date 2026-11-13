@@ -45,7 +45,8 @@ SHORT = [16, 128, 512]
 LONG = [16, 128, 512, 2000]
 
 
-def row(model, engine, precision, lengths, extra=(), ctx=0, ref_label="torch-fp32"):
+def row(model, engine, precision, lengths, extra=(), ctx=0, ref_label="torch-fp32",
+        acc_batch=16):
     return {
         "model": model,
         "engine": engine,
@@ -54,6 +55,7 @@ def row(model, engine, precision, lengths, extra=(), ctx=0, ref_label="torch-fp3
         "extra": list(extra),
         "ctx": ctx,
         "ref_label": ref_label,
+        "acc_batch": acc_batch,
     }
 
 
@@ -95,10 +97,36 @@ ROWS = [
     # Nemotron 3.5 Embed 1B (mistral3 encoder): the S4.14b path.
     row("nemotron-3.5-embed-1b", "peregrine", "q8_0", LONG, ctx=2048),
     row("nemotron-3.5-embed-1b", "llama_cpp", "q8_0", LONG, LLAMA_2048),
+    # nomic-bert (nomic-embed-text v1.5) and jina-bert-v2 (jina-embeddings-v2-base-en):
+    # the two newest encoder families, every engine that can load them (S4.9u).
+    row("nomic", "peregrine", "f16", LONG, acc_batch=1),
+    row("nomic", "peregrine", "q8_0", LONG, acc_batch=1),
+    row("nomic", "llama_cpp", "f16", LONG, acc_batch=1),
+    row("nomic", "llama_cpp", "q8_0", LONG, acc_batch=1),
+    row("nomic", "tei", "fp32", LONG, acc_batch=1),
+    row("nomic", "fastembed", "fp32", LONG, acc_batch=1),
+    row("nomic", "fastembed", "int8", LONG, acc_batch=1),
+    row("nomic", "openvino", "fp32", LONG, acc_batch=1),
+    row("nomic", "openvino", "int8", LONG, acc_batch=1),
+    row("nomic", "onnxruntime", "fp32", LONG, acc_batch=1),
+    row("nomic", "onnxruntime", "int8", LONG, acc_batch=1),
+    row("jina", "peregrine", "f16", LONG, acc_batch=1),
+    row("jina", "peregrine", "q8_0", LONG, acc_batch=1),
+    row("jina", "llama_cpp", "f16", LONG, acc_batch=1),
+    row("jina", "llama_cpp", "q8_0", LONG, acc_batch=1),
+    row("jina", "tei", "fp32", LONG, acc_batch=1),
+    row("jina", "fastembed", "fp32", LONG, acc_batch=1),
+    row("jina", "fastembed", "int8", LONG, acc_batch=1),
+    row("jina", "openvino", "fp32", LONG, acc_batch=1),
+    row("jina", "openvino", "int8", LONG, acc_batch=1),
+    row("jina", "onnxruntime", "fp32", LONG, acc_batch=1),
+    row("jina", "onnxruntime", "int8", LONG, acc_batch=1),
 ]
 
 ACCURACY_REF_LABEL = {
     "embeddinggemma": "onnx-fp32",
+    "nomic": "onnx-fp32",
+    "jina": "onnx-fp32",
 }
 
 
@@ -121,7 +149,7 @@ def command(r, args, mode):
     if args.peregrine_binary:
         cmd += ["--peregrine-binary", args.peregrine_binary]
     if mode == "accuracy":
-        cmd += ["--mode", "accuracy", "--acc-batch", "16",
+        cmd += ["--mode", "accuracy", "--acc-batch", str(r.get("acc_batch", args.acc_batch)),
                 "--ref-label", r["ref_label"]]
         return cmd
     cmd += ["--lengths", ",".join(str(x) for x in r["lengths"]),
@@ -155,6 +183,7 @@ def main():
     ap.add_argument("--budget", type=float, default=0.5)
     ap.add_argument("--max-cell-seconds", type=float, default=900.0)
     ap.add_argument("--request-timeout", type=float, default=1800.0)
+    ap.add_argument("--acc-batch", type=int, default=16)
     ap.add_argument("--max-load", type=float, default=20.0,
                     help="the host is shared; the load is recorded, and the gate only "
                          "refuses a host that is actually busy")
@@ -177,7 +206,8 @@ def main():
             and (args.mode != "cache" or r["engine"] == "peregrine")]
     if args.mode == "accuracy":
         rows = [r for r in rows if r["model"] in
-                ("minilm", "bge-small", "bge-m3", "embeddinggemma", "qwen3-embed-0.6b")]
+                ("minilm", "bge-small", "bge-m3", "embeddinggemma", "qwen3-embed-0.6b",
+                 "nomic", "jina")]
         for r in rows:
             r["ref_label"] = ACCURACY_REF_LABEL.get(r["model"], r["ref_label"])
 

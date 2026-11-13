@@ -39,6 +39,7 @@ class FastEmbedAdapter(EmbedAdapter):
             "--model-path", str(model_path),
             "--port", str(port),
             "--threads", str(self.threads),
+            "--batch-size", str(int(row.get("fastembed_batch_size") or 128)),
         ]
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"

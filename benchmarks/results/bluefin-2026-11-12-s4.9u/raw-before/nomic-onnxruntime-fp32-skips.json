@@ -1,0 +1,7 @@
+{
+ "L2000_b8_c1": {
+  "skipped": "8 x 2 000 = 16 000 tokens; ONNX Runtime's padded attention buffers took 6.8 GB here and the server was OOM-killed on this 13 GB host. The 2 000-token batch-1 cell is measured.",
+  "batch_tokens": 16000,
+  "batch_token_cap": 16384
+ }
+}
