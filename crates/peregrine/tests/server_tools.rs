@@ -475,10 +475,14 @@ fn what_cannot_be_honoured_is_refused_by_name() {
             "{extra}: {message:?} lacks {word:?}"
         );
     };
-    refused(json!({"tool_choice": "required"}), "constrained sampling");
     refused(
-        json!({"tool_choice": {"type": "function", "function": {"name": "get_weather"}}}),
-        "constrained sampling",
+        json!({"tool_choice": {"type": "function", "function": {"name": "get_stocks"}}}),
+        "which is not one of the request's tools",
+    );
+    refused(json!({"tool_choice": "always"}), "tool_choice must be");
+    refused(
+        json!({"tools": [], "tool_choice": "required"}),
+        "needs tools",
     );
     refused(json!({"functions": [{"name": "f"}]}), "functions");
     refused(json!({"function_call": "auto"}), "function_call");
@@ -502,6 +506,90 @@ fn what_cannot_be_honoured_is_refused_by_name() {
         ]}),
         "not JSON",
     );
+}
+
+/// A forced choice is a constraint on the sampler, so even a file of random weights
+/// answers with calls that parse and fit the tool's schema (S6.6b). The tool's arguments
+/// are a finite language here, so every reply closes well inside the token limit.
+#[test]
+fn a_forced_choice_answers_with_valid_calls_whatever_the_model_writes() {
+    let (_server, port) = serve_tool_model("forced");
+    let tools = json!([
+        {"type": "function", "function": {"name": "set_unit", "description": "Set the unit",
+            "parameters": {"type": "object",
+                "properties": {"unit": {"enum": ["celsius", "fahrenheit"]}, "exact": {"type": "boolean"}},
+                "required": ["unit"], "additionalProperties": false}}},
+        {"type": "function", "function": {"name": "reset"}}
+    ]);
+    let check_call = |call: &Value| {
+        assert_eq!(call["type"], "function", "{call}");
+        let name = call["function"]["name"].as_str().expect("a name");
+        let args: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap())
+            .unwrap_or_else(|e| panic!("arguments are not JSON ({e}): {call}"));
+        let args = args.as_object().expect("arguments are an object");
+        match name {
+            "set_unit" => {
+                assert!(
+                    matches!(args["unit"].as_str(), Some("celsius" | "fahrenheit")),
+                    "{call}"
+                );
+                assert!(args.keys().all(|k| k == "unit" || k == "exact"), "{call}");
+                assert!(args.get("exact").is_none_or(Value::is_boolean), "{call}");
+            }
+            "reset" => assert!(args.is_empty(), "{call}"),
+            other => panic!("a call to {other:?}, which is not a tool of the request"),
+        }
+        name.to_string()
+    };
+    for seed in 0..6u64 {
+        // A named function: exactly one call, to it, and nothing else in the message.
+        for name in ["set_unit", "reset"] {
+            let (status, body) = post(
+                port,
+                tool_request(json!({
+                    "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 200,
+                    "tool_choice": {"type": "function", "function": {"name": name}}
+                })),
+            );
+            assert_eq!(status, 200, "{body}");
+            let choice = &body["choices"][0];
+            assert_eq!(choice["finish_reason"], "tool_calls", "{body}");
+            assert!(choice["message"]["content"].is_null(), "{body}");
+            let calls = choice["message"]["tool_calls"].as_array().expect("calls");
+            assert_eq!(calls.len(), 1, "{body}");
+            assert_eq!(check_call(&calls[0]), name);
+        }
+        // `"required"` with one call allowed: one call to either tool.
+        let (status, body) = post(
+            port,
+            tool_request(json!({
+                "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 200,
+                "tool_choice": "required", "parallel_tool_calls": false
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        let choice = &body["choices"][0];
+        assert_eq!(choice["finish_reason"], "tool_calls", "{body}");
+        let calls = choice["message"]["tool_calls"].as_array().expect("calls");
+        assert_eq!(calls.len(), 1, "{body}");
+        check_call(&calls[0]);
+        // `"required"` with parallel calls: at least one, each valid. A random model may
+        // keep calling until the token limit; whatever it completed is still valid.
+        let (status, body) = post(
+            port,
+            tool_request(json!({
+                "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 120,
+                "tool_choice": "required"
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        let choice = &body["choices"][0];
+        let calls = choice["message"]["tool_calls"].as_array().expect("calls");
+        assert!(!calls.is_empty(), "{body}");
+        calls.iter().for_each(|c| {
+            check_call(c);
+        });
+    }
 }
 
 #[test]
