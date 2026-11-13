@@ -660,7 +660,19 @@ fn matmul_block(
     // slowest core. Workers instead claim chunks of rows from a counter, so a fast core takes more of them.
     // Which worker computes a row never changes the row's value, so the output is identical either way.
     if dynamic_rows() && pool.width() > 1 {
-        let mut chunk = (total / (pool.width() * 8)).clamp(8, 256);
+        // The grain is a tail, not just a load-balance knob: the caller's share ends
+        // when the counter is exhausted, so what it then waits for is the chunk (or
+        // two) another worker claimed just before — at 512 tokens and twelve threads
+        // that tail was 287 µs a join, 11 % of the pass. One 32nd of the row space per
+        // worker (at most 64 rows) is the grain that measured best (S5.4o: +6.7 % on
+        // the fast 512-token cell, +1.7 % at 4 096, and the exact engine gains too);
+        // finer than that and the claims themselves cost more than the tail they save.
+        // A *decode* step is the other side of it: one activation row per matmul, 224
+        // joins a token, and no tail worth chasing — the finer grain cost 11 % of the
+        // decode rate in the first cut, so a one-row pass keeps the grain it had.
+        // Which worker takes which range still cannot change a row's value.
+        let (div, cap) = if nb == 1 { (8, 256) } else { (32, 64) };
+        let mut chunk = (total / (pool.width() * div)).clamp(8, cap);
         if tiled {
             chunk = chunk.div_ceil(16) * 16;
         }
