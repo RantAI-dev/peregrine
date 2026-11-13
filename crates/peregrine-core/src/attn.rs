@@ -857,7 +857,7 @@ fn fast_walk(
                     e - lev,
                     hd,
                     sh.scale,
-                    k16.map(|k| &k[j0 * hd * 2..]),
+                    k16.map(|k| &k[(j0 + lev) * hd * 2..]),
                 );
                 lev = e;
             }
@@ -928,7 +928,7 @@ fn fast_walk(
                     e - lev,
                     hd,
                     lev == 0,
-                    v16.map(|v| &v[j0 * hd * 2..]),
+                    v16.map(|v| &v[(j0 + lev) * hd * 2..]),
                 );
                 lev = e;
             }
