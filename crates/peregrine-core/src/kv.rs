@@ -45,6 +45,7 @@
 //! measurement tool, and `docs/dev/accuracy.md` says how to use it.
 
 use crate::gguf::{f16, to_f16};
+use std::marker::PhantomData;
 
 /// Widest head the int8 rotation handles (on the stack, per `put`).
 const MAX_ROTATED_DIM: usize = 256;
@@ -90,6 +91,139 @@ impl KvPrec {
             KvPrec::F16 => 2,
             KvPrec::F32 => 4,
             KvPrec::I8 => 1,
+        }
+    }
+}
+
+/// One `(layer, head, position)` vector encoded into the cache's storage.
+///
+/// `dst` is the vector's own `head_dim × prec.elem()` bytes and `scale` the int8
+/// cache's per-vector scale slot. `KvCache::put` and `KvWriter::put_row` both come
+/// through here, so a write made on the pool is the same bytes as one made serially.
+fn encode_vec(
+    prec: KvPrec,
+    rotated: bool,
+    hd: usize,
+    dst: &mut [u8],
+    scale: Option<&mut f32>,
+    x: &[f32],
+) {
+    match prec {
+        KvPrec::F16 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if hd.is_multiple_of(8) && vector_path() {
+                    // SAFETY: features checked; `dst` is `hd * 2` bytes.
+                    unsafe { encode_f16_avx(x, dst) };
+                    return;
+                }
+            }
+            for (d, &val) in dst.chunks_exact_mut(2).zip(x.iter()) {
+                d.copy_from_slice(&to_f16(val).to_le_bytes());
+            }
+        }
+        KvPrec::F32 => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if hd.is_multiple_of(8) && crate::cpu_has!("avx2") {
+                    // SAFETY: features checked; `dst` is `hd * 4` bytes.
+                    unsafe { encode_f32_avx(x, dst) };
+                    return;
+                }
+            }
+            for (d, &val) in dst.chunks_exact_mut(4).zip(x.iter()) {
+                d.copy_from_slice(&val.to_le_bytes());
+            }
+        }
+        KvPrec::I8 => {
+            let mut rot = [0.0f32; MAX_ROTATED_DIM];
+            let x = if rotated {
+                let r = &mut rot[..hd];
+                r.copy_from_slice(x);
+                crate::vmath::hadamard(r);
+                &*r
+            } else {
+                x
+            };
+            let amax = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
+            let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+            for (b, &val) in dst.iter_mut().zip(x.iter()) {
+                *b = ((val * inv).round().clamp(-127.0, 127.0) as i8) as u8;
+            }
+            if let Some(s) = scale {
+                *s = d;
+            }
+        }
+    }
+}
+
+/// [`KvCache::put`] for the rows of one chunk, called by the workers that prepared
+/// them (S5.4o).
+///
+/// The cache's four buffers are reached as raw pointers because every worker would
+/// otherwise need a mutable reference to the whole cache; the discipline is the
+/// recurrent state's (`blocks::recurrent`): a write is one position of every head, the
+/// caller gives each worker a distinct set of positions, and the SAME bytes come out as
+/// the serial `put` (both encode through one function).
+#[derive(Clone, Copy)]
+pub struct KvWriter<'a> {
+    k: *mut u8,
+    v: *mut u8,
+    ks: *mut f32,
+    vs: *mut f32,
+    prec: KvPrec,
+    rotated: bool,
+    head_dim: usize,
+    n_layer: usize,
+    n_kv_head: usize,
+    max_ctx: usize,
+    _cache: PhantomData<&'a mut KvCache>,
+}
+
+// SAFETY: the only writable state is the four buffers, and `put_row` writes exactly the
+// vectors of the position it is given — a byte range and (for int8) one scale that no
+// other writer of the same chunk writes. Every other field is a copy of the cache's
+// geometry, and the shared reads of it are immutable.
+unsafe impl Send for KvWriter<'_> {}
+// SAFETY: as `Send`; shared access only reads the geometry fields.
+unsafe impl Sync for KvWriter<'_> {}
+
+impl KvWriter<'_> {
+    /// Writes one row's keys and values: `n_kv_head` vectors of one position.
+    ///
+    /// # Safety
+    ///
+    /// `pos` must be a position no other live writer of this cache writes, and nothing
+    /// else may touch the cache's storage until every writer is dropped.
+    pub unsafe fn put_row(&self, layer: usize, pos: usize, k: &[f32], v: &[f32]) {
+        // A real check, not a debug one: the serial `put` panics on an index past the
+        // cache through the slice bounds, and a raw-pointer write must not do worse.
+        let kvd = self.n_kv_head * self.head_dim;
+        assert!(
+            layer < self.n_layer && pos < self.max_ctx && k.len() >= kvd && v.len() >= kvd,
+            "a K/V write past the cache: layer {layer}, position {pos}"
+        );
+        let hd = self.head_dim;
+        let elem = self.prec.elem();
+        for h in 0..self.n_kv_head {
+            let idx = (layer * self.n_kv_head + h) * self.max_ctx + pos;
+            let off = idx * hd * elem;
+            let src = &k[h * hd..(h + 1) * hd];
+            let dsrc = &v[h * hd..(h + 1) * hd];
+            let (scale, dscale) = if self.prec == KvPrec::I8 {
+                // SAFETY: the scale of `(layer, head, pos)` is this writer's, as the vector is.
+                unsafe { (Some(&mut *self.ks.add(idx)), Some(&mut *self.vs.add(idx))) }
+            } else {
+                (None, None)
+            };
+            // SAFETY: this writer owns vector `idx` of both buffers (see the type's docs).
+            unsafe {
+                let dst = std::slice::from_raw_parts_mut(self.k.add(off), hd * elem);
+                encode_vec(self.prec, self.rotated, hd, dst, scale, src);
+                let dst = std::slice::from_raw_parts_mut(self.v.add(off), hd * elem);
+                encode_vec(self.prec, self.rotated, hd, dst, dscale, dsrc);
+            }
         }
     }
 }
@@ -682,67 +816,45 @@ impl KvCache {
     }
 
     fn encode_into(&mut self, is_k: bool, idx: usize, x: &[f32]) {
-        let hd = self.head_dim;
+        let (prec, rotated, hd) = (self.prec, self.rotated, self.head_dim);
         let off = idx * hd;
-        match self.prec {
-            KvPrec::F16 => {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if hd.is_multiple_of(8) && vector_path() {
-                        let buf = if is_k { &mut self.k } else { &mut self.v };
-                        // SAFETY: features checked; `off + hd` elements fit (vec_index).
-                        unsafe { encode_f16_avx(x, &mut buf[off * 2..(off + hd) * 2]) };
-                        return;
-                    }
-                }
-                let buf = if is_k { &mut self.k } else { &mut self.v };
-                for (i, &val) in x.iter().enumerate() {
-                    let h = to_f16(val).to_le_bytes();
-                    buf[(off + i) * 2] = h[0];
-                    buf[(off + i) * 2 + 1] = h[1];
-                }
-            }
-            KvPrec::F32 => {
-                #[cfg(target_arch = "x86_64")]
-                {
-                    if hd.is_multiple_of(8) && crate::cpu_has!("avx2") {
-                        let buf = if is_k { &mut self.k } else { &mut self.v };
-                        // SAFETY: features checked; `off + hd` elements fit (vec_index).
-                        unsafe { encode_f32_avx(x, &mut buf[off * 4..(off + hd) * 4]) };
-                        return;
-                    }
-                }
-                let buf = if is_k { &mut self.k } else { &mut self.v };
-                for (d, &val) in buf[off * 4..(off + hd) * 4]
-                    .chunks_exact_mut(4)
-                    .zip(x.iter())
-                {
-                    d.copy_from_slice(&val.to_le_bytes());
-                }
-            }
-            KvPrec::I8 => {
-                let mut rot = [0.0f32; MAX_ROTATED_DIM];
-                let x = if self.rotated {
-                    let r = &mut rot[..hd];
-                    r.copy_from_slice(x);
-                    crate::vmath::hadamard(r);
-                    &*r
-                } else {
-                    x
-                };
-                let amax = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-                let d = if amax > 0.0 { amax / 127.0 } else { 0.0 };
-                let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
-                let buf = if is_k { &mut self.k } else { &mut self.v };
-                for (i, &val) in x.iter().enumerate() {
-                    buf[off + i] = ((val * inv).round().clamp(-127.0, 127.0) as i8) as u8;
-                }
-                if is_k {
-                    self.ks[idx] = d;
-                } else {
-                    self.vs[idx] = d;
-                }
-            }
+        let elem = prec.elem();
+        let (buf, scale) = if is_k {
+            (&mut self.k, &mut self.ks)
+        } else {
+            (&mut self.v, &mut self.vs)
+        };
+        let sc = (prec == KvPrec::I8).then(|| &mut scale[idx]);
+        encode_vec(
+            prec,
+            rotated,
+            hd,
+            &mut buf[off * elem..(off + hd) * elem],
+            sc,
+            x,
+        );
+    }
+
+    /// The cache's storage as a writer the pool's workers may share (S5.4o).
+    ///
+    /// A chunk's K/V write is one position per batch row across every KV head, so the
+    /// rows' writes are disjoint: [`KvWriter::put_row`] is what lets the preparation
+    /// pass's own join write the cache instead of a serial pass after it. The writer
+    /// borrows the cache mutably for its lifetime, so nothing else can touch it while
+    /// the workers hold copies.
+    pub fn writer(&mut self) -> KvWriter<'_> {
+        KvWriter {
+            k: self.k.as_mut_ptr(),
+            v: self.v.as_mut_ptr(),
+            ks: self.ks.as_mut_ptr(),
+            vs: self.vs.as_mut_ptr(),
+            prec: self.prec,
+            rotated: self.rotated,
+            head_dim: self.head_dim,
+            n_layer: self.n_layer,
+            n_kv_head: self.n_kv_head,
+            max_ctx: self.max_ctx,
+            _cache: PhantomData,
         }
     }
 
@@ -1395,6 +1507,68 @@ mod tests {
         // Truncating above the current length must not extend it.
         c.truncate(9);
         assert_eq!(c.len, 4);
+    }
+
+    /// A write made by the preparation pass's workers is the serial `put`'s bytes.
+    ///
+    /// `writer`/`put_row` (S5.4o) reach the cache's buffers through raw pointers so the
+    /// workers of one chunk can share it; the encoding is the same function `put` uses,
+    /// so the two must agree on every precision (the int8 cache's Hadamard rotation and
+    /// per-vector scale included).
+    #[test]
+    fn a_worker_write_is_the_serial_puts_bytes() {
+        let (n_layer, n_head, hd, rows) = (2usize, 2usize, 64usize, 5usize);
+        for prec in [KvPrec::F16, KvPrec::F32, KvPrec::I8] {
+            for rotated in [true, false] {
+                let mut serial = KvCache::new(prec, n_layer, n_head, hd, rows + 2);
+                let mut pooled = KvCache::new(prec, n_layer, n_head, hd, rows + 2);
+                if !rotated {
+                    serial = serial.without_rotation();
+                    pooled = pooled.without_rotation();
+                }
+                let k: Vec<f32> = (0..rows * n_head * hd)
+                    .map(|i| ((i * 29 % 127) as f32 - 63.0) / 41.0)
+                    .collect();
+                let v: Vec<f32> = (0..rows * n_head * hd)
+                    .map(|i| ((i * 17 % 89) as f32 - 44.0) / 23.0)
+                    .collect();
+                for b in 0..rows {
+                    let kvd = n_head * hd;
+                    let kb = &k[b * kvd..(b + 1) * kvd];
+                    let vb = &v[b * kvd..(b + 1) * kvd];
+                    for layer in 0..n_layer {
+                        for h in 0..n_head {
+                            let s = h * hd;
+                            serial.put(layer, h, b, &kb[s..s + hd], &vb[s..s + hd]);
+                        }
+                    }
+                }
+                let writer = pooled.writer();
+                for b in 0..rows {
+                    let kvd = n_head * hd;
+                    let kb = &k[b * kvd..(b + 1) * kvd];
+                    let vb = &v[b * kvd..(b + 1) * kvd];
+                    for layer in 0..n_layer {
+                        // SAFETY: position `b` is written once, by this loop.
+                        unsafe { writer.put_row(layer, b, kb, vb) };
+                    }
+                }
+                let _ = writer;
+                assert_eq!(serial.k, pooled.k, "{prec:?} rotated={rotated} keys");
+                assert_eq!(serial.v, pooled.v, "{prec:?} rotated={rotated} values");
+                assert_eq!(serial.ks, pooled.ks, "{prec:?} key scales");
+                assert_eq!(serial.vs, pooled.vs, "{prec:?} value scales");
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a K/V write past the cache")]
+    fn a_worker_write_past_the_cache_panics() {
+        let mut c = KvCache::new(KvPrec::F16, 1, 1, 8, 4);
+        let w = c.writer();
+        // SAFETY: one writer, one position; the call must refuse it.
+        unsafe { w.put_row(0, 4, &[0.0; 8], &[0.0; 8]) };
     }
 
     #[test]

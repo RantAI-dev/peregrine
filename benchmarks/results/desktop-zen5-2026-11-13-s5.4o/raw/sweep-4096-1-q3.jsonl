@@ -1,0 +1,5 @@
+{"arm": "exact", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 25.38521232514867, "load1": 1.07}
+{"arm": "fast-before", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 33.99711451309946, "load1": 1.3}
+{"arm": "fast", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 33.24697192817138, "load1": 1.18}
+{"arm": "ik", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 32.913255, "load1": 1.54}
+{"arm": "ik-rtr", "model": "Qwen3-1.7B-Q4_K_M.gguf", "p": 4096, "t": 1, "round": 1, "tok_s": 37.652266, "load1": 1.33}

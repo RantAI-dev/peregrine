@@ -1,0 +1,5 @@
+{"arm": "b", "p": 512, "t": 12, "round": 1, "tok_s": 335.2191562736278, "load1": 5.09, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 2, "tok_s": 347.7500690749138, "load1": 5.72, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 3, "tok_s": 332.3316970655522, "load1": 5.72, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 4, "tok_s": 346.90164732710986, "load1": 5.34, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}
+{"arm": "b", "p": 512, "t": 12, "round": 5, "tok_s": 349.27810318206315, "load1": 4.99, "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"}

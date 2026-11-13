@@ -1,0 +1,91 @@
+base file    /var/tmp/pg/s54c/base/llama32-1b.base.bin
+  n_ctx 512, n_vocab 128256, n_chunk 40
+  255 scored positions per chunk (the second half, the last one excluded), 10200 in total
+model        ~/models-ab/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+  n_vocab 128256, add_bos true
+  KV cache    f16
+  prompt rows marked (the mode the flags ask for)
+  8-bit form  1003487232 bytes
+reference    the same model, no row marked (exact)
+  8-bit form  1003487232 bytes
+   1    PPL    7.3196    KLD   0.00391    chunk KLD   0.00391    chunk top 95.686 %    same top p 95.686 %
+   2    PPL    9.9239    KLD   0.00359    chunk KLD   0.00328    chunk top 98.039 %    same top p 96.863 %
+   3    PPL   11.3661    KLD   0.00352    chunk KLD   0.00337    chunk top 95.686 %    same top p 96.471 %
+   4    PPL   12.0971    KLD   0.00340    chunk KLD   0.00306    chunk top 97.255 %    same top p 96.667 %
+   5    PPL   12.7262    KLD   0.00325    chunk KLD   0.00263    chunk top 95.686 %    same top p 96.471 %
+   6    PPL   13.1220    KLD   0.00333    chunk KLD   0.00374    chunk top 97.647 %    same top p 96.667 %
+   7    PPL   13.7971    KLD   0.00328    chunk KLD   0.00298    chunk top 96.863 %    same top p 96.695 %
+   8    PPL   14.7679    KLD   0.00329    chunk KLD   0.00338    chunk top 96.863 %    same top p 96.716 %
+   9    PPL   16.2189    KLD   0.00326    chunk KLD   0.00304    chunk top 96.078 %    same top p 96.645 %
+  10    PPL   16.5248    KLD   0.00324    chunk KLD   0.00303    chunk top 98.039 %    same top p 96.784 %
+  11    PPL   16.7687    KLD   0.00330    chunk KLD   0.00384    chunk top 96.471 %    same top p 96.756 %
+  12    PPL   17.1304    KLD   0.00338    chunk KLD   0.00430    chunk top 95.686 %    same top p 96.667 %
+  13    PPL   18.1355    KLD   0.00337    chunk KLD   0.00331    chunk top 96.078 %    same top p 96.621 %
+  14    PPL   17.2130    KLD   0.00337    chunk KLD   0.00330    chunk top 97.647 %    same top p 96.695 %
+  15    PPL   16.9727    KLD   0.00333    chunk KLD   0.00283    chunk top 96.078 %    same top p 96.654 %
+  16    PPL   16.4691    KLD   0.00330    chunk KLD   0.00278    chunk top 98.039 %    same top p 96.740 %
+  17    PPL   16.2464    KLD   0.00333    chunk KLD   0.00382    chunk top 98.824 %    same top p 96.863 %
+  18    PPL   16.6386    KLD   0.00334    chunk KLD   0.00359    chunk top 96.863 %    same top p 96.863 %
+  19    PPL   16.5184    KLD   0.00343    chunk KLD   0.00497    chunk top 96.471 %    same top p 96.842 %
+  20    PPL   16.2358    KLD   0.00343    chunk KLD   0.00343    chunk top 96.471 %    same top p 96.824 %
+  21    PPL   16.1444    KLD   0.00342    chunk KLD   0.00314    chunk top 96.471 %    same top p 96.807 %
+  22    PPL   15.7243    KLD   0.00341    chunk KLD   0.00336    chunk top 97.255 %    same top p 96.827 %
+  23    PPL   15.3333    KLD   0.00342    chunk KLD   0.00350    chunk top 95.686 %    same top p 96.777 %
+  24    PPL   15.1493    KLD   0.00345    chunk KLD   0.00427    chunk top 94.118 %    same top p 96.667 %
+  25    PPL   14.6824    KLD   0.00347    chunk KLD   0.00381    chunk top 95.686 %    same top p 96.627 %
+  26    PPL   14.6564    KLD   0.00346    chunk KLD   0.00330    chunk top 97.255 %    same top p 96.652 %
+  27    PPL   14.4590    KLD   0.00343    chunk KLD   0.00258    chunk top 99.216 %    same top p 96.747 %
+  28    PPL   14.3259    KLD   0.00343    chunk KLD   0.00350    chunk top 98.431 %    same top p 96.807 %
+  29    PPL   14.5109    KLD   0.00344    chunk KLD   0.00374    chunk top 93.725 %    same top p 96.700 %
+  30    PPL   14.4680    KLD   0.00344    chunk KLD   0.00347    chunk top 96.863 %    same top p 96.706 %
+  31    PPL   14.5690    KLD   0.00346    chunk KLD   0.00389    chunk top 96.078 %    same top p 96.686 %
+  32    PPL   14.5527    KLD   0.00345    chunk KLD   0.00331    chunk top 95.294 %    same top p 96.642 %
+  33    PPL   14.6166    KLD   0.00344    chunk KLD   0.00309    chunk top 96.078 %    same top p 96.625 %
+  34    PPL   14.6708    KLD   0.00343    chunk KLD   0.00323    chunk top 98.824 %    same top p 96.690 %
+  35    PPL   14.8342    KLD   0.00346    chunk KLD   0.00442    chunk top 96.471 %    same top p 96.683 %
+  36    PPL   15.0577    KLD   0.00348    chunk KLD   0.00420    chunk top 94.118 %    same top p 96.612 %
+  37    PPL   14.9045    KLD   0.00347    chunk KLD   0.00290    chunk top 98.824 %    same top p 96.672 %
+  38    PPL   14.9829    KLD   0.00346    chunk KLD   0.00333    chunk top 96.863 %    same top p 96.677 %
+  39    PPL   14.9021    KLD   0.00346    chunk KLD   0.00336    chunk top 96.471 %    same top p 96.672 %
+  40    PPL   14.9080    KLD   0.00346    chunk KLD   0.00358    chunk top 96.471 %    same top p 96.667 %
+
+====== Perplexity statistics ======
+reference: this model's exact mode (no row marked)
+Mean PPL(Q)                   :  14.907955 ±   0.419821
+Mean PPL(base)                :  14.891412 ±   0.419271
+Cor(ln(PPL(Q)), ln(PPL(base))):  99.95%
+Mean ln(PPL(Q)/PPL(base))     :   0.001110 ±   0.000891
+Mean PPL(Q)/PPL(base)         :   1.001111 ±   0.000892
+Mean PPL(Q)-PPL(base)         :   0.016543 ±   0.013290
+
+====== KL divergence statistics ======
+Mean    KLD:   0.003464 ±   0.000047
+Maximum KLD:   0.142790
+99.9%   KLD:   0.047641
+99.0%   KLD:   0.022973
+95.0%   KLD:   0.009785
+90.0%   KLD:   0.006906
+Median  KLD:   0.002456
+10.0%   KLD:   0.000298
+ 5.0%   KLD:   0.000103
+ 1.0%   KLD:   0.000006
+ 0.1%   KLD:  -0.000029
+Minimum KLD:  -0.000077
+
+====== Token probability statistics ======
+Mean    Δp: -0.030 ± 0.013 %
+Maximum Δp:  0.182%
+99.9%   Δp:  0.079%
+99.0%   Δp:  0.041%
+95.0%   Δp:  0.019%
+90.0%   Δp:  0.011%
+75.0%   Δp:  0.002%
+Median  Δp: -0.000%
+25.0%   Δp: -0.003%
+10.0%   Δp: -0.012%
+ 5.0%   Δp: -0.020%
+ 1.0%   Δp: -0.042%
+ 0.1%   Δp: -0.099%
+Minimum Δp: -0.155%
+RMS Δp    :  1.359 ± 0.031 %
+Same top p: 96.667 ± 0.178 %

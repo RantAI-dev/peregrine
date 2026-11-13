@@ -60,6 +60,10 @@ struct Args {
     /// precision, which is what a like-for-like comparison against another engine
     /// (whose attention reads f16 operands) needs.
     kv: KvPrec,
+    /// `--ref-kv`: the precision of the reference pass's cache under `--ref-self`.
+    /// The same as `--kv` unless asked for, so a candidate on one cache can be
+    /// measured against the exact engine on another (S5.4o's int8 cache against f16).
+    ref_kv: KvPrec,
     /// `--fast-prompt`: turn the opt-in 8-bit prompt pass on (`PEREGRINE_FAST_PROMPT`,
     /// which must be set before the load) and mark every row of the prefill as a
     /// prompt row. Off is the default engine, unchanged.
@@ -306,6 +310,7 @@ fn parse_args() -> Result<Args, String> {
     let mut threads = std::thread::available_parallelism().map_or(8, |n| n.get());
     let mut prefill = PREFILL_CHUNK_DEFAULT;
     let mut kv = KvPrec::F16;
+    let mut ref_kv: Option<KvPrec> = None;
     let mut fast = false;
     let mut ref_self = false;
     let mut ref_model = None;
@@ -338,10 +343,17 @@ fn parse_args() -> Result<Args, String> {
                 kv = KvPrec::parse(&v)
                     .ok_or_else(|| format!("--kv: unknown precision {v:?} — f16, f32 or i8"))?;
             }
+            "--ref-kv" => {
+                let v = it.next().ok_or("--ref-kv needs a precision")?;
+                ref_kv = Some(KvPrec::parse(&v).ok_or_else(|| {
+                    format!("--ref-kv: unknown precision {v:?} — f16, f32 or i8")
+                })?);
+            }
             "-h" | "--help" => {
                 println!(
                     "usage: kld --base <base.bin> [--model <model.gguf>] [--threads N] [--prefill N]\n\
-                     \x20           [--kv f16|f32|i8] [--ref-self | --ref-model <model.gguf>] [--fast-prompt]\n\
+                     \x20           [--kv f16|f32|i8] [--ref-kv f16|f32|i8] [--ref-self | --ref-model <model.gguf>]\n\
+                     \x20           [--fast-prompt]\n\
                      \n\
                      Reads a llama.cpp `--kl-divergence-base` file. With --model it runs\n\
                      Peregrine over the same tokens and prints the KL divergence against\n\
@@ -367,7 +379,9 @@ fn parse_args() -> Result<Args, String> {
                      --kv is the precision of the KV cache (f16 by default). With f32\n\
                      the keys and values attention reads are the ones the model produced,\n\
                      with no rounding — the setting a like-for-like comparison against\n\
-                     another engine needs."
+                     another engine needs. --ref-kv sets the reference pass's cache\n\
+                     precision (the candidate's unless given), so the exact engine on an\n\
+                     f16 cache can be the reference of a candidate on another cache."
                 );
                 std::process::exit(0);
             }
@@ -386,6 +400,7 @@ fn parse_args() -> Result<Args, String> {
         threads: threads.max(1),
         prefill: prefill.clamp(1, MAX_BATCH),
         kv,
+        ref_kv: ref_kv.unwrap_or(kv),
         fast,
         ref_self,
         ref_model,
@@ -609,12 +624,14 @@ impl Loaded {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_model(
     path: &Path,
     threads: usize,
     n_ctx: usize,
     prefill: usize,
     kv: KvPrec,
+    ref_kv: KvPrec,
     marked: bool,
     ref_cache: bool,
 ) -> Result<Loaded, String> {
@@ -630,7 +647,7 @@ fn load_model(
     // kernel panics on a state built with the default layout.
     let state = model.new_state(prefill, prefill, n_ctx, pool.width());
     let cache = model.new_cache(kv, n_ctx);
-    let kv_ref = ref_cache.then(|| model.new_cache(kv, n_ctx));
+    let kv_ref = ref_cache.then(|| model.new_cache(ref_kv, n_ctx));
     Ok(Loaded {
         path: path.to_path_buf(),
         model,
@@ -695,6 +712,7 @@ fn run(args: &Args) -> Result<(), String> {
                 n_ctx as usize,
                 args.prefill,
                 args.kv,
+                args.ref_kv,
                 args.fast,
                 args.ref_self,
             )?)
@@ -708,6 +726,7 @@ fn run(args: &Args) -> Result<(), String> {
             n_ctx as usize,
             args.prefill,
             args.kv,
+            args.ref_kv,
             false,
             false,
         )?),
