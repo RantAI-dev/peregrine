@@ -1,0 +1,16 @@
+# forced.py against Peregrine, Qwen2.5-0.5B-Instruct-Q4_K_M, 4 threads, temperature 0
+# before marker tokens (the tags spelled out of ordinary tokens):
+required, weather             1.19s tool_calls content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}')] tok=31
+required, no parallel         1.05s tool_calls content=None calls=[('get_weather', '{"city": "Tokyo", "unit": "celsius"}')] tok=34
+named get_time, weather q     0.81s tool_calls content=None calls=[('get_time', '{"timezone": "Europe/Paris"}')] tok=26
+# after (S6.6c):
+auto, tool question           2.15s tool_calls content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}')] tok=26
+auto, chit-chat               0.15s stop       content='Hello!' calls=[] tok=2
+required, chit-chat           1.79s tool_calls content=None calls=[('get_time', '{"timezone": "Asia/Shanghai"}'), ('get_weather', '{"city": "Shanghai", "unit": "fahrenheit"}')] tok=53
+required, weather             0.83s tool_calls content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}')] tok=26
+required, two things          1.69s tool_calls content=None calls=[('get_weather', '{"city": "Tokyo", "unit": "celsius"}'), ('get_time', '{"timezone": "Asia/Tokyo"}')] tok=50
+required, no parallel         0.76s tool_calls content=None calls=[('get_weather', '{"city": "Tokyo", "unit": "celsius"}')] tok=27
+named get_time, weather q     0.75s tool_calls content=None calls=[('get_time', '{"timezone": "Europe/Paris"}')] tok=21
+named get_weather             0.83s tool_calls content=None calls=[('get_weather', '{"city": "Oslo", "unit": "fahrenheit"}')] tok=27
+named unknown                HTTP 400 {"error":{"code":400,"message":"tool_choice names \"nope\", which is not one of the request's tools","type":"invalid_request_error"}}
+required, stream off, temp 1  1.79s tool_calls content=None calls=[('get_weather', '{"city": "New York", "unit": "fahrenheit"}'), ('get_time', '{"timezone": "America/New_York"}')] tok=54

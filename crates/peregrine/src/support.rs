@@ -151,8 +151,8 @@ GEGLU, mean/cls), Gemma 3 (EmbeddingGemma: mean/cls with \
 `peregrine embed`";
 
     // 7. Tool calling
-    let tool_str = "OpenAI `tools`, `tool_choice` (`auto`, `none`) and `tool_calls` on \
-`POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 \
+    let tool_str = "OpenAI `tools`, `tool_choice` (`auto`, `none`, `required`, a named function) and `tool_calls` \
+on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 \
 (the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the \
 prompt is the one llama.cpp builds from the model's template";
 

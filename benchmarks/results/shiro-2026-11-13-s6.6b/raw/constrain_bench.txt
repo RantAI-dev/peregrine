@@ -1,0 +1,17 @@
+model ~/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf vocab 151936 prep_ms 199.3 prep_median_ms 192.0 prep_min_ms 183.7 prep_max_ms 211.3
+micro any-object-key: first 173392 ns, warm 3174 ns/call (bits 78800 394)
+micro any-object-value: first 240194 ns, warm 2977 ns/call (bits 97800 489)
+micro any-array-value: first 175597 ns, warm 3390 ns/call (bits 100600 503)
+micro string-content: first 148338 ns, warm 3233 ns/call (bits 97800 489)
+micro medium-value: first 60018 ns, warm 3336 ns/call (bits 80200 401)
+micro medium-string: first 150776 ns, warm 3191 ns/call (bits 29440800 147204)
+micro free-text: first 64820685 ns, next request 14204 ns, warm 3045 ns/call (allowed 151720, sink 30344000)
+micro free-text-partial-terminator: first 65362616 ns, next request 15000 ns, warm 4276 ns/call (allowed 151720, sink 30344000)
+micro free-text-inside-a-character: first 70871 ns, next request 24321 ns, warm 3920 ns/call (allowed 101, sink 20200)
+micro literal-with-marker: first 18993 ns, next request 14494 ns, warm 3223 ns/call (allowed 3, sink 600)
+micro literal-middle: first 14670 ns, next request 11607 ns, warm 4144 ns/call (allowed 2, sink 400)
+micro json-after-literal: first 20411 ns, next request 14605 ns, warm 4244 ns/call (allowed 4, sink 800)
+unconstrained: tok_s median 44.10 runs [41.055460141115226, 44.35673798963068, 44.10130523747785, 49.56546015603213, 41.93891450630501]
+json_object: tok_s median 44.56 runs [44.557041758088054, 43.715819420466744, 49.57822704449647, 50.80132404681067, 40.92149936528007]
+medium: tok_s median 49.29 runs [41.03439849725748, 51.255830690901085, 49.40460847052391, 49.29358066789566, 40.582347458890816]
+large: tok_s median 42.87 runs [43.36973926946533, 32.77012219487506, 44.387298145676745, 42.870420078870524, 34.592656251010794]

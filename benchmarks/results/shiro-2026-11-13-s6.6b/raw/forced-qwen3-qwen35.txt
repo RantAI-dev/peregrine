@@ -1,0 +1,13 @@
+# forced2.py against Peregrine, 6 threads, temperature 0
+Qwen3 1.7B (Qwen_Qwen3-1.7B-Q4_K_M, the hermes call syntax, the model opens its own thinking block)
+required, thinking off               8.2s tool_calls think=   0ch content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}'), ('get_time', '{"timezone": "Europe/Paris", "utc": true}')] tok=53
+named get_time, off                  3.1s tool_calls think=   0ch content=None calls=[('get_time', '{"timezone": "Europe/Oslo", "utc": true}')] tok=32
+required, thinking ON               24.3s tool_calls think=1355ch content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}'), ('get_time', '{"timezone": "Europe/Paris"}')] tok=350
+auto+response_format, off, chat      2.3s tool_calls think=   0ch content=None calls=[('get_weather', '{"city": "New York", "unit": "fahrenheit", "days": 1}')] tok=38
+auto+response_format, off, tool q    3.7s tool_calls think=   0ch content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}'), ('get_time', '{"timezone": "Europe/Paris", "utc": true}')] tok=53
+Qwen3.5 2B (Qwen_Qwen3.5-2B-Q4_K_M, the XML call syntax, the template opens the thinking block)
+required, thinking off              11.6s tool_calls think=   0ch content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}'), ('get_time', '{"timezone": "Europe/Paris"}')] tok=66
+named get_time, off                  7.3s tool_calls think=   0ch content=None calls=[('get_time', '{"timezone": "Europe/Oslo"}')] tok=28
+required, thinking ON               19.7s tool_calls think= 338ch content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}'), ('get_time', '{"timezone": "Europe/Paris"}')] tok=155
+auto+response_format, off, chat      8.7s tool_calls think=   0ch content=None calls=[('get_weather', '{"city": "Earth", "unit": "celsius"}')] tok=38
+auto+response_format, off, tool q   12.2s tool_calls think=   0ch content=None calls=[('get_weather', '{"city": "Paris", "unit": "celsius"}'), ('get_time', '{"timezone": "Europe/Paris"}')] tok=66

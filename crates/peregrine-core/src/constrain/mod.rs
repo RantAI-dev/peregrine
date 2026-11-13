@@ -1,5 +1,6 @@
 //! Constrained decoding: the sampler may only pick tokens that keep the reply a valid
-//! prefix of a constraint (a JSON schema, a literal sequence, or a combination).
+//! prefix of a constraint (a JSON schema, a literal sequence, free text up to a terminator,
+//! or a combination).
 //!
 //! The constraint is applied between the logits and the existing sampler: the forward pass
 //! is untouched, and a request without a constraint takes exactly the path it took before.
@@ -20,7 +21,12 @@
 //! ]);
 //! // Several calls in one reply, and one of two shapes.
 //! let several = Constraint::repeat(call.clone(), 1, Some(3));
-//! let either = Constraint::any_of(vec![call, several]);
+//! let either = Constraint::any_of(vec![call.clone(), several]);
+//! // Free text up to a terminator (a thinking block), then the call.
+//! let after_thinking = Constraint::concat(vec![
+//!     Constraint::sequence(vec![Part::Until("</think>".into()), Part::Literal("\n\n".into())]),
+//!     call,
+//! ]);
 //! ```
 //!
 //! Attach one to a generation request with `SlotCfg::constraint`; the server's

@@ -261,6 +261,27 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`tool_choice: "required"`, a named function, and `tools` beside a `response_format`
+  (S6.6b, S6.6c)**: a forced tool choice is now a constraint on the sampler. The reply is
+  calls in the model's own call syntax — the Hermes JSON form for Qwen 2.5 and Qwen 3, the
+  `<function=…>`/`<parameter=…>` form for Qwen 3.5 and Bonsai 2 — whose arguments fit the
+  tool's `parameters` schema, whatever the model would have written: at least one call for
+  `"required"`, exactly one for a named function or with `parallel_tool_calls: false`.
+  `tools` may be sent with a `response_format`: the reply is then calls or JSON of the
+  schema (with `"none"`, the schema alone). On Qwen 3, Qwen 3.5 and Bonsai 2 a constraint
+  is laid after the model's thinking, which stays free text, so `response_format` and a
+  forced choice now work with thinking on. Under it the constraint engine gained a
+  free-text part (`Part::Until`, text up to the first occurrence of a terminator),
+  `Constraint::concat`, and marker tokens: a user-defined token such as `<tool_call>` is
+  allowed where the constraint spells its bytes, so a forced call is the same 26 tokens as
+  an unforced one on Qwen 2.5 0.5B instead of 31 with the tags spelled out. Measured on
+  that file against llama.cpp v0.9.0, 20 forced requests, three rounds: every Peregrine
+  reply carries schema-valid calls (20 of 20; llama.cpp answers four of the twenty in
+  prose), at 1.11–1.36× llama.cpp's decode speed on a loaded host. A request that cannot be
+  honoured is a 400 that names the tool: a named function that is not among the tools,
+  parameters that are not an object schema, a schema keyword the constraint compiler
+  refuses. Design: `docs/design/s6.6-constrained-decoding.md` §12 and §13; results:
+  `benchmarks/results/shiro-2026-11-13-s6.6b/`.
 - **Constrained decoding and `response_format` (S6.6a)**: `POST /v1/chat/completions` accepts
   OpenAI's `response_format`: `{"type": "json_object"}` or a JSON Schema document
   (`{"type": "json_schema", "json_schema": {"name", "schema", "strict"}}`), and the sampler may
