@@ -156,8 +156,11 @@ pub fn attend_texts(
             Sched::Static,
             |wk, rows, out_chunk| {
                 // SAFETY: worker `wk` owns slot `wk` for the whole call: its strip's
-                // scores first, then the strip's softmax denominators.
-                let slot = unsafe { strips_buf.chunk(wk * k::STRIP_SLOT, k::STRIP_SLOT) };
+                // scores first, then the strip's softmax denominators. Not claimed in
+                // the overlap tracker: a claimed job (S5.6) enters this closure once
+                // per range it takes, and the second fetch of the worker's own slot
+                // is not a second writer.
+                let slot = unsafe { strips_buf.window_mut(wk * k::STRIP_SLOT, k::STRIP_SLOT) };
                 let (buf, inv) = slot.split_at_mut(area);
                 let mut si = spans
                     .iter()

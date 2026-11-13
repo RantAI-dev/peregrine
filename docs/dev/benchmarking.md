@@ -103,13 +103,14 @@ elsewhere the configured window is used unchanged.
 ## Stalls on a shared host
 
 A second controller (S5.6) watches the caller's post-share wait instead of the schedstat reading.
-When the wait is at least half the fork–join and the host's smoothed run-queue delay says the
+When the wait is at least 40 % of the fork–join (and at least 50 µs) and the host's smoothed run-queue delay says the
 machine is oversubscribed (at least 80 permille), four such joins in a row make every waiter park
 at once, and blocks that can split their work ask the pool for claimed ranges instead of static
 shares: the caller then returns when the units are exhausted and none is in flight, without waiting
 for a worker the host has not scheduled yet. After a hold of unstalled joins the window is probed
 back; a probe that stalls parks again and doubles the hold. `PEREGRINE_ADAPTIVE_STALL=0` turns both
-parts off (the default path is then the old one), and the claimed partitions themselves are only
+parts off (the default path is then the old one), `PEREGRINE_ADAPTIVE_STALL=claim` takes the claimed
+partitions on every fork–join (a test switch: CI runs the golden suites through it), and the claimed partitions themselves are only
 used while the controller says the pool is stalled, so a quiet host keeps the partition each block
 was tuned with. The signal is Linux-only; the claimed paths are portable. Measurements and the
 account are in `benchmarks/results/spark-arm-2026-11-13-s5.6/` and

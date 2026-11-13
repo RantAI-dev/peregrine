@@ -720,6 +720,14 @@ impl Architecture for Gemma3 {
 
             // ---- Attend ----
             let t_attn = Instant::now();
+            // The fast prompt mode's row flags (S5.4j): a prompt row of the mode takes
+            // the fast attention order on the tiers that have it, exactly as the dense
+            // family's rows do. A sliding-window layer passes its window as always.
+            let fast_on = st.fast_attn;
+            for b in 0..nb {
+                st.fast_rows[b] = fast_on && st.acts[b].prompt;
+            }
+            let fast = fast_on.then(|| &st.fast_rows[..nb]);
             for (r0, len, c) in caches.runs(nb) {
                 peregrine_core::blocks::attn::attend_scaled_window(
                     cfg,
@@ -735,6 +743,7 @@ impl Architecture for Gemma3 {
                     window,
                     Some(self.attn_scale),
                     None,
+                    fast,
                     stats,
                 );
             }

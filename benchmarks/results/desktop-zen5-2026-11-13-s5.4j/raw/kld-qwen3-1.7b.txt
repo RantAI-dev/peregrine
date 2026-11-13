@@ -1,0 +1,23 @@
+# kld --ref-self --fast-prompt, wikitext-2 40x512, Qwen3 1.7B Q4_K_M, 12 threads.
+#   PEREGRINE_FAST_PROMPT=1 kld --base /var/tmp/pg/s54c/base/qwen3-17b.base.bin \
+#       --model /var/tmp/pg/s54c/models/Qwen3-1.7B-Q4_K_M.gguf --threads 12 --ref-self --fast-prompt
+
+before (S5.4i build)
+Mean    KLD:   0.017115 +/-   0.000993
+99.0%   KLD:   0.148500
+Median  KLD:   0.006523
+Mean    dp: -0.056 +/- 0.037 %
+99.0%   dp:  0.113%
+Median  dp:  0.000%
+RMS dp    :  3.751 +/- 0.125 %
+Same top p: 93.912 +/- 0.237 %
+
+after (this branch)
+Mean    KLD:   0.017336 +/-   0.001186
+99.0%   KLD:   0.153158
+Median  KLD:   0.006527
+Mean    dp: -0.072 +/- 0.038 %
+99.0%   dp:  0.115%
+Median  dp:  0.000%
+RMS dp    :  3.817 +/- 0.130 %
+Same top p: 94.196 +/- 0.232 %

@@ -141,6 +141,30 @@ const LOAD_SAMPLE: Duration = Duration::from_millis(8);
 /// sample taken across a park (an idle session) would otherwise be mostly denominator.
 const LOAD_MIN_RUNNABLE: Duration = Duration::from_millis(4);
 
+/// The longest gap between two fork–joins the pool will bridge by spinning, in µs
+/// (S5.4j).
+///
+/// A worker that finds no job spins for [`WaitControl::budgets`]' window and then parks,
+/// and the next job pays the wake ([`crate::calib`] measures that latency at startup and
+/// sets the configured window to twice it). A **prompt pass** has a much longer gap
+/// between joins than a decode token — its caller does 1–5 ms of serial work between
+/// them (the KV write, the activation quantise, the form's interleaved fill) — so a
+/// window sized by the wake latency is shorter than the gap, and every join in a prompt
+/// pass pays a park and a wake. Measured on the reference desktop, 512 tokens at twelve
+/// threads, the fast prompt mode: a 2 000 µs window +6 %, 4 000 µs +8 %, 8 000 µs +4 %
+/// against the calibrated 1 000 µs, and the park log showed 675 of 1 006 parks lasting
+/// 1–5 ms.
+const GAP_CAP_US: u64 = 8000;
+
+/// A gap longer than this is a pass boundary (an idle session), not a fork-to-fork gap:
+/// it must not stretch the window, because no worker is waiting across it.
+const GAP_MAX_NS: u64 = 20_000_000;
+
+/// Weight of a new gap sample in the pool's smoothed join gap: one quarter, so the
+/// window follows a pass's shape within a handful of joins and cannot be moved by one
+/// slow join.
+const GAP_SHIFT: u32 = 2;
+
 /// Run-queue delay that means the host has more runnable threads than free cores.
 ///
 /// Measured on the reference host (Xeon E5-2680 v4, four threads pinned to four cores):
@@ -243,6 +267,17 @@ struct WaitControl {
     /// `PEREGRINE_ADAPTIVE_STALL=0` turns the stall detection (and the claimed
     /// partitions it enables) off, leaving the spin ladder exactly as it was.
     stall_enabled: bool,
+    /// `PEREGRINE_ADAPTIVE_STALL=claim`: [`Pool::claiming`] is always true, so every
+    /// splittable block takes its claimed partition. A test and diagnostic switch.
+    claim_always: bool,
+    /// Smoothed gap between the end of one fork–join and the start of the next, in
+    /// nanoseconds (0 until the first measured gap). The worker's spin window is
+    /// stretched to cover it: that is the wait a spin can save, and a prompt pass's gap
+    /// is longer than the wake latency the configured window is sized by.
+    gap_ns: AtomicU64,
+    /// When the previous fork–join ended, in nanoseconds since the pool's first join.
+    /// Only the caller thread writes it; `0` means "no join has finished yet".
+    last_end: AtomicU64,
     /// Trial state; only the caller thread uses it, one join at a time.
     trial: Mutex<Trial>,
 }
@@ -447,6 +482,14 @@ fn print_adaptive_totals() {
     );
 }
 
+/// Nanoseconds since the process's first fork–join, the clock the join gaps are kept on
+/// (a `u64` of nanoseconds, not an `Instant`, so the field is a plain atomic).
+fn nanos_since_base(now: Instant) -> u64 {
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let base = *BASE.get_or_init(|| now);
+    now.saturating_duration_since(base).as_nanos() as u64
+}
+
 impl WaitControl {
     fn new(spin_us: u64, yield_us: u64, enabled: bool, stall_enabled: bool) -> WaitControl {
         WaitControl {
@@ -460,6 +503,9 @@ impl WaitControl {
             logged: AtomicU64::new(0),
             enabled,
             stall_enabled,
+            claim_always: false,
+            gap_ns: AtomicU64::new(0),
+            last_end: AtomicU64::new(0),
             trial: Mutex::new(Trial {
                 active: false,
                 rung: 0,
@@ -489,11 +535,58 @@ impl WaitControl {
             return (Duration::ZERO, Duration::ZERO);
         }
         let spin = match self.level.load(Ordering::Relaxed) {
-            0 => self.max_spin_us,
+            0 => {
+                let configured = self.max_spin_us;
+                // A caller that asks for no spinning (`PEREGRINE_SPIN_US=0`, and the
+                // calibration's own wake probe) keeps none.
+                if configured == 0 || !self.enabled {
+                    configured
+                } else {
+                    configured.max(self.gap_us())
+                }
+            }
             _ => 0,
         };
         let yld = self.max_yield_us.max(spin);
         (Duration::from_micros(spin), Duration::from_micros(yld))
+    }
+
+    /// The measured join gap, in µs, capped at [`GAP_CAP_US`].
+    fn gap_us(&self) -> u64 {
+        (self.gap_ns.load(Ordering::Relaxed) / 1000).min(GAP_CAP_US)
+    }
+
+    /// Record the gap a worker would have to bridge: the time from the end of the last
+    /// fork–join to the start of this one.
+    fn observe_gap(&self, now: Instant) {
+        if !self.enabled || self.max_spin_us == 0 {
+            return;
+        }
+        let nanos = nanos_since_base(now);
+        let prev = self.last_end.load(Ordering::Relaxed);
+        if prev == 0 || nanos <= prev {
+            return;
+        }
+        let gap = nanos - prev;
+        if gap > GAP_MAX_NS {
+            return;
+        }
+        let old = self.gap_ns.load(Ordering::Relaxed);
+        let next = if old == 0 {
+            gap
+        } else {
+            old - (old >> GAP_SHIFT) + (gap >> GAP_SHIFT)
+        };
+        self.gap_ns.store(next, Ordering::Relaxed);
+    }
+
+    /// Mark the end of this fork–join, which is where the next gap is measured from.
+    fn mark_join_end(&self, now: Instant) {
+        if !self.enabled || self.max_spin_us == 0 {
+            return;
+        }
+        self.last_end
+            .store(nanos_since_base(now), Ordering::Relaxed);
     }
 
     /// Update the busy gate from one scheduling sample.
@@ -952,6 +1045,12 @@ impl Inner {
         claim: usize,
     ) {
         self.job_seq.fetch_add(1, Ordering::SeqCst);
+        // The odd sequence must be visible before any field changes: without this
+        // fence a weakly ordered CPU (aarch64) may let a field store pass the
+        // increment, and a reader could pair an unchanged even sequence with a new
+        // field. The reader's fence below is the other half; this is the standard
+        // sequence-lock discipline (crossbeam's `SeqLock` uses the same two fences).
+        std::sync::atomic::fence(Ordering::Release);
         self.job_gen.store(generation, Ordering::Relaxed);
         self.job_kind.store(kind, Ordering::Relaxed);
         self.job_data.store(data as usize, Ordering::Relaxed);
@@ -977,6 +1076,10 @@ impl Inner {
                 units: self.job_units.load(Ordering::Relaxed),
                 claim: self.job_claim.load(Ordering::Relaxed),
             };
+            // The field loads above are relaxed, so nothing else orders them before
+            // the validating load: the fence does (an acquire *load* only orders what
+            // follows it).
+            std::sync::atomic::fence(Ordering::Acquire);
             if self.job_seq.load(Ordering::Acquire) == first {
                 return job;
             }
@@ -1046,7 +1149,10 @@ impl Pool {
             done_mu: Mutex::new(()),
             done_cv: Condvar::new(),
             n,
-            wait: WaitControl::new(o.spin_us, o.yield_us, o.adaptive_spin, o.adaptive_stall),
+            wait: WaitControl {
+                claim_always: o.claim_always,
+                ..WaitControl::new(o.spin_us, o.yield_us, o.adaptive_spin, o.adaptive_stall)
+            },
             strikes: AtomicU32::new(0),
             healthy: AtomicU32::new(0),
             hold: AtomicU32::new(STALL_HOLD),
@@ -1201,8 +1307,10 @@ impl Pool {
     pub fn run<F: Fn(usize, usize) + Sync>(&self, f: F) {
         #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
         crate::blocks::par::bump_epoch();
+        self.inner.wait.observe_gap(Instant::now());
         if self.n == 1 {
             f(0, 1);
+            self.inner.wait.mark_join_end(Instant::now());
             return;
         }
         // One caller at a time. This is what the SAFETY comment below rests on: a pool
@@ -1300,6 +1408,7 @@ impl Pool {
         if let Some(t) = wait_t0 {
             crate::prof::add(crate::prof::Slot::Wait, t.elapsed().as_nanos() as u64);
         }
+        self.inner.wait.mark_join_end(Instant::now());
         crate::blocks::par::bump_epoch();
         let poisoned = self.inner.poisoned.swap(false, Ordering::AcqRel);
         if let Err(p) = mine {
@@ -1319,7 +1428,9 @@ impl Pool {
     /// On a healthy host the flag is false and every block keeps the partition it
     /// was tuned with.
     pub fn claiming(&self) -> bool {
-        self.inner.wait.stall_enabled && self.inner.wait.forced_park.load(Ordering::Relaxed)
+        self.inner.wait.claim_always
+            || (self.inner.wait.stall_enabled
+                && self.inner.wait.forced_park.load(Ordering::Relaxed))
     }
 
     /// Run `f(worker, width, lo, hi)` for every claimed range of `units`.
@@ -1343,8 +1454,12 @@ impl Pool {
         }
         #[cfg(any(debug_assertions, peregrine_check_disjoint, feature = "check-disjoint"))]
         crate::blocks::par::bump_epoch();
+        // A claimed job is a fork–join like any other for the join-gap measure
+        // (S5.4j): leaving it out would hand the next `run` a gap that spans it.
+        self.inner.wait.observe_gap(Instant::now());
         if self.n == 1 {
             f(0, 1, 0, units);
+            self.inner.wait.mark_join_end(Instant::now());
             return;
         }
         if self.inner.in_run.swap(true, Ordering::Acquire) {
@@ -1437,6 +1552,7 @@ impl Pool {
             JOIN_MAX_NS.fetch_max(wait_ns, Ordering::Relaxed);
             self.record_straggler();
         }
+        self.inner.wait.mark_join_end(Instant::now());
         crate::blocks::par::bump_epoch();
         let poisoned = self.inner.poisoned.swap(false, Ordering::AcqRel);
         if let Err(p) = mine {
@@ -2420,6 +2536,10 @@ mod tests {
     /// configured window back, and a stalled probe parks again with a longer hold.
     #[test]
     fn the_stall_gate_parks_and_probes_back() {
+        if crate::options::get().claim_always {
+            eprintln!("skip: PEREGRINE_ADAPTIVE_STALL=claim pins the claimed partitions on");
+            return;
+        }
         let p = Pool::new(4);
         assert!(!p.claiming(), "a fresh pool is not stalled");
         // A busy host: the run-queue sample has to say so before a join can be a stall.

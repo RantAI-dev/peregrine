@@ -1,0 +1,11 @@
+# The one-thread attention buckets, one interleaved pair of promptbench runs per cell
+# (S5.4i's build, then this branch), Llama 3.2 1B, PEREGRINE_PROF2=full, --fast-prompt.
+# Recorded from the same runs whose JSON is in raw/account-512-12-*.txt and -4096-12-*.txt.
+
+512 tokens, 1 thread
+  base : prefill 79.9 tok/s  attention 517.6 ms  pass 6.39 s
+  final: prefill 80.0 tok/s  attention 522.2 ms  pass 6.39 s
+
+4096 tokens, 1 thread
+  base : prefill 52.8 tok/s  attention 30 642.2 ms  pass 77.56 s
+  final: prefill 52.8 tok/s  attention 30 753.2 ms  pass 77.58 s
