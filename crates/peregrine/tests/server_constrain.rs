@@ -317,13 +317,14 @@ fn the_400s_are_openai_shaped_and_name_the_field() {
             "response_format": {"type": "json_object"}
         })),
     );
+    // Tools beside a response_format are served: the reply is calls or the format's JSON
+    // (S6.6b). This file's chat template has no tool format, which is the refusal here.
     assert_eq!(status, 400, "{v}");
-    assert_eq!(v["error"]["param"], "response_format");
     assert!(
         v["error"]["message"]
             .as_str()
             .unwrap_or("")
-            .contains("response_format with tools is not supported yet"),
+            .contains("no tool format"),
         "{v}"
     );
 }

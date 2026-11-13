@@ -1393,6 +1393,41 @@ fn tool_choice(b: &Value) -> Result<ToolChoice, String> {
     }
 }
 
+/// The reply's constraint once the tools have had their say (S6.6b). `content` is
+/// `response_format`'s constraint, if the request has one. Also says which request field
+/// the constraint comes from, for an error's `param`.
+///
+/// * A forced `tool_choice` wins: the reply is calls and has no content for a schema to
+///   describe.
+/// * Tools the model may call (`"auto"`) beside a `response_format`: the reply is either
+///   calls, in the format's syntax with each tool's parameters as its arguments' schema,
+///   or content of the response schema. Never a mixture: text before a call would not be
+///   the schema's JSON.
+/// * Otherwise (`"none"`, no tools, no tool path) the content's constraint stands alone.
+fn join_tool_constraint(
+    tool: Option<&ToolPlan>,
+    content: Option<Arc<Constraint>>,
+) -> Result<(Option<Arc<Constraint>>, &'static str), String> {
+    let Some(tool) = tool else {
+        return Ok((content, "response_format"));
+    };
+    if let Some(forced) = &tool.constraint {
+        return Ok((Some(forced.clone()), "tool_choice"));
+    }
+    let Some(content) = content else {
+        return Ok((None, "response_format"));
+    };
+    if !tool.parse || tool.tools.is_empty() {
+        return Ok((Some(content), "response_format"));
+    }
+    let calls = tools::forced_calls(tool.format, &tool.tools, &tools::Forced::Any, tool.parallel)
+        .map_err(|e| format!("response_format with tools: {e}"))?;
+    let either = Constraint::any_of(vec![calls, (*content).clone()]);
+    peregrine_core::constrain::Matcher::new(&either)
+        .map_err(|e| format!("response_format with tools: {}", e.message()))?;
+    Ok((Some(Arc::new(either)), "response_format"))
+}
+
 fn parallel_tool_calls(b: &Value) -> Result<bool, String> {
     match b.get("parallel_tool_calls") {
         None | Some(Value::Null) => Ok(true),
@@ -1512,9 +1547,6 @@ fn plan_with(b: &Value, tool_path: bool) -> Result<Plan, String> {
     // Validate the tool choice even without tools: a forced call has nothing to call.
     if tool_choice(b)?.forced().is_some() && !tool_path {
         return Err("a required or named tool_choice needs tools".into());
-    }
-    if tool_path && b.get("response_format").is_some_and(|v| !v.is_null()) {
-        return Err("response_format with tools is not supported yet".into());
     }
     reject_unsupported_sampling(b)?;
     let n = b["n"].as_u64().unwrap_or(1).max(1);
@@ -3676,22 +3708,19 @@ async fn chat(State(state): State<Arc<App>>, OpenAiJson(body, raw): OpenAiJson) 
     } else {
         None
     };
-    // A forced tool choice is the reply's constraint (`response_format` with tools was
-    // refused above, so the two never meet).
-    let forced_tools = p.tool.as_ref().and_then(|t| t.constraint.clone());
-    let constrained_by = if forced_tools.is_some() {
-        "tool_choice"
-    } else {
-        "response_format"
-    };
-    if let Some(c) = forced_tools {
-        p.constraint = Some(c);
-    }
     // `response_format` is read from the request's own text: a schema's property order is
     // the order the client wrote, which serde_json without `preserve_order` would sort.
     if let Err(e) = apply_response_format(&mut p, &raw) {
         return bad_param(e, "response_format");
     }
+    // Then the tools' say: a forced choice, or calls beside the content's schema.
+    let constrained_by = match join_tool_constraint(p.tool.as_ref(), p.constraint.take()) {
+        Ok((constraint, by)) => {
+            p.constraint = constraint;
+            by
+        }
+        Err(e) => return bad_param(e, "tools"),
+    };
     // A constrained reply is the assistant's content. A reasoning model's reply starts in
     // its thinking span, and the engine's sampler cannot be told when the server's parser
     // closes it; refuse instead of constraining the wrong span.
@@ -5242,13 +5271,68 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_response_format_are_refused_together() {
-        let body = json!({
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
-            "response_format": {"type": "json_object"},
-        });
-        let err = plan_with(&body, true).err().expect("refused");
-        assert_eq!(err, "response_format with tools is not supported yet");
+    fn tools_and_response_format_together_allow_calls_or_the_schemas_content() {
+        const CALL: &str =
+            "<tool_call>\n{\"name\": \"weather\", \"arguments\": {\"city\": \"Paris\"}}\n</tool_call>";
+        let schema = json!({"type": "json_schema", "json_schema": {"name": "a", "schema": {
+            "type": "object", "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"], "additionalProperties": false
+        }}});
+        let joined = |extra: Value| {
+            let mut b = tool_body(extra);
+            b["response_format"] = schema.clone();
+            let raw = b.to_string();
+            let mut p = plan_with(&b, true).expect("the plan");
+            apply_response_format(&mut p, &raw).expect("the schema");
+            let tool = tool_request(tool_format(), &b, &raw).expect("the tool request");
+            super::join_tool_constraint(Some(&tool), p.constraint.take()).expect("joined")
+        };
+        let accepts = |c: &Option<std::sync::Arc<peregrine_core::constrain::Constraint>>,
+                       text: &str| {
+            let mut m = peregrine_core::constrain::Matcher::new(c.as_ref().expect("a constraint"))
+                .expect("it starts");
+            m.advance_bytes(text.as_bytes()).is_ok() && m.can_end()
+        };
+        // The model may call or answer: a call, or the schema's JSON, and not both.
+        let (c, by) = joined(json!({"tools": weather_tools()}));
+        assert_eq!(by, "response_format");
+        assert!(accepts(&c, CALL));
+        assert!(accepts(&c, "{\"ok\": true}"));
+        assert!(!accepts(&c, "{\"ok\": 1}"));
+        assert!(!accepts(&c, "Sure."));
+        assert!(!accepts(&c, &format!("{{\"ok\": true}}\n{CALL}")));
+        // `"none"`: the content's schema alone.
+        let (c, _) = joined(json!({"tools": weather_tools(), "tool_choice": "none"}));
+        assert!(accepts(&c, "{\"ok\": false}"));
+        assert!(!accepts(&c, CALL));
+        // A forced choice: calls only; a forced reply has no content.
+        let (c, by) = joined(json!({"tools": weather_tools(), "tool_choice": "required"}));
+        assert_eq!(by, "tool_choice");
+        assert!(accepts(&c, CALL));
+        assert!(!accepts(&c, "{\"ok\": true}"));
+        // Without a response_format the default tool path is not constrained at all.
+        let b = tool_body(json!({"tools": weather_tools()}));
+        let tool = tool_request(tool_format(), &b, &b.to_string()).unwrap();
+        assert!(super::join_tool_constraint(Some(&tool), None)
+            .unwrap()
+            .0
+            .is_none());
+        // Tools whose parameters the constraint cannot express are refused by name here,
+        // because the calls have to be constrained too.
+        let mut b = tool_body(json!({"tools": [{"type": "function", "function": {
+            "name": "f", "parameters": {"type": "object",
+                "properties": {"a": {"type": "string", "pattern": "^x"}}}}}]}));
+        b["response_format"] = json!({"type": "json_object"});
+        let raw = b.to_string();
+        let mut p = plan_with(&b, true).unwrap();
+        apply_response_format(&mut p, &raw).unwrap();
+        let tool = tool_request(tool_format(), &b, &raw).unwrap();
+        let e = super::join_tool_constraint(Some(&tool), p.constraint.take())
+            .err()
+            .expect("refused");
+        assert!(
+            e.starts_with("response_format with tools: tools[0].function.parameters: "),
+            "{e}"
+        );
     }
 }

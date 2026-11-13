@@ -592,6 +592,52 @@ fn a_forced_choice_answers_with_valid_calls_whatever_the_model_writes() {
     }
 }
 
+/// Tools beside a `response_format`: the reply is calls or JSON of the response schema,
+/// never anything else, on a file of random weights too (S6.6b).
+#[test]
+fn tools_beside_a_response_format_answer_with_calls_or_the_schemas_json() {
+    let (_server, port) = serve_tool_model("either");
+    let tools = json!([{"type": "function", "function": {"name": "reset"}}]);
+    let format = json!({"type": "json_schema", "json_schema": {"name": "verdict", "schema": {
+        "type": "object", "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"], "additionalProperties": false
+    }}});
+    let (mut called, mut answered) = (0, 0);
+    for seed in 0..12u64 {
+        let (status, body) = post(
+            port,
+            tool_request(json!({
+                "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 120,
+                "response_format": format, "parallel_tool_calls": false
+            })),
+        );
+        assert_eq!(status, 200, "{body}");
+        let choice = &body["choices"][0];
+        let message = &choice["message"];
+        match message["tool_calls"].as_array() {
+            Some(calls) if !calls.is_empty() => {
+                called += 1;
+                assert_eq!(calls.len(), 1, "{body}");
+                assert_eq!(calls[0]["function"]["name"], "reset", "{body}");
+                assert_eq!(calls[0]["function"]["arguments"], "{}", "{body}");
+                assert!(message["content"].is_null(), "{body}");
+                assert_eq!(choice["finish_reason"], "tool_calls", "{body}");
+            }
+            _ => {
+                answered += 1;
+                let content = message["content"].as_str().expect("content");
+                let v: Value = serde_json::from_str(content)
+                    .unwrap_or_else(|e| panic!("content is not JSON ({e}): {body}"));
+                let o = v.as_object().expect("an object");
+                assert_eq!(o.len(), 1, "{body}");
+                assert!(o["ok"].is_boolean(), "{body}");
+                assert_eq!(choice["finish_reason"], "stop", "{body}");
+            }
+        }
+    }
+    assert_eq!(called + answered, 12);
+}
+
 #[test]
 fn tools_on_a_file_without_a_tool_format_are_refused() {
     let dir = tmpdir("no-format");
