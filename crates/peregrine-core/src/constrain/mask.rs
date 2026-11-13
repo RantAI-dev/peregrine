@@ -231,7 +231,25 @@ pub struct Vocabulary {
     /// after its first request.
     mask_cache: Mutex<MaskMemo>,
     mask_tick: std::sync::atomic::AtomicU64,
+    /// Free-text masks by (terminator, bytes of it matched), shared by every request of
+    /// this model: which tokens are text there does not depend on the constraint around
+    /// the part, only the few tokens that complete the terminator do.
+    until_tables: Mutex<HashMap<(Vec<u8>, u32), std::sync::Arc<UntilTable>>>,
 }
+
+/// What a free-text state allows, as far as the vocabulary alone decides it.
+struct UntilTable {
+    /// The tokens that are text from this state: they keep the stream well-formed UTF-8
+    /// and do not complete the terminator.
+    stay: TokenMask,
+    /// The tokens that complete the terminator, with the number of their bytes it takes.
+    /// Whether one is allowed depends on what follows the part: the rest of its bytes
+    /// must be read by the frames below.
+    completing: Vec<(u32, u32)>,
+}
+
+/// More terminators than any format has; past it the tables are dropped and rebuilt.
+const UNTIL_TABLES_CAP: usize = 64;
 
 type MaskEntry = (Matcher, Vec<u32>, TokenMask, u64);
 
@@ -412,6 +430,7 @@ impl Vocabulary {
             boundary_tick: std::sync::atomic::AtomicU64::new(0),
             mask_cache: Mutex::new(MaskMemo::default()),
             mask_tick: std::sync::atomic::AtomicU64::new(0),
+            until_tables: Mutex::new(HashMap::new()),
         }
     }
 
@@ -491,7 +510,12 @@ impl Vocabulary {
             return mask;
         }
         if let Some((below, item)) = matcher.until_split() {
-            self.walk_until_node(&self.content, matcher, below, item, 0, &mut mask);
+            if item.between_characters() {
+                self.until_content(&mut mask, matcher, below, item);
+            } else {
+                // Inside a character only its continuation bytes go on: a short walk.
+                self.walk_until_node(&self.content, matcher, below, item, 0, &mut mask);
+            }
         } else if let Some((chars, _min, max)) = matcher.simple_string() {
             self.string_content(&mut mask, matcher, chars, max);
         } else {
@@ -761,6 +785,88 @@ impl Vocabulary {
             if ok && (bytes.len() == 1 || matcher.spelled(bytes)) {
                 mask.insert(*id);
             }
+        }
+    }
+
+    /// The mask of a free-text state that stands between characters: the vocabulary's
+    /// table for (terminator, matched bytes), built once per model, plus the tokens that
+    /// complete the terminator and whose remaining bytes the frames below read.
+    fn until_content(
+        &self,
+        mask: &mut TokenMask,
+        matcher: &Matcher,
+        below: &[super::matcher::Item],
+        item: UntilItem,
+    ) {
+        let table = self.until_table(matcher, item);
+        mask.insert_all(&table.stay);
+        if table.completing.is_empty() {
+            return;
+        }
+        let Some(next) = matcher.resume_below(below) else {
+            return;
+        };
+        for &(id, used) in &table.completing {
+            let rest = &self.bytes[id as usize][used as usize..];
+            if rest.is_empty() || next.clone().advance_bytes(rest).is_ok() {
+                mask.insert(id);
+            }
+        }
+    }
+
+    fn until_table(&self, matcher: &Matcher, item: UntilItem) -> std::sync::Arc<UntilTable> {
+        let schema = matcher.until_schema(item);
+        let key = (schema.term.clone(), item.k);
+        {
+            let tables = self.until_tables.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(t) = tables.get(&key) {
+                return t.clone();
+            }
+        }
+        let mut table = UntilTable {
+            stay: TokenMask::new(self.n_vocab),
+            completing: Vec::new(),
+        };
+        self.fill_until_table(schema, item, 0, 0, &mut table);
+        table.completing.sort_unstable();
+        let table = std::sync::Arc::new(table);
+        let mut tables = self.until_tables.lock().unwrap_or_else(|e| e.into_inner());
+        if tables.len() >= UNTIL_TABLES_CAP {
+            tables.clear();
+        }
+        tables.insert(key, table.clone());
+        table
+    }
+
+    fn fill_until_table(
+        &self,
+        schema: &super::schema::UntilSchema,
+        item: UntilItem,
+        node: u32,
+        depth: u32,
+        table: &mut UntilTable,
+    ) {
+        for &id in &self.content.tokens[node as usize] {
+            table.stay.insert(id);
+        }
+        for &(b, child) in &self.content.children[node as usize] {
+            match until_step(schema, item, b) {
+                UntilStep::More(next) => {
+                    self.fill_until_table(schema, next, child, depth + 1, table)
+                }
+                UntilStep::Done => self.collect_subtree(child, depth + 1, &mut table.completing),
+                UntilStep::No => {}
+            }
+        }
+    }
+
+    /// Every token at or below `node` of the content trie, with `used`.
+    fn collect_subtree(&self, node: u32, used: u32, out: &mut Vec<(u32, u32)>) {
+        for &id in &self.content.tokens[node as usize] {
+            out.push((id, used));
+        }
+        for &(_, child) in &self.content.children[node as usize] {
+            self.collect_subtree(child, used, out);
         }
     }
 

@@ -233,6 +233,14 @@ pub(crate) struct UntilItem {
     pub(crate) tail: Utf8Tail,
 }
 
+impl UntilItem {
+    /// Whether the text stands between characters (no UTF-8 sequence is in progress).
+    #[inline]
+    pub(crate) fn between_characters(&self) -> bool {
+        self.tail.need == 0
+    }
+}
+
 pub(crate) enum UntilStep {
     /// The byte is text (or a piece of a terminator match in progress).
     More(UntilItem),
