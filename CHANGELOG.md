@@ -8,6 +8,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **A prompt pass's tails, its form's fill and its KV write, and the int8 key measured (S5.4o)**:
+  the opt-in fast prompt mode was 0.82-0.97× ik_llama.cpp's `-rtr` path, held at 512 tokens by the
+  caller's wait and the serial steps and at 4 096 by attention, which S5.4j had read as the fork's
+  int8 dot product. **It is not**: the fork's `-rtr` cells keep **f16** K/V and score them with an
+  f32 × f16 kernel (`iqk_gemm_default_floats`); its int8 path is taken only for a quantised cache,
+  which its measured cells do not use. Peregrine's own `KV=i8` cache is measured end to end and
+  **costs 7-15 % of the prompt at 512 tokens and 11-14 % at 4 096 on twelve threads** — it adds a
+  dequantise per key tile and removes the f16-direct read, with no integer dot anywhere — for
+  +0.00015 (1B) and +0.00056 (Qwen3) nats of mean KL on top of the mode's own 0.0035/0.0173. The
+  fast order works with it unchanged; no default moves. **The pass's own shape is where the 512-token
+  cells were lost**, and three scheduling-only changes take them from 0.823/0.816 to
+  **0.925/0.957** against `-rtr`: the dynamic row partition's grain now follows its tail (one 32nd
+  of the row space per worker, capped at 64 rows; a decode pass keeps the old grain, which the first
+  cut cost 11 % of), **+5.8-6.7 %**; the form's interleaved activation fill (**78.9 ms, 6.4 %** of a
+  pass — S5.4j's 1.5 % was an estimate low by the `down` group's size) is filled on the pool,
+  **+7.5 %** at 512/12 and +3.5 % at 4 096/12; and the serial KV write (**37.4 ms, 3.0 %**) rides
+  the preparation pass's own join, **+3.3 %**. The caller's wait falls 138 → 92 ms (12.5 → 8.9 %)
+  and the parks 1 009 → 173; the exact engine gains 1.6 % at 512/12 and is level at one thread;
+  decode and the ten-user cell do not move; **no `.golden` file moves**. Report:
+  `benchmarks/results/desktop-zen5-2026-11-13-s5.4o/`; design: `docs/design/s5.4-fast-prompt.md`
+  §5o (and §5k's int8 sentence is corrected). `promptbench --kv` and `kld --ref-kv` are the two
+  measurement-tool changes the grid needed.
 - **The pool degrades gracefully on a contended host (S5.6)**: a controlled disturbance (N busy
   threads pinned to the same cores) showed that one co-tenant thread made a ten-thread decode step
   run at **9.9 tok/s against 124.5 quiet**, because every fork–join waited a scheduler timeslice

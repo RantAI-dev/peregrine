@@ -170,46 +170,52 @@ tables above because it trades accuracy for speed. Prompt tokens read their Q4_K
 weights from an 8-bit copy built at load, and on AVX-512 a prompt row's attention is computed in
 the mode's own tiled summation order too (S5.4j); generated rows keep the exact kernels and the
 exact attention on every tier.
-2026-11-13, desktop, AVX-512, the whole CPU set pinned (`taskset -c 0-23` for 12 threads,
-`taskset -c 0` for 1), five interleaved rounds per 512-token cell and three per 4096-token cell,
-medians, the 1-minute load recorded beside every run. Prompt tok/s:
+2026-11-13 (S5.4o's window), desktop, AVX-512, the whole CPU set pinned (`taskset -c 0-23` for 12
+threads, `taskset -c 0` for 1), five interleaved rounds per 512-token cell, three for the 4096-token
+12-thread cells, three for Llama 3.2 1B at 4096/1 and one for Qwen3 1.7B's (llama.cpp at 4096/1 on
+the 1B: two rounds); medians, the 1-minute load recorded beside every run. Prompt tok/s:
 
 | Model | prompt / threads | Per. default | Per. fast | ik (defaults) | ik (`-rtr`) | llama.cpp | fast ÷ default | fast ÷ ik | fast ÷ ik `-rtr` | fast ÷ llama |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Llama 3.2 1B | 512 / 12 | 332.8 | **462.2** | 431.0 | 561.9 | 287.4 | **1.39×** | **1.07×** | **0.82×** | **1.61×** |
-| Llama 3.2 1B | 512 / 1 | 54.1 | **79.1** | 65.3 | 83.8 | 43.8 | **1.46×** | **1.21×** | **0.94×** | **1.81×** |
-| Llama 3.2 1B | 4096 / 12 | 257.6 | **338.6** | 319.5 | 380.2 | 198.9 | **1.32×** | **1.06×** | **0.89×** | **1.70×** |
-| Llama 3.2 1B | 4096 / 1 | 39.8 | **52.6** | — | 57.0 | 30.5 | **1.32×** | — | **0.92×** | **1.72×** |
-| Qwen3 1.7B | 512 / 12 | 227.9 | **300.5** | 289.7 | 368.3 | 189.7 | **1.32×** | **1.04×** | **0.82×** | **1.58×** |
-| Qwen3 1.7B | 512 / 1 | 36.7 | **53.3** | 43.6 | 55.3 | 26.8 | **1.45×** | **1.22×** | **0.96×** | **1.99×** |
-| Qwen3 1.7B | 4096 / 12 | 168.8 | **215.5** | 206.1 | 245.2 | 125.5 | **1.28×** | **1.05×** | **0.88×** | **1.72×** |
-| Qwen3 1.7B | 4096 / 1 | 24.9 | **31.3** | — | 32.2 | — | **1.26×** | — | **0.97×** | — |
+| Llama 3.2 1B | 512 / 12 | 342.0 | **498.0** | 418.0 | 538.3 | 269.9 | **1.46×** | **1.19×** | **0.925×** | **1.85×** |
+| Llama 3.2 1B | 512 / 1 | 52.5 | **76.5** | 62.2 | 80.9 | 39.0 | **1.46×** | **1.23×** | **0.946×** | **1.96×** |
+| Llama 3.2 1B | 4096 / 12 | 254.9 | **356.1** | 308.4 | 452.2 | 201.8 | **1.40×** | **1.15×** | **0.787×** | **1.77×** |
+| Llama 3.2 1B | 4096 / 1 | 38.3 | **51.1** | 49.4 | 57.1 | 30.1 | **1.34×** | **1.03×** | **0.895×** | **1.70×** |
+| Qwen3 1.7B | 512 / 12 | 221.8 | **338.2** | 277.0 | 353.5 | 181.2 | **1.53×** | **1.22×** | **0.957×** | **1.87×** |
+| Qwen3 1.7B | 512 / 1 | 35.9 | **51.5** | 41.4 | 53.8 | 25.7 | **1.44×** | **1.24×** | **0.957×** | **2.00×** |
+| Qwen3 1.7B | 4096 / 12 | 166.6 | **233.3** | 201.5 | 270.1 | 124.6 | **1.40×** | **1.16×** | **0.864×** | **1.87×** |
+| Qwen3 1.7B | 4096 / 1 | 25.4 | **33.2** | 32.9 | 37.7 | — | **1.31×** | **1.01×** | **0.883×** | — |
 
-**Cells below 1.0, named:** against ik_llama.cpp with `-rtr` (its own fast path, the one
-that uses the same `q8_k_r16` arithmetic) the fast mode is behind on **all eight** cells
-(0.82-0.97×); against ik at its defaults it is ahead on all six measured cells (1.04-1.22×).
-The fast mode is ahead of the exact default everywhere (1.26-1.46×) and of llama.cpp everywhere
-(1.58-1.99×). S5.4j's change is in this table already: the fast mode was 0.80-0.95× `-rtr` in
-S5.4i's window (+2-6 % per cell from the attention order and the pool's gap-matched spin
-window), and the mode's bound is re-baselined to 0.0040 (design §4; the owner's confirmation
-pending).
+**Cells below 1.0, named:** against ik_llama.cpp with `-rtr` (its own fast path) the fast mode is
+behind on **all eight** cells (0.787-0.957×); against ik at its defaults it is ahead on all eight
+measured cells (1.01-1.24×). The fast mode is ahead of the exact default everywhere (1.31-1.53×)
+and of llama.cpp everywhere (1.70-2.00×). S5.4o's changes are in this table: the two 512-token
+twelve-thread cells went from 0.82× to **0.925/0.957×** (a tail-following dynamic grain, the form's
+activation fill on the pool, the KV write inside the preparation join), and the two 4096-token
+twelve-thread cells gained 9-12 % but read lower against `-rtr` than S5.4j's because the fork's own
+cells moved in this window (380.2 → 452.2 tok/s at 4096/12 on the 1B). The mode's bound is
+re-baselined to 0.0040 (design §4; the owner's confirmation pending).
 
-**Where the fast pass loses, measured (S5.4i, extended by S5.4j).** Not in the 8-bit kernel: in
-situ on Llama 3.2 1B at 512 tokens it runs at **96.2 GMAC/s for Q4_K and 103.9 for Q6_K**
-(`PEREGRINE_PROF2`), against the fork's own `q8_k_r16` at **94.9 GMAC/s** at 512 activation
-rows and 85.1 at 256, called through the fork's library. At 12 threads **36 % of the
-512-token pass is not the kernel** (the caller's wait for parked workers 10.4 %, the caller's
-serial steps 11.2 %, attention 9.1 %, the activation's fill and the output's untile 3 %), and at
-4096 tokens **attention is 38 % of the pass against 20.5 % of the fork's own** (`-fa 0`:
-399.9 → 317.9 tok/s), i.e. 2.1× the fork's attention in absolute time. S5.4j gives a prompt row
-its own attention order (17 % off attention's own time at 512/12, 3 % at 4096/12, 2-6 % of a pass) and makes the pool's
-spin window follow the measured gap between joins (a prompt pass's joins are 1-5 ms apart
-against a 1 ms window: +3.3 % on the 512-token 12-thread cell); the rest of the attention gap is
-the fork's **int8** dot product, a different arithmetic. The account, both engines' timings and
-the eight cells: S5.4i's
-[`benchmarks/results/desktop-zen5-2026-11-12-s5.4i/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4i/README.md)
-and S5.4j's
-[`benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`](../benchmarks/results/desktop-zen5-2026-11-13-s5.4j/README.md).
+**Where the fast pass loses, measured (S5.4i, extended by S5.4j and S5.4o).** Not in the 8-bit
+kernel: in situ on Llama 3.2 1B at 512 tokens it runs at **96.2 GMAC/s for Q4_K and 103.9 for
+Q6_K** (`PEREGRINE_PROF2`), against the fork's own `q8_k_r16` at **94.9 GMAC/s** at 512
+activation rows and 85.1 at 256, called through the fork's library. At 12 threads the 512-token
+pass is no longer kernel-bound plus a wait: S5.4o's three scheduling changes (the dynamic grain
+follows its tail, the form's 78.9 ms activation fill runs on the pool, the 37.4 ms KV write rides
+the preparation join) take the caller's wait from 12.5 % to 8.9 % and the parks from 1 009 to 173,
+and attention is 8.4 % of the pass. At 4096 tokens **attention is 45 % of the pass against 20.5 %
+of the fork's own** (`-fa 0`: 399.9 → 317.9 tok/s), i.e. 2.1× the fork's attention in absolute
+time. S5.4j gives a prompt row its own attention order (17 % off attention's own time at 512/12,
+3 % at 4096/12, 2-6 % of a pass); the rest of the attention gap is the fork's **f16**-key kernel
+reading the stored halves while our fast order widens every key tile to f32 — S5.4o corrects an
+earlier reading of it as an int8 dot product: the fork's `-rtr` cells keep f16 K/V, and our own
+`KV=i8` cache costs 7-15 % of the prompt and buys nothing (design §5o). The account, both engines'
+timings and the eight cells: S5.4i's
+[`benchmarks/results/desktop-zen5-2026-11-12-s5.4i/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4i/README.md),
+S5.4j's
+[`benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`](../benchmarks/results/desktop-zen5-2026-11-13-s5.4j/README.md)
+and S5.4o's
+[`benchmarks/results/desktop-zen5-2026-11-13-s5.4o/`](../benchmarks/results/desktop-zen5-2026-11-13-s5.4o/README.md).
 
 **Accuracy** (the full report and the F16 comparison:
 [`benchmarks/results/desktop-zen5-2026-11-12-s5.4c/`](../benchmarks/results/desktop-zen5-2026-11-12-s5.4c/README.md)):
