@@ -308,6 +308,11 @@ fn fast_mode_is_prompt_invariant() {
 /// many more pieces to agree on (S5.4j). A small model, so the whole staged read is a
 /// few seconds; the prompt is longer than any chunk the sweep uses and every row is a
 /// prompt row.
+///
+/// `d_model` is a whole number of k-quant super-blocks (256): a narrower k-quant row
+/// needs the *padded* per-256 activation layout, which is a process-global switch the
+/// form's loader turns on, so a 128-wide row would make this test depend on which
+/// other test in the binary ran first (the suites run in parallel).
 #[test]
 fn fast_attention_is_prompt_invariant_at_4096_tokens() {
     let dir = tmpdir("invariant-4096");
@@ -315,7 +320,7 @@ fn fast_attention_is_prompt_invariant_at_4096_tokens() {
         return;
     };
     let shape = Dense {
-        d_model: 128,
+        d_model: 256,
         n_layer: 1,
         n_head: 4,
         n_head_kv: 2,

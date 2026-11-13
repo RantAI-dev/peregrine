@@ -788,11 +788,21 @@ fn fast_walk(
     let p_end = t.p1.min(max_ctx);
     let mut blk = t.p0.max(p_min_task / BLOCK * BLOCK);
     let mut alpha = [1.0f32; MAX_PARTIAL_ROWS];
+    // On aarch64 a F16 cache is read in the kernels' registers: the conversion is
+    // exact, so the fast order's pieces see the same keys and values for half the
+    // bytes the widened tile would stream (S5.4n).
+    #[cfg(target_arch = "aarch64")]
+    let direct = f16_direct(kv, sh);
+    #[cfg(not(target_arch = "aarch64"))]
+    let direct = false;
     while blk < p_end {
         let bn = ((blk / BLOCK + 1) * BLOCK - blk).min(p_end - blk);
         // 1. The keys: score every group of rows that sees this tile, and fold each
         //    row's own soft-max over its own piece.
-        kv.decode_block(true, layer, kh, blk, bn, &mut sc.kf);
+        let k16 = direct.then(|| kv.block_bytes(true, layer, kh, blk, bn));
+        if k16.is_none() {
+            kv.decode_block(true, layer, kh, blk, bn, &mut sc.kf);
+        }
         let mut lr = 0;
         while lr < sub {
             let (start, len0) = vis_range(sh, ctx_of[lr], blk, bn);
@@ -839,7 +849,16 @@ fn fast_walk(
                 for a in act.iter_mut().skip(na) {
                     *a = pad;
                 }
-                fast::scores_rows(sc, &act, na, j0 + lev, e - lev, hd, sh.scale);
+                fast::scores_rows(
+                    sc,
+                    &act,
+                    na,
+                    j0 + lev,
+                    e - lev,
+                    hd,
+                    sh.scale,
+                    k16.map(|k| &k[j0 * hd * 2..]),
+                );
                 lev = e;
             }
             for r in 0..n {
@@ -853,7 +872,10 @@ fn fast_walk(
             lr = nxt;
         }
         // 2. The values: the same tiles, the same groups, mixed ascending.
-        kv.decode_block(false, layer, kh, blk, bn, &mut sc.kf);
+        let v16 = direct.then(|| kv.block_bytes(false, layer, kh, blk, bn));
+        if v16.is_none() {
+            kv.decode_block(false, layer, kh, blk, bn, &mut sc.kf);
+        }
         let mut lr = 0;
         while lr < sub {
             let (start, len0) = vis_range(sh, ctx_of[lr], blk, bn);
@@ -897,7 +919,17 @@ fn fast_walk(
                 for a in act.iter_mut().skip(na) {
                     *a = pad;
                 }
-                fast::mix_rows(sc, &act, na, &alpha, j0 + lev, e - lev, hd, lev == 0);
+                fast::mix_rows(
+                    sc,
+                    &act,
+                    na,
+                    &alpha,
+                    j0 + lev,
+                    e - lev,
+                    hd,
+                    lev == 0,
+                    v16.map(|v| &v[j0 * hd * 2..]),
+                );
                 lev = e;
             }
             lr = nxt;
@@ -2165,7 +2197,314 @@ pub mod fast {
         (m_new, sum, crate::vmath::det_exp(m_old - m_new))
     }
 
+    /// [`scores_twin`] on sixteen NEON lanes, [`FAST_ROWS`] rows sharing one pass over
+    /// the key: lane `l` of the four `f32x4` accumulators takes dimensions
+    /// `l, l+16, …` and the reduction is `T16 = T8(v[l] + v[l+8])`, bit for bit.
+    ///
+    /// # Safety
+    /// The CPU must have NEON; `hd` must be a multiple of 16; `q` must hold `hd`
+    /// floats at every `rows[r] · hd`, `kf` the level's keys at `hd`, and `s` `len`
+    /// floats at every `rows[r] · sstride`.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn scores_neon(
+        q: *const f32,
+        hd: usize,
+        kf: *const f32,
+        rows: &[usize; FAST_ROWS],
+        nrows: usize,
+        len: usize,
+        scale: f32,
+        s: *mut f32,
+        sstride: usize,
+        sofs: usize,
+    ) {
+        use std::arch::aarch64::*;
+        assert!(
+            hd.is_multiple_of(LANES),
+            "the fast body takes whole 16-lane blocks"
+        );
+        // One key per pass, up to four rows' sixteen lane accumulators in flight: the
+        // key vector is loaded once and every row's four FMAs ride it.
+        let mut j = 0;
+        while j < len {
+            let kp = kf.add(j * hd);
+            let mut a = [[vdupq_n_f32(0.0); 4]; FAST_ROWS];
+            let mut d = 0;
+            while d < hd {
+                let k0 = vld1q_f32(kp.add(d));
+                let k1 = vld1q_f32(kp.add(d + 4));
+                let k2 = vld1q_f32(kp.add(d + 8));
+                let k3 = vld1q_f32(kp.add(d + 12));
+                for r in 0..nrows {
+                    let qp = q.add(rows[r] * hd + d);
+                    a[r][0] = vfmaq_f32(a[r][0], vld1q_f32(qp), k0);
+                    a[r][1] = vfmaq_f32(a[r][1], vld1q_f32(qp.add(4)), k1);
+                    a[r][2] = vfmaq_f32(a[r][2], vld1q_f32(qp.add(8)), k2);
+                    a[r][3] = vfmaq_f32(a[r][3], vld1q_f32(qp.add(12)), k3);
+                }
+                d += LANES;
+            }
+            for r in 0..nrows {
+                // T16: the low half plus the high half of the sixteen lanes, then the
+                // eight-lane tree — the definition's association, not a wider sum.
+                let lo = vaddq_f32(a[r][0], a[r][2]);
+                let hi = vaddq_f32(a[r][1], a[r][3]);
+                let t = hsum4_neon(lo) + hsum4_neon(hi);
+                *s.add(rows[r] * sstride + sofs + j) = t * scale;
+            }
+            j += 1;
+        }
+    }
+
+    /// [`mix_twin`] on sixteen NEON lanes, [`FAST_ROWS`] rows over one pass of V.
+    ///
+    /// # Safety
+    /// The CPU must have NEON; `hd` a multiple of 16; `v` `len · hd` floats; `p`
+    /// `len` floats at every `rows[r] · pstride`; `o` `hd` floats at every
+    /// `rows[r] · hd`. The caller pads `rows` with a valid row, so every read is in
+    /// bounds; only the first `nrows` are written back.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn mix_neon(
+        o: *mut f32,
+        hd: usize,
+        alpha: *const f32,
+        rows: &[usize; FAST_ROWS],
+        nrows: usize,
+        p: *const f32,
+        pstride: usize,
+        v: *const f32,
+        len: usize,
+    ) {
+        use std::arch::aarch64::*;
+        assert!(
+            hd.is_multiple_of(LANES),
+            "the fast body takes whole 16-lane blocks"
+        );
+        let mut d0 = 0;
+        while d0 < hd {
+            let mut acc = [[vdupq_n_f32(0.0); 4]; FAST_ROWS];
+            for r in 0..FAST_ROWS {
+                let al = vdupq_n_f32(*alpha.add(rows[r]));
+                for (l, a) in acc[r].iter_mut().enumerate() {
+                    *a = vmulq_f32(vld1q_f32(o.add(rows[r] * hd + d0 + l * 4)), al);
+                }
+            }
+            // One ascending chain per element, exactly as the definition writes it; the
+            // four value vectors are loaded once for every row.
+            for j in 0..len {
+                let vp = v.add(j * hd + d0);
+                let v0 = vld1q_f32(vp);
+                let v1 = vld1q_f32(vp.add(4));
+                let v2 = vld1q_f32(vp.add(8));
+                let v3 = vld1q_f32(vp.add(12));
+                for r in 0..FAST_ROWS {
+                    let w = vdupq_n_f32(*p.add(rows[r] * pstride + j));
+                    acc[r][0] = vfmaq_f32(acc[r][0], w, v0);
+                    acc[r][1] = vfmaq_f32(acc[r][1], w, v1);
+                    acc[r][2] = vfmaq_f32(acc[r][2], w, v2);
+                    acc[r][3] = vfmaq_f32(acc[r][3], w, v3);
+                }
+            }
+            for r in 0..nrows {
+                for (l, a) in acc[r].iter().enumerate() {
+                    vst1q_f32(o.add(rows[r] * hd + d0 + l * 4), *a);
+                }
+            }
+            d0 += LANES;
+        }
+    }
+
+    /// [`denom_twin`] on NEON: [`peregrine_kernels::vmath::exp4`] (its own `exp`s
+    /// lane for lane) and the `T16` group sum in `f32`, the groups added to the row's
+    /// `f64` in ascending order.
+    ///
+    /// # Safety
+    /// The CPU must have NEON and `s` must be readable for `s.len()` floats.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    pub(super) unsafe fn denom_neon(s: &mut [f32], m_old: f32) -> (f32, f64, f32) {
+        use std::arch::aarch64::*;
+        let m_new = crate::vmath::max(s).max(m_old);
+        let sh = vdupq_n_f32(m_new);
+        let mut sum = 0.0f64;
+        let mut g = 0;
+        while g < s.len() {
+            let n = s.len() - g;
+            let (v0, v1, v2, v3) = if n >= LANES {
+                let v0 = peregrine_kernels::vmath::exp4(vsubq_f32(
+                    vld1q_f32(s.as_ptr().add(g)),
+                    sh,
+                ));
+                let v1 = peregrine_kernels::vmath::exp4(vsubq_f32(
+                    vld1q_f32(s.as_ptr().add(g + 4)),
+                    sh,
+                ));
+                let v2 = peregrine_kernels::vmath::exp4(vsubq_f32(
+                    vld1q_f32(s.as_ptr().add(g + 8)),
+                    sh,
+                ));
+                let v3 = peregrine_kernels::vmath::exp4(vsubq_f32(
+                    vld1q_f32(s.as_ptr().add(g + 12)),
+                    sh,
+                ));
+                vst1q_f32(s.as_mut_ptr().add(g), v0);
+                vst1q_f32(s.as_mut_ptr().add(g + 4), v1);
+                vst1q_f32(s.as_mut_ptr().add(g + 8), v2);
+                vst1q_f32(s.as_mut_ptr().add(g + 12), v3);
+                (v0, v1, v2, v3)
+            } else {
+                // The piece's last group: lanes past its end are a zero term, as in
+                // the twin, so `exp` must not be applied to them.
+                let mut x = [0.0f32; LANES];
+                for (l, xl) in x.iter_mut().enumerate() {
+                    if l < n {
+                        let e = peregrine_kernels::vmath::exp_scalar(s[g + l] - m_new);
+                        s[g + l] = e;
+                        *xl = e;
+                    }
+                }
+                (
+                    vld1q_f32(x.as_ptr()),
+                    vld1q_f32(x.as_ptr().add(4)),
+                    vld1q_f32(x.as_ptr().add(8)),
+                    vld1q_f32(x.as_ptr().add(12)),
+                )
+            };
+            let lo = vaddq_f32(v0, v2);
+            let hi = vaddq_f32(v1, v3);
+            sum += (hsum4_neon(lo) + hsum4_neon(hi)) as f64;
+            g += LANES;
+        }
+        (m_new, sum, crate::vmath::det_exp(m_old - m_new))
+    }
+
+    /// [`scores_neon`] on the cache's own F16 halves: `vcvt_f32_f16` in registers,
+    /// then the same accumulators and `T16`. The conversion is exact, so this is the
+    /// widened body's bits — reading the halves only halves the bytes.
+    ///
+    /// # Safety
+    /// The CPU must have NEON; `hd` must be a multiple of 16; `q` must hold `hd`
+    /// floats at every `rows[r] · hd`, `k` the level's keys as F16 at `hd`, and `s`
+    /// `len` floats at every `rows[r] · sstride`.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn scores_f16_neon(
+        q: *const f32,
+        hd: usize,
+        k: *const u8,
+        rows: &[usize; FAST_ROWS],
+        nrows: usize,
+        len: usize,
+        scale: f32,
+        s: *mut f32,
+        sstride: usize,
+        sofs: usize,
+    ) {
+        use std::arch::aarch64::*;
+        assert!(
+            hd.is_multiple_of(LANES),
+            "the fast body takes whole 16-lane blocks"
+        );
+        let mut j = 0;
+        while j < len {
+            let kp = k.add(j * hd * 2);
+            let mut a = [[vdupq_n_f32(0.0); 4]; FAST_ROWS];
+            let mut d = 0;
+            while d < hd {
+                let at = d * 2;
+                let k0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at) as *const u16)));
+                let k1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 8) as *const u16)));
+                let k2 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 16) as *const u16)));
+                let k3 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(kp.add(at + 24) as *const u16)));
+                for r in 0..nrows {
+                    let qp = q.add(rows[r] * hd + d);
+                    a[r][0] = vfmaq_f32(a[r][0], vld1q_f32(qp), k0);
+                    a[r][1] = vfmaq_f32(a[r][1], vld1q_f32(qp.add(4)), k1);
+                    a[r][2] = vfmaq_f32(a[r][2], vld1q_f32(qp.add(8)), k2);
+                    a[r][3] = vfmaq_f32(a[r][3], vld1q_f32(qp.add(12)), k3);
+                }
+                d += LANES;
+            }
+            for r in 0..nrows {
+                let lo = vaddq_f32(a[r][0], a[r][2]);
+                let hi = vaddq_f32(a[r][1], a[r][3]);
+                let t = hsum4_neon(lo) + hsum4_neon(hi);
+                *s.add(rows[r] * sstride + sofs + j) = t * scale;
+            }
+            j += 1;
+        }
+    }
+
+    /// [`mix_neon`] on the cache's own F16 halves: each position's four value vectors
+    /// are converted once and feed every row's chain, so four rows share one
+    /// conversion per element — the exact path converts once per row.
+    ///
+    /// # Safety
+    /// The CPU must have NEON; `hd` a multiple of 16; `v` `len · hd` halves; `p`
+    /// `len` floats at every `rows[r] · pstride`; `o` `hd` floats at every
+    /// `rows[r] · hd`. The caller pads `rows` with a valid row; only the first
+    /// `nrows` are written back.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn mix_f16_neon(
+        o: *mut f32,
+        hd: usize,
+        alpha: *const f32,
+        rows: &[usize; FAST_ROWS],
+        nrows: usize,
+        p: *const f32,
+        pstride: usize,
+        v: *const u8,
+        len: usize,
+    ) {
+        use std::arch::aarch64::*;
+        assert!(
+            hd.is_multiple_of(LANES),
+            "the fast body takes whole 16-lane blocks"
+        );
+        let mut d0 = 0;
+        while d0 < hd {
+            let mut acc = [[vdupq_n_f32(0.0); 4]; FAST_ROWS];
+            for r in 0..FAST_ROWS {
+                let al = vdupq_n_f32(*alpha.add(rows[r]));
+                for (l, a) in acc[r].iter_mut().enumerate() {
+                    *a = vmulq_f32(vld1q_f32(o.add(rows[r] * hd + d0 + l * 4)), al);
+                }
+            }
+            for j in 0..len {
+                let vp = v.add((j * hd + d0) * 2);
+                let v0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp as *const u16)));
+                let v1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(8) as *const u16)));
+                let v2 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(16) as *const u16)));
+                let v3 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(vp.add(24) as *const u16)));
+                for r in 0..FAST_ROWS {
+                    let w = vdupq_n_f32(*p.add(rows[r] * pstride + j));
+                    acc[r][0] = vfmaq_f32(acc[r][0], w, v0);
+                    acc[r][1] = vfmaq_f32(acc[r][1], w, v1);
+                    acc[r][2] = vfmaq_f32(acc[r][2], w, v2);
+                    acc[r][3] = vfmaq_f32(acc[r][3], w, v3);
+                }
+            }
+            for r in 0..nrows {
+                for (l, a) in acc[r].iter().enumerate() {
+                    vst1q_f32(o.add(rows[r] * hd + d0 + l * 4), *a);
+                }
+            }
+            d0 += LANES;
+        }
+    }
+
     /// The scores of up to [`FAST_ROWS`] rows that see the same keys of one tile.
+    ///
+    /// `k16` is the tile's F16 halves at the first visible key when the cache can be
+    /// read directly (`f16_direct`); the conversion is exact, so the halves are only
+    /// fewer bytes, never different bits.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn scores_rows(
         sc: &mut Scratch,
@@ -2175,7 +2514,9 @@ pub mod fast {
         len: usize,
         hd: usize,
         scale: f32,
+        k16: Option<&[u8]>,
     ) {
+        let _ = k16;
         if body_ok(hd) {
             #[cfg(target_arch = "x86_64")]
             {
@@ -2195,6 +2536,41 @@ pub mod fast {
                         BLOCK,
                         j,
                     )
+                };
+                return;
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                // SAFETY: NEON is this target's baseline and `body_ok` checked the
+                // tier; `rows` are distinct scratch rows inside `MAX_PARTIAL_ROWS` and
+                // `s_tile` holds one `BLOCK` row each; `k16` is the tile's halves.
+                unsafe {
+                    match k16 {
+                        Some(k) => scores_f16_neon(
+                            sc.q.as_ptr(),
+                            hd,
+                            k.as_ptr(),
+                            rows,
+                            nrows,
+                            len,
+                            scale,
+                            sc.s_tile.as_mut_ptr(),
+                            BLOCK,
+                            j,
+                        ),
+                        None => scores_neon(
+                            sc.q.as_ptr(),
+                            hd,
+                            sc.kf.as_ptr().add(j * hd),
+                            rows,
+                            nrows,
+                            len,
+                            scale,
+                            sc.s_tile.as_mut_ptr(),
+                            BLOCK,
+                            j,
+                        ),
+                    }
                 };
                 return;
             }
@@ -2222,7 +2598,9 @@ pub mod fast {
         len: usize,
         hd: usize,
         first: bool,
+        v16: Option<&[u8]>,
     ) {
+        let _ = v16;
         if body_ok(hd) {
             #[cfg(target_arch = "x86_64")]
             {
@@ -2242,6 +2620,41 @@ pub mod fast {
                         sc.kf.as_ptr().add(j * hd),
                         len,
                     )
+                };
+                return;
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                let one = [1.0f32; MAX_PARTIAL_ROWS];
+                let al = if first { alpha.as_ptr() } else { one.as_ptr() };
+                // SAFETY: as `scores_rows`; `al` is indexed by the same scratch rows,
+                // `p` is the row's own scores of this piece, and `v16` the tile's
+                // halves (or `kf` its widened floats).
+                unsafe {
+                    match v16 {
+                        Some(v) => mix_f16_neon(
+                            sc.o.as_mut_ptr(),
+                            hd,
+                            al,
+                            rows,
+                            nrows,
+                            sc.s_tile.as_ptr().add(j),
+                            BLOCK,
+                            v.as_ptr(),
+                            len,
+                        ),
+                        None => mix_neon(
+                            sc.o.as_mut_ptr(),
+                            hd,
+                            al,
+                            rows,
+                            nrows,
+                            sc.s_tile.as_ptr().add(j),
+                            BLOCK,
+                            sc.kf.as_ptr().add(j * hd),
+                            len,
+                        ),
+                    }
                 };
                 return;
             }
@@ -2274,6 +2687,13 @@ pub mod fast {
                 // SAFETY: the tier's features are checked (`body_ok`) and `s` is this
                 // row's own piece of `s_tile`.
                 return unsafe { denom_zmm(s, m_old) };
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                let s = &mut sc.s_tile[lr * BLOCK + j..lr * BLOCK + j + len];
+                // SAFETY: NEON is this target's baseline and `body_ok` checked the
+                // tier; `s` is this row's own piece of `s_tile`.
+                return unsafe { denom_neon(s, m_old) };
             }
         }
         denom_twin(&mut sc.s_tile[lr * BLOCK + j..lr * BLOCK + j + len], m_old)
@@ -5551,10 +5971,10 @@ mod tests {
 
     /// The lengths S5.2b's pair-mix test swept, plus the ones the mode's pieces take.
     ///
-    /// Both grids are only read by the two bit-identity tests, which exist only on the
-    /// architecture whose 512-bit bodies they pin (the twin is portable; the body is
-    /// not), so they are gated with them.
-    #[cfg(target_arch = "x86_64")]
+    /// Both grids are only read by the three bit-identity tests, which exist only on
+    /// the architectures whose SIMD bodies they pin (the twin is portable; the bodies
+    /// are not), so they are gated with them.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     const FAST_LENS: [usize; 24] = [
         1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 63, 64, 65, 70, 127, 128, 129, 511, 512, 513, 4095,
         4096, 4097,
@@ -5562,16 +5982,126 @@ mod tests {
 
     /// The head widths the gate models use and the ones a non-multiple of the lane
     /// width produces.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     const FAST_DIMS: [usize; 5] = [64, 128, 80, 72, 16];
+
+    /// The tier's fast score body, one call shape for both architectures' tests.
+    ///
+    /// # Safety
+    /// As [`fast::scores_zmm`] / [`fast::scores_neon`]: the tier is checked by the
+    /// caller and `hd` is a multiple of 16.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fast_scores_body(
+        q: *const f32,
+        hd: usize,
+        kf: *const f32,
+        rows: &[usize; fast::FAST_ROWS],
+        nrows: usize,
+        len: usize,
+        scale: f32,
+        s: *mut f32,
+        sstride: usize,
+        sofs: usize,
+    ) {
+        // SAFETY: the caller checked the tier.
+        unsafe { fast::scores_zmm(q, hd, kf, rows, nrows, len, scale, s, sstride, sofs) }
+    }
+
+    /// The tier's fast score body, one call shape for both architectures' tests.
+    ///
+    /// # Safety
+    /// As [`fast::scores_neon`]: the tier is checked by the caller and `hd` is a
+    /// multiple of 16.
+    #[cfg(target_arch = "aarch64")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fast_scores_body(
+        q: *const f32,
+        hd: usize,
+        kf: *const f32,
+        rows: &[usize; fast::FAST_ROWS],
+        nrows: usize,
+        len: usize,
+        scale: f32,
+        s: *mut f32,
+        sstride: usize,
+        sofs: usize,
+    ) {
+        // SAFETY: the caller checked the tier.
+        unsafe { fast::scores_neon(q, hd, kf, rows, nrows, len, scale, s, sstride, sofs) }
+    }
+
+    /// The tier's fast value-mix body, one call shape for both architectures' tests.
+    ///
+    /// # Safety
+    /// As [`fast::mix_zmm`] / [`fast::mix_neon`]: the tier is checked by the caller
+    /// and `hd` is a multiple of 16.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fast_mix_body(
+        o: *mut f32,
+        hd: usize,
+        alpha: *const f32,
+        rows: &[usize; fast::FAST_ROWS],
+        nrows: usize,
+        p: *const f32,
+        pstride: usize,
+        v: *const f32,
+        len: usize,
+    ) {
+        // SAFETY: the caller checked the tier.
+        unsafe { fast::mix_zmm(o, hd, alpha, rows, nrows, p, pstride, v, len) }
+    }
+
+    /// The tier's fast value-mix body, one call shape for both architectures' tests.
+    ///
+    /// # Safety
+    /// As [`fast::mix_neon`]: the tier is checked by the caller and `hd` is a
+    /// multiple of 16.
+    #[cfg(target_arch = "aarch64")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fast_mix_body(
+        o: *mut f32,
+        hd: usize,
+        alpha: *const f32,
+        rows: &[usize; fast::FAST_ROWS],
+        nrows: usize,
+        p: *const f32,
+        pstride: usize,
+        v: *const f32,
+        len: usize,
+    ) {
+        // SAFETY: the caller checked the tier.
+        unsafe { fast::mix_neon(o, hd, alpha, rows, nrows, p, pstride, v, len) }
+    }
+
+    /// The tier's fast soft-max body, one call shape for both architectures' tests.
+    ///
+    /// # Safety
+    /// The tier is checked by the caller; `s` is the row's own piece.
+    #[cfg(target_arch = "x86_64")]
+    unsafe fn fast_denom_body(s: &mut [f32], m_old: f32) -> (f32, f64, f32) {
+        // SAFETY: the caller checked the tier.
+        unsafe { fast::denom_zmm(s, m_old) }
+    }
+
+    /// The tier's fast soft-max body, one call shape for both architectures' tests.
+    ///
+    /// # Safety
+    /// The tier is checked by the caller; `s` is the row's own piece.
+    #[cfg(target_arch = "aarch64")]
+    unsafe fn fast_denom_body(s: &mut [f32], m_old: f32) -> (f32, f64, f32) {
+        // SAFETY: the caller checked the tier.
+        unsafe { fast::denom_neon(s, m_old) }
+    }
 
     /// The fast score body against the fast order's own definition, bit for bit.
     ///
-    /// The identity is defined on this architecture only: the twin is portable, but the
-    /// 512-bit body exists only where AVX-512 does (and `fast::tier()` is the tier
-    /// table's verdict). Every other tier runs the twin.
+    /// The identity is defined on the architectures whose SIMD bodies carry it (the
+    /// twin is portable, the bodies are not): AVX-512 and aarch64's NEON tier, and
+    /// `fast::tier()` is the tier table's verdict. Every other tier runs the twin.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn the_fast_score_body_is_the_twin() {
         if !fast::tier() {
             eprintln!("skip: this tier keeps the exact attention for prompt rows");
@@ -5608,10 +6138,11 @@ mod tests {
                     let rows: [usize; fast::FAST_ROWS] = std::array::from_fn(|r| r);
                     for nrows in [1usize, 3, fast::FAST_ROWS] {
                         let mut got = vec![0.0f32; fast::FAST_ROWS * len];
-                        // SAFETY: AVX-512 checked by `fast::tier()`; `hd % 16 == 0` for
-                        // every width but 72's tail, which the twin takes.
+                        // SAFETY: the tier's features are checked by `fast::tier()`;
+                        // `hd % 16 == 0` for every width but 72's tail, which the twin
+                        // takes.
                         unsafe {
-                            fast::scores_zmm(
+                            fast_scores_body(
                                 q.as_ptr(),
                                 hd,
                                 kf.as_ptr(),
@@ -5650,7 +6181,7 @@ mod tests {
 
     /// The fast value-mix body against the fast order's definition, bit for bit.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn the_fast_mix_body_is_the_twin() {
         if !fast::tier() {
             eprintln!("skip: this tier keeps the exact attention for prompt rows");
@@ -5683,10 +6214,11 @@ mod tests {
                                 hd,
                             );
                         }
-                        // SAFETY: AVX-512 checked; `hd % 16 == 0` for every width the
-                        // body takes (72 is the twin's, and the loop's guard agrees).
+                        // SAFETY: the tier's features are checked; `hd % 16 == 0` for
+                        // every width the body takes (72 is the twin's, and the loop's
+                        // guard agrees).
                         unsafe {
-                            fast::mix_zmm(
+                            fast_mix_body(
                                 got.as_mut_ptr(),
                                 hd,
                                 alphas.as_ptr(),
@@ -5724,7 +6256,7 @@ mod tests {
 
     /// The fast soft-max body against the fast order's definition, bit for bit.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn the_fast_denominator_body_is_the_twin() {
         if !fast::tier() {
             eprintln!("skip: this tier keeps the exact attention for prompt rows");
@@ -5754,8 +6286,9 @@ mod tests {
                     let mut want = s.clone();
                     let (wm, ws, wa) = fast::denom_twin(&mut want, m_old);
                     let mut got = s.clone();
-                    // SAFETY: AVX-512 checked; `s` is the row's own piece.
-                    let (gm, gs, ga) = unsafe { fast::denom_zmm(&mut got, m_old) };
+                    // SAFETY: the tier's features are checked; `s` is the row's own
+                    // piece.
+                    let (gm, gs, ga) = unsafe { fast_denom_body(&mut got, m_old) };
                     if wm.to_bits() != gm.to_bits()
                         || ws.to_bits() != gs.to_bits()
                         || wa.to_bits() != ga.to_bits()
@@ -5780,6 +6313,119 @@ mod tests {
         assert_eq!(
             failures, 0,
             "{failures} fast denominators differ from the definition"
+        );
+    }
+
+    /// The fast order's F16-direct bodies against the widened ones, bit for bit.
+    ///
+    /// `vcvt_f32_f16` is exact, so reading the cache's halves in the kernel — the
+    /// aarch64 fast path (S5.4n) — cannot move a row's bits; it only halves the bytes
+    /// the tile streams. The grid is the twin tests' (every piece length, every head
+    /// width the bodies cover, one, three and four rows).
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn the_fast_f16_bodies_are_the_widened_ones() {
+        if !fast::tier() {
+            eprintln!("skip: this tier keeps the exact attention for prompt rows");
+            return;
+        }
+        let mut failures = 0usize;
+        for hd in FAST_DIMS {
+            if !hd.is_multiple_of(16) {
+                continue;
+            }
+            for &len in &FAST_LENS {
+                let vf: Vec<f32> = prng(0x41 + hd as u64, len * hd)
+                    .iter()
+                    .map(|x| x * 0.5)
+                    .collect();
+                let halves: Vec<u8> = vf
+                    .iter()
+                    .flat_map(|x| peregrine_kernels::quant::f32_to_f16(*x).to_le_bytes())
+                    .collect();
+                let widened: Vec<f32> = halves
+                    .chunks_exact(2)
+                    .map(|b| peregrine_kernels::format::f16(u16::from_le_bytes([b[0], b[1]])))
+                    .collect();
+                let q: Vec<f32> = prng(0x43 + hd as u64, fast::FAST_ROWS * hd);
+                let p: Vec<f32> = prng(0x47 + len as u64, fast::FAST_ROWS * len)
+                    .iter()
+                    .map(|x| x.abs())
+                    .collect();
+                let o0 = prng(0x49, fast::FAST_ROWS * hd);
+                let alphas = [0.75f32; MAX_PARTIAL_ROWS];
+                let rows: [usize; fast::FAST_ROWS] = std::array::from_fn(|r| r);
+                for nrows in [1usize, 3, fast::FAST_ROWS] {
+                    let mut want_s = vec![0.0f32; fast::FAST_ROWS * len];
+                    let mut got_s = vec![0.0f32; fast::FAST_ROWS * len];
+                    let mut want_m = o0.clone();
+                    let mut got_m = o0.clone();
+                    // SAFETY: NEON is this target's baseline and `fast::tier()` checked
+                    // the tier; every buffer is `FAST_ROWS · hd`/`· len` long.
+                    unsafe {
+                        fast::scores_neon(
+                            q.as_ptr(),
+                            hd,
+                            widened.as_ptr(),
+                            &rows,
+                            nrows,
+                            len,
+                            0.125,
+                            want_s.as_mut_ptr(),
+                            len,
+                            0,
+                        );
+                        fast::scores_f16_neon(
+                            q.as_ptr(),
+                            hd,
+                            halves.as_ptr(),
+                            &rows,
+                            nrows,
+                            len,
+                            0.125,
+                            got_s.as_mut_ptr(),
+                            len,
+                            0,
+                        );
+                        fast::mix_neon(
+                            want_m.as_mut_ptr(),
+                            hd,
+                            alphas.as_ptr(),
+                            &rows,
+                            nrows,
+                            p.as_ptr(),
+                            len,
+                            widened.as_ptr(),
+                            len,
+                        );
+                        fast::mix_f16_neon(
+                            got_m.as_mut_ptr(),
+                            hd,
+                            alphas.as_ptr(),
+                            &rows,
+                            nrows,
+                            p.as_ptr(),
+                            len,
+                            halves.as_ptr(),
+                            len,
+                        );
+                    }
+                    for at in 0..fast::FAST_ROWS * len {
+                        if want_s[at].to_bits() != got_s[at].to_bits() {
+                            failures += 1;
+                        }
+                    }
+                    for at in 0..fast::FAST_ROWS * hd {
+                        if want_m[at].to_bits() != got_m[at].to_bits() {
+                            failures += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            failures, 0,
+            "{failures} F16-direct fast values differ from the widened bodies"
         );
     }
 
@@ -5932,3 +6578,4 @@ mod tests {
         }
     }
 }
+
