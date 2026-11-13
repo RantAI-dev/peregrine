@@ -175,6 +175,7 @@ pub struct KvWriter<'a> {
     prec: KvPrec,
     rotated: bool,
     head_dim: usize,
+    n_layer: usize,
     n_kv_head: usize,
     max_ctx: usize,
     _cache: PhantomData<&'a mut KvCache>,
@@ -196,7 +197,13 @@ impl KvWriter<'_> {
     /// `pos` must be a position no other live writer of this cache writes, and nothing
     /// else may touch the cache's storage until every writer is dropped.
     pub unsafe fn put_row(&self, layer: usize, pos: usize, k: &[f32], v: &[f32]) {
-        debug_assert!(pos < self.max_ctx && k.len() >= self.n_kv_head * self.head_dim);
+        // A real check, not a debug one: the serial `put` panics on an index past the
+        // cache through the slice bounds, and a raw-pointer write must not do worse.
+        let kvd = self.n_kv_head * self.head_dim;
+        assert!(
+            layer < self.n_layer && pos < self.max_ctx && k.len() >= kvd && v.len() >= kvd,
+            "a K/V write past the cache: layer {layer}, position {pos}"
+        );
         let hd = self.head_dim;
         let elem = self.prec.elem();
         for h in 0..self.n_kv_head {
@@ -844,6 +851,7 @@ impl KvCache {
             prec: self.prec,
             rotated: self.rotated,
             head_dim: self.head_dim,
+            n_layer: self.n_layer,
             n_kv_head: self.n_kv_head,
             max_ctx: self.max_ctx,
             _cache: PhantomData,
@@ -1552,6 +1560,15 @@ mod tests {
                 assert_eq!(serial.vs, pooled.vs, "{prec:?} value scales");
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "a K/V write past the cache")]
+    fn a_worker_write_past_the_cache_panics() {
+        let mut c = KvCache::new(KvPrec::F16, 1, 1, 8, 4);
+        let w = c.writer();
+        // SAFETY: one writer, one position; the call must refuse it.
+        unsafe { w.put_row(0, 4, &[0.0; 8], &[0.0; 8]) };
     }
 
     #[test]
