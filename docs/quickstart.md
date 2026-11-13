@@ -293,11 +293,15 @@ print(second.choices[0].message.content)             # an answer in text
 ```
 
 The prompt Peregrine builds for a request with tools is the one llama.cpp builds from the model's own
-chat template, byte for byte. `tool_choice` may be `"auto"` (the default) or `"none"`;
-`parallel_tool_calls: false` stops after the first call; streaming sends each call as one chunk. Not
-built yet, and refused with a 400 that says so: tool calling for other model families (Qwen 3,
-Qwen 3.5 / Bonsai 2, Llama 3, gpt-oss), and `tool_choice: "required"` or a named function, which need
-constrained sampling. A call the model writes badly (broken JSON, a tool that was not offered) comes
+chat template, byte for byte. `tool_choice` may be `"auto"` (the default), `"none"`, `"required"`
+(the reply is at least one call) or a named function
+(`{"type": "function", "function": {"name": "get_weather"}}`: exactly one call to it). The last two
+hold the sampler to the model's call syntax and to the tool's `parameters` schema, so the reply is
+valid calls by construction; a thinking model thinks first and the call follows.
+`parallel_tool_calls: false` stops after the first call; streaming sends each call as one chunk.
+`tools` may be sent beside a `response_format`: the reply is then either calls or JSON of the
+response schema. Not built yet, and refused with a 400 that says so: tool calling for other model
+families (Llama 3, gpt-oss). Under `"auto"` a call the model writes badly (broken JSON, a tool that was not offered) comes
 back as text, not as an error.
 
 ## 6. Embeddings

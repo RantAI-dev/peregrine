@@ -2345,6 +2345,13 @@ impl Tokenizer {
         self.specials.iter().map(|&(_, id)| id).collect()
     }
 
+    /// Every user-defined token id (GGUF token type 4): tokens a model's authors added
+    /// with a text of their own, such as `<tool_call>` or `</think>` in Qwen's files.
+    /// Unlike a control token, such a token is written into the reply as its text.
+    pub fn user_defined_ids(&self) -> Vec<u32> {
+        self.user_specials.iter().map(|&(_, id)| id).collect()
+    }
+
     pub fn piece(&self, id: u32) -> &str {
         self.pieces
             .get(id as usize)

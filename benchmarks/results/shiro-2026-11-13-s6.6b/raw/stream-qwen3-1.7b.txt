@@ -1,0 +1,5 @@
+# forced_stream.py against Peregrine, Qwen_Qwen3-1.7B-Q4_K_M, thinking on, temperature 0: the same request whole and streamed
+auto (unconstrained): {'finish': 'tool_calls', 'think': 534, 'content': None, 'calls': [('get_weather', '{"city": "Paris", "unit": "celsius"}')], 'tokens': 142}
+   streamed the same: True (116 chunks)
+required: {'finish': 'tool_calls', 'think': 534, 'content': None, 'calls': [('get_weather', '{"city": "Paris", "unit": "celsius"}')], 'tokens': 142}
+   streamed the same: True (116 chunks)

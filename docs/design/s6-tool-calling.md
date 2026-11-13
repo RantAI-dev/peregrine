@@ -76,8 +76,8 @@ call, a call cut off by the token limit, arguments that are not valid JSON.
   `id` and `name`, the following ones carry pieces of `arguments`. Text that could be the start of a
   call is held back until it is known to be one or not, so a client never sees half a tag.
 - `tool_choice: "none"` renders the tools as the template does and returns text only. `"required"`
-  and a named function need the constraint of S6.6; until then they are refused by name rather than
-  accepted and not honoured.
+  and a named function are the constraint of S6.6 (built in S6.6b:
+  `docs/design/s6.6-constrained-decoding.md` §13).
 - The older `functions` and `function_call` fields are refused by name.
 - A model's text that looks like a call but does not parse (broken JSON, an unknown tool name) is
   returned as text, never as a server error. With the constraint on, this cannot happen.
@@ -140,7 +140,8 @@ Peregrine's form:
 1. **OpenAI's shapes on the existing chat endpoint**, as llama-server serves them. No second API.
 2. **A format per template family, checked against llama.cpp; no template engine.** A template
    Peregrine does not know with tools is refused when tools are sent.
-3. **Unhonoured options are refused**, not ignored: `required` and named choices wait for S6.6.
+3. **Unhonoured options are refused**, not ignored (`required` and named choices were, until
+   S6.6b built them).
 4. **A broken call is text**, never an error.
 5. **The constraint is a schema matcher**, not a grammar language. A general `grammar` field stays
    unsupported.
@@ -162,7 +163,8 @@ at least one. A stream sends each call as one chunk (`delta.tool_calls` with `in
 and the whole `function`). Reasoning text does not pass through the parser.
 
 **Options.** `tool_choice`: `"auto"` or absent parses calls; `"none"` renders the tools and returns
-text; `"required"` and a named function are refused (they need S6.6). `parallel_tool_calls: false`
+text; `"required"` and a named function constrain the reply to calls (S6.6b; they were refused
+when this section was written). `parallel_tool_calls: false`
 cancels the generation when the first call is complete. `functions` and `function_call` are refused
 by name, also on requests without tools.
 
