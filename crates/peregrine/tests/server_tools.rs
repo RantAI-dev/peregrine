@@ -718,6 +718,63 @@ fn a_forced_choice_in_the_xml_syntax_answers_with_valid_calls() {
     );
 }
 
+/// Llama 3.2's template (S6.4): a forced choice is one call in the `llama3` syntax, even
+/// with parallel calls on, and the date a request pins is the one the prompt writes.
+#[test]
+fn a_forced_choice_on_llama3_answers_with_exactly_one_valid_call() {
+    let (_server, port) =
+        serve_qwen35_model("forced-llama3", 47, peregrine_core::tools::LLAMA32_TEMPLATE);
+    // Enumerated values, so a random model's call ends within the token limit.
+    let tools = json!([
+        {"type": "function", "function": {"name": "set_unit", "description": "Set the unit",
+            "parameters": {"type": "object",
+                "properties": {"unit": {"enum": ["celsius", "fahrenheit"]}, "exact": {"type": "boolean"}},
+                "required": ["unit"], "additionalProperties": false}}},
+        {"type": "function", "function": {"name": "reset"}}
+    ]);
+    for seed in 0..6u64 {
+        for choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "set_unit"}}),
+        ] {
+            let (status, body) = post(
+                port,
+                tool_request(json!({
+                    "tools": tools, "seed": seed, "temperature": 1.0, "max_tokens": 120,
+                    "tool_choice": choice, "parallel_tool_calls": true
+                })),
+            );
+            assert_eq!(status, 200, "{body}");
+            let c = &body["choices"][0];
+            assert_eq!(c["finish_reason"], "tool_calls", "{body}");
+            let calls = c["message"]["tool_calls"].as_array().expect("calls");
+            assert_eq!(calls.len(), 1, "one call per reply: {body}");
+            let name = calls[0]["function"]["name"].as_str().unwrap();
+            let args: Value =
+                serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap())
+                    .unwrap_or_else(|e| panic!("arguments are not JSON ({e}): {body}"));
+            match name {
+                "set_unit" => {
+                    assert!(
+                        matches!(args["unit"].as_str(), Some("celsius" | "fahrenheit")),
+                        "{body}"
+                    );
+                    assert!(args.get("exact").is_none_or(Value::is_boolean), "{body}");
+                }
+                "reset" => assert!(choice.is_string(), "the named choice called reset: {body}"),
+                other => panic!("a call to {other:?}: {body}"),
+            }
+        }
+    }
+    // Without a forced choice the random model writes text, which is served as text.
+    let (status, body) = post(
+        port,
+        tool_request(json!({"tools": tools, "max_tokens": 8,
+            "chat_template_kwargs": {"date_string": "26 Jul 2024"}})),
+    );
+    assert_eq!(status, 200, "{body}");
+}
+
 #[test]
 fn tools_on_a_file_without_a_tool_format_are_refused() {
     let dir = tmpdir("no-format");

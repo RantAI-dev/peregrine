@@ -399,6 +399,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Tool calling on Llama 3.2 (S6.4)**: the `llama3` tool format. The prompt is Llama 3.2's
+  template, byte for byte as llama.cpp renders it (30 fixture requests, and the 4 it refuses
+  refused), with the date pinned by `chat_template_kwargs.date_string`; a reply that is one JSON
+  object `{"name": ..., "parameters": {...}}` is a call; one call per reply, as the template allows;
+  `tool_choice` required and named hold the reply to that shape. On the 1B file 15 of 16 replies
+  are identical to llama.cpp's; where the model writes two calls Peregrine returns the first and
+  llama.cpp answers 500. Llama 3.1 and 3.3 templates are not recognised yet.
 - **`tool_choice: "required"`, a named function, and `tools` beside a `response_format`
   (S6.6b, S6.6c)**: a forced tool choice is now a constraint on the sampler. The reply is
   calls in the model's own call syntax — the Hermes JSON form for Qwen 2.5 and Qwen 3, the

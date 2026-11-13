@@ -112,6 +112,53 @@ impl Value {
         out
     }
 
+    /// The JSON text llama.cpp's Jinja `tojson(indent=n)` writes: one item per line, each
+    /// level indented by `indent` spaces, `": "` after a key, an empty list or object as
+    /// `[]` or `{}`, scalars as [`to_jinja_json`](Self::to_jinja_json) writes them.
+    pub fn to_jinja_json_indent(&self, indent: usize) -> String {
+        let mut out = String::new();
+        self.write_jinja_json_indent(&mut out, indent, 0);
+        out
+    }
+
+    fn write_jinja_json_indent(&self, out: &mut String, indent: usize, depth: usize) {
+        let pad = |out: &mut String, depth: usize| {
+            out.push('\n');
+            for _ in 0..indent * depth {
+                out.push(' ');
+            }
+        };
+        match self {
+            Value::Arr(a) if !a.is_empty() => {
+                out.push('[');
+                for (i, v) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    pad(out, depth + 1);
+                    v.write_jinja_json_indent(out, indent, depth + 1);
+                }
+                pad(out, depth);
+                out.push(']');
+            }
+            Value::Obj(o) if !o.is_empty() => {
+                out.push('{');
+                for (i, (k, v)) in o.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    pad(out, depth + 1);
+                    write_string(k, out);
+                    out.push_str(": ");
+                    v.write_jinja_json_indent(out, indent, depth + 1);
+                }
+                pad(out, depth);
+                out.push('}');
+            }
+            other => other.write_jinja_json(out),
+        }
+    }
+
     fn write_jinja_json(&self, out: &mut String) {
         match self {
             Value::Null => out.push_str("null"),

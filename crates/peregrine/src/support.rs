@@ -153,8 +153,8 @@ GEGLU, mean/cls), Gemma 3 (EmbeddingGemma: mean/cls with \
     // 7. Tool calling
     let tool_str = "OpenAI `tools`, `tool_choice` (`auto`, `none`, `required`, a named function) and `tool_calls` \
 on `POST /v1/chat/completions`, streamed or not, for Qwen 2.5 (the `hermes` tool format), Qwen 3 \
-(the `qwen3` format) and Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off; the \
-prompt is the one llama.cpp builds from the model's template";
+(the `qwen3` format), Qwen 3.5 and Bonsai 2 (the `qwen-xml` format), thinking on or off, and \
+Llama 3.2 (the `llama3` format, one call per reply); the prompt is the one llama.cpp builds from the model's template";
 
     // 8. Rerank and classify
     let rr_str = "a `bert` or `modern-bert` file's classifier head (`cls`, `cls.norm`, \

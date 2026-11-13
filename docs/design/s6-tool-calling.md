@@ -40,7 +40,7 @@ A **tool format** is a renderer and a parser for one family of templates:
 |---|---|---|
 | `hermes` | Qwen 2.5 (and Qwen 3, with its thinking block) | Tool signatures as JSON lines inside `<tools>` in the system message; a call is `{"name": ..., "arguments": {...}}` inside `<tool_call>`; a result is sent back inside `<tool_response>` in a user turn |
 | `qwen-xml` | Qwen 3.5 and Bonsai 2 | The same `<tools>` list with its own instructions; a call is `<function=name>` with one `<parameter=key>` block per argument inside `<tool_call>`, values written bare (`True`, `None`, JSON for lists and objects); assistant turns after the last question keep their thinking block; the prompt ends inside one, or after an empty one when thinking is off |
-| `llama3` | Llama 3.1 / 3.2 | Tool definitions in the first user message; a call is one JSON object `{"name": ..., "parameters": {...}}`; a result is an `ipython` turn |
+| `llama3` | Llama 3.2 (S6.4; 3.1 and 3.3 not yet) | Tool definitions in the first user message; a call is one JSON object `{"name": ..., "parameters": {...}}`; a result is an `ipython` turn |
 | `harmony` | gpt-oss | Tools as a TypeScript-like namespace in the developer message; a call is a message to `functions.<name>` on the commentary channel |
 | `generic` | templates with no tool section (Gemma 3, Phi-4, Llama 2, Mistral v0.2) | A system instruction that describes the tools and asks for a JSON answer, as llama.cpp's fallback does |
 
@@ -367,3 +367,47 @@ thinking off lengthens the prompt, a request without tools is rendered by the sa
 the four give the same prompt lengths and replies.
 
 **Not built.** Llama 3, gpt-oss, the generic fallback; `required` and named choices (S6.6).
+
+## 12. S6.4 as built (the `llama3` format)
+
+**Recognised by exact text.** `ToolFormat::Llama3` is Llama 3.2's template as the 1B and 3B files
+carry it (`tools/llama32.jinja`); the comparison is exact, like the Qwen formats. Llama 3.1 and 3.3
+carry a longer template (built-in tools, `<|eom_id|>` after a `<|python_tag|>` call) and are not
+recognised yet: a request with `tools` on those files is refused as before, and chat without tools
+still takes the ordinary Llama 3 prompt.
+
+**The prompt.** `render_llama3` follows the template branch for branch with its defaults: the
+tools as `tojson(indent=4)` under the first message (`tools_in_user_message`), "Environment:
+ipython" in the system header, every message's text trimmed, a call written as
+`{"name": T, "parameters": A}` (an earlier message's text beside a call is dropped, as the template
+drops it), a tool's result as a JSON string in an `ipython` turn, and a message with two calls
+refused with the template's own words. The date is the UTC day (`template::today_llama3`, the same
+one the ordinary path writes); `chat_template_kwargs.date_string` pins it, as in llama.cpp.
+`tests/fixtures/tools-llama3.jsonl` holds 34 requests rendered by llama.cpp v0.9.0 with a pinned
+date: 30 prompts byte-identical, and the 4 it refuses are refused.
+
+**The reply.** A call has no tags: the reply is a call when it begins (past whitespace and an
+optional `<|python_tag|>`) with a JSON object of the form `{"name": T, "parameters": {...}}`
+naming one of the request's tools (`arguments` is read too). The parser follows strings and
+nesting to the object's closing brace, holding the object back until then; anything that is not
+a call makes the rest of the reply text, exactly as written. Because the template writes one call
+per assistant message and refuses a history with more, the format stops a reply at its first call
+whatever `parallel_tool_calls` says (`ToolFormat::parallel_calls`). The 1B joins two calls with
+`; `: Peregrine returns the first call, so the conversation can go on; llama.cpp v0.9.0 answers
+500 ("does not match the expected peg-native format").
+
+**Forced calls.** `tool_choice: "required"` or a named function holds the reply to
+`{"name": "T", "parameters": ` + the tool's schema + `}`, exactly one call. llama.cpp v0.9.0 does
+not hold a named choice on this file: asked for `calculate` about the weather it returned
+`get_weather`.
+
+**Measured** (Llama 3.2 1B Q4_K_M, H0, eight threads, `scripts/tool-e2e.py` with the date
+pinned, temperature 0): Peregrine and llama.cpp both call the expected tool on 11 of 16 requests
+(the 1B calls a tool on all four requests where none fits, in both engines); 15 of 16 replies are
+identical, and the 16th calls the same tool with a `?` more in its query. The two-step exchange
+answers with a call in both. Wall time for the 16 requests and the exchange, interleaved, two runs:
+Peregrine 19.6 s and 19.2 s, llama.cpp 25.7 s and 23.7 s (1.23–1.31×; the host was shared).
+
+**Left.** Llama 3.1 / 3.3 wordings; with `tool_choice: "none"` a control token the model writes
+(`<|python_tag|>`) reaches the content as text.
+
