@@ -23,6 +23,7 @@ pub mod arch;
 pub mod attn;
 pub mod blocks;
 pub mod calib;
+pub mod constrain;
 pub mod decision;
 pub mod draft;
 #[cfg(feature = "dspark")]

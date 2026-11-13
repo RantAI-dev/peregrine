@@ -1,0 +1,6 @@
+{"cell": "32x128", "rows": 32, "round": 0, "threads": 1, "secs": 34.37504368099326, "tokens": 4394, "texts": 128, "load1": 2.48, "tokens_per_s": 127.82529211532442, "texts_per_s": 3.7236316319439067}
+{"cell": "32x128", "rows": 128, "round": 0, "threads": 1, "secs": 32.77318841200031, "tokens": 4391, "texts": 128, "load1": 2.47, "tokens_per_s": 133.98147121969313, "texts_per_s": 3.905631591009046}
+{"cell": "32x128", "rows": 128, "round": 1, "threads": 1, "secs": 32.795325660001254, "tokens": 4392, "texts": 128, "load1": 2.69, "tokens_per_s": 133.9215242297988, "texts_per_s": 3.90299524166991}
+{"cell": "32x128", "rows": 32, "round": 1, "threads": 1, "secs": 34.2773898489977, "tokens": 4383, "texts": 128, "load1": 2.38, "tokens_per_s": 127.86854598055582, "texts_per_s": 3.734239992131222}
+{"cell": "32x128", "rows": 32, "round": 2, "threads": 1, "secs": 34.35809897100262, "tokens": 4382, "texts": 128, "load1": 2.49, "tokens_per_s": 127.53907029892135, "texts_per_s": 3.725468050721573}
+{"cell": "32x128", "rows": 128, "round": 2, "threads": 1, "secs": 32.73907005399815, "tokens": 4381, "texts": 128, "load1": 2.51, "tokens_per_s": 133.81565184271278, "texts_per_s": 3.909701765776589}

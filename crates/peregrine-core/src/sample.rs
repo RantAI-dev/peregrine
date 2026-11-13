@@ -193,6 +193,9 @@ pub struct Scratch {
     bin: Vec<(u32, f32)>,
     mass1: Vec<f64>,
     mass2: Vec<f64>,
+    /// The penalised values of the allowed tokens, kept while the rest of the row is
+    /// masked to `-inf` by [`sample_constrained`].
+    vals: Vec<f32>,
 }
 
 /// The index of the largest logit (the first one on a tie).
@@ -306,6 +309,70 @@ pub fn sample_penalized(
         return fallback;
     }
     race(sc, key)
+}
+
+/// [`sample_penalized`] restricted to `allowed` token ids: every other logit becomes
+/// `-inf`, and the rest of the sampler chain runs unchanged. `None` means the allowed set
+/// is empty (the caller must fail the request rather than emit an unconstrained token).
+// Each argument is a separate sampling control; bundling them would hide which are per request.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_constrained(
+    logits: &[f32],
+    temperature: f32,
+    top_p: f32,
+    top_k: usize,
+    min_p: f32,
+    pen: &Penalties,
+    window: &[(u32, u32)],
+    allowed: &crate::constrain::TokenMask,
+    key: u64,
+    sc: &mut Scratch,
+) -> Option<u32> {
+    if allowed.is_empty() {
+        return None;
+    }
+    sc.p.clear();
+    sc.p.extend_from_slice(logits);
+    if !pen.is_off() && !window.is_empty() {
+        apply_penalties(&mut sc.p, pen, window);
+    }
+    if allowed.len() > sc.p.len() || allowed.iter().any(|id| id as usize >= sc.p.len()) {
+        return None;
+    }
+    // Save the allowed values, mask the row, restore the saved values. The raw row is
+    // not edited: another row of the batch and the log-probability still see it.
+    sc.vals.clear();
+    sc.vals.reserve(allowed.count());
+    for id in allowed.iter() {
+        sc.vals.push(sc.p[id as usize]);
+    }
+    sc.p.fill(f32::NEG_INFINITY);
+    for (slot, id) in allowed.iter().enumerate() {
+        sc.p[id as usize] = sc.vals[slot];
+    }
+    if temperature <= 0.0 {
+        return Some(argmax(&sc.p));
+    }
+    let fallback = argmax(&sc.p);
+    let m = crate::vmath::max(&sc.p);
+    let z = crate::vmath::exp_scaled_sum(&mut sc.p, m, 1.0 / temperature);
+    if top_k == 0 && min_p <= 0.0 {
+        nucleus(
+            &sc.p,
+            z,
+            top_p,
+            &mut sc.kept,
+            &mut sc.bin,
+            &mut sc.mass1,
+            &mut sc.mass2,
+        );
+    } else {
+        cut_nucleus(&sc.p, top_p, top_k, min_p, temperature, &mut sc.kept);
+    }
+    if sc.kept.is_empty() {
+        return Some(fallback);
+    }
+    Some(race(sc, key))
 }
 
 /// The race over the nucleus: argmax p_i / E_i, compared as ln p_i − ln E_i.
