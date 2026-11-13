@@ -386,7 +386,7 @@ fastembed and text-embeddings-inference):
 - **Bonsai 2 (ternary): 1.4–2.3× the decode and 1.9–2.6× the prompt speed** of PrismML's fork across
   x86-64 (AVX-512 and AVX2) and ARM64 (NEON), and **1.8–2.8× with 10 users**.
 
-- **Embeddings and decisions: fastest in 79 of 104 embedding cells and all nine decision cells** on the
+- **Embeddings and decisions: fastest in 85 of 104 embedding cells and all nine decision cells** on the
   4-core Ryzen 3, against llama.cpp, OpenVINO, ONNX Runtime, fastembed and text-embeddings-inference at
   equal accuracy: bge-m3, EmbeddingGemma, Qwen3-Embedding and Nemotron 3.5 Embed are **1.18–1.62×**
   llama.cpp, and `/v1/systemone` decisions **1.33–1.84×**.

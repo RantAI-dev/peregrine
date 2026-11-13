@@ -662,28 +662,47 @@ fn matmul_block(
     st.barriers += 1;
 }
 
+/// The most activation bytes one packed-float unit reads per pass over its panels.
+///
+/// A unit streams its row block's activations once (for its two panels) and its panels
+/// once, so a larger block means fewer reads of the weights and a larger activation to
+/// keep near. S4.9w measured the old block, [`peregrine_kernels::fpack::row_block`]
+/// (half of L2, 21 rows at 3 072 inputs on a 512 KiB L2): a 128-row pass was cut into
+/// seven blocks and the down projection's weights were streamed seven times, 9–10 % of
+/// a 128-token pass, while the whole pass's activation (128 × 3 072 × 4 bytes = 1.5 MiB)
+/// sat in L3 unused. The matmul driver splits every pass that is not a fast prompt at
+/// [`DEFAULT_BATCH`] rows, so a unit's block is at most 128 rows (1.5 MiB at 3 072
+/// inputs) and two mebibytes cover it up to 4 096 inputs. The bound binds below that only
+/// on the measured 6 144-wide FFN down projection (Nemotron F16, two blocks, 0.995×
+/// whole, inside the round spread) and above it on a wide fast-prompt pass; it is what
+/// keeps a 512-row pass from streaming its 6 MB activation per unit. One mebibyte was
+/// measured too: it splits a 128-row pass at 3 072 inputs and loses 1.4–2.8 % on the
+/// 128-token cells, so 2 MiB is the measured floor; 4 MiB is indistinguishable from it
+/// and has identical counters.
+const FP_BLOCK_BYTES: usize = 2 << 20;
+
 /// The activation rows one packed-float unit covers.
 ///
-/// At most [`peregrine_kernels::fpack::row_block`] (half of L2), and few enough rows
-/// that a matrix with too few panels still fills the pool: a group of one panel pair
-/// (a router, the MTP head's slice) would otherwise be one unit, one thread. The
-/// block only changes how often a panel is read, never a result.
+/// As many as [`FP_BLOCK_BYTES`] holds (never fewer than the kernel's own L2 block), cut
+/// further only so that a group with fewer units than the pool still fills it: a group of
+/// one panel pair (a router, the MTP head's slice) would otherwise be one unit, one
+/// thread. The block changes how often a panel and an activation row are read, never a
+/// result. S4.9w report, design §27.
 fn fp_row_block(n_in: usize, nb: usize, per: usize, width: usize) -> usize {
     let want = (width / per.max(1)).max(1);
-    nb.div_ceil(want)
-        .min(peregrine_kernels::fpack::row_block(n_in))
-        .max(1)
+    let fit = (FP_BLOCK_BYTES / (4 * n_in.max(1))).max(peregrine_kernels::fpack::row_block(n_in));
+    nb.div_ceil(want).min(fit).max(1)
 }
 
 /// The packed float panels of a group, one work unit at a time (S4.9f).
 ///
-/// A unit is [`FP_UNIT_PANELS`] panels against one [`row_block`](peregrine_kernels::fpack::row_block)
-/// of activation rows; the units of every job are concatenated and partitioned
+/// A unit is [`FP_UNIT_PANELS`] panels against one block of activation rows;
+/// the units of every job are concatenated and partitioned
 /// exactly as `matmul_group`'s row space is, so nothing about who computed a unit
-/// can reach the result. Threading: with few activation rows there is one block and
-/// the units are panels (a weight stream per worker); with many there are several
-/// blocks and the batch is split too, which is the same work the kernel would do
-/// serially and the same total weight traffic.
+/// can reach the result. Threading: a group with more units than the pool gives each
+/// worker a run of panels over the pass's whole row block; a group with fewer splits
+/// the rows instead, so the pool is never left with an idle worker. Both are the same
+/// work the kernel would do serially and the same total weight traffic.
 fn fp_group(
     w: &Weights,
     jobs: &[MatJob],

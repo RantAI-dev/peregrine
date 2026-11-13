@@ -1,0 +1,5 @@
+
+== bge-small / peregrine / f32 (round 2) ==
+  L128_b32_c1             46.62 texts/s    5967.5 tok/s p50   684.7 ms p99    684.7 ms n=1 (0.69s)
+  L512_b8_c1               9.19 texts/s    4698.9 tok/s p50   870.3 ms p99    870.3 ms n=1 (0.87s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part1/r2-bound/bge-small-peregrine-f32-r2.json

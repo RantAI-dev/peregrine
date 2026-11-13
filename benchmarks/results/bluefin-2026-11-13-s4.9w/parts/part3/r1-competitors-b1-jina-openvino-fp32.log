@@ -1,0 +1,4 @@
+
+== jina / openvino / fp32 (round 1) ==
+  L128_b1_c1              11.45 texts/s    1465.4 tok/s p50    86.8 ms p99     88.3 ms n=6 (0.52s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r1-competitors/b1/jina-openvino-fp32-r1.json

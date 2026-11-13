@@ -1,0 +1,4 @@
+
+== nomic / peregrine / q8_0 (round 1) ==
+  L128_b1_c1              10.20 texts/s    1305.5 tok/s p50    96.0 ms p99    102.1 ms n=6 (0.59s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r1-peregrine/b1/nomic-peregrine-q8_0-r1.json

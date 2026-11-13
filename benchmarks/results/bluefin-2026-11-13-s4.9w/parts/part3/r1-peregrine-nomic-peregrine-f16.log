@@ -1,0 +1,10 @@
+
+== nomic / peregrine / f16 (round 1) ==
+  L16_b8_c1               92.54 texts/s    1480.6 tok/s p50    85.6 ms p99     85.8 ms n=2 (0.17s)
+  L16_b32_c1              92.83 texts/s    1485.4 tok/s p50   344.2 ms p99    348.2 ms n=2 (0.69s)
+  L128_b8_c1              11.88 texts/s    1521.3 tok/s p50   672.5 ms p99    672.5 ms n=1 (0.67s)
+  L128_b32_c1             11.80 texts/s    1510.6 tok/s p50  2710.8 ms p99   2710.8 ms n=1 (2.71s)
+  L512_b8_c1               2.68 texts/s    1374.3 tok/s p50  2980.0 ms p99   2980.0 ms n=1 (2.98s)
+  L512_b32_c1              2.69 texts/s    1378.0 tok/s p50 11889.2 ms p99  11889.2 ms n=1 (11.89s)
+  mixed_b32_c1            13.06 texts/s    1434.7 tok/s p50  2450.2 ms n=1 (2.45s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r1-peregrine/main/nomic-peregrine-f16-r1.json

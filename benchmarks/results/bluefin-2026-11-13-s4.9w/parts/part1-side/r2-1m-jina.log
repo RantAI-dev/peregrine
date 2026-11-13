@@ -1,0 +1,6 @@
+
+== jina / peregrine / f16 (round 2) ==
+  L128_b1_c1              11.45 texts/s    1465.7 tok/s p50    86.2 ms p99     89.9 ms n=6 (0.52s)
+  L128_b32_c1             11.63 texts/s    1489.0 tok/s p50  2750.3 ms p99   2750.3 ms n=1 (2.75s)
+  L2000_b1_c1              0.49 texts/s     981.8 tok/s p50  2036.7 ms p99   2036.7 ms n=1 (2.04s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part1-side/r2-1m/jina-peregrine-f16-r2.json

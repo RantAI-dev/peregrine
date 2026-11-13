@@ -1,0 +1,4 @@
+
+== nomic / openvino / fp32 (round 2) ==
+  L128_b1_c1              10.43 texts/s    1334.4 tok/s p50    95.1 ms p99     98.5 ms n=6 (0.58s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r2-competitors/b1/nomic-openvino-fp32-r2.json

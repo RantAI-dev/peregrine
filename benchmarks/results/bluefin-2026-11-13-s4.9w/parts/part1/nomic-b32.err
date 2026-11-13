@@ -1,0 +1,11 @@
+adaptive: t=502 ms level 0 smoothed 0 permille
+adaptive: t=502 ms level 0 smoothed 0 permille
+adaptive: t=1007 ms level 0 smoothed 0 permille
+adaptive: t=1508 ms level 0 smoothed 0 permille
+adaptive: t=2010 ms level 0 smoothed 0 permille
+adaptive: t=2514 ms level 0 smoothed 0 permille
+adaptive: ladder wall per thread: level0 11051.6 ms (1199), level1 0.0 ms (0), level2 0.0 ms (0), transitions 0
+adaptive: park durations <100us 0, <500us 0, <1ms 3, <5ms 0, >=5ms 3
+joins: 9537 (9537 per join), wait 0.043 s (1.6 %), share 2.584 s, max wait 0.283 ms
+joins: straggler gap mean 0.003 ms, max 0.256 ms
+joins: last worker histogram [0:2338 1:1890 2:2567 3:2742]
