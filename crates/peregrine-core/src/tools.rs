@@ -2298,7 +2298,7 @@ mod tests {
         );
         assert_eq!(feed(&open, &format!("</think>\n\n{NOW}")), Ok((true, true)));
         assert!(feed(&open, &format!("thinking</think>{NOW}")).is_err());
-        assert!(feed(&open, &format!("thinking</think>\n\nSure.")).is_err());
+        assert!(feed(&open, "thinking</think>\n\nSure.").is_err());
         // The reply cannot end in the reasoning, however long it is.
         assert_eq!(feed(&open, "still thinking"), Ok((false, false)));
         // The model may open a block itself, or go straight to the call.
