@@ -150,6 +150,9 @@
     {"engine": "llama_cpp", "precision": "q8_0",
      "path": "nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
      "notes": "GGUF Q8_0 from W4D/Nemotron-3.5-Embed-1B-GGUF"},
+    {"engine": "peregrine", "precision": "f16",
+     "path": "nemotron/Nemotron-3.5-Embed-1B-F16.gguf",
+     "notes": "the same weights widened to F16, for the S4.9w float-path row-block cells"},
     {"engine": "peregrine", "precision": "q8_0",
      "path": "nemotron/Nemotron-3.5-Embed-1B-Q8_0.gguf",
      "notes": "the mistral3 non-causal encoder path (S4.14b), mean pooling"}

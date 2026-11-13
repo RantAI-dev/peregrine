@@ -1,0 +1,4 @@
+
+== nomic / fastembed / fp32 (round 1) ==
+  L128_b1_c1              11.11 texts/s    1422.4 tok/s p50    87.1 ms p99    101.9 ms n=6 (0.54s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r1-competitors/b1/nomic-fastembed-fp32-r1.json

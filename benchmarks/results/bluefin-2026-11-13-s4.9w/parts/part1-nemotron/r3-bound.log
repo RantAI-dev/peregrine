@@ -1,0 +1,4 @@
+
+== nemotron-3.5-embed-1b / peregrine / f16 (round 3) ==
+  L512_b1_c1               0.35 texts/s     180.1 tok/s p50  2838.4 ms p99   2838.4 ms n=1 (2.84s)
+  wrote benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part1-nemotron/r3-bound/nemotron-3.5-embed-1b-peregrine-f16-r3.json

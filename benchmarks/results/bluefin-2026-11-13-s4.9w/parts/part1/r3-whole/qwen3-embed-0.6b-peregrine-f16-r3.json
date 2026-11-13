@@ -1,0 +1,193 @@
+{
+ "benchmark": "peregrine-s4.2-embed",
+ "timestamp": "2026-11-13T04:02:15.391675+00:00",
+ "round": 3,
+ "model": {
+  "name": "qwen3-embed-0.6b",
+  "hf": "Qwen/Qwen3-Embedding-0.6B",
+  "pooling": "last",
+  "max_tokens": 2048,
+  "dim": 1024,
+  "tokenizer_dir": "qwen3-embed-0.6b"
+ },
+ "row": {
+  "engine": "peregrine",
+  "precision": "f16",
+  "path": "~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-f16.gguf",
+  "sha256": "ca1916883dad2a151e9b70b68bad8f59fb3421bfbe8713ae6dc5e88b87f84e04",
+  "size_bytes": 1197629632,
+  "fingerprint": {
+   "kind": "file",
+   "sha256": "ca1916883dad2a151e9b70b68bad8f59fb3421bfbe8713ae6dc5e88b87f84e04",
+   "size_bytes": 1197629632
+  },
+  "notes": "the same weights widened with llama-quantize F16, for the S4.9b memory-bound sweep"
+ },
+ "machine": {
+  "hostname": "bluefin",
+  "os": "Linux",
+  "kernel": "7.2.7-200.fc44.x86_64",
+  "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+  "cpu_features": [
+   "fma",
+   "avx",
+   "avx2"
+  ],
+  "cores_logical": 8,
+  "threads_tested": 4,
+  "governor": "powersave",
+  "python": "3.14.8"
+ },
+ "engine": {
+  "name": "peregrine",
+  "binary": "/tmp/opencode/bin/pg-whole",
+  "worktree": "~/peregrine",
+  "commit": "d38132514f969a3d196278b1718685d0260c50ec",
+  "branch": "s4.9w-encoder-dispatch",
+  "server_version": "peregrine 0.2.0"
+ },
+ "start": {
+  "cmd": [
+   "/tmp/opencode/bin/pg-whole",
+   "serve",
+   "-m",
+   "~/models/embed/qwen3-embed-0.6b/qwen3-embed-0.6b-f16.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8428",
+   "-t",
+   "4",
+   "-c",
+   "2048",
+   "--slots",
+   "40",
+   "--no-profile"
+  ],
+  "threads": 4,
+  "slots": 40,
+  "pooling": "last"
+ },
+ "host_before": {
+  "loadavg": [
+   6.06396484375,
+   6.11865234375,
+   6.01318359375
+  ],
+  "mem_available_gb": 4.37,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.82
+ },
+ "host_after": {
+  "loadavg": [
+   6.0537109375,
+   6.1142578125,
+   6.01220703125
+  ],
+  "mem_available_gb": 4.34,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.84
+ },
+ "preflight": {
+  "loadavg": [
+   5.96875,
+   6.115234375,
+   6.0107421875
+  ],
+  "mem_available_gb": 4.56,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 0.82
+ },
+ "settings": {
+  "lengths": [
+   128,
+   512,
+   2000
+  ],
+  "batches": [
+   1
+  ],
+  "clients": [
+   1
+  ],
+  "threads": 4,
+  "budget_s": 0.5,
+  "max_requests": 20,
+  "max_big_requests": 2,
+  "max_cell_seconds": 120.0,
+  "texts_file": "/var/tmp/embed-texts-s49l/qwen3-embed-0.6b.json",
+  "texts_per_length": 128
+ },
+ "cells": {
+  "L128_b1_c1": {
+   "texts_per_s": 2.337,
+   "tokens_per_s": 299.1,
+   "wall_s": 0.8559,
+   "requests": 2,
+   "texts": 2,
+   "tokens_calibrated": 256,
+   "tokens_reported": 256,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 0.42715,
+    "p99": 0.428421,
+    "min": 0.425853,
+    "max": 0.428447,
+    "n": 2
+   },
+   "length": 128,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 0.86,
+   "tokens_per_text_median": 128
+  },
+  "L512_b1_c1": {
+   "texts_per_s": 0.548,
+   "tokens_per_s": 280.7,
+   "wall_s": 1.824,
+   "requests": 1,
+   "texts": 1,
+   "tokens_calibrated": 512,
+   "tokens_reported": 512,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 1.823697,
+    "p99": 1.823697,
+    "min": 1.823697,
+    "max": 1.823697,
+    "n": 1
+   },
+   "length": 512,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 1.82,
+   "tokens_per_text_median": 512
+  },
+  "L2000_b1_c1": {
+   "texts_per_s": 0.116,
+   "tokens_per_s": 231.8,
+   "wall_s": 8.6293,
+   "requests": 1,
+   "texts": 1,
+   "tokens_calibrated": 2000,
+   "tokens_reported": 2000,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 8.629003,
+    "p99": 8.629003,
+    "min": 8.629003,
+    "max": 8.629003,
+    "n": 1
+   },
+   "length": 2000,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 8.63,
+   "tokens_per_text_median": 2000
+  }
+ }
+}

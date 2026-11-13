@@ -1,0 +1,10 @@
+
+== nomic / fastembed / fp32 (round 3) ==
+  L16_b8_c1               61.86 texts/s     989.8 tok/s p50   128.5 ms p99    134.0 ms n=2 (0.26s)
+  L16_b32_c1              60.08 texts/s     961.2 tok/s p50   532.1 ms p99    532.1 ms n=1 (0.53s)
+  L128_b8_c1              11.42 texts/s    1462.1 tok/s p50   700.0 ms p99    700.0 ms n=1 (0.7s)
+  L128_b32_c1             11.47 texts/s    1468.5 tok/s p50  2788.6 ms p99   2788.6 ms n=1 (2.79s)
+  L512_b8_c1               2.24 texts/s    1146.0 tok/s p50  3573.8 ms p99   3573.8 ms n=1 (3.57s)
+  L512_b32_c1              2.26 texts/s    1158.4 tok/s p50 14143.6 ms p99  14143.6 ms n=1 (14.14s)
+  mixed_b32_c1             7.13 texts/s     783.0 tok/s p50  4490.0 ms n=1 (4.49s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r3-competitors/main/nomic-fastembed-fp32-r3.json

@@ -1,0 +1,29 @@
+    Finished `release` profile [optimized] target(s) in 0.05s
+    Finished `release` profile [optimized] target(s) in 0.02s
+=== Building / Locating Engines ===
+[peregrine] Checking binary...
+=== Probing Hardware Ceilings and System Record ===
+Host: AMD Ryzen 3 PRO 4350G with Radeon Graphics (x86_64-avx2)
+Streaming Bandwidth Ceiling: 39.69 GB/s
+FMA Compute Ceiling: 504.28 GFLOP/s (Ridge: 12.71)
+
+========================================================
+Benchmarking Model: Llama-3.2-1B-Instruct-Q4_K_M.gguf
+========================================================
+Peregrine Telemetry: 801191568.0 bytes moved per token
+
+--- Interleaved Run 1 of 1 ---
+[peregrine] Starting run 1...
+[peregrine] Context 512 tokens, 1 user (slots=1, ctx=704, port=8201):
+[peregrine] Warming up...
+  Calibrating prompt characters for target 512 tokens...
+  [calibrated] 2735 chars -> 508 tokens (0.8% error <= 2%)
+  1 user:  decode 46.7 tok/s, prompt 221.2 tok/s, TTFT 2.166 s (prompt tokens: 510)
+[peregrine] Stopping server...
+[peregrine] Context 512 tokens, 10 users (slots=10, ctx=704, port=8202):
+[peregrine] Warming up...
+  10 users: aggregate 37.8 tok/s, TTFT 17.443 s (prompt tokens: 512.0)
+[peregrine] Stopping server...
+
+=== Aggregating Results and Writing JSON ===
+Saved run set to: ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part0-gen/r2-before/2026-11-13-084457-peregrine-Llama-3.2-1B-Instruct-Q4_K_M.json

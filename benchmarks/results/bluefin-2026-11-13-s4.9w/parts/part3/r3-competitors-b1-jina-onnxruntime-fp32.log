@@ -1,0 +1,4 @@
+
+== jina / onnxruntime / fp32 (round 3) ==
+  L128_b1_c1              11.74 texts/s    1502.6 tok/s p50    82.4 ms p99     96.6 ms n=6 (0.51s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r3-competitors/b1/jina-onnxruntime-fp32-r3.json

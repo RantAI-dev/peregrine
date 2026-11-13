@@ -1,0 +1,1 @@
+{"cell":"L2000_b1","batch":1,"tokens":2000,"bytes":11349,"texts_per_s":0.505,"tokens_per_s":1010.3,"wall_s":1.9795,"tokenise_s":0.000764,"tokenise_ms_per_text":0.764,"stats_ms":{"matmul":1246.935,"head":0.000,"attention":552.234,"other":180.349,"total":1979.518,"barriers":1153},"prof_ms":{}}

@@ -1,0 +1,4 @@
+
+== jina / peregrine / q8_0 (round 1) ==
+  L128_b1_c1              11.11 texts/s    1422.4 tok/s p50    89.8 ms p99     90.2 ms n=6 (0.54s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r1-peregrine/b1/jina-peregrine-q8_0-r1.json

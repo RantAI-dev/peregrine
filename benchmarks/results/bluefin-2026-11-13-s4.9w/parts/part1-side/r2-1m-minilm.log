@@ -1,0 +1,4 @@
+
+== minilm / peregrine / f16 (round 2) ==
+  L128_b32_c1            102.48 texts/s   13117.5 tok/s p50   311.4 ms p99    314.7 ms n=2 (0.62s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part1-side/r2-1m/minilm-peregrine-f16-r2.json

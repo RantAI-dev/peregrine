@@ -1,0 +1,147 @@
+{
+ "benchmark": "peregrine-s4.2-embed",
+ "timestamp": "2026-11-13T04:10:04.438964+00:00",
+ "round": 4,
+ "model": {
+  "name": "nemotron-3.5-embed-1b",
+  "hf": "W4D/Nemotron-3.5-Embed-1B-GGUF",
+  "pooling": "mean",
+  "max_tokens": 2048,
+  "dim": 2048,
+  "tokenizer_dir": "nemotron/ref"
+ },
+ "row": {
+  "engine": "peregrine",
+  "precision": "f16",
+  "path": "~/models/nemotron/Nemotron-3.5-Embed-1B-F16.gguf",
+  "sha256": "e1346f416e2f945911bac7a80f449eb2218b54921f526fc15d7b86218b7211b5",
+  "size_bytes": 2289844320,
+  "fingerprint": {
+   "kind": "file",
+   "sha256": "e1346f416e2f945911bac7a80f449eb2218b54921f526fc15d7b86218b7211b5",
+   "size_bytes": 2289844320
+  },
+  "notes": "the same weights widened to F16, for the S4.9w float-path row-block cells"
+ },
+ "machine": {
+  "hostname": "bluefin",
+  "os": "Linux",
+  "kernel": "7.2.7-200.fc44.x86_64",
+  "platform": "Linux-7.2.7-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "cpu_model": "AMD Ryzen 3 PRO 4350G with Radeon Graphics",
+  "cpu_features": [
+   "fma",
+   "avx",
+   "avx2"
+  ],
+  "cores_logical": 8,
+  "threads_tested": 4,
+  "governor": "powersave",
+  "python": "3.14.8"
+ },
+ "engine": {
+  "name": "peregrine",
+  "binary": "/tmp/opencode/bin/pg-bound",
+  "worktree": "~/peregrine",
+  "commit": "d38132514f969a3d196278b1718685d0260c50ec",
+  "branch": "s4.9w-encoder-dispatch",
+  "server_version": "peregrine 0.2.0"
+ },
+ "start": {
+  "cmd": [
+   "/tmp/opencode/bin/pg-bound",
+   "serve",
+   "-m",
+   "~/models/nemotron/Nemotron-3.5-Embed-1B-F16.gguf",
+   "--host",
+   "127.0.0.1",
+   "--port",
+   "8420",
+   "-t",
+   "4",
+   "-c",
+   "2048",
+   "--slots",
+   "40",
+   "--no-profile"
+  ],
+  "threads": 4,
+  "slots": 40,
+  "pooling": "mean"
+ },
+ "host_before": {
+  "loadavg": [
+   5.982421875,
+   6.0751953125,
+   6.0224609375
+  ],
+  "mem_available_gb": 4.13,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.12
+ },
+ "host_after": {
+  "loadavg": [
+   6.14404296875,
+   6.107421875,
+   6.033203125
+  ],
+  "mem_available_gb": 4.12,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.12
+ },
+ "preflight": {
+  "loadavg": [
+   6.23779296875,
+   6.13037109375,
+   6.0400390625
+  ],
+  "mem_available_gb": 4.29,
+  "mem_total_gb": 13.52,
+  "swap_total_gb": 8.0,
+  "swap_free_gb": 1.13
+ },
+ "settings": {
+  "lengths": [
+   512
+  ],
+  "batches": [
+   1
+  ],
+  "clients": [
+   1
+  ],
+  "threads": 4,
+  "budget_s": 0.5,
+  "max_requests": 20,
+  "max_big_requests": 2,
+  "max_cell_seconds": 120.0,
+  "texts_file": "/var/tmp/embed-texts-s49l/nemotron-3.5-embed-1b.json",
+  "texts_per_length": 128
+ },
+ "cells": {
+  "L512_b1_c1": {
+   "texts_per_s": 0.362,
+   "tokens_per_s": 185.1,
+   "wall_s": 2.7657,
+   "requests": 1,
+   "texts": 1,
+   "tokens_calibrated": 512,
+   "tokens_reported": 512,
+   "tokens_source": "engine",
+   "latency_s": {
+    "p50": 2.761676,
+    "p99": 2.761676,
+    "min": 2.761676,
+    "max": 2.761676,
+    "n": 1
+   },
+   "length": 512,
+   "batch": 1,
+   "clients": 1,
+   "elapsed_s": 2.77,
+   "tokens_per_text_median": 512
+  }
+ }
+}

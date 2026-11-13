@@ -1,0 +1,6 @@
+
+== qwen3-embed-0.6b / peregrine / f16 (round 3) ==
+  L128_b1_c1               2.34 texts/s     299.1 tok/s p50   427.1 ms p99    428.4 ms n=2 (0.86s)
+  L512_b1_c1               0.55 texts/s     280.7 tok/s p50  1823.7 ms p99   1823.7 ms n=1 (1.82s)
+  L2000_b1_c1              0.12 texts/s     231.8 tok/s p50  8629.0 ms p99   8629.0 ms n=1 (8.63s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part1/r3-whole/qwen3-embed-0.6b-peregrine-f16-r3.json
