@@ -239,8 +239,61 @@ pub fn alibi_slopes(n_head: usize, max_bias: f32) -> Vec<f32> {
 pub fn alibi_row(x: &mut [f32], lo: usize, hi: usize, qpos: usize, slope: f32) {
     assert!(lo <= hi && hi <= x.len(), "ALiBi band outside the row");
     assert!(slope.is_finite(), "ALiBi slope must be finite, got {slope}");
+    #[cfg(target_arch = "x86_64")]
+    {
+        if vector_ok() {
+            // SAFETY: AVX2 + FMA checked; the loop stays inside `lo..hi`.
+            unsafe { alibi_row_avx2(x, lo, hi, qpos, slope) };
+            return;
+        }
+    }
+    alibi_row_scalar(x, lo, hi, qpos, slope)
+}
+
+/// [`alibi_row`]'s scalar twin, and the definition of the bias.
+pub fn alibi_row_scalar(x: &mut [f32], lo: usize, hi: usize, qpos: usize, slope: f32) {
     for (j, s) in x.iter_mut().enumerate().take(hi).skip(lo) {
         *s += slope * -(j.abs_diff(qpos) as f32);
+    }
+}
+
+/// # Safety
+/// AVX2 must be available; `lo <= hi <= x.len()`.
+///
+/// The eight lanes compute `slope · (−|j − qpos|)` for eight consecutive keys and add
+/// it to the stored score with a separate multiply and add, exactly as the scalar twin
+/// does (no FMA: the product is rounded before the add). `|j − qpos|` is exact in
+/// `i32` for every position an encoder can hold (its context is below 2^24), and
+/// `cvtepi32_ps` is exact there, so a lane's bias is the scalar bias bit for bit. The
+/// negation is a sign-bit flip, which keeps `−0.0` a `−0.0`; subtracting zero would
+/// not.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn alibi_row_avx2(x: &mut [f32], lo: usize, hi: usize, qpos: usize, slope: f32) {
+    let sl = _mm256_set1_ps(slope);
+    let q = _mm256_set1_epi32(qpos as i32);
+    let sign = _mm256_set1_ps(-0.0);
+    let mut j = lo;
+    while j + LANES <= hi {
+        let idx = _mm256_setr_epi32(
+            j as i32,
+            (j + 1) as i32,
+            (j + 2) as i32,
+            (j + 3) as i32,
+            (j + 4) as i32,
+            (j + 5) as i32,
+            (j + 6) as i32,
+            (j + 7) as i32,
+        );
+        let d = _mm256_abs_epi32(_mm256_sub_epi32(idx, q));
+        let nd = _mm256_xor_ps(_mm256_cvtepi32_ps(d), sign);
+        let s = _mm256_loadu_ps(x.as_ptr().add(j));
+        let bias = _mm256_mul_ps(sl, nd);
+        _mm256_storeu_ps(x.as_mut_ptr().add(j), _mm256_add_ps(s, bias));
+        j += LANES;
+    }
+    for (k, s) in x.iter_mut().enumerate().take(hi).skip(j) {
+        *s += slope * -(k.abs_diff(qpos) as f32);
     }
 }
 
@@ -3924,6 +3977,59 @@ mod tests {
         for j in 3..91 {
             let want = orig[j] + 0.03125 * -((j as i64 - 40).unsigned_abs() as f32);
             assert_eq!(row[j].to_bits(), want.to_bits(), "key {j}");
+        }
+    }
+
+    /// The vector body is the scalar twin on every length, position and slope.
+    #[test]
+    fn alibi_row_matches_the_scalar_twin() {
+        let slopes = [
+            0.5f32,
+            0.25,
+            0.00390625,
+            1.0 / 32.0f32.sqrt(),
+            0.0,
+            -0.0,
+            1e-30,
+        ];
+        let base: Vec<f32> = (0..140)
+            .map(|i| (i as f32 * 0.37).sin() * 8.0 - 0.5)
+            .collect();
+        for n in 0..=70usize {
+            for &q in &[0usize, 1, 7, 33, 69] {
+                for &(lo, hi) in &[(0usize, n), (q.min(n), n), (0, q.min(n))] {
+                    for &sl in &slopes {
+                        let mut a = base[..n].to_vec();
+                        let mut b = base[..n].to_vec();
+                        alibi_row(&mut a, lo, hi, q, sl);
+                        alibi_row_scalar(&mut b, lo, hi, q, sl);
+                        for i in 0..n {
+                            assert_eq!(
+                                a[i].to_bits(),
+                                b[i].to_bits(),
+                                "n={n} q={q} lo={lo} hi={hi} slope={sl} i={i}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Edge values and a negative-zero score.
+        for &v in &[
+            0.0f32,
+            -0.0,
+            1e-38,
+            -1e-38,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            let mut a = [v; 19];
+            let mut b = [v; 19];
+            alibi_row(&mut a, 2, 17, 9, 0.125);
+            alibi_row_scalar(&mut b, 2, 17, 9, 0.125);
+            for i in 0..19 {
+                assert_eq!(a[i].to_bits(), b[i].to_bits(), "edge {v} at {i}");
+            }
         }
     }
 }

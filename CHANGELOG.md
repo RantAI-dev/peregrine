@@ -56,6 +56,28 @@ All notable changes to this project are documented here. The format follows
   `benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`; design:
   `docs/design/s5.4-fast-prompt.md` §5k/§5l.
 
+- **nomic-bert and jina-bert-v2 against every engine on bluefin (S4.9u)**: the two newest
+  encoder families had only been timed against llama.cpp, on a noisy shared VM. This run puts
+  them through the S4.9l proof — llama.cpp v0.9.0, ONNX Runtime 1.31, OpenVINO 2026.4,
+  fastembed 0.9 and TEI 1.9.4 beside Peregrine on the same F16/Q8_0 GGUF and the fp32/published
+  int8 ONNX, 16/128/512/2 000 tokens × batch 1/8/32 and the mixed batch, three interleaved
+  rounds, cache off, accuracy against the fp32 ONNX export. Peregrine is the fastest
+  equal-accuracy engine in **24 of the 36 cells** they add (13 before S4.9u, 21 before the
+  re-read below): **1.04–1.11×** at 512 and **1.07–1.09×** at 2 000 for nomic, **1.00–1.06×**
+  and **1.01–1.21×** for jina, and **1.71×/1.69×** on the mixed batch. Twelve cells remain
+  behind, all at 128 tokens or in the 16-token batch cells, where the GEMM is 89–90 % of the
+  pass and MLAS's 128-row path runs at 202–206 GMAC/s against Peregrine's 180–181. What the
+  account allowed was closed with every vector bit-identical: `bidir::alibi_row` gains an AVX2
+  body beside its scalar twin (jina's attention 48.8 → 37.3 ms, its 512-token cells 0.96–1.00 →
+  1.01–1.06×), and both families' single-thread q/k/v bias, query-scale and residual walks take
+  the pool (element-wise 46.9 → 38.2 ms on nomic, 33.6 → 26.8 on jina). No golden moved; the
+  real-file gates still pass. S4.8b's wider float pass (128 rows where 32 was the rule) landed
+  on `main` while this was open, and the merged build's re-read of the batch cells moves nomic's
+  16-token cells to **1.02/1.09×** and jina's to 0.94/0.96× (a 128-row pass packs eight 16-token
+  texts; a 128-token text is one pass either way, so the 128-token cells do not move). Tables,
+  both engines' own profiles, file hashes and commands:
+  `benchmarks/results/bluefin-2026-11-12-s4.9u/` and the re-read's
+  `benchmarks/results/bluefin-2026-11-13-s4.9u-merge/`; design §25.
 - **The pass width of large float encoders is right for ARM (S4.9, measured)**: #251 gave a
   bidirectional encoder whose weights are all float and larger than 256 MiB 128 rows per pass
   instead of 32, measured on x86 only. Re-measured on the ARM host with both settings of one
@@ -198,7 +220,6 @@ All notable changes to this project are documented here. The format follows
   tier's exact `llama-Q4_K` golden (asserted in the test), on scalar both fast goldens do; the
   AVX-512 fast goldens pass unchanged under Intel SDE. `peregrine tier`, the server's startup
   line and the `--fast-prompt` help now name the formats the CPU takes.
-
 - **Qwen3-Embedding F16 at long text: the value mix shares V across two rows (S4.9s, ARM)**:
   the one cell still behind 1.0 in the cache-off ARM table (Qwen3-Embedding 0.6B F16, one
   2 000-token text, 0.96× llama.cpp) spends 24 % of its pass in the attention value mix, at

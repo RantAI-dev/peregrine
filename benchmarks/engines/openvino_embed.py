@@ -47,6 +47,8 @@ class OpenVINOAdapter(EmbedAdapter):
             "--model-path", str(model_path),
             "--port", str(port),
             "--threads", str(self.threads),
+            "--max-seq-length", str(row.get("max_seq_length")
+                                    or model.get("max_tokens") or 512),
         ]
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
