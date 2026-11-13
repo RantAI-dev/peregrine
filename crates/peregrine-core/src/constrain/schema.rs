@@ -171,6 +171,15 @@ impl Constraint {
         }
     }
 
+    /// Several constraints one after another: the reply is a text of the first, then a
+    /// text of the second, and so on. This is [`sequence`](Constraint::sequence) for parts
+    /// that are themselves constraints (an alternative, a repetition).
+    pub fn concat(parts: Vec<Constraint>) -> Constraint {
+        Constraint {
+            ast: Ast::Seq(parts.into_iter().map(|c| c.ast).collect()),
+        }
+    }
+
     /// The same constraint repeated `min..=max` times (`max: None` = unbounded).
     ///
     /// The inner constraint must consume at least one byte, or the automaton would loop
