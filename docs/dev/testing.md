@@ -682,6 +682,15 @@ has free, so it could not be recorded again with the change: on an AVX2 machine 
 (`PEREGRINE_GOLDEN=record`). The other large files (Llama-2-7B, Mistral-7B, Qwen3-30B-A3B) hold no
 Q5_K tensors and are not touched by that change.
 
+**Qwen3-30B-A3B's AVX2 golden was re-recorded for v0.3.0.** The file is quantised, but its MoE
+router (`blk.N.ffn_gate_inp.weight`, 2048 × 128) is F32, so it takes the packed float path S4.9f
+introduced (one sequential FMA chain per output, `fpack`); S4.9f moved every float golden once and
+missed this one, because the file has no other float matmul. Found by the v0.3.0 release gate on
+bluefin and bisected to `fef63309` (v0.2.0 already gave the new bits; with `PEREGRINE_FPACK=0` the
+old golden still matches). Two argmax lists and one greedy run are unchanged; the logits moved in
+their last bits. A quantised file with any F32 or F16 matrix (a router, a classifier head) is a
+float model for this purpose.
+
 ## Accuracy against llama.cpp
 
 `docs/dev/accuracy.md`: the KL-divergence measurement on real text (`peregrine-bench` example `kld`).
