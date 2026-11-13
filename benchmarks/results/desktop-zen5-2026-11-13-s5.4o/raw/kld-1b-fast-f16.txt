@@ -1,7 +1,7 @@
 base file    /var/tmp/pg/s54c/base/llama32-1b.base.bin
   n_ctx 512, n_vocab 128256, n_chunk 40
   255 scored positions per chunk (the second half, the last one excluded), 10200 in total
-model        /home/uaa/models-ab/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+model        ~/models-ab/Llama-3.2-1B-Instruct-Q4_K_M.gguf
   n_vocab 128256, add_bos true
   KV cache    f16
   prompt rows marked (the mode the flags ask for)

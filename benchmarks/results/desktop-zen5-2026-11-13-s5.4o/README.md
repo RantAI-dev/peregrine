@@ -267,6 +267,7 @@ rotated and unrotated.
 | exact 512/1, 5 rounds | 52.6 | 52.4 | 0.997 |
 | fast 1 024/1 (1B), 3 rounds | 48.6 | **49.9** | **1.025** |
 | fast 1 024/1 (Qwen3), 3 rounds | 34.1 | 33.9 | 0.993 |
+| fast 512/12, **after merging `origin/main`** (S5.4n and the review fixes), 5 rounds | 442.1 | **484.9** | **1.097** |
 
 **Decode did not move**: after a 512-token fast prompt, 60.4-61.7 tok/s before and 59.6-62.2 after
 (three pairs each). **The ten-user cell** (10 slots, 512-token prompts, one pool): prefill
