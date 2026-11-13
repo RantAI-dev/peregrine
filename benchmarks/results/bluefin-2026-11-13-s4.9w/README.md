@@ -284,5 +284,5 @@ Raw files: `parts/part0/` (JSON per arm/round, one per model, and the `/proc/sta
 `parts/part0-gen/` (the generation run sets), `parts/part1/` (`cellprof` stdout and the
 join/adaptive stderr), `parts/rowblock/` and `parts/pass256/` (the lever JSONL), and
 `parts/part3/` (the harness logs, one per row and round — the raw record
-`summarize3.py` reads; the per-cell JSON that the runner also writes was kept only for the
-arm/round directories that survived the run, so the logs are the authoritative raw file).
+`summarize3.py` reads; the runner also writes a per-cell JSON, and the logs carry the same
+numbers plus the spread, so only the logs were retained for this report).
