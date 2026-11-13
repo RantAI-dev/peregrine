@@ -223,19 +223,23 @@ const EXP_P3: f32 = f32::from_bits(0x3eff_fedb);
 /// The coefficient of `b`.
 const EXP_P4: f32 = f32::from_bits(0x3f7f_fff6);
 
-/// Four `exp`s at once — [`exp8`]'s constants, operation order and fused multiply-adds,
-/// four lanes wide. The result is [`exp_scalar`]'s bit for bit.
+/// Four `exp`s at once — the AVX-512 `exp8`'s constants, operation order and fused
+/// multiply-adds, four lanes wide. The result is [`exp_scalar`]'s bit for bit.
 ///
 /// The `|n| > 126` path (underflow, overflow) is rare enough that the four lanes take
 /// the scalar twin instead of carrying the masked sequence: each lane's result depends
 /// on its input alone either way, so a row's bits cannot depend on its neighbours.
+///
+/// Public because the fast prompt mode's aarch64 soft-max body (S5.4n,
+/// `peregrine_core::attn::fast`) folds a piece's exponentials in groups of sixteen, the
+/// same lane-for-lane `exp`s this computes.
 ///
 /// # Safety
 /// The CPU must have NEON.
 #[cfg(target_arch = "aarch64")]
 #[inline]
 #[target_feature(enable = "neon")]
-pub(crate) unsafe fn exp4(x: float32x4_t) -> float32x4_t {
+pub unsafe fn exp4(x: float32x4_t) -> float32x4_t {
     let r = vdupq_n_f32(f32::from_bits(0x4b40_0000)); // 0x1.8p23
     let z = vfmaq_f32(r, x, vdupq_n_f32(EXP_LOG2E));
     let n = vsubq_f32(z, r);

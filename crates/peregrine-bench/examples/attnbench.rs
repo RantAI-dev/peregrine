@@ -54,6 +54,15 @@ fn main() {
     let mut xb = vec![0.0f32; batch * qd];
     let mut stats = StepStats::default();
     let flags = vec![true; batch];
+    // Which order this run times: the tier's verdict and the head width the 16-lane
+    // bodies cover (S5.4n). `PEREGRINE_FAST_ATTN=1` marks every row a prompt row.
+    println!(
+        "tier {} fast_attn {} head_dim {} fast_rows {}",
+        peregrine_kernels::cpu::cap(),
+        peregrine_kernels::table::MatKernels::get().fast_attn(),
+        hd,
+        std::env::var("PEREGRINE_FAST_ATTN").as_deref() == Ok("1"),
+    );
     let mut best = f64::INFINITY;
     let mut out_chk = 0.0f32;
     for _ in 0..reps {

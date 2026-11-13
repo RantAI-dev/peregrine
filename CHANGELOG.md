@@ -36,6 +36,25 @@ All notable changes to this project are documented here. The format follows
   and dropped (0.973-0.976x at 128 tokens: the activation working set costs more in L3 than
   the halved weight stream saves). No golden moved and no result depends on batch, chunk, pass
   budget or threads. Report: `benchmarks/results/bluefin-2026-11-13-s4.9w/`; design §27.
+- **The fast prompt mode's attention order on NEON (S5.4n)**: S5.4j defined the mode's own
+  attention summation order and built it for AVX-512; the ARM tier kept the exact attention.
+  This step adds aarch64's three bodies — sixteen lanes in four `f32x4` accumulators per score
+  row with up to four rows sharing one pass over the key, the `T16` reduction in registers, the
+  four-row value mix, and the 16-key denominator fold on `exp4` — bit-identical to the same
+  scalar twins on the twin tests' whole grid, and reads the F16 cache in registers so the order
+  streams no more bytes than the exact path (the conversion is exact). `MatKernels::fast_attn()`
+  is now true on `neon`, `neon-dotprod` and `neon-i8mm` and still false under
+  `PEREGRINE_ISA=scalar`; the `head_dim % 16` rule and every other piece of the definition are
+  unchanged. The kernel bench is 1.06-1.18× the exact attention at head width 64 and
+  1.70-1.76× at 128; a 4 096-token fast pass gains 5.3 % at one thread and 4.2 % at ten, and
+  attention's bucket falls 5.8-11.4 %. The mode's mean KL against exact moves +0.26 % and
+  +0.10 % of itself (inside the run's error); generated rows, embeddings, rerank, decisions and
+  the whole exact engine are the same bits. Eight goldens move — the three aarch64 NEON tiers'
+  `llama-*-fast` files, Linux and macOS — and nothing else. The pool's join-gap spin stretch
+  (S5.4j) is now taken only while the host run queue is below the stall gate: the re-read on
+  the merged build measured it costing 1.2-2.6 % of prefill at ten threads on the shared ARM
+  host, quiet and disturbed. Report: `benchmarks/results/spark-arm-2026-11-13-s5.4n/` and
+  `benchmarks/results/spark-arm-2026-11-13-s5.6-reread/`.
 - **The pool degrades gracefully on a contended host (S5.6)**: a controlled disturbance (N busy
   threads pinned to the same cores) showed that one co-tenant thread made a ten-thread decode step
   run at **9.9 tok/s against 124.5 quiet**, because every fork–join waited a scheduler timeslice

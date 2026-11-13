@@ -1,0 +1,17 @@
+adaptive: t=500 ms level 0 smoothed 0 permille
+adaptive: t=1001 ms level 0 smoothed 0 permille
+adaptive: t=1505 ms level 0 smoothed 0 permille
+adaptive: t=2012 ms level 0 smoothed 0 permille
+adaptive: t=2518 ms level 0 smoothed 0 permille
+adaptive: t=3021 ms level 0 smoothed 0 permille
+adaptive: t=3524 ms level 0 smoothed 0 permille
+adaptive: t=4024 ms level 0 smoothed 0 permille
+adaptive: t=4524 ms level 0 smoothed 0 permille
+adaptive: t=5025 ms level 0 smoothed 0 permille
+adaptive: t=5527 ms level 0 smoothed 0 permille
+adaptive: t=6028 ms level 0 smoothed 0 permille
+adaptive: t=6534 ms level 0 smoothed 0 permille
+adaptive: t=7035 ms level 0 smoothed 0 permille
+adaptive: t=7538 ms level 0 smoothed 0 permille
+adaptive: ladder wall per thread: level0 78728.4 ms (8767), level1 0.0 ms (0), level2 0.0 ms (0), transitions 0
+adaptive: park durations <100us 292, <500us 1033, <1ms 1239, <5ms 18, >=5ms 0
