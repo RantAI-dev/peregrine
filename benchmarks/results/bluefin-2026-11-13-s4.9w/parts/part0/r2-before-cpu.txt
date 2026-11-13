@@ -1,0 +1,1 @@
+cpu_busy_ticks idle_ticks before: 197130489 498739657 after: 197142730 498753891

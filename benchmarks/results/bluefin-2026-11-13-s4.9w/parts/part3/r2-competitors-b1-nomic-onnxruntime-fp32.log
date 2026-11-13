@@ -1,0 +1,4 @@
+
+== nomic / onnxruntime / fp32 (round 2) ==
+  L128_b1_c1              10.88 texts/s    1392.5 tok/s p50    86.9 ms p99    113.6 ms n=6 (0.55s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r2-competitors/b1/nomic-onnxruntime-fp32-r2.json

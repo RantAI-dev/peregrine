@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The float path's row block, not its fork-joins (S4.9w)**: S4.9v left the encoder pass's
+  flat 12-14 % over its own kernel to "peregrine-core's per-layer dispatch" (48 GEMM calls,
+  3 456 units, 289 barriers a pass). Measured on the build with S5.4j's gap-following spin
+  window and S5.6's stall gate, the fork-joins are not the cost: the caller's post-claim wait
+  is **1.5 ms of an 82 ms pass** (1.8 %), no worker parks inside it, and the last-worker
+  histogram is even. The loss is one level down — **the row block each packed-float unit
+  reads its weights in**. The old cap at `fpack::row_block` (half of L2) cut a 128-row pass
+  into two blocks at 768 inputs and seven at 3 072, so the down projection's 4.7 MB of
+  weights were streamed seven times a layer: 6.9 ms of the 12.2 ms matmul gap; the remaining
+  5.3 ms is the one pass over 212 MB of weights that the isolated kernel bench amortises over
+  fifteen calls. Removing the cap — a row block is a schedule, and every output keeps its
+  ascending `k` chain — moves nomic and jina F16 by **+8.2-9.6 % at 128 tokens, +5.6-6.7 % at
+  512 and +4.3-5.8 % at 2 000**, and flips six of the twelve standings cells that were behind:
+  nomic F16 is **12 of 12**, jina F16 **11 of 12** (16 b8/b32 1.014/1.045x, 128 b1/b8
+  1.011/1.033x, b32 0.993x) and jina Q8_0 **7 of 12** (its eight-row tile is outside the
+  packed-float path). That is **30 of the 36 cells these two models add, 85 of 104** with the
+  existing table (24 and 79 before); the six still behind are named. A 256-row pass was built
+  and dropped (0.973-0.976x at 128 tokens: the activation working set costs more in L3 than
+  the halved weight stream saves). No golden moved and no result depends on batch, chunk, pass
+  budget or threads. Report: `benchmarks/results/bluefin-2026-11-13-s4.9w/`; design §27.
 - **The pool degrades gracefully on a contended host (S5.6)**: a controlled disturbance (N busy
   threads pinned to the same cores) showed that one co-tenant thread made a ten-thread decode step
   run at **9.9 tok/s against 124.5 quiet**, because every fork–join waited a scheduler timeslice

@@ -1,0 +1,10 @@
+
+== nomic / openvino / fp32 (round 2) ==
+  L16_b8_c1               77.67 texts/s    1242.8 tok/s p50   102.1 ms p99    103.8 ms n=2 (0.21s)
+  L16_b32_c1              78.17 texts/s    1250.8 tok/s p50   408.8 ms p99    408.8 ms n=1 (0.41s)
+  L128_b8_c1               8.45 texts/s    1081.1 tok/s p50   946.8 ms p99    946.8 ms n=1 (0.95s)
+  L128_b32_c1              9.55 texts/s    1222.1 tok/s p50  3351.2 ms p99   3351.2 ms n=1 (3.35s)
+  L512_b8_c1               2.32 texts/s    1189.2 tok/s p50  3444.0 ms p99   3444.0 ms n=1 (3.44s)
+  L512_b32_c1              2.25 texts/s    1153.8 tok/s p50 14199.6 ms p99  14199.6 ms n=1 (14.2s)
+  mixed_b32_c1             2.32 texts/s     254.7 tok/s p50 13802.5 ms n=1 (13.8s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r2-competitors/main/nomic-openvino-fp32-r2.json

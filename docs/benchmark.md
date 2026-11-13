@@ -29,7 +29,7 @@ compared with OpenVINO, ONNX Runtime, fastembed and text-embeddings-inference. W
   twice as fast (Peregrine at 0.39-0.58×); decode is level (0.89-1.06×) and Peregrine is ahead with 10
   users (1.05-3.09×). See [Against ik_llama.cpp](#against-ik_llamacpp-desktop-avx-512).
 
-- **Embeddings and decisions: fastest engine in 79 of 104 embedding cells and all nine decision cells on
+- **Embeddings and decisions: fastest engine in 85 of 104 embedding cells and all nine decision cells on
   the 4-core Ryzen 3**, against llama.cpp, OpenVINO, ONNX Runtime, fastembed and
   text-embeddings-inference at equal accuracy. bge-m3, EmbeddingGemma, Qwen3-Embedding and Nemotron 3.5
   Embed are **1.18–1.62×** llama.cpp and decisions **1.33–1.84×**. The 25 cells behind are the two small
@@ -335,8 +335,8 @@ batch cells re-measured on the merged build after S4.8b's wider float pass
 |---|---|---|---|---|---|---|---|
 | all-MiniLM-L6-v2 | F16, Q8_0 | OpenVINO, ONNX Runtime, llama.cpp | **1.01–1.46×** | 0.97–1.08× | 0.99–1.03× | n/a | **1.60–1.65×** |
 | bge-small-en-v1.5 | F32, Q8_0 | OpenVINO, ONNX Runtime, fastembed | 0.95–1.23× | 0.93–1.01× | 0.90–0.95× | n/a | **1.31×** |
-| nomic-embed-text v1.5 | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.51×** (b1), **1.02–1.09×** (b8/b32) | 0.93–1.00× | **1.04–1.11×** | **1.07–1.09×** | **1.71–1.72×** |
-| jina-embeddings-v2-base-en | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.34×** (b1), 0.94–0.96× (b8/b32) | 0.91–0.92× | **1.00–1.06×** | **1.01–1.21×** | **1.67–1.69×** |
+| nomic-embed-text v1.5 | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.51×** (b1), **1.09–1.13×** (b8/b32) | **1.02–1.03×** | **1.06–1.19×** | **1.07–1.09×** | **1.80×** |
+| jina-embeddings-v2-base-en | F16, Q8_0 | ONNX Runtime, fastembed, OpenVINO, TEI, llama.cpp | **1.34×** (b1), 0.92–1.05× (b8/b32) | 0.92–1.03× | **1.01–1.09×** | **1.01–1.21×** | **1.69–1.78×** |
 
 | bge-m3 | Q8_0 | llama.cpp | **1.18–1.53× across every cell** | | | **1.35×** | |
 | EmbeddingGemma 300M | Q8_0 | llama.cpp | **1.30–1.51× across every cell** | | | | |
@@ -362,9 +362,10 @@ mixed-length batch is a win on both models because Peregrine never pads: the pad
 
 **S4.9u adds the two newest encoder families.** Both are ahead in every 512- and 2 000-token
 cell (nomic 1.04–1.11× and 1.07–1.09×, jina 1.00–1.06× and 1.01–1.21×) and on the mixed batch
-(1.71× and 1.69×), and behind at 128 tokens and in the 16-token batch cells: nomic 0.93× at
-128 b32, jina 0.94–0.96× at 16 b8/b32 and 0.91–0.92× at 128, against ONNX Runtime or fastembed
-(both MLAS) at 128 and OpenVINO at the larger cells. The account is not the element-wise block
+(1.71× and 1.69×), and were behind at 128 tokens and in the 16-token batch cells: nomic 0.93×
+at 128 b32, jina 0.94–0.96× at 16 b8/b32 and 0.91–0.92× at 128, against ONNX Runtime or fastembed
+(both MLAS) at 128 and OpenVINO at the larger cells; S4.9w's row-block fix takes six of those
+twelve, as the next paragraph records. The account is not the element-wise block
 this time: at 128 tokens the matrix product is 89–90 % of the pass, and Peregrine's GEMM runs at
 180–181 GMAC/s against MLAS's 202–206 for 128 rows (it is level, 179 against 184–190, at 512
 rows). ONNX Runtime's own non-matmul work there is 11.5 ms (jina) and 20.1 ms (nomic, its
@@ -386,8 +387,17 @@ in `fpack` — with a kernel bench and ONNX Runtime's `MatMul` on the same shape
 at 128 rows the 6-row × 16-column tile runs at 199–228 GMAC/s against MLAS's 208–222 (0.99–1.08×)
 and MLAS only leads at 512 rows (0.85–0.99×); the rate falls below ~64 rows because a unit
 streams its panels once per call, not because of the tile; and the pass's flat 12–14 % over its
-own kernel is the per-layer dispatch in `peregrine-core`, not the kernel. **No row moves**: no
-engine file changed, so every cell here is the S4.9u re-read's.
+own kernel was left to `peregrine-core`'s dispatch. S4.9w measured that dispatch and found the
+loss one level down: the float path's **row block** cut a 128-row pass into two blocks at 768
+inputs and seven at 3 072, so the down projection's weights were streamed seven times a layer —
+6.9 ms of the 12.2 ms matmul gap — while the 289 fork-joins cost 1.5 ms of wait. Removing the
+cap, a schedule that keeps every output's ascending `k` chain, moves nomic and jina F16 by
+**8.2–9.6 % at 128 tokens, 5.6–6.7 % at 512 and 4.3–5.8 % at 2 000** and flips six of the
+twelve cells that were behind: nomic F16 is now **12 of 12** (128 tokens 1.019–1.034×), jina F16
+**11 of 12** (16 b8/b32 1.014/1.045×, 128 b1/b8 1.011/1.033×, 128 b32 0.993×), jina Q8_0
+**7 of 12** (its eight-row tile is outside the packed-float path). The count on this table is
+**30 of the 36 cells these two models add, 85 of 104** with the existing table (24 and 79
+before); the six still behind are named in §27 and in the S4.9w report.
 
 Accuracy on the same texts: Q8_0 agrees with llama.cpp's Q8_0 within 3e-4 cosine and is closer to the
 fp32 reference on all three BERT models; the F16 and F32 rows are exact against the fp32 engines;

@@ -1,0 +1,10 @@
+
+== jina / peregrine / q8_0 (round 3) ==
+  L16_b8_c1               85.07 texts/s    1361.1 tok/s p50    93.2 ms p99     93.4 ms n=2 (0.19s)
+  L16_b32_c1              86.38 texts/s    1382.0 tok/s p50   370.1 ms p99    371.2 ms n=2 (0.74s)
+  L128_b8_c1              11.17 texts/s    1430.2 tok/s p50   715.6 ms p99    715.6 ms n=1 (0.72s)
+  L128_b32_c1             11.01 texts/s    1409.4 tok/s p50  2905.6 ms p99   2905.6 ms n=1 (2.91s)
+  L512_b8_c1               2.52 texts/s    1288.3 tok/s p50  3179.1 ms p99   3179.1 ms n=1 (3.18s)
+  L512_b32_c1              2.54 texts/s    1301.9 tok/s p50 12584.5 ms p99  12584.5 ms n=1 (12.59s)
+  mixed_b32_c1            12.39 texts/s    1361.0 tok/s p50  2582.8 ms n=1 (2.58s)
+  wrote ~/peregrine/benchmarks/results/bluefin-2026-11-13-s4.9w/parts/part3/r3-peregrine/main/jina-peregrine-q8_0-r3.json
