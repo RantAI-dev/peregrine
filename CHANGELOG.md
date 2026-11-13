@@ -38,6 +38,27 @@ All notable changes to this project are documented here. The format follows
   `benchmarks/results/desktop-zen5-2026-11-13-s5.4j/`; design:
   `docs/design/s5.4-fast-prompt.md` §5k/§5l.
 
+- **The float GEMM at small row counts: the tile is not the deficit (S4.9v)**: S4.9u left the
+  128-token cells to "a small-M tile in `fpack`", on 180–181 GMAC/s against MLAS's 202–206 at
+  128 rows. Measured from both ends, that is not where the loss is. A new kernel bench
+  (`peregrine-bench`'s `mgemm`) calls the packed float GEMM as the engine does — units of two
+  panels over a spinning four-thread pool, the strided output, three sweeps of 15 calls — and
+  MLAS is timed on the same shapes through ONNX Runtime's `MatMul` with the weight packed once:
+  at 128 rows the 6-row × 16-column tile runs at **199–228 GMAC/s** against MLAS's **208–222**
+  (0.99–1.08×, ahead on the wide matrices, level on the narrow), and **MLAS only leads at 512
+  rows** (0.85–0.99×) — the crossing is the opposite of the small-M story. The rate falls below
+  ~64 rows because a unit streams its panels once per call (`M/2` MAC per weight byte: 8 at 16
+  rows, where 23 GB/s of L2/L3 is the measured limit), a pass-width question S4.8b already
+  answered. The engine's own counters put the *pass* at 180 (128 tokens) and 179 (512), a flat
+  12–14 % above its own isolated kernel, and the parts were measured one at a time: activation
+  copy 1 ms of the 80 ms matmul bucket, unit granularity (2 → 4 panels) neutral end to end, the
+  store layout identical, the 21-row block for `n_in` 3 072 level with the rest. What is left is
+  the per-layer dispatch (48 calls, 3 456 units, 289 barriers per 128-row pass) — same-bits work
+  in `peregrine-core`, which this account names as the next step. The only way to widen the tile
+  is a second accumulator per output (8 rows × 16 columns needs 19 `ymm` registers), which
+  changes the summation order and the bits. **No engine file changed**, no golden moved, and
+  every standings cell stands: 24 of 36 for these two families, 79 of 104. Numbers, raw sweeps
+  and the ONNX Runtime script: `benchmarks/results/bluefin-2026-11-13-s4.9v/`; design §26.
 - **nomic-bert and jina-bert-v2 against every engine on bluefin (S4.9u)**: the two newest
   encoder families had only been timed against llama.cpp, on a noisy shared VM. This run puts
   them through the S4.9l proof — llama.cpp v0.9.0, ONNX Runtime 1.31, OpenVINO 2026.4,
